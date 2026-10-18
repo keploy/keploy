@@ -1022,6 +1022,10 @@ type MockState struct {
 	Timestamp        int64     `json:"timestamp"`
 	ReqTimestampMock string    `json:"reqTimestampMock,omitempty"`
 	ResTimestampMock string    `json:"resTimestampMock,omitempty"`
+	// AnswerPlaced says the mock is placed at its answer (IsAnswerPlaced):
+	// the replay attributes it by its response time, never by the in-flight
+	// rule.
+	AnswerPlaced bool `json:"answerPlaced,omitempty"`
 	// Lifetime carries the recorder-derived mock tier (per-test, session,
 	// connection, …) through GetConsumedMocks so the test-mode mapping
 	// writer can carve out session/connection mocks from its

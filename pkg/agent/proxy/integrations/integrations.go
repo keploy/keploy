@@ -477,8 +477,9 @@ type MockReader interface {
 	// --- Unification API (primary going forward). ---
 
 	// GetPerTestMocksInWindow returns only those per-test (Lifetime ==
-	// LifetimePerTest) mocks whose Spec.ReqTimestampMock falls inside
-	// the current window [start, end], and those in flight when the
+	// LifetimePerTest) mocks placed inside the current window [start,
+	// end] (models.PlaceOf: Spec.ReqTimestampMock, or Spec.ResTimestampMock
+	// for a mock placed at its answer), and those in flight when the
 	// window's test began: sent in the gap before the window
 	// (models.WindowSchedule.GapBefore) and answered at or after start
 	// (models.InFlightEligible). Mocks whose Spec.ResTimestampMock
@@ -498,14 +499,15 @@ type MockReader interface {
 	//
 	// GetSessionMocks returns the session-scoped mock pool snapshot
 	// (Lifetime == LifetimeSession) plus any startup-tier mocks (those
-	// whose Spec.ReqTimestampMock predated the first test window).
+	// placed before the first test window, models.PlaceOf).
 	// Session mocks are reusable across every test — never
 	// window-filtered, never consumed on match.
 	GetSessionMocks() ([]*models.Mock, error)
 
 	// GetStartupMocks returns the startup-tier mock pool snapshot —
-	// app-bootstrap recordings whose Spec.ReqTimestampMock predates the
-	// first HTTP test window (Flyway migrations, Hibernate metadata
+	// app-bootstrap recordings placed before the first HTTP test window
+	// (models.PlaceOf: Spec.ReqTimestampMock, or the answer's for a mock
+	// placed at its answer) (Flyway migrations, Hibernate metadata
 	// boot, HikariCP pool warm-up). Strictly disjoint from
 	// GetSessionScopedMocks, GetPerTestMocksInWindow, and
 	// GetConnectionMocks; a mock lives in exactly one of the four

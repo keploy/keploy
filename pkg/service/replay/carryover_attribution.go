@@ -159,14 +159,19 @@ func sortByRecordedTime(entries []models.MockEntry) {
 }
 
 // bootAsked reports whether st is a per-test mock the app's startup asked
-// for: requested before bootEnd, not reusable, not flagged carry-over, not
+// for: placed before bootEnd (requested, or answered for a mock placed at its
+// answer, MockState.AnswerPlaced), not reusable, not flagged carry-over, not
 // DNS.
 func bootAsked(st models.MockState, bootEnd time.Time) bool {
 	if isReusableTierState(st) || st.CarryOver || strings.EqualFold(string(st.Kind), string(models.DNS)) || st.ReqTimestampMock == "" {
 		return false
 	}
-	req, err := models.ParseMockTimestamp(st.ReqTimestampMock)
-	return err == nil && !req.IsZero() && req.Before(bootEnd)
+	placed := st.ReqTimestampMock
+	if st.AnswerPlaced && st.ResTimestampMock != "" {
+		placed = st.ResTimestampMock
+	}
+	at, err := models.ParseMockTimestamp(placed)
+	return err == nil && !at.IsZero() && at.Before(bootEnd)
 }
 
 // answerOwner is the test of the earliest recorded window st's answer came in,
@@ -189,7 +194,11 @@ func (a *carryOverAttribution) releaseIndex(st models.MockState) (int, bool) {
 	if a == nil || !st.CarryOver || a.sched.Len() == 0 || st.ReqTimestampMock == "" {
 		return 0, false
 	}
-	t, err := models.ParseMockTimestamp(st.ReqTimestampMock)
+	placed := st.ReqTimestampMock // a mock placed at its answer, by its answer
+	if st.AnswerPlaced && st.ResTimestampMock != "" {
+		placed = st.ResTimestampMock
+	}
+	t, err := models.ParseMockTimestamp(placed)
 	if err != nil || t.IsZero() {
 		return 0, false
 	}
@@ -303,7 +312,10 @@ func (a *carryOverAttribution) inFlightAnsweredLate(consumed []models.MockState,
 	}
 	var out []models.MockState
 	for _, st := range consumed {
-		if st.CarryOver || st.ReqTimestampMock == "" || st.ResTimestampMock == "" {
+		// A mock placed at its answer (MockState.AnswerPlaced) is its
+		// answer's window's, wherever it was sent: the in-flight rule is not
+		// its own (models.InFlightEligible).
+		if st.CarryOver || st.AnswerPlaced || st.ReqTimestampMock == "" || st.ResTimestampMock == "" {
 			continue
 		}
 		if st.Lifetime != models.LifetimePerTest || strings.EqualFold(string(st.Kind), string(models.DNS)) || models.WindowBound(st.Kind) {

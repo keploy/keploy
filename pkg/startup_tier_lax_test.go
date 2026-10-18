@@ -155,3 +155,88 @@ func TestAMockInFlightWhenTheWindowBeganIsKeptPerTest(t *testing.T) {
 		}
 	}
 }
+
+// A poll placed at its answer (models.RegisterAnswerPlaced) is filtered by its
+// place, its answer: kept per-test in the window its answer is in, whether it
+// was sent in the test before (b) or as the app booted (e), which by its
+// request time was another window's or the start-up band; one sent inside the
+// window and answered after it is out of it, and so is one sent as the app
+// booted and answered in a later window, which by its request time was
+// start-up traffic: dropped in strict mode and, its lifetime unstated,
+// promoted in lax mode as every per-test mock out of the window is.
+func TestAPollPlacedAtItsAnswerIsFilteredByItsAnswer(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	first := time.Date(2026, 10, 18, 6, 56, 0, 0, time.UTC) // the first test's start
+	after, before := first.Add(time.Second), first.Add(1100*time.Millisecond)
+	poll := func(name string, req, res time.Duration) *models.Mock {
+		return &models.Mock{Version: "api.keploy.io/v1beta1", Name: name, Kind: models.HTTP,
+			Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks", "poll": "yes"},
+				ReqTimestampMock: first.Add(req), ResTimestampMock: first.Add(res)},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+	}
+	prevOverride, prevExplicitOff := strictWindowEnvOverride, strictWindowEnvExplicitOff
+	strictWindowEnvOverride, strictWindowEnvExplicitOff = false, false
+	t.Cleanup(func() {
+		strictWindowEnvOverride, strictWindowEnvExplicitOff = prevOverride, prevExplicitOff
+	})
+	namesOf := func(ms []*models.Mock) []string {
+		names := []string{}
+		for _, m := range ms {
+			names = append(names, m.Name)
+		}
+		sort.Strings(names)
+		return names
+	}
+	for _, strict := range []bool{true, false} {
+		filtered, promoted := FilterPerTestAndLaxPromotedInFlightAware(context.Background(), zap.NewNop(), []*models.Mock{
+			poll("poll-b", 50*time.Millisecond, 1050*time.Millisecond),
+			poll("boot-poll", -2*time.Second, 1060*time.Millisecond),
+			poll("poll-later", 1020*time.Millisecond, 2050*time.Millisecond),
+			poll("boot-poll-later", -2*time.Second, 2060*time.Millisecond),
+		}, after, before, strict, first, time.Time{}, strict)
+		if got, want := namesOf(filtered), []string{"boot-poll", "poll-b"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("strict=%v: per-test slice %v, want %v", strict, got, want)
+		}
+		wantPromoted := []string{}
+		if !strict {
+			wantPromoted = []string{"boot-poll-later", "poll-later"}
+		}
+		if got := namesOf(promoted); !reflect.DeepEqual(got, wantPromoted) {
+			t.Fatalf("strict=%v: session pool %v, want %v", strict, got, wantPromoted)
+		}
+	}
+}
+
+// The three-tier filter places a poll placed at its answer by its answer too:
+// in the window its answer is in, and not in the start-up band when it was
+// asked as the app booted and answered in a test.
+func TestTheThreeTierFilterPlacesAPollByItsAnswer(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	first := time.Date(2026, 10, 18, 6, 56, 0, 0, time.UTC)
+	after, before := first.Add(time.Second), first.Add(1100*time.Millisecond)
+	poll := func(name string, req, res time.Duration) *models.Mock {
+		return &models.Mock{Version: "api.keploy.io/v1beta1", Name: name, Kind: models.HTTP,
+			Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks", "poll": "yes"},
+				ReqTimestampMock: first.Add(req), ResTimestampMock: first.Add(res)},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+	}
+	namesOf := func(ms []*models.Mock) []string {
+		names := []string{}
+		for _, m := range ms {
+			names = append(names, m.Name)
+		}
+		sort.Strings(names)
+		return names
+	}
+	filtered, _, startup := FilterByTimeStampThreeTier(context.Background(), zap.NewNop(), []*models.Mock{
+		poll("poll-b", 50*time.Millisecond, 1050*time.Millisecond),
+		poll("boot-poll", -2*time.Second, 1060*time.Millisecond),
+		poll("boot-poll-later", -2*time.Second, 2060*time.Millisecond),
+	}, after, before, true, first)
+	if got, want := namesOf(filtered), []string{"boot-poll", "poll-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered %v, want %v", got, want)
+	}
+	if got := namesOf(startup); len(got) != 0 {
+		t.Fatalf("the start-up band holds %v; want none: each poll is placed in a test", got)
+	}
+}
