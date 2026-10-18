@@ -132,7 +132,52 @@ type exactState struct {
 	// worker is the worker scope's reachable mocks (ServeExactWorker), which
 	// each view installed after it shows.
 	worker atomic.Pointer[map[string]struct{}]
+	// begun is the mocks the tests begun in the current staging own
+	// (StagedOwnerBegun).
+	begun begunOwners
 }
+
+// begunOwners is, for one staging (stagingEpoch), the names of the mocks the
+// tests begun in it own (ServeExactTest's owned).
+type begunOwners struct {
+	mu    sync.Mutex
+	epoch uint64
+	names map[string]struct{}
+}
+
+// note records owned as owned by a test begun in staging epoch.
+func (b *begunOwners) note(epoch uint64, owned []*models.Mock) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.names == nil || b.epoch != epoch {
+		b.epoch, b.names = epoch, map[string]struct{}{}
+	}
+	for _, mk := range owned {
+		if mk != nil && mk.Name != "" {
+			b.names[mk.Name] = struct{}{}
+		}
+	}
+}
+
+// has reports whether name is owned by a test begun in staging epoch.
+func (b *begunOwners) has(epoch uint64, name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.names[name]
+	return ok && b.epoch == epoch
+}
+
+// StagedOwnerBegun reports whether name, a staged mock, is owned by a test
+// that has begun in the current staging (integrations.BegunOwnerReader): a
+// call made after its test began, where that test's view no longer shows it,
+// is the recording made later than recorded. A poll whose answer depends on
+// what a test caused (a queue's message) is told so from one made before the
+// test that caused it, which rightly finds nothing.
+func (m *MockManager) StagedOwnerBegun(name string) bool {
+	return m.exact.begun.has(m.stagingEpoch.Load(), name)
+}
+
+var _ integrations.BegunOwnerReader = (*MockManager)(nil)
 
 // outsideAnswers is the staged data-plane recordings a parser consumed
 // through a delete door while no test was open, in one staging
@@ -255,14 +300,19 @@ func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
 var _ integrations.ExactServingReader = (*MockManager)(nil)
 
-// FindStagedNotOwned is, under exact serving with a test open, the name of
-// the first mock of kind staged in the manager's trees (per-test, session,
-// startup, in that order) that the open test does not own and match accepts,
-// whatever the open view shows (integrations.StagedFinder); "" for none. For a
+// FindStagedNotOwned is, under exact serving, the name of the first mock of
+// kind staged in the manager's trees (per-test, session, startup, in that
+// order) that the open view does not show, that no call of the set has
+// consumed, and that match accepts (integrations.StagedFinder); "" for none.
+// With a test open that is a mock the test does not own: another test's, or
+// a worker-scope mock (models.Mapping.Worker) whose place the run has not
+// reached. With none open, it is any test's. Such a miss is the call a
+// recording elsewhere holds, made where it was not recorded, which record's
+// judging reads to bake the recording into the worker scope (S12, a2). For a
 // miss's diagnosis only: the mock is never handed out, nor served.
 func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
 	v := m.exactView()
-	if v == nil || v.test == "" || match == nil {
+	if v == nil || match == nil {
 		return ""
 	}
 	m.treesMu.RLock()
@@ -278,7 +328,10 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 			if !ok || mk == nil || mk.Kind != kind {
 				return true
 			}
-			if _, own := v.index[mk.Name]; own {
+			if _, own := v.index[mk.Name]; own && v.test != "" {
+				return true
+			}
+			if v.shows(mk) || m.consumedInSet(mk.Name) {
 				return true
 			}
 			if match(mk) {
@@ -289,6 +342,15 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 		})
 	}
 	return found
+}
+
+// consumedInSet reports whether a call of the current test set consumed the
+// mock named name (flagMockAsUsed's history, reset as a set is staged).
+func (m *MockManager) consumedInSet(name string) bool {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	_, ok := m.consumedPersistent[name]
+	return ok
 }
 
 // StagedMocks is every mock staged in the manager's trees (per-test, session,
@@ -342,6 +404,7 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 		}
 		v.carried[a.owned.Name] = true
 	}
+	m.exact.begun.note(m.stagingEpoch.Load(), owned)
 	m.exact.fired.Store(true)
 	m.exact.last.Store(v)
 	m.installExact(v)

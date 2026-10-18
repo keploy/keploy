@@ -301,6 +301,17 @@ func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.M
 
 var _ integrations.StagedFinder = (*scopedMockDb)(nil)
 
+// StagedOwnerBegun forwards the store's (integrations.BegunOwnerReader);
+// false from a store that cannot tell.
+func (s *scopedMockDb) StagedOwnerBegun(name string) bool {
+	if b, ok := s.MockMemDb.(integrations.BegunOwnerReader); ok {
+		return b.StagedOwnerBegun(name)
+	}
+	return false
+}
+
+var _ integrations.BegunOwnerReader = (*scopedMockDb)(nil)
+
 // passThrough reports whether this view passes every read and consume
 // straight to the store it wraps: while the store serves each test exactly
 // its own mocks (exact serving, the proven switch), it alone decides what
