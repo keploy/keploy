@@ -89,6 +89,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -931,7 +932,7 @@ func (p *Proxy) replayUnrecordedPort(
 				zap.Uint32("port", port),
 				zap.String("dstAddr", dstAddr),
 				zap.Uint32s("recordedPorts", recorded),
-				zap.String("next_step", "set mysqlPorts in keploy.yml to pin the port, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here"))
+				zap.String("next_step", "set mysqlPorts in keploy.yml to pin the port, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here"), log.Show)
 		}
 		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "recorded-endpoint-moved"}, nil
 	}
@@ -978,7 +979,7 @@ func (p *Proxy) hintUnlistedEndpoint(logger *zap.Logger, dstAddr string, host ne
 	logger.Warn("a connection to a port the recording never saw ended with nothing sent ("+what+"): if the application was waiting there for its server to speak first, it reaches MySQL at an endpoint that moved since the recording, which keploy serves only by the container or the host the recording reached MySQL at (not this machine, nor the Docker host at the container's gateway, at the address /etc/hosts gives host.docker.internal, or at an address of its own the keploy CLI gave the agent), so it served this one nothing",
 		zap.String("dstAddr", dstAddr),
 		zap.Uint32s("recordedPorts", recorded),
-		zap.String("next_step", p.unlistedNextStep(dstAddr, host, port)))
+		zap.String("next_step", p.unlistedNextStep(dstAddr, host, port)), log.Show)
 }
 
 // unlistedNextStep is the next step for a MySQL endpoint keploy cannot tie to

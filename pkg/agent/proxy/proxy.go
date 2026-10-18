@@ -35,6 +35,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -46,6 +47,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -1521,7 +1523,13 @@ func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Lo
 	// connection unwinds at once, and telling the user their recording is
 	// incomplete at the moment they are reading the logs is noise about
 	// something that did not go wrong.
-	if ctx.Err() == nil {
+	if ctx.Err() == nil && mismatch.MockMode() {
+		dest := ""
+		if addr := session.Egress.RemoteAddr(); addr != nil {
+			dest = " to " + addr.String()
+		}
+		logger.Warn(fmt.Sprintf("a %s connection%s was passed through and not recorded", parserType, dest), zap.Error(err), log.Show)
+	} else if ctx.Err() == nil {
 		// Warn, not Debug: this is permanent capture loss for the rest of
 		// the connection, and the user's recording is quietly smaller than
 		// they think.
@@ -5599,9 +5607,9 @@ func (p *Proxy) logSelfCalls() {
 		processes++
 		return true
 	})
-	p.logger.Info("self-calls passed through to the run's own listeners; the real handler answered them, not a mock",
+	p.logger.Info(fmt.Sprintf("%d self-calls passed through to the run's own listeners; the real handler answered them, not a mock", n),
 		zap.Int64("calls", n), zap.Int("processes", processes),
-		zap.String("reason", models.ReasonLoopbackOutsideRun))
+		zap.String("reason", models.ReasonLoopbackOutsideRun), log.Show)
 }
 
 func (p *Proxy) closeDependencyConns() {
@@ -5721,7 +5729,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
 			zap.String("reason", models.ReasonLoopbackOutsideRun),
-			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
+			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"), log.Show)
 	} else {
 		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),

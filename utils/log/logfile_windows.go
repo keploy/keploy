@@ -1,6 +1,9 @@
 package log
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // Windows has neither O_NOFOLLOW nor O_NONBLOCK. A reparse point at the log's
 // name is refused by the Lstat below instead, which leaves a window between
@@ -24,4 +27,12 @@ func openLogFile() (*os.File, string, error) {
 		return nil, "", err
 	}
 	return f, "", nil
+}
+
+func OpenAgentLog() (*os.File, error) {
+	name := agentLogName()
+	if fi, err := os.Lstat(name); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New(name + " is a symbolic link")
+	}
+	return os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, logFileMode)
 }

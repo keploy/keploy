@@ -268,8 +268,12 @@ start_dep() {
   done
 }
 stop_dep() { kill "$DP" 2>/dev/null; wait "$DP" 2>/dev/null; DP=""; }
+# Under the switch it is the "mocks" field; without it the console is quiet
+# (log.Quiet), shows no fields, and the count is in the summary line.
 mocks_of() {
-  sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -oE '"mocks": *[0-9]+' | grep -oE '[0-9]+' | tail -1
+  sed 's/\x1b\[[0-9;]*m//g' "$1" |
+    grep -oE '"mocks": *[0-9]+|^keploy: recorded [0-9]+ tests?: [0-9]+ outgoing calls?' |
+    grep -oE '[0-9]+( outgoing|$)' | grep -oE '^[0-9]+' | tail -1
 }
 
 has() { grep -qE "(^|[^[:alnum:]])$1([^[:alnum:],]|\$)" "$2"; }

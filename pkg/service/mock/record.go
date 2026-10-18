@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -89,9 +90,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if err := m.checkRealDeps(); err != nil {
 		return err
 	}
-	m.logger.Info("Recording mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", m.userCommand))
+	m.logger.Info("recording: "+m.userCommand, zap.String("mock-set", name), log.Show)
 
 	// The caller's context: only ITS cancellation is the user's Ctrl+C. The
 	// errgroup below cancels the context it derives whenever any goroutine in
@@ -118,6 +117,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	setupGate := utils.NewSetupGate(ctx, setupCancel)
 
 	var stopReason string
+	var last func()
 	defer func() {
 		m.notifyShutdown()
 		// Cancel the errgroup ctx so the agent-monitor / app-runner goroutines
@@ -128,6 +128,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		setupCancel()
 		if err := utils.DrainErrGroup(m.logger, "mock-record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-record goroutines")
+		}
+		if last != nil {
+			last()
 		}
 	}()
 
@@ -150,7 +153,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed setting up the environment"
+		stopReason = "keploy's agent did not start"
 		utils.LogError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
@@ -187,7 +190,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to bring up the keploy-agent compose service"
+		stopReason = "keploy's agent compose service did not come up"
 		utils.LogError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
@@ -311,7 +314,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to start capturing outgoing calls"
+		stopReason = "keploy's agent did not start capturing outgoing calls"
 		utils.LogError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
@@ -347,7 +350,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, staging)
 		if err != nil {
 			if errors.Is(err, models.ErrMockEncode) {
-				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
+				m.logger.Warn("one "+mk.GetKind()+" call could not be saved and is not in the recording", zap.Error(err))
 				return
 			}
 			utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
@@ -403,7 +406,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to release the app behind the keploy-agent healthcheck"
+		stopReason = "keploy's agent did not release the app"
 		utils.LogError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
@@ -411,7 +414,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 6. Optional record timer.
 	if m.config.Mock.RecordTimer > 0 {
 		errGrp.Go(func() error {
-			m.logger.Info("recording will stop after " + m.config.Mock.RecordTimer.String())
+			m.logger.Info("recording will stop after "+m.config.Mock.RecordTimer.String(), log.Show)
 			select {
 			case <-time.After(m.config.Mock.RecordTimer):
 				_ = utils.Stop(m.logger, "record timer elapsed")
@@ -501,9 +504,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
-		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
-			zap.Int64("mocks_seen", mocksSeen.Load()),
-			zap.Duration("stalledFor", mockDrainStall))
+		m.logger.Warn(fmt.Sprintf("stopped waiting for the agent after %s: %d calls were saved, later ones were not", mockDrainStall, mocksSeen.Load()))
 	}
 	capture.wait(mockDrainStall)
 
@@ -608,7 +609,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
 			}
-			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
+			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name), log.Show)
 			return nil
 		}
 		keep = true
@@ -616,7 +617,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 			return nil
 		}
-		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		m.logger.Info(fmt.Sprintf("recording stopped; %d captured calls saved", mockCount), zap.Int("mocks", mockCount), zap.String("mock-set", name), log.Show)
 		sayUnconfirmed()
 		return nil
 	}
@@ -630,7 +631,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
 		}
-		stopReason = "the recording did not finish"
+		stopReason = "keploy's agent stopped before the recording finished"
 		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return fmt.Errorf("%s: %w", stopReason, cause)
 	}
@@ -732,7 +733,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if keep && mockCount == 0 && len(capture.list()) == 0 && !judged {
 		keep = false
-		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
+		m.logger.Warn(fmt.Sprintf("nothing was recorded: keploy saw no outgoing call and no incoming request from the test command (tests marked: %d); the existing recording is unchanged", len(windows)),
 			zap.String("mock-set", name),
 			zap.String("next_step", nothingCapturedNext()))
 		m.propagateExit(appErr, "record")
@@ -772,7 +773,7 @@ func (m *mockService) Record(ctx context.Context) error {
 						utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name), zap.String("next_step", "free the disk or fix the set directory's permissions, then record again"))
 						return fmt.Errorf("%s: %w", stopReason, err)
 					}
-					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
+					m.logger.Warn("could not save which calls belong to which test; every test will be offered every recorded call", zap.Error(err))
 				} else {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
@@ -816,18 +817,39 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
-	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	if provenswitch.On() {
+		m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		if capture != nil {
+			m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+		}
+		if mockCount == 0 {
+			m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
+				zap.String("next_step", nothingCapturedNext()))
+		}
+		// 13. Propagate the runner's exit code so a CI 're-record on merge'
+		//     job fails when the tests fail.
+		m.propagateExit(appErr, "record")
+		return nil
+	}
+	tests, incoming := len(windows), 0
 	if capture != nil {
-		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+		incoming = len(capture.list())
 	}
-	if mockCount == 0 {
-		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", nothingCapturedNext()))
+	if keep && mockCount == 0 {
+		m.logger.Warn("no outgoing calls were recorded ("+were(incoming, "incoming request")+")",
+			zap.String("mock-set", name), zap.String("next_step", nothingCapturedNext()))
 	}
-
-	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
-	//     fails when the tests fail.
-	m.propagateExit(appErr, "record")
+	// Said once the agent has stopped (the deferred drain above), so it is
+	// the recording's last line; and so is the exit it propagates.
+	last = func() {
+		if keep {
+			m.logger.Info(fmt.Sprintf("recorded %s: %s, %s", plural(tests, "test"), plural(mockCount, "outgoing call"), plural(incoming, "incoming request")),
+				zap.Int("mocks", mockCount), zap.String("mock-set", name), log.Show)
+		}
+		// 13. Propagate the runner's exit code so a CI 're-record on merge'
+		//     job fails when the tests fail.
+		m.propagateExit(appErr, "record")
+	}
 	return nil
 }
 
@@ -972,7 +994,7 @@ func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
 			return
 		}
 		if mvErr := os.Rename(saved, set); mvErr != nil {
-			m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
+			m.logger.Warn("could not put the previous recording back; it is kept at "+saved+"; put it back: mv "+saved+" "+set, zap.String("mock-set", name), zap.Error(mvErr))
 		}
 	}, true, nil
 }
@@ -1010,11 +1032,11 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 	}
 	mapper, ok := m.mappingDB.(CaseMapper)
 	if !ok {
-		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
+		m.logger.Debug("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
 		return
 	}
 	if err := mapper.UpsertCases(ctx, name, byCase, startup, suites); err != nil {
-		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
+		m.logger.Warn("could not save the recorded requests per test", zap.Error(err))
 		return
 	}
 	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
@@ -1023,11 +1045,11 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 func (m *mockService) upsertBoots(ctx context.Context, name string, boots []models.BootSpec) {
 	mapper, ok := m.mappingDB.(BootMapper)
 	if !ok {
-		m.logger.Warn("the mapping store cannot record app starts", zap.String("mock-set", name))
+		m.logger.Debug("the mapping store cannot record app starts", zap.String("mock-set", name))
 		return
 	}
 	if err := mapper.UpsertBoots(ctx, name, boots); err != nil {
-		m.logger.Warn("failed to write the app starts", zap.Error(err))
+		m.logger.Warn("could not save the recorded app starts", zap.Error(err))
 	}
 }
 
@@ -1038,7 +1060,7 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 	}
 	deleter, ok := m.mappingDB.(MappingDeleter)
 	if !ok {
-		m.logger.Warn("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
+		m.logger.Debug("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
 		return
 	}
 	if err := deleter.Delete(ctx, name); err != nil {

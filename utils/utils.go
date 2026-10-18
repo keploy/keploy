@@ -27,6 +27,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -1909,4 +1911,45 @@ func GetFullCommandUsed() string {
 	cmdStr := strings.Join(parts, " ")
 
 	return cmdStr
+}
+
+func QuoteArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = a
+		switch {
+		case !utf8.ValidString(a) || strings.IndexFunc(a, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }) >= 0:
+			out[i] = cQuote(a)
+		case a == "" || strings.HasPrefix(a, "=") || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^"):
+			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+func cQuote(a string) string {
+	var b strings.Builder
+	b.WriteString("$'")
+	for i := 0; i < len(a); {
+		r, size := utf8.DecodeRuneInString(a[i:])
+		switch {
+		case r == '\\' || r == '\'':
+			b.WriteString("\\" + string(r))
+		case r == '\n':
+			b.WriteString("\\n")
+		case r == '\t':
+			b.WriteString("\\t")
+		case r == '\r':
+			b.WriteString("\\r")
+		case r == utf8.RuneError && size == 1, unicode.IsControl(r), r == '\u2028', r == '\u2029':
+			for _, c := range []byte(a[i : i+size]) {
+				fmt.Fprintf(&b, "\\%03o", c)
+			}
+		default:
+			b.WriteString(a[i : i+size])
+		}
+		i += size
+	}
+	b.WriteString("'")
+	return b.String()
 }

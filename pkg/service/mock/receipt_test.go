@@ -246,7 +246,7 @@ func TestMinCoverage(t *testing.T) {
 		wantExit int
 		wantLog  string
 	}{
-		{"above the floor passes", replayCase{minCov: 70, covReport: profile75}, 0, "offline coverage"},
+		{"above the floor passes", replayCase{minCov: 70, covReport: profile75}, 0, "coverage with every outgoing call answered from the recording"},
 		{"below the floor fails", replayCase{minCov: 80, covReport: profile75}, 1, "less of the code than the floor"},
 		// A floor that passes whenever it cannot measure is a floor nobody has to clear.
 		{"no report fails", replayCase{minCov: 10}, 1, "no coverage report to check"},
@@ -304,6 +304,9 @@ func TestTheReplaySaysWhatItProved(t *testing.T) {
 	if logs.FilterMessageSnippet("did not prove the tests run with the dependencies off").Len() != 1 {
 		t.Fatal("a replay that proved nothing claimed to, or said nothing at all")
 	}
+	if logs.FilterMessageSnippet("--on-miss passthrough lets a call the recording does not have reach the real dependency").Len() != 1 {
+		t.Fatal("a passthrough replay did not say calls can reach the real dependency")
+	}
 	if logs.FilterMessageSnippet("ran with every dependency answered from the recording").Len() != 0 {
 		t.Fatal("a passthrough replay claimed every dependency came from the recording")
 	}
@@ -313,10 +316,10 @@ func TestTheReplaySaysWhatItProved(t *testing.T) {
 // and the log must not say it is.
 func TestCoverageIsOnlyOfflineWhenIsolated(t *testing.T) {
 	_, _, logs := replayIn(t, replayCase{onMiss: "passthrough", covReport: profile75})
-	if logs.FilterMessageSnippet("offline coverage").Len() != 0 {
+	if logs.FilterMessageSnippet("coverage with every outgoing call answered from the recording").Len() != 0 {
 		t.Fatal("a passthrough run's coverage was called offline coverage")
 	}
-	if logs.FilterMessageSnippet("test coverage of this replay").Len() != 1 {
+	if logs.FilterMessageSnippet("coverage of this replay: ").Len() != 1 {
 		t.Fatal("the passthrough run's coverage was not reported")
 	}
 }
@@ -381,10 +384,8 @@ func TestReceiptRecordsTheUsersCommandNotTheLaunchLine(t *testing.T) {
 	if r := mustReceipt(t, keployDir); r.Command != "go test ./..." {
 		t.Fatalf("receipt command = %q, want the user's %q", r.Command, "go test ./...")
 	}
-	for _, e := range logs.FilterMessageSnippet("Replaying mocks for your test command").All() {
-		if got := e.ContextMap()["command"]; got != "go test ./..." {
-			t.Fatalf("the replay log named %q as the user's command", got)
-		}
+	if logs.FilterMessage("replaying: go test ./...").Len() != 1 {
+		t.Fatalf("the replay log did not name the user's command")
 	}
 }
 

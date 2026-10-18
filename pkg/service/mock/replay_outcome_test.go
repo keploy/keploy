@@ -56,7 +56,7 @@ func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
 			consumed: nil,
 			onMiss:   models.MissFail,
 			wantExit: 1,
-			wantLog:  "verified nothing",
+			wantLog:  "nothing was checked against the recording",
 		},
 		{
 			name:     "it also fails under --strict: known-empty misses do not shadow it",
@@ -65,7 +65,7 @@ func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
 			onMiss:   models.MissFail,
 			strict:   true,
 			wantExit: 1,
-			wantLog:  "verified nothing",
+			wantLog:  "nothing was checked against the recording",
 		},
 		{
 			name:     "serving a recorded call is a real pass",
@@ -157,7 +157,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			name:          "both reads land: the real counts, and --strict applies to them",
 			consumedMocks: twoConsumed,
 			wantExit:      0,
-			wantLogs:      []string{"mock replay summary"},
+			wantLogs:      []string{"outgoing calls: "},
 			unwantLogs:    []string{"incomplete", "could not be proven"},
 			wantFields:    map[string]any{"consumed": int64(2), "missed": int64(0)},
 			wantMetered:   &ReplayOutcome{SetName: "set", Loaded: 0, Consumed: 2, Missed: 0},
@@ -254,7 +254,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			var summary map[string]any
 			for _, e := range logs.All() {
 				printed = append(printed, e.Message)
-				if strings.HasPrefix(e.Message, "mock replay summary") {
+				if strings.HasPrefix(e.Message, "mock replay summary") || strings.HasPrefix(e.Message, "outgoing calls: ") {
 					summary = e.ContextMap()
 				}
 			}
@@ -386,7 +386,7 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			var summary map[string]any
 			for _, e := range logs.All() {
 				printed = append(printed, e.Message+" "+fmt.Sprint(e.ContextMap()))
-				if strings.HasPrefix(e.Message, "mock replay summary") {
+				if strings.HasPrefix(e.Message, "mock replay summary") || strings.HasPrefix(e.Message, "outgoing calls: ") {
 					summary = e.ContextMap()
 				}
 			}
@@ -457,10 +457,10 @@ func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
 	if utils.ErrCode != 0 {
 		t.Errorf("exit code %d, want 0: nothing was loaded, so nothing was left unverified", utils.ErrCode)
 	}
-	if logs.FilterMessageSnippet("the mock set is empty").Len() != 1 {
+	if logs.FilterMessageSnippet("the recording has no recorded calls").Len() != 1 {
 		t.Errorf("want the empty-set WARN, got %v", logs.All())
 	}
-	if logs.FilterMessageSnippet("verified nothing").Len() != 0 {
+	if logs.FilterMessageSnippet("nothing was checked against the recording").Len() != 0 {
 		t.Errorf("a set the agent holds nothing of is not a replay that verified nothing: %v", logs.All())
 	}
 	if !slices.Contains(instr.seq(), "store") {
@@ -516,7 +516,27 @@ func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
 	if !strings.Contains(messages[0], "nothing sent") || strings.Contains(messages[0], "outgoing call") {
 		t.Errorf("the connection that sent nothing is told as %q", messages[0])
 	}
-	if messages[1] != "no recorded mock matched an outgoing call" {
+	// With the switch off the line says the call itself: a quiet console
+	// shows no fields.
+	if messages[1] != "no recorded mock matched an outgoing call: GET /a on dep:80, outside every test" {
 		t.Errorf("a call that missed is told as %q", messages[1])
+	}
+}
+
+// With the switch off a miss line names the test that made the call, as
+// attributeMocks filed it, and a call no test made as made outside them.
+func TestAMissLineNamesItsTest(t *testing.T) {
+	at := runnerT0.Add(5 * time.Millisecond)
+	misses := []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /price", Destination: "dep:9000", At: at},
+		{Protocol: "HTTP", ActualSummary: "GET /price", Destination: "dep:9000", At: runnerT0.Add(time.Hour)},
+	}
+	windows := []models.ScopeWindow{{Name: "TestA", Start: runnerT0, End: runnerT0.Add(time.Second)}}
+	tests := missTests(misses, attributeMocks(windows, nil, nil, misses))
+	if got := missWhere(misses[0], tests[0]); got != "TestA called GET /price on dep:9000" {
+		t.Errorf("the miss in TestA is told as %q", got)
+	}
+	if got := missWhere(misses[1], tests[1]); got != "GET /price on dep:9000, outside every test" {
+		t.Errorf("the miss outside every test is told as %q", got)
 	}
 }

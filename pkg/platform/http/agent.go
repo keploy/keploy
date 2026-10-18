@@ -49,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -98,6 +99,16 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+
+	mock      bool
+	agentLog  string
+	agentFile *os.File
+	tail      *agentTail
+	logMu     sync.Mutex
+	failed    bool
+	dropped   bool
+	named     bool
+	slow      *time.Timer
 
 	// run is the agent's current start (startAgent); guarded by mu. A stop
 	// reads how to end the agent from the run it stops, never from a later one.
@@ -527,6 +538,10 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 				// End of the stream or connection closed during shutdown
 				break
 			}
+			if a.mock {
+				utils.LogError(a.logger, err, "could not read a recorded request from keploy's agent")
+				break
+			}
 			utils.LogError(a.logger, err, "failed to decode test case from stream")
 			break
 		}
@@ -715,6 +730,10 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		// indistinguishable from one where the call never happened - is
 		// what made this class of bug take an investigation to find.
 		if !handOff(mockChan, &mock, nil, mockHandoffGrace) {
+			if a.mock {
+				utils.LogError(a.logger, nil, fmt.Sprintf("one %s call (%s) was not saved: keploy did not take it from its agent within %s", mock.Kind, mock.Name, mockHandoffGrace))
+				return true
+			}
 			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
 				zap.Duration("waited", mockHandoffGrace))
@@ -1785,7 +1804,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 			}
 		}
 		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
+			utils.LogError(a.logger, appErr.Err, "error while running the app", log.Hide)
 		}
 		if appErr.AppErrorType != models.ErrCtxCanceled && appErr != (models.AppError{}) {
 			appErrCh <- appErr
@@ -2043,8 +2062,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = a.agentOutput()
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
@@ -2053,6 +2071,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if err := agentUtils.StartCommand(cmd); err != nil {
 		removeProgress()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
+		a.endAgentLog(false)
 		return err
 	}
 
@@ -2080,11 +2099,15 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		defer utils.Recover(a.logger)
 		err, ok := a.awaitAgentExit(ctx, reaped, run, pid)
 		if !ok {
+			// Let go at the user's Ctrl+C: a stop, so its log goes unless
+			// the agent warned.
+			a.endAgentLog(true)
 			return nil
 		}
 		// If ctx wasn't cancelled, bubble up unexpected exits
+		a.endAgentLog(ctx.Err() != nil)
 		if err != nil && ctx.Err() == nil {
-			a.logger.Error("agent process exited with error", zap.Error(err))
+			a.logger.Error("agent process exited with error", zap.Error(err), log.Hide)
 			return err
 		}
 		a.mu.Lock()
@@ -2536,6 +2559,9 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 		// Agent context cancelled or agent stopped
 		if errors.Is(agentCtx.Err(), context.Canceled) {
 			a.logger.Info("Agent was stopped intentionally")
+		} else if a.mock {
+			a.logger.Error("keploy's agent exited before the run ended; this run's results are incomplete")
+			a.sayAgentLog()
 		} else {
 			a.logger.Error("Agent stopped unexpectedly, client operations may be affected", zap.String("next_step", "check agent logs for panic/oom, ensure required capabilities/permissions, or rerun with --debug and verify the agent binary is compatible with the CLI"))
 		}
@@ -2562,6 +2588,7 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 		cause = agentExitCause(ee.ExitCode())
 	}
 	if cause == nil {
+		a.sayAgentLog()
 		if exitErr == nil {
 			return errors.New("the keploy agent exited before it became ready")
 		}
@@ -2601,7 +2628,12 @@ func agentExitCause(code int) error {
 // process's own exit code, and tells the user what to do about it.
 func (a *AgentClient) armAgentStartCause(cause error, isDockerCmd bool) {
 	utils.SetExitCodeOnce(utils.ExitCodeFor(cause))
-	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", agentStartRemedy(cause, isDockerCmd, runtime.GOOS)))
+	remedy := agentStartRemedy(cause, isDockerCmd, runtime.GOOS)
+	if a.agentLog != "" {
+		remedy = strings.ReplaceAll(strings.ReplaceAll(remedy, "The agent's log above", "The agent's log"), "the agent's log above", "the agent's log")
+	}
+	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", remedy))
+	a.sayAgentLog()
 }
 
 // agentStartRemedy is what the user can do about an agent that could not start
@@ -2866,7 +2898,11 @@ func (a *AgentClient) checkDockerModePrivileges(opts models.SetupOptions) error 
 		return a.dockerModeRefused(err, perfEventParanoidRemedy)
 	}
 	if err != nil {
-		a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		if a.mock {
+			a.logger.Error("could not set /proc/sys/kernel/perf_event_paranoid", zap.Error(err))
+		} else {
+			a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		}
 	}
 	return err
 }
@@ -2959,6 +2995,7 @@ func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
+	a.mock = opts.MockMode
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
@@ -3110,7 +3147,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		if err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts); err != nil {
+		err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts)
+		a.agentReady()
+		if err != nil {
 			return err
 		}
 	}
@@ -3142,6 +3181,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
 		certPEM, caErr := a.fetchAgentCA(ctx)
 		if caErr != nil {
+			if a.mock {
+				utils.LogError(a.logger, caErr, "keploy's agent did not hand over its TLS certificate")
+				a.sayAgentLog()
+				return caErr
+			}
 			utils.LogError(a.logger, caErr, "failed to fetch the agent's CA certificate; the app would not trust keploy's MITM leaves",
 				zap.String("next_step", "ensure the agent started cleanly (check the agent log for a SetupCA error) and retry"))
 			return caErr
@@ -3389,15 +3433,16 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
-	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
-	if agentUtils.NeedsPTY() {
+	if agentUtils.NeedsPTY() && (!a.quietAgent() || strings.Contains(cmd.String(), "sudo ")) {
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = a.agentOutput()
+	a.watchStart()
 
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	a.endAgentLog(ctx.Err() != nil)
+	if err != nil {
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
 			logger.Info("Keploy agent in docker stopped gracefully.")

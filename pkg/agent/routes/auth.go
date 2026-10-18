@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -198,9 +199,9 @@ func ConsumeSessionToken(logger *zap.Logger, tokenFile string, isDocker bool) (s
 			"none), so anything that can reach this pod's agent port can use the API")
 		return "", nil
 	}
-	logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
-		" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and " +
-		"captured traffic, and can stop or alter the session.")
+	logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no "+token.Env+
+		" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and "+
+		"captured traffic, and can stop or alter the session.", log.Show)
 	return "", nil
 }
 

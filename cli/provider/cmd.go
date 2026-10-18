@@ -34,7 +34,16 @@ import (
 	"go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
+	"golang.org/x/term"
 )
+
+func banner(mockRun, disableANSI bool) {
+	if mockRun && !term.IsTerminal(int(log.PrimarySink().Fd())) {
+		fmt.Fprintf(log.PrimarySink(), "keploy: version %s\n", utils.Version)
+		return
+	}
+	PrintLogo(log.PrimarySink(), disableANSI)
+}
 
 func LogExample(example string) string {
 	return fmt.Sprintf("Example usage: %s", example)
@@ -1229,9 +1238,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
+	mockRun := IsMockRun(cmd)
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
 	if cmd.Name() != "agent" && !machine {
-		PrintLogo(log.PrimarySink(), disableAnsi)
+		banner(mockRun, disableAnsi)
 	}
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
@@ -1298,6 +1308,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if err := c.checkDeletedSettings(cmd); err != nil {
 			utils.LogError(c.logger, err, "refusing a deleted flag")
 			return err
+		}
+	}
+
+	// A keploy mock record or replay shows the console's facts, warnings and
+	// errors, and leaves the rest to its log (log.Quiet). Not under the
+	// proven switch: its verbs say what they found in INFO lines of their own,
+	// and its judging rounds, which run under it too, print nothing. Nor is a
+	// mock-mode agent's console narrowed to its facts there.
+	if mockRun && !c.cfg.Debug && !log.Quieted() && !provenswitch.On() {
+		logger, err := log.Quiet()
+		if err == nil && log.Quieted() {
+			*c.logger = *logger
+		}
+	}
+	if cmd.Name() == "agent" && !c.cfg.Debug && !provenswitch.On() {
+		if on, _ := cmd.Flags().GetBool("mock-mode"); on {
+			*c.logger = *log.Facts(c.logger)
 		}
 	}
 
