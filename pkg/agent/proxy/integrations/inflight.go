@@ -39,8 +39,9 @@ func WithRequestHolder(ctx context.Context, h RequestHolder) context.Context {
 }
 
 // HoldRequest marks a request the parser of ctx's connection has read and
-// holds, until release is called. Without the proven switch, or for a
-// connection the proxy does not keep, it marks nothing.
+// holds, until release is called. For a connection the proxy does not keep
+// (it keeps them under the proven switch, or for an agent settling reads), it
+// marks nothing.
 func HoldRequest(ctx context.Context) (release func()) {
 	if h, ok := ctx.Value(requestHolderKey{}).(RequestHolder); ok && h != nil {
 		return h.Hold()
@@ -61,9 +62,9 @@ type UnknownMarker interface {
 // (RequestHolding) but has a state it cannot mark exactly, such as Mongo's
 // moreToCome group, open until a later frame ends it, which may come only in
 // the next test. A test's end that finds the mark leaves the test not
-// verified, never passed, and does not wait for the mark to go. Without the
-// proven switch, or for a connection the proxy does not keep, it marks
-// nothing.
+// verified, never passed, and does not wait for the mark to go. For a
+// connection the proxy does not keep (it keeps them under the proven switch,
+// or for an agent settling reads), it marks nothing.
 //
 // The parser marks before it reads on with the state open, and releases the
 // mark before it reads again once the state ends, after the requests the mark
@@ -94,8 +95,9 @@ type IdleMarker interface {
 // recorded to fetch, waiting out its MaxWait). The wait is the dependency's
 // time, not keploy's work, so a test's end does not wait for it: while marked,
 // the connection's handler counts as waiting for the application, as one
-// blocked reading does. Without the proven switch, or for a connection the
-// proxy does not keep, it marks nothing.
+// blocked reading does. For a connection the proxy does not keep (it keeps
+// them under the proven switch, or for an agent settling reads), it marks
+// nothing.
 //
 // The parser marks once it has chosen the answer and consumed what answers
 // with it, and releases the mark before it writes the answer: from the release

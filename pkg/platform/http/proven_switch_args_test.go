@@ -425,3 +425,19 @@ func TestMakeAgentReadyForDockerComposeChecksTheSwitchFirst(t *testing.T) {
 		t.Fatalf("the agreeing agent was released %d times, want 1", n)
 	}
 }
+
+// A run that learns noise starts its native agent settling reads
+// (--settle-reads), which sudo would otherwise have no way to tell it; any
+// other run's argv does not change.
+func TestNativeAgentArgs_CarrySettleReads(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	a := New(zap.NewNop(), nil, &config.Config{})
+	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
+	if args := a.nativeAgentArgs(opts); slices.Contains(args, "--settle-reads") {
+		t.Fatalf("a run that learns no noise, yet the native agent argv carries --settle-reads: %v", args)
+	}
+	opts.SettleReads = true
+	if args := a.nativeAgentArgs(opts); !slices.Contains(args, "--settle-reads") {
+		t.Fatalf("a run that learns noise, yet the native agent argv lacks --settle-reads: %v", args)
+	}
+}

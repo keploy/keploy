@@ -12,9 +12,11 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
-// The proxy's share of a test's end count, under the proven switch (design
+// The proxy's share of a test's end count, under the proven switch, and of a
+// settled read of a test's misses for an agent started settling reads (design
 // v14 §5.2; release1-cut §5.1 item 5). Once every connection the kernel
 // completed to the proxy has been accepted (the agent's ProxyConns), the
 // test's calls can still be in the proxy's hands in two ways:
@@ -477,3 +479,13 @@ var (
 	_ integrations.IdleMarker    = (*trackedConn)(nil)
 	_ syscall.Conn               = (*trackedConn)(nil)
 )
+
+// keepsConnections reports whether the accept keeps each connection it hands
+// over (inflight.track), so a test's end, or a read of its misses, can tell
+// when none holds its calls: under the proven switch; and with it off, for an
+// agent started for a run that learns noise (settleReads) whose calls are
+// counted from the proxy's start (CountedFromStart). One whose calls cannot be
+// counted settles no read, so it keeps none, as before.
+func (p *Proxy) keepsConnections() bool {
+	return provenswitch.On() || p.settleReads && p.countedFromStart.Load()
+}

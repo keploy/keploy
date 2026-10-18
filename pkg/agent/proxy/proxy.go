@@ -360,9 +360,25 @@ type Proxy struct {
 
 	Listener net.Listener
 
-	// inflight keeps, under the proven switch, every accepted connection, so
-	// a test's end can tell when none holds its calls (inflight.go).
+	// inflight keeps, under the proven switch or for an agent that settles
+	// its reads (settleReads), every accepted connection, so a test's end, or
+	// a read of its misses, can tell when none holds its calls (inflight.go).
 	inflight inflight
+	// settleReads is the agent's --settle-reads (models.SetupOptions.
+	// SettleReads), set at its start: a run that learns noise has its reads of
+	// a test's misses settle the test's calls first, with the switch off too.
+	settleReads bool
+	// countedFromStart: once the canary had run, before the proxy said it
+	// was ready, the kernel counted the connections to its listener and the
+	// bytes on its paired connections could be read (decideCounted). With
+	// the switch off it drops to false, for good, at the first connection
+	// the kernel tied to none of the application's (dropCounting).
+	countedFromStart atomic.Bool
+	// countingLost is why, with the switch off, the run's calls stopped
+	// being counted (dropCounting); nil while they are. countingLostCh is
+	// closed then.
+	countingLost   atomic.Pointer[error]
+	countingLostCh chan struct{}
 
 	// nodataRelayLogged dedupes the "relayed NODATA" Info log to once per
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
@@ -1117,6 +1133,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IncomingProxyPort:         opts.IncomingProxyPort,
 		DNSPort:                   opts.DNSPort, // default: 26789
 		synchronous:               opts.Agent.Synchronous,
+		settleReads:               opts.Agent.SettleReads,
+		countingLostCh:            make(chan struct{}),
 		IP4:                       "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
 		IP6:                       "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:                   &sync.Mutex{},
@@ -2327,6 +2345,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// The kernel's count is proven before the proxy says it is ready
 	// (accepts.go); the stop ends the proof.
 	p.canary(ctx, listener)
+	p.decideCounted()
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Handshakes are held from the first session whose connections dial
 	// their destination (ensureHandshakeHold); one already set is honoured
@@ -2492,14 +2511,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				_ = clientConn.Close()
 				return nil
 			}
-			// Under the proven switch the connection is kept from its
-			// accept on, so a test's end sees what it holds (inflight.go):
-			// kept before it is counted, or a wait that saw the count reach
-			// it could find it nowhere and call the test settled while its
-			// request sat unread.
+			// Under the proven switch, or for an agent that settles its
+			// reads, the connection is kept from its accept on, so a test's
+			// end sees what it holds (inflight.go): kept before it is
+			// counted, or a wait that saw the count reach it could find it
+			// nowhere and call the test settled while its request sat unread.
 			raw := clientConn
 			var tracked *trackedConn
-			if provenswitch.On() {
+			if p.keepsConnections() {
 				tracked = p.inflight.track(clientConn)
 				clientConn = tracked
 			}
@@ -2586,8 +2605,8 @@ func (p *Proxy) handleRecovered(ctx context.Context, conn net.Conn) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
-	// tracked is the connection as the accept kept it (inflight.go), under
-	// the proven switch: srcConn is wrapped again below (a peek's reader, a
+	// tracked is the connection as the accept kept it (inflight.go:
+	// keepsConnections): srcConn is wrapped again below (a peek's reader, a
 	// prefix, TLS), and what a test's end reads of it goes to this one.
 	tracked, _ := srcConn.(*trackedConn)
 	// activeConns.Add/Done are paired at the goroutine-spawn site
@@ -2655,12 +2674,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-	// Under the proven switch, a connection the kernel paired with the
-	// application's carries its own destination; one it paired with none
-	// is refused. Never a destination by source port, which another
-	// connection may share (accepts.go).
+	// When the proxy uses the kernel's pairing (the proven switch, or calls
+	// counted from its start: usesPairing), a connection the kernel paired
+	// with the application's carries its own destination; one it paired with
+	// none is refused under the switch, and with it off drops the count and
+	// is routed by its source port, as it always was. A paired one never
+	// takes a destination by source port, which another connection may share
+	// (accepts.go).
 	var err error
 	destInfo, counted := p.pairedDest(srcConn)
+	if counted && destInfo == nil && !provenswitch.On() && p.dropCounting(srcConn) {
+		// With the switch off a connection the kernel tied to none of the
+		// application's (a NAT between them) is routed by its source port,
+		// as it always was: the run is no longer counted, and every later
+		// read of its misses is unread (CountingLost).
+		counted = false
+	}
 	if counted {
 		if destInfo == nil {
 			p.refuseUnpaired(srcConn)
@@ -2780,9 +2809,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
-	// Under the proven switch the accept kept the connection (inflight.go):
-	// a parser that reads ahead says through it which requests it holds
-	// (integrations.HoldRequest).
+	// Under the proven switch, or settleReads, the accept kept the connection
+	// (inflight.go): a parser that reads ahead says through it which requests
+	// it holds (integrations.HoldRequest).
 	if tracked != nil {
 		parserCtx = integrations.WithRequestHolder(parserCtx, tracked)
 	}

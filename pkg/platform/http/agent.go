@@ -1934,6 +1934,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.RecordRequests {
 		args = append(args, "--record-requests")
 	}
+	if opts.SettleReads {
+		args = append(args, "--settle-reads")
+	}
 	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
 	// the agent, so it travels as a flag.
 	args = append(args, provenswitch.AgentArgs()...)

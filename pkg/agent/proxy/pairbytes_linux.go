@@ -414,7 +414,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
 	case err != nil:
 		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
-		p.pairLost(pc, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: no test's end can be verified from now on", zap.Error(err))
+		p.pairLost(pc, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: from now on it cannot vouch that every call of a test is in its hands", zap.Error(err))
 	case unread == 0:
 	case tc == nil || tc.tlsLayer.Load() == nil:
 		p.pairLost(pc, unreadLost)
@@ -512,7 +512,7 @@ func (p *Proxy) pairLost(pc *pairedConn, msg string, fields ...zap.Field) {
 	p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
-		zap.String("next_step", "the test that was open, and every later one, is not verified; check the agent's log for why the connection ended"),
+		zap.String("next_step", "keploy cannot vouch for the calls of the test that was open (under the proven switch, it and every later test are not verified); check the agent's log for why the connection ended"),
 	}, fields...)...)
 }
 
@@ -539,9 +539,19 @@ func (p *Proxy) checkPairedBytes(app, proxy net.Conn) {
 	}
 }
 
+// PairedBytesErr is why the bytes on the proxy's paired connections cannot be
+// counted, nil while they can: found at the proxy's start (its canary,
+// checkPairedBytes), or since, by a failure that makes every later wait on a
+// paired connection unknown (agent.PairedBytesChecker).
+func (p *Proxy) PairedBytesErr() error {
+	p.paired.mu.Lock()
+	defer p.paired.mu.Unlock()
+	return p.paired.err
+}
+
 func (p *Proxy) pairedBytesUnsupported(err error) {
 	p.paired.fail(fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err))
-	p.logger.Warn("keploy cannot tell whether the bytes the application wrote to the connections its proxy holds have reached the proxy: no test's end can be verified while one is open",
+	p.logger.Warn("keploy cannot tell whether the bytes the application wrote to the connections its proxy holds have reached the proxy: while one is open, it cannot vouch that every call of a test is in its hands",
 		zap.Error(err),
 		zap.String("next_step", "the kernel needs sock_diag for TCP (inet_diag and tcp_diag) in the agent's network namespace"))
 }

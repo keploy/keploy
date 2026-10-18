@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
@@ -64,6 +65,15 @@ type Agent struct {
 	coreAgent.IncomingProxy
 	proxyStarted bool
 	config       *config.Config
+	// countsCalls: once its proxy was up, the kernel counted the calls
+	// waiting for it (the proxy's CountedFromStart: its canary counted, the
+	// bytes on its paired connections readable). Latched at the start
+	// (latchCounting): a count lost later is a read that cannot vouch for
+	// every miss, never a return to reads that do not settle.
+	countsCalls atomic.Bool
+	// readLosses is the agent's count of its capture losses at the last read
+	// of a test's misses settled with the switch off (lostSinceLastRead).
+	readLosses atomic.Uint64
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
@@ -838,8 +848,9 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
 	}
-	// Under the proven switch, the proxy's listener is marked for the hooks'
-	// count of the connections waiting for it (proxyconns.go).
+	// Under the proven switch, or for an agent that settles its reads, the
+	// proxy's listener is marked for the hooks' count of the connections
+	// waiting for it (proxyconns.go).
 	a.markProxyListener()
 
 	// The proxy's start can take long without a step: its CA's install runs
@@ -873,6 +884,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 
 	a.proxyStarted = true
+	a.latchCounting()
 	return nil
 }
 
@@ -886,12 +898,34 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// proxy's hands and answered (settle_proven.go): the run's last read
 	// included, so a call made after the last test's end is read, never
 	// filed after it. One keploy cannot settle is a read that cannot vouch
-	// for every miss.
+	// for every miss. With the switch off an agent started for a run that
+	// learns noise waits the same way where it can count the calls
+	// (settlesReads): that noise is learned from these reads, and a miss
+	// decided after the app answered its test (its own client gave up first)
+	// would otherwise be read with the next test's.
 	var settleErr error
-	if provenswitch.On() && a.replaying() {
-		// keploy test reads a test case's misses after its end: what the
-		// listener dropped since is no test's, and is not compared here.
-		_, settleErr = a.settle(ctx, true)
+	if (provenswitch.On() || a.settlesReads()) && a.replaying() {
+		if lost := a.countingLost(); lost != nil {
+			// With the switch off a NAT'd connection has dropped the run to
+			// not counted: no read of it can vouch for every miss, and none
+			// waits for calls that can never settle.
+			settleErr = lost
+		} else {
+			// keploy test reads a test case's misses after its end: what the
+			// listener dropped since is no test's, and is not compared here.
+			_, settleErr = a.settle(ctx, true)
+			if lost := a.countingLost(); settleErr == nil && lost != nil {
+				// Dropped while it settled: a call accepted since is not
+				// kept, so the settle could not have seen it.
+				settleErr = lost
+			}
+		}
+		if !provenswitch.On() {
+			// Counted whatever the settle said, so a loss is one read's.
+			if err := a.lostSinceLastRead(ctx); settleErr == nil {
+				settleErr = err
+			}
+		}
 	}
 	errs, err := a.Proxy.GetMockErrors(ctx)
 	if settleErr != nil && err == nil {

@@ -393,7 +393,18 @@ type SetupOptions struct {
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
 	MockMode bool
 	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
-	RecordRequests    bool
+	RecordRequests bool
+	// SettleReads has the agent settle a test's calls before a replay reads
+	// its misses, as the proven switch always does: from the agent's start its
+	// proxy listens marked for the kernel's count of the connections waiting
+	// for it, keeps each connection from its accept, and each read waits until
+	// every call the application made is in its hands and answered
+	// (Agent.GetMockErrors). Set for a run that learns noise from the misses
+	// it reads (config.Test.LearnsNoise): a miss
+	// decided after the app answered its test is then read with that test.
+	// The agent's, from its start: its proxy's listener is marked for the
+	// kernel's count before it listens. Forwarded as --settle-reads.
+	SettleReads       bool
 	GlobalPassthrough bool
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so
