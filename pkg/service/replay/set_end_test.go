@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	"go.uber.org/zap/zapcore"
+
 	"go.keploy.io/server/v3/pkg/models"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // setEndRecorder is the run's own hooks with SetEndHook: what a hook that
@@ -226,4 +231,229 @@ func (f *refuseSecondReport) InsertReport(ctx context.Context, runID, setID stri
 		return errors.New("disk full")
 	}
 	return f.bpReportDB.InsertReport(ctx, runID, setID, rep)
+}
+
+// uncheckedHooks is the run's own hooks with UncheckedHook: a hook that could
+// not read what a set's tests read (enterprise's decryption of a set's
+// sealed values, when its key service stopped answering) says why. It takes
+// SetEndHook too, to see what the hooks are told of the set's end.
+type uncheckedHooks struct {
+	TestHooks
+	why  string
+	asks []string
+	ends []models.SetEnd
+}
+
+func (h *uncheckedHooks) Unchecked(testSetID string) string {
+	h.asks = append(h.asks, testSetID)
+	return h.why
+}
+
+func (h *uncheckedHooks) SetEnd(_ string, end models.SetEnd) {
+	h.ends = append(h.ends, end)
+}
+
+// uncheckedWhy is what the hooks of the tests below say.
+const uncheckedWhy = "the key service at https://kms.example stopped answering; 3 sealed values were served sealed"
+
+// A hook that changes what a set reads could not tell keploy that some of the
+// set's tests could not be checked: its sealed values were served sealed, a
+// test that read one failed as a regression, and one that did not passed, so
+// a set the run could not check read as the application's fault, or green.
+// Under the proven switch the set is not judged with the hook's reason, and
+// the round goes on (markNotJudged); with it off, the report says the reason
+// first and keeps the run's status, and the run's log says so. The hooks are
+// told the report's reason. A set run again is asked again, once per run.
+func TestASetAHookCouldNotCheckSaysWhy(t *testing.T) {
+	const why = uncheckedWhy
+	for _, c := range []struct {
+		name     string
+		proven   bool
+		wrong    bool
+		runs     int
+		status   models.TestSetStatus
+		notJudge bool
+	}{
+		{"proven, the tests passed", true, false, 1, models.TestSetStatusInternalErr, true},
+		{"proven, a test failed", true, true, 1, models.TestSetStatusInternalErr, true},
+		{"proven, run again", true, false, 2, models.TestSetStatusInternalErr, true},
+		{"switch off, the tests passed", false, false, 1, models.TestSetStatusPassed, false},
+		{"switch off, a test failed", false, true, 1, models.TestSetStatusFailed, false},
+		{"switch off, run again", false, false, 2, models.TestSetStatusPassed, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			app := newBPApp(t)
+			if c.wrong {
+				app.wrong["/test-2"] = true
+			}
+			run := newBasePathRun(t, app.URL, "test-1", "test-2")
+			run.replayer.config.Test.MaxFlakyChecks = uint32(c.runs)
+			h := &uncheckedHooks{TestHooks: run.replayer.GetTestHooks(), why: why}
+			run.replayer.SetTestHooks(h)
+
+			_, _ = run.start(t)
+
+			rep := run.report.report
+			if rep == nil {
+				t.Fatal("no report")
+			}
+			if got := models.TestSetStatus(rep.Status); got != c.status {
+				t.Errorf("status %s, want %s", got, c.status)
+			}
+			if !strings.Contains(rep.FailureReason, why) {
+				t.Errorf("failure reason %q, want it to say %q", rep.FailureReason, why)
+			}
+			if c.notJudge && !strings.Contains(rep.FailureReason, "not judged: "+why) {
+				t.Errorf("failure reason %q, want the set not judged for it", rep.FailureReason)
+			}
+			if !c.notJudge && !strings.HasPrefix(rep.FailureReason, "keploy could not check every test: "+why) {
+				t.Errorf("failure reason %q, want it to give the reason first", rep.FailureReason)
+			}
+			if got := run.replayer.notJudged("test-set-0"); got != c.notJudge {
+				t.Errorf("marked not judged %v, want %v: a set not judged goes on to the next set, any other INTERNAL_ERR ends the round", got, c.notJudge)
+			}
+			if want := slices.Repeat([]string{"test-set-0"}, c.runs); !slices.Equal(h.asks, want) {
+				t.Errorf("asked %v, want %v: once per run of the set", h.asks, want)
+			}
+			if len(h.ends) != c.runs || h.ends[len(h.ends)-1].Why != rep.FailureReason {
+				t.Errorf("hooks told %+v, want %d ends, the last with the report's reason", h.ends, c.runs)
+			}
+			level, msg := zapcore.WarnLevel, "keploy could not check every test of the test-set"
+			if c.proven {
+				level, msg = zapcore.ErrorLevel, "test-set is not judged: keploy could not read all its tests read"
+			}
+			if said := run.said(level, msg); len(said) != c.runs || said[0].ContextMap()["reason"] != why {
+				t.Errorf("the run said %+v at %s, want %d line(s) %q with the reason", said, level, c.runs, msg)
+			}
+		})
+	}
+}
+
+// Under the proven switch a set whose application never got ready is not
+// judged, saying so first: a hook's reason is one more reason it is not
+// judged, after that one, never put ahead of it as a set with a status of
+// its own has it.
+func TestASetNeverReadyAHookCouldNotCheckIsNotJudgedForBoth(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	wake := manualWake(t)
+	stallLimit(t, 1)
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	app := newBPApp(t)
+	run := newBasePathRun(t, app.URL, "test-1")
+	run.replayer.config.Test.HealthURL = down.URL + "/up"
+	run.replayer.SetTestHooks(&uncheckedHooks{TestHooks: run.replayer.GetTestHooks(), why: uncheckedWhy})
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case wake <- struct{}{}:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	_, _ = run.start(t)
+
+	rep := run.report.report
+	if rep == nil || rep.Status != string(models.TestSetStatusInternalErr) || !strings.HasPrefix(rep.FailureReason, "not judged: the application never answered") {
+		t.Fatalf("report %+v, want INTERNAL_ERR saying first that the application never got ready", rep)
+	}
+	if !strings.Contains(rep.FailureReason, "; not judged: "+uncheckedWhy) || strings.Contains(rep.FailureReason, "keploy could not check every test") {
+		t.Fatalf("failure reason %q, want the hook's reason as one more reason the set is not judged", rep.FailureReason)
+	}
+}
+
+// uncheckedPRHooks is the RunTestSet harness's hooks with UncheckedHook.
+type uncheckedPRHooks struct {
+	prHooks
+	why string
+}
+
+func (h uncheckedPRHooks) Unchecked(string) string { return h.why }
+
+// A run a hook could not check is no basis for writing anything back to the
+// recording, with the switch on or off: a mock it served sealed matched no
+// call, so it is consumed by no test. The prune would delete it
+// (--remove-unused-mocks, PreserveFailedMocks off: what k8s-proxy
+// auto-replay sets), a new mappings.yaml would leave it out of its test's
+// entry for good, and record's full round would keep what it learned on it.
+func TestASetAHookCouldNotCheckWritesNothingBack(t *testing.T) {
+	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
+	t.Run("no prune", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		h := newPartialRunHarness(t, 4, 0)
+		h.replayer.config.Test.RemoveUnusedMocks = true
+		h.replayer.hookImpl = uncheckedPRHooks{why: uncheckedWhy}
+		if status := h.run(t); status != models.TestSetStatusPassed {
+			t.Fatalf("status %s, want PASSED: with the switch off the set keeps its status", status)
+		}
+		if got := h.mocks.pruneCalls(); got != 0 {
+			t.Fatalf("UpdateMocks calls = %d, want 0", got)
+		}
+	})
+	t.Run("no mappings.yaml", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		for _, flag := range []bool{false, true} {
+			h := newPartialRunHarness(t, 4, 0)
+			h.replayer.config.Test.UpdateTestMapping = flag
+			h.replayer.hookImpl = uncheckedPRHooks{prHooks: prHooks{consumed: session}, why: uncheckedWhy}
+			_ = h.run(t)
+			if got := h.mappings.insertCalls(); got != 0 {
+				t.Fatalf("--update-test-mapping=%v: mappings.yaml writes = %d, want 0", flag, got)
+			}
+		}
+	})
+	t.Run("nothing learned kept", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		h := newPartialRunHarness(t, 2, 0)
+		h.replayer.config.Test.Learn = true
+		store := &learnedStore{prMockDB: h.mocks}
+		h.replayer.mockDB = store
+		h.replayer.hookImpl = uncheckedPRHooks{prHooks: prHooks{consumed: session}, why: uncheckedWhy}
+		if status := h.run(t); status != models.TestSetStatusInternalErr {
+			t.Fatalf("status %s, want INTERNAL_ERR: not judged", status)
+		}
+		if store.persisted != nil {
+			t.Fatalf("the learn step kept %v from a round that could not read its recordings", store.persisted)
+		}
+	})
+}
+
+// A hook that says nothing changes no report, and holds nothing back.
+func TestASetAHookCheckedKeepsItsReport(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	app := newBPApp(t)
+	run := newBasePathRun(t, app.URL, "test-1")
+	run.replayer.SetTestHooks(&uncheckedHooks{TestHooks: run.replayer.GetTestHooks()})
+
+	if _, err := run.start(t); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if rep := run.report.report; rep == nil || rep.Status != string(models.TestSetStatusPassed) || rep.FailureReason != "" {
+		t.Fatalf("report %+v, want PASSED with no reason", rep)
+	}
+	if run.replayer.notJudged("test-set-0") {
+		t.Fatal("the set is marked not judged")
+	}
+
+	t.Setenv(provenswitch.Env, "")
+	h := newPartialRunHarness(t, 4, 0)
+	h.replayer.config.Test.RemoveUnusedMocks = true
+	h.replayer.hookImpl = uncheckedPRHooks{why: " \n"}
+	if status := h.run(t); status != models.TestSetStatusPassed || h.report.report.FailureReason != "" {
+		t.Fatalf("status %s, reason %q: want PASSED with no reason for a hook that says only blanks", status, h.report.report.FailureReason)
+	}
+	if got := h.mocks.pruneCalls(); got != 1 {
+		t.Fatalf("UpdateMocks calls = %d, want 1: a hook that says nothing holds no prune", got)
+	}
 }
