@@ -368,7 +368,9 @@ type SimulationConfig struct {
 	// left out of the request: the recorded app_port does not replace the
 	// URL's port, and the recorded Host header is not sent, so the request
 	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
-	// a virtual host is not reached under the name it was recorded with.
+	// a virtual host is not reached under the name it was recorded with. (A
+	// CONNECT in authority form still asks for the target it was recorded
+	// with: its Host names that, not the app; ConnectsToAuthority.)
 	TargetFromURL bool
 	// SentTo, when set, is told where each HTTP request goes once everything
 	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
@@ -725,6 +727,22 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
 	}
+	// A CONNECT in authority form (ConnectsToAuthority) names the host and
+	// port it asks to reach as its request target and as its Host (RFC 9110
+	// §9.3.6, §7.2): the Host it was recorded with, wherever the request is
+	// sent (a base path's host included: it is the proxy the CONNECT goes
+	// through, not the target). net/http would send the recorded URL's path
+	// "/" as the request target; with no path and the target as the opaque
+	// part, it sends the target, and the answer's label (describe) names it.
+	// A recording with no Host asks for the host it is sent to.
+	if ConnectsToAuthority(req.Method, req.URL) {
+		target := hostHeader
+		if target == "" {
+			target = req.URL.Host
+		}
+		req.URL.Path, req.URL.RawPath, req.URL.Opaque = "", "", target
+		req.Host = target
+	}
 	if cfg.SentTo != nil {
 		asked := req.Host
 		if asked == "" {
@@ -787,25 +805,52 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
-// endAtHeaders gives a 101 (Switching Protocols) answer no body. A 101's
-// response ends at its header section, and what follows on the connection
-// belongs to the protocol it switched to (RFC 9110 §15.2.2); for a 101,
-// net/http hands back the connection itself as the body. keploy test speaks
-// no protocol a request switches to, so it closes the connection unread, as a
-// client that will not go on does. Read as the body, the next protocol's
-// bytes (an h2c tunnel's preface, a WebSocket's frames) made a replayed
-// upgrade differ from its recording, which has none, once a body of another
-// kind than the recorded one was compared (pkg/matcher/http, cfea2520e); and
-// the read lasted as long as the app kept the connection open: until it gave
-// up on its peer, or, for one that waits on it (most WebSocket servers), for
-// ever, which neither --api-timeout nor the proven switch's stall rule ends,
-// since neither closes a connection the test's request holds.
+// endAtHeaders gives an answer that switches its connection to another
+// protocol no body: a 101 (Switching Protocols), whose response ends at its
+// header section, what follows on the connection belonging to the protocol it
+// switched to (RFC 9110 §15.2.2); and a 2xx answer to CONNECT, after whose
+// header section the connection is a tunnel, its bytes those of the
+// connection it tunnels to (RFC 9110 §9.3.6). For a 101, net/http hands back
+// the connection itself as the body; for a 2xx answer to CONNECT with no
+// length, a body read until the connection closes. keploy test speaks no
+// protocol a request switches to and opens no tunnel, so it closes the
+// connection unread, as a client that will not go on does. Read as the body,
+// the next protocol's bytes (an h2c tunnel's preface, a WebSocket's frames, a
+// tunnelled TLS handshake) made a replayed answer differ from its recording,
+// which has none, once a body of another kind than the recorded one was
+// compared (pkg/matcher/http, cfea2520e); and the read lasted as long as the
+// app kept the connection open. A 101's connection is the caller's once it is
+// handed back, so for an app that waits on its peer (most WebSocket servers)
+// that was for ever: neither --api-timeout nor the proven switch's stall rule
+// closes it. A CONNECT's body is the transport's still, and they end it, but
+// the test failed all the same.
 func endAtHeaders(resp *http.Response) {
-	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols || resp.Body == nil {
+	if resp == nil || resp.Body == nil || !switchesProtocol(resp) {
 		return
 	}
 	_ = resp.Body.Close()
 	resp.Body = http.NoBody
+}
+
+// ConnectsToAuthority reports whether a test's request, by its method and
+// URL, is a CONNECT that names its target in authority form, the host and
+// port it asks to reach (RFC 9110 §9.3.6). The capture records one as a URL of
+// that authority (its Host) with the path "/" and no query. "CONNECT /", an
+// origin-form CONNECT to the path "/", records alike, and is taken as the
+// authority form, CONNECT's own; a CONNECT with another path or a query (Go's
+// net/rpc's "CONNECT /_goRPC_") is in origin form, its path its own.
+func ConnectsToAuthority(method string, u *url.URL) bool {
+	return method == http.MethodConnect && u != nil && u.Opaque == "" &&
+		(u.Path == "/" || u.Path == "") && u.RawQuery == "" && !u.ForceQuery
+}
+
+// switchesProtocol reports whether resp's connection goes on in another
+// protocol after its header section (endAtHeaders).
+func switchesProtocol(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return true
+	}
+	return resp.Request != nil && resp.Request.Method == http.MethodConnect && resp.StatusCode/100 == 2
 }
 
 // connClosingBody is the body of the app's answer to a test request: closed,

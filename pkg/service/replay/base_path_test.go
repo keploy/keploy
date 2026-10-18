@@ -1057,6 +1057,64 @@ func TestReplaceBaseURL(t *testing.T) {
 	}
 }
 
+// A CONNECT in authority form, recorded as a URL of its target with the path
+// "/", has no path for a base path's to go in front of: it takes the base
+// path's scheme and host only. Under the base path's path it asked for
+// "CONNECT /api/", which a proxy refuses. Any other request, an origin-form
+// CONNECT among them, goes under the base path's path as ReplaceBaseURL puts
+// it.
+func TestRequestAtBasePath(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, base, old, want string
+	}{
+		{"a CONNECT to its target", "CONNECT", "http://10.0.0.5:9000/api", "http://upstream.invalid:443/", "http://10.0.0.5:9000/"},
+		{"a CONNECT to its target, recorded with no path", "CONNECT", "http://10.0.0.5:9000/api", "http://upstream.invalid:443", "http://10.0.0.5:9000"},
+		{"a CONNECT to its target, under a path alone", "CONNECT", "/api", "http://upstream.invalid:443/", "http:///"},
+		{"a CONNECT to a path", "CONNECT", "http://10.0.0.5:9000/api", "http://127.0.0.1:18911/_goRPC_", "http://10.0.0.5:9000/api/_goRPC_"},
+		{"a CONNECT with a query", "CONNECT", "http://10.0.0.5:9000/api", "http://127.0.0.1:18911/?a=1", "http://10.0.0.5:9000/api/?a=1"},
+		{"a GET of /", "GET", "http://10.0.0.5:9000/api", "http://127.0.0.1:18911/", "http://10.0.0.5:9000/api/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := requestAtBasePath(tc.base, models.HTTPReq{Method: models.Method(tc.method), URL: tc.old})
+			if err != nil {
+				t.Fatalf("requestAtBasePath(%q, %s %q): %v", tc.base, tc.method, tc.old, err)
+			}
+			if got != tc.want {
+				t.Fatalf("requestAtBasePath(%q, %s %q) = %q, want %q", tc.base, tc.method, tc.old, got, tc.want)
+			}
+		})
+	}
+}
+
+// A run against a base path sends a CONNECT for the target it was recorded
+// asking for, as its request target and its Host, whatever path the base path
+// has; it has nothing to say of a recorded Host it did not send, since it sent
+// it. An origin-form CONNECT goes under the base path's path as any request
+// does.
+func TestBasePathSendsAConnectForItsRecordedTarget(t *testing.T) {
+	app := newBPApp(t)
+	recordedPort := closedLocalPort(t)
+	tunnel := bpRequest("tunnel", recordedPort, "/")
+	tunnel.HTTPReq.Method = models.Method(http.MethodConnect)
+	tunnel.HTTPReq.URL = "http://upstream.invalid:443/"
+	tunnel.HTTPReq.Header = map[string]string{"Host": "upstream.invalid:443"}
+	rpc := bpRequest("rpc", recordedPort, "/_goRPC_")
+	rpc.HTTPReq.Method = models.Method(http.MethodConnect)
+	rpc.HTTPReq.Header = map[string]string{"Host": app.host()}
+	run := newBasePathRunOf(t, app.URL+"/v2", nil, tunnel, rpc)
+
+	if _, err := run.start(t); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got, want := app.asked(), []string{"CONNECT upstream.invalid:443", "CONNECT /v2/_goRPC_"}; !slices.Equal(got, want) {
+		t.Fatalf("the app at the base path was asked\n  %q\nwant the CONNECT for its recorded target, and the one to a path under the base path\n  %q", got, want)
+	}
+	if said := run.said(zap.InfoLevel, "not under the Host header they were recorded with"); len(said) != 0 {
+		t.Fatalf("the run said the recorded Host is not sent, of a CONNECT that sent it: %+v", said)
+	}
+}
+
 // What the app at the base path is asked is the recorded request, escapes and
 // all, as it is when keploy starts the app itself. Start to app, so that
 // nothing between the rewrite and the wire undoes it. (A URL with %7B in it is
@@ -1335,9 +1393,9 @@ func bpSimulate(t *testing.T, cfg *config.Config, tests ...*models.TestCase) *ob
 	hooks := NewHooks(zap.New(core), cfg, &bpNoAgent{})
 	for _, test := range tests {
 		if test.Kind == models.HTTP {
-			rewritten, err := ReplaceBaseURL(cfg.Test.BasePath, test.HTTPReq.URL)
+			rewritten, err := requestAtBasePath(cfg.Test.BasePath, test.HTTPReq)
 			if err != nil {
-				t.Fatalf("ReplaceBaseURL: %v", err)
+				t.Fatalf("requestAtBasePath: %v", err)
 			}
 			test.HTTPReq.URL = rewritten
 		}
