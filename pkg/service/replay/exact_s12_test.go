@@ -556,3 +556,29 @@ func TestUnderTheSwitchAFailedReadOfTheWorkerScopeLeavesTheSetUnjudged(t *testin
 		t.Fatalf("not judged %v, missing named %d time(s); want not judged and nothing named", h.replayer.notJudged("test-set-0"), workerNamed(logs))
 	}
 }
+
+// A set that already failed is red whatever its worker scope does: its end
+// does not wait for the worker scope's calls, nor names one as never made.
+// Only a set that passed so far waits for them.
+func TestUnderTheSwitchAFailedSetDoesNotWaitForItsWorkerScope(t *testing.T) {
+	setSwitch(t, true)
+	fastWorkerWait(t)
+	h := newPartialRunHarness(t, 1, 0)
+	pinWindows(h)
+	h.replayer.config.Command = "./app"
+	core, logs := observer.New(zap.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+	mappingFile(t, h, nil)
+	// test-1 never makes its call: it fails, and with it the set.
+	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{})}
+	if got := h.run(t); got != models.TestSetStatusFailed {
+		t.Fatalf("set %s, want FAILED: test-1 never made its call", got)
+	}
+	if got := statusOf(t, h, "test-1"); got != models.TestStatusFailed {
+		t.Fatalf("test-1: %s, want FAILED", got)
+	}
+	if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); waited != 0 || workerNamed(logs) != 0 {
+		t.Fatalf("a failed set waited for its worker scope %d time(s) and named a call missing %d time(s); want neither", waited, workerNamed(logs))
+	}
+}

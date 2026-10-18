@@ -684,3 +684,34 @@ func TestWindowMappingsMarkTheShutdownsCalls(t *testing.T) {
 		t.Fatalf("a recording never stopped marked %v", got)
 	}
 }
+
+// Through Start: a worker-scope call recorded once keploy record began
+// stopping the application (a Ctrl+C, the record timer) is its shutdown's
+// (MockEntry.AtStop), and one recorded before is not. A recording that did
+// not note its stop wrote no such mark, and its replay waited on the
+// shutdown's calls as on the application's own, until the stall limit.
+func TestStart_ProvenRecordMarksTheCallsItsStopMade(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	keepExitCode(t)
+	w := startWinRecording(t, &config.Config{}, nil, nil)
+	// The agent stamps a call as it records it: this one, after the stop
+	// the recording is about to get.
+	shutdown := winMock("deregister", models.HTTP, "", 0)
+	shutdown.Spec.ReqTimestampMock = time.Now().Add(time.Hour)
+	shutdown.Spec.ResTimestampMock = shutdown.Spec.ReqTimestampMock.Add(time.Millisecond)
+	w.mock(t, winMock("boot-query", models.Postgres, "mocks", 500))
+	w.mock(t, shutdown)
+	w.test(t, winTest("test-1", 1000, 1100))
+	w.stop(t, 1, 2)
+
+	w.mapping.mu.Lock()
+	worker := append([]models.MockEntry(nil), w.mapping.worker...)
+	w.mapping.mu.Unlock()
+	atStop := map[string]bool{}
+	for _, e := range worker {
+		atStop[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"boot-query": false, "deregister": true}; !reflect.DeepEqual(atStop, want) {
+		t.Fatalf("worker scope written with atStop %v; want %v: only the call recorded after the stop is the shutdown's", atStop, want)
+	}
+}
