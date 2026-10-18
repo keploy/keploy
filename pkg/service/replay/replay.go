@@ -1407,17 +1407,18 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		}
 
 		//executing afterTestRun hook, executed after running all the test-sets
-		// Under docker compose without a kept stack, the agent is part of each
-		// set's stack and goes down with it: the last set that ran calls the
-		// hook while its agent is up (RunTestSet). When that was not the last
-		// set listed (the sets after it ran nothing), no agent is left here
-		// to answer it.
-		composeAgentGone := cmdType == utils.DockerCompose && r.instrument && !effectiveKeepAlive
-		if !r.afterTestRunCalled && composeAgentGone {
-			r.logger.Debug("not calling the after-test-run hook: under docker compose the agent went down with the last test set that ran")
-		}
-		if !r.afterTestRunCalled && !composeAgentGone {
-			err = r.hookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+		if !r.afterTestRunCalled {
+			// Under docker compose without a kept stack, the agent is part
+			// of each set's stack and goes down with it, so the last set
+			// listed calls this hook while its agent is up (RunTestSet).
+			// One that ran nothing (ignored, empty, or ended early) leaves
+			// no agent to answer here: the run's hooks still run, all but
+			// the agent's (withoutAgent).
+			hookCtx := ctx
+			if cmdType == utils.DockerCompose && r.instrument && !effectiveKeepAlive {
+				hookCtx = withoutAgent(ctx)
+			}
+			err = r.hookImpl.AfterTestRun(hookCtx, testRunID, testSets, coverageData)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to execute after test run hook")
 			}

@@ -233,8 +233,9 @@ func TestBeforeTestSetCompose_ARestartedAgentGetsThisSetsHook(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		mu.Lock()
 		sets = append(sets, req.TestSetID)
+		n := len(sets)
 		mu.Unlock()
-		if req.TestSetID == "test-set-1" && len(sets) == 2 {
+		if req.TestSetID == "test-set-1" && n == 2 {
 			// The agent dies before it answers test-set-1's hook.
 			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 				_ = conn.Close()

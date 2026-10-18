@@ -320,10 +320,11 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 			runtime.Gosched()
 		}
 	}
-	// oneShortUnknown: one short is unknown, and charges nothing.
+	// oneShortUnknown: one short, the FIN counted, is unknown, and charges
+	// nothing.
 	oneShortUnknown := func(t *testing.T, p *Proxy, pc *pairedConn, ps proxySide, why string) {
 		t.Helper()
-		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1, finCounted: true})
 		if ok || !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("one short = %v, %v; want unknown (%v): %s", ok, err, models.ErrProxyConnsUnsupported, why)
 		}
@@ -331,10 +332,10 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 			t.Fatalf("one short: %d app_bytes_lost charged, want none (unknown)", l)
 		}
 	}
-	// twoShortLoss: two short is a loss, charged once.
+	// twoShortLoss: two short, the FIN counted, is a loss, charged once.
 	twoShortLoss := func(t *testing.T, p *Proxy, pc *pairedConn, ps proxySide) {
 		t.Helper()
-		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 2})
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 2, finCounted: true})
 		if !ok || err != nil {
 			t.Fatalf("two short = %v, %v; want resolved as a loss", ok, err)
 		}
@@ -353,7 +354,7 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 			oneShortUnknown(t, p, pc, ps, "the orphan is gone, which says nothing of the FIN")
 			return
 		}
-		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1, finCounted: true})
 		if !ok || err != nil {
 			t.Fatalf("pairReached = %v, %v; want settled", ok, err)
 		}
@@ -366,10 +367,32 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		p, pc, _, ps := closedPair(t, 120)
 		// A full socket: gone only if the kernel's orphan or memory
 		// limits took it at the close, which is judged as gone.
-		orphanIn(t, pc, tcpFinWait2)
+		if orphanIn(t, pc, tcpFinWait2) {
+			t.Log("the kernel destroyed the orphan at its close (its orphan or memory limits): judged gone, not in FIN_WAIT2")
+		}
 		oneShortUnknown(t, p, pc, ps, "the FIN, or a byte the orphan will refuse, is still to come")
 		twoShortLoss(t, p, pc, ps)
 	})
+
+	// One short with the FIN not counted (the application has not closed)
+	// is a byte of data, which the orphan refuses: a loss, in FIN_WAIT2 or
+	// gone alike.
+	for _, c := range []struct {
+		name    string
+		linger2 int
+	}{{"one byte short, its orphan waiting for a FIN", 120}, {"one byte short, its orphan gone", -1}} {
+		t.Run(c.name, func(t *testing.T) {
+			p, pc, _, ps := closedPair(t, c.linger2)
+			orphanIn(t, pc, tcpFinWait2) // in FIN_WAIT2, or gone
+			ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
+			if !ok || err != nil {
+				t.Fatalf("one byte short = %v, %v; want resolved as a loss", ok, err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+				t.Fatalf("one byte short: %d app_bytes_lost charged, want 1: the orphan refuses the byte", l)
+			}
+		})
+	}
 
 	t.Run("its orphan is gone", func(t *testing.T) {
 		p, pc, _, ps := closedPair(t, -1)
