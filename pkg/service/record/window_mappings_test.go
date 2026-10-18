@@ -715,3 +715,25 @@ func TestStart_ProvenRecordMarksTheCallsItsStopMade(t *testing.T) {
 		t.Fatalf("worker scope written with atStop %v; want %v: only the call recorded after the stop is the shutdown's", atStop, want)
 	}
 }
+
+// A worker-scope call is the shutdown's by its place (models.PlaceOf, as the
+// window mappings read it): one sent before the stop that a parser places at
+// its answer, answered after the stop began, is the shutdown's; one placed
+// before the stop is not, whenever it was answered; an entry with no place
+// known is read by its request time.
+func TestMarkAtStopReadsAMocksPlace(t *testing.T) {
+	stop := winAt(3000)
+	worker := []models.MockEntry{
+		{Name: "held-poll", ReqTimestampMock: models.FormatMockTimestamp(winAt(2900))},
+		{Name: "early", ReqTimestampMock: models.FormatMockTimestamp(winAt(2900)), ResTimestampMock: models.FormatMockTimestamp(winAt(3100))},
+		{Name: "unplaced", ReqTimestampMock: models.FormatMockTimestamp(winAt(3050))},
+	}
+	markAtStop(worker, map[string]time.Time{"held-poll": winAt(3100), "early": winAt(2900)}, stop)
+	got := map[string]bool{}
+	for _, e := range worker {
+		got[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"held-poll": true, "early": false, "unplaced": true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked %v; want %v", got, want)
+	}
+}
