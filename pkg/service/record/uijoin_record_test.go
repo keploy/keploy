@@ -233,7 +233,7 @@ only that half on purpose: the rest of the field doc now reads "when
 capture began", which is this change's own wording and cannot be its
 justification.) Handing it
 `sessionStart` -- the top of Start(), before instrumentation setup, agent
-bring-up (AgentReadyTimeout defaults to 330s), and under docker-compose
+bring-up (as long as the agent's start makes progress), and under docker-compose
 the app's own boot as well --
 charges the whole of startup to the skew, which is a larger error than
 the one the model refuses.

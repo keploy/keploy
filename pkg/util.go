@@ -2857,24 +2857,17 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 	}
 }
 
-// DefaultAgentReadyTimeout is how long keploy waits for the in-docker
-// keploy-agent's HTTP endpoint to become reachable before giving up. This
-// bounds container BOOT only — the AgentHealthTicker gate that runs before
-// StoreMocks — not the compose ready-file healthcheck, which has its own
-// generous, env-tunable start_period floor (see agentHealthcheckStartPeriod in
-// pkg/platform/docker). Under heavy CI docker-daemon contention the agent
-// container can take ~2 minutes just to start — observed in CI as a `docker
-// run` of an already-local image taking 126s before the agent process ran. A
-// shorter CLI wait gives up while the container is still booting, tearing down
-// a bring-up that would have succeeded.
-//
-// ErrAgentNotReady is returned by an agent Setup whose agent's start stopped
-// making progress before it reported healthy (pkg/platform/http,
-// agent_boot_watch.go), or, for a docker compose agent, did not report healthy
-// within AgentReadyTimeout. It is a distinct sentinel so callers can
-// retry a fresh bring-up on this — a nondeterministic container-runtime stall,
-// observed intermittently on macOS Docker Desktop — WITHOUT retrying
-// deterministic failures like missing kernel privileges or a bad config.
+// ErrAgentNotReady is the error of an agent start that stopped making progress
+// before the agent reported healthy (pkg/platform/http, agent_boot_watch.go):
+// one keploy started itself (Setup), or one docker compose started
+// (WatchAgentStart). No budget of wall time ends a start that makes progress:
+// under heavy CI docker-daemon contention the agent container can take
+// minutes just to start, and a fixed budget (KEPLOY_AGENT_READY_TIMEOUT, 330 s,
+// since removed) tore down bring-ups that would have succeeded. It is a
+// distinct sentinel so callers can retry a fresh bring-up on this — a
+// nondeterministic container-runtime stall, observed intermittently on macOS
+// Docker Desktop — WITHOUT retrying deterministic failures like missing kernel
+// privileges or a bad config.
 var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
 
 // AgentStartWatcher is implemented by an instrumentation that can watch the
@@ -2895,22 +2888,6 @@ func WatchAgentStart(ctx context.Context, inst any) <-chan error {
 		return w.WatchAgentStart(ctx)
 	}
 	return nil
-}
-
-const DefaultAgentReadyTimeout = 330 * time.Second
-
-// AgentReadyTimeout returns how long to wait for the keploy-agent to become
-// ready. It defaults to DefaultAgentReadyTimeout and is overridable via the
-// KEPLOY_AGENT_READY_TIMEOUT env var (whole seconds) for tuning on unusually
-// slow or fast hosts. A non-positive / unparsable value falls back to the
-// default.
-func AgentReadyTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
-	}
-	return DefaultAgentReadyTimeout
 }
 
 // agentSetupAttempts bounds how many times a stalled agent bring-up is retried

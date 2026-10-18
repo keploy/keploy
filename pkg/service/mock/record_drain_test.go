@@ -1112,7 +1112,6 @@ func TestAComposeRecordingSavedUnconfirmedIsSaid(t *testing.T) {
 		{name: "the agent died: not kept", mocks: true, res: models.AppError{AppErrorType: models.ErrAppStopped}, failed: func() error { return errors.New("keploy-agent exited (137)") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			core, logs := observer.New(zapcore.WarnLevel)
 			instr := newInstr(t, agentUpAfterRun, false, tc.res)
 			instr.runUntilReady = true
