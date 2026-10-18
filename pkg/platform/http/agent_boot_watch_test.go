@@ -4,17 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // bootLooks drives a judge: each look advances keploy's runnable time by
@@ -443,5 +451,324 @@ func TestANativeAgentsStartIsWatchedWhereItReports(t *testing.T) {
 		if got := sudoMayPrompt(tc.elevates, tc.cached, tc.euid); got != tc.want {
 			t.Errorf("sudoMayPrompt(%v, %v, %d) = %v, want %v", tc.elevates, tc.cached, tc.euid, got, tc.want)
 		}
+	}
+}
+
+// An agent that said its server listens, then stopped running (its container
+// paused, or one compose starts again), is waited for with no bound while it
+// does not run: its health check is due within bootSilence of keploy's
+// runnable time once it runs again, from then.
+func TestAReadyAgentThatDoesNotRunIsWaitedForWithNoBound(t *testing.T) {
+	b := newBootLooks(t)
+	ready := utils.BootProgress{Beat: 3, Seq: 9, Ready: true}
+	b.look(0, ready, true, true)
+	for i := 0; i < 100; i++ {
+		if v, why := b.look(time.Hour, ready, true, false); v != bootWaiting {
+			t.Fatalf("look %d at a ready agent whose container is paused: %v (%s), want waiting", i, v, why)
+		}
+	}
+	b.look(0, ready, true, true)
+	if v, why := b.look(bootSilence-time.Second, ready, true, true); v != bootWaiting {
+		t.Fatalf("short of bootSilence since it runs again: %v (%s), want waiting", v, why)
+	}
+	if v, why := b.look(time.Second, ready, true, true); v != bootStalled || !strings.Contains(why, "health check has not answered") {
+		t.Fatalf("bootSilence since it runs again, its health check silent: %v (%s), want stalled", v, why)
+	}
+}
+
+// scriptedContainer stands in for the agent's container (containerBootLook,
+// containerEnd): what each look finds of it is what the test last set.
+type scriptedContainer struct {
+	mu      sync.Mutex
+	running bool
+	p       utils.BootProgress
+	ok      bool
+	ended   bool
+	code    int
+	looks   int
+}
+
+func (c *scriptedContainer) set(running bool, p utils.BootProgress, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.running, c.p, c.ok = running, p, ok
+}
+
+func (c *scriptedContainer) exit(code int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.running, c.ended, c.code = false, true, code
+}
+
+func (c *scriptedContainer) looked() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.looks
+}
+
+// install makes it the container every look looks at.
+func (c *scriptedContainer) install(t *testing.T) {
+	t.Helper()
+	look, silence, bootLookFn, endFn := bootLook, bootSilence, containerBootLook, containerEnd
+	bootLook, bootSilence = time.Millisecond, 50*time.Millisecond
+	containerBootLook = func(*zap.Logger, string) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+		read := func(context.Context) (utils.BootProgress, bool) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.p, c.ok
+		}
+		running := func(context.Context) bool {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			c.looks++
+			return c.running
+		}
+		return read, running
+	}
+	containerEnd = func(*zap.Logger, string) func(context.Context) (int, bool) {
+		return func(context.Context) (int, bool) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.code, c.ended
+		}
+	}
+	t.Cleanup(func() { bootLook, bootSilence, containerBootLook, containerEnd = look, silence, bootLookFn, endFn })
+}
+
+// awaitLooks waits until the watch has looked at c n more times, so a test
+// knows the watch has seen what it set.
+func (c *scriptedContainer) awaitLooks(t *testing.T, n int) {
+	t.Helper()
+	want := c.looked() + n
+	deadline := time.Now().Add(30 * time.Second)
+	for c.looked() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("the watch looked %d times, want %d", c.looked(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A compose wait watches the start of the agent docker compose starts, by its
+// container (WatchAgentStart): nothing while the engine has not run the
+// container, however many looks that takes, nor while a running agent's start
+// takes steps; the agent's own failure, with the cause its exit code names,
+// once it reports one, armed as this process's code; a stalled start once it
+// stops taking steps.
+func TestWatchAgentStartFollowsTheStartOfAComposeAgent(t *testing.T) {
+	keepCode := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = keepCode })
+	for _, tc := range []struct {
+		name  string
+		end   func(c *scriptedContainer)
+		want  func(error) bool
+		armed int
+	}{
+		{"failed", func(c *scriptedContainer) {
+			c.set(true, utils.BootProgress{Beat: 9, Seq: 4, Failed: true, ExitCode: utils.ExitPrivilegeRequired, Failure: "failed to load eBPF"}, true)
+		}, func(err error) bool {
+			return errors.Is(err, utils.ErrPrivilegeRequired) && strings.Contains(err.Error(), "failed to load eBPF")
+		}, utils.ExitPrivilegeRequired},
+		{"stalled", func(c *scriptedContainer) {
+			c.set(true, utils.BootProgress{Beat: 9 + bootStallChecks, Seq: 4}, true)
+		}, func(err error) bool {
+			return errors.Is(err, pkg.ErrAgentNotReady) && strings.Contains(err.Error(), "took no step")
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ErrCode = 0
+			c := &scriptedContainer{}
+			c.install(t)
+			a := clientFor("http://127.0.0.1:1")
+			a.agentContainer = "keploy-v3-test"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errs := a.WatchAgentStart(ctx)
+			// Not created yet, then not started: many looks, and a long
+			// time, with nothing said.
+			c.awaitLooks(t, 200)
+			select {
+			case err := <-errs:
+				t.Fatalf("a container the engine has not run ended the wait: %v", err)
+			default:
+			}
+			for beat := uint64(0); beat < 3*bootStallChecks; beat++ {
+				c.set(true, utils.BootProgress{Beat: beat, Seq: beat}, true)
+				c.awaitLooks(t, 1)
+			}
+			c.set(true, utils.BootProgress{Beat: 9, Seq: 4}, true)
+			c.awaitLooks(t, 2)
+			select {
+			case err := <-errs:
+				t.Fatalf("a start taking steps ended the wait: %v", err)
+			default:
+			}
+			tc.end(c)
+			select {
+			case err := <-errs:
+				if !tc.want(err) {
+					t.Fatalf("the watch said %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the watch said nothing")
+			}
+			if utils.ErrCode != tc.armed {
+				t.Fatalf("armed exit code %d, want %d", utils.ErrCode, tc.armed)
+			}
+		})
+	}
+	// No agent at all, not even a URI: nothing to watch, a channel that
+	// never says.
+	if errs := clientFor("").WatchAgentStart(context.Background()); errs != nil {
+		t.Fatal("a client with no agent watched one")
+	}
+}
+
+// steppingClock is a runnable clock that moves by a second at every read: a
+// keploy that runs flat out between looks.
+type steppingClock struct{ stall.ManualClock }
+
+func (c *steppingClock) Runnable() time.Duration {
+	c.Advance(time.Second)
+	return c.ManualClock.Runnable()
+}
+
+// fastURILooks makes the looks at an agent known only by its URI quick, and
+// keploy's runnable time move a second at each.
+func fastURILooks(t *testing.T) {
+	t.Helper()
+	look, silence, clk, every := bootLook, bootSilence, uriClock, stillWaitingLooks
+	bootLook, bootSilence, uriClock, stillWaitingLooks = time.Millisecond, 5*time.Second, &steppingClock{}, 5
+	t.Cleanup(func() { bootLook, bootSilence, uriClock, stillWaitingLooks = look, silence, clk, every })
+}
+
+// An agent this client did not set up (a sidecar another process started) is
+// watched at its URI. Where nothing takes a connection, no agent is there:
+// once nothing has for bootSilence of keploy's runnable time, the wait ends,
+// saying so, as a start that made no progress; never a wait that goes on in
+// silence.
+func TestAnAgentURIWhereNothingAnswersIsGivenUpOn(t *testing.T) {
+	fastURILooks(t)
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := "http://" + closed.Addr().String() + "/agent"
+	_ = closed.Close()
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
+	select {
+	case err := <-a.WatchAgentStart(context.Background()):
+		if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "nothing answers at "+uri) {
+			t.Fatalf("the watch said %v; want that nothing answers at the URI", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("a URI where nothing answers was waited on")
+	}
+	if logs.FilterMessageSnippet("still waiting for the keploy agent at "+uri).Len() == 0 {
+		t.Fatal("the wait said nothing while it waited")
+	}
+}
+
+// Where something takes connections at the URI (the agent, whose health check
+// answers only once its start is over, or a forward in front of it), keploy
+// waits on however long that takes, past bootSilence many times over, and
+// says now and then that it still waits, and what it found.
+func TestAnAgentURIThatTakesConnectionsIsWaitedFor(t *testing.T) {
+	fastURILooks(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	uri := "http://" + ln.Addr().String() + "/agent"
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errs := a.WatchAgentStart(ctx)
+	deadline := time.Now().Add(30 * time.Second)
+	// 20 lines, 5 looks apart: 100 looks, 100 s of keploy's runnable time,
+	// 20 times bootSilence.
+	for logs.FilterMessageSnippet("still waiting for the keploy agent at "+uri).Len() < 20 {
+		select {
+		case err := <-errs:
+			t.Fatalf("an agent that takes connections was given up on: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("said it still waits %d times, want 20", logs.FilterMessageSnippet("still waiting").Len())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	line := logs.FilterMessageSnippet("still waiting for the keploy agent at " + uri).All()[0]
+	if !strings.Contains(line.Message, "something takes connections there") {
+		t.Fatalf("the line says %q; want what the look found", line.Message)
+	}
+}
+
+// A compose wait does not end on the agent's container having exited:
+// compose's own exit says why (its project aborts over a dependency that
+// failed to start). The release of the app (watchAgent's endOnExit) does: a
+// container that stopped answers no more.
+func TestOnlyTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
+	for _, endOnExit := range []bool{false, true} {
+		c := &scriptedContainer{}
+		c.install(t)
+		a := clientFor("http://127.0.0.1:1")
+		a.agentContainer = "keploy-v3-test"
+		ctx, cancel := context.WithCancel(context.Background())
+		errs := a.watchAgent(ctx, endOnExit)
+		c.set(true, utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, true)
+		c.awaitLooks(t, 2)
+		c.exit(137)
+		if !endOnExit {
+			c.awaitLooks(t, 200)
+			select {
+			case err := <-errs:
+				t.Fatalf("a compose wait ended on the container's exit: %v", err)
+			default:
+			}
+		} else {
+			select {
+			case err := <-errs:
+				if !strings.Contains(err.Error(), "exited with code 137") {
+					t.Fatalf("the release ended with %v, want the container's exit", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the release did not end on the container's exit")
+			}
+		}
+		cancel()
+	}
+}
+
+// The release of the app ends at once on the CA setup failure the agent
+// latches, with its words: no wait changes it.
+func TestTheReleaseEndsAtOnceOnALatchedCASetupFailure(t *testing.T) {
+	var readies atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/agent/ready") {
+			readies.Add(1)
+			http.Error(w, "CA setup failed: open /tmp/keploy-tls/ca.crt: read-only file system", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("KEPLOY_PROVEN", "")
+	a := clientFor(srv.URL)
+	err := a.MakeAgentReadyForDockerCompose(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "read-only file system") || readies.Load() != 1 {
+		t.Fatalf("MakeAgentReadyForDockerCompose = %v after %d asks; want the latched failure, after one", err, readies.Load())
 	}
 }

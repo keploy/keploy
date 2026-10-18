@@ -2922,6 +2922,26 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 // deterministic failures like missing kernel privileges or a bad config.
 var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
 
+// AgentStartWatcher is implemented by an instrumentation that can watch the
+// start of the agent it set up (pkg/platform/http's AgentClient): a wait for an
+// agent it did not start itself (docker compose starts it as a service of the
+// project) follows the start's progress, not a clock. WatchAgentStart sends one
+// error once the start has failed (the agent says so) or has stopped making
+// progress (ErrAgentNotReady), and nothing while it makes progress, or while
+// its process does not run yet; ctx ends it.
+type AgentStartWatcher interface {
+	WatchAgentStart(ctx context.Context) <-chan error
+}
+
+// WatchAgentStart is inst's watch of its agent's start (AgentStartWatcher), or
+// nil, which never sends, for an instrumentation that cannot watch one.
+func WatchAgentStart(ctx context.Context, inst any) <-chan error {
+	if w, ok := inst.(AgentStartWatcher); ok {
+		return w.WatchAgentStart(ctx)
+	}
+	return nil
+}
+
 const DefaultAgentReadyTimeout = 330 * time.Second
 
 // AgentReadyTimeout returns how long to wait for the keploy-agent to become

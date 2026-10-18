@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -417,11 +416,13 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	return nil
 }
 
-// awaitAgentAnswers waits, up to the agent's readiness budget, for its health
-// endpoint to answer.
+// awaitAgentAnswers waits for the agent's health endpoint to answer while its
+// start makes progress (WatchAgentStart), as long as that takes, and ends once
+// the start fails or stops making progress.
 func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	start := a.WatchAgentStart(ctx)
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -441,6 +442,9 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 		case <-ctx.Done():
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not answer at %s: %w",
 				a.conf.Agent.AgentURI, ctx.Err())
+		case err := <-start:
+			return fmt.Errorf("keploy's agent, started again by docker compose, did not come up at %s: %w",
+				a.conf.Agent.AgentURI, err)
 		case <-tick.C:
 		}
 	}
