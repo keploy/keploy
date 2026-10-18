@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/docker/compose/v5/pkg/api"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -135,7 +137,18 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		defer close(teardownDone)
 		select {
 		case <-ctx.Done():
-			a.composeGraceThenDown(composeDown)
+			if composeStopsTheApp() {
+				// Under the switch the app's stop is keploy's own, and says
+				// when it had to kill (compose_appstop.go).
+				// It says a recording's kill itself.
+				// An app that exited on its own needs no stop.
+				if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+					a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
+				}
+				composeDown()
+			} else {
+				a.composeGraceThenDown(composeDown)
+			}
 			cancelUp()
 		case <-upDone:
 		}

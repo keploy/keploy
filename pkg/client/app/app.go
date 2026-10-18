@@ -130,6 +130,9 @@ type App struct {
 	// stopReached is what the latest stop of a native app reached with its
 	// interrupt, under the proven switch, until TakeStopReached takes it.
 	stopReached atomic.Pointer[[]utils.Reached]
+	// composeApp is what keploy knows of a compose app's container, which it
+	// stops and watches itself under the proven switch (compose_appstop.go).
+	composeApp composeAppState
 }
 
 func (a *App) Setup(ctx context.Context) error {
@@ -2018,6 +2021,20 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// container has to be read between compose stopping it and keploy
 		// removing it. See readStoppedAgent.
 		defer a.readStoppedAgent(ctx)
+		// Under the switch keploy, not compose's abort, ends the run on an
+		// exit of the app it did not ask for (compose_appstop.go). Deferred
+		// last, so the watch ends before the stack is taken down.
+		if composeStopsTheApp() {
+			a.composeApp.halted.Store(nil)
+			a.composeApp.stopping.Store(false)
+			stopWatch := a.watchComposeApp(ctx, func() {
+				a.composeApp.stopping.Store(true)
+				if !a.stopComposeProject(context.WithoutCancel(ctx)) {
+					composeDown()
+				}
+			})
+			defer stopWatch()
+		}
 	}
 
 	// dockerRunName is the resolved user-app container name; reused by the
@@ -2085,7 +2102,18 @@ func (a *App) run(ctx context.Context) models.AppError {
 			// keploy record's stop of the app, under the switch, says
 			// when it had to kill too: what the app would have done as it
 			// stopped is then not in the recording (P101-b-k).
-			recordEnd := a.kind != utils.DockerCompose && !setEnd && a.StopsARecording()
+			// A compose app's stop is keploy's own under the switch
+			// (compose_appstop.go), so it says so too.
+			recordEnd := !setEnd && a.StopsARecording()
+			if a.kind == utils.DockerCompose && composeStopsTheApp() {
+				// It says a recording's kill itself.
+				// An app that exited on its own needs no stop.
+				if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+					a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
+				}
+				composeDown()
+				return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
+			}
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
@@ -2327,6 +2355,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 			return models.AppError{AppErrorType: models.ErrTestBinStopped, Err: context.Canceled, AppLogs: appLogs}
 		}
 
+		// The app's container exited when keploy had not asked it to: the
+		// run ends with the app's exit, as compose's abort ended it.
+		if halt := a.composeAppHalt(); halt != nil {
+			return halt.appError(appLogs)
+		}
 		if err != nil {
 			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err, AppLogs: appLogs, ExitCode: exitCodeFromErr(err)}
 		}

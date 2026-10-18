@@ -94,3 +94,23 @@ func (u *updatingConf) got() *models.TestSet { return u.written }
 type plainConf struct{ *confStore }
 
 func (p *plainConf) got() *models.TestSet { return p.written }
+
+// Under the proven switch the recording keeps the first reason its end is
+// cut (the agent went before it had handed over what it captured), which its
+// config then carries as a stop that killed the app would; with the switch off
+// it keeps none.
+func TestARecordingKeepsWhyItsEndIsCut(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	r := &Recorder{logger: zap.NewNop()}
+	r.noteEndCut("the agent ended its mocks stream first")
+	r.noteEndCut("the drain stalled")
+	if why := r.endCut.Load(); why == nil || *why != "the agent ended its mocks stream first" {
+		t.Fatalf("kept %v, want the first reason", why)
+	}
+	t.Setenv(provenswitch.Env, "")
+	off := &Recorder{logger: zap.NewNop()}
+	off.noteEndCut("the drain stalled")
+	if why := off.endCut.Load(); why != nil {
+		t.Fatalf("switch off: kept %q", *why)
+	}
+}

@@ -48,33 +48,12 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	clientGone, releaseClient := utils.ExitOf(client)
 	defer releaseClient()
 
-	seen, readable := false, false
-	var procs []utils.Reached
-	mainGone := make(<-chan struct{})
-	// The daemon's word, bounded only as a hang guard: a daemon that does
-	// not answer is waited for on its wait and the client's exit.
-	ictx, icancel := context.WithTimeout(ctx, utils.StopStallBudget)
-	info, ierr := a.docker.ContainerInspect(ictx, a.container)
-	icancel()
-	switch {
-	case ierr == nil && info.ContainerJSONBase != nil && info.State != nil:
-		seen = true
-		if !info.State.Running {
-			return "", nil
-		}
-		if main, ok := utils.ProcOf(info.State.Pid); ok && inContainer(info.State.Pid, info.ID) {
-			readable = true
-			procs = utils.TreeOf(info.State.Pid)
-			var releaseMain func()
-			mainGone, releaseMain = utils.ExitOf(main)
-			defer releaseMain()
-		}
-	case errdefs.IsNotFound(ierr):
-		// Never seen, or removed already (--rm) once it stopped.
-	default:
-		seen = true
-		a.logger.Debug("the docker daemon did not describe the app's container; waiting for its word and its docker client instead", zap.String("container", a.container), zap.Error(ierr))
+	w := a.watchContainer(ctx, a.container)
+	defer w.release()
+	if w.seen && !w.running {
+		return "", nil
 	}
+	seen, readable, procs, mainGone := w.seen, w.readable, w.procs, w.mainGone
 
 	stopped := make(chan struct{})
 	var daemonSaid <-chan container.WaitResponse
@@ -154,6 +133,50 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	default:
 	}
 	return why, utils.SendSignal(a.logger, -client.PID, syscall.SIGKILL)
+}
+
+// containerWatch is what keploy reads of a container it stops: whether the
+// daemon has it (seen: it described it, or did not answer the inspect) and
+// runs it (running; one the daemon did not describe is taken for running),
+// whether its processes can be read (readable: inContainer), those processes
+// as they run now, its main process's exit (mainGone; never, where it cannot
+// be read), and what releases that watch.
+type containerWatch struct {
+	seen, running, readable bool
+	// exitCode is a stopped container's, as the daemon gave it.
+	exitCode int
+	procs    []utils.Reached
+	mainGone <-chan struct{}
+	release  func()
+}
+
+// watchContainer reads container id for its stop. The daemon's word is
+// bounded only as a hang guard: one that does not answer is waited for on
+// the stop's other events.
+func (a *App) watchContainer(ctx context.Context, id string) containerWatch {
+	w := containerWatch{mainGone: make(<-chan struct{}), release: func() {}}
+	ictx, icancel := context.WithTimeout(ctx, utils.StopStallBudget)
+	info, ierr := a.docker.ContainerInspect(ictx, id)
+	icancel()
+	switch {
+	case ierr == nil && info.ContainerJSONBase != nil && info.State != nil:
+		w.seen, w.running = true, info.State.Running
+		if !w.running {
+			w.exitCode = info.State.ExitCode
+			return w
+		}
+		if main, ok := utils.ProcOf(info.State.Pid); ok && inContainer(info.State.Pid, info.ID) {
+			w.readable = true
+			w.procs = utils.TreeOf(info.State.Pid)
+			w.mainGone, w.release = utils.ExitOf(main)
+		}
+	case errdefs.IsNotFound(ierr):
+		// Never seen, or removed already (--rm) once it stopped.
+	default:
+		w.seen, w.running = true, true
+		a.logger.Debug("the docker daemon did not describe the app's container; waiting for its word instead", zap.String("container", id), zap.Error(ierr))
+	}
+	return w
 }
 
 // inContainer reports whether pid, as keploy's /proc shows it, is a process
