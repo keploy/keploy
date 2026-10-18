@@ -258,12 +258,15 @@ func snapshotBoot(beat uint64, busy bool) BootProgress {
 
 // ReportBootProgress writes the agent's start's progress to path, a path the
 // agent chose itself (a containerised agent's, in its own container): see
-// reportBootProgress.
-func ReportBootProgress(ctx context.Context, logger *zap.Logger, path string) {
+// reportBootProgress. The returned channel is closed once the reporter has
+// returned, and so written its last report (at once for an empty path).
+func ReportBootProgress(ctx context.Context, logger *zap.Logger, path string) (exited <-chan struct{}) {
 	if path == "" {
-		return
+		done := make(chan struct{})
+		close(done)
+		return done
 	}
-	reportBootProgress(ctx, logger, pathSink(path), nil)
+	return reportBootProgress(ctx, logger, pathSink(path), nil)
 }
 
 // ReportBootProgressTo writes the agent's start's progress next to the

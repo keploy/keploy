@@ -228,7 +228,10 @@ func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), utils.BootProgressFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	// The reporter writes into the test's temp dir until it has seen ctx end:
+	// it is waited for before that dir is removed.
+	reported := utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	t.Cleanup(func() { cancel(); <-reported })
 	StartAgentServer(ctx, zap.NewNop(), 70000, false, http.NotFoundHandler()) // returns: no listener
 	deadline := time.Now().Add(30 * time.Second)
 	for {
