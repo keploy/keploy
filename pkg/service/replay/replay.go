@@ -2037,6 +2037,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
+			// The set's start is reached only when keploy starts its
+			// application for it: an application kept alive from an earlier
+			// set, or one keploy does not start, booted before this set.
+			r.exact.bootSeen = r.instrument && !serveTest && (strings.TrimSpace(conf.AppCommand) != "" || strings.TrimSpace(r.config.Command) != "")
 			r.noteOwnsNothing(testSetID)
 		}
 		return filtered, unfiltered, nil
@@ -2560,6 +2564,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	carried, initialConsumed := splitCarriedConsumed(consumedMocks)
 	startupConsumed, rearmedConsumed := partitionInitialConsumed(initialConsumed)
 	startupConsumed = append(startupConsumed, carried...)
+	// Under exact serving a worker-scope mock (models.Mapping.Worker) the
+	// application consumed before the first test is spent for the staging
+	// on the agent (decision 31): nothing re-arms it, and the set's end
+	// counts it as answered (awaitWorkerScope). Withheld, it was never
+	// counted: the drain is the only read of it.
+	startupConsumed, rearmedConsumed = r.exact.takeWorker(startupConsumed, rearmedConsumed)
 	for _, m := range startupConsumed {
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
@@ -4812,8 +4822,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	unclaimedReason := ""
 	// workerMissing: under the proven switch, the set's worker-scope calls
 	// its run reached the place of that the application never made
-	// (awaitWorkerScope).
+	// (awaitWorkerScope); workerUnread, why keploy could not read what they
+	// answered, which leaves the set not judged.
 	var workerMissing []string
+	var workerUnread error
 	// appNotStopped is why the set's end was read with its app still running
 	// (P101-c), "" when keploy stopped it first.
 	appNotStopped := ""
@@ -4849,14 +4861,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// made. A worker makes its calls in its own time, so the end waits
 		// for them, as long as the application lives and the calls keep
 		// coming; one never made fails the set below.
-		if r.exact != nil && captureOpened {
-			workerMissing = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks, func(read []models.MockState) {
+		// A set that already failed is red whatever its worker scope did:
+		// nothing waits for it.
+		checkWorker := r.exact != nil && captureOpened && testSetStatus == models.TestSetStatusPassed
+		if checkWorker {
+			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks, func(read []models.MockState) {
 				for _, m := range read {
 					totalConsumedMocks[m.Name] = m
 					allConsumedAcrossCycles[m.Name] = m
 				}
 			})
 		}
+		stopDrained := false
 		// The final attempt of a run's last set stops the app --keep-app-alive
 		// keeps across sets before its end's read, as a set stops its own
 		// (P101-c): the run ends after it, and no attempt of it follows.
@@ -4896,7 +4912,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					totalConsumedMocks[m.Name] = m
 					allConsumedAcrossCycles[m.Name] = m
 				}
+				stopDrained = true
 			}
+		}
+		// What the application consumed as keploy stopped it is read now:
+		// the worker scope is judged again with it, the calls the recording
+		// made as keploy record stopped its application included
+		// (MockEntry.AtStop), which nothing waited for. A set whose app
+		// keploy did not stop requires none of those.
+		if checkWorker && workerUnread == nil {
+			workerMissing = r.exact.unansweredWorker(totalConsumedMocks, stopDrained)
 		}
 		// stoppedByUser records, once the run's user has stopped it (Ctrl+C,
 		// SIGTERM), that the set is USER_ABORT, and reports it. The app
@@ -4972,7 +4997,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("test-set", testSetID), zap.String("reason", appNotStopped))
 			}
 			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
-			if len(workerMissing) > 0 {
+			if workerUnread != nil {
+				notJudged = alsoNotJudged(notJudged, "keploy could not read what the test set's worker scope (the calls no test owns) answered: "+workerUnread.Error())
+				r.logger.Error("test-set is not judged: keploy could not read from its agent what the calls no test owns answered; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID), zap.Error(workerUnread))
+				testSetStatus = models.TestSetStatusInternalErr
+				r.markNotJudged(testSetID)
+			} else if len(workerMissing) > 0 {
 				unclaimedReason = workerWhy(workerMissing)
 				r.logger.Error("test-set failed: "+unclaimedReason+" ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.Strings("mocks", workerMissing),
@@ -6313,7 +6344,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// BaseTime) stages the set once, and the agent then serves its pool
 	// (exact.go).
 	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
-		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: append([]models.MockEntry(nil), r.exact.worker...)}
+		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged()}
 	}
 
 	// Send parameters to agent for filtering and mock updates

@@ -648,3 +648,39 @@ func TestWindowMappingsWriteAnIdleAnswerInTheWorkerScope(t *testing.T) {
 		t.Fatalf("worker scope %+v; want empty-poll placed after test-1", db.worker)
 	}
 }
+
+// A worker-scope call recorded once keploy record began stopping the
+// application is its shutdown's (MockEntry.AtStop): a replay requires it only
+// once it has stopped the application. One recorded before the stop is not
+// marked, and a recording never stopped marks none. The earliest stop moment
+// is kept.
+func TestWindowMappingsMarkTheShutdownsCalls(t *testing.T) {
+	write := func(stops ...int) []models.MockEntry {
+		db := &recMappingDB{}
+		w := &windowMappings{}
+		w.addTest(winTest("test-1", 1000, 1100))
+		w.addMock(winMock("own", models.HTTP, "", 1050))
+		w.addMock(winMock("after-last", models.HTTP, "", 2000))
+		w.addMock(winMock("deregister", models.HTTP, "", 3000))
+		for _, at := range stops {
+			w.noteStop(winAt(at))
+		}
+		w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+		return db.worker
+	}
+	atStop := func(worker []models.MockEntry) []string {
+		var out []string
+		for _, e := range worker {
+			if e.AtStop {
+				out = append(out, e.Name)
+			}
+		}
+		return out
+	}
+	if got := atStop(write(3500, 2500)); !reflect.DeepEqual(got, []string{"deregister"}) {
+		t.Fatalf("marked %v at the stop; want [deregister], recorded after the earliest stop", got)
+	}
+	if got := atStop(write()); got != nil {
+		t.Fatalf("a recording never stopped marked %v", got)
+	}
+}

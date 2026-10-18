@@ -34,6 +34,12 @@ type MockEntry struct {
 	// in the set's run it becomes reachable: after the test case of this ID
 	// began; empty for the set's start. See Mapping.Worker.
 	Place string `json:"place,omitempty" yaml:"place,omitempty" bson:"place,omitempty"`
+	// AtStop says, for a mock of the worker scope, that keploy record
+	// recorded it once it had begun stopping the application: a call the
+	// application makes as it shuts down (a deregistration, a final flush).
+	// A replay requires it only once keploy has stopped the set's
+	// application, and never waits for it before.
+	AtStop bool `json:"atStop,omitempty" yaml:"atStop,omitempty" bson:"at_stop,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so

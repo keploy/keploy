@@ -1594,6 +1594,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The moment the recording is stopped (a stop signal, the record timer,
+	// a caller's cancel each end ctx first) is when the application's
+	// shutdown begins: what it records from then on is the shutdown's
+	// (MockEntry.AtStop).
+	if windowMaps != nil {
+		go func() {
+			<-ctx.Done()
+			windowMaps.noteStop(time.Now())
+		}()
+	}
 
 	// Bounded drains: a goroutine wedged under contention that ignores its
 	// cancel() must not hang teardown forever (which would swallow SIGINT and
@@ -1710,6 +1720,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if composeAgent {
 			drainComposeAgent(false)
 		}
+		windowMaps.noteStop(time.Now())
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")

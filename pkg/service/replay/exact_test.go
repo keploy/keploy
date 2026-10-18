@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,15 +35,19 @@ func TestNewExactPlan(t *testing.T) {
 	}
 }
 
-// The set's worker scope is the stored mocks its section lists that no test
-// case's mapping lists and the agent holds, in the section's order with their
-// places, and none of them is the pool's.
+// The set's worker scope is the mocks its section lists that no test case's
+// mapping lists, in the section's order with their places, and none of them
+// is the pool's. One the agent does not hold is in it, required, but not
+// staged on the agent.
 func TestNewExactPlanKeepsTheWorkerScopeOutOfThePool(t *testing.T) {
 	stored := []*models.Mock{{Name: "own"}, {Name: "w-boot"}, {Name: "w-late"}, {Name: "pool"}, {Name: "also-owned"}}
 	worker := []models.MockEntry{{Name: "w-late", Place: "test-1"}, {Name: "w-boot"}, {Name: "also-owned"}, {Name: "not-held"}}
 	p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "own"}, {Name: "also-owned"}}}, worker, stored)
-	if want := []models.MockEntry{{Name: "w-late", Place: "test-1"}, {Name: "w-boot"}}; !reflect.DeepEqual(p.worker, want) {
+	if want := []models.MockEntry{{Name: "w-late", Place: "test-1"}, {Name: "w-boot"}, {Name: "not-held"}}; !reflect.DeepEqual(p.worker, want) {
 		t.Fatalf("worker scope %+v, want %+v", p.worker, want)
+	}
+	if want := []models.MockEntry{{Name: "w-late", Place: "test-1"}, {Name: "w-boot"}}; !reflect.DeepEqual(p.staged(), want) {
+		t.Fatalf("staged worker scope %+v, want %+v", p.staged(), want)
 	}
 	if want := []string{"pool"}; !reflect.DeepEqual(p.pool, want) {
 		t.Fatalf("pool %v, want %v: a worker-scope mock is not the pool's", p.pool, want)
@@ -308,9 +313,14 @@ func TestNextExactTestIsTheNextOneTheLoopOpens(t *testing.T) {
 type consumedReads struct {
 	prHooks
 	reads chan []models.MockState
+	// err, when set, is every read's error.
+	err error
 }
 
 func (c consumedReads) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
 	select {
 	case r := <-c.reads:
 		return r, nil
@@ -320,26 +330,69 @@ func (c consumedReads) GetConsumedMocks(context.Context) ([]models.MockState, er
 }
 
 // The set's end requires answered every worker-scope mock its run reached the
-// place of (D3): one placed at the set's start, and one placed after a test
-// case that began. One placed after a test case that never began, and one
-// whose answer its parser declares idle (D4), are not required; nor is one
-// consumed already.
+// place of (D3): one placed at the set's start when keploy started the set's
+// application (bootSeen), and one placed after a test case that began. One
+// placed after a test case that never began, one whose answer its parser
+// declares idle (D4), and one consumed already are not required; nor is one
+// placed at the set's start of an application keploy did not start for the
+// set. One the recording made as keploy record stopped the application
+// (AtStop) is required only once keploy stopped this set's.
 func TestTheSetsEndRequiresTheWorkerScopeItsRunReached(t *testing.T) {
 	poll := &models.Mock{Name: "w-empty-poll", Kind: models.HTTP}
 	unregister := models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-empty-poll" })
 	t.Cleanup(unregister)
-	stored := []*models.Mock{{Name: "w-boot"}, {Name: "w-after-1"}, {Name: "w-after-2"}, poll, {Name: "w-done"}}
+	stored := []*models.Mock{{Name: "w-boot"}, {Name: "w-after-1"}, {Name: "w-after-2"}, poll, {Name: "w-done"}, {Name: "w-shutdown"}}
 	p := newExactPlan(nil, []models.MockEntry{
 		{Name: "w-boot"}, {Name: "w-after-1", Place: "test-1"}, {Name: "w-after-2", Place: "test-2"},
-		{Name: "w-empty-poll"}, {Name: "w-done"},
+		{Name: "w-empty-poll"}, {Name: "w-done"}, {Name: "w-shutdown", Place: "test-1", AtStop: true},
 	}, stored)
 	consumed := map[string]models.MockState{"w-done": {Name: "w-done"}}
-	if got := p.unansweredWorker(consumed); !reflect.DeepEqual(got, []string{"w-boot"}) {
+	if got := p.unansweredWorker(consumed, false); got != nil {
+		t.Fatalf("before any test of an application keploy did not start: %v; want none", got)
+	}
+	p.bootSeen = true
+	if got := p.unansweredWorker(consumed, false); !reflect.DeepEqual(got, []string{"w-boot"}) {
 		t.Fatalf("before any test: %v; want [w-boot]", got)
 	}
 	p.begin("test-1")
-	if got := p.unansweredWorker(consumed); !reflect.DeepEqual(got, []string{"w-boot", "w-after-1"}) {
+	if got := p.unansweredWorker(consumed, false); !reflect.DeepEqual(got, []string{"w-boot", "w-after-1"}) {
 		t.Fatalf("after test-1 began: %v; want [w-boot w-after-1]", got)
+	}
+	if got := p.unansweredWorker(consumed, true); !reflect.DeepEqual(got, []string{"w-boot", "w-after-1", "w-shutdown"}) {
+		t.Fatalf("once the application was stopped: %v; want [w-boot w-after-1 w-shutdown]", got)
+	}
+}
+
+// A worker-scope entry naming a mock the agent does not hold is required all
+// the same, as a test case's own entry is: a recorded call never made fails
+// the set. One of a kind no assertion covers (DNS) is not, nor is a
+// protocol-phase mock.
+func TestTheWorkerScopeRequiresAnEntryTheAgentDoesNotHold(t *testing.T) {
+	// A stored protocol-phase mock (a DNS answer) under an entry that names
+	// another kind: the stored mock decides.
+	resolved := &models.Mock{Name: "w-resolved", Kind: models.DNS}
+	p := newExactPlan(nil, []models.MockEntry{
+		{Name: "w-skipped", Kind: string(models.HTTP)}, {Name: "w-dns", Kind: string(models.DNS)}, {Name: "w-resolved", Kind: string(models.HTTP)},
+	}, []*models.Mock{resolved})
+	p.bootSeen = true
+	if got := p.unansweredWorker(nil, false); !reflect.DeepEqual(got, []string{"w-skipped"}) {
+		t.Fatalf("required %v; want [w-skipped]", got)
+	}
+}
+
+// Of the mocks consumed before the set's first test that would be re-armed
+// (partitionInitialConsumed), the worker-scope ones are counted: the agent
+// spent each for the staging. The others are re-armed as before; with no plan
+// nothing moves.
+func TestAWorkerMockConsumedBeforeTheFirstTestIsCounted(t *testing.T) {
+	p := newExactPlan(nil, []models.MockEntry{{Name: "w-boot"}}, []*models.Mock{{Name: "w-boot"}})
+	counted, rearm := p.takeWorker([]models.MockState{{Name: "handshake"}}, []models.MockState{{Name: "w-boot"}, {Name: "probe"}})
+	if len(counted) != 2 || counted[1].Name != "w-boot" || len(rearm) != 1 || rearm[0].Name != "probe" {
+		t.Fatalf("counted %v, re-armed %v; want w-boot counted and probe re-armed", counted, rearm)
+	}
+	var none *exactPlan
+	if c, r := none.takeWorker(nil, []models.MockState{{Name: "w-boot"}}); len(c) != 0 || len(r) != 1 {
+		t.Fatalf("with no plan counted %v, re-armed %v", c, r)
 	}
 }
 
@@ -356,16 +409,22 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 	wakes := make(chan time.Time)
 	workerWake = func(context.Context) (<-chan time.Time, func()) { return wakes, func() {} }
 	plan := func() *exactPlan {
-		return newExactPlan(nil, []models.MockEntry{{Name: "w-1"}, {Name: "w-2"}}, []*models.Mock{{Name: "w-1"}, {Name: "w-2"}})
+		p := newExactPlan(nil, []models.MockEntry{{Name: "w-1"}, {Name: "w-2"}, {Name: "w-shutdown", AtStop: true}},
+			[]*models.Mock{{Name: "w-1"}, {Name: "w-2"}, {Name: "w-shutdown"}})
+		p.bootSeen = true
+		return p
 	}
+	var readErr error
 	run := func(r *Replayer, ctx context.Context, p *exactPlan, consumed map[string]models.MockState) <-chan []string {
 		out := make(chan []string, 1)
 		go func() {
-			out <- r.awaitWorkerScope(ctx, p, consumed, func(read []models.MockState) {
+			missing, err := r.awaitWorkerScope(ctx, p, consumed, func(read []models.MockState) {
 				for _, m := range read {
 					consumed[m.Name] = m
 				}
 			})
+			readErr = err
+			out <- missing
 		}()
 		return out
 	}
@@ -414,8 +473,19 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 	t.Run("nothing required", func(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState)}}
 		consumed := map[string]models.MockState{"w-1": {}, "w-2": {}}
+		// The shutdown's call is not waited for: the application makes it
+		// only once it is stopped.
 		if missing := <-run(r, context.Background(), plan(), consumed); missing != nil {
 			t.Fatalf("reported %v with every call made", missing)
+		}
+	})
+	t.Run("a read fails", func(t *testing.T) {
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState), err: errors.New("the agent did not answer")}}
+		done := run(r, context.Background(), plan(), map[string]models.MockState{})
+		wakes <- time.Time{}
+		<-done
+		if readErr == nil {
+			t.Fatal("a failed read was not returned: the calls would be reported as never made")
 		}
 	})
 }
