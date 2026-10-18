@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/network"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -71,7 +73,19 @@ for a in "$@"; do
   fi
 done
 for a in "$@"; do
-  if [ "$a" = "down" ]; then exit ` + itoa(downCode) + `; fi
+  if [ "$a" = "down" ]; then
+    printf 'DOWN-STARTED\n' >> "` + argvLog + `"
+    # KEPLOY_STUB_DOWN_TENTHS: the down takes that many tenths of a second,
+    # each its own short sleep off the output pipe, so a down keploy kills
+    # leaves no sleep holding the pipe or running on.
+    i=0
+    while [ "$i" -lt "${KEPLOY_STUB_DOWN_TENTHS:-0}" ]; do
+      sleep 0.1 </dev/null >/dev/null 2>&1
+      i=$((i+1))
+    done
+    printf 'DOWN-DONE\n' >> "` + argvLog + `"
+    exit ` + itoa(downCode) + `
+  fi
 done
 exit 0
 `
@@ -114,6 +128,67 @@ type inspectRecorder struct {
 	// hangRemove makes ContainerRemove block until its context expires, which
 	// is how a saturated daemon presents.
 	hangRemove bool
+	// events is what the daemon reports of the project (Events): nil, nothing.
+	events chan events.Message
+	// eventLabels records the label filters Events was asked for;
+	// eventTypes and eventActions, its type and event filters.
+	eventLabels, eventTypes, eventActions []string
+	// eventsHang makes Events wait for its context to end before it returns,
+	// as the docker client's does while the daemon has not answered.
+	eventsHang bool
+	// networks are the networks NetworkList answers; netLabels records its
+	// label filters, netRemoved every NetworkRemove.
+	networks   []network.Summary
+	netLabels  []string
+	netRemoved []string
+}
+
+// Events answers as the docker client's does: messages from r.events until
+// ctx ends, then ctx's error.
+func (r *inspectRecorder) Events(ctx context.Context, o events.ListOptions) (<-chan events.Message, <-chan error) {
+	r.mu.Lock()
+	r.eventLabels = append(r.eventLabels, o.Filters.Get("label")...)
+	r.eventTypes = append(r.eventTypes, o.Filters.Get("type")...)
+	r.eventActions = append(r.eventActions, o.Filters.Get("event")...)
+	src, hang := r.events, r.eventsHang
+	r.mu.Unlock()
+	msgs, errs := make(chan events.Message), make(chan error, 1)
+	if hang {
+		<-ctx.Done()
+		errs <- ctx.Err()
+		return msgs, errs
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				errs <- ctx.Err()
+				return
+			case m := <-src:
+				select {
+				case msgs <- m:
+				case <-ctx.Done():
+					errs <- ctx.Err()
+					return
+				}
+			}
+		}
+	}()
+	return msgs, errs
+}
+
+func (r *inspectRecorder) NetworkList(_ context.Context, o network.ListOptions) ([]network.Summary, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netLabels = append(r.netLabels, o.Filters.Get("label")...)
+	return append([]network.Summary(nil), r.networks...), nil
+}
+
+func (r *inspectRecorder) NetworkRemove(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netRemoved = append(r.netRemoved, id)
+	return nil
 }
 
 func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ container.RemoveOptions) error {

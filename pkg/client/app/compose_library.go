@@ -155,8 +155,9 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// teardown's reap barrier exists to prevent.
 	//
 	// It cannot hang: the goroutine closes teardownDone on both branches, and
-	// composeGraceThenDown is bounded by graceBudget plus ComposeDown's own
-	// per-call budgets.
+	// composeGraceThenDown is bounded by graceBudget, ComposeDown by the
+	// project's progress (keploy cuts a down that made none) and the per-call
+	// budgets of its sweeps.
 	<-teardownDone
 
 	if err != nil {
