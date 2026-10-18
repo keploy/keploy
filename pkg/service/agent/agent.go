@@ -330,7 +330,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 	// Hooked into the app, the proxy up. The memory guard's start reads the
 	// cgroup's files: a stage of the start (utils.BeginBootWork).
-	endGuard := utils.BeginBootWork()
+	endGuard := utils.BeginBootWork("the memory guard's start")
 	err = memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit)
 	endGuard()
 	if err != nil {
@@ -811,7 +811,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// The load can take long without a step (the kernel's verifier, on a
 	// loaded host): a stage of the start, making progress while its thread
 	// runs (utils.BeginBootWork).
-	endLoad := utils.BeginBootWork()
+	endLoad := utils.BeginBootWork("the hooks' load")
 	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 	endLoad()
 
@@ -857,7 +857,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// keytool, update-ca-certificates (whose Java hook starts a JVM) and
 	// certutil, and the auxiliary hook loads BPF. A stage of the start, on
 	// this goroutine (utils.BeginBootWork), with steps of its own inside.
-	endProxy := utils.BeginBootWork()
+	endProxy := utils.BeginBootWork("the proxy's start")
 	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""

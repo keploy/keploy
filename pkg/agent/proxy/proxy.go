@@ -2053,7 +2053,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// falls back to the legacy PATH-keytool behaviour. See
 	// pkg/agent/proxy/tls/java_detect.go for the resolution order.
 	err = pTls.SetupCAForApp(ctx, p.logger, p.IsDocker, int(p.appPID), p.caJavaHome)
-	utils.BootStep() // the agent's start: the CA's install is over
+	utils.BootStep("the CA's install is over")
 	if err != nil {
 		// Terminal: the CA cannot be installed in this process and
 		// Keploy-proxied TLS will fail cert-verify for every workload
@@ -2174,13 +2174,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	if err := <-readyChan; err != nil {
 		return err
 	}
-	utils.BootStep() // the agent's start: the proxy listens
+	utils.BootStep("the proxy listens")
 
 	// Serve DNS over TCP and UDP, and wait for both to be bound.
 	if err := p.startDNSServers(ctx, g); err != nil {
 		return err
 	}
-	utils.BootStep() // the agent's start: its DNS servers listen
+	utils.BootStep("the DNS servers listen")
 
 	if p.auxiliaryHook != nil {
 		if err := p.runAuxStart(ctx); err != nil {
@@ -2256,6 +2256,11 @@ func (p *Proxy) runSkipListenerFlush(ctx context.Context, interval time.Duration
 	}
 }
 
+// beginBootWork is utils.BeginBootWork: the work of the agent's start that the
+// proxy does on goroutines of its own (the listener's start, the DNS servers'
+// binds) while StartProxy's stage waits for it. A variable for tests.
+var beginBootWork = utils.BeginBootWork
+
 // start function starts the proxy server on the idle local port.
 // When skipListener is true, no TCP listener is created.
 // The function blocks on ctx.Done and handles cleanup on shutdown.
@@ -2328,6 +2333,15 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		return nil
 	}
 
+	// The listener's start below -- its bind, the kernel count's proof, the
+	// handshake hold -- is the agent's start's own work, done here while
+	// StartProxy's stage waits for it on readyChan: a stage of the start of
+	// its own, on this goroutine, so the CLI that waits for the agent sees
+	// it make progress (utils.BeginBootWork). The wait alone shows none. It
+	// ends before readyChan says how the start went.
+	endListen := beginBootWork("the proxy listener's start")
+	defer endListen() // a panic's path: its thread let go, the stage over
+
 	// It will listen on all the interfaces
 	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
 	if err != nil {
@@ -2337,6 +2351,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// the shutdown below that removes it is never set up (a port in use,
 		// a previous agent still around, left the anchor trusted).
 		p.detachThenRemoveCA(ctx)
+		endListen()
 		// Notify failure
 		readyChan <- err
 		return err
@@ -2352,6 +2367,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// now, before the proxy is reported ready.
 	p.armHandshakeHold(ctx)
 	defer p.stopHandshakeHold()
+	endListen()
 	// Signal that the server is ready
 	readyChan <- nil
 	defer func(listener net.Listener) {

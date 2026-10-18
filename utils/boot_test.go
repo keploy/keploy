@@ -12,6 +12,7 @@ import (
 	"time"
 
 	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -22,6 +23,7 @@ func resetBoot(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		bootSeq.Store(0)
+		bootStep.Store(nil)
 		bootErrors.Store(0)
 		bootError.Store(nil)
 		bootReady.Store(false)
@@ -68,7 +70,7 @@ func TestReportBootProgress(t *testing.T) {
 	defer close(stop)
 	done := reportBootProgress(context.Background(), zap.NewNop(), pathSink(path), stop)
 
-	BootStep()
+	BootStep("a step")
 	for {
 		if p, ok := readBoot(t, path); ok && p.Seq == 1 && p.Beat > 2 && !p.Ready {
 			if p.Pid != os.Getpid() {
@@ -127,7 +129,7 @@ func TestBootWorkIsReportedBusy(t *testing.T) {
 		t.Fatal("busy with no work in progress")
 	}
 	before := bootSeq.Load()
-	end := BeginBootWork()
+	end := BeginBootWork("a stage")
 	if bootSeq.Load() != before+1 {
 		t.Fatal("the work's start is no step")
 	}
@@ -223,7 +225,7 @@ func TestAFailureAfterTheStartIsNoFailureOfIt(t *testing.T) {
 func TestABootPromptIsReported(t *testing.T) {
 	resetBoot(t)
 	before := bootSeq.Load()
-	end := BeginBootPrompt()
+	end := BeginBootPrompt("a prompt")
 	if p := snapshotBoot(0, false); !p.Prompt || p.Seq != before+1 {
 		t.Fatalf("report %+v while the prompt is up, want prompt, one step", p)
 	}
@@ -236,18 +238,25 @@ func TestABootPromptIsReported(t *testing.T) {
 
 // Where a stage's progress cannot be seen, it is not reported busy: busy
 // throughout, one wedged there would be waited on for ever. Its start and its
-// end are still steps.
+// end are still steps, and it is still reported in progress, by its name,
+// as unseen: a start that stalls says it was in it.
 func TestBootWorkWhoseProgressCannotBeSeenIsNotBusy(t *testing.T) {
 	resetBoot(t)
 	probe := newWorkProbe
 	newWorkProbe = func() workProbe { return nil }
 	t.Cleanup(func() { newWorkProbe = probe })
 	before := bootSeq.Load()
-	end := BeginBootWork()
+	end := BeginBootWork("a stage")
 	if bootBusy() {
 		t.Fatal("work whose progress cannot be seen is busy")
 	}
+	if _, stages := bootLook(); len(stages) != 1 || stages[0] != (BootStage{Name: "a stage", Unseen: true}) {
+		t.Fatalf("stages %+v, want the stage named, unseen", stages)
+	}
 	end()
+	if _, stages := bootLook(); len(stages) != 0 {
+		t.Fatalf("stages %+v once the stage ended, want none", stages)
+	}
 	if bootSeq.Load() != before+2 {
 		t.Fatalf("%d steps, want its start and its end", bootSeq.Load()-before)
 	}
@@ -267,7 +276,7 @@ func TestReportBootProgressToWritesNextToTheTeardownFile(t *testing.T) {
 	if err := ReportBootProgressTo(ctx, zap.NewNop(), teardown); err != nil {
 		t.Fatal(err)
 	}
-	BootStep()
+	BootStep("a step")
 	MarkBootReady()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -303,4 +312,140 @@ func TestAFailedStartsReportIsRedacted(t *testing.T) {
 	if p := snapshotBoot(0, false); p.Failure != "dial postgres://app:[REDACTED]@db:5432: refused" {
 		t.Fatalf("reported %q; want it redacted", p.Failure)
 	}
+}
+
+// manualBootClock has the reporter beat on clk, the agent's runnable time as
+// the test drives it, for the rest of the test.
+func manualBootClock(t *testing.T) *stall.ManualClock {
+	t.Helper()
+	clk := &stall.ManualClock{}
+	was := bootClock
+	bootClock = func() (stall.Clock, func()) { return clk, func() {} }
+	t.Cleanup(func() { bootClock = was })
+	return clk
+}
+
+// awaitBootReport returns the first report at path that want accepts.
+func awaitBootReport(t *testing.T, path string, want func(BootProgress) bool) BootProgress {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for {
+		if p, ok := readBoot(t, path); ok && want(p) {
+			return p
+		}
+		if time.Now().After(deadline) {
+			p, _ := readBoot(t, path)
+			t.Fatalf("no such report; the last: %+v", p)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// awaitPending returns once the reporter waits on clk again: whatever it was
+// woken for is done.
+func awaitPending(t *testing.T, clk *stall.ManualClock) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the reporter never waited on its clock again")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A beat is BootBeat of the agent's own runnable time, not of wall time: an
+// agent the host starves beats only as fast as it gets to run, so its start,
+// which runs no faster, is not charged beats it could not spend. Wall time
+// passing alone (the clock's timers firing, the agent not run) is no beat,
+// however often; each BootBeat it could run is one, and so is each of several
+// it ran between two looks.
+func TestBootBeatsAreTheAgentsRunnableTime(t *testing.T) {
+	resetBoot(t)
+	clk := manualBootClock(t)
+	bootBeat = time.Second
+	path := filepath.Join(t.TempDir(), BootProgressFileName)
+	stop := make(chan struct{})
+	reported := reportBootProgress(context.Background(), zap.NewNop(), pathSink(path), stop)
+	// Gone before the next test: a reporter left running takes its kicks.
+	t.Cleanup(func() { close(stop); <-reported })
+	awaitBootReport(t, path, func(BootProgress) bool { return true })
+	for i := 0; i < 100; i++ {
+		awaitPending(t, clk)
+		clk.Pass()
+	}
+	awaitPending(t, clk)
+	if p, _ := readBoot(t, path); p.Beat != 0 {
+		t.Fatalf("beat %d after wall time alone, want none: a starved agent was charged beats it could not run", p.Beat)
+	}
+	clk.Advance(time.Second / 2)
+	awaitPending(t, clk)
+	if p, _ := readBoot(t, path); p.Beat != 0 {
+		t.Fatalf("beat %d after half a beat of runnable time, want none", p.Beat)
+	}
+	clk.Advance(time.Second / 2)
+	awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == 1 })
+	awaitPending(t, clk)
+	clk.Advance(3 * time.Second)
+	awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == 4 })
+	// What it ran past its last beat counts toward the next.
+	awaitPending(t, clk)
+	clk.Advance(1500 * time.Millisecond)
+	awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == 5 })
+	awaitPending(t, clk)
+	clk.Advance(time.Second / 2)
+	awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == 6 })
+}
+
+// The agent counts its beats without progress itself, beat by beat: the beats
+// since its start's last step at which no stage of it had made progress and no
+// prompt was up (BootProgress.Quiet). A step starts the count again, and so
+// does a beat at which a stage made progress. The CLI, which reads only the
+// latest report, gives the start up by this count, not by what it read.
+func TestTheAgentCountsItsOwnBeatsWithoutProgress(t *testing.T) {
+	resetBoot(t)
+	clk := manualBootClock(t)
+	bootBeat = time.Second
+	probe := &recordedProbe{}
+	was := newWorkProbe
+	newWorkProbe = func() workProbe { return probe }
+	t.Cleanup(func() { newWorkProbe = was })
+	path := filepath.Join(t.TempDir(), BootProgressFileName)
+	stop := make(chan struct{})
+	reported := reportBootProgress(context.Background(), zap.NewNop(), pathSink(path), stop)
+	// The reporter is gone before the probe is put back.
+	t.Cleanup(func() { close(stop); <-reported })
+	BootStep("the agent's process runs")
+	awaitBootReport(t, path, func(p BootProgress) bool { return p.Seq == 1 && p.CountsQuiet })
+	// beat has the agent run one more beat, its stage's probe answering
+	// progress at it. The probe is set once the reporter waits on its clock
+	// again: it is done reading it.
+	beat := func(progress bool, want func(BootProgress) bool) BootProgress {
+		t.Helper()
+		awaitPending(t, clk)
+		probe.progress = progress
+		clk.Advance(time.Second)
+		return awaitBootReport(t, path, want)
+	}
+	for q := uint64(1); q <= 3; q++ {
+		beat(false, func(p BootProgress) bool { return p.Beat == q && p.Quiet == q })
+	}
+	BootStep("the CA's install is over")
+	if p := awaitBootReport(t, path, func(p BootProgress) bool { return p.Seq == 2 }); p.Quiet != 0 || p.Step != "the CA's install is over" {
+		t.Fatalf("report %+v after a step: want no beat without progress, and the step named", p)
+	}
+	end := BeginBootWork("the proxy's start")
+	beat(true, func(p BootProgress) bool { return p.Beat == 4 })
+	p := beat(true, func(p BootProgress) bool { return p.Beat == 5 })
+	if p.Quiet != 0 || !p.Busy || len(p.Stages) != 1 || p.Stages[0].Name != "the proxy's start" || !p.Stages[0].Progressing {
+		t.Fatalf("report %+v while a stage makes progress: want no beat without progress, the stage named and progressing", p)
+	}
+	beat(false, func(p BootProgress) bool { return p.Beat == 6 && p.Quiet == 1 })
+	p = beat(false, func(p BootProgress) bool { return p.Beat == 7 })
+	if p.Quiet != 2 || p.Busy || len(p.Stages) != 1 || p.Stages[0].Progressing || p.Step != "the proxy's start began" {
+		t.Fatalf("report %+v while a stage makes none: want 2 beats without progress, the stage named, not progressing, and its start the last step", p)
+	}
+	beat(true, func(p BootProgress) bool { return p.Beat == 8 && p.Quiet == 0 })
+	awaitPending(t, clk)
+	end()
 }

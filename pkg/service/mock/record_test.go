@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -423,5 +424,50 @@ func TestRecordListsACallPlacedAtItsAnswerUnderTheTestItsAnswerIsIn(t *testing.T
 		if e.Name == "boot-poll" {
 			t.Errorf("the boot poll, answered in TestA, is listed as start-up traffic: %v", startup)
 		}
+	}
+}
+
+// setupFails is the fake agent whose first starts fail with errs, in order,
+// and whose next start comes up.
+type setupFails struct {
+	*composeInstr
+	errs   []error
+	setups atomic.Int32
+}
+
+func (s *setupFails) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
+	if n := int(s.setups.Add(1)) - 1; n < len(s.errs) {
+		return s.errs[n]
+	}
+	return s.composeInstr.Setup(ctx, cmd, opts)
+}
+
+// errStalledStart is a start the CLI gave up on for want of progress, as
+// waitForAgent says it.
+var errStalledStart = fmt.Errorf("%w: its start took no step across 30 of its beats, with no work in progress making progress", pkg.ErrAgentNotReady)
+
+// A start the CLI gave up on for want of progress (pkg.ErrAgentNotReady) is
+// tried again with a fresh agent, as keploy record and keploy test try it
+// (pkg.RetryAgentSetup), and the recording goes on with that one: the boot
+// judge's contract. It was not, so a start the judge gave up on once ended the
+// recording -- and the judging rounds of keploy mock record with it. Any other
+// failure of the start is not tried again: it would fail the same way.
+func TestARecordingTriesAStalledStartAgain(t *testing.T) {
+	base := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr := &setupFails{composeInstr: base, errs: []error{errStalledStart}}
+	err := recordWith(t, context.Background(), instr, base, utils.Native)
+	if n := instr.setups.Load(); n != 2 || errors.Is(err, pkg.ErrAgentNotReady) {
+		t.Fatalf("%d starts, error %v: want the stalled start tried again, once, and the recording to go on", n, err)
+	}
+	if runs, _ := base.counts(); runs == 0 {
+		t.Fatal("the test command never ran after the second start came up")
+	}
+
+	base = newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	denied := fmt.Errorf("%w: the keploy agent could not start (exit status 3)", utils.ErrPrivilegeRequired)
+	instr = &setupFails{composeInstr: base, errs: []error{denied}}
+	err = recordWith(t, context.Background(), instr, base, utils.Native)
+	if n := instr.setups.Load(); n != 1 || !errors.Is(err, utils.ErrPrivilegeRequired) {
+		t.Fatalf("%d starts, error %v: want a start that cannot work tried once, its reason kept", n, err)
 	}
 }
