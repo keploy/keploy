@@ -239,14 +239,22 @@ type Proxy struct {
 	// pendingLost is set, under captureMu, when a miss made with no test's
 	// window open was dropped because pendingMockErrors was full. The next
 	// window decides whose loss it is: a set's first discards those misses
-	// (they are no test's), so it only says so; the next test's carries them,
-	// so its read is incomplete (missLoss).
+	// (they are no test's), so it only says so, but under the proven switch,
+	// where they are the set's (beforeSetMiss) and its read is incomplete
+	// (missLoss); the next test's carries them, so its read is incomplete.
 	pendingLost bool
+	// missCutPending is set, under the proven switch, by a test set's Mock,
+	// and taken by its first staging (SetMocksWithWindow from
+	// models.BaseTime), which cuts what was missed until then
+	// (cutMissesAtSetStart).
+	missCutPending atomic.Bool
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
 	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
 	// ContinueTestErrorCapture carries them into the next test's window;
-	// BeginTestErrorCapture (a set's first test) discards and logs them;
+	// BeginTestErrorCapture (a set's first test) discards and logs them, but
+	// under the proven switch, where it carries them as the set's
+	// (beforeSetMiss);
 	// GetMockErrors returns them where no window is opened at all. Only
 	// mock-not-found errors are retained (background noise — OTel, health
 	// checks — is still discarded), and the buffer is bounded so it can't grow
@@ -4338,6 +4346,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// LifetimeConnection mocks from the prior test-set or merge them
 	// with the current one's.
 	if provenswitch.On() {
+		// A new test set: what is missed until its mocks are staged is not
+		// its (cutMissesAtSetStart, at the set's staging).
+		p.missCutPending.Store(true)
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
 		p.learnTracker.NewSet()
@@ -4454,12 +4465,18 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // SetMocksWithWindow atomically updates mocks AND the test window in a
 // single call so concurrent readers cannot observe a torn (newMocks,
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
-func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+func (p *Proxy) SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
 	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
+	}
+	// A test set's staging (from models.BaseTime, the first since its Mock,
+	// under the proven switch): what was missed until its mocks were in is
+	// not the set's (cutMissesAtSetStart).
+	if start.Equal(models.BaseTime) && p.missCutPending.CompareAndSwap(true, false) {
+		p.cutMissesAtSetStart(ctx)
 	}
 	if p.asyncEngine != nil && opensTestWindow(start) {
 		// Engine owns the "first window doesn't count" rule.
@@ -4735,9 +4752,59 @@ func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 var (
 	missLostListFull        = fmt.Sprintf("a miss was dropped: the test's list of misses was full (%d)", maxPendingMockErrors)
 	missLostBetweenFull     = fmt.Sprintf("a miss made between two tests was dropped: the list of misses waiting for the next test was full (%d)", maxPendingMockErrors)
+	missLostBeforeSetFull   = fmt.Sprintf("a miss made before the test set's first test was dropped: the list of misses waiting for it was full (%d)", maxPendingMockErrors)
 	missLostDrainStopped    = "a miss could not be queued for its test: keploy's error drain had stopped"
 	missLostNoDrainChanFull = "a miss could not be queued for its test: keploy's error channel was full and no error drain was running"
 )
+
+// cutMissesAtSetStart drops, once a test set's mocks are staged (its first
+// staging since its Mock, under the proven switch), what was missed before:
+// after the previous set's last read (a call its application made as it
+// stopped, or later still, where keploy did not stop it), and while this set's
+// mocks were not in yet (a warm application's call, which missed for keploy's
+// staging, not for the call). It is no test's, and not this set's. Left, this
+// set's first test would read it as made before this set (beforeSetMiss), and
+// fail the set with it. It is said, with the calls, as a miss no test is
+// charged with is. An application keploy starts for the set starts after the
+// staging, so none of its startup is cut. The drain is flushed first, so a miss
+// it holds is cut with the rest; a flush that cannot complete (the drain
+// stopped, the staging given up) cuts what is filed. A call matched before the
+// staging whose miss reaches the drain only after the flush is not cut: it is
+// read as the set's, red, never green.
+func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
+	if p.errDrainActive.Load() && p.errChannel != nil {
+		_, _ = p.flushOnEvents(ctx, &flushMarker{done: make(chan struct{})})
+	}
+	p.captureMu.Lock()
+	var tail []error
+	if acc := p.activeTestErrors.Swap(nil); acc != nil {
+		tail = acc.drain()
+	}
+	tail = append(tail, p.pendingMockErrors.drain()...)
+	lost := p.pendingLost
+	p.pendingLost = false
+	// A loss since the previous set's last read was of its tail: no read of
+	// this set is short of it.
+	p.missLoss.Store(nil)
+	p.captureMu.Unlock()
+	p.logDroppedMisses("mock mismatches made after the previous test set's last read, or before this set's mocks were staged, are not attributed to a test or a test set", tail)
+	if lost {
+		p.logger.Warn("more mock mismatches were made after the previous test set's last read, or before this set's mocks were staged, than keploy keeps; the rest were dropped, and they are not attributed to a test or a test set either",
+			zap.Int("kept", maxPendingMockErrors))
+	}
+}
+
+// beforeSetMiss is a miss made before a test set's first test began, with no
+// test's window open: the application's startup, as it is readied for the
+// set. Under the proven switch it is the set's, no test's: the first test's
+// window carries it, so it is read in order with every other miss, and the
+// read returns it marked (models.UnmatchedCall.BeforeSet) for the replay to
+// fail the set with, charging no test. It was dropped with a warning, and a
+// set whose application made, as it started, a call no mock answers passed.
+type beforeSetMiss struct{ error }
+
+// Unwrap is the miss itself, for errors.As.
+func (b beforeSetMiss) Unwrap() error { return b.error }
 
 // noteMissLost records that a miss was lost, and why: the next read is then
 // incomplete, naming the first cause, rather than silently short. With the
@@ -4768,7 +4835,8 @@ func (p *Proxy) pendingDroppedForRoom(err error) {
 // (models.MockMismatchReport.CountsAgainstTest): one without a report is
 // taken to, as nothing says it does not.
 func missCounts(err error) bool {
-	if pe, ok := err.(models.ParserError); ok && pe.MismatchReport != nil {
+	var pe models.ParserError
+	if errors.As(err, &pe) && pe.MismatchReport != nil {
 		return pe.MismatchReport.CountsAgainstTest()
 	}
 	return true
@@ -4778,8 +4846,8 @@ func missCounts(err error) bool {
 // the only error class GetMockErrors surfaces to the replayer, and thus the
 // only class worth retaining in pendingMockErrors.
 func isMockNotFoundErr(err error) bool {
-	parserErr, ok := err.(models.ParserError)
-	if ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+	var parserErr models.ParserError
+	if errors.As(err, &parserErr) && parserErr.ParserErrorType == models.ErrMockNotFound {
 		return true
 	}
 	return errors.Is(err, models.ErrNoMockMatched)
@@ -4908,7 +4976,11 @@ func (p *Proxy) openTestErrorCapture(carry bool) {
 	between = append(between, p.pendingMockErrors.drain()...)
 	pendingLost := p.pendingLost
 	p.pendingLost = false
-	if carry {
+	// Under the proven switch a set's first test carries what was missed
+	// before it as the set's (beforeSetMiss): nothing is dropped.
+	beforeSet := !carry && provenswitch.On()
+	switch {
+	case carry:
 		for _, err := range between {
 			if !acc.addBounded(err, maxPendingMockErrors) {
 				p.missDroppedForRoom(err)
@@ -4918,9 +4990,19 @@ func (p *Proxy) openTestErrorCapture(carry bool) {
 			// They were this test's: its read is short of them.
 			p.missLoss.CompareAndSwap(nil, &missLostBetweenFull)
 		}
+	case beforeSet:
+		for _, err := range between {
+			if !acc.addBounded(beforeSetMiss{err}, maxPendingMockErrors) {
+				p.noteMissLost(err, missLostBeforeSetFull)
+			}
+		}
+		if pendingLost {
+			// They were the set's: the read that carries them is short of them.
+			p.missLoss.CompareAndSwap(nil, &missLostBeforeSetFull)
+		}
 	}
 	p.captureMu.Unlock()
-	if !carry {
+	if !carry && !beforeSet {
 		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
 		if pendingLost {
 			// They were no test's either: said, and no read is short of them.
@@ -5097,6 +5179,13 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {
+		// A miss made before the set's first test (beforeSetMiss) is read
+		// as the set's, an outside_test miss.
+		before, isBefore := err.(beforeSetMiss)
+		if isBefore {
+			err = before.error
+		}
+		first := len(errs)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
 			if parserErr.MismatchReport != nil {
 				errs = append(errs, models.UnmatchedCall{
@@ -5145,6 +5234,12 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
 					Kind:          parserErr.MissKind,
 				})
+			}
+		}
+		if isBefore {
+			for i := first; i < len(errs); i++ {
+				errs[i].BeforeSet = true
+				errs[i].Kind = models.MissOutsideTest
 			}
 		}
 	}

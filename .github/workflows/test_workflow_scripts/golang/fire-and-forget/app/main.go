@@ -152,6 +152,14 @@ func main() {
 		resp.Body.Close()
 		log.Printf("ready: broker said %d on the pooled connection", resp.StatusCode)
 	}
+	// STARTUP_PUBLISH: as it starts, before it listens, the app publishes
+	// "startup" (with SUFFIX) and waits for the broker's reply, as an app that
+	// announces itself at boot does: a call made before the set's first test.
+	// A publish no one answers is logged, and the app goes on.
+	if os.Getenv("STARTUP_PUBLISH") != "" {
+		publish(broker, "startup"+os.Getenv("SUFFIX"), make(chan struct{}))
+		log.Printf("startup published")
+	}
 	pub := func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
 		written := make(chan struct{})

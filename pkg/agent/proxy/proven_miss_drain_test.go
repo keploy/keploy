@@ -239,8 +239,10 @@ func overflowPending(p *Proxy) {
 }
 
 // Misses made while no test's window is open, past what keploy keeps, are no
-// test's when a set's first test opens its window: they are discarded, the
-// drop is said, and no read is made incomplete by them.
+// test's when a set's first test opens its window: with the proven switch off
+// they are discarded, the drop is said, and no read is made incomplete by
+// them. Under the switch they are the set's: the first test reads those kept,
+// marked as made before the set, and its read says it is short of the rest.
 func TestBeginTestErrorCapture_SaysAPendingOverflowAndJudgesTheTest(t *testing.T) {
 	eitherSwitch(t, func(t *testing.T) {
 		// The logger is the proxy's before its drain starts: the drain reads it.
@@ -251,7 +253,17 @@ func TestBeginTestErrorCapture_SaysAPendingOverflowAndJudgesTheTest(t *testing.T
 		p.StartErrorDrain(ctx)
 		overflowPending(p)
 		p.BeginTestErrorCapture()
-		if got, err := p.GetMockErrors(context.Background()); err != nil || len(got) != 0 {
+		got, err := p.GetMockErrors(context.Background())
+		if provenswitch.On() {
+			if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBeforeSetFull) {
+				t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set", err)
+			}
+			if len(got) != maxPendingMockErrors || !got[0].BeforeSet {
+				t.Fatalf("the set's first test read %d misses (first %+v); want the %d kept, marked as the set's", len(got), got[0], maxPendingMockErrors)
+			}
+			return
+		}
+		if err != nil || len(got) != 0 {
 			t.Fatalf("the set's first test read %d misses, err %v; want none, complete", len(got), err)
 		}
 		if n := len(logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").All()); n != 1 {
