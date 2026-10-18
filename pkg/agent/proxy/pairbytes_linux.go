@@ -253,12 +253,19 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// when the wait began). One short with the orphan still waiting
 		// for a FIN (FIN_WAIT1/2): that FIN, or a byte the orphan will
 		// refuse, is on its way, and no event of the wait's says which.
+		// One short with the orphan gone says no more: the kernel destroys
+		// an orphan it has no timewait bucket for, or no room for under its
+		// orphan and memory limits, without a refusal (TCPTimeWaitOverflow,
+		// TCPAbortOnMemory), as it destroys one that refused a byte.
 		// Otherwise what arrives now is answered with a reset: a loss.
 		d, took, err := orphanTookFIN(pc)
+		oneShort := t.want-ps.received == 1
 		switch {
 		case took:
 			return true, nil
-		case err == nil && t.want-ps.received == 1 && (d.state == tcpFinWait1 || d.state == tcpFinWait2):
+		case errors.Is(err, errNoSocket) && oneShort:
+			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and its orphaned socket is gone: the kernel destroys one it has no room for, or one that refused a byte, alike", models.ErrProxyConnsUnsupported, pc.app)
+		case err == nil && oneShort && (d.state == tcpFinWait1 || d.state == tcpFinWait2):
 			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and that FIN, or a byte its orphaned socket will refuse, is still on its way", models.ErrProxyConnsUnsupported, pc.app)
 		}
 		p.pairLost(pc, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
