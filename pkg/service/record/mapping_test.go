@@ -235,6 +235,9 @@ func (countingMappingDB) Upsert(context.Context, string, string, []models.MockEn
 func (countingMappingDB) UpsertBatch(context.Context, string, map[string][]models.MockEntry) error {
 	return nil
 }
+func (countingMappingDB) UpsertWorker(context.Context, string, []models.MockEntry) error {
+	return nil
+}
 
 // TestResolveMappingEntries_DroppedAsyncMockDoesNotRevoke guards the blast
 // radius of the revoke path.

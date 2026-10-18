@@ -30,6 +30,10 @@ type MockEntry struct {
 	// only while a test process of that key holds the run and no test is
 	// open. Empty means PoolKeyNone.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
+	// Place is, for a mock of the set's worker scope (Mapping.Worker), where
+	// in the set's run it becomes reachable: after the test case of this ID
+	// began; empty for the set's start. See Mapping.Worker.
+	Place string `json:"place,omitempty" yaml:"place,omitempty" bson:"place,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -85,6 +89,25 @@ type Mapping struct {
 	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
 	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
 	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
+	// Worker is the set's worker scope (design v14 S12, the founder's D1 to
+	// D4): the data-plane mocks no test case owns, which the application made
+	// on its own rather than for a test's request (a queue consumer, a timer,
+	// work a test left running), in recorded order, each with its Place.
+	//
+	// Under the proven switch a worker mock answers whether or not a test is
+	// open, from its place on (never before it: what it answers may be what a
+	// later test caused), each at most one request, as the test mocks do. No
+	// test is charged with it: the set is. At the set's end every worker mock
+	// whose place its run reached must have answered, unless its parser marks
+	// its answer idle (an empty poll). A request no mock answers is a miss, as
+	// anywhere.
+	//
+	// keploy record writes it under the switch: a test mock recorded while no
+	// test's window was open (the gap's traffic, the app's start, what came
+	// after the last test) is the scope's, at the place its recording holds
+	// it (DeriveWindowMappings). Omitted when empty; a reader that predates it
+	// ignores the key.
+	Worker []MockEntry `json:"worker,omitempty" yaml:"worker,omitempty" bson:"worker,omitempty"`
 	// Source is the keploy command that wrote the file's test entries, when
 	// it is not keploy record: MappingSourceKeployTest. A writer that names
 	// none keeps the file's, keploy record's writes included. Empty in a file

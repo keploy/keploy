@@ -1950,10 +1950,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var fromWindows bool
 		// windowsWhy: why the test windows say what each test case owns.
 		var windowsWhy string
+		// workerScope: under the proven switch, the set's worker scope, the
+		// mocks no test case owns that answer from their place in the set's
+		// run on (models.Mapping.Worker).
+		var workerScope []models.MockEntry
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
 			// case owns, and a mapping that cannot be read refuses the set.
-			if expectedTestMockMappings, windowsWhy, err = r.provenMappings(ctx, testSetID); err != nil {
+			if expectedTestMockMappings, workerScope, windowsWhy, err = r.provenMappings(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
 			useMappingBased = true
@@ -2004,7 +2008,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil, nil, err
 		}
 		if fromWindows {
-			expectedTestMockMappings = r.windowOwnership(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
+			expectedTestMockMappings, workerScope = r.windowOwnership(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
 		mockLookup = lookup
 		addKinds(filtered)
@@ -2041,7 +2045,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
-			r.exact = newExactPlan(expectedTestMockMappings, filtered, unfiltered)
+			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
 			r.noteOwnsNothing(testSetID)
 		}
@@ -6290,7 +6294,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// BaseTime) stages the set once, and the agent then serves its pool
 	// (exact.go).
 	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
-		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...)}
+		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: append([]models.MockEntry(nil), r.exact.worker...)}
 	}
 
 	// Send parameters to agent for filtering and mock updates
