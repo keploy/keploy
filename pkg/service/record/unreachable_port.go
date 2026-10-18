@@ -15,8 +15,9 @@ import (
 // them where it does by default: replay sends each test from the host to the
 // port it was recorded on, and the instrumentation says the host cannot reach
 // the app there (in Docker mode, a port the docker command does not publish as
-// itself; the app calling its own in-container server is recorded as ingress on
-// such a port). A replay with a port map in keploy.yml (test.replaceWith) can
+// itself, nor on one other host port only, where replay sends its tests
+// instead: pkg.PublishedTarget; the app calling its own in-container server is
+// recorded as ingress on such a port). A replay with a port map in keploy.yml (test.replaceWith) can
 // still send those tests to a host port their port is published on, and the
 // reason says so where there is one. Without it the first sign is a replay
 // refusing every one of those tests.
@@ -28,6 +29,7 @@ import (
 type unreachablePortWarner struct {
 	logger  *zap.Logger
 	reach   pkg.AppPortReachability
+	pub     pkg.AppPortPublishing // nil when the instrumentation cannot tell
 	host    string
 	checked map[uint16]bool
 }
@@ -41,7 +43,8 @@ func newUnreachablePortWarner(logger *zap.Logger, instrumentation Instrumentatio
 	if host == "" {
 		host = "localhost"
 	}
-	return &unreachablePortWarner{logger: logger, reach: reach, host: host, checked: map[uint16]bool{}}
+	pub, _ := instrumentation.(pkg.AppPortPublishing)
+	return &unreachablePortWarner{logger: logger, reach: reach, pub: pub, host: host, checked: map[uint16]bool{}}
 }
 
 // check asks about tc's app port the first time a test case is recorded on it.
@@ -50,9 +53,26 @@ func (w *unreachablePortWarner) check(ctx context.Context, tc *models.TestCase) 
 		return
 	}
 	w.checked[tc.AppPort] = true
-	// It runs in line with the recording; reach bounds its own wait.
-	reason := w.reach.UnreachableAppPort(ctx, w.host, tc.AppPort, tc.AppPort)
+	// A port published on one other host port only is where replay sends
+	// these tests (pkg.PublishedTarget): whether they can be replayed is
+	// whether that host port reaches the app (it does not when the app
+	// listens there only on loopback). It runs in line with the recording;
+	// pub and reach bound their own waits.
+	sentTo := tc.AppPort
+	if w.pub != nil {
+		if port, known := w.pub.PublishedHostPort(ctx, w.host, tc.AppPort); known && port != 0 {
+			w.logger.Debug("the app's port is published on one other host port, where replay sends its test cases",
+				zap.Uint16("appPort", tc.AppPort), zap.Uint16("hostPort", port))
+			sentTo = port
+		}
+	}
+	reason := w.reach.UnreachableAppPort(ctx, w.host, sentTo, tc.AppPort)
 	if reason == "" {
+		return
+	}
+	if sentTo != tc.AppPort {
+		w.logger.Warn(fmt.Sprintf("test cases recorded on the app's port %d cannot be replayed from the host at host port %d, where it is published: %s", tc.AppPort, sentTo, reason),
+			zap.String("first testcase on the port", tc.Name))
 		return
 	}
 	w.logger.Warn(fmt.Sprintf("test cases recorded on the app's port %d cannot be replayed at that port from the host: %s", tc.AppPort, reason),

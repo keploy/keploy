@@ -1651,6 +1651,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Whether this run of the set is judged is this run's to say: a mark left
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
+	// Where the app's ports are published is this run's to say too: the
+	// agent container an attempt starts may publish them on other host ports.
+	publishedPortsOf(r.logger, r.instrumentation).newRun(testSetID)
 
 	// Under the proven switch the set is judged only if one agent process
 	// answered for all of it (watchAgent): the watch begins before anything
@@ -7885,7 +7888,7 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
 	defer cancel()
 
-	if scheme, host, port, ok := resolveProbeTarget(r.config.Test, testCase, testSetID, r.logger); ok {
+	if scheme, host, port, ok := resolveProbeTarget(wctx, r.config.Test, testCase, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID)); ok {
 		if err := waitForHTTPServing(wctx, scheme, host, port); err != nil {
 			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
 				zap.String("host", host), zap.String("port", port), zap.Error(err))

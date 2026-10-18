@@ -93,29 +93,57 @@ func TestUnreachablePortWarnerSaysHowToPublishTheRecordedPort(t *testing.T) {
 		return []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: port}, {HostIP: "::", HostPort: port}}
 	}
 	const prefix = "test cases recorded on the app's port 8095 cannot be replayed at that port from the host: "
-	const sendThere = ", or send these tests to host port 18095 with a port map in keploy.yml (test.replaceWith.global.port: {8095: 18095})"
 	for _, tc := range []struct {
-		name  string
-		ports nat.PortMap
-		want  string
+		name   string
+		ports  nat.PortMap
+		listen map[string][]string // where the app listens, by container port; nil: on 8095, every address
+		want   string
 	}{
 		{
-			name:  "host port 8095 published to another container port",
-			ports: nat.PortMap{"9000/tcp": both("8095"), "8095/tcp": both("18095")},
+			name:  "host port 8095 published to another container port, the app's port on two others",
+			ports: nat.PortMap{"9000/tcp": both("8095"), "8095/tcp": append(both("18095"), both("28095")...)},
 			want: prefix + "host port 8095 is published to the container's port 9000, where nothing listens, instead of the app's port 8095 these tests were recorded on, where the app listens, and keploy sends each test from the host to port 8095, the port it was recorded on. " +
-				"Change -p 8095:9000 to -p 8095:8095 in the docker command" + sendThere,
+				"Change -p 8095:9000 to -p 8095:8095 in the docker command" +
+				", or send these tests to one of host ports 18095, 28095 with a port map in keploy.yml (test.replaceWith.global.port: {8095: 18095})",
 		},
 		{
-			name:  "host port 8095 not published",
+			// Replay sends the tests to host port 18095 (pkg.PublishedTarget).
+			name:  "host port 8095 published to another container port, the app's port on one other",
+			ports: nat.PortMap{"9000/tcp": both("8095"), "8095/tcp": both("18095")},
+		},
+		{
+			name:  "host port 8095 not published, the app's port on two others",
+			ports: nat.PortMap{"8095/tcp": append(both("18095"), both("28095")...)},
+			want: prefix + "it is published on host port 18095, 28095 instead, and keploy sends each test from the host to port 8095, the port it was recorded on. " +
+				"Publish it on the same port (add -p 8095:8095 to the docker command)" +
+				", or send these tests to one of host ports 18095, 28095 with a port map in keploy.yml (test.replaceWith.global.port: {8095: 18095})",
+		},
+		{
+			// Replay sends the tests to host port 18095 (pkg.PublishedTarget).
+			name:  "host port 8095 not published, the app's port on one other",
 			ports: nat.PortMap{"8095/tcp": both("18095")},
-			want: prefix + "it is published on host port 18095 instead, and keploy sends each test from the host to port 8095, the port it was recorded on. " +
-				"Publish it on the same port (add -p 8095:8095 to the docker command)" + sendThere,
+		},
+		{
+			// Replay sends the tests to host port 18095, which docker forwards
+			// to the container's own address: an app listening only on
+			// loopback never sees them, so that is warned of, at 18095.
+			name:   "the app's port on one other host port, the app listening only on loopback",
+			ports:  nat.PortMap{"8095/tcp": both("18095")},
+			listen: map[string][]string{"8095": {"127.0.0.1"}},
+			want: "test cases recorded on the app's port 8095 cannot be replayed from the host at host port 18095, where it is published: " +
+				"host port 18095 is published to the app's port 8095, where the app listens only on 127.0.0.1 inside the container, which no published port reaches, " +
+				"and keploy sends these tests from the host to port 18095, for the app's port 8095 they were recorded on. " +
+				"keploy cannot replay these tests from the host while the app listens only there: the app would have to listen on 0.0.0.0:8095",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// The app listens on 8095, on every address; nothing on 9000.
-				addrs := map[string][]string{"9000": {}, "8095": {"0.0.0.0"}}[r.URL.Query().Get("port")]
+				listen := tc.listen
+				if listen == nil {
+					listen = map[string][]string{"9000": {}, "8095": {"0.0.0.0"}}
+				}
+				addrs := listen[r.URL.Query().Get("port")]
 				_ = json.NewEncoder(w).Encode(models.AppListenAddrs{Addrs: addrs})
 			}))
 			defer agent.Close()
@@ -133,6 +161,12 @@ func TestUnreachablePortWarnerSaysHowToPublishTheRecordedPort(t *testing.T) {
 			w := newUnreachablePortWarner(zap.New(core), agenthttp.New(zap.NewNop(), inspectOnly{resp: inspect}, cfg), cfg)
 			w.check(context.Background(), &models.TestCase{Name: "test-1", AppPort: 8095})
 
+			if tc.want == "" {
+				if logs.Len() != 0 {
+					t.Fatalf("warned %v; replay sends these tests where the app's port is published", logs.All())
+				}
+				return
+			}
 			if logs.Len() != 1 || logs.All()[0].Message != tc.want {
 				t.Fatalf("warned %v\nwant one warning:\n%q", logs.All(), tc.want)
 			}

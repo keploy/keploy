@@ -70,15 +70,42 @@ func TestResolveProbeTarget(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			scheme, host, port, ok := resolveProbeTarget(c.cfg, c.tc, "test-set-0", zap.NewNop())
+			scheme, host, port, ok := resolveProbeTarget(context.Background(), c.cfg, c.tc, "test-set-0", zap.NewNop(), nil)
 			if ok != c.wantOK || scheme != c.wantScheme || host != c.wantHost || port != c.wantPort {
 				t.Fatalf("got (%q,%q,%q,%v), want (%q,%q,%q,%v)",
 					scheme, host, port, ok, c.wantScheme, c.wantHost, c.wantPort, c.wantOK)
 			}
 		})
 	}
-	if _, _, _, ok := resolveProbeTarget(config.Test{Host: "localhost"}, nil, "test-set-0", zap.NewNop()); ok {
+	if _, _, _, ok := resolveProbeTarget(context.Background(), config.Test{Host: "localhost"}, nil, "test-set-0", zap.NewNop(), nil); ok {
 		t.Fatal("a nil test case must not be probeable")
+	}
+}
+
+// A readiness probe goes where the set's tests will: to the one host port the
+// app's port is published on when it is not published as itself, unless a
+// port the user set (test.port) sends the tests elsewhere.
+func TestResolveProbeTargetGoesWhereTheTestsGo(t *testing.T) {
+	published := func(_ context.Context, _ string, appPort uint16) uint16 {
+		if appPort == 8080 {
+			return 18080
+		}
+		return 0
+	}
+	tc := &models.TestCase{Kind: models.HTTP, AppPort: 8080, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://localhost:18080/x"}}
+	if _, _, port, ok := resolveProbeTarget(context.Background(), config.Test{}, tc, "test-set-0", zap.NewNop(), published); !ok || port != "18080" {
+		t.Fatalf("probe port %q (%v), want 18080", port, ok)
+	}
+	if _, _, port, ok := resolveProbeTarget(context.Background(), config.Test{}, tc, "test-set-0", zap.NewNop(), nil); !ok || port != "8080" {
+		t.Fatalf("with nothing published elsewhere: probe port %q (%v), want 8080, the app port", port, ok)
+	}
+	if _, _, port, ok := resolveProbeTarget(context.Background(), config.Test{Port: 7777}, tc, "test-set-0", zap.NewNop(), published); !ok || port != "7777" {
+		t.Fatalf("with test.port: probe port %q (%v), want 7777", port, ok)
+	}
+	// test.port naming the app port itself is still the user's choice: the
+	// probe stays there, as the tests do.
+	if _, _, port, ok := resolveProbeTarget(context.Background(), config.Test{Port: 8080}, tc, "test-set-0", zap.NewNop(), published); !ok || port != "8080" {
+		t.Fatalf("with test.port the app port: probe port %q (%v), want 8080", port, ok)
 	}
 }
 

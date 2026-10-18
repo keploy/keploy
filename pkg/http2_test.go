@@ -2,12 +2,17 @@ package pkg
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"net"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -130,4 +135,34 @@ func TestReadGRPCFrameRejectsOversizedLength(t *testing.T) {
 	got, err := ReadGRPCFrame(bytes.NewReader(raw))
 	require.NoError(t, err)
 	assert.Equal(t, raw, got)
+}
+
+// A gRPC test of an app port published on one other host port is dialled
+// there, which PublishedPort names; without it, it is dialled at its app port.
+func TestAGRPCTestOfAnAppPortPublishedOnOneHostPortIsDialledThere(t *testing.T) {
+	var dialled atomic.Int32
+	addr := serveEachConn(t, func(c net.Conn) { dialled.Add(1); _ = c.Close() })
+	_, hp, _ := net.SplitHostPort(addr)
+	hostPort, _ := strconv.Atoi(hp)
+	appPort := refusedPort(t)
+	tc := func() *models.TestCase {
+		tc := grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}})
+		tc.AppPort = appPort
+		return tc
+	}
+
+	_, err := SimulateGRPC(context.Background(), tc(), "set", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}})
+	if !IsUnreachableAppPort(err) || dialled.Load() != 0 {
+		t.Fatalf("without PublishedPort: err %v, %d connections to host port %d; want its app port %d refused", err, dialled.Load(), hostPort, appPort)
+	}
+	published := func(_ context.Context, _ string, port uint16) uint16 {
+		if port == appPort {
+			return uint16(hostPort)
+		}
+		return 0
+	}
+	_, _ = SimulateGRPC(context.Background(), tc(), "set", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}, PublishedPort: published})
+	if dialled.Load() == 0 {
+		t.Fatalf("with PublishedPort naming host port %d, nothing dialled it", hostPort)
+	}
 }
