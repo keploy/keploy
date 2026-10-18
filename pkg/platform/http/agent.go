@@ -1000,15 +1000,14 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 	})
 }
 
-func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) (retErr error) {
-	defer func() {
-		// Made again on a restarted agent, it is no first run: what a
-		// first run cleans up was cleaned up (see replay's repair, which
-		// re-registers the same way).
-		if retErr == nil && a.session().recording() {
-			a.session().record(stepTestSetHook, func(c context.Context) error { return a.BeforeTestSetCompose(c, testRunID, testSetID, false) })
-		}
-	}()
+func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
+	// Made again on a restarted agent, it is no first run: what a first run
+	// cleans up was cleaned up (see replay's repair, which re-registers the
+	// same way). This set's hook is the one a restarted agent needs, whether
+	// or not this agent answered it, so it replaces the previous set's.
+	if a.session().recording() {
+		a.session().record(stepTestSetHook, func(c context.Context) error { return a.BeforeTestSetCompose(c, testRunID, testSetID, false) })
+	}
 	return a.callHook(ctx, "/hooks/before-test-set-compose", models.BeforeTestSetCompose{
 		TestRunID: testRunID,
 		TestSetID: testSetID,
@@ -1027,14 +1026,25 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 // started exits before it answers (whileAgentRuns).
 var errAgentExited = errors.New("keploy's agent exited")
 
+// hookNoticeAfter is how long a hook call goes unanswered before keploy says it
+// is waiting for the agent, and hookStillWaitingEvery how often it says so
+// again. Notices only: neither ends the wait. Variables for tests.
+var (
+	hookNoticeAfter       = 5 * time.Second
+	hookStillWaitingEvery = 30 * time.Second
+)
+
 // callHook posts payload to the agent's hook endpoint and waits for its answer
 // for as long as the agent serves it: until it answers, the agent this client
 // started exits (whileAgentRuns), the connection ends (an agent that dies
-// closes it; a host that is gone stops answering its keepalives), or ctx ends.
-// There is no deadline: on a starved host a hook takes what it takes. The 50 s
-// one there was returned nil while the agent still served the call, so the
-// run went on as if the hook were done, and the next hook call overlapped it.
-// Not getting an answer is an error, as a refusal is.
+// closes it; a host that is gone stops answering its keepalives), or ctx ends
+// (the run is stopped, or the test set's app exited). There is no deadline: on
+// a starved host a hook takes what it takes, and an agent that is alive but
+// never answers is for the user or the job's own limit to stop, as an app that
+// never answers a test is; while it waits keploy says so. The 50 s deadline
+// there was returned nil while the agent still served the call, so the run went
+// on as if the hook were done, and the next hook call overlapped it. A call
+// that ends without an answer is an error, as a refusal is.
 func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any) error {
 	if a.conf.Agent.AgentURI == "" {
 		return nil
@@ -1050,13 +1060,16 @@ func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	answered := make(chan struct{})
+	go a.sayHookWait(endpoint, answered, hookNoticeAfter, hookStillWaitingEvery)
 	resp, err := a.client.Do(req)
+	close(answered)
 	if err != nil {
 		if errors.Is(context.Cause(hctx), errAgentExited) {
-			return fmt.Errorf("keploy's agent exited before it answered %s", endpoint)
+			return fmt.Errorf("%w before it answered %s", errAgentExited, endpoint)
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("stopped waiting for keploy's agent to answer %s: %w", endpoint, ctx.Err())
+			return fmt.Errorf("stopped waiting for keploy's agent to answer %s: %w", endpoint, context.Cause(ctx))
 		}
 		return fmt.Errorf("keploy's agent did not answer %s: %w", endpoint, err)
 	}
@@ -1066,10 +1079,39 @@ func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any
 	}()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		a.logger.Error("agent hook returned error", zap.String("endpoint", endpoint), zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
+		if b := strings.TrimSpace(string(respBody)); b != "" {
+			return fmt.Errorf("agent hook failed: %d: %s", resp.StatusCode, b)
+		}
 		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// sayHookWait says, while a hook call waits for the agent's answer (until
+// answered is closed), that it is waiting: once after noticeAfter, then every
+// stillEvery, and once more when the answer comes after that.
+func (a *AgentClient) sayHookWait(endpoint string, answered <-chan struct{}, noticeAfter, stillEvery time.Duration) {
+	began := time.Now()
+	notice := time.NewTimer(noticeAfter)
+	defer notice.Stop()
+	noticed := false
+	for {
+		select {
+		case <-answered:
+			if noticed {
+				a.logger.Info("keploy's agent answered the hook", zap.String("endpoint", endpoint), zap.Duration("after", time.Since(began)))
+			}
+			return
+		case <-notice.C:
+			if !noticed {
+				a.logger.Info("waiting for keploy's agent to answer a hook; the run goes on once it has", zap.String("endpoint", endpoint))
+			} else {
+				a.logger.Info("still waiting for keploy's agent to answer a hook", zap.String("endpoint", endpoint), zap.Duration("waited", time.Since(began)))
+			}
+			noticed = true
+			notice.Reset(stillEvery)
+		}
+	}
 }
 
 // whileAgentRuns is ctx, ended with errAgentExited as its cause once the agent

@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -87,14 +88,14 @@ func (h *Hooks) beforeSimulate(ctx context.Context, tc *models.TestCase, at *tim
 			// Whatever the hook began (a freeze, a coverage window) ends,
 			// as after any case.
 			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 			return err
 		}
 		return nil
 	}
 	if err := h.instrumentation.BeforeSimulate(ctx, at, testSetID, tc.Name); err != nil {
-		h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeSimulate hook")
 	}
 	return nil
 }
@@ -156,7 +157,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
 
 			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 
 			return resp, err
@@ -166,7 +167,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
@@ -214,7 +215,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
@@ -359,7 +360,7 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 
 	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {
-		h.logger.Error("failed to call BeforeTestRun hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeTestRun hook")
 	}
 
 	return nil
@@ -374,7 +375,7 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, test
 	// (handled by HandleBeforeTestSetCompose in the agent process).
 
 	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
-		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeTestSetCompose hook")
 	}
 
 	return nil
@@ -402,7 +403,7 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
-		h.logger.Error("failed to call AfterTestRun hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")
 	}
 	return nil
 }

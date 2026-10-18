@@ -129,35 +129,12 @@ func (a *AgentClient) RealTest(ctx context.Context) (models.RealTest, error) {
 // case must not run at its recorded time against a dependency that answers
 // at real time. Without an agent there is no clock to move.
 func (a *AgentClient) BeforeSimulateReal(ctx context.Context, timestamp *time.Time, testSetID, tcName string, real []string) error {
-	if a.conf.Agent.AgentURI == "" {
-		return nil
-	}
-	req0 := models.BeforeSimulateRequest{TestSetID: testSetID, TestCaseName: tcName, Real: real}
+	req := models.BeforeSimulateRequest{TestSetID: testSetID, TestCaseName: tcName, Real: real}
 	if timestamp != nil {
-		req0.TimeStamp = *timestamp
+		req.TimeStamp = *timestamp
 	}
-	body, err := json.Marshal(req0)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/hooks/before-simulate", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// No deadline of keploy's: the agent's answer, or the connection's
-	// close, ends it.
-	res, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to ask keploy's agent to put a mock.real test case on the real clock: %w", err)
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, res.Body)
-		_ = res.Body.Close()
-	}()
-	if res.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(res.Body)
-		return fmt.Errorf("keploy's agent did not put a mock.real test case on the real clock: status %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
+	if err := a.callHook(ctx, "/hooks/before-simulate", req); err != nil {
+		return fmt.Errorf("keploy's agent did not put a mock.real test case on the real clock: %w", err)
 	}
 	return nil
 }

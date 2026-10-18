@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // hookCalls is every /hooks/* call, each made with the ctx it is given.
@@ -135,8 +138,8 @@ func TestAgentHooks_EndWhenTheAgentExits(t *testing.T) {
 			<-ag.served
 			run.exited()
 			err := <-done
-			require.Error(t, err)
-			require.Contains(t, err.Error(), "keploy's agent exited before it answered")
+			require.ErrorIs(t, err, errAgentExited)
+			require.Contains(t, err.Error(), "keploy's agent exited before it answered /hooks/")
 		})
 	}
 	t.Run("an agent gone before the call", func(t *testing.T) {
@@ -145,8 +148,7 @@ func TestAgentHooks_EndWhenTheAgentExits(t *testing.T) {
 		run.exited()
 		a.run = run
 		err := a.BeforeTestRun(context.Background(), "test-run-0")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "keploy's agent exited before it answered")
+		require.ErrorIs(t, err, errAgentExited)
 	})
 }
 
@@ -187,4 +189,80 @@ func TestAgentHooks_AnUnansweredCallIsAnError(t *testing.T) {
 		ag.answer <- http.StatusInternalServerError
 		require.EqualError(t, a.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}), "agent hook failed: 500")
 	})
+}
+
+// waitForLog waits until the logger has written msg at least n times, for as
+// long as that takes.
+func waitForLog(logs *observer.ObservedLogs, msg string, n int) []observer.LoggedEntry {
+	for {
+		if got := logs.FilterMessage(msg).All(); len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A hook call that waits for the agent says so, names the hook, says it again
+// while it waits, and says when the answer came: a wait with no end is not a
+// silent one.
+func TestAgentHooks_SayWhileTheyWait(t *testing.T) {
+	prevNotice, prevStill := hookNoticeAfter, hookStillWaitingEvery
+	hookNoticeAfter, hookStillWaitingEvery = 0, 10*time.Millisecond
+	t.Cleanup(func() { hookNoticeAfter, hookStillWaitingEvery = prevNotice, prevStill })
+	core, logs := observer.New(zapcore.InfoLevel)
+	ag, a := newSlowAgent(t)
+	a.logger = zap.New(core)
+	done := make(chan error, 1)
+	go func() { done <- a.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}) }()
+	<-ag.served
+	first := waitForLog(logs, "waiting for keploy's agent to answer a hook; the run goes on once it has", 1)
+	require.Equal(t, "/hooks/after-test-run", first[0].ContextMap()["endpoint"])
+	waitForLog(logs, "still waiting for keploy's agent to answer a hook", 2)
+	ag.answer <- http.StatusOK
+	require.NoError(t, <-done)
+	waitForLog(logs, "keploy's agent answered the hook", 1)
+}
+
+// A set's hook is the one a restarted agent is given again, whether or not the
+// agent it was sent to answered it: not the previous set's.
+func TestBeforeTestSetCompose_ARestartedAgentGetsThisSetsHook(t *testing.T) {
+	var mu sync.Mutex
+	var sets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req models.BeforeTestSetCompose
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		sets = append(sets, req.TestSetID)
+		mu.Unlock()
+		if req.TestSetID == "test-set-1" && len(sets) == 2 {
+			// The agent dies before it answers test-set-1's hook.
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { sessions.Delete(srv.URL) })
+	a := &AgentClient{logger: zap.NewNop(), client: agentHTTPClient(""), conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.session().configure(true)
+
+	require.NoError(t, a.BeforeTestSetCompose(context.Background(), "test-run-0", "test-set-0", true))
+	require.Error(t, a.BeforeTestSetCompose(context.Background(), "test-run-0", "test-set-1", false))
+
+	s := a.session()
+	s.mu.Lock()
+	var apply func(context.Context) error
+	for _, step := range s.steps {
+		if step.kind == stepTestSetHook {
+			apply = step.apply
+		}
+	}
+	s.mu.Unlock()
+	require.NotNil(t, apply, "no set hook recorded for a restarted agent")
+	require.NoError(t, apply(context.Background()))
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"test-set-0", "test-set-1", "test-set-1"}, sets, "a restarted agent was given another set's hook")
 }
