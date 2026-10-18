@@ -189,7 +189,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}()
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
-	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
+	//    A start the agent stops making progress in is given up on
+	//    (pkg.ErrAgentNotReady) and retried with a fresh agent, as record and
+	//    test retry it (pkg.RetryAgentSetup). Any other failure is not
+	//    retried.
+	opts := models.SetupOptions{
 		Container:        m.config.ContainerName,
 		FromContainer:    m.config.FromContainer,
 		CommandType:      m.config.CommandType,
@@ -202,6 +206,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughPorts: config.GetByPassPorts(m.config),
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
+	}
+	if err := pkg.RetryAgentSetup(ctx, m.logger, func(c context.Context, _ int) error {
+		return m.instrumentation.Setup(c, m.config.Command, opts)
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the

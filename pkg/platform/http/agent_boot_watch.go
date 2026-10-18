@@ -46,12 +46,21 @@ import (
 //     cannot report (one older than this keploy, or one whose report cannot be
 //     read) is held to the same bound: its start is given up on once it has run
 //     that long without one.
-//   - From its first report on, the agent's own beats judge it: it beats once a
-//     second of its own time, and a start that takes no step across
+//   - From its first report on, the agent's own beats judge it. It beats once
+//     a second of its own runnable time: an agent the host freezes, stops or
+//     throttles beats only as fast as it gets to run, and one it does not run
+//     does not beat, and is not judged. A start that takes no step across
 //     bootStallChecks of them, with no work in progress making progress (the
-//     eBPF load, the proxy's start, which the agent sees through their thread)
-//     and no prompt in front of the user, has stopped. An agent the host does
-//     not run does not beat, and is not judged.
+//     eBPF load, the proxy's start, its listener's start and its DNS
+//     servers' binds, which the agent sees through their threads) and no
+//     prompt in front of the user, has stopped. The agent counts those beats
+//     itself, as it saw each of them (BootProgress.Quiet): keploy reads only
+//     the latest report, and charged every beat since its last read to it,
+//     so a keploy that read seldom counted beats of work in progress as beats
+//     without. An older agent's report, without the count, is judged by
+//     keploy's own count as before. A stopped start says the last step it
+//     took and the stages it had in progress, with their threads' state and
+//     wait point.
 //   - One that says its server listens is due to answer its health check
 //     within bootSilence of keploy's runnable time (a port the runtime does not
 //     forward does not answer).
@@ -133,14 +142,20 @@ func (j *bootJudge) look(p utils.BootProgress, ok, running bool) (bootVerdict, s
 		return bootWaiting, ""
 	}
 	if !j.seen || p.Beat != j.lastBeat || p.Seq != j.lastSeq {
-		if j.seen && p.Seq == j.lastSeq && !p.Busy && !p.Prompt && p.Beat > j.lastBeat {
+		switch {
+		case p.CountsQuiet:
+			// The agent's own count, beat by beat.
+			j.quiet = p.Quiet
+		case j.seen && p.Seq == j.lastSeq && !p.Busy && !p.Prompt && p.Beat > j.lastBeat:
+			// An older agent's: the beats since the last report read, as
+			// this one says they went.
 			j.quiet += p.Beat - j.lastBeat
-		} else {
+		default:
 			j.quiet = 0
 		}
 		j.seen, j.lastBeat, j.lastSeq = true, p.Beat, p.Seq
 		if j.quiet >= bootStallChecks {
-			return bootStalled, withBootErrors(fmt.Sprintf("its start took no step across %d of its beats, with no work in progress making progress", j.quiet), p)
+			return bootStalled, withBootErrors(stalledStart(j.quiet, p), p)
 		}
 	}
 	if p.Ready {
@@ -152,6 +167,60 @@ func (j *bootJudge) look(p utils.BootProgress, ok, running bool) (bootVerdict, s
 		}
 	}
 	return bootWaiting, ""
+}
+
+// stalledStart is why a start that took no step across quiet of its beats has
+// stopped: with the last step it took, and the stages it had in progress, each
+// with its thread's state and wait point, where the agent says them -- where a
+// start that stalls was, which nothing else keploy shows says.
+func stalledStart(quiet uint64, p utils.BootProgress) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "its start took no step across %d of its beats, with no work in progress making progress", quiet)
+	if p.Step != "" {
+		fmt.Fprintf(&b, "; its last step: %s", p.Step)
+	}
+	if len(p.Stages) == 0 {
+		if p.CountsQuiet {
+			b.WriteString("; no stage of it in progress")
+		}
+		return b.String()
+	}
+	b.WriteString("; in progress: ")
+	for i, st := range p.Stages {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(st.Name)
+		switch {
+		case st.Unseen:
+			b.WriteString(" (its progress cannot be seen here)")
+		case st.State != "" && st.Wait != "":
+			fmt.Fprintf(&b, " (its thread %s, in %s)", threadState(st.State), st.Wait)
+		case st.State != "":
+			fmt.Fprintf(&b, " (its thread %s)", threadState(st.State))
+		}
+	}
+	return b.String()
+}
+
+// threadState says the kernel's state of a thread (its stat letter) in words.
+func threadState(st string) string {
+	switch st {
+	case "R":
+		return "running or waiting to run"
+	case "S":
+		return "sleeping"
+	case "D":
+		return "in an uninterruptible wait"
+	case "T", "t":
+		return "stopped"
+	case "Z":
+		return "a zombie"
+	case "I":
+		return "idle"
+	default:
+		return "in state " + st
+	}
 }
 
 // withBootErrors is why, with the last ERROR the agent logged while starting,

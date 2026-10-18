@@ -65,6 +65,62 @@ func TestABootThatStopsTakingStepsIsStalled(t *testing.T) {
 	}
 }
 
+// An agent that counts its beats without progress itself is judged by its
+// count, not by the beats keploy read: keploy reads only the latest report, and
+// charged every beat since its last read to it. Read at beat 10 (busy) and next
+// at beat 40, a report that is not busy at 40 says nothing of beats 11 to 39,
+// which the agent may have seen busy; it counts one beat without progress, and
+// the start goes on. Its own count reaching bootStallChecks stops it.
+func TestAStartIsJudgedByTheAgentsOwnCountOfBeatsWithoutProgress(t *testing.T) {
+	b := newBootLooks(t)
+	if v, why := b.look(0, utils.BootProgress{Beat: 10, Seq: 5, Busy: true, CountsQuiet: true}, true, true); v != bootWaiting {
+		t.Fatalf("a busy beat: %v (%s), want waiting", v, why)
+	}
+	if v, why := b.look(time.Second, utils.BootProgress{Beat: 10 + bootStallChecks, Seq: 5, Quiet: 1, CountsQuiet: true}, true, true); v != bootWaiting {
+		t.Fatalf("%d beats read at once, the agent counting one without progress: %v (%s), want waiting", bootStallChecks, v, why)
+	}
+	v, why := b.look(time.Second, utils.BootProgress{Beat: 11 + bootStallChecks, Seq: 5, Quiet: bootStallChecks, CountsQuiet: true}, true, true)
+	if v != bootStalled || !strings.Contains(why, "took no step") {
+		t.Fatalf("the agent counting %d beats without progress: %v (%s), want stalled", bootStallChecks, v, why)
+	}
+
+	// An older agent's report, without the count, is judged by keploy's.
+	b = newBootLooks(t)
+	b.look(0, utils.BootProgress{Beat: 10, Seq: 5, Busy: true}, true, true)
+	if v, _ := b.look(time.Second, utils.BootProgress{Beat: 10 + bootStallChecks, Seq: 5}, true, true); v != bootStalled {
+		t.Fatalf("an older agent's report: %v, want keploy's own count, stalled", v)
+	}
+}
+
+// A stopped start says where it was: the last step it took, and each stage in
+// progress with its thread's state and the kernel function it sleeps in. That
+// is what tells a stage waiting on a lock from one waiting on another
+// goroutine, which a bare "took no step" did not.
+func TestAStalledStartSaysWhereItWas(t *testing.T) {
+	b := newBootLooks(t)
+	p := utils.BootProgress{Beat: 41, Seq: 9, Quiet: bootStallChecks, CountsQuiet: true, Step: "the proxy listens",
+		Stages: []utils.BootStage{{Name: "the UDP DNS server's bind", State: "D", Wait: "rtnl_lock"}, {Name: "the proxy's start", State: "S"}},
+		Errors: 1, Error: "failed to attach the udp4 sendmsg hook"}
+	v, why := b.look(0, p, true, true)
+	want := "its start took no step across 30 of its beats, with no work in progress making progress; its last step: the proxy listens; in progress: the UDP DNS server's bind (its thread in an uninterruptible wait, in rtnl_lock), the proxy's start (its thread sleeping) (it logged 1 ERROR(s) while starting, the last: failed to attach the udp4 sendmsg hook)"
+	if v != bootStalled || why != want {
+		t.Fatalf("%v\n got: %s\nwant: %s", v, why, want)
+	}
+	b = newBootLooks(t)
+	_, why = b.look(0, utils.BootProgress{Beat: 31, Seq: 2, Quiet: bootStallChecks, CountsQuiet: true, Step: "the hooks' load ended"}, true, true)
+	if !strings.HasSuffix(why, "; its last step: the hooks' load ended; no stage of it in progress") {
+		t.Fatalf("a stall between stages: %s", why)
+	}
+	// Where the agent cannot see a stage's progress (not on Linux) it still
+	// names the stage.
+	b = newBootLooks(t)
+	_, why = b.look(0, utils.BootProgress{Beat: 31, Seq: 4, Quiet: bootStallChecks, CountsQuiet: true, Step: "the proxy's start began",
+		Stages: []utils.BootStage{{Name: "the proxy's start", Unseen: true}}}, true, true)
+	if !strings.HasSuffix(why, "; in progress: the proxy's start (its progress cannot be seen here)") {
+		t.Fatalf("a stall in an unseen stage: %s", why)
+	}
+}
+
 // Work in progress that makes progress (the eBPF load, its thread running) is
 // no beat without progress, however many beats it takes.
 func TestBootWorkInProgressIsNoStall(t *testing.T) {
