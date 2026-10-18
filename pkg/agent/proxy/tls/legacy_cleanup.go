@@ -161,7 +161,7 @@ func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte)
 	}
 	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
 	out, err := cmd.CombinedOutput()
-	utils.BootStep() // a step of the agent's start: keytool's JVM is done
+	utils.BootStep("keytool -delete is over")
 	if err != nil {
 		logger.Debug("could not delete the legacy JDK alias", zap.String("cacerts", cacerts), zap.ByteString("output", out), zap.Error(err))
 		return
@@ -174,7 +174,7 @@ func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte)
 func exportJavaAliasCert(ctx context.Context, keytool, cacerts, alias string) (der []byte, ok bool) {
 	cmd := exec.CommandContext(ctx, keytool, "-exportcert", "-rfc", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit")
 	out, err := cmd.Output()
-	utils.BootStep() // a step of the agent's start: keytool's JVM is done
+	utils.BootStep("keytool -exportcert is over")
 	if err != nil {
 		return nil, false
 	}

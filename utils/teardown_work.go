@@ -63,6 +63,14 @@ type workProbe interface {
 	release()
 }
 
+// describedProbe is a workProbe that can also say how the stage's thread
+// stands: the kernel's state of it, and the kernel function it sleeps in (its
+// wait point, empty when it runs or cannot be read). What an agent's start
+// that stalls reports of the stages it stalled in (BootProgress.Stages).
+type describedProbe interface {
+	describe() (state, wait string)
+}
+
 // newWorkProbe returns the probe for a stage of teardown work begun on the
 // calling goroutine, or nil where its progress cannot be seen. A variable so
 // that tests that must count every step see none from the checks.

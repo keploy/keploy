@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -133,7 +134,11 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
-	if err := m.instrumentation.Setup(setupCtx, m.config.Command, models.SetupOptions{
+	//    A start the agent stops making progress in is given up on
+	//    (pkg.ErrAgentNotReady) and retried with a fresh agent, as record and
+	//    test retry it (pkg.RetryAgentSetup). Any other failure is not
+	//    retried.
+	opts := models.SetupOptions{
 		Container:        m.config.ContainerName,
 		FromContainer:    m.config.FromContainer,
 		CommandType:      m.config.CommandType,
@@ -146,6 +151,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		RecordRequests:   requests,
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
+	}
+	if err := pkg.RetryAgentSetup(setupCtx, m.logger, func(c context.Context, _ int) error {
+		return m.instrumentation.Setup(c, m.config.Command, opts)
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil

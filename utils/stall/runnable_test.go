@@ -195,6 +195,23 @@ func TestMeter_ExpiresOnRunnableTimeOnly(t *testing.T) {
 	}
 }
 
+// ResetBy spends d of the stall and keeps what the process could run past
+// it: a watcher counting the stall in whole units loses no part of one.
+func TestMeter_ResetByKeepsWhatRanPastIt(t *testing.T) {
+	clk := &ManualClock{}
+	m := NewMeter(clk, time.Second)
+	defer m.Stop()
+	clk.Advance(1500 * time.Millisecond)
+	m.ResetBy(time.Second)
+	if got := m.Stalled(); got != 500*time.Millisecond {
+		t.Fatalf("stalled %v after spending a second of 1.5 s, want the 500 ms past it kept", got)
+	}
+	clk.Advance(500 * time.Millisecond)
+	if !m.Expired() {
+		t.Fatalf("not expired a second after the spent one (stalled %v)", m.Stalled())
+	}
+}
+
 // A meter on the process clock holds the clock until it stops.
 func TestMeter_HoldsTheProcessClockUntilStopped(t *testing.T) {
 	m := NewMeter(nil, time.Hour)

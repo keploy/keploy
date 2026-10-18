@@ -10,8 +10,9 @@
 // about to come. Counted in runnable time (Clock), a starved process accrues
 // the stall only as fast as it gets to run.
 //
-// The stall bounds of the agent's supervisor and relay tee and of the CLI's
-// record and mock-record stops are measured on the one process clock
+// The stall bounds of the agent's supervisor and relay tee, the agent's boot
+// beats (utils.BootBeat) and the CLI's bounds on a starting agent, and the
+// CLI's record and mock-record stops are measured on the one process clock
 // (Process), so they agree on what "the process could run" means. Others
 // (the relay's half-close idle wait, mock replay's capture wait) are not yet.
 package stall
@@ -259,6 +260,12 @@ func CheckEvery(grace time.Duration) time.Duration {
 
 // Reset says the watched work made progress: the stall starts again.
 func (m *Meter) Reset() { m.start.Store(int64(m.clk.Runnable())) }
+
+// ResetBy says d of the stall so far is spent: the stall starts d later, and
+// what the process could run past it counts toward the next. A watcher that
+// counts the stall in whole units of d (a reporter's beats) loses no part of
+// one between its looks.
+func (m *Meter) ResetBy(d time.Duration) { m.start.Add(int64(d)) }
 
 // Stalled is how long the process could run since the stall began.
 func (m *Meter) Stalled() time.Duration {
