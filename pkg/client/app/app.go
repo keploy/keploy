@@ -20,7 +20,9 @@ import (
 
 	cli "github.com/docker/cli/cli"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	mobyclient "github.com/moby/moby/client"
@@ -32,6 +34,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -684,19 +687,25 @@ func sanitizeAppLogLine(line string) string {
 // replay loop can tear the stack down on a per-test-set setup failure
 // (agent-readiness timeout) before a retry, not only via run()'s defer.
 func (a *App) ComposeDown() {
-	// Bound each docker CLI call below on its OWN deadline so a daemon saturated
-	// by a high-stress CI run cannot wedge the teardown. The record/replay
-	// teardown drains the app-runner goroutine under utils.DrainErrGroup's 30s
-	// budget; an UNBOUNDED `docker compose down` / `docker rm -f` blocked that
-	// goroutine well past 30s, tripping a spurious "teardown drain timed out … a
-	// goroutine is ignoring context cancellation" error on an otherwise-green
-	// run. (`--timeout 1` only bounds compose's per-container *stop* grace, not
-	// the `docker compose down` process itself.) Per-call budgets — not one
-	// shared deadline — so the force-remove + reap barrier still free the
-	// agent/app container names even when the down consumes its full budget
-	// (that name-freeing is exactly what avoids "container name already in use"
-	// on the next compose up).
-	downCtx, downCancel := context.WithTimeout(context.Background(), composeDownCmdBudget)
+	// The down runs while the project makes progress on its way down: its
+	// containers stopping and going, its network going, as the daemon's own
+	// events for the project tell (composeDownContext). It is cut only when
+	// nothing of the project moved for the stall bound of keploy's runnable
+	// time, never on a number of seconds: a daemon loaded by a stressed CI run
+	// takes as long as it takes to stop and remove a stack, and a down cut
+	// short leaves the project behind (its dependencies, keploy's agent, its
+	// network), for the next `up` to trip over. It was cut at 8 s, with the
+	// agent and the app's dependencies still stopping.
+	//
+	// The teardown's drains (utils.DrainErrGroup) wait for it: the down stops
+	// keploy's agent with the stack, an agent's stop in progress
+	// (utils.BeginAgentStop), which ends on its own.
+	if !a.useComposeLibrary() && len(a.composeContent) == 0 && a.composeFile == "" {
+		return
+	}
+	defer utils.BeginAgentStop()()
+	project := a.composeDownProject()
+	downCtx, downCancel := a.composeDownContext(project)
 	defer downCancel()
 
 	downSucceeded := true
@@ -728,7 +737,7 @@ func (a *App) ComposeDown() {
 		}
 		if err := runner.Down(downCtx, composeDownStopGrace); err != nil {
 			downSucceeded = false
-			a.logger.Debug("compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
+			a.logger.Debug("compose down finished with error (may be expected if containers already removed, or keploy cut a down that made no progress)",
 				zap.Error(err))
 		}
 	// Reached only where the library is not linked (darwin): same teardown,
@@ -758,7 +767,7 @@ func (a *App) ComposeDown() {
 	if downCmd != nil {
 		if output, err := downCmd.CombinedOutput(); err != nil {
 			downSucceeded = false
-			a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
+			a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or keploy cut a down that made no progress)",
 				zap.Error(err), zap.String("output", string(output)))
 		}
 	}
@@ -809,6 +818,248 @@ func (a *App) ComposeDown() {
 	}
 
 	a.waitContainersRemoved(append([]string{a.keployContainer, a.container}, stragglers...), reapBarrierBudget)
+
+	// A down cut short leaves the project's networks too: compose removes
+	// them last, once the containers on them are gone. The sweep above
+	// removed those containers; their networks go now.
+	if !downSucceeded {
+		a.sweepProjectNetworks(project)
+	}
+}
+
+// composeDownStall is how long, in keploy's runnable time, a compose down may
+// go with nothing of its project moving before keploy cuts it (the watchdog's
+// stall bound, stall.HangBudget). A test sets it shorter.
+var composeDownStall = stall.HangBudget
+
+// composeDownProject is the compose project the down takes down. In-process
+// (the compose library), the project the library's up ran, which it knows
+// without asking the daemon. Else the label compose put on the app's
+// container, or on keploy's agent's; else the project compose itself takes,
+// as the compose command names it (-p), or as COMPOSE_PROJECT_NAME does, set
+// in the command (which only the shell a `docker compose` command runs in
+// reads) or in keploy's environment; "" when none tells it. Each inspect has
+// its own bound (dockerInspectBudget): one a saturated daemon took the whole
+// of does not leave the next none.
+func (a *App) composeDownProject() string {
+	if a.useComposeLibrary() {
+		a.composeRunnerMu.Lock()
+		r := a.composeRunnerVal
+		a.composeRunnerMu.Unlock()
+		if r != nil {
+			if p := r.ProjectName(); p != "" {
+				return p
+			}
+		}
+	}
+	appCtx, appCancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+	defer appCancel()
+	if p := a.composeProjectLabel(appCtx); p != "" {
+		return p
+	}
+	agentCtx, agentCancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+	defer agentCancel()
+	if p := a.composeProjectLabelOf(agentCtx, a.keployContainer); p != "" {
+		return p
+	}
+	if p := composeProjectFlag(a.cmd); p != "" {
+		return p
+	}
+	// The library never runs the command in a shell: an assignment in it
+	// does not reach its project, keploy's own environment does.
+	if !a.useComposeLibrary() {
+		if p := composeProjectEnvAssignment(a.cmd); p != "" {
+			return p
+		}
+	}
+	return strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME"))
+}
+
+// composeProjectEnvAssignment is COMPOSE_PROJECT_NAME as cmd's leading
+// assignments set it (`COMPOSE_PROJECT_NAME=x docker compose up`), "" when
+// they do not.
+func composeProjectEnvAssignment(cmd string) string {
+	for _, f := range strings.Fields(cmd) {
+		name, value, ok := strings.Cut(f, "=")
+		if !ok || name == "" || strings.HasPrefix(name, "-") {
+			return ""
+		}
+		if name == "COMPOSE_PROJECT_NAME" {
+			return strings.Trim(value, `"'`)
+		}
+	}
+	return ""
+}
+
+// composeProjectLabelOf is the compose project label on container name, ""
+// when it has none or cannot be read.
+func (a *App) composeProjectLabelOf(ctx context.Context, name string) string {
+	if name == "" {
+		return ""
+	}
+	info, err := a.docker.ContainerInspect(ctx, name)
+	if err != nil || info.Config == nil {
+		return ""
+	}
+	return strings.TrimSpace(info.Config.Labels["com.docker.compose.project"])
+}
+
+// composeProjectFlag is the project the compose command cmd names (-p,
+// --project-name), "" when it names none.
+func composeProjectFlag(cmd string) string {
+	flags := extractProjectFlags(cmd)
+	for i := 0; i < len(flags); i++ {
+		switch {
+		case (flags[i] == "-p" || flags[i] == "--project-name") && i+1 < len(flags):
+			return flags[i+1]
+		case strings.HasPrefix(flags[i], "-p="):
+			return strings.TrimPrefix(flags[i], "-p=")
+		case strings.HasPrefix(flags[i], "--project-name="):
+			return strings.TrimPrefix(flags[i], "--project-name=")
+		}
+	}
+	return ""
+}
+
+// composeDownSteps are the steps a container of the project takes on its way
+// out in a down; each one a container reaches, once, is the down's progress.
+var composeDownSteps = []events.Action{events.ActionKill, events.ActionDie, events.ActionStop, events.ActionDestroy}
+
+// composeDownContext is the context a compose down of project runs under. It
+// is cancelled when no container of the project (under its compose label)
+// has reached a step on its way out (composeDownSteps) for composeDownStall
+// of keploy's runnable time, or at the user's Ctrl+C, which the wait offers
+// after the run's interrupt (utils.StopNowNotice), as a stop that waits on
+// progress does, so the wait can always be ended. Nothing else of the
+// project is progress: a running container's healthcheck (keploy's agent
+// runs one every 5 s) and its health status, or a restart loop's dying over
+// and over, go on while a down is wedged. Network events carry no labels,
+// so the network's going is not seen; its containers' going is. With no
+// project to watch, nothing tells progress, and the stall bound alone
+// bounds the down.
+//
+// Its cancel returns once the meter's watch has ended. The subscription's
+// goroutine is not waited for: it ends as the docker client gives up the
+// subscription at ctx's end, and a client that did not would hang the
+// teardown instead of leaking it.
+func (a *App) composeDownContext(project string) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var moved atomic.Uint64
+	if project != "" {
+		// Subscribed on its own goroutine, not before the down: the docker
+		// client's Events returns only once the daemon has answered, which a
+		// saturated one may not do soon, and the stall bound has to stand
+		// from the down's start whatever the daemon does.
+		go func() {
+			args := filters.NewArgs(filters.Arg("label", "com.docker.compose.project="+project),
+				filters.Arg("type", string(events.ContainerEventType)))
+			for _, step := range composeDownSteps {
+				args.Add("event", string(step))
+			}
+			msgs, errs := a.docker.Events(ctx, events.ListOptions{Filters: args})
+			seen := map[string]bool{}
+			for {
+				select {
+				case m, ok := <-msgs:
+					if !ok {
+						return
+					}
+					// Checked here too, not left to the daemon's filter: a
+					// step counts once per container, whatever the daemon
+					// sends.
+					if !isComposeDownStep(m) {
+						continue
+					}
+					if k := m.Actor.ID + "/" + string(m.Action); !seen[k] {
+						seen[k] = true
+						moved.Add(1)
+					}
+				case err := <-errs:
+					// No more news of the project: the stall bound stands.
+					if ctx.Err() == nil {
+						a.logger.Debug("the docker events of the compose project stopped during its down", zap.String("project", project), zap.Error(err))
+					}
+					return
+				}
+			}
+		}()
+	} else {
+		a.logger.Debug("no compose project name for the down to watch; it is bounded by the stall bound alone")
+	}
+	meter := stall.NewMeter(nil, composeDownStall)
+	notice := utils.NewStopNowNotice(utils.StopOffer)
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		defer meter.Stop()
+		defer notice.Withdraw()
+		offering := false
+		last := moved.Load()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-notice.Interrupt():
+				a.logger.Warn("keploy cuts docker compose down at your Ctrl+C, and removes what it left", zap.String("project", project))
+				cancel()
+				return
+			case <-meter.Wait():
+			}
+			if !offering && notice.Next() {
+				offering = true
+				a.logger.Info("keploy waits for docker compose down to take the project down, as long as it makes progress; press Ctrl+C again to cut it now",
+					zap.String("project", project))
+			}
+			if n := moved.Load(); n != last {
+				last = n
+				meter.Reset()
+				continue
+			}
+			if meter.Expired() {
+				a.logger.Warn("docker compose down made no progress taking the project down; keploy cuts it, and removes what it left",
+					zap.String("project", project), zap.Duration("stall", meter.Grace()))
+				cancel()
+				return
+			}
+		}
+	}()
+	return ctx, func() { cancel(); <-watched }
+}
+
+// isComposeDownStep reports whether m is a container's step on its way out
+// in a down (composeDownSteps).
+func isComposeDownStep(m events.Message) bool {
+	if m.Type != events.ContainerEventType || m.Actor.ID == "" {
+		return false
+	}
+	for _, step := range composeDownSteps {
+		if m.Action == step {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepProjectNetworks removes the networks of project that a cut-short down
+// left, each removal bounded as the container sweep's is (projectSweepBudget).
+// A network another container of the user's still uses is not removed (the
+// daemon refuses it), and is the user's.
+func (a *App) sweepProjectNetworks(project string) {
+	if project == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), projectSweepBudget)
+	defer cancel()
+	nets, err := a.docker.NetworkList(ctx, network.ListOptions{Filters: filters.NewArgs(filters.Arg("label", "com.docker.compose.project="+project))})
+	if err != nil {
+		a.logger.Debug("could not list the compose project's networks after a cut-short down", zap.String("project", project), zap.Error(err))
+		return
+	}
+	for _, n := range nets {
+		if err := a.docker.NetworkRemove(ctx, n.ID); err != nil {
+			a.logger.Debug("could not remove a network the compose down left", zap.String("network", n.Name), zap.Error(err))
+		}
+	}
 }
 
 // setComposeSource records the compose source this run will drive, and the
@@ -957,34 +1208,39 @@ func (a *App) forceRemoveContainers(ids []string) {
 
 // Teardown budgets. The record/replay teardown drains the app-runner goroutine
 // under utils.DrainErrGroup's 30s budget (pkg/service/record/record.go,
-// pkg/service/replay/replay.go). Every docker CLI call on the teardown path is
-// bounded so the goroutine returns well inside 30s even when the daemon is
-// saturated. Worst-case compose teardown (run()'s cmdCancel): the grace loop
-// (graceBudget + up to one last-iteration overshoot of sleep+inspect ≈ 2.5s,
-// since the deadline is checked at the loop top) + composeDownCmdBudget +
-// 2×forceRemoveBudget + 2×projectSweepBudget + reapBarrierBudget
-// ≈ (5+2.5) + 8 + 2×2 + 2×2 + 3 ≈ 26.5s with every single call timed out.
-// The margin matters more than it looks: reaching the SIGKILL is not the end
-// of the drain — os/exec only starts its WaitDelay once Cancel returns, and
+// pkg/service/replay/replay.go). The compose down is not under it: it holds
+// the drains while it runs (utils.BeginAgentStop, ComposeDown), and ends on
+// its own, at the down's end or at keploy's cut of a down that made no
+// progress (composeDownStall). The docker calls around it are each bounded,
+// so the rest of a compose teardown (run()'s cmdCancel) returns well inside
+// 30s even when the daemon is saturated: the grace loop (graceBudget + up to
+// one last-iteration overshoot of sleep+inspect ≈ 2.5s, since the deadline is
+// checked at the loop top), and, once the down ends, 2×forceRemoveBudget +
+// 2×projectSweepBudget + reapBarrierBudget + projectSweepBudget (the network
+// sweep) ≈ (5+2.5) + 2×2 + 2×2 + 3 + 2 ≈ 20.5s with every single call timed
+// out, the drain's bound starting again at the down's end. The margin
+// matters more than it looks: reaching the SIGKILL is not the end of the
+// drain — os/exec only starts its WaitDelay once Cancel returns, and
 // record.go gates the post-record mock rewrite on the drain NOT having timed
 // out, so an overrun silently skips it.
 //
-// The sweep's downSucceeded gate buys nothing here, and it is worth being
+// The sweeps' downSucceeded gate buys nothing here, and it is worth being
 // explicit about that rather than counting it twice: a daemon slow enough to
-// time out the grace inspect, the down and both force-removes is a daemon
-// whose down has certainly failed, so in the worst case the gate is open. It
-// exists to keep the sweep off the HEALTHY path, not to bound the bad one;
-// waitTillExit is then skipped on the compose path and the ctx-cancelled run
-// returns before recentAppLogs — comfortably under 30s.
+// time out the grace inspect and both force-removes is a daemon whose down
+// has likely failed, so in the worst case the gate is open. It exists to keep
+// the sweeps off the HEALTHY path, not to bound the bad one; waitTillExit is
+// then skipped on the compose path and the ctx-cancelled run returns before
+// recentAppLogs — comfortably under 30s.
 const (
-	composeDownCmdBudget = 8 * time.Second // `docker compose down`
 	// composeDownStopGrace is the library form of the shell-out's `--timeout 1`:
 	// the per-container stop grace `down` allows before killing. It bounds the
-	// containers, NOT the down call itself — composeDownCmdBudget does that.
+	// containers, NOT the down call itself, which runs as long as it makes
+	// progress (composeDownContext).
 	composeDownStopGrace = 1 * time.Second
-	// projectSweepBudget bounds EACH of the two calls that clean up whatever the
-	// bounded `down` did not reach: the `compose ps` that lists them and the
-	// single `docker rm -f` that removes them.
+	// projectSweepBudget bounds EACH of the calls that clean up whatever a
+	// cut-short `down` did not reach: the `compose ps` that lists its
+	// containers, the single `docker rm -f` that removes them, and the network
+	// sweep's list and removals.
 	projectSweepBudget  = 2 * time.Second
 	forceRemoveBudget   = 2 * time.Second // each `docker rm -f` in the teardown drain path
 	reapBarrierBudget   = 3 * time.Second // waitContainersRemoved poll
@@ -1749,11 +2005,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	// ComposeDown can fire on two paths within a single run() — cmdCancel below
 	// (SIGINT/teardown) and this deferred call (normal exit / the
-	// --abort-on-container-exit path). Collapse them with a run-local Once so a
-	// bounded ComposeDown never runs twice and risks overrunning the drain
-	// budget; whichever path fires first does the teardown, the other is a
-	// no-op. External callers (the replay per-test-set loop) invoke
-	// a.ComposeDown directly and are unaffected by this run-local guard.
+	// --abort-on-container-exit path). Collapse them with a run-local Once so
+	// a ComposeDown never runs twice and doubles the teardown; whichever path
+	// fires first does the teardown, the other is a no-op. External callers
+	// (the replay per-test-set loop) invoke a.ComposeDown directly and are
+	// unaffected by this run-local guard.
 	var downOnce sync.Once
 	composeDown := func() { downOnce.Do(a.ComposeDown) }
 	if a.kind == utils.DockerCompose {
