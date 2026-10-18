@@ -251,11 +251,34 @@ func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T
 // sockets, with no socket filter: an orphan that took the FIN (TIME_WAIT)
 // refused nothing and settles with no loss; one still waiting for a FIN
 // (FIN_WAIT2) cannot tell it from a byte it will refuse, so the wait answers
-// unknown; two short is a loss, whatever the orphan holds.
+// unknown; one gone (the kernel destroyed it: it had no room for it, or it
+// refused a byte) cannot either; two short is a loss, whatever the orphan
+// holds.
+//
+// The orphan's shape is the kernel's to choose. TIME_WAIT takes a timewait
+// bucket from the network namespace's budget (tcp_max_tw_buckets), which a
+// loaded runner's earlier connections can have used up: the kernel then
+// destroys the orphan (TCPTimeWaitOverflow), and the test judges the shape it
+// finds. The orphan that waits for a FIN is kept a full socket (TCP_LINGER2
+// past TCP_TIMEWAIT_LEN), which takes no bucket; the gone one is made gone
+// (TCP_LINGER2 -1: the kernel destroys it as it reaches FIN_WAIT2).
 func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
-	closedPair := func(t *testing.T) (*Proxy, *pairedConn, *net.TCPConn, proxySide) {
+	// closedPair closes the proxy's side of a pair after it read the 10
+	// bytes the application wrote; linger2, when not 0, is the TCP_LINGER2
+	// (seconds) of the proxy's socket, set before the close.
+	closedPair := func(t *testing.T, linger2 int) (*Proxy, *pairedConn, *net.TCPConn, proxySide) {
 		t.Helper()
 		p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+		if linger2 != 0 {
+			rc, err := proxySide.SyscallConn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var serr error
+			if err := rc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_LINGER2, linger2) }); err != nil || serr != nil {
+				t.Fatalf("TCP_LINGER2 %d on the proxy's socket: %v %v", linger2, err, serr)
+			}
+		}
 		if _, err := app.Write([]byte("publish 1\n")); err != nil {
 			t.Fatal(err)
 		}
@@ -278,24 +301,58 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		}
 		return p, pc, app, ps
 	}
-	orphanIn := func(t *testing.T, pc *pairedConn, state uint8) {
+	// orphanIn waits until the proxy's orphaned socket is in state (any
+	// state, when state is 0), and reports false, or until the kernel has
+	// destroyed it, and reports true.
+	orphanIn := func(t *testing.T, pc *pairedConn, state uint8) (gone bool) {
 		t.Helper()
 		for {
 			d, err := lookupTCP(pc.proxy, pc.app)
+			if errors.Is(err, errNoSocket) {
+				return true
+			}
 			if err != nil {
 				t.Fatalf("the proxy's orphaned socket: %v", err)
 			}
-			if d.state == state {
-				return
+			if state != 0 && d.state == state {
+				return false
 			}
 			runtime.Gosched()
 		}
 	}
+	// oneShortUnknown: one short is unknown, and charges nothing.
+	oneShortUnknown := func(t *testing.T, p *Proxy, pc *pairedConn, ps proxySide, why string) {
+		t.Helper()
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
+		if ok || !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("one short = %v, %v; want unknown (%v): %s", ok, err, models.ErrProxyConnsUnsupported, why)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+			t.Fatalf("one short: %d app_bytes_lost charged, want none (unknown)", l)
+		}
+	}
+	// twoShortLoss: two short is a loss, charged once.
+	twoShortLoss := func(t *testing.T, p *Proxy, pc *pairedConn, ps proxySide) {
+		t.Helper()
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 2})
+		if !ok || err != nil {
+			t.Fatalf("two short = %v, %v; want resolved as a loss", ok, err)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+			t.Fatalf("two short: %d app_bytes_lost charged, want 1: at least one byte the application wrote will be refused", l)
+		}
+	}
 
 	t.Run("its orphan took the FIN", func(t *testing.T) {
-		p, pc, app, ps := closedPair(t)
+		p, pc, app, ps := closedPair(t, 0)
 		_ = app.Close()
-		orphanIn(t, pc, tcpTimeWait)
+		if orphanIn(t, pc, tcpTimeWait) {
+			// No timewait bucket was left for it: the kernel destroyed
+			// it, and a gone orphan tells the FIN from a refused byte no
+			// more than any other gone one does.
+			oneShortUnknown(t, p, pc, ps, "the orphan is gone, which says nothing of the FIN")
+			return
+		}
 		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
 		if !ok || err != nil {
 			t.Fatalf("pairReached = %v, %v; want settled", ok, err)
@@ -306,22 +363,19 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 	})
 
 	t.Run("its orphan still waits for a FIN", func(t *testing.T) {
-		p, pc, _, ps := closedPair(t)
+		p, pc, _, ps := closedPair(t, 120)
+		// A full socket: gone only if the kernel's orphan or memory
+		// limits took it at the close, which is judged as gone.
 		orphanIn(t, pc, tcpFinWait2)
-		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
-		if ok || !errors.Is(err, models.ErrProxyConnsUnsupported) {
-			t.Fatalf("one short = %v, %v; want unknown (%v): the FIN, or a byte the orphan will refuse, is still to come", ok, err, models.ErrProxyConnsUnsupported)
-		}
-		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
-			t.Fatalf("one short: %d app_bytes_lost charged, want none (unknown)", l)
-		}
-		ok, err = p.pairReached(&pairTarget{pc: pc, want: ps.received + 2})
-		if !ok || err != nil {
-			t.Fatalf("two short = %v, %v; want resolved as a loss", ok, err)
-		}
-		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
-			t.Fatalf("two short: %d app_bytes_lost charged, want 1: at least one byte the application wrote will be refused", l)
-		}
+		oneShortUnknown(t, p, pc, ps, "the FIN, or a byte the orphan will refuse, is still to come")
+		twoShortLoss(t, p, pc, ps)
+	})
+
+	t.Run("its orphan is gone", func(t *testing.T) {
+		p, pc, _, ps := closedPair(t, -1)
+		orphanIn(t, pc, 0) // the kernel destroys it as it reaches FIN_WAIT2
+		oneShortUnknown(t, p, pc, ps, "an orphan the kernel had no room for is gone as one that refused a byte is")
+		twoShortLoss(t, p, pc, ps)
 	})
 }
 
