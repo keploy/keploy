@@ -375,6 +375,13 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 	}
 	for _, step := range append(steps, ready...) {
 		if err := step.apply(ctx); err != nil {
+			if step.kind == stepTestSetHook {
+				// As on the agent before it: a set hook that fails is
+				// logged and the run goes on (the replay's hooks), and
+				// the mocks and readiness after it still matter.
+				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
+				continue
+			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)
 		}
 	}

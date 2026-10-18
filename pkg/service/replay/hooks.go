@@ -399,8 +399,30 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
 }
 
+// agentGoneKey marks a context whose run has no agent left to call
+// (withoutAgent).
+type agentGoneKey struct{}
+
+// withoutAgent is ctx for a run-level hook whose run's agent has gone: under
+// docker compose without a kept stack it goes down with each test set's
+// stack. The hook's own work still runs; only its call to the agent is left
+// out, which nothing would answer.
+func withoutAgent(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentGoneKey{}, true)
+}
+
+// agentGone reports whether ctx says its run's agent has gone (withoutAgent).
+func agentGone(ctx context.Context) bool {
+	gone, _ := ctx.Value(agentGoneKey{}).(bool)
+	return gone
+}
+
 func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
+	if agentGone(ctx) {
+		h.logger.Debug("not calling the agent's after-test-run hook: under docker compose it went down with the last test set's stack")
+		return nil
+	}
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
 		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")

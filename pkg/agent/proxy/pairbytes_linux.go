@@ -32,6 +32,10 @@ type pairTarget struct {
 	// received all of them once its own count (tcpi_bytes_received, which a
 	// FIN also moves) reaches it.
 	want uint64
+	// finCounted: want counts the application's FIN, which its socket had
+	// sent when the wait began (FIN_WAIT1, CLOSING, LAST_ACK): the last of
+	// want may be that FIN. Otherwise every byte of want is data.
+	finCounted bool
 	// gone: the application's socket was already gone (closed, or reset)
 	// when the wait began. Its FIN, after everything it wrote, or a reset,
 	// is what the proxy's side waits for.
@@ -176,7 +180,7 @@ func (p *Proxy) pairTarget(ds *diagSock, pc *pairedConn) (*pairTarget, error) {
 		}
 		return nil, fmt.Errorf("%w: the application's socket %s (TCP state %d) has no tcp_info", models.ErrProxyConnsUnsupported, pc.app, d.state)
 	}
-	return &pairTarget{pc: pc, want: want}, nil
+	return &pairTarget{pc: pc, want: want, finCounted: d.state == tcpFinWait1 || d.state == tcpClosing || d.state == tcpLastAck}, nil
 }
 
 // appWritten is how many bytes (and a FIN) the application had written to
@@ -258,8 +262,10 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// orphan and memory limits, without a refusal (TCPTimeWaitOverflow,
 		// TCPAbortOnMemory), as it destroys one that refused a byte.
 		// Otherwise what arrives now is answered with a reset: a loss.
+		// Without the FIN counted, one short is a byte of data, which an
+		// orphan refuses: a loss, whatever its state.
 		d, took, err := orphanTookFIN(pc)
-		oneShort := t.want-ps.received == 1
+		oneShort := t.finCounted && t.want-ps.received == 1
 		switch {
 		case took:
 			return true, nil

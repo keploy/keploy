@@ -310,3 +310,14 @@ func TestBeforeSimulatePutsARealTestCaseOnTheRealClock(t *testing.T) {
 	require.NoError(t, h.beforeSimulate(context.Background(), real, &at, "set"))
 	require.Equal(t, []string{"real"}, s.frozen, "without the switch the list is not read")
 }
+
+// A run-level AfterTestRun whose run has no agent left (withoutAgent) does its
+// own work and leaves out only the agent's hook; without the mark it calls it.
+func TestAfterTestRunWithoutAgentLeavesOutOnlyTheAgent(t *testing.T) {
+	agent := &bpNoAgent{}
+	h := newHooks(zap.NewNop(), &config.Config{}, agent, false)
+	require.NoError(t, h.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}))
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.NoError(t, h.AfterTestRun(withoutAgent(context.Background()), "test-run-0", nil, models.TestCoverage{}))
+	require.EqualValues(t, 1, agent.afterTestRuns.Load(), "the agent's hook was called with no agent left")
+}

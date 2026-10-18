@@ -1060,10 +1060,10 @@ func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	answered := make(chan struct{})
-	go a.sayHookWait(endpoint, answered, hookNoticeAfter, hookStillWaitingEvery)
+	ended := make(chan bool, 1)
+	go a.sayHookWait(endpoint, ended, hookNoticeAfter, hookStillWaitingEvery)
 	resp, err := a.client.Do(req)
-	close(answered)
+	ended <- err == nil
 	if err != nil {
 		if errors.Is(context.Cause(hctx), errAgentExited) {
 			return fmt.Errorf("%w before it answered %s", errAgentExited, endpoint)
@@ -1088,17 +1088,18 @@ func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any
 }
 
 // sayHookWait says, while a hook call waits for the agent's answer (until
-// answered is closed), that it is waiting: once after noticeAfter, then every
-// stillEvery, and once more when the answer comes after that.
-func (a *AgentClient) sayHookWait(endpoint string, answered <-chan struct{}, noticeAfter, stillEvery time.Duration) {
+// ended gets whether an answer came), that it is waiting: once after
+// noticeAfter, then every stillEvery, and once more when an answer comes
+// after that. A call that ended without one says why itself.
+func (a *AgentClient) sayHookWait(endpoint string, ended <-chan bool, noticeAfter, stillEvery time.Duration) {
 	began := time.Now()
 	notice := time.NewTimer(noticeAfter)
 	defer notice.Stop()
 	noticed := false
 	for {
 		select {
-		case <-answered:
-			if noticed {
+		case answered := <-ended:
+			if noticed && answered {
 				a.logger.Info("keploy's agent answered the hook", zap.String("endpoint", endpoint), zap.Duration("after", time.Since(began)))
 			}
 			return

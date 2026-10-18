@@ -53,6 +53,9 @@ type bpNoAgent struct {
 	afterSimulate func(test string)
 
 	beforeTestRuns, afterTestRuns atomic.Int32
+	// setupOK has Setup succeed: a run with a command, whose agent setup is
+	// not what the test is about.
+	setupOK bool
 }
 
 func (a *bpNoAgent) needsAgent(call string) error {
@@ -69,6 +72,9 @@ func (a *bpNoAgent) made() []string {
 }
 
 func (a *bpNoAgent) Setup(context.Context, string, models.SetupOptions) error {
+	if a.setupOK {
+		return nil
+	}
 	return a.needsAgent("setup")
 }
 func (a *bpNoAgent) MockOutgoing(context.Context, models.OutgoingOptions) error {
