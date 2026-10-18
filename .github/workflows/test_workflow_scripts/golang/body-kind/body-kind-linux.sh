@@ -27,7 +27,12 @@
 # failed every replayed upgrade whose app sent anything after its 101 once a
 # body of another kind was compared (v3.6.129).
 # keploy record does not make a test of an upgrade (its connection becomes a
-# raw byte pump), so the case is the recorded GET /t's, rewritten.
+# raw byte pump), so the case is the recorded GET /t's, rewritten. So is a
+# CONNECT's: the app answers it 200 (Connection Established) and then relays
+# a tunnel's bytes, as an HTTP proxy does; its test, a 200 with no body,
+# passes with the switch off (1) and on (4): after a 2xx answer to CONNECT
+# the connection is a tunnel (RFC 9110 §9.3.6), which keploy test once read
+# as the answer's body.
 #
 # Readiness is the dependency's own "ready" line, the app's port while
 # recording, and keploy's own probe of the app (--health-path) while
@@ -137,6 +142,17 @@ UP_AT="$up_at" yq '.name = "test-upgrade" | .spec.req.url |= sub("/t$"; "/upgrad
     | .spec.resp.status_code = 101 | .spec.resp.status_message = "Switching Protocols"
     | .spec.resp.header = {"Connection": "Upgrade", "Upgrade": "keploy-e2e"} | .spec.resp.body = "" | del(.curl)' \
     "$t_case" >keploy/test-set-0/tests/test-upgrade.yaml || { echo "::error::could not write the upgrade case"; exit 1; }
+connect_at="$(date -u -d "$up_at + 1 second" +%Y-%m-%dT%H:%M:%S.%NZ)" ||
+    { echo "::error::could not make the CONNECT case's time"; exit 1; }
+# As Keploy Enterprise's capture records a CONNECT: a URL of the target it asks
+# to reach (its Host) with the path "/", and the app's port, which keploy test
+# sends it to.
+CONNECT_AT="$connect_at" yq '.name = "test-connect" | .spec.req.method = "CONNECT" | .spec.req.url = "http://upstream.invalid:443/"
+    | .spec.req.header.Host = "upstream.invalid:443" | .spec.app_port = 8092
+    | .spec.req.timestamp = strenv(CONNECT_AT) | .spec.resp.timestamp = strenv(CONNECT_AT)
+    | .spec.resp.status_code = 200 | .spec.resp.status_message = "Connection Established"
+    | .spec.resp.header = {} | .spec.resp.body = "" | del(.curl)' \
+    "$t_case" >keploy/test-set-0/tests/test-connect.yaml || { echo "::error::could not write the CONNECT case"; exit 1; }
 kill "$DEP_PID" 2>/dev/null
 wait "$DEP_PID" 2>/dev/null
 DEP_PID=""
@@ -169,6 +185,14 @@ expect_upgrade_pass() {
     yq -o=json -I=0 "[.tests[] | select(.req.url | test(\"/upgrade\$\"))][0] | {\"result\": .result, \"reason\": (.failure_info // .failureInfo // \"\")}" "$(REPORT)" | head -c 4000
     echo
 }
+# connect_test <field>: the CONNECT's test's field in the report.
+connect_test() { yq -r "[.tests[] | select(.req.method == \"CONNECT\")][0] | $1" "$(REPORT)"; }
+expect_connect_pass() {
+    [ "$(connect_test .status)" = PASSED ] && return 0
+    fail "$1: the CONNECT's 200 must pass, its response ending at its headers (status $(connect_test .status))"
+    yq -o=json -I=0 "[.tests[] | select(.req.method == \"CONNECT\")][0] | {\"result\": .result, \"reason\": (.failure_info // .failureInfo // \"\")}" "$(REPORT)" | head -c 4000
+    echo
+}
 # text_test <field>: GET /t's test's field in the report.
 text_test() { yq -r "[.tests[] | select(.req.url | test(\"/t\$\"))][0] | $1" "$(REPORT)"; }
 # expect_body_fail <step>: the set failed, and on a body the report says
@@ -186,6 +210,7 @@ expect_body_fail() {
 PROVEN="" replay off-recorded
 expect_pass "1 (switch off, the recording as it is)"
 expect_upgrade_pass "1"
+expect_connect_pass "1"
 
 cp keploy/test-set-0/mocks.yaml mocks.yaml.saved
 : >keploy/test-set-0/mocks.yaml
@@ -203,6 +228,7 @@ cp mocks.yaml.saved keploy/test-set-0/mocks.yaml
 PROVEN=1 replay proven-recorded
 expect_pass "4 (KEPLOY_PROVEN=1, the recording as it is: a text body compared byte for byte)"
 expect_upgrade_pass "4"
+expect_connect_pass "4"
 
 if [ "$FAIL" -eq 0 ]; then
     echo "body-kind e2e passed"

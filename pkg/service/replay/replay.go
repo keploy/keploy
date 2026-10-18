@@ -1606,7 +1606,7 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 	if r.config.Test.BasePath == "" || testCase.Kind != models.HTTP {
 		return nil
 	}
-	newURL, err := ReplaceBaseURL(r.config.Test.BasePath, testCase.HTTPReq.URL)
+	newURL, err := requestAtBasePath(r.config.Test.BasePath, testCase.HTTPReq)
 	if err != nil {
 		return fmt.Errorf("cannot send the test to the base path %q: %w", r.config.Test.BasePath, err)
 	}
