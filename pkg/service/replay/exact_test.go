@@ -232,6 +232,40 @@ func TestNoteAheadListsATestCasesMappedCallsInFlight(t *testing.T) {
 	}
 }
 
+// A call a parser holds until its answer (models.RegisterAnswerPlaced) is
+// placed at its answer (models.PlaceOf): one sent in the gap before a test
+// and answered in its window is in the window, not in flight when it began,
+// and is not served in the gap: its parser holds it until the test's window
+// brings its recording, as the recording's answer came in the test. A call
+// not so placed, sent in the gap, is still in flight.
+func TestNoteAheadLeavesOutACallPlacedAtItsAnswerInTheWindow(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	at := func(ms int) time.Time { return attrAt(ms) }
+	entry := func(name string, req, res int) models.MockEntry {
+		return models.MockEntry{Name: name, Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(at(req)), ResTimestampMock: models.FormatMockTimestamp(at(res))}
+	}
+	held := func(name string, req, res int, poll bool) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks", models.MetadataLifetimeKey: models.MetadataLifetimePerTest},
+			ReqTimestampMock: at(req), ResTimestampMock: at(res),
+		}}
+		if poll {
+			m.Spec.Metadata["poll"] = "yes"
+		}
+		return m
+	}
+	mappings := map[string][]models.MockEntry{"test-2": {entry("poll", 1500, 2050), entry("fetch", 1600, 2060)}}
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(1000)}, HTTPResp: models.HTTPResp{Timestamp: at(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(2000)}, HTTPResp: models.HTTPResp{Timestamp: at(2100)}},
+	}
+	p := newExactPlan(mappings, []*models.Mock{held("poll", 1500, 2050, true), held("fetch", 1600, 2060, false)})
+	p.noteAhead(mappings, cases)
+	if got := p.ahead["test-2"]; len(got) != 1 || got[0] != "fetch" {
+		t.Fatalf("test-2's calls in flight = %v; want [fetch]: the poll is placed at its answer, in the window", got)
+	}
+}
+
 // The pool call after a test case names the next one the loop opens: not one
 // the selection leaves out, nor an ignored or a refused one; after the loop's
 // last, the first deferred streaming test case.

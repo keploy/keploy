@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
@@ -372,6 +374,54 @@ func TestARecordUnderTheSwitchRefusesEveryDockerCommandBeforeAnythingStarts(t *t
 			if err == nil || !strings.Contains(err.Error(), "runs the test command natively in this release") {
 				t.Fatalf("judged %v: a %s record under the switch was not refused before it started: %v", judged, kind, err)
 			}
+		}
+	}
+}
+
+// keploy mock record lists a call a parser holds until its answer
+// (models.RegisterAnswerPlaced) under the test its answer is in
+// (models.PlaceOf): a consumer's poll sent inside TestA and answered in TestC
+// is TestC's, and one sent as the app boots and answered in TestA is TestA's,
+// not start-up traffic. keploy mock replay stages a test's mapping as its
+// whole recording (ExactMapping): listed by its request, the poll was served
+// a test early, or at boot.
+func TestRecordListsACallPlacedAtItsAnswerUnderTheTestItsAnswerIsIn(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	ms := time.Millisecond
+	poll := func(name string, req, res time.Duration) *models.Mock {
+		m := mockAt(name, runnerT0.Add(req))
+		m.Spec.ResTimestampMock = runnerT0.Add(res)
+		// Stated per-test, as the HTTP recorder states a data mock.
+		m.Spec.Metadata = map[string]string{"type": "mocks", "poll": "yes", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+		return m
+	}
+	instr := newRunnerInstr(t, sequentialMarks()...) // TestA [0, 10ms], TestC [10ms, 20ms]
+	instr.mocks = []*models.Mock{
+		poll("boot-poll", -5*ms, 5*ms),
+		mockAt("own-a", runnerT0.Add(3*ms)),
+		poll("poll-b", 8*ms, 15*ms),
+		mockAt("own-c", runnerT0.Add(12*ms)),
+	}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	if err := recordSet(t, instr, mapDB, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := mappedNames(t, mapDB)
+	for _, names := range got {
+		sort.Strings(names)
+	}
+	for test, want := range map[string][]string{"orders/e2e.TestA": {"boot-poll", "own-a"}, "orders/e2e.TestC": {"own-c", "poll-b"}} {
+		if fmt.Sprint(got[test]) != fmt.Sprint(want) {
+			t.Errorf("%s is mapped %v; want %v", test, got[test], want)
+		}
+	}
+	startup, err := mapDB.GetStartup(context.Background(), "set")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range startup {
+		if e.Name == "boot-poll" {
+			t.Errorf("the boot poll, answered in TestA, is listed as start-up traffic: %v", startup)
 		}
 	}
 }

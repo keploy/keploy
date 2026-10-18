@@ -35,6 +35,9 @@ type WindowedMock struct {
 	// At is when its request was recorded, and Res when its response was; a
 	// mock without At is in no window.
 	At, Res time.Time
+	// Place is where it sits in the recording (PlaceOf): At, or Res for a
+	// mock placed at its answer. The window that holds it owns it.
+	Place time.Time
 	// TestMock says a test may own it: a data-plane mock (IsProtocolPhase) that
 	// no async lane serves. An async lane's mocks are served in their lane's
 	// recorded order whichever test is open, so no test owns one.
@@ -52,9 +55,18 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		Kind:     m.Kind,
 		At:       m.Spec.ReqTimestampMock,
 		Res:      m.Spec.ResTimestampMock,
+		Place:    PlaceOf(m),
 		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
 		InFlight: InFlightEligible(m),
 	}
+}
+
+// placed is where m sits: its Place, or At for one built without it.
+func (m WindowedMock) placed() time.Time {
+	if m.Place.IsZero() {
+		return m.At
+	}
+	return m.Place
 }
 
 // entry is the mock as a mapping lists it.
@@ -80,9 +92,10 @@ type WindowMappings struct {
 }
 
 // DeriveWindowMappings gives each test the test mocks recorded inside its
-// window: those whose request time is in the window's [Start, End]. A mock
-// recorded while no window was open belongs to no test (start-up traffic, a
-// call sent and answered between two tests), except one the in-flight rule
+// window: those whose place (WindowedMock.Place: the request time, or the
+// answer's for a mock placed at its answer) is in the window's [Start, End].
+// A mock placed while no window was open belongs to no test (start-up traffic,
+// a call sent and answered between two tests), except one the in-flight rule
 // applies to (WindowedMock.InFlight) that was sent in the gap before a test
 // and answered at or after its start: it was in flight when that test began,
 // and is that test's (WindowSchedule.InFlightInto, which gives it to neither
@@ -114,7 +127,7 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			ms = append(ms, m)
 		}
 	}
-	sort.SliceStable(ms, func(i, j int) bool { return ms[i].At.Before(ms[j].At) })
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].placed().Before(ms[j].placed()) })
 
 	sched := NewWindowSchedule(ws)
 	out := WindowMappings{Tests: make([]MappedTestCase, len(ws))}
@@ -133,15 +146,16 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 	ending := &windowEnds{ws: ws}
 	next := 0
 	for _, m := range ms {
-		for next < len(ws) && !ws[next].Start.After(m.At) {
+		at := m.placed()
+		for next < len(ws) && !ws[next].Start.After(at) {
 			open = append(open, next)
 			heap.Push(ending, next)
 			next++
 		}
-		for len(open) > 0 && ws[open[0]].End.Before(m.At) {
+		for len(open) > 0 && ws[open[0]].End.Before(at) {
 			open = open[1:]
 		}
-		for ending.Len() > 0 && ws[ending.idx[0]].End.Before(m.At) {
+		for ending.Len() > 0 && ws[ending.idx[0]].End.Before(at) {
 			heap.Pop(ending)
 		}
 		if len(open) == 0 {

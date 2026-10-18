@@ -940,12 +940,13 @@ func (m *MockManager) windowActiveLocked() bool {
 	return m.scopeOpen || (!m.windowStart.IsZero() && !m.windowEnd.IsZero())
 }
 
-// GetFilteredMocksInWindow returns non-config filtered mocks whose recorded
-// REQUEST timestamp lies inside the current test window. Response timestamps
-// may legitimately straggle outside the window (downstream async completion)
-// and are not used for window containment — only mocks whose response
-// timestamp is EARLIER than their request timestamp are dropped as a sanity
-// check on inconsistent recordings.
+// GetFilteredMocksInWindow returns non-config filtered mocks placed inside the
+// current test window (models.PlaceOf): their recorded REQUEST timestamp, or
+// their answer's for a mock placed at its answer (a consumer's long poll).
+// Other response timestamps may legitimately straggle outside the window
+// (downstream async completion) and are not used for window containment —
+// only mocks whose response timestamp is EARLIER than their request
+// timestamp are dropped as a sanity check on inconsistent recordings.
 //
 // Also kept: a per-test mock in flight when the window's test began
 // (models.InFlightEligible), sent in the gap before the window
@@ -1035,13 +1036,15 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 			droppedInvalidOrder++
 			continue
 		}
-		// Request-timestamp containment. Responses may straggle past
-		// the outer test's response timestamp (async completion on
-		// downstream calls); that's not a bleed signal. The bleed bug
-		// this window protects against manifests as REQUESTS landing
-		// outside the window — those are always from a different test.
-		switch {
-		case !req.Before(start) && !req.After(end):
+		// Containment by place (models.PlaceOf): the request timestamp,
+		// or the answer's for a mock placed at its answer. Responses may
+		// straggle past the outer test's response timestamp (async
+		// completion on downstream calls); that's not a bleed signal. The
+		// bleed bug this window protects against manifests as REQUESTS
+		// landing outside the window — those are always from a different
+		// test.
+		switch place := models.PlaceOf(mock); {
+		case !place.Before(start) && !place.After(end):
 			out = append(out, mock)
 		case inFlightAtStart(mock, req, res, gapFrom, start, hasGap):
 			// In flight when the window's test began: its own.
@@ -1466,10 +1469,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 				droppedInvalid++
 				continue
 			}
-			// Window containment on request timestamp only. Responses
-			// may legitimately straggle past `end` (async downstream
-			// completion is normal).
-			if !req.Before(start) && !req.After(end) {
+			// Window containment by place (models.PlaceOf): the request
+			// timestamp, or the answer's for a mock placed at its answer.
+			// Responses may legitimately straggle past `end` (async
+			// downstream completion is normal).
+			place := models.PlaceOf(mock)
+			if !place.Before(start) && !place.After(end) {
 				out = append(out, mock)
 				continue
 			}
@@ -1488,7 +1493,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// Stale previous-test mocks (firstStart <= req < start)
 			// continue to be dropped — that's the bleed case this
 			// whole machinery exists to protect against.
-			if !firstStart.IsZero() && req.Before(firstStart) {
+			if !firstStart.IsZero() && place.Before(firstStart) {
 				startupInit = append(startupInit, mock)
 				continue
 			}
@@ -2133,7 +2138,7 @@ func (m *MockManager) InFlightIntoOpenTest(mk *models.Mock) bool {
 	if !active || start.IsZero() || end.IsZero() || req.IsZero() || res.IsZero() {
 		return false
 	}
-	if !req.Before(start) && !req.After(end) {
+	if place := models.PlaceOf(mk); !place.Before(start) && !place.After(end) {
 		return false
 	}
 	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
@@ -2141,7 +2146,8 @@ func (m *MockManager) InFlightIntoOpenTest(mk *models.Mock) bool {
 }
 
 // inRecordedWindow is GetFilteredMocksInWindow's test of one mock against a
-// test's recorded window [start, end]: its request inside it, in flight when
+// test's recorded window [start, end]: placed inside it (models.PlaceOf: its
+// request, or its answer for a mock placed at its answer), in flight when
 // the test began (inFlightAtStart, with gapFrom and hasGap the window's
 // models.WindowSchedule.GapBefore), or no recorded times. A mock whose
 // response is stamped before its request is in no window, as that read leaves
@@ -2155,7 +2161,7 @@ func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap boo
 	if res.Before(req) && !provenswitch.On() {
 		return false
 	}
-	if !req.Before(start) && !req.After(end) {
+	if place := models.PlaceOf(mk); !place.Before(start) && !place.After(end) {
 		return true
 	}
 	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
@@ -3230,6 +3236,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			Lifetime:         new.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
+			AnswerPlaced:     models.IsAnswerPlaced(new),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
@@ -3309,6 +3316,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+			AnswerPlaced:     models.IsAnswerPlaced(&mock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
@@ -3378,6 +3386,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				Lifetime:         mk.TestModeInfo.Lifetime,
 				ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 				ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
+				AnswerPlaced:     models.IsAnswerPlaced(mk),
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 				Variables:        variablesOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
@@ -3445,6 +3454,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+			AnswerPlaced:     models.IsAnswerPlaced(&mock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
@@ -3607,6 +3617,7 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 			Lifetime:         mk.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
+			AnswerPlaced:     models.IsAnswerPlaced(mk),
 			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
@@ -3822,6 +3833,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		Lifetime:         mock.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+		AnswerPlaced:     models.IsAnswerPlaced(&mock),
 		// Carry schema-detected request noise for non-HTTP integrations
 		// (e.g. Pulsar) that consume via MarkMockAsUsed rather than the
 		// Delete*/Update* paths, so UpdateMocks can persist it back to disk.
@@ -4598,7 +4610,7 @@ func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 	if start.IsZero() || end.IsZero() {
 		return false
 	}
-	if !req.Before(start) && !req.After(end) {
+	if place := models.PlaceOf(&mock); !place.Before(start) && !place.After(end) {
 		return false
 	}
 	from, ok := m.testWindows.Load().GapBefore(start)
