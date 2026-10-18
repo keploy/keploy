@@ -2104,31 +2104,45 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// for readiness. Re-paying a 120s window per test-set is dead time where a
 		// transient daemon stall can land. Mirrors the waitForAppReady gating.
 		if !serveTest || r.isFirstTestSet {
-			// Aligned with the agent's own healthcheck budget; a fixed 120s wait
-			// gave up while the agent container was still starting under CI daemon
-			// contention. See pkg.AgentReadyTimeout (KEPLOY_AGENT_READY_TIMEOUT).
-			agentCtx, cancel := context.WithTimeout(runTestSetCtx, pkg.AgentReadyTimeout())
+			// The wait follows the agent's start, not a clock: it lasts while
+			// the start makes progress (and while the engine has not run the
+			// agent's container yet: compose starts it in its own time), and
+			// ends once the start fails or stops making progress
+			// (pkg.WatchAgentStart). A fixed budget gave up on a start a
+			// loaded host ran slowly, and waited out the whole of it for one
+			// that had stopped.
+			agentCtx, cancel := context.WithCancel(runTestSetCtx)
 			defer cancel()
 
 			agentReadyCh := make(chan bool, 1)
 			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
+			agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 			select {
 			case <-runTestSetCtx.Done():
 				// Parent context cancelled (user pressed Ctrl+C)
 				return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-			case <-agentCtx.Done():
+			case err := <-agentStart:
+				if runTestSetCtx.Err() != nil {
+					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
+				}
 				// Tear down the compose stack we already created before returning,
 				// so a retry's `compose up` doesn't hit "container name already in
-				// use" — the readiness timeout otherwise leaves the dependency
-				// containers + project network behind. Fresh ctx since
+				// use" — an agent that did not come up otherwise leaves the
+				// dependency containers + project network behind. Fresh ctx since
 				// runTestSetCtx is being torn down; composeDown bounds itself.
 				if downErr := r.instrumentation.ComposeDownOnSetupFailure(context.Background()); downErr != nil {
-					r.logger.Debug("composeDown after agent-ready timeout failed", zap.Error(downErr))
+					r.logger.Debug("composeDown after the agent did not come up failed", zap.Error(downErr))
 				}
-				return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
-			case <-agentReadyCh:
+				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
+			case ready, ok := <-agentReadyCh:
+				// The ticker closes its channel unready only once the set's
+				// context ends.
+				if !ok || !ready {
+					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
+				}
 			}
+			cancel()
 		}
 
 		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
