@@ -218,10 +218,10 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Exact serving's pool call begins no test (BeginsTestVariables below):
-	// values it gave would be bound nowhere.
+	// A test set's staging and exact serving's pool call begin no test
+	// (BeginsTestVariables below): values they gave would be bound nowhere.
 	if provenswitch.On() && !updateParamsReq.FilterParams.BeginsTestVariables() && len(updateParamsReq.FilterParams.Variables) > 0 {
-		respondAgent(w, r, http.StatusUnprocessableEntity, errors.New("a filter that serves the pool between test cases begins no test, and gives no values to bind"))
+		respondAgent(w, r, http.StatusUnprocessableEntity, errors.New("a filter that stages a test set or serves the pool between test cases begins no test, and gives no values to bind"))
 		return
 	}
 	if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
@@ -229,9 +229,10 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	// Under the proven switch a mock filter a client sends starts a test:
-	// keploy test sends one per test case, before the test case is sent, so
-	// a test case begins with no variable bound. The scope begins after the
+	// Under the proven switch a test case's mock filter a client sends
+	// starts a test: keploy test sends one per test case, before the test
+	// case is sent, so a test case begins with none of the previous test
+	// case's variables bound (the run's stay: MockManager.NewVariableSet). The scope begins after the
 	// new pool is in, so a call checked against the previous pool binds
 	// nothing in it (variables.Table). The agent's own filters, as a test of
 	// keploy mock replay begins and ends, do not come through here.
@@ -242,7 +243,10 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	// that uses one unbound, a failure of the app that is keploy's.
 	// Exact serving's pool call (models.ExactServing, between test cases)
 	// begins no test: the variables the test case bound stay readable, and
-	// keploy test reads them after it (MockFilterParams.BeginsTestVariables).
+	// keploy test reads them after it. Nor does a test set's staging: the
+	// set's variables began at its Mock, and what its start-up binds after
+	// the staging is the run's, which every test of the set reads
+	// (MockFilterParams.BeginsTestVariables).
 	if provenswitch.On() && updateParamsReq.FilterParams.BeginsTestVariables() {
 		given := updateParamsReq.FilterParams.Variables
 		switch s := a.svc.(type) {
