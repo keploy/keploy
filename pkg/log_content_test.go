@@ -240,3 +240,37 @@ func TestSimulateHTTP_AStalledAnswerNamesItsRequestWithoutItsQuery(t *testing.T)
 		})
 	}
 }
+
+// A test's URL that does not parse fails with url.Parse's error, which quotes
+// the URL whole: the line that says so, and the error returned for the replay
+// to log, name it without its query, unless KEPLOY_LOG_CONTENT is set. It
+// fails where the target is resolved, where its host is replaced, or, when a
+// replacement names a port and so ends the resolving early, where the request
+// is built.
+func TestSimulateHTTP_AURLThatDoesNotParseIsLoggedWithoutItsQuery(t *testing.T) {
+	url := "http://127.0.0.1:8080/notes?ref=" + canary + "\x7f"
+	for name, tc := range map[string]struct {
+		line string
+		cfg  SimulationConfig
+	}{
+		"resolved":      {"failed to parse test case URL", SimulationConfig{APITimeout: 3}},
+		"host replaced": {"failed to replace host with config host", SimulationConfig{APITimeout: 3, ConfigHost: "10.0.0.1"}},
+		"request built": {"failed to create a http request from the yaml document",
+			SimulationConfig{APITimeout: 3, URLReplacements: map[string]string{"127.0.0.1:8080": "127.0.0.1:9090"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				c := &models.TestCase{Name: "unparsed", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url}}
+				_, err := SimulateHTTP(context.Background(), c, "test-set", logger, tc.cfg)
+				if err == nil || !strings.Contains(err.Error(), "/notes") {
+					t.Fatalf("SimulateHTTP = %v; want url.Parse's error, naming the URL", err)
+				}
+				logtest.Check(t, logs, canary, on, tc.line)
+				if got := strings.Contains(err.Error(), canary); got != on {
+					t.Fatalf("the error the replay logs carries the query: %v, want %v: %v", got, on, err)
+				}
+			})
+		})
+	}
+}

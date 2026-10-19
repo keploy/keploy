@@ -795,6 +795,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
+		err = requestError(err)
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
@@ -1199,14 +1200,14 @@ func sentRequestFields(req *http.Request) []zap.Field {
 	return fields
 }
 
-// requestError is client.Do's error for a test's request as keploy logs and
-// returns it. net/http's *url.Error names the request's whole URL, and the
-// error is logged where the request fails and again by the replay that sent
-// it, so it names the URL as loggedURL does. Its Op and cause are kept, so
-// what reads it (isPreResponseConnRefused, IsTransportConnReset, errors.Is)
-// reads it as before.
+// requestError is the error about a test's request URL, client.Do's or
+// url.Parse's, as keploy logs and returns it. Their *url.Error names the whole
+// URL, and the error is logged where the request fails and again by the
+// replay that sent it, so it names the URL as loggedURL does. Its Op and
+// cause are kept, so what reads it (isPreResponseConnRefused,
+// IsTransportConnReset, errors.Is) reads it as before.
 func requestError(err error) error {
-	uerr, ok := err.(*url.Error) // client.Do's error is always one
+	uerr, ok := err.(*url.Error) // client.Do's and url.Parse's errors always are
 	if !ok {
 		return err
 	}
@@ -4808,6 +4809,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
 		}
 		if err != nil {
+			err = requestError(err)
 			utils.LogError(logger, err, "failed to replace host with config host")
 			return "", err
 		}
@@ -4822,6 +4824,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	if isHTTP {
 		parsedURL, parseErr := url.Parse(finalTarget)
 		if parseErr != nil {
+			parseErr = requestError(parseErr)
 			utils.LogError(logger, parseErr, "failed to parse test case URL")
 			return "", parseErr
 		}
