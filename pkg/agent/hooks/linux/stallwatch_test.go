@@ -4,6 +4,7 @@ package linux
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,8 +17,12 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// neverError is an errorFrom no test reaches: every report a WARN.
+const neverError = math.MaxInt
 
 func newObservedLogger() (*zap.Logger, *observer.ObservedLogs) {
 	core, logs := observer.New(zap.DebugLevel)
@@ -29,7 +34,7 @@ func newObservedLogger() (*zap.Logger, *observer.ObservedLogs) {
 // pure noise and would train readers to ignore it.
 func TestWatchStallSilentWhenCallReturnsQuickly(t *testing.T) {
 	logger, logs := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Hour, time.Hour, stallErrorAfter)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Hour, time.Hour, stallErrorFrom)
 	// Give a watchdog that reports too eagerly real time to do so before
 	// stopping it. Stopping immediately would let a broken implementation win
 	// the race against its own first report and pass this test.
@@ -46,19 +51,12 @@ func TestWatchStallSilentWhenCallReturnsQuickly(t *testing.T) {
 // ready" for five minutes.
 func TestWatchStallReportsBlockedCall(t *testing.T) {
 	logger, logs := newObservedLogger()
-	// errorAfter=0 makes the very first tick terminal, which is the state this
-	// test is about: a call that is never coming back.
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", "", 10*time.Millisecond, time.Hour, 0)
+	// errorFrom=1 makes the very first report terminal, which is the state
+	// this test is about: a call that is never coming back.
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", "", 10*time.Millisecond, time.Hour, 1)
 	defer stop()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for logs.Len() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if logs.Len() == 0 {
-		t.Fatal("watchdog stayed silent while the call was still blocked")
-	}
-
+	firstReport(logs)
 	e := logs.All()[0]
 	if e.Level != zap.ErrorLevel {
 		t.Errorf("a permanently blocked agent should report at ERROR; got %v", e.Level)
@@ -117,7 +115,7 @@ func TestWatchStallReportsWhatTheThreadIsDoing(t *testing.T) {
 	// sleeping threads: the stack says where the thread waits.
 	dir := fakeTask(t, "868 (keploy (agent)) D 1 868 868 0 -1 4194560", "0\n", stack, "1000000 5000 12\n")
 	logger, logs := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", dir, 10*time.Millisecond, time.Hour, time.Hour)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", dir, 10*time.Millisecond, time.Hour, neverError)
 	defer stop()
 	fields := firstReport(logs)
 	if got := fields["threadState"]; got != "D" {
@@ -181,7 +179,7 @@ func TestIsWSLRelease(t *testing.T) {
 // one.
 func TestWatchStallGivesARemedyOnlyUnderWSL(t *testing.T) {
 	logger, logs := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Millisecond, time.Hour, 0)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Millisecond, time.Hour, 1)
 	fields := firstReport(logs)
 	stop()
 	got, ok := fields["remediation"]
@@ -192,7 +190,7 @@ func TestWatchStallGivesARemedyOnlyUnderWSL(t *testing.T) {
 		t.Errorf("off WSL the ERROR report gives a remedy: %v", got)
 	}
 	logger, logs = newObservedLogger()
-	stop = watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Millisecond, time.Hour, time.Hour)
+	stop = watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Millisecond, time.Hour, neverError)
 	fields = firstReport(logs)
 	stop()
 	if got, ok := fields["remediation"]; ok {
@@ -227,7 +225,7 @@ func TestThreadFieldsSayHowLongTheThreadRan(t *testing.T) {
 func TestWatchStallLeavesOutWhatItCannotRead(t *testing.T) {
 	dir := fakeTask(t, "868 (keploy) R 1 868", "0\n", "", "0 0 0\n")
 	logger, logs := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", dir, 10*time.Millisecond, time.Hour, time.Hour)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", dir, 10*time.Millisecond, time.Hour, neverError)
 	defer stop()
 	fields := firstReport(logs)
 	if got := fields["threadState"]; got != "R" {
@@ -240,7 +238,7 @@ func TestWatchStallLeavesOutWhatItCannotRead(t *testing.T) {
 	}
 
 	logger, logs = newObservedLogger()
-	stop2 := watchStall(logger, "bpf(BPF_PROG_LOAD)", filepath.Join(t.TempDir(), "gone"), 10*time.Millisecond, time.Hour, time.Hour)
+	stop2 := watchStall(logger, "bpf(BPF_PROG_LOAD)", filepath.Join(t.TempDir(), "gone"), 10*time.Millisecond, time.Hour, neverError)
 	defer stop2()
 	fields = firstReport(logs)
 	for _, absent := range []string{"threadState", "waitingIn", "kernelStack", "ranOnCPU"} {
@@ -323,7 +321,7 @@ func TestWatchStallReadsALiveThread(t *testing.T) {
 		return blockingRead()
 	})
 	logger, logs := newObservedLogger()
-	stop := watchStall(logger, "read(2)", taskDir(tid), time.Millisecond, time.Hour, time.Hour)
+	stop := watchStall(logger, "read(2)", taskDir(tid), time.Millisecond, time.Hour, neverError)
 	fields := firstReport(logs)
 	stop()
 	release()
@@ -345,7 +343,7 @@ func TestWatchedCallWatchesTheThreadTheCallRunsOn(t *testing.T) {
 	logger, logs := newObservedLogger()
 	moved := make(chan string, 1)
 	tid, release := blockedReader(t, func(blockingRead func() error) error {
-		return watchedCallWith(logger, "read(2)", time.Millisecond, time.Hour, time.Hour, func() error {
+		return watchedCallWith(logger, "read(2)", time.Millisecond, time.Hour, neverError, func() error {
 			first := unix.Gettid()
 			for i := 0; i < 500; i++ {
 				runtime.Gosched()
@@ -382,19 +380,12 @@ func TestWatchedCallWatchesTheThreadTheCallRunsOn(t *testing.T) {
 // tests passed, the lane still exited 1).
 func TestWatchStallReportsSlowCallAtWarnNotError(t *testing.T) {
 	logger, logs := newObservedLogger()
-	// The call has been blocked for ~10ms, far below errorAfter, so it may still
-	// return: WARN, not ERROR.
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", 10*time.Millisecond, time.Hour, time.Hour)
+	// The first report, with the agent's own errorFrom: the call may still
+	// return, WARN, not ERROR.
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", 10*time.Millisecond, time.Hour, stallErrorFrom)
 	defer stop()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for logs.Len() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if logs.Len() == 0 {
-		t.Fatal("watchdog stayed silent while the call was still blocked")
-	}
-
+	firstReport(logs)
 	e := logs.All()[0]
 	if e.Level != zap.WarnLevel {
 		t.Errorf("a still-running call must report at WARN, not %v — ERROR is reserved for a call that is never coming back", e.Level)
@@ -409,42 +400,40 @@ func TestWatchStallReportsSlowCallAtWarnNotError(t *testing.T) {
 	}
 }
 
-// The escalation itself — a report that starts at WARN and becomes ERROR once the
-// call has been blocked past errorAfter. Testing only the two endpoints
-// (errorAfter=0 and errorAfter=huge) would pass against an implementation that
-// derived the severity from "errorAfter == 0" and never crossed anything.
+// The watch the agent's calls get (agentStall, what watchedCall passes)
+// gives a call at least 2 minutes before its first ERROR: 135 s at the
+// soonest, the number stallErrorFrom's comment gives.
+func TestStallErrorFromComesAfterTwoMinutes(t *testing.T) {
+	soonest := agentStall.first + time.Duration(agentStall.errorFrom-1)*agentStall.repeat
+	if soonest != 135*time.Second {
+		t.Errorf("the first ERROR comes at %v blocked at the soonest; stallErrorFrom's comment says 135 s", soonest)
+	}
+	if soonest < 2*time.Minute {
+		t.Errorf("the first ERROR comes at %v blocked: a call is given at least 2 minutes", soonest)
+	}
+}
+
+// The escalation itself — reports that start at WARN and become ERROR from
+// report errorFrom on. Testing only the two endpoints (errorFrom=1 and
+// errorFrom=never) would pass against an implementation that derived the
+// severity from "errorFrom == 1" and never crossed anything. A count, so a
+// first report that comes late is still a WARN.
 func TestWatchStallEscalatesFromWarnToError(t *testing.T) {
 	logger, logs := newObservedLogger()
-	// blockedFor is rounded to whole seconds before the comparison, so a 1s
-	// threshold crosses once ~500ms has elapsed. Ticking every 10ms gives plenty
-	// of reports on both sides of that line.
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", 10*time.Millisecond, 10*time.Millisecond, time.Second)
+	// ERROR from the third report on: the first two are WARN however late
+	// they come: the level is the report's number, not the time.
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Millisecond, time.Millisecond, 3)
 	defer stop()
+	for logs.Len() < 4 {
+		time.Sleep(time.Millisecond)
+	}
+	stop()
 
-	deadline := time.Now().Add(5 * time.Second)
-	sawWarn, sawError := false, false
-	for time.Now().Before(deadline) && !sawError {
-		for _, e := range logs.All() {
-			switch e.Level {
-			case zap.WarnLevel:
-				sawWarn = true
-			case zap.ErrorLevel:
-				sawError = true
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if !sawWarn {
-		t.Error("the early reports, while the call could still return, must be WARN")
-	}
-	if !sawError {
-		t.Error("a call still blocked past errorAfter must escalate to ERROR")
-	}
-	// Order matters: WARN must come first, or the escalation is not an escalation.
 	all := logs.All()
-	if len(all) > 0 && all[0].Level != zap.WarnLevel {
-		t.Errorf("the FIRST report must be WARN; got %v", all[0].Level)
+	for i, want := range []zapcore.Level{zap.WarnLevel, zap.WarnLevel, zap.ErrorLevel, zap.ErrorLevel} {
+		if all[i].Level != want {
+			t.Errorf("report %d is %v, want %v: WARN while the call could still return, ERROR from errorFrom on", i+1, all[i].Level, want)
+		}
 	}
 }
 
@@ -452,15 +441,13 @@ func TestWatchStallEscalatesFromWarnToError(t *testing.T) {
 // looks at a wedged container ten minutes later needs to see it is still stuck.
 func TestWatchStallRepeatsWhileBlocked(t *testing.T) {
 	logger, logs := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", 10*time.Millisecond, 10*time.Millisecond, 0)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", 10*time.Millisecond, 10*time.Millisecond, 1)
 	defer stop()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for logs.Len() < 3 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if logs.Len() < 3 {
-		t.Fatalf("watchdog reported %d times; a still-blocked call must keep reporting", logs.Len())
+	// However long the reports take to come: a watchdog that stopped
+	// reporting is the test binary's timeout.
+	for logs.Len() < 3 {
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -469,7 +456,7 @@ func TestWatchStallRepeatsWhileBlocked(t *testing.T) {
 func TestWatchStallStopIsRaceFree(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		logger, logs := newObservedLogger()
-		stop := watchStall(logger, "op", "", time.Microsecond, time.Microsecond, 0)
+		stop := watchStall(logger, "op", "", time.Microsecond, time.Microsecond, 1)
 		time.Sleep(time.Duration(i%5) * time.Millisecond)
 		stop()
 		before := logs.Len()
@@ -486,7 +473,7 @@ func TestWatchStallStopIsRaceFree(t *testing.T) {
 // that panics the process with "close of closed channel".
 func TestWatchStallStopIsIdempotent(t *testing.T) {
 	logger, _ := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Hour, time.Hour, stallErrorAfter)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Hour, time.Hour, stallErrorFrom)
 	stop()
 	stop() // would panic on a second close(done)
 	stop()
@@ -496,19 +483,14 @@ func TestWatchStallStopIsIdempotent(t *testing.T) {
 // watchdog actually stopped rather than returning early.
 func TestWatchStallStopIsConcurrencySafe(t *testing.T) {
 	logger, _ := newObservedLogger()
-	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Hour, time.Hour, stallErrorAfter)
+	stop := watchStall(logger, "bpf(BPF_PROG_LOAD)", "", time.Hour, time.Hour, stallErrorFrom)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() { defer wg.Done(); stop() }()
 	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent stop() calls deadlocked")
-	}
+	// Concurrent stops that deadlock are the test binary's timeout.
+	wg.Wait()
 }
 
 // A schedstat run time that does not fit a Duration, or carries a sign, is no
