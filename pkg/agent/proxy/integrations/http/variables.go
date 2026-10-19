@@ -748,6 +748,13 @@ func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMo
 // answers the call or the call is a miss with that evidence), or another
 // connection took the mock first. Nothing is consumed before the binds hold.
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
+	return h.serveVariablesBy(hit, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
+}
+
+// serveVariablesBy is serveVariables with consume taking the mock from the
+// mock store (false: another connection took it first): the HTTP parser's
+// updateMock, or another parser's own consume (VariableMatch).
+func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
 		return nil, nil, false, err
@@ -763,7 +770,7 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
 			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
 	}
-	if !h.updateMock(ctx, hit.mock, mockDb, nil) {
+	if !consume(hit.mock) {
 		return nil, nil, true, nil
 	}
 	return rendered, nil, false, nil
