@@ -82,6 +82,10 @@ type Instrumentation interface {
 	NotifyGracefulShutdown(ctx context.Context) error
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	// WatchAgentStart watches the start of the agent the gate waits for
+	// (pkg.AgentStartWatcher): part of the surface, so that a wrapper (the
+	// sandbox's) passes it on, or does not compile.
+	WatchAgentStart(ctx context.Context) <-chan error
 }
 
 // MockDB reads mocks from storage.
