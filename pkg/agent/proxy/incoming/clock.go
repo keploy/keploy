@@ -17,10 +17,9 @@ type ingressClock struct {
 }
 
 // stubbedClock, if set, stands in for the system clock in the ingress: the
-// stamps the synchronous loop's windows are made of (clockNow, also behind the
-// request stamps of the zero-copy loop, which shares wireTimeConn), and the
-// waits for the clock to pass them (waitPastYield). A test's way to give the
-// ingress a clock as coarse as Windows'.
+// stamps both loops' windows are made of (clockNow, behind wireTimeConn too),
+// and the waits for the clock to pass them (waitPastYield). A test's way to
+// give the ingress a clock as coarse as Windows'.
 var stubbedClock atomic.Pointer[ingressClock]
 
 // clockNow is the ingress's time.Now: what its exchanges' windows are stamped
@@ -68,8 +67,10 @@ const (
 // read, and makes its calls, from then on), before it forwards the headers a
 // window yielded at (a client may answer them, and a request that gave the
 // lock back at its body of unknown length may already run beside this one),
-// and before the client can see a response's end (endWaitBody). A nil window
-// claims nothing: it returns at once.
+// and before the client can see a response's end (endWaitBody). The zero-copy
+// loop calls it before the client can see a response's end too: its client
+// may send the next request, on this connection or another, the moment it
+// does. A nil window claims nothing: it returns at once.
 //
 // Mocks are attributed by time alone, and a window claims what was made up to
 // its yield, and to its end, both included. A call that something the loop
