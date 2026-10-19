@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -763,6 +764,60 @@ func TestLearnMatchBetweenTestsAPerTestMockIsNotPaired(t *testing.T) {
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/a", `{"kind":"order","id":"x"}`, nil, `{}`)}}
 	if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"kind":"refund","id":"x"}`, nil), db, n, opts); served != nil || miss == nil {
 		t.Fatalf("a per-test mock was paired outside every test: served %v", served)
+	}
+}
+
+// endingDb is a learnDb whose test ends while a call reads its scope: after
+// the tracker said the test was open, before the call took the test's own
+// mock (learn.Tracker.Answer).
+type endingDb struct {
+	*learnDb
+	end  func()
+	once sync.Once
+}
+
+func (d *endingDb) InRecordedTestWindow(t time.Time) (bool, bool) {
+	d.once.Do(d.end)
+	return d.learnDb.InRecordedTestWindow(t)
+}
+
+// A call of a test that ended before it took the test's own mock is a call of
+// the gap: no test is open, so, as main's rule for the gap says, it answers
+// on an exact match only, and never as the ended test's own. One that drifted
+// from the recording is refused, and nothing is learned onto it.
+func TestLearnMatchALateCallOfAnEndedTestAnswersOnAnExactMatchOnly(t *testing.T) {
+	for _, drifted := range []bool{false, true} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &endingDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/a", `{"kind":"order","id":"x"}`, nil, `{}`)}}, end: tr.End}
+		body := `{"kind":"order","id":"x"}`
+		if drifted {
+			body = `{"kind":"order","id":"y"}`
+		}
+		served, miss, err := h.learnMatch(ctx, live("POST", "/a", body, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.Open() {
+			t.Fatal("precondition: the test did not end while the call read its scope")
+		}
+		if tr.Answered("mock-0") {
+			t.Fatalf("drifted %v: a call made after its test ended was answered as that test's own", drifted)
+		}
+		if drifted {
+			if served != nil || miss == nil {
+				t.Fatalf("a drifted call of an ended test was paired: served %v", served != nil)
+			}
+			if len(db.consumed) != 0 {
+				t.Fatalf("a refused call of an ended test consumed its recording, noise %v", db.consumed[0].Spec.ReqBodyNoise)
+			}
+			continue
+		}
+		if served == nil || miss != nil {
+			t.Fatalf("a call of an ended test that matches its recording exactly was not answered: %+v", miss)
+		}
 	}
 }
 

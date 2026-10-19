@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,6 +111,41 @@ func TestLearnMatchAnUnservedStartUpRecordingIsAnEarlierPlace(t *testing.T) {
 		}
 		if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged {
 			t.Errorf("test %d: the recorded start-up client id was not refused: served %v, miss %+v", tests, served != nil, miss)
+		}
+	}
+}
+
+// A start-up call the learn step itself paired, carrying a value the run made
+// (a client id minted at start-up), is the run's exchange (learn.Earlier.Run):
+// an earlier place, with its live value, of every test of the set. A test's
+// call that carries that value is refused there, in its first test and in
+// later ones, because only a test's own calls carry its variables; it is never
+// learned as noise.
+func TestLearnMatchADriftedStartUpValueIsRefusedInEveryTest(t *testing.T) {
+	for _, tests := range []int{1, 2} {
+		h, n, opts := learnOn(t)
+		opts.LearnPool = true
+		tr := learn.NewTracker()
+		tr.NewSet()
+		ctx := learn.WithTracker(context.Background(), tr)
+		boot := learnRecorded("mock-s", -time.Minute, "POST", "/v1/register", `{"client":"cid-7f3a9e21"}`, nil, `{"ok":true}`)
+		boot.TestModeInfo.Lifetime = models.LifetimeSession
+		db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{boot}}, pool: map[time.Time]bool{boot.Spec.ReqTimestampMock: true}, observe: tr.ServedMock}
+		if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"client":"cid-0b5d4c88"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+			t.Fatalf("the drifted start-up call is paired: served %v, miss %+v, err %v", served != nil, miss, err)
+		}
+		beginTests(tr, tests)
+		own := learnRecorded("mock-1", time.Duration(tests)*time.Second, "GET", "/v1/items", "", map[string]string{"X-Client-Id": "cid-7f3a9e21"}, `{"items":[]}`)
+		tdb := &learnDb{perTest: []*models.Mock{own}, pool: map[time.Time]bool{boot.Spec.ReqTimestampMock: true}}
+		served, miss, err := h.learnMatch(ctx, live("GET", "/v1/items", "", map[string]string{"X-Client-Id": "cid-0b5d4c88"}), tdb, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "only a test's own calls carry its variables") {
+			t.Errorf("test %d: the start-up client id was not refused as the run's: served %v, miss %+v", tests, served != nil, miss)
+		}
+		if len(tdb.consumed) != 0 || len(tdb.perTest) != 1 {
+			t.Errorf("test %d: the refused call consumed its recording", tests)
 		}
 	}
 }
