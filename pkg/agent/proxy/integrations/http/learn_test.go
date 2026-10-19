@@ -293,17 +293,18 @@ func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
 }
 
 // A variable whose value F saw drift only with its clock where it is bound (a
-// clock read moved by the lead: learn.ClockOf) is marked so at its bind
-// (MockVariable.Clock); one that drifted otherwise is not.
+// clock read moved by the lead: learn.ClockOf) is marked so at its bind with
+// the read its recording holds, the instant and resolution it says
+// (MockVariable.Clock, learn.ClockReads); one that drifted otherwise is not.
 func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
-	rec := learnAt.Add(-time.Hour)
+	rec := learnAt.Add(-time.Hour).Truncate(time.Second)
 	for _, c := range []struct {
 		name  string
 		live  string
-		clock bool
+		clock []models.ClockRead
 	}{
-		{"moved by the lead", rec.Add(learn.FullRoundLead).Format(time.RFC3339), true},
-		{"moved by another amount", rec.Add(5 * time.Minute).Format(time.RFC3339), false},
+		{"moved by the lead", rec.Add(learn.FullRoundLead).Format(time.RFC3339), []models.ClockRead{{At: rec.UTC(), Res: time.Second}}},
+		{"moved by another amount", rec.Add(5 * time.Minute).Format(time.RFC3339), nil},
 	} {
 		h, n, opts := learnOn(t)
 		tr := learn.NewTracker()
@@ -326,7 +327,7 @@ func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
 			t.Fatalf("%s: binds %+v, want one variable bound at mock-0", c.name, db.consumed[1].Spec.LearnedBinds())
 		}
 		for name, v := range binds {
-			if v.Bind != "body.at" || v.Clock != c.clock {
+			if v.Bind != "body.at" || !reflect.DeepEqual(v.Clock, c.clock) {
 				t.Fatalf("%s: variable %s bound %+v, want at body.at with Clock %v", c.name, name, v, c.clock)
 			}
 		}

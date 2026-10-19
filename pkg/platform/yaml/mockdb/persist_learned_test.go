@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -86,6 +87,60 @@ func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 	}
 }
 
+// A clock variable's reads (models.MockVariable.Clock: the instant and
+// resolution its recording says, read where F saw it move by the lead) are
+// written with its bind and read back as they were, in every storage format:
+// a replay compares them to let two reads made in one second share a live
+// value (FD-3).
+func TestPersistLearnedKeepsAClockVariablesReads(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	reads := []models.ClockRead{
+		{At: time.Date(2026, 10, 14, 10, 0, 0, 250e6, time.UTC), Res: time.Millisecond},
+		{At: time.Date(0, 1, 1, 10, 0, 41, 0, time.UTC), Res: time.Second, Day: true},
+	}
+	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(f), func(t *testing.T) {
+			dir := t.TempDir()
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", f)
+			ctx := context.Background()
+			set := "test-set-0"
+			if err := ys.InsertMock(ctx, noiseTestMock(`{"at":"2026-10-14T10:00:00.250Z 10:00:41"}`), set); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			states := map[string]models.MockState{"mock-0": {Name: "mock-0",
+				Variables: models.MockVariables{"at": {Recorded: "2026-10-14T10:00:00.250Z 10:00:41", Bind: "body.at", Clock: reads}}}}
+			if _, err := ys.PersistLearned(ctx, set, states); err != nil {
+				t.Fatal(err)
+			}
+			mocks, err := ys.GetUnFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			filtered, err := ys.GetFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []models.ClockRead
+			for _, m := range append(mocks, filtered...) {
+				if m.Name == "mock-0" {
+					got = m.Spec.Variables["at"].Clock
+				}
+			}
+			if len(got) != len(reads) {
+				t.Fatalf("the variable's reads read back as %v, want %v", got, reads)
+			}
+			for i := range reads {
+				if !got[i].At.Equal(reads[i].At) || got[i].Res != reads[i].Res || got[i].Day != reads[i].Day {
+					t.Errorf("read %d read back as %+v, want %+v", i, got[i], reads[i])
+				}
+			}
+		})
+	}
+}
+
 // Two declarations of one variable in one call are one: a bind from either,
 // every use and answer, and an echo only when both say so.
 func TestMergeVariable(t *testing.T) {
@@ -101,13 +156,17 @@ func TestMergeVariable(t *testing.T) {
 		t.Fatal("an echo merged into nothing stays an echo")
 	}
 	// A clock read goes with its bind (models.MergeVariables).
-	if got := mergeVariable(models.MockVariable{Recorded: "v", Use: []string{"url.query.since"}}, models.MockVariable{Recorded: "v", Bind: "body.at", Clock: true}); !got.Clock {
-		t.Fatal("a clock read's bind merged into a use lost its mark")
+	at := []models.ClockRead{{At: time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC), Res: time.Second}}
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Use: []string{"url.query.since"}}, models.MockVariable{Recorded: "v", Bind: "body.at", Clock: at}); !reflect.DeepEqual(got.Clock, at) {
+		t.Fatalf("a clock read's bind merged into a use lost its reads: %v", got.Clock)
 	}
-	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at", Clock: true}, models.MockVariable{Recorded: "v", Bind: "body.at"}); got.Clock {
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at", Clock: at}, models.MockVariable{Recorded: "v", Bind: "body.at"}); got.Clock != nil {
 		t.Fatal("a variable two binds declare is a clock read though one says it is not")
 	}
-	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at"}, models.MockVariable{Recorded: "v", Use: []string{"url.query.since"}, Clock: true}); got.Clock {
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at"}, models.MockVariable{Recorded: "v", Bind: "body.at", Clock: at}); got.Clock != nil {
+		t.Fatal("a variable two binds declare is a clock read though the first says it is not")
+	}
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at"}, models.MockVariable{Recorded: "v", Use: []string{"url.query.since"}, Clock: at}); got.Clock != nil {
 		t.Fatal("a use's mark made a bind a clock read")
 	}
 }

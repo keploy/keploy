@@ -3,9 +3,12 @@ package learn
 import (
 	"encoding/hex"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // FullRoundLead is how far past each recorded instant record's full round F
@@ -15,11 +18,12 @@ const FullRoundLead = 61500 * time.Millisecond
 
 // clockSet is what of a drifted value (recorded, live) is a clock read that
 // moved by FullRoundLead: the ASCII words of such reads, recorded (rec) and
-// live (live), and whether every word of the value that changed is one
-// (whole).
+// live (live), whether every word of the value that changed is one (whole),
+// and each such read as recorded, in the order they stand in it (reads).
 type clockSet struct {
 	rec, live map[string]bool
 	whole     bool
+	reads     []models.ClockRead
 }
 
 // A clock layout is a way a value can carry an instant, as a pattern of the
@@ -55,6 +59,21 @@ func ClockOf(recorded, live string) bool {
 	return clockOf(recorded, live).whole
 }
 
+// ClockReads is that evidence as the learn step records it on a variable it
+// binds (models.MockVariable.Clock): for a value ClockOf says drifted only
+// with F's clock, each clock read it held when recorded that moved by the
+// lead, the instant and resolution its recorded text says, in the order they
+// stand in it; nil for any other value. A replay lets two variables recorded
+// with two values share one live value only when both hold reads made in
+// one second (models.ReadInOneSecond).
+func ClockReads(recorded, live string) []models.ClockRead {
+	c := clockOf(recorded, live)
+	if !c.whole {
+		return nil
+	}
+	return c.reads
+}
+
 // clockOf finds in a drifted value the clock reads that moved by
 // FullRoundLead: the recorded and the live value are each searched for
 // instants in clockLayouts, at ASCII word boundaries (so one glued to text
@@ -70,6 +89,7 @@ func ClockOf(recorded, live string) bool {
 func clockOf(recorded, live string) clockSet {
 	c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
+	var at []int
 	for _, lay := range clockLayouts {
 		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
 		for k := 0; k < len(rm) && k < len(lm); k++ {
@@ -77,6 +97,9 @@ func clockOf(recorded, live string) clockSet {
 			if rs == ls || !moved(lay, rs, ls) {
 				continue
 			}
+			rt, rres, _ := lay.read(rs)
+			c.reads = append(c.reads, models.ClockRead{At: rt.UTC(), Res: rres, Day: lay.wraps})
+			at = append(at, rm[k][0])
 			for i := rm[k][0]; i < rm[k][1]; i++ {
 				takenR[i] = true
 			}
@@ -96,6 +119,9 @@ func clockOf(recorded, live string) clockSet {
 			}
 		}
 	}
+	// The reads in the order they stand in the recorded value: a layout's
+	// are found after an earlier layout's.
+	sort.Sort(byPlace{at, c.reads})
 	// The whole value is a clock read when every word that changed is a
 	// part of one, and some did.
 	r, l := tokensBy(recorded, isWord), tokensBy(live, isWord)
@@ -115,6 +141,19 @@ func clockOf(recorded, live string) clockSet {
 	}
 	c.whole = c.whole && changed
 	return c
+}
+
+// byPlace sorts reads by where each stands in its value (at).
+type byPlace struct {
+	at    []int
+	reads []models.ClockRead
+}
+
+func (b byPlace) Len() int           { return len(b.at) }
+func (b byPlace) Less(i, j int) bool { return b.at[i] < b.at[j] }
+func (b byPlace) Swap(i, j int) {
+	b.at[i], b.at[j] = b.at[j], b.at[i]
+	b.reads[i], b.reads[j] = b.reads[j], b.reads[i]
 }
 
 // clockMatches are the places of s that hold an instant in layout lay, at
@@ -199,6 +238,9 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 		res = time.Minute
 		if strings.Count(clock, ":") >= 2 {
 			res = time.Second
+			if f := strings.IndexByte(clock, '.'); f >= 0 {
+				res = fractionRes(len(clock) - f - 1)
+			}
 		}
 	}
 	for _, layout := range []string{"2006-01-02T15:04:05Z07:00", "2006-01-02T15:04:05Z0700", "2006-01-02T15:04:05Z07", "2006-01-02T15:04:05",
@@ -219,8 +261,13 @@ func readCompact(s string) (time.Time, time.Duration, bool) {
 	return time.Time{}, 0, false
 }
 
+// readTimeOfDay reads a time of day, to the second or the minute, or to its
+// fraction of a second ("10:00:41.250").
 func readTimeOfDay(s string) (time.Time, time.Duration, bool) {
 	if t, err := time.Parse("15:04:05", s); err == nil {
+		if f := strings.IndexByte(s, '.'); f >= 0 {
+			return t, fractionRes(len(s) - f - 1), true
+		}
 		return t, time.Second, true
 	}
 	if t, err := time.Parse("15:04", s); err == nil {
@@ -230,9 +277,11 @@ func readTimeOfDay(s string) (time.Time, time.Duration, bool) {
 }
 
 // readEpoch reads seconds (10 digits, with or without a fraction),
-// milliseconds (13), microseconds (16) or nanoseconds (19) since the epoch.
+// milliseconds (13), microseconds (16) or nanoseconds (19) since the epoch,
+// each to its own resolution.
 func readEpoch(s string) (time.Time, time.Duration, bool) {
 	var t time.Time
+	var res time.Duration
 	digits := s
 	if i := strings.IndexByte(s, '.'); i >= 0 {
 		digits = s[:i]
@@ -240,7 +289,7 @@ func readEpoch(s string) (time.Time, time.Duration, bool) {
 		if err != nil {
 			return time.Time{}, 0, false
 		}
-		t = time.Unix(0, int64(f*1e9)).UTC()
+		t, res = time.Unix(0, int64(f*1e9)).UTC(), fractionRes(len(s)-i-1)
 	} else {
 		n, err := strconv.ParseInt(digits, 10, 64)
 		if err != nil {
@@ -248,13 +297,13 @@ func readEpoch(s string) (time.Time, time.Duration, bool) {
 		}
 		switch len(digits) {
 		case 10:
-			t = time.Unix(n, 0).UTC()
+			t, res = time.Unix(n, 0).UTC(), time.Second
 		case 13:
-			t = time.UnixMilli(n).UTC()
+			t, res = time.UnixMilli(n).UTC(), time.Millisecond
 		case 16:
-			t = time.UnixMicro(n).UTC()
+			t, res = time.UnixMicro(n).UTC(), time.Microsecond
 		case 19:
-			t = time.Unix(0, n).UTC()
+			t, res = time.Unix(0, n).UTC(), time.Nanosecond
 		default:
 			return time.Time{}, 0, false
 		}
@@ -262,12 +311,22 @@ func readEpoch(s string) (time.Time, time.Duration, bool) {
 	if !inClockRange(t) {
 		return time.Time{}, 0, false
 	}
-	return t, time.Nanosecond, true
+	return t, res, true
 }
 
-// readUUIDTime reads the instant of a time-ordered UUID: version 7 (its
-// first 48 bits, milliseconds since the epoch) or version 1 (60 bits of
-// 100-nanosecond intervals since 1582-10-15).
+// fractionRes is the resolution of a fraction of a second written with n
+// digits: a tenth of a second for one, a nanosecond for nine or more.
+func fractionRes(n int) time.Duration {
+	res := time.Second
+	for ; n > 0 && res > time.Nanosecond; n-- {
+		res /= 10
+	}
+	return res
+}
+
+// readUUIDTime reads the instant of a time-ordered UUID, each to its own
+// resolution: version 7 (its first 48 bits, milliseconds since the epoch) or
+// version 1 (60 bits of 100-nanosecond intervals since 1582-10-15).
 func readUUIDTime(s string) (time.Time, time.Duration, bool) {
 	h := strings.ReplaceAll(s, "-", "")
 	b, err := hex.DecodeString(h)
@@ -275,21 +334,22 @@ func readUUIDTime(s string) (time.Time, time.Duration, bool) {
 		return time.Time{}, 0, false
 	}
 	var t time.Time
+	var res time.Duration
 	switch b[6] >> 4 {
 	case 7:
 		ms := int64(b[0])<<40 | int64(b[1])<<32 | int64(b[2])<<24 | int64(b[3])<<16 | int64(b[4])<<8 | int64(b[5])
-		t = time.UnixMilli(ms).UTC()
+		t, res = time.UnixMilli(ms).UTC(), time.Millisecond
 	case 1:
 		ts := (int64(b[6]&0x0f)<<56 | int64(b[7])<<48 | int64(b[4])<<40 | int64(b[5])<<32 | int64(b[0])<<24 | int64(b[1])<<16 | int64(b[2])<<8 | int64(b[3]))
 		const gregorianToUnix = 122192928000000000 // 100 ns intervals from 1582-10-15 to 1970-01-01
-		t = time.Unix(0, (ts-gregorianToUnix)*100).UTC()
+		t, res = time.Unix(0, (ts-gregorianToUnix)*100).UTC(), 100*time.Nanosecond
 	default:
 		return time.Time{}, 0, false
 	}
 	if !inClockRange(t) {
 		return time.Time{}, 0, false
 	}
-	return t, time.Millisecond, true
+	return t, res, true
 }
 
 // uuidTimeWord reports whether word i (0-based, of the five groups) of a

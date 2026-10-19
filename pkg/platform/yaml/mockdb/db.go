@@ -903,9 +903,9 @@ func mergeVariable(a, b models.MockVariable) models.MockVariable {
 		a.Echo = a.Echo && b.Echo
 	}
 	if a.Bind == "" {
-		a.Bind, a.Clock = b.Bind, b.Clock
-	} else if b.Bind != "" {
-		a.Clock = a.Clock && b.Clock
+		a.Bind, a.Clock = b.Bind, append([]models.ClockRead(nil), b.Clock...)
+	} else if b.Bind != "" && len(b.Clock) == 0 {
+		a.Clock = nil
 	}
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)
