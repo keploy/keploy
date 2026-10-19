@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/network"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -71,7 +73,28 @@ for a in "$@"; do
   fi
 done
 for a in "$@"; do
-  if [ "$a" = "down" ]; then exit ` + itoa(downCode) + `; fi
+  if [ "$a" = "up" ] && [ -n "${KEPLOY_STUB_UP_WAIT_FILE:-}" ]; then
+    # KEPLOY_STUB_UP_WAIT_FILE: the up runs until the file exists, as an
+    # up attached to the app alone runs until the app has stopped.
+    while [ ! -e "$KEPLOY_STUB_UP_WAIT_FILE" ]; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+    printf 'UP-DONE\n' >> "` + argvLog + `"
+    exit 0
+  fi
+done
+for a in "$@"; do
+  if [ "$a" = "down" ]; then
+    printf 'DOWN-STARTED\n' >> "` + argvLog + `"
+    # KEPLOY_STUB_DOWN_TENTHS: the down takes that many tenths of a second,
+    # each its own short sleep off the output pipe, so a down keploy kills
+    # leaves no sleep holding the pipe or running on.
+    i=0
+    while [ "$i" -lt "${KEPLOY_STUB_DOWN_TENTHS:-0}" ]; do
+      sleep 0.1 </dev/null >/dev/null 2>&1
+      i=$((i+1))
+    done
+    printf 'DOWN-DONE\n' >> "` + argvLog + `"
+    exit ` + itoa(downCode) + `
+  fi
 done
 exit 0
 `
@@ -109,11 +132,81 @@ type inspectRecorder struct {
 	// removed records every ContainerRemove. Removal moved from `docker rm -f`
 	// to the Engine API, so the argv log no longer sees it.
 	removed []string
-	// listed records the name filters ContainerList was asked about.
-	listed []string
+	// listed records the name filters ContainerList was asked about, and
+	// listedLabels its label filters.
+	listed, listedLabels []string
 	// hangRemove makes ContainerRemove block until its context expires, which
 	// is how a saturated daemon presents.
 	hangRemove bool
+	// events is what the daemon reports of the project (Events): nil, nothing.
+	events chan events.Message
+	// eventLabels records the label filters Events was asked for;
+	// eventTypes and eventActions, its type and event filters.
+	eventLabels, eventTypes, eventActions []string
+	// inspects answers ContainerInspect for the containers it names, until
+	// they are removed; any other is "no such container".
+	inspects map[string]container.InspectResponse
+	// eventsHang makes Events wait for its context to end before it returns,
+	// as the docker client's does while the daemon has not answered.
+	eventsHang bool
+	// networks are the networks NetworkList answers; netLabels records its
+	// label filters, netRemoved every NetworkRemove.
+	networks   []network.Summary
+	netLabels  []string
+	netRemoved []string
+}
+
+// Events answers as the docker client's does: messages from r.events until
+// ctx ends, then ctx's error.
+func (r *inspectRecorder) Events(ctx context.Context, o events.ListOptions) (<-chan events.Message, <-chan error) {
+	r.mu.Lock()
+	r.eventLabels = append(r.eventLabels, o.Filters.Get("label")...)
+	r.eventTypes = append(r.eventTypes, o.Filters.Get("type")...)
+	r.eventActions = append(r.eventActions, o.Filters.Get("event")...)
+	src, hang := r.events, r.eventsHang
+	r.mu.Unlock()
+	msgs, errs := make(chan events.Message), make(chan error, 1)
+	if hang {
+		<-ctx.Done()
+		errs <- ctx.Err()
+		return msgs, errs
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				errs <- ctx.Err()
+				return
+			case m := <-src:
+				select {
+				case msgs <- m:
+				case <-ctx.Done():
+					errs <- ctx.Err()
+					return
+				}
+			}
+		}
+	}()
+	return msgs, errs
+}
+
+// ContainerLogs answers that the container is gone, as after a teardown.
+func (r *inspectRecorder) ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error) {
+	return nil, errors.New("no such container")
+}
+
+func (r *inspectRecorder) NetworkList(_ context.Context, o network.ListOptions) ([]network.Summary, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netLabels = append(r.netLabels, o.Filters.Get("label")...)
+	return append([]network.Summary(nil), r.networks...), nil
+}
+
+func (r *inspectRecorder) NetworkRemove(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netRemoved = append(r.netRemoved, id)
+	return nil
 }
 
 func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ container.RemoveOptions) error {
@@ -123,6 +216,7 @@ func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ co
 	}
 	r.mu.Lock()
 	r.removed = append(r.removed, name)
+	delete(r.inspects, name)
 	r.mu.Unlock()
 	return nil
 }
@@ -130,8 +224,22 @@ func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ co
 func (r *inspectRecorder) ContainerList(_ context.Context, options container.ListOptions) ([]container.Summary, error) {
 	r.mu.Lock()
 	r.listed = append(r.listed, options.Filters.Get("name")...)
+	r.listedLabels = append(r.listedLabels, options.Filters.Get("label")...)
 	r.mu.Unlock()
 	return nil, nil
+}
+
+// listedProject reports whether the containers of compose project p were
+// listed (stopComposeProject lists them to stop them).
+func (r *inspectRecorder) listedProject(p string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.listedLabels {
+		if l == "com.docker.compose.project="+p {
+			return true
+		}
+	}
+	return false
 }
 
 // didRemove reports whether the given container was force-removed.
@@ -154,8 +262,11 @@ func (r *inspectRecorder) removedIDs() []string {
 
 func (r *inspectRecorder) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.asked = append(r.asked, name)
-	r.mu.Unlock()
+	if info, ok := r.inspects[name]; ok {
+		return info, nil
+	}
 	return container.InspectResponse{}, errors.New("no such container")
 }
 

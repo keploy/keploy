@@ -353,7 +353,6 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			core, logs := observer.New(zapcore.DebugLevel)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr.runUntilReady = true

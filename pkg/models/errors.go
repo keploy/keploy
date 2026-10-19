@@ -33,6 +33,12 @@ type AppError struct {
 // AppError.StopKilled whether that had to kill it.
 var ErrAppStoppedForSetEnd = errors.New("keploy stopped the application at its test set's end")
 
+// ErrAppExitedOnItsOwn is what keploy's stop of an application it watches
+// (a docker compose app, under the proven switch: P101-c) answers when the
+// app had exited on its own before keploy asked it to stop: a halt, not a
+// stop. Its set is APP_HALTED, as compose's abort on the app's exit made it.
+var ErrAppExitedOnItsOwn = errors.New("the application exited on its own before keploy stopped it")
+
 type AppErrorType string
 
 func (e AppError) Error() string {

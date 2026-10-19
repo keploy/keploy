@@ -103,10 +103,13 @@ type timedChunk struct {
 }
 
 // wireTimeConn wraps a net.Conn and stamps the time of the most recent
-// non-empty Read on an atomic field. The sync-path HTTP capture loop
-// uses this to sample the wire-arrival time of an HTTP request: when
-// http.ReadRequest had to drive at least one new socket Read during
-// this iteration, the latest stamp is the tightest available upper
+// non-empty Read on an atomic field. The zero-copy loop also wraps the app's
+// side in one, for when the bytes that end a response arrived: the end of
+// its exchange's window.
+//
+// Both HTTP/1 capture loops use it to sample the wire-arrival time of an
+// HTTP request: when http.ReadRequest had to drive at least one new socket
+// Read during this iteration, the latest stamp is the tightest available upper
 // bound on actual wire arrival of THIS request's bytes, and is < the
 // time at which parsing completed.
 //
@@ -904,11 +907,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// The app's side is read ahead of the client (aheadReader), so a slow
 		// client does not stretch the window past when the app finished, up
 		// to the read-ahead's bounds; nor is it the moment the body was
-		// forwarded (the zero-copy loop's stamp). A body read whole with its
-		// headers keeps the headers' time, taken before the lock is given
-		// back. A window that goes on past its headers overlaps the requests
-		// run beside the rest of it, and the yield at the headers (above)
-		// keeps what they claim theirs.
+		// forwarded. A body read whole with its headers keeps the headers'
+		// time, taken before the lock is given back. A window that goes on
+		// past its headers overlaps the requests run beside the rest of it,
+		// and the yield at the headers (above) keeps what they claim theirs.
 		respTimestamp = endAt()
 		// The exchange is over: from its last byte on its request is in flight
 		// no more, and claims nothing over the requests that run beside a
@@ -1242,7 +1244,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 	wireConn := &wireTimeConn{Conn: clientConn}
 	clientReader := bufio.NewReader(wireConn)
-	upstreamReader := bufio.NewReader(upConn)
+	// The app's side is stamped as it is read: when the bytes that end a
+	// response arrived from the app is where its exchange's window ends.
+	upWire := &wireTimeConn{Conn: upConn}
+	upstreamReader := bufio.NewReader(upWire)
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
 	captureEnabled := t != nil && !isIngressRecordingPaused()
@@ -1316,7 +1321,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			return err
 		}
 		upConn = newConn
-		upstreamReader = bufio.NewReader(upConn)
+		upWire = &wireTimeConn{Conn: upConn}
+		upstreamReader = bufio.NewReader(upWire)
 		upConnHolder.Store(&connHolder{c: newConn})
 		return nil
 	}
@@ -1333,7 +1339,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			captureEnabled = false
 		}
 
-		iterStart := time.Now()
+		iterStart := clockNow()
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -1692,6 +1698,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 		}
 
+		// The response's headers are read: the earliest its exchange can end.
+		headersAt := clockNow()
+
 		// The app has answered. The rest of a body it answered before it came
 		// is forwarded, within bounds, before the answer (requestRelay.finish).
 		// A request that still did not reach the app whole (an upload its
@@ -1729,6 +1738,42 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			appResp = closeAfter(resp)
 		}
 
+		// The response's time, the end of its exchange's window, is taken as
+		// its end is found, BEFORE what ends it is forwarded: when the bytes
+		// that end it arrived from the app (its headers', for a response with
+		// no body), or, for a body that ends when the app closes the
+		// connection, when that close was read. The client sees the end only
+		// once the clock reads past it (waitPastYield), so the window holds
+		// every call the app made for the exchange and nothing its client does
+		// on the answer: a sequential client's next request, on this
+		// connection or on a new one, and the calls that request makes.
+		// Stamped after the write instead, the window ran on for as long as
+		// this goroutine waited to run again once its client had the answer,
+		// and took the next request's calls: on a loaded host the next test
+		// was recorded without them and this one with calls it never made.
+		// On Linux the wait returns at once; on a clock as coarse as Windows'
+		// it holds the end up to one tick, as the synchronous loop does.
+		endAt, ended := headersAt, false
+		hasBody := resp.Body != nil && resp.Body != http.NoBody
+		closeDelimited := hasBody && resp.ContentLength < 0 && !isChunked(resp.TransferEncoding)
+		markEnd := func() {
+			ended = true
+			if closeDelimited {
+				endAt = clockNow()
+			} else if last := upWire.LastReadTime(); last.After(endAt) {
+				endAt = last
+			}
+			// An exchange that is not recorded claims nothing: no wait.
+			if captureEligible && (reqCapture == nil || !reqCapture.Truncated()) && (respCapture == nil || !respCapture.Truncated()) {
+				waitPastYield(win, endAt)
+			}
+		}
+		if hasBody {
+			resp.Body = &endWaitBody{ReadCloser: resp.Body, left: resp.ContentLength, atEnd: markEnd}
+		} else {
+			markEnd()
+		}
+
 		if err := resp.Write(clientConn); err != nil {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
@@ -1740,14 +1785,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			_ = resp.Body.Close()
 		}
 
-		// Last-byte semantics for respTimestamp: capture AFTER resp.Write
-		// has drained the upstream body and forwarded it to the client.
-		// This keeps the per-test window invariant
-		// (reqTimestamp ≤ outbound-mock-timestamp ≤ respTimestamp): any
-		// DB-side mocks the app fired while streaming the response body
-		// stamp before time.Now() here, so they fall inside the per-test
-		// window and match correctly at replay.
-		respTimestamp := time.Now()
+		// The window invariant (reqTimestamp <= an egress call's time <=
+		// respTimestamp) holds with the end found above. A write that
+		// returned without its body's end being read (none does today) ends
+		// it now, as before.
+		respTimestamp := endAt
+		if !ended {
+			respTimestamp = clockNow()
+		}
 
 		// Async capture (matches synchronous-mode pattern at the call
 		// site below — keeps the proxy hot-loop free of dump+parse

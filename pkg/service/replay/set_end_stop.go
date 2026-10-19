@@ -70,3 +70,11 @@ func keepAliveStopper(ctx context.Context, cmdType utils.CmdType) (appCtx contex
 func noAttemptFollows(attempt int, test config.Test) bool {
 	return attempt == int(test.MaxFlakyChecks) && !test.MustPass
 }
+
+// composeAppStopper is an instrumentation that stops and starts the app's
+// container of a docker compose stack, its stack running on, under the proven
+// switch (AgentClient; P101-c).
+type composeAppStopper interface {
+	StopComposeApp(ctx context.Context) (string, error)
+	StartComposeApp(ctx context.Context) error
+}

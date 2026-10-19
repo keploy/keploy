@@ -3,15 +3,18 @@ package agent
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // resetProxy counts the times the agent forgets the bound variables.
@@ -122,6 +125,47 @@ func TestVariablesKeployCannotFollowAreRefusedAtLoad(t *testing.T) {
 	// is judged for, a protocol-phase one as no test's.
 	if want := map[string]bool{"pg": true, "async": true, "cfg": false}; !reflect.DeepEqual(store.refused, want) {
 		t.Fatalf("the store noted %v refused, want %v", store.refused, want)
+	}
+}
+
+// A mock of a kind whose parser registered a variable follower is served when
+// the follower says it follows the mock's variables, and refused, with the
+// follower's reason, when it does not; a kind with none follows none.
+func TestVariablesAParserFollowsAreServed(t *testing.T) {
+	const kind models.Kind = "FollowingKind"
+	integrations.RegisterVariableFollower(kind, func(m *models.Mock) (bool, string) {
+		for _, v := range m.Spec.Variables {
+			if v.Bind == "" {
+				return false, ""
+			}
+			if !v.Echo {
+				return false, "this parser follows echoes only"
+			}
+		}
+		return true, ""
+	})
+	t.Cleanup(func() { integrations.RegisterVariableFollower(kind, nil) })
+	echo := &models.Mock{Name: "echo", Kind: kind, Spec: models.MockSpec{Variables: models.MockVariables{"id": {Recorded: "1", Bind: "bind.$1", Answer: []string{"row.1.id"}, Echo: true}}}}
+	flowed := &models.Mock{Name: "flowed", Kind: kind, Spec: models.MockSpec{Variables: models.MockVariables{"id": {Recorded: "1", Bind: "bind.$1"}}}}
+	// A follower that gives no reason is still refused with one.
+	unbound := &models.Mock{Name: "unbound", Kind: kind, Spec: models.MockSpec{Variables: models.MockVariables{"id": {Recorded: "1"}}}}
+	other := &models.Mock{Name: "other", Kind: models.PostgresV2, Spec: echo.Spec}
+	core, logs := observer.New(zap.ErrorLevel)
+	a := &Agent{logger: zap.New(core)}
+	store := &ClientMockStorage{}
+	kept := a.refuseUnfollowable([]*models.Mock{echo, flowed, unbound, other}, store)
+	if len(kept) != 1 || kept[0].Name != "echo" {
+		t.Fatalf("kept %v, want [echo]", kept)
+	}
+	if want := map[string]bool{"flowed": true, "unbound": true, "other": true}; !reflect.DeepEqual(store.refused, want) {
+		t.Fatalf("the store noted %v refused, want %v", store.refused, want)
+	}
+	why := map[string]string{}
+	for _, e := range logs.All() {
+		why[e.ContextMap()["mock"].(string)] = e.ContextMap()["why"].(string)
+	}
+	if why["flowed"] != "this parser follows echoes only" || !strings.Contains(why["unbound"], "does not follow this mock's variables") || !strings.Contains(why["other"], "parser does not") {
+		t.Fatalf("refused with %v", why)
 	}
 }
 

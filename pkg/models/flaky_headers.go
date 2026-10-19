@@ -156,7 +156,20 @@ func ProvenFlakyHeaderNoise() map[string][]string {
 	for _, h := range PayloadHashHeaders {
 		delete(nm, h)
 	}
+	for _, h := range ProvenOnlyFlakyHeaders {
+		nm[h] = []string{}
+	}
 	return nm
+}
+
+// ProvenOnlyFlakyHeaders are the headers the static list holds under the
+// proven switch only: the strict matcher's (ProvenFlakyHeaderNoise) and the
+// learn step's, one list, so that without the switch the list is as it was.
+var ProvenOnlyFlakyHeaders = []string{
+	// aws-sdk-java v1's retry header (<retries>/<last backoff ms>/<capacity>):
+	// its capacity falls after any retryable error in the client's life, so
+	// it differs from call to call once one throttle came.
+	"amz-sdk-retry",
 }
 
 // volatileResponseHeaders are response headers a server mints fresh on every

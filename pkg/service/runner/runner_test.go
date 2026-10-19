@@ -205,6 +205,7 @@ func (s *setupInstr) StoreMocks(_ context.Context, f, u []*models.Mock) error {
 }
 func (*setupInstr) MakeAgentReadyForDockerCompose(context.Context) error { return nil }
 func (*setupInstr) NotifyGracefulShutdown(context.Context) error         { return nil }
+func (*setupInstr) WatchAgentStart(context.Context) <-chan error         { return nil }
 
 // skippingMockDB reads every pool in one pass (TestSetMocksReader); its
 // decoders skipped the named documents and read the filtered mocks.

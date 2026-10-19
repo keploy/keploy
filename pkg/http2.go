@@ -76,38 +76,60 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 	}
 }
 
-// ExtractHTTP2Frame attempts to extract an HTTP/2 frame from raw bytes
-func ExtractHTTP2Frame(data []byte) (http2.Frame, int, error) {
-	if len(data) < 9 { // Minimum frame size
-		return nil, 0, fmt.Errorf("incomplete frame: got %d bytes, need at least 9", len(data))
+// FrameReader reads the frames of one direction of an HTTP/2 connection, one
+// complete frame at a time, in order, with one Framer for all of them. A
+// header block a peer splits across a HEADERS frame and CONTINUATION frames
+// (one larger than a frame) is one block (RFC 9113 §6.10): the Framer accepts
+// the CONTINUATION frames that follow a HEADERS frame without END_HEADERS,
+// and refuses any other frame between them, as the RFC does. Each frame read
+// alone, by a Framer that had seen no frame before it, a CONTINUATION was
+// refused as following no HEADERS frame, and the parser of that direction gave
+// up on the connection.
+//
+// A frame it returns is valid until the next ReadFrame (the Framer reuses its
+// buffer).
+type FrameReader struct {
+	src frameSource
+	fr  *http2.Framer
+}
+
+// frameSource is what a FrameReader's Framer reads: the frame ReadFrame was
+// given.
+type frameSource struct{ b []byte }
+
+func (s *frameSource) Read(p []byte) (int, error) {
+	if len(s.b) == 0 {
+		return 0, io.EOF
 	}
+	n := copy(p, s.b)
+	s.b = s.b[n:]
+	return n, nil
+}
 
-	// First, read the frame header to determine the full frame length
-	// Length is a 24-bit unsigned integer
-	length := (uint32(data[0]) << 16) | (uint32(data[1]) << 8) | uint32(data[2])
+// NewFrameReader is a FrameReader for one direction of a connection, from its
+// first frame (after the client's preface).
+func NewFrameReader() *FrameReader {
+	r := &FrameReader{}
+	r.fr = http2.NewFramer(nil, &r.src) // reads frames up to MaxFrameSize
+	return r
+}
 
-	// Validate length before proceeding
-	if length > MaxFrameSize {
-		return nil, 0, fmt.Errorf("frame length %d exceeds maximum allowed size %d", length, MaxFrameSize)
-	}
-
-	// Check if we have the complete frame
-	totalSize := int(length) + 9 // frame header (9 bytes) + payload
-	if len(data) < totalSize {
-		return nil, 0, fmt.Errorf("incomplete frame: got %d bytes, need %d", len(data), totalSize)
-	}
-
-	// Create a reader for just this frame
-	frameReader := bytes.NewReader(data[:totalSize])
-	framer := http2.NewFramer(nil, frameReader)
-
-	// Read the frame
-	frame, err := framer.ReadFrame()
+// ReadFrame reads data, exactly one complete frame (its header and payload),
+// as the next frame of the direction.
+func (r *FrameReader) ReadFrame(data []byte) (http2.Frame, error) {
+	r.src.b = data
+	frame, err := r.fr.ReadFrame()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read frame: %v", err)
+		if detail := r.fr.ErrorDetail(); detail != nil {
+			return nil, fmt.Errorf("%w: %v", err, detail)
+		}
+		return nil, err
 	}
-
-	return frame, totalSize, nil
+	if left := len(r.src.b); left > 0 {
+		r.src.b = nil
+		return nil, fmt.Errorf("%d bytes after the frame", left)
+	}
+	return frame, nil
 }
 
 // HTTP2StreamState represents the state of an HTTP/2 stream
@@ -126,6 +148,9 @@ type HTTP2StreamState struct {
 	reqHeadersReceived   bool
 	reqDataFrames        [][]byte
 	reqEndStreamReceived bool
+	// reqEndsWithBlock: a HEADERS frame with END_STREAM began the header
+	// block still open; the stream ends at that block's end.
+	reqEndsWithBlock bool
 
 	// ===== Response (outgoing frames) =====
 	respHeaderFrags       [][]byte
@@ -133,6 +158,8 @@ type HTTP2StreamState struct {
 	respTrailersReceived  bool
 	respDataFrames        [][]byte
 	respEndStreamReceived bool
+	// respEndsWithBlock: as reqEndsWithBlock, for the response.
+	respEndsWithBlock bool
 
 	// gRPC specific state
 	grpcReq  *models.GrpcReq
@@ -218,49 +245,26 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		fragCopy := make([]byte, len(f.HeaderBlockFragment()))
 		copy(fragCopy, f.HeaderBlockFragment())
 
+		// A HEADERS frame with END_STREAM ends its stream with its header
+		// block, the CONTINUATION frames that follow it included: they are
+		// part of it (RFC 9113 §8.1). The stream ends at the block's end
+		// (endHeaderBlock), and a response's end is the time of the frame
+		// that ends the block, as a frame's time is that of the chunk that
+		// completes it.
 		if isOutgoing {
 			s.respHeaderFrags = append(s.respHeaderFrags, fragCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
-					return err
-				}
-			}
 			if f.StreamEnded() {
-				s.respEndStreamReceived = true
-				// gRPC error responses send a single HEADERS frame with END_STREAM
-				// that merges initial headers and trailers (grpc-status, grpc-message).
-				// processHeaderBlock treated it as initial headers, so respTrailersReceived
-				// is still false. Promote the initial headers to trailers so that
-				// checkStreamCompletion can mark the stream complete.
-				if s.respHeadersReceived && !s.respTrailersReceived {
-					if s.grpcResp == nil {
-						s.grpcResp = &models.GrpcResp{}
-					}
-					s.grpcResp.Trailers = models.GrpcHeaders{
-						PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
-						OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
-					}
-					s.respTrailersReceived = true
-				}
-				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
-					return err
-				}
-				s.endTime = frameTime
-				sm.checkStreamCompletion(streamID)
+				s.respEndsWithBlock = true
 			}
 		} else {
 			s.reqHeaderFrags = append(s.reqHeaderFrags, fragCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
-					return err
-				}
-			}
 			if f.StreamEnded() {
-				s.reqEndStreamReceived = true
-				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
-					return err
-				}
-				sm.checkStreamCompletion(streamID)
+				s.reqEndsWithBlock = true
+			}
+		}
+		if f.HeadersEnded() {
+			if err := sm.endHeaderBlock(s, isOutgoing, frameTime); err != nil {
+				return err
 			}
 		}
 
@@ -270,17 +274,12 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 
 		if isOutgoing {
 			s.respHeaderFrags = append(s.respHeaderFrags, contCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
-					return err
-				}
-			}
 		} else {
 			s.reqHeaderFrags = append(s.reqHeaderFrags, contCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
-					return err
-				}
+		}
+		if f.HeadersEnded() {
+			if err := sm.endHeaderBlock(s, isOutgoing, frameTime); err != nil {
+				return err
 			}
 		}
 
@@ -312,6 +311,58 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		}
 	}
 
+	return nil
+}
+
+// endHeaderBlock decodes the header block that ended on stream s, its
+// fragments joined (processHeaderBlock), and, when the HEADERS frame that
+// began it had END_STREAM, ends that side of the stream; a response's at
+// frameTime, the time of the frame that ended the block. Stamped with the
+// HEADERS frame's time instead, a block split across chunks ended its call
+// before the chunk that completed it: the HEADERS frame's chunk was let go
+// as completing no call, and a stop that asked before the next chunk was
+// noted heard "clear", then a call from before it came.
+func (sm *DefaultStreamManager) endHeaderBlock(s *HTTP2StreamState, isOutgoing bool, frameTime time.Time) error {
+	if err := sm.processHeaderBlock(s, isOutgoing); err != nil {
+		return err
+	}
+	if !isOutgoing {
+		if !s.reqEndsWithBlock {
+			return nil
+		}
+		s.reqEndsWithBlock = false
+		s.reqEndStreamReceived = true
+		if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
+			return err
+		}
+		sm.checkStreamCompletion(s.ID)
+		return nil
+	}
+	if !s.respEndsWithBlock {
+		return nil
+	}
+	s.respEndsWithBlock = false
+	s.respEndStreamReceived = true
+	s.endTime = frameTime
+	// gRPC error responses send a single header block with END_STREAM that
+	// merges initial headers and trailers (grpc-status, grpc-message).
+	// processHeaderBlock treated it as initial headers, so respTrailersReceived
+	// is still false. Promote the initial headers to trailers so that
+	// checkStreamCompletion can mark the stream complete.
+	if s.respHeadersReceived && !s.respTrailersReceived {
+		if s.grpcResp == nil {
+			s.grpcResp = &models.GrpcResp{}
+		}
+		s.grpcResp.Trailers = models.GrpcHeaders{
+			PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
+			OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
+		}
+		s.respTrailersReceived = true
+	}
+	if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
+		return err
+	}
+	sm.checkStreamCompletion(s.ID)
 	return nil
 }
 

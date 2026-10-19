@@ -621,6 +621,12 @@ type Recorder struct {
 	// write mocks the recording captured (mocksNotWritten): the recording is
 	// incomplete, and ends as failed.
 	captureLost atomic.Bool
+	// endCut, under the proven switch, is why the recording's end is cut:
+	// keploy's agent went before it had handed over what it captured (its
+	// stream ended without its end marker, or its drain stalled). The
+	// test-set's config says so, as for a stop that killed the app (P101-b-k,
+	// P101-c).
+	endCut atomic.Pointer[string]
 	// mocksLossSaid is set once mocksNotWritten has said the mock store
 	// could not write mocks the recording captured.
 	mocksLossSaid atomic.Bool
@@ -710,6 +716,7 @@ type backlogLooks struct {
 // compose or kubelet stops): frames from before the stop still coming would
 // not tell its backlog from this CLI's own lag in taking what it had sent.
 func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
+	r.noteEndCut("keploy's agent ended its " + kind + " stream before it said it had handed over all it captured, so what it still held is not in the recording")
 	if !looks.Held() && !startedAgent(r.instrumentation) {
 		r.logger.Warn("the keploy agent ended its stream before it said it held nothing more: what it still held, if anything, is lost",
 			zap.String("frames", kind),
@@ -1564,7 +1571,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	 * ERROR rather than a matter of taste. Deliberately not quoting the
 	 * rest of it. `sessionStart` is stamped at the
 	 * top of Start(), before instrumentation setup and agent bring-up
-	 * (AgentReadyTimeout defaults to 330s) — tens of seconds in a
+	 * (as long as the agent's start makes progress) — tens of seconds in a
 	 * docker-compose recording, where the user's app boot falls inside
 	 * that window too. (For every other command type instrumentation.Run
 	 * starts the app AFTER this stamp, so app boot is not excluded;
@@ -1620,6 +1627,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		err, timedOut := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
+		}
+		if timedOut {
+			r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
 		}
 		return !timedOut
 	}
@@ -1718,17 +1728,22 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// before the stack it is a service of is taken down.
 		composeAgent := r.config.CommandType == string(utils.DockerCompose)
 		if composeAgent {
+			// Under the switch the app's stop is keploy's own and leaves the
+			// agent up (P101-c): the app is stopped first, so what it does as
+			// it stops is recorded with the rest, and the drain then takes
+			// it. Its stop says, in the app's run, whether it had to kill.
+			if s, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
+				// An app that exited on its own needs no stop.
+				if _, err := s.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+					r.logger.Warn("keploy could not stop the application's container before saving what the agent captured", zap.Error(err))
+				}
+			}
 			drainComposeAgent(false)
 		}
 		windowMaps.noteStop(time.Now())
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
-		}
-		// The stop had to kill the app: what it would have done as it
-		// stopped is not in this recording, and the recording says so.
-		if why := stopKilled.Load(); why != nil && recordingStarted && newTestSetID != "" {
-			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
 		if !composeAgent {
 			// Read before the frames drain: the agent stays up while this
@@ -1739,6 +1754,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
+		}
+		// The stop had to kill the app, or the agent went before it had
+		// handed over what it captured: the recording's end is cut, and the
+		// recording says so.
+		why := stopKilled.Load()
+		if why == nil {
+			why = r.endCut.Load()
+		}
+		if why != nil && recordingStarted && newTestSetID != "" {
+			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
 
 		setupCtxCancel()
@@ -2235,25 +2260,31 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			return nil
 		})
 
-		// Aligned with the agent's own healthcheck budget; a fixed 120s wait gave
-		// up while the agent container was still starting under CI daemon
-		// contention. See pkg.AgentReadyTimeout (KEPLOY_AGENT_READY_TIMEOUT).
-		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+		// The wait follows the agent's start, not a clock: it lasts while the
+		// start makes progress (and while the engine has not run the agent's
+		// container yet: compose starts it in its own time), and ends once
+		// the start fails or stops making progress (pkg.WatchAgentStart). A
+		// fixed budget gave up on a start a loaded host ran slowly, and
+		// waited out the whole of it for one that had stopped.
+		agentCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
 		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 		select {
-		case <-agentCtx.Done():
-			// agentCtx is ctx's: a stop (Ctrl+C) ends it too, and a stop is
-			// no agent that never got ready, and no failure.
+		case <-ctx.Done():
+			// A stop (Ctrl+C) is no agent that never got ready, and no
+			// failure.
+			return ctx.Err()
+		case err := <-agentStart:
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			stopReason = "keploy-agent did not become ready in time"
-			utils.LogError(r.logger, nil, stopReason)
-			return errors.New(stopReason)
+			stopReason = "the keploy-agent docker compose started did not come up"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s: %w", stopReason, err)
 		case appErr := <-appErrChan:
 			// The project stopped before the agent was ready. When the agent
 			// is what stopped -- it could not start: no tracefs where Docker
@@ -2278,17 +2309,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			utils.LogError(r.logger, appErr, stopReason)
 			return fmt.Errorf("%s: %w", stopReason, appErr)
 		case ready, ok := <-agentReadyCh:
-			// The ticker closes its channel, unready, when the budget ends:
-			// the same "not ready in time" as agentCtx's own end.
+			// The ticker closes its channel, unready, only once ctx ends.
 			if !ok || !ready {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				stopReason = "keploy-agent did not become ready in time"
-				utils.LogError(r.logger, nil, stopReason)
-				return errors.New(stopReason)
+				return ctx.Err()
 			}
 		}
+		// The health check answered: the watch of the agent's start ends.
+		cancel()
 	}
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
@@ -3336,6 +3363,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					// (whenever that came: see forwardUntilDrained), and the
 					// mappings it still held are lost.
 					if mapCtx.Err() == nil {
+						r.noteEndCut("keploy's agent ended its mapping stream before the recording had saved its mappings, so those it still held are not in the recording")
 						r.logger.Warn("the keploy agent ended its mapping stream before the recording had saved its mappings: those it still held, if any, are lost",
 							zap.String("next_step", "the agent was stopped before the recording had saved its mappings (docker compose stops it with the project, also when the app exits on its own; kubelet with its pod): stop the recording, not the app or the agent. A test left without its mapping replays with no mocks"))
 					}
