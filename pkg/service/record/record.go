@@ -1659,6 +1659,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					capWatch.afterTestCases(ctx)
 				}
 				joined := drainFrames()
+				capWatch.waitForReads() // while the agent is up
 				if e, ok := r.instrumentation.(composeAgentEnder); ok {
 					// A drain given up on a stall may hold its stream open,
 					// and the agent waits for that stream: it is told to go.
@@ -1670,6 +1671,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			if recordingStarted {
 				r.reportRealRun(ctx)
 				capWatch.afterTestCases(ctx)
+				capWatch.waitForReads() // before the stack, and the agent with it, goes
 			}
 		})
 	}
@@ -1754,6 +1756,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
+			capWatch.waitForReads() // before the agent stops
 		}
 		// The stop had to kill the app, or the agent went before it had
 		// handed over what it captured: the recording's end is cut, and the
