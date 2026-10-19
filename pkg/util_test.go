@@ -2236,6 +2236,59 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 	})
 }
 
+func TestRewriteForRelay(t *testing.T) {
+	tests := []struct {
+		name     string
+		testURL  string
+		relayURL string
+		want     string
+	}{
+		{
+			name:     "standard HTTP URL with port and path",
+			testURL:  "http://localhost:8080/client/v1/mcp?foo=bar",
+			relayURL: "http://localhost:34567/agent/relay",
+			want:     "http://localhost:34567/agent/relay/8080/client/v1/mcp?foo=bar",
+		},
+		{
+			name:     "HTTP URL with default port 80",
+			testURL:  "http://localhost/health",
+			relayURL: "http://localhost:34567/agent/relay",
+			want:     "http://localhost:34567/agent/relay/80/health",
+		},
+		{
+			name:     "HTTPS URL with default port 443",
+			testURL:  "https://api.keploy.io/v1/data",
+			relayURL: "http://localhost:34567/agent/relay",
+			want:     "http://localhost:34567/agent/relay/443/v1/data",
+		},
+		{
+			name:     "URL with no query string",
+			testURL:  "http://localhost:9090/metrics",
+			relayURL: "http://localhost:34567/agent/relay",
+			want:     "http://localhost:34567/agent/relay/9090/metrics",
+		},
+		{
+			name:     "root path",
+			testURL:  "http://localhost:8080/",
+			relayURL: "http://localhost:34567/agent/relay",
+			want:     "http://localhost:34567/agent/relay/8080/",
+		},
+		{
+			name:     "relay base with trailing slash",
+			testURL:  "http://localhost:8080/api",
+			relayURL: "http://localhost:34567/agent/relay/",
+			want:     "http://localhost:34567/agent/relay/8080/api",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := rewriteForRelay(tt.testURL, tt.relayURL)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // TestFilterByTimeStampThreeTier validates the Lifetime-elevated three-
 // pool partition. Contract:
 //   - LifetimeConnection           → startupMocks (connection-scoped reuse)

@@ -501,6 +501,12 @@ type Test struct {
 	// address and probe it. Intent has to be stated, not inferred.
 	DisableAppReadyProbe   bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
 	Host                   string              `json:"host" yaml:"host" mapstructure:"host"`
+	// RelayBaseURL, when non-empty, rewrites every resolved test URL so the
+	// request goes through the agent's reverse-proxy relay endpoint instead of
+	// directly to the app port. Set by k8s-proxy cross-cluster replay so
+	// traffic reaches the app on its pod IP (not loopback), avoiding
+	// DNS-rebinding guards (mcp-go, CSRF, etc.). See k8s-proxy#1062.
+	RelayBaseURL           string              `json:"relayBaseURL,omitempty" yaml:"relayBaseURL,omitempty" mapstructure:"relayBaseURL"`
 	Port                   uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort               uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
 	SSEPort                uint32              `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`

@@ -144,6 +144,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			PortMappings:    portMappings,
 			TargetFromURL:   h.appAt != nil,
 			TLSConfig:       h.tlsConfig,
+			RelayBaseURL:    h.cfg.Test.RelayBaseURL,
 
 			AppPortReachability: h.appPortReachability(),
 		}

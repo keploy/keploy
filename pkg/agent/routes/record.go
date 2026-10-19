@@ -178,6 +178,11 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		// Reverse-proxy relay for cross-cluster replay: the k8s-proxy
+		// sends test requests here instead of port-forwarding directly
+		// to the app, so the app receives them on the pod IP (not
+		// loopback) and DNS-rebinding guards do not fire. See #1062.
+		r.HandleFunc("/relay/{port}/*", a.HandleRelay)
 	})
 }
 

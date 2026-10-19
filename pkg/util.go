@@ -383,6 +383,12 @@ type SimulationConfig struct {
 	// relaxing TLS verification globally. Default nil preserves the
 	// stdlib system-pool behaviour.
 	TLSConfig *tls.Config
+	// RelayBaseURL, when non-empty, rewrites the resolved test URL to go
+	// through the agent's reverse-proxy relay. The resolved URL
+	// http://host:port/path becomes <RelayBaseURL>/<port>/path so the
+	// request is delivered on the pod IP instead of loopback. Set by
+	// k8s-proxy cross-cluster replay. See k8s-proxy#1062.
+	RelayBaseURL string
 	// AppPortReachability, when non-nil, is asked about a test request that
 	// was refused, reset or dropped before an answer: an address the app can
 	// never be reached at fails the test at once, saying why, instead of
@@ -699,6 +705,18 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
+	}
+
+	// Cross-cluster relay: rewrite the resolved URL so the request goes
+	// through the agent's reverse-proxy relay endpoint. The relay forwards
+	// the request to the app on the pod IP, avoiding loopback delivery that
+	// triggers DNS-rebinding guards. See k8s-proxy#1062.
+	if cfg.RelayBaseURL != "" {
+		testURL, err = rewriteForRelay(testURL, cfg.RelayBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("relay URL rewrite: %w", err)
+		}
+		logger.Debug("rewrote test URL for agent relay", zap.String("relayURL", testURL))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
@@ -4577,6 +4595,34 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 
 	logger.Debug("Final resolved target", zap.String("target", finalTarget))
 	return finalTarget, nil
+}
+
+// rewriteForRelay rewrites a resolved test URL so the request goes through the
+// agent's reverse-proxy relay endpoint. The resolved URL
+// http://host:8080/api/v1/data?q=1 becomes <relayBaseURL>/8080/api/v1/data?q=1.
+//
+// The relay endpoint extracts the port from the path and forwards the request
+// to the app on the pod's real IP, preserving the original Host header.
+func rewriteForRelay(testURL, relayBaseURL string) (string, error) {
+	u, err := url.Parse(testURL)
+	if err != nil {
+		return "", fmt.Errorf("parse test URL %q: %w", testURL, err)
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	relay, err := url.Parse(relayBaseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse relay base URL %q: %w", relayBaseURL, err)
+	}
+	relay.Path = strings.TrimRight(relay.Path, "/") + "/" + port + u.Path
+	relay.RawQuery = u.RawQuery
+	return relay.String(), nil
 }
 
 // controlPlaneProbed records the agents that have already given a conclusive
