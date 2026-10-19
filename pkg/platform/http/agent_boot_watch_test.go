@@ -1134,8 +1134,9 @@ func TestEngineSaysGoneReadsTheEnginesNotThereWhereverItIsSaid(t *testing.T) {
 }
 
 // Against the real engine CLI, where there is one: a container it does not
-// know does not run, and has ended (containerGone), whatever the CLI's
-// version says of it, and wherever it says it.
+// know does not run, whatever the CLI's version says of it, and wherever it
+// says it; and it has ended (containerGone) once keploy has known it to be
+// there, not before (one docker compose has not created yet).
 func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	cli := newEngineCLI(zap.NewNop())
 	if _, err := cli.stdout(context.Background(), "version", "--format", "{{.Server.Version}}"); err != nil {
@@ -1155,6 +1156,10 @@ func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	if running(context.Background()) {
 		t.Fatal("the engine does not know the container, and it is still taken to run")
 	}
+	if code, ended := containerExited(cli, name)(context.Background()); ended {
+		t.Fatalf("containerExited = %d, %v of a container keploy never knew to be there; want not ended", code, ended)
+	}
+	knowContainer(name)
 	if code, ended := containerExited(cli, name)(context.Background()); !ended || code != containerGone {
 		t.Fatalf("containerExited = %d, %v; want containerGone, ended", code, ended)
 	}

@@ -2994,9 +2994,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
-		a.mu.Lock()
-		a.agentContainer = opts.KeployContainer
-		a.mu.Unlock()
+		a.nameAgentContainer(opts.KeployContainer)
 		// The agent container maps host.docker.internal to the Docker host
 		// (host-gateway) where the daemon resolves it (extra_hosts.go). A
 		// daemon that does not answer its version would not start the agent
