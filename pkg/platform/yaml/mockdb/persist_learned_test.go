@@ -100,6 +100,16 @@ func TestMergeVariable(t *testing.T) {
 	if got := mergeVariable(models.MockVariable{}, models.MockVariable{Recorded: "v", Bind: "body.id", Echo: true}); !got.Echo {
 		t.Fatal("an echo merged into nothing stays an echo")
 	}
+	// A clock read goes with its bind (models.MergeVariables).
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Use: []string{"url.query.since"}}, models.MockVariable{Recorded: "v", Bind: "body.at", Clock: true}); !got.Clock {
+		t.Fatal("a clock read's bind merged into a use lost its mark")
+	}
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at", Clock: true}, models.MockVariable{Recorded: "v", Bind: "body.at"}); got.Clock {
+		t.Fatal("a variable two binds declare is a clock read though one says it is not")
+	}
+	if got := mergeVariable(models.MockVariable{Recorded: "v", Bind: "body.at"}, models.MockVariable{Recorded: "v", Use: []string{"url.query.since"}, Clock: true}); got.Clock {
+		t.Fatal("a use's mark made a bind a clock read")
+	}
 }
 
 // With the switch off the noise writers are what they were: a mock that

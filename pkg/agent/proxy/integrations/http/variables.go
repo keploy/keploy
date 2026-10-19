@@ -59,9 +59,13 @@ type varDecl struct {
 	name     string
 	recorded string
 	echo     bool
-	bind     *varPlace
-	use      []varPlace
-	answer   []varPlace
+	// clock: the learn step marked the variable a clock read at its bind
+	// (models.MockVariable.Clock). It is read only where the call binds the
+	// variable.
+	clock  bool
+	bind   *varPlace
+	use    []varPlace
+	answer []varPlace
 }
 
 // requestPlaces is the variable's bind place (first) and uses.
@@ -132,7 +136,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -618,7 +622,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			others = append(others, b)
 		}
 		for _, b := range others {
-			if !b.Given && b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded {
+			if !b.Given && b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded && !(b.Clock && d.clock) {
 				return nil, &varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, v.value, b.Name, b.Mock, b.Place),
@@ -626,7 +630,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 			}
 		}
-		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
+		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock}
 	}
 	for _, d := range decls {
 		if b, ok := taken[d.name]; ok {

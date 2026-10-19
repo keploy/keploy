@@ -54,6 +54,13 @@ type MockVariable struct {
 	// dependency echoes): bound at Bind for this exchange, answered, and
 	// never asked of another call.
 	Echo bool `json:"echo,omitempty" yaml:"echo,omitempty" bson:"echo,omitempty"`
+	// Clock marks a variable that the learn step saw, at its Bind, drift
+	// only with F's clock: a clock read that moved by the full round's lead
+	// (learn.ClockOf). Two such variables recorded with two values may share
+	// one live value in a replay (two reads of one clock in one second); any
+	// other two may not. Each is still asserted at every one of its places.
+	// Only the learn step sets it, with a Bind.
+	Clock bool `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
 }
 
 // Clone returns a copy of v that shares no map or slice with it; nil for an
@@ -73,7 +80,9 @@ func (v MockVariables) Clone() MockVariables {
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
 // both keeps a's bind and both's uses and answers, and is an echo only when
-// both say so.
+// both say so. Clock goes with the bind it was read at: a's bind keeps a's,
+// one taken from b keeps b's, and a variable both bind is a clock read only
+// when both say so.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -86,7 +95,9 @@ func MergeVariables(a, b MockVariables) MockVariables {
 			continue
 		}
 		if cur.Bind == "" {
-			cur.Bind = v.Bind
+			cur.Bind, cur.Clock = v.Bind, v.Clock
+		} else if v.Bind != "" {
+			cur.Clock = cur.Clock && v.Clock
 		}
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
@@ -151,4 +162,8 @@ type VariableBinding struct {
 	// value), not one the application made: it binds the variable for the
 	// calls that use it, and is never another variable's value.
 	Given bool `json:"given,omitempty" yaml:"given,omitempty"`
+	// Clock marks a binding of a clock variable (MockVariable.Clock): it may
+	// share its live value with another clock variable's binding, and with
+	// no other.
+	Clock bool `json:"clock,omitempty" yaml:"clock,omitempty"`
 }

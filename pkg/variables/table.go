@@ -186,12 +186,13 @@ func (t *Table) put(b Binding) {
 }
 
 // BindAll binds bs together, all or none, under one lock, for a call checked
-// in scope gen (Gen): each name holds one value (a name already bound must be
-// bound to the same value), and two variables recorded with two values do not
-// share a live value. It returns the first binding that does not hold and the
-// binding it collides with; stale is true when a new scope began since gen
-// (nothing is bound); ok is true when every binding of bs is in force
-// afterwards.
+// in scope gen (Gen): each name holds one value (a name already bound, the
+// run's included, must be bound to the same value), and two variables
+// recorded with two values do not share a live value, unless both are clock
+// reads the learn step marked (Binding.Clock, models.MockVariable.Clock). It
+// returns the first binding that does not hold and the binding it collides
+// with; stale is true when a new scope began since gen (nothing is bound); ok
+// is true when every binding of bs is in force afterwards.
 func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -204,7 +205,7 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 			return b, have, false, false
 		}
 		for _, other := range inForce {
-			if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
+			if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
 				return b, other, false, false
 			}
 		}
@@ -212,7 +213,7 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 			if other.Name == b.Name && other.Value != b.Value {
 				return b, other, false, false
 			}
-			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
+			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
 				return b, other, false, false
 			}
 		}
@@ -224,6 +225,12 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	}
 	return Binding{}, Binding{}, false, true
 }
+
+// bothClock reports whether a and b are both bindings of clock variables the
+// learn step marked (models.MockVariable.Clock): the one pair of variables
+// recorded with two values that may share a live value (two reads of one
+// clock in one second). Nothing about the values decides it.
+func bothClock(a, b Binding) bool { return a.Clock && b.Clock }
 
 // Start begins a new scope (as Reset) with the values its test case gave
 // bound, under one lock: no call of the scope binds before them. A name given
