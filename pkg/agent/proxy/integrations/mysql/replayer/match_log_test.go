@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -18,9 +19,11 @@ import (
 
 // The debug log of an EXECUTE the matcher compares masks its query
 // attributes' values: an attribute named as a secret (a password) holds one
-// whatever it looks like, and was logged in the clear. The statement's own
-// values, its attributes' names and types are logged as they are.
+// whatever it looks like, and was logged in the clear. With content logged
+// (KEPLOY_LOG_CONTENT), the statement's own values, its attributes' names and
+// types are logged as they are.
 func TestMatchCommand_TheDebugLogMasksAnExecutesAttributeValues(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
 	const secret = "correct-horse-battery-staple"
 	at := stmtT0.Add(time.Second)
 	db := &fakeMockDb{session: []*models.Mock{executedMock("mock-1", 1, at, "row", ordersInsert, "k1", "t1")},

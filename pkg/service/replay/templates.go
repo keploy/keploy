@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -68,7 +69,7 @@ func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckRes
 	r.logTemplateFailures(sent.Name, testSetID, res.Failures, check, true)
 	for _, c := range res.Captures {
 		r.logger.Debug("captured a template value from the app's answer",
-			zap.String("testcase", sent.Name), zap.String("key", c.Key), zap.String("value", c.Value), zap.String("where", c.Where))
+			zap.String("testcase", sent.Name), zap.String("key", c.Key), logcontent.String("value", c.Value), zap.String("where", c.Where))
 	}
 	exp := *sent
 	exp.HTTPResp = res.Resp

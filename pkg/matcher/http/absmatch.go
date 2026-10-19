@@ -7,6 +7,8 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcher "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -65,14 +67,14 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	//compare http req
 	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !reqPass {
-		logger.Info("test case http req is not equal", zap.Any("tcs1HttpReq", tcs1.HTTPReq), zap.Any("tcs2HttpReq", tcs2.HTTPReq))
+		logger.Info("test case http req is not equal", logcontent.Any("tcs1HttpReq", tcs1.HTTPReq), logcontent.Any("tcs2HttpReq", tcs2.HTTPReq))
 		pass = false
 	}
 
 	//compare http resp
 	respPass, respCompare := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !respPass {
-		logger.Info("test case http resp is not equal", zap.Any("tcs1HttpResp", tcs1.HTTPResp), zap.Any("tcs2HttpResp", tcs2.HTTPResp))
+		logger.Info("test case http resp is not equal", logcontent.Any("tcs1HttpResp", tcs1.HTTPResp), logcontent.Any("tcs2HttpResp", tcs2.HTTPResp))
 		pass = false
 	}
 
@@ -127,7 +129,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 
 	if tcs1.HTTPReq.URL != tcs2.HTTPReq.URL {
 		reqCompare.URLResult.Normal = false
-		logger.Debug("test case http req url is not equal", zap.String("tcs1HttpReqURL", tcs1.HTTPReq.URL), zap.String("tcs2HttpReqURL", tcs2.HTTPReq.URL))
+		logger.Debug("test case http req url is not equal", logcontent.String("tcs1HttpReqURL", tcs1.HTTPReq.URL), logcontent.String("tcs2HttpReqURL", tcs2.HTTPReq.URL))
 		pass = false
 	}
 
@@ -149,11 +151,11 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	if len(urlParams1) == len(urlParams2) {
 		ok := CompareURLParams(urlParams1, urlParams2, &reqCompare.URLParamsResult)
 		if !ok {
-			logger.Debug("test case http req url params are not equal", zap.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), zap.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
+			logger.Debug("test case http req url params are not equal", zap.Strings("tcs1HttpReqURLParamNames", utils.HeaderNames(tcs1.HTTPReq.URLParams)), zap.Strings("tcs2HttpReqURLParamNames", utils.HeaderNames(tcs2.HTTPReq.URLParams)), logcontent.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), logcontent.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
 			pass = false
 		}
 	} else {
-		logger.Debug("test case http req url params are not equal", zap.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), zap.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
+		logger.Debug("test case http req url params are not equal", zap.Strings("tcs1HttpReqURLParamNames", utils.HeaderNames(tcs1.HTTPReq.URLParams)), zap.Strings("tcs2HttpReqURLParamNames", utils.HeaderNames(tcs2.HTTPReq.URLParams)), logcontent.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), logcontent.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
 		pass = false
 	}
 
@@ -166,7 +168,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	// compare http req headers
 	ok := matcher.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqCompare.HeaderResult, reqHeaderNoise)
 	if !ok {
-		logger.Debug("test case http req headers are not equal", zap.Any("tcs1HttpReqHeaders", tcs1.HTTPReq.Header), zap.Any("tcs2HttpReqHeaders", tcs2.HTTPReq.Header))
+		logger.Debug("test case http req headers are not equal", zap.Strings("tcs1HttpReqHeaderNames", utils.HeaderNames(tcs1.HTTPReq.Header)), zap.Strings("tcs2HttpReqHeaderNames", utils.HeaderNames(tcs2.HTTPReq.Header)), logcontent.Any("tcs1HttpReqHeaders", tcs1.HTTPReq.Header), logcontent.Any("tcs2HttpReqHeaders", tcs2.HTTPReq.Header))
 		pass = false
 	}
 
@@ -221,8 +223,8 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		logger.Debug("cleanExp", logcontent.Any("cleanExp", cleanExp))
+		logger.Debug("cleanAct", logcontent.Any("cleanAct", cleanAct))
 	} else {
 		if tcs1.HTTPReq.Body != tcs2.HTTPReq.Body {
 			pass = false
@@ -341,7 +343,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	// compare http resp headers
 	ok = matcher.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPResp.Header), pkg.ToHTTPHeader(tcs2.HTTPResp.Header), &respCompare.HeadersResult, headerNoise)
 	if !ok {
-		logger.Debug("test case http resp headers are not equal", zap.Any("tcs1HttpRespHeaders", tcs1.HTTPResp.Header), zap.Any("tcs2HttpRespHeaders", tcs2.HTTPResp.Header))
+		logger.Debug("test case http resp headers are not equal", zap.Strings("tcs1HttpRespHeaderNames", utils.HeaderNames(tcs1.HTTPResp.Header)), zap.Strings("tcs2HttpRespHeaderNames", utils.HeaderNames(tcs2.HTTPResp.Header)), logcontent.Any("tcs1HttpRespHeaders", tcs1.HTTPResp.Header), logcontent.Any("tcs2HttpRespHeaders", tcs2.HTTPResp.Header))
 		pass = false
 	}
 
@@ -394,8 +396,8 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		logger.Debug("cleanExp", logcontent.Any("cleanExp", cleanExp))
+		logger.Debug("cleanAct", logcontent.Any("cleanAct", cleanAct))
 	} else {
 		if !skipBody && tcs1.HTTPResp.Body != tcs2.HTTPResp.Body {
 			pass = false

@@ -21,6 +21,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -962,7 +963,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("streaming_exchange", streamingExchange),
 				zap.Bool("chunked_transfer", chunkedTransfer),
-				zap.String("url", req.URL.String()),
+				zap.String("path", req.URL.Path),
+				logcontent.String("url", req.URL.String()),
 				zap.String("method", req.Method),
 				zap.Int("status_code", resp.StatusCode),
 				zap.String("response_content_type", resp.Header.Get("Content-Type")),
@@ -1029,7 +1031,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Int("captured_exchange_bytes", exchangeCaptureSize),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int64("response_bytes_seen", respBytesTotal),
-					zap.String("url", capturedReq.URL.String()),
+					zap.String("path", capturedReq.URL.Path),
+					logcontent.String("url", capturedReq.URL.String()),
 					zap.String("method", capturedReq.Method),
 					zap.Int("status_code", capturedResp.StatusCode),
 				)

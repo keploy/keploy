@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 
 	"github.com/k0kubun/pp/v3"
@@ -127,7 +128,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		// Log actual response body as debug before clearing
 		logger.Debug("actual response body (skipped during recording)",
 			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
+			logcontent.String("body", actualResponse.Body))
 
 		bodySizeResult = models.IntResult{
 			Normal:   bodySizeMatch,
@@ -237,8 +238,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		logger.Debug("cleanExp", logcontent.Any("cleanExp", cleanExp))
+		logger.Debug("cleanAct", logcontent.Any("cleanAct", cleanAct))
 	} else {
 		// Skip the comparison of a non-JSON body of the recorded kind, with
 		// the switch off and no --compare-all (compareNonJSON above).

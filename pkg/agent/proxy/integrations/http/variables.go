@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -760,8 +761,8 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 		return nil, nil, true, nil
 	}
 	for _, b := range hit.binds {
-		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
-			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+		h.Logger.Debug("variable bound", zap.String("variable", b.Name), logcontent.String("value", b.Value),
+			logcontent.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
 	}
 	if !h.updateMock(ctx, hit.mock, mockDb, nil) {
 		return nil, nil, true, nil

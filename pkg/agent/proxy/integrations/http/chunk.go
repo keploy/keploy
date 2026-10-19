@@ -12,6 +12,7 @@ import (
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -396,7 +397,7 @@ func (h *HTTP) contentLengthResponse(ctx context.Context, finalResp *[]byte, cli
 			}
 		}
 
-		h.Logger.Debug("This is a chunk of response[content-length]: " + string(resp))
+		h.Logger.Debug("This is a chunk of response[content-length]", logcontent.Bytes("chunk", resp))
 		*finalResp = append(*finalResp, resp...)
 		contentLength -= len(resp)
 

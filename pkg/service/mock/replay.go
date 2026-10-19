@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -1749,7 +1750,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
 					if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
-						m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
+						m.logger.Debug("ids this run made in place of recorded ones", zap.Int("count", len(pairs)), logcontent.Any("pairs", pairs))
 						m.ids = ids.New(pairs)
 					} else {
 						m.logger.Debug("failed to read the ids this run made", zap.Error(err))

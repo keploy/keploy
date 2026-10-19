@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -244,7 +245,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return models.NewMockMismatchError(baseErr, report)
 			}
 
-			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))
+			logger.Debug("Matched the command with the mock", zap.String("response_type", packetType(&resp.PacketBundle)), logcontent.Any("mock", resp))
 
 			// Handle prepared statement cleanup for COM_STMT_CLOSE
 			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
@@ -261,14 +262,14 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			// But we need to remove the corresponding mock from the mockDb for no response commands.
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
-				logger.Debug("No response for the command", zap.Any("command", command))
+				logger.Debug("No response for the command", zap.String("request_type", commandPkt.Header.Type), logcontent.Any("command", command))
 				continue
 			}
 
 			//Encode the matched resp
 			buf, err := wire.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to encode the response", zap.Any("response", resp))
+				utils.LogError(logger, err, "failed to encode the response", zap.String("response_type", packetType(&resp.PacketBundle)), logcontent.Any("response", resp))
 				return err
 			}
 

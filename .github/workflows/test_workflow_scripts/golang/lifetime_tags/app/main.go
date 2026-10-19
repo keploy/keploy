@@ -17,8 +17,11 @@
 //	                    caller's profile
 //	GET  /profile       the token, the caller's profile
 //	GET  /quote?qty=N   the rate, a count of the orders
-//	GET  /orders/count  a count of the orders
+//	GET  /orders/count  a count of the orders, and the last order's note
 //	GET  /healthz       nothing
+//
+// Each order is written with orderNote, which the count reads back: a row of
+// the application's content, which the lane checks keploy's logs never carry.
 package main
 
 import (
@@ -34,6 +37,10 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// orderNote is the note every order is written with. The lane's script
+// greps keploy's logs for it, so it is spelled there too.
+const orderNote = "kp-e2e-canary-row-c41a06"
 
 type app struct {
 	db       *sql.DB
@@ -62,7 +69,7 @@ func main() {
 		log.Fatalf("open: %v", err)
 	}
 	for _, stmt := range []string{
-		`CREATE TABLE IF NOT EXISTS orders (id BIGINT AUTO_INCREMENT PRIMARY KEY, qty INT NOT NULL, total INT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS orders (id BIGINT AUTO_INCREMENT PRIMARY KEY, qty INT NOT NULL, total INT NOT NULL, note VARCHAR(64) NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS settings (k VARCHAR(32) PRIMARY KEY, v INT NOT NULL)`,
 		`INSERT IGNORE INTO settings (k, v) VALUES ('tax_rate', 3)`,
 	} {
@@ -166,7 +173,7 @@ func (a *app) createOrder(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	res, err := tx.ExecContext(r.Context(), `INSERT INTO orders (qty, total) VALUES (?, ?)`, in.Qty, in.Qty*rate)
+	res, err := tx.ExecContext(r.Context(), `INSERT INTO orders (qty, total, note) VALUES (?, ?, ?)`, in.Qty, in.Qty*rate, orderNote)
 	if err != nil {
 		_ = tx.Rollback()
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -220,8 +227,13 @@ func (a *app) quote(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) count(w http.ResponseWriter, r *http.Request) {
 	var orders int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM orders`).Scan(&orders); err != nil {
+	var note string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*), COALESCE(MAX(note), '') FROM orders`).Scan(&orders, &note); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if note != "" && note != orderNote {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "an order holds another note"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"orders": orders})
