@@ -316,3 +316,87 @@ func TestDecodeHTTPChecksThePayloadHashAgainstTheBodyAsSent(t *testing.T) {
 		t.Fatalf("a gzipped SigV4 call hashed as sent was answered %q", got)
 	}
 }
+
+// Whether the session token is signed says what kind of credentials signed
+// the call (temporary: an SSO session, an assumed role, IRSA), which the
+// credentials of where the replay runs decide: a recording made with
+// temporary credentials is the call made with static ones, and the reverse.
+// Another signed header than the token is still another call.
+func TestStrictSigV4TheKindOfCredentialsIsNeverCompared(t *testing.T) {
+	body := "hello"
+	const withToken = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+	temporary := func(n int) map[string]string {
+		h := awsCall(sigV4("ASIATEMP", "20261015", "us-east-1", "s3", withToken, sig(n)), "20261015T101010Z", hashOf(body))
+		h["X-Amz-Security-Token"] = fmt.Sprintf("session-token-%d", n)
+		return h
+	}
+	static := func(n int) map[string]string {
+		return awsCall(sigV4("AKIASTATIC", "20261023", "us-east-1", "s3", signed, sig(n)), "20261023T090000Z", hashOf(body))
+	}
+	for _, tc := range []struct {
+		name      string
+		rec, live map[string]string
+	}{
+		{"recorded with temporary credentials, replayed with static ones", temporary(1), static(2)},
+		{"recorded with static credentials, replayed with temporary ones", static(1), temporary(2)},
+		{"a rotated session token", temporary(1), temporary(2)},
+	} {
+		rec := recorded("put", "/bucket/key", tc.rec, body)
+		if got, diag := strictMatch(t, sent("/bucket/key", tc.live, body), nil, nil, nil, rec); got == nil {
+			t.Fatalf("%s: not served: differs %v", tc.name, differs(diag))
+		}
+	}
+	rec := recorded("put", "/bucket/key", temporary(1), body)
+	other := temporary(2)
+	other["Authorization"] = sigV4("ASIATEMP", "20261015", "us-east-1", "s3", "host;x-amz-date;x-amz-security-token", sig(2))
+	if got, diag := strictMatch(t, sent("/bucket/key", other, body), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "header.authorization.signed_headers") {
+		t.Fatalf("another signed header than the token: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A presigned URL's session token is a credential: read by the grammar,
+// never compared. A URL presigned with temporary credentials is the one
+// presigned again with a rotated token, or with static credentials.
+func TestStrictSigV4APresignedURLsSessionTokenIsNeverCompared(t *testing.T) {
+	withToken := func(path, token string) string { return path + "&X-Amz-Security-Token=" + token }
+	rec := recorded("get", withToken(presigned("ASIATEMP/20261015/us-east-1/s3/aws4_request", "20261015T101010Z", 900, 1), "token-a"), nil, "")
+	for name, path := range map[string]string{
+		"a rotated token":     withToken(presigned("ASIATEMP/20261015/us-east-1/s3/aws4_request", "20261015T101533Z", 900, 2), "token-b"),
+		"static credentials":  presigned("AKIASTATIC/20261023/us-east-1/s3/aws4_request", "20261023T090000Z", 900, 2),
+		"the token, recorded": withToken(presigned("ASIATEMP/20261015/us-east-1/s3/aws4_request", "20261015T101533Z", 900, 2), "token-a"),
+	} {
+		if got, diag := strictMatch(t, sent(path, nil, ""), nil, nil, nil, rec); got == nil {
+			t.Fatalf("%s: not served: differs %v", name, differs(diag))
+		}
+	}
+}
+
+// aws-sdk-java v1's retry header differs from call to call once one
+// throttle came: noise under the switch, and only there.
+func TestStrictTheJavaSDKsRetryHeaderIsNoise(t *testing.T) {
+	if _, ok := models.ProvenFlakyHeaderNoise()["amz-sdk-retry"]; !ok {
+		t.Fatal("amz-sdk-retry is not on the switched static list")
+	}
+	if _, ok := models.FlakyHeaderNoise()["amz-sdk-retry"]; ok {
+		t.Fatal("amz-sdk-retry joined the list without the switch")
+	}
+	rec := recorded("post", "/", map[string]string{"Amz-Sdk-Retry": "0/0/500"}, "{}")
+	if got, diag := strictMatch(t, sent("/", map[string]string{"Amz-Sdk-Retry": "0/0/495"}, "{}"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a call after a throttle was not served: differs %v", differs(diag))
+	}
+}
+
+// The learn step reads the proven switch's own static additions as the
+// strict matcher does: one list (models.ProvenOnlyFlakyHeaders).
+func TestTheLearnStepReadsTheProvenOnlyStaticHeaders(t *testing.T) {
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	n := h.newLearnNoise(models.OutgoingOptions{}, nil, nil)
+	for _, k := range models.ProvenOnlyFlakyHeaders {
+		if !n.headers[k] {
+			t.Fatalf("the learn step compares %s, which the strict matcher excuses", k)
+		}
+		if _, ok := models.ProvenFlakyHeaderNoise()[k]; !ok {
+			t.Fatalf("%s is not on the strict matcher's switched list", k)
+		}
+	}
+}

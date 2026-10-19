@@ -214,8 +214,12 @@ func TestStrictFitsHoldsAnotherParsersRecordingsToTheStrictRule(t *testing.T) {
 		t.Fatal("a call signed with other credentials does not fit (the access key is not compared)")
 	}
 	for name, edit := range map[string]func(h http.Header){
-		"another region":         func(h http.Header) { h.Set("Authorization", strings.Replace(h.Get("Authorization"), "us-east-1", "eu-west-1", 1)) },
-		"other signed headers":   func(h http.Header) { h.Set("Authorization", strings.Replace(h.Get("Authorization"), "content-type;", "", 1)) },
+		"another region": func(h http.Header) {
+			h.Set("Authorization", strings.Replace(h.Get("Authorization"), "us-east-1", "eu-west-1", 1))
+		},
+		"other signed headers": func(h http.Header) {
+			h.Set("Authorization", strings.Replace(h.Get("Authorization"), "content-type;", "", 1))
+		},
 		"another operation":      func(h http.Header) { h.Set("X-Amz-Target", "AmazonSQS.SendMessageBatch") },
 		"another header's value": func(h http.Header) { h.Set("Content-Type", "application/json") },
 	} {

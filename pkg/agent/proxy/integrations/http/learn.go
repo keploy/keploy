@@ -77,6 +77,12 @@ func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][
 				n.headers[k] = true
 			}
 		}
+		// The proven switch's own additions, as the strict matcher reads
+		// them (models.ProvenFlakyHeaderNoise): the learn step runs under the
+		// switch only.
+		for _, k := range models.ProvenOnlyFlakyHeaders {
+			n.headers[k] = true
+		}
 	}
 	return n
 }

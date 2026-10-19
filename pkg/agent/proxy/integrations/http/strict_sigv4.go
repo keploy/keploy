@@ -161,10 +161,31 @@ func sigV4AuthorizationDiffs(rec, live string) (out []strictField, ok bool) {
 		return nil, false
 	}
 	out = sigV4ScopeDiffs("header.authorization", ra.scope, la.scope)
-	if ra.signedHeaders != la.signedHeaders {
+	if signedHeadersWithoutToken(ra.signedHeaders) != signedHeadersWithoutToken(la.signedHeaders) {
 		out = append(out, field(valueDiff("header.authorization.signed_headers", ra.signedHeaders, la.signedHeaders)))
 	}
 	return out, true
+}
+
+// sigV4SecurityToken is the SigV4 session token's header, signed exactly when
+// the credentials are temporary (an SSO session, an assumed role, IRSA).
+const sigV4SecurityToken = "x-amz-security-token"
+
+// signedHeadersWithoutToken is a SignedHeaders list without the session
+// token's header: whether it is signed says what kind of credentials signed
+// the call, which the credentials of where the replay runs decide, as they
+// decide the access key id (SF-3, founder ruling: credential and
+// environment values are never compared). Compared, a recording made with
+// temporary credentials missed every replay with static ones, and the
+// reverse.
+func signedHeadersWithoutToken(list string) string {
+	var out []string
+	for _, h := range strings.Split(list, ";") {
+		if h != sigV4SecurityToken {
+			out = append(out, h)
+		}
+	}
+	return strings.Join(out, ";")
 }
 
 // samePayloadHash reports whether a live x-amz-content-sha256 is the recorded
@@ -190,6 +211,9 @@ const (
 	amzCredential = "X-Amz-Credential"
 	amzDate       = "X-Amz-Date"
 	amzSignature  = "X-Amz-Signature"
+	// amzSecurityToken is the session token of temporary credentials, in
+	// a presigned URL's query.
+	amzSecurityToken = "X-Amz-Security-Token"
 )
 
 // parsePresignedSigV4 reads a query as a SigV4 presigned URL's: X-Amz-Algorithm
@@ -235,16 +259,20 @@ func firstOf(v []string) string {
 
 // presignedDiffs compares the signing parameters of two presigned URLs
 // (parsePresignedSigV4): the credential by its parts
-// (query.X-Amz-Credential.<part>), the signature and the signing time not at
-// all. byGrammar names the parameters it read, which the query comparison
-// does not compare again; nil when either query is no presigned URL's, and
-// the query is compared value by value, as before.
+// (query.X-Amz-Credential.<part>), the signature, the signing time and the
+// session token not at all. byGrammar names the parameters it read, which
+// the query comparison does not compare again; nil when either query is no
+// presigned URL's, and the query is compared value by value, as before.
 func presignedDiffs(rec, live url.Values) (byGrammar map[string]bool, out []strictField) {
 	rp, rok := parsePresignedSigV4(rec)
 	lp, lok := parsePresignedSigV4(live)
 	if !rok || !lok {
 		return nil, nil
 	}
-	return map[string]bool{amzCredential: true, amzDate: true, amzSignature: true},
+	// X-Amz-Security-Token, the session token of temporary credentials, is
+	// a credential: read by the grammar, never compared (SF-3), as its
+	// header form is noise. Compared by value, every URL presigned with
+	// temporary credentials missed, its token rotating hourly.
+	return map[string]bool{amzCredential: true, amzDate: true, amzSignature: true, amzSecurityToken: true},
 		sigV4ScopeDiffs("query."+amzCredential, rp.scope, lp.scope)
 }
