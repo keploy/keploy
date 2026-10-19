@@ -11,7 +11,16 @@
 // fingerprint (Fingerprint), next to the facts a line keeps that are not
 // content: a message's type, an op's name, ids, header names, counts. Setting
 // EnvVar to 1 or true is the explicit opt-in: each helper then logs the value
-// itself, as zap.ByteString, zap.String and zap.Any do.
+// itself, as zap.ByteString, zap.Binary, zap.String and zap.Any do.
+//
+// A URL's query is content; its path is kept. Lines name a call by its
+// method and path, as the test case's name and keploy's report do. A path
+// can hold an application's value too (a token in /reset/<token>, an email
+// address in /users/<email>), and keploy cannot tell such a segment from a
+// route's by looking at it, so the lines a default run prints for a call
+// keploy could not answer name it by its shape (models.CallShape), which
+// writes a segment that does not read as a name as {}. The Debug lines that
+// trace a call keep its path whole: that is the trade this package makes.
 //
 // It depends on nothing of keploy's, so the parsers in keploy, integrations
 // and enterprise all import the same switch.
@@ -33,6 +42,11 @@ import (
 // EnvVar, set to 1 or true, opts into log lines that carry customer content.
 const EnvVar = "KEPLOY_LOG_CONTENT"
 
+// AgentFlag is the hidden `keploy agent` flag that carries the opt-in to a
+// native agent (AgentArgs): one a user who is not root starts through sudo,
+// which drops EnvVar on the way.
+const AgentFlag = "log-content"
+
 // on is EnvVar's answer, read once at start. It is atomic so that a test's
 // Set does not race the tests logging beside it.
 var on atomic.Bool
@@ -48,6 +62,21 @@ func Wanted(v string) bool {
 // On reports whether log lines carry customer content (EnvVar, read once at
 // start).
 func On() bool { return on.Load() }
+
+// OptIn turns the switch on for the rest of the process: the agent's, when
+// its AgentFlag says the keploy that started it was opted in. It is read at
+// start, as EnvVar is, before any line that carries content is logged.
+func OptIn() { on.Store(true) }
+
+// AgentArgs is what a launcher appends to the argv of the native agent it
+// starts: AgentFlag when the switch is on in this process, nothing otherwise,
+// so with it off the argv is what it was.
+func AgentArgs() []string {
+	if !On() {
+		return nil
+	}
+	return []string{"--" + AgentFlag}
+}
 
 // Set turns the switch on or off for a test and returns what puts it back.
 // Reading the switch while a test flips it is safe from any goroutine, but
@@ -75,6 +104,16 @@ func Set(v bool) (restore func()) {
 func Bytes(key string, b []byte) zap.Field {
 	if on.Load() {
 		return zap.ByteString(key, b)
+	}
+	return zap.Object(key, bytesDigest(b))
+}
+
+// Binary is zap.Binary(key, b), b as base64, with the switch on, and with it
+// off what Bytes logs: the same payload logged by Bytes and Binary is named
+// by the same fingerprint, whichever way a line would have written it.
+func Binary(key string, b []byte) zap.Field {
+	if on.Load() {
+		return zap.Binary(key, b)
 	}
 	return zap.Object(key, bytesDigest(b))
 }
