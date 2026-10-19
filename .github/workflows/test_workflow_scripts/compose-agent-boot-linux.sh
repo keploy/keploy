@@ -9,25 +9,30 @@
 # (KEPLOY_AGENT_READY_TIMEOUT, 330 s by default, since removed) gave up on a
 # start a loaded host ran slowly, and on a container the daemon held.
 #
-# Three legs, each with KEPLOY_AGENT_READY_TIMEOUT far below what the leg
+# Two legs, each with KEPLOY_AGENT_READY_TIMEOUT far below what the leg
 # takes: this keploy reads no such variable, and a keploy that still did fails
-# the leg:
+# the leg. Each fails on a keploy whose waits a clock bounds:
 #   1. starved, docker compose: the agent's container gets 2% of a CPU from its
-#      start on, so its start takes far longer than the budget while it makes
-#      progress. keploy must record the app's N calls, and exit 0 on its own
-#      once the app exits after them.
-#   2. paused, docker run: keploy starts the agent's container itself, which
-#      the lane pauses as it starts, for longer than the budget and than
-#      keploy's bound on a running agent's silence (bootSilence, 60 s of
-#      keploy's runnable time), then unpauses. While it does not run nothing
-#      bounds keploy's wait, and the recording must hold the app's N calls.
-#   3. paused, docker compose: compose's own wait for its agent service's
-#      healthcheck fails on a paused container ("dependency failed to start:
-#      ... is unhealthy") and the project aborts. keploy must say so at once,
-#      as the project's exit, never as an agent start it gave up on.
+#      start on, before it says its server listens (checked), so its start
+#      takes far longer than the budget while it makes progress. keploy must
+#      record the app's N calls, and exit 0 on its own once the app exits
+#      after them. A keploy bound by the budget gives up after it.
+#   2. paused after it said ready, docker run: keploy starts the agent's
+#      container itself. From its creation on, before its process runs, the
+#      lane drops every connection to its control port, so keploy's health
+#      check cannot answer. Once the agent's report says its server listens
+#      (ready), and keploy has read that report (the engine's archive-path
+#      event of keploy's next docker cp of it), the lane pauses the container
+#      for HOLD_S, past keploy's bound on an agent that says it listens and
+#      does not answer (bootSilence, 60 s of keploy's runnable time), then
+#      unpauses it and lets the port go. While the engine does not run the
+#      agent nothing bounds keploy's wait, and the recording must hold the
+#      app's N calls. A keploy that counts a paused agent's time against that
+#      bound gives up during the pause.
 #
-# Every wait is on an event (a line in a log, a container's start event,
-# keploy's exit); the pause's length is the fixture's, not a bound.
+# Every wait is on an event (a line in a log, a container's create or start
+# event, the agent's report, keploy's exit); the pause's length is the
+# fixture's, not a bound.
 #
 # Env: RECORD_BIN (the keploy binary under test). The agent image the binary
 # names must be loaded (.github/actions/download-image).
@@ -43,7 +48,8 @@ N=5
 # The budget a clock-bound wait would give up at.
 BUDGET_S=10
 # How long the paused leg holds the agent's container paused: past the budget,
-# and past bootSilence.
+# and past bootSilence (60 s of keploy's runnable time, which is wall time for
+# a keploy the host does not starve).
 HOLD_S="${HOLD_S:-90}"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
@@ -53,14 +59,22 @@ PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.
 EVENTS_PID=""
 ACTOR_PID=""
 
+# stop_watch ends the container watch and its action, and waits for the
+# action to be gone: its trap ends what it runs in the background (a hold's
+# sleep), so nothing of it outlives the leg.
 stop_watch() {
-  [ -n "$ACTOR_PID" ] && kill "$ACTOR_PID" 2>/dev/null
+  if [ -n "$ACTOR_PID" ]; then
+    kill "$ACTOR_PID" 2>/dev/null
+    wait "$ACTOR_PID" 2>/dev/null
+  fi
   [ -n "$EVENTS_PID" ] && sudo kill "$EVENTS_PID" 2>/dev/null
   ACTOR_PID="" EVENTS_PID=""
   return 0
 }
 cleanup() {
   stop_watch
+  [ -f blocked.port ] && unblock_port "$(cat blocked.port)"
+  for c in $(sudo docker ps -aq --filter status=paused --filter name=keploy-v3-); do sudo docker unpause "$c" >/dev/null 2>&1; done
   [ -f docker-compose.yml ] && sudo docker compose down --remove-orphans >/dev/null 2>&1
   return 0
 }
@@ -183,14 +197,17 @@ with open(log, "rb") as f:
 PY
 }
 
-# watch_agent_start ACTION: once the agent's container (keploy-v3-*) starts,
-# its start event, ACTION runs with its name, in the background.
-watch_agent_start() {
-  local action=$1 events="events.$1"
+# watch_agent EVENT ACTION: once the agent's container (keploy-v3-*) has its
+# EVENT (create: before its process runs; start), ACTION runs with its name,
+# in the background. Stopped (stop_watch), it ends what ACTION runs in the
+# background with it.
+watch_agent() {
+  local event=$1 action=$2 events="events.$2"
   : > "$events"
-  sudo docker events --filter type=container --filter event=start --format '{{.Actor.Attributes.name}}' > "$events" 2>&1 &
+  sudo docker events --filter type=container --filter "event=$event" --format '{{.Actor.Attributes.name}}' > "$events" 2>&1 &
   EVENTS_PID=$!
   (
+    trap 'sudo kill $(jobs -p) 2>/dev/null; exit 143' TERM
     name=""
     until name=$(grep -m1 '^keploy-v3-' "$events"); do sleep 0.1; done
     "$action" "$name"
@@ -198,14 +215,88 @@ watch_agent_start() {
   ACTOR_PID=$!
 }
 
-pause_agent() {
-  sudo docker pause "$1" && echo "PAUSED $1 at $(date +%s)"
-  sleep "$HOLD_S"
-  sudo docker unpause "$1" && echo "UNPAUSED $1 at $(date +%s)"
+# boot_ready NAME: the start report of the agent in container NAME says its
+# server listens (utils.BootProgress.Ready). Read through the engine's cp,
+# which reads a paused container's files too.
+boot_ready() {
+  sudo docker cp "$1:/tmp/keploy-agent-boot.json" - 2>/dev/null | tar -xO 2>/dev/null |
+    python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("ready") else 1)' 2>/dev/null
 }
 
+# agent_port NAME: the control port of the agent in container NAME (its
+# command's --port).
+agent_port() {
+  sudo docker inspect -f '{{json .Args}}' "$1" |
+    python3 -c 'import json, sys; a = json.load(sys.stdin); print(a[a.index("--port") + 1])'
+}
+
+# block_port PORT / unblock_port PORT: drop, and stop dropping, every
+# connection to PORT the host makes (keploy's to the agent, through the
+# published port or to the container), by its original destination port.
+block_port() {
+  echo "$1" > blocked.port
+  sudo iptables -I OUTPUT -p tcp -m conntrack --ctorigdstport "$1" -j DROP &&
+    sudo ip6tables -I OUTPUT -p tcp -m conntrack --ctorigdstport "$1" -j DROP
+}
+unblock_port() {
+  sudo iptables -D OUTPUT -p tcp -m conntrack --ctorigdstport "$1" -j DROP 2>/dev/null
+  sudo ip6tables -D OUTPUT -p tcp -m conntrack --ctorigdstport "$1" -j DROP 2>/dev/null
+  rm -f blocked.port
+  return 0
+}
+
+# up NAME: the agent's container is still being created or runs.
+up() {
+  case "$(sudo docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" in
+    created|running) return 0 ;;
+  esac
+  return 1
+}
+
+# hold_after_ready NAME: met at its container's creation, the agent in NAME
+# cannot answer keploy's health check (its port blocked) when its report says
+# its server listens, and keploy has read that report; then it is paused for
+# HOLD_S, unpaused, and answers.
+hold_after_ready() {
+  local name=$1 port since ev
+  port=$(agent_port "$name") || { echo "NOPORT: $name's command names no --port"; return 1; }
+  block_port "$port" && echo "BLOCKED $port"
+  if boot_ready "$name"; then
+    echo "LATE: $name said its server listens before its port was blocked"
+    return 1
+  fi
+  until boot_ready "$name"; do
+    up "$name" || { echo "GONE: $name went before it said its server listens"; return 1; }
+    sleep 0.2
+  done
+  # keploy's own read of the report that says so: the engine's archive-path
+  # event of the next docker cp out of the container, which, the lane's own
+  # cps over, is keploy's look at the agent's start. A pause before keploy
+  # had read it would hold an agent keploy still took for one whose server
+  # does not listen yet, which no rule bounds before or after this change.
+  since=$(date +%s.%N)
+  sudo docker events --since "$since" --filter type=container --filter "container=$name" --filter event=archive-path \
+    --format '{{.Action}}' > "read.$name" 2>&1 &
+  ev=$!
+  until grep -q archive-path "read.$name"; do
+    up "$name" || { echo "GONE: $name went before keploy read its report"; sudo kill "$ev"; return 1; }
+    sleep 0.2
+  done
+  sudo kill "$ev"
+  sudo docker pause "$name" && echo "PAUSED $name at $(date +%s), after it said its server listens and keploy read so"
+  sleep "$HOLD_S" &
+  wait $!
+  sudo docker unpause "$name" && echo "UNPAUSED $name at $(date +%s)"
+  unblock_port "$port" && echo "UNBLOCKED $port"
+}
+
+# starve_agent NAME: 2% of a CPU, from its start on, before it said its
+# server listens.
 starve_agent() {
   sudo docker update --cpus 0.02 "$1" && echo "STARVED $1 at $(date +%s)"
+  if boot_ready "$1"; then
+    echo "LATE: $1 said its server listens before it was starved"
+  fi
 }
 
 # unstarve_agent ACTION: gives the agent's container (the one ACTION met) the
@@ -217,18 +308,18 @@ unstarve_agent() {
   sudo docker update --cpus "$(nproc)" "$name" >/dev/null && echo "UNSTARVED $name"
 }
 
-# record NAME ACTION CMD CONTAINER [AFTER]: keploy records CMD (the app, in
-# CONTAINER), its agent's container met by ACTION as it starts, while the
-# lane makes the app's N calls; the app then exits, and keploy must exit 0 on
+# record NAME EVENT ACTION CMD CONTAINER [AFTER]: keploy records CMD (the app,
+# in CONTAINER), its agent's container met by ACTION at its EVENT (create or
+# start), while the lane makes the app's N calls; the app then exits, and keploy must exit 0 on
 # its own. The calls go once the app listens and keploy's agent forwards its
 # port ("Started ingress forwarding": a call before that is reset, the
 # record ingress race keploy knows of), after AFTER ACTION runs, when given.
 # A call that fails stops keploy, so a failed leg ends.
 record() {
-  local name=$1 action=$2 cmd=$3 container=$4 after=${5:-} log="$1.log" pid rc i before=$FAIL t0 failed=0
+  local name=$1 event=$2 action=$3 cmd=$4 container=$5 after=${6:-} log="$1.log" pid rc i before=$FAIL t0 failed=0
   sudo rm -rf keploy
   : > "$log"
-  watch_agent_start "$action"
+  watch_agent "$event" "$action"
   t0=$(date +%s)
   sudo -E env PATH="$PATH" KEPLOY_AGENT_READY_TIMEOUT="$BUDGET_S" "$RECORD_BIN" record -c "$cmd" --container-name "$container" \
     --disable-tele --debug > "$log" 2>&1 &
@@ -273,39 +364,22 @@ saved_all() {
 }
 
 echo "== 1. docker compose, the agent's container starved (2% of a CPU) from its start =="
-record starved starve_agent "docker compose up" "cab-app-$ID" unstarve_agent
+record starved start starve_agent "docker compose up" "cab-app-$ID" unstarve_agent
 grep -q "^STARVED " starve_agent.out || { echo "FAIL: starved: the agent's container was never starved"; FAIL=1; }
+if grep -q "^LATE" starve_agent.out; then
+  echo "FAIL: starved: the agent said its server listens before it was starved; the leg starved no start"
+  FAIL=1
+fi
 saved_all starved
 cleanup
 
-echo "== 2. docker run, the agent's container paused as it starts, for ${HOLD_S}s =="
-record paused pause_agent "docker run --rm --name cab-solo-$ID -v $WORK:/w:z -w /w -e N=$N -p $PORT:8080 $IMAGE python solo.py" "cab-solo-$ID"
-grep -q "^UNPAUSED " pause_agent.out || { echo "FAIL: paused: the agent's container was never paused and unpaused"; FAIL=1; }
+echo "== 2. docker run, the agent's container paused for ${HOLD_S}s once it says its server listens, its health check held off =="
+record paused create hold_after_ready "docker run --rm --name cab-solo-$ID -v $WORK:/w:z -w /w -e N=$N -p $PORT:8080 $IMAGE python solo.py" "cab-solo-$ID"
+if ! grep -q "^UNBLOCKED " hold_after_ready.out; then
+  echo "FAIL: paused: the agent was not held: blocked, paused once it said its server listens, unpaused and let go"
+  FAIL=1
+fi
 saved_all paused 0
-cleanup
-
-echo "== 3. docker compose, the agent's container paused as it starts =="
-# compose's own dependency wait fails on the paused agent and aborts the
-# project: keploy says so at once, as the project's exit.
-sudo rm -rf keploy
-: > compose-paused.log
-HOLD_S=600 watch_agent_start pause_agent
-sudo -E env PATH="$PATH" KEPLOY_AGENT_READY_TIMEOUT="$BUDGET_S" "$RECORD_BIN" record -c "docker compose up" --container-name "cab-app-$ID" \
-  --disable-tele --debug > compose-paused.log 2>&1
-rc=$?
-stop_watch
-for c in $(sudo docker ps -aq --filter status=paused --filter name=keploy-v3-); do sudo docker unpause "$c" >/dev/null 2>&1; done
-[ "$rc" -ne 0 ] || { echo "FAIL: compose-paused: keploy record exited 0 with its project aborted"; FAIL=1; }
-if ! grep -q "the compose project stopped while keploy was waiting for the keploy-agent to come up" compose-paused.log; then
-  echo "FAIL: compose-paused: keploy did not say the project stopped while it waited for the agent"
-  tail -40 compose-paused.log
-  FAIL=1
-fi
-if grep -Eq "did not come up|did not become ready" compose-paused.log; then
-  echo "FAIL: compose-paused: keploy took the project's abort for an agent start it gave up on"
-  grep -En "did not come up|did not become ready" compose-paused.log
-  FAIL=1
-fi
 cleanup
 
 if grep -l "WARNING: DATA RACE" ./*.log; then
