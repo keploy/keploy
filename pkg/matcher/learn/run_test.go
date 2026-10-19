@@ -216,38 +216,67 @@ func TestNamedLeavesTheExchangeItWasGiven(t *testing.T) {
 	}
 }
 
+// wrote is an exchange of the run that wrote rec, made live, into record at
+// path (Seen.Written, Seen.Record), typed typ.
+func wrote(mock string, at time.Time, record, path string, typ Type, rec, live string) Earlier {
+	return Earlier{Mock: mock, At: at, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: typ, Value: rec}, Live: live, Place: path, Written: true, Record: record}}}
+}
+
 // An answer that holds a value an earlier call wrote with another value in
-// this run is answered with the value where it was first written; a short
-// value, or one no call wrote anew, is not.
+// this run, into the record the read names, is answered with the value where
+// it was first written, whatever its length, script or type. A value no
+// linked write stored is not: one the write did not change, one a call only
+// named (not Written), one whose live value is unknown, one written into
+// another record, and any read the adapter links to no record.
 func TestReadBack(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
+	const order = "orders\x00o-live-1"
+	named := wrote("mock-7", t0, order, "body.note", String, "abc", "xyz")
+	named.Seen[0].Written = false
+	unknown := wrote("mock-8", t0, order, "body.tag", String, "t-rec", "")
 	earlier := []Earlier{
-		sent("mock-3", t0.Add(time.Second), "body.code", "body.code", "BJBM-NZBS", "QQRT-XKCD"),
-		sent("mock-1", t0.Add(-time.Second), "body.code", "body.code", "BJBM-NZBS", "FRST-XKCD"),
-		sent("mock-2", t0, "body.created", "body.created", "1792000000000", "1792000555000"),
-		sent("mock-4", t0, "body.n", "body.n", "12", "13"),
-		sent("mock-5", t0, "body.kind", "body.kind", "pending", "pending"),
-		sent("mock-6", t0, "body.name", "body.name", "日本", "韓国"),
+		wrote("mock-3", t0.Add(time.Second), order, "body.code", String, "BJBM-NZBS", "QQRT-XKCD"),
+		wrote("mock-1", t0.Add(-time.Second), order, "body.code", String, "BJBM-NZBS", "FRST-XKCD"),
+		wrote("mock-2", t0, order, "body.created", Number, "1792000000000", "1792000555000"),
+		wrote("mock-4", t0, order, "body.pin", String, "48213", "90717"),
+		wrote("mock-5", t0, order, "body.kind", String, "pending", "pending"),
+		wrote("mock-6", t0, order, "body.name", String, "日本", "韓国"),
+		wrote("mock-9", t0, "orders\x00o-live-2", "body.code2", String, "ZZZZ-1111", "YYYY-2222"),
+		named, unknown,
 	}
 	for _, c := range []struct {
-		value, mock, live string
+		value  string
+		typ    Type
+		record string
+		mock   string
+		live   string
 	}{
-		{"BJBM-NZBS", "mock-1", "FRST-XKCD"},
-		{"1792000000000", "mock-2", "1792000555000"},
-		{"12", "", ""},
-		{"pending", "", ""},
-		{"日本", "", ""},
+		{"BJBM-NZBS", String, order, "mock-1", "FRST-XKCD"},
+		{"1792000000000", Number, order, "mock-2", "1792000555000"},
+		{"1792000000000", String, order, "mock-2", "1792000555000"},
+		{"48213", Number, order, "mock-4", "90717"},
+		{"日本", String, order, "mock-6", "韓国"},
+		{"pending", String, order, "", ""},
+		{"abc", String, order, "", ""},
+		{"t-rec", String, order, "", ""},
+		{"ZZZZ-1111", String, order, "", ""},
+		{"BJBM-NZBS", String, "orders\x00o-live-2", "", ""},
+		{"BJBM-NZBS", String, "", "", ""},
+		{"", String, order, "", ""},
 	} {
-		p, ok := ReadBack(Leaf{Path: "body.value.x", Type: String, Value: c.value}, earlier)
+		p, ok := ReadBack(Leaf{Path: "body.value.x", Type: c.typ, Value: c.value}, c.record, earlier)
 		if c.mock == "" {
 			if ok {
-				t.Fatalf("%q was read back from %+v", c.value, p)
+				t.Errorf("%q (%c) of record %q was read back from %+v", c.value, c.typ, c.record, p)
 			}
 			continue
 		}
 		if !ok || p.Mock != c.mock || p.Live != c.live || p.Side != Request || !p.Whole {
-			t.Fatalf("%q read back as %+v (%v), want it from %s with %q", c.value, p, ok, c.mock, c.live)
+			t.Errorf("%q (%c) of record %q read back as %+v (%v), want it from %s with %q", c.value, c.typ, c.record, p, ok, c.mock, c.live)
 		}
+	}
+	if _, ok := ReadBack(Leaf{Path: "body.value.x", Type: String, Value: "BJBM-NZBS", Unnamed: true}, order, earlier); ok {
+		t.Error("an unnamed leaf was read back")
 	}
 }
 

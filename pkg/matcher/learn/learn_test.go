@@ -643,10 +643,15 @@ func TestClockOf(t *testing.T) {
 		{"no word changed", "a-b", "a_b", false},
 		{"an emoji", "🦊", "🐼", false},
 		{"ten digits outside the clock's years", "0000000041", "0000000102", false},
+		{"ten digits that did not move by the lead", "2025551234", "2025559876", false},
 	} {
 		c := clockOf(tc.rec, tc.live)
 		if c.whole != tc.whole {
 			t.Errorf("%s: whole %v, want %v (%q→%q, clock words %v %v)", tc.name, c.whole, tc.whole, tc.rec, tc.live, c.rec, c.live)
+		}
+		// ClockOf is that evidence, for an adapter.
+		if ClockOf(tc.rec, tc.live) != tc.whole {
+			t.Errorf("%s: ClockOf %v, want %v", tc.name, !tc.whole, tc.whole)
 		}
 	}
 	// A UUID v7's time groups moved with the clock; its random ones did not.

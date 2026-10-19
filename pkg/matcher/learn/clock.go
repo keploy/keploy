@@ -43,6 +43,18 @@ var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?`), read: readTimeOfDay, wraps: true},
 }
 
+// ClockOf reports whether a value drifted only with F's clock: every word
+// that changed between its recording (recorded) and record's full round
+// (live) is a part of a clock read that moved by FullRoundLead, and one did.
+// It is the evidence Classify reads (clockOf), read at learn time: live is
+// the value F saw, its clock set past each recorded instant by the lead. An
+// adapter asks it, and has no rule of its own of what a time looks like: a
+// value that only looks like one ("2025551234") and did not move by the
+// lead is no clock read.
+func ClockOf(recorded, live string) bool {
+	return clockOf(recorded, live).whole
+}
+
 // clockOf finds in a drifted value the clock reads that moved by
 // FullRoundLead: the recorded and the live value are each searched for
 // instants in clockLayouts, at ASCII word boundaries (so one glued to text
