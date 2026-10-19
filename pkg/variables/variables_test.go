@@ -442,23 +442,26 @@ func TestTable_AScopeBegunEarlyAndTheRunBindConcurrently(t *testing.T) {
 	}
 }
 
-// BindEach binds variables that share a live value, and refuses only a name
-// bound to another value, or a call of a previous scope.
-func TestTable_BindEach(t *testing.T) {
+// BindAll is the only bind of a call: two variables recorded with two values
+// never share one live value, whatever the values look like (two reads of
+// one clock in one millisecond included), in one call, across calls, and
+// against the run's.
+func TestTable_TwoVariablesNeverShareALiveValue(t *testing.T) {
+	const live = "1792000000000"
 	var tb Table
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "session", Value: "S", Recorded: "s-1"})
 	tb.Reset()
-	gen := tb.Gen()
-	if stale, ok := tb.BindEach(gen, []Binding{{Name: "created", Value: "1792000000000", Recorded: "1"}, {Name: "polled", Value: "1792000000000", Recorded: "2"}}); stale || !ok {
-		t.Fatal("two clock reads of one millisecond did not both bind")
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "created", Value: live, Recorded: "1"}, {Name: "polled", Value: live, Recorded: "2"}}); ok {
+		t.Fatal("two variables recorded with two values bound one live value in one call")
 	}
-	if _, ok := tb.BindEach(gen, []Binding{{Name: "created", Value: "1792000000001", Recorded: "1"}}); ok {
-		t.Fatal("a bound name took another value")
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "created", Value: live, Recorded: "1"}}); !ok {
+		t.Fatal("created could not bind")
 	}
-	if _, ok := tb.BindEach(gen, []Binding{{Name: "a", Value: "1"}, {Name: "a", Value: "2"}}); ok {
-		t.Fatal("a name given twice with two values bound")
+	if bad, with, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "polled", Value: live, Recorded: "2"}}); ok || bad.Name != "polled" || with.Name != "created" {
+		t.Fatalf("a later call bound polled to created's live value: ok %v, evidence %+v %+v", ok, bad, with)
 	}
-	tb.Reset()
-	if stale, _ := tb.BindEach(gen, []Binding{{Name: "x", Value: "1"}}); !stale {
-		t.Fatal("a call of the previous scope bound in this one")
+	if bad, with, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "order", Value: "S", Recorded: "o-1"}}); ok || with.Name != "session" {
+		t.Fatalf("a call bound the run's live value as another variable: ok %v, evidence %+v %+v", ok, bad, with)
 	}
 }

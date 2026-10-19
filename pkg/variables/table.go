@@ -133,8 +133,8 @@ func (t *Table) Lookup(name string) (Binding, bool) {
 
 // Bind records b unless its name is already bound. It returns the binding in
 // force afterwards and whether it is b. It is for a value of no call (a
-// start-up's, a given one): a call checked in a scope binds with BindAll or
-// BindEach, which refuse a call of a scope that ended since.
+// start-up's, a given one): a call checked in a scope binds with BindAll,
+// which refuses a call of a scope that ended since.
 func (t *Table) Bind(b Binding) (Binding, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -223,35 +223,6 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 		}
 	}
 	return Binding{}, Binding{}, false, true
-}
-
-// BindEach binds each of bs on its own, under one lock, for a call checked in
-// scope gen: a name already bound, or given twice in bs, must hold the same
-// value, and nothing else is required of it (two variables may share a live
-// value: two clock reads of one millisecond). stale is true when a new scope
-// began since gen; nothing is bound unless ok.
-func (t *Table) BindEach(gen uint64, bs []Binding) (stale, ok bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if gen != t.gen {
-		return true, false
-	}
-	for i, b := range bs {
-		if have, bound := t.lookup(b.Name); bound && have.Value != b.Value {
-			return false, false
-		}
-		for _, other := range bs[:i] {
-			if other.Name == b.Name && other.Value != b.Value {
-				return false, false
-			}
-		}
-	}
-	for _, b := range bs {
-		if _, bound := t.lookup(b.Name); !bound {
-			t.put(b)
-		}
-	}
-	return false, true
 }
 
 // Start begins a new scope (as Reset) with the values its test case gave
