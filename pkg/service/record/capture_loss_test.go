@@ -224,13 +224,20 @@ func TestARecordingThatLostNothingPasses(t *testing.T) {
 	}
 }
 
-// With the switch off, or an agent that cannot count, nothing is read and
+// With the switch off nothing fails and no loss is said but a failed TLS
+// handshake (caRejectWatch: the count is read as capture begins and as each
+// test case is saved, for that WARN alone); with an agent that cannot count,
 // nothing fails.
 func TestTheCaptureWatchIsOffWithoutTheSwitchOrACount(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	off := &countingInstr{answers: []models.CaptureLosses{nil, pid(9)}}
-	if _, failed, _ := record3(t, off); failed || off.reads != 0 {
-		t.Fatalf("switch off: failed %v after %d reads; want no read and no failure", failed, off.reads)
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), off)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	if failed := w.finish("test-set-0"); failed || logs.Len() != 0 || off.reads != 4 {
+		t.Fatalf("switch off: failed %v, logged %v, after %d reads; want no failure, nothing said of a PID map loss, and the CA WARN's 4 reads", failed, logs.All(), off.reads)
 	}
 	t.Setenv(provenswitch.Env, "1")
 	unsupported := &countingInstr{answers: []models.CaptureLosses{nil}, errAt: map[int]error{1: models.ErrCaptureLossesUnsupported}}
