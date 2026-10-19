@@ -1281,22 +1281,43 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 // back whatever its length, script or type (the request place's type is not
 // compared with r's: an id stored as a number is read back as text), and a
 // value no linked write stored is never read back, however it looks.
+//
+// Two fields of the record written with r's recorded value that drifted to
+// two live values (each field's first write) are two values r may be: the
+// evidence does not say which field r reads, so r is read back from neither,
+// and its drift stays unexplained.
 func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	if r.Unnamed || r.Value == "" || record == "" {
 		return Place{}, false
 	}
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	var first Place
+	found := false
+	// The live value of each field's first write: a later write of a field
+	// carries it on.
+	firstLive := map[string]string{}
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if s.Side != Request || !s.Written || s.Record != record || s.Place == "" || s.Leaf.Value != r.Value || s.Live == s.Leaf.Value || s.Live == "" {
 				continue
 			}
-			return Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}, true
+			if _, ok := firstLive[s.Place]; !ok {
+				firstLive[s.Place] = s.Live
+			}
+			if !found {
+				first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+					Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
+				found = true
+			}
 		}
 	}
-	return Place{}, false
+	for _, live := range firstLive {
+		if live != first.Live {
+			return Place{}, false
+		}
+	}
+	return first, found
 }
 
 // Named is e with each request place that holds one of vars (as its bind or

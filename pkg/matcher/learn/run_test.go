@@ -332,6 +332,56 @@ func TestReadBack(t *testing.T) {
 	}
 }
 
+// Two fields of one record written with the same recorded value that drifted
+// to two live values are two values a read of it may be: which field the
+// read reads, the evidence does not say, so it is read back from neither
+// (the answer's drift is then unexplained, and refused). Where both drifted
+// to one live value, the read is read back from the earliest. A field written
+// twice is read back from its first write, as before.
+func TestReadBackOfTwoFieldsWithOneRecordedValue(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	const order = "orders\x00o-live-1"
+	r := Leaf{Path: "body.value.x", Type: String, Value: "SAME-1"}
+	for _, c := range []struct {
+		name    string
+		earlier []Earlier
+		mock    string // "" when not read back
+		live    string
+	}{
+		{"two fields, two live values", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "LIVE-2"),
+		}, "", ""},
+		{"two fields of one exchange, two live values", []Earlier{{Mock: "mock-1", At: t0, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.first", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Place: "body.first", Written: true, Record: order},
+			{Side: Request, Leaf: Leaf{Path: "body.second", Type: String, Value: "SAME-1"}, Live: "LIVE-2", Place: "body.second", Written: true, Record: order},
+		}}}, "", ""},
+		{"two fields, one live value", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "LIVE-1"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "mock-1", "LIVE-1"},
+		{"one field written twice", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-2"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "mock-1", "LIVE-1"},
+		{"a field of another record", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-2", t0.Add(time.Second), "orders\x00o-live-2", "body.second", String, "SAME-1", "LIVE-2"),
+		}, "mock-1", "LIVE-1"},
+	} {
+		p, ok := ReadBack(r, order, c.earlier)
+		if c.mock == "" {
+			if ok {
+				t.Errorf("%s: read back from %+v", c.name, p)
+			}
+			continue
+		}
+		if !ok || p.Mock != c.mock || p.Live != c.live {
+			t.Errorf("%s: read back as %+v (%v), want it from %s with %q", c.name, p, ok, c.mock, c.live)
+		}
+	}
+}
+
 // ReplaceToken replaces a value only where it stands as a token.
 func TestReplaceToken(t *testing.T) {
 	for _, c := range []struct {
