@@ -198,7 +198,7 @@ func TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt(t *testing.T) {
 	startUnixHelper(t, "listen "+outside) // before the agent: never a member
 	h := unixReportAgent(t)
 	t.Setenv(provenswitch.Env, "1")
-	u, err := loadUnixConn(&h.objects)
+	u, err := loadUnixConn(h.logger, &h.objects)
 	if err != nil {
 		t.Fatalf("the AF_UNIX report did not load: %v", err)
 	}
