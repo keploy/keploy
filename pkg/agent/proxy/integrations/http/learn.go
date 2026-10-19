@@ -946,6 +946,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			bv := b[name]
 			bv.Recorded, bv.Bind = r.Value, from.Var
+			// F's clock evidence, read where the variable is bound: a clock
+			// read that moved by the lead there may share its live value with
+			// another one in a replay (models.MockVariable.Clock).
+			bv.Clock = learn.ClockOf(r.Value, from.Live)
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}

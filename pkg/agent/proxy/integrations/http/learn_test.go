@@ -292,6 +292,47 @@ func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
 	}
 }
 
+// A variable whose value F saw drift only with its clock where it is bound (a
+// clock read moved by the lead: learn.ClockOf) is marked so at its bind
+// (MockVariable.Clock); one that drifted otherwise is not.
+func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
+	rec := learnAt.Add(-time.Hour)
+	for _, c := range []struct {
+		name  string
+		live  string
+		clock bool
+	}{
+		{"moved by the lead", rec.Add(learn.FullRoundLead).Format(time.RFC3339), true},
+		{"moved by another amount", rec.Add(5 * time.Minute).Format(time.RFC3339), false},
+	} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		recorded := rec.Format(time.RFC3339)
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+recorded+`"}`, nil, `{}`),
+			learnRecorded("mock-1", time.Second, "GET", "/v1/events?since="+url.QueryEscape(recorded), "", nil, `{}`),
+		}}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"at":"`+c.live+`"}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("%s: the first call is paired: %+v", c.name, miss)
+		}
+		served, miss, err := h.learnMatch(ctx, live("GET", "/v1/events?since="+url.QueryEscape(c.live), "", nil), db, n, opts)
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("%s: served %v miss %+v err %v", c.name, served, miss, err)
+		}
+		binds := db.consumed[1].Spec.LearnedBinds()["mock-0"]
+		if len(binds) != 1 {
+			t.Fatalf("%s: binds %+v, want one variable bound at mock-0", c.name, db.consumed[1].Spec.LearnedBinds())
+		}
+		for name, v := range binds {
+			if v.Bind != "body.at" || v.Clock != c.clock {
+				t.Fatalf("%s: variable %s bound %+v, want at body.at with Clock %v", c.name, name, v, c.clock)
+			}
+		}
+	}
+}
+
 func TestLearnMatchMissReasons(t *testing.T) {
 	h, n, opts := learnOn(t)
 	for _, tc := range []struct {

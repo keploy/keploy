@@ -481,3 +481,37 @@ func TestTable_NewSetMakesAnEarlierCallStale(t *testing.T) {
 		t.Fatal("a stale call of the previous set left late bound")
 	}
 }
+
+// Two clock reads the learn step marked (Binding.Clock) may share one live
+// value though recorded with two values: two reads of one clock in one
+// second. A marked read and an unmarked variable may not, whatever the values
+// look like, in one call, across calls, or against the run's.
+func TestTable_TwoClockReadsTheLearnStepMarkedMayShareALiveValue(t *testing.T) {
+	const live = "2026-10-19T08:00:00Z"
+	var tb Table
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "booted", Value: live, Recorded: "2026-10-14T09:59:00Z", Clock: true})
+	tb.Reset()
+	if bad, with, _, ok := tb.BindAll(tb.Gen(), []Binding{
+		{Name: "created", Value: live, Recorded: "2026-10-14T10:00:00Z", Clock: true},
+		{Name: "polled", Value: live, Recorded: "2026-10-14T10:00:01Z", Clock: true},
+	}); !ok {
+		t.Fatalf("clock reads the learn step marked could not share a live value: %+v with %+v", bad, with)
+	}
+	for name, b := range map[string]Binding{
+		"an unmarked variable":        {Name: "order", Value: live, Recorded: "o-1"},
+		"an unmarked one recorded so": {Name: "stamp", Value: live, Recorded: "2026-10-14T10:00:02Z"},
+	} {
+		if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{b}); ok {
+			t.Errorf("%s bound a clock read's live value", name)
+		}
+	}
+	var fresh Table
+	fresh.Reset()
+	if _, _, _, ok := fresh.BindAll(fresh.Gen(), []Binding{
+		{Name: "created", Value: live, Recorded: "r-1", Clock: true},
+		{Name: "order", Value: live, Recorded: "r-2"},
+	}); ok {
+		t.Error("a marked clock read and an unmarked variable shared a live value in one call")
+	}
+}
