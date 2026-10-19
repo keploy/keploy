@@ -154,24 +154,35 @@ func TestMatchCommand_APreparesLinesCarryNoStatement(t *testing.T) {
 // A command the matcher answers costs a Debug level that is off nothing for
 // the switch: the lines it logs for every command check their level before
 // they build a logcontent field. Each case runs a line the canary tests above
-// hold: the synthetic OK's and the recorded PREPARE's.
+// hold: the synthetic OK's, the recorded PREPARE's, and the one of an EXECUTE
+// matched on its parameters alone.
 func TestMatchCommand_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
 	logger := logtest.Disabled()
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
 	const stmt = "SELECT body FROM notes WHERE tag = ?"
+	const insert = "INSERT INTO notes (body, at, tag) VALUES (?, ?, 'x')"
+	at := stmtT0.Add(time.Second)
 	for name, tc := range map[string]struct {
 		req   func() mysql.Request
 		mocks func() []*models.Mock
+		stmts map[uint32]string
 	}{
-		"a synthetic OK": {func() mysql.Request { return comQueryReq("SET @note = 'x'") },
-			func() []*models.Mock { return []*models.Mock{readbackMock("unrelated", "SELECT 1", "x", zeroTime())} }},
-		"a recorded PREPARE": {func() mysql.Request { return stmtPrepareReq(stmt) },
-			func() []*models.Mock { return []*models.Mock{preparedMock("mock-prepare", "0", 7, stmt, zeroTime())} }},
+		"a synthetic OK": {req: func() mysql.Request { return comQueryReq("SET @note = 'x'") },
+			mocks: func() []*models.Mock { return []*models.Mock{readbackMock("unrelated", "SELECT 1", "x", zeroTime())} }},
+		"a recorded PREPARE": {req: func() mysql.Request { return stmtPrepareReq(stmt) },
+			mocks: func() []*models.Mock { return []*models.Mock{preparedMock("mock-prepare", "0", 7, stmt, zeroTime())} }},
+		"an EXECUTE whose PREPARE was not kept": {req: func() mysql.Request { return liveExecute("x", "t1") },
+			mocks: func() []*models.Mock { return []*models.Mock{executedMock("mock-exec", 2, at, "row", "", "x", "t1")} },
+			stmts: map[uint32]string{33: insert}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			logtest.CheckDisabledCost(t, func() {
-				db := &fakeMockDb{session: tc.mocks()}
-				if _, ok, _, err := matchCommand(ctx, logger, tc.req(), db, newDecodeCtx(), nil, nil); err != nil || !ok {
+				db := &fakeMockDb{session: tc.mocks(), winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+				dctx := newDecodeCtx()
+				for id, q := range tc.stmts {
+					dctx.StmtIDToQuery[id] = q
+				}
+				if _, ok, _, err := matchCommand(ctx, logger, tc.req(), db, dctx, nil, nil); err != nil || !ok {
 					t.Fatalf("the command was not answered (%v)", err)
 				}
 			})
