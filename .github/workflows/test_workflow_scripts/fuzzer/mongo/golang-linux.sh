@@ -194,7 +194,23 @@ endsec
 section "Cloning go-fuzzers Repository"
 echo "Cloning keploy/go-fuzzers using PRO_ACCESS_TOKEN..."
 if [ -n "${PRO_ACCESS_TOKEN:-}" ]; then
-  git clone https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git
+  # git gets the token from a credential helper that reads it from the
+  # environment, never from the userinfo of the clone URL. git decides that
+  # the server redirected it by comparing the URL it asked for with the one
+  # libcurl says it reached (CURLINFO_EFFECTIVE_URL), and libcurl leaves the
+  # credentials out of that URL since its fix for CVE-2026-94266 (Ubuntu
+  # curl 8.5.0-2ubuntu10.16, runner image ubuntu24/20261018.339). With the
+  # token as the URL's username every clone looked redirected: git moved to
+  # the URL without it, sent the next request with no credentials and died
+  # on "could not read Username for 'https://github.com'". The helper is
+  # asked whatever URL git ends up on, and the token stays out of the
+  # command line and out of go-fuzzers/.git/config. The empty helper first
+  # drops any helper the runner configured, so this token is the one that
+  # answers.
+  GIT_TERMINAL_PROMPT=0 PRO_ACCESS_TOKEN="${PRO_ACCESS_TOKEN}" git \
+    -c credential.helper= \
+    -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "$PRO_ACCESS_TOKEN"; fi; }; f' \
+    clone https://github.com/keploy/go-fuzzers.git
 else
   echo "::warning::PRO_ACCESS_TOKEN not set, attempting clone without auth (will fail for private repo)"
   git clone https://github.com/keploy/go-fuzzers.git
