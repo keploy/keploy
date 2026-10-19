@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -1268,22 +1269,34 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 }
 
 // followable reports whether this keploy can follow the variables a mock
-// declares (models.MockVariables): those of a plain HTTP call. A mock whose
-// variables it cannot follow is never served, under the proven switch: served
-// as recorded, it would answer a call whose variable does not hold. It is
-// named in an error, and the call it was recorded for misses.
+// declares (models.MockVariables): those of a plain HTTP call, and those the
+// parser of the mock's kind says it follows (integrations.VariableFollower,
+// which a parser registers). A mock whose variables it cannot follow is never
+// served, under the proven switch: served as recorded, it would answer a call
+// whose variable does not hold. It is named in an error, and the call it was
+// recorded for misses.
 func (a *Agent) followable(m *models.Mock) bool {
 	if m == nil || len(m.Spec.Variables) == 0 {
 		return true
 	}
 	why := ""
+	follow, registered := integrations.VariableFollowerOf(m.Kind)
 	switch {
-	case m.Kind != models.HTTP:
-		why = "keploy follows variables on HTTP calls only"
-	case m.IsAsync():
+	case m.Kind == models.HTTP && m.IsAsync():
 		why = "keploy does not follow variables on an async HTTP call"
-	default:
+	case m.Kind == models.HTTP:
 		return true
+	case !registered:
+		why = "keploy follows variables on HTTP calls, and on the calls of a parser that says it does; the " + string(m.Kind) + " parser does not"
+	default:
+		ok, w := follow(m)
+		if ok {
+			return true
+		}
+		why = w
+		if why == "" {
+			why = "the " + string(m.Kind) + " parser does not follow this mock's variables"
+		}
 	}
 	a.logger.Error("keploy cannot follow the variables of a recorded call, so it will not answer that call",
 		zap.String("mock", m.Name), zap.String("kind", string(m.Kind)), zap.String("why", why),
