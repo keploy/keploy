@@ -49,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -1980,6 +1981,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
 	// the agent, so it travels as a flag.
 	args = append(args, provenswitch.AgentArgs()...)
+	// sudo drops KEPLOY_LOG_CONTENT too, and the agent writes the lines
+	// agent-debug.log keeps, so the opt-in travels as a flag as well.
+	args = append(args, logcontent.AgentArgs()...)
 	// And the Docker endpoint the tests' containers run on, which sudo drops
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)
