@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -132,7 +133,7 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("value", variable["value"]))
+			pi.logger.Error("Global variable value is not a string", zap.Any("key", variable["key"]), logcontent.Any("value", variable["value"]))
 			continue
 		}
 
@@ -207,7 +208,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 		response.Header[key] = strings.Join(value, ",")
 	}
 	// Use the response.Body field to avoid unused write error
-	pi.logger.Info("Response Body", zap.String("body", response.Body))
+	pi.logger.Info("Response Body", logcontent.String("body", response.Body))
 
 	return response, nil
 }

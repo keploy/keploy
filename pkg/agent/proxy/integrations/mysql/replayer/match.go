@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -815,7 +816,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				allEntries = append(allEntries, fmt.Sprintf("connID=%s stmtID=%d query=%q mock=%s", connID, entry.statementID, entry.query, entry.mockName))
 			}
 		}
-		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
+		logger.Debug("recorded prepEntries", zap.Int("count", len(allEntries)), logcontent.String("entries", strings.Join(allEntries, " | ")))
 	}
 
 	// closeBest is the highest score a COM_STMT_CLOSE candidate can reach (see
@@ -1201,7 +1202,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					if !seen {
 						// remove this log and if block
 						if ce := logger.Check(zap.DebugLevel, "Trying to match the mock with com-stmt-execute request"); ce != nil && actMsg != nil {
-							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg)))
+							ce.Write(zap.String("mock_name", mock.Name), zap.Uint32("statement_id", actMsg.StatementID),
+								zap.Int("parameters", len(actMsg.Parameters)), logcontent.Any("Req", executeForLog(actMsg)))
 						}
 
 						var expectedQuery, actualQuery string
@@ -1216,7 +1218,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actMsg.StatementID])
 						}
 
-						logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
+						logger.Debug("queries comparison", logcontent.String("expected_query", expectedQuery), logcontent.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 
 						ev.ok, ev.score, ev.queryExact = matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise))
 						ev.recorded = expectedQuery
@@ -1553,7 +1555,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							},
 						},
 					}
-					logger.Debug("Returning synthetic OK for unmocked control/DDL", zap.String("query", q))
+					logger.Debug("Returning synthetic OK for unmocked control/DDL", logcontent.String("query", q))
 
 					return generic, true, nil, nil
 				}
@@ -1757,7 +1759,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				}
 
 				logger.Info("Synthesized PREPARE_OK for unmocked statement (likely TiDB+JDBC cachePrepStmts caching pre-record stmtIDs)",
-					zap.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
+					logcontent.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
 					zap.Uint32("synthetic_stmt_id", newStmtID),
 					zap.Uint16("num_params", numParams))
 				return synthetic, true, nil, nil
@@ -1774,14 +1776,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			logger.Debug("mock miss",
 				zap.String("protocol", "MySQL"),
 				zap.String("type", req.Header.Type),
-				zap.String("actual_query", truncate(actualQuery, 200)),
+				logcontent.String("actual_query", truncate(actualQuery, 200)),
 				zap.String("closest_mock", bestPartialMock.Name),
-				zap.String("closest_query", truncate(bestPartialQuery, 200)))
+				logcontent.String("closest_query", truncate(bestPartialQuery, 200)))
 		} else if actualQuery != "" {
 			logger.Debug("mock miss",
 				zap.String("protocol", "MySQL"),
 				zap.String("type", req.Header.Type),
-				zap.String("actual_query", truncate(actualQuery, 200)))
+				logcontent.String("actual_query", truncate(actualQuery, 200)))
 		}
 
 		bestPartialMockName := ""
@@ -1897,7 +1899,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				logger.Debug("Recorded runtime PREP mapping with new statement ID",
 					zap.Uint32("original_stmt_id from mock ", originalStmtID),
 					zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
-					zap.String("query", strings.TrimSpace(sp.Query)))
+					logcontent.String("query", strings.TrimSpace(sp.Query)))
 			}
 		}
 	}
@@ -2060,8 +2062,8 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	// rejects the very statements this comparison exists to match.
 	if expectedQuery == actualQuery {
 		log.Debug("Query Exact matched",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+			logcontent.String("expected query", expectedQuery),
+			logcontent.String("actual query", actualQuery))
 		return true, scoreQueryExact, expectedQuery
 	}
 
@@ -2127,13 +2129,13 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	// check if any of them the query is dml and other is not, then there is no match.
 	if expectedIsDML && !actualIsDML {
 		log.Debug("expected query is dml but actual is not",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+			logcontent.String("expected query", expectedQuery),
+			logcontent.String("actual query", actualQuery))
 		return false, 0, expectedQuery
 	} else if !expectedIsDML && actualIsDML {
 		log.Debug("actual query is dml but expected is not",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+			logcontent.String("expected query", expectedQuery),
+			logcontent.String("actual query", actualQuery))
 		return false, 0, expectedQuery
 	}
 
@@ -2150,15 +2152,15 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 		if !isSessionControlStatement(expectedQuery) && !isSessionControlStatement(actualQuery) &&
 			maskSQLLiterals(expectedQuery) == live.maskedLiterals() {
 			log.Debug("query matched with drifted inline literals",
-				zap.String("expected query", expectedQuery),
-				zap.String("actual query", actualQuery))
+				logcontent.String("expected query", expectedQuery),
+				logcontent.String("actual query", actualQuery))
 			// The payload-length tie-break only ranks candidates already known to
 			// share every keyword, identifier and literal type.
 			return false, scoreQueryLiteralDrift + equalPayloadLength(expected, actual), expectedQuery
 		}
 		log.Debug("No Query is dml",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+			logcontent.String("expected query", expectedQuery),
+			logcontent.String("actual query", actualQuery))
 		return false, 0, expectedQuery
 	}
 
@@ -2169,7 +2171,7 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	actualSignature, err := live.structure()
 	if err != nil {
 		log.Debug("failed to get actual query structure",
-			zap.String("actual Query", actualQuery),
+			logcontent.String("actual Query", actualQuery),
 			zap.Error(err))
 		return false, 0, expectedQuery
 	}
@@ -2177,7 +2179,7 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	expectedSignature, err := getQueryStructureCached(expectedQuery)
 	if err != nil {
 		log.Debug("failed to get expected query structure",
-			zap.String("expected Query", expectedQuery),
+			logcontent.String("expected Query", expectedQuery),
 			zap.Error(err))
 		return false, 0, expectedQuery
 	}
@@ -2587,7 +2589,7 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 	if allParamsMatched && eq == "" {
 		logger.Debug("EXECUTE matched on params alone (mock has no recorded PREPARE)",
 			zap.String("mock-name", mockName),
-			zap.String("actual_query", truncate(aq, 200)))
+			logcontent.String("actual_query", truncate(aq, 200)))
 		return true, matchCount, queryExactMatched
 	}
 

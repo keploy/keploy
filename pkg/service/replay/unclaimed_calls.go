@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -73,7 +74,7 @@ func (r *Replayer) logUnclaimed(testSetID string, calls []models.UnmatchedCall) 
 			zap.String("protocol", c.Protocol),
 			zap.String("call", c.ActualSummary),
 			zap.String("destination", c.Destination),
-			zap.String("diff", c.Diff),
+			logcontent.String("diff", c.Diff),
 			zap.String("next_step", "a call the application starts after it has answered a test (a fire-and-forget publish or write) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"))
 	}
 }

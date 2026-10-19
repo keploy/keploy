@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 
 	"go.uber.org/zap"
 
@@ -371,7 +372,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
 					if logger.Core().Enabled(zap.DebugLevel) {
-						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+						logger.Debug("Failed to read buffer", zap.Int("size", len(buffer)), logcontent.String("base64_encoded", util.EncodeBase64(buffer)))
 					}
 				}
 				errChannel <- err
@@ -412,7 +413,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 	// Check if the initial buffer already contains complete headers
 	if HasCompleteHTTPHeaders(initialBuf) {
-		logger.Debug("received complete HTTP headers in initial buffer", zap.Any("size", len(initialBuf)), zap.Any("headers", string(initialBuf)))
+		logger.Debug("received complete HTTP headers in initial buffer", zap.Any("size", len(initialBuf)), logcontent.Bytes("headers", initialBuf))
 		return initialBuf, nil
 	}
 
@@ -446,7 +447,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 			// Check if we reached the end of headers
 			if HasCompleteHTTPHeaders(buffer) {
-				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
+				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), logcontent.Bytes("headers", buffer))
 				return buffer, nil
 			}
 		}

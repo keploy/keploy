@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -166,8 +167,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			zap.Strings("request_header_names", utils.HeaderNames(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
+			zap.Strings("response_header_names", utils.HeaderNames(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
+			logcontent.Any("request_headers", grpcSpec.GrpcReq.Headers),
+			logcontent.Any("response_headers", grpcSpec.GrpcResp.Headers),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
 			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 

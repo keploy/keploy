@@ -4,6 +4,10 @@
 //	GET  /config/boot   the app's startup configuration, read once at boot
 //	POST /oauth/token   a token, which the app fetches once and caches
 //	GET  /profile       the caller's profile, for a request with that token
+//
+// The token, which the app sends back in its Authorization header, and the
+// profile's note are the application's content, which the lane checks keploy's
+// logs never carry; its script spells them too.
 package main
 
 import (
@@ -13,7 +17,10 @@ import (
 	"os"
 )
 
-const token = "tok-7f3a"
+const (
+	token = "kp-e2e-canary-auth-5d2f9a"
+	note  = "kp-e2e-canary-body-8b3e17"
+)
 
 func main() {
 	mux := http.NewServeMux()
@@ -28,7 +35,7 @@ func main() {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bad token"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"user": "ada", "plan": "pro"})
+		writeJSON(w, http.StatusOK, map[string]string{"user": "ada", "plan": "pro", "note": note})
 	})
 	addr := os.Getenv("UPSTREAM_ADDR")
 	if addr == "" {

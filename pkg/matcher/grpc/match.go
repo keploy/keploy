@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -641,8 +642,8 @@ func compareGrpcMessage(
 	if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
 		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
 			zap.Int("message_index", msgIdx),
-			zap.String("expectedDecodedData", expectedDecodedData),
-			zap.String("actualDecodedData", actualDecodedData))
+			logcontent.String("expectedDecodedData", expectedDecodedData),
+			logcontent.String("actualDecodedData", actualDecodedData))
 
 		expectedDecodedData = matcher.NormalizeNestedJSONForNoise(expectedDecodedData, bodyNoise, logger)
 		actualDecodedData = matcher.NormalizeNestedJSONForNoise(actualDecodedData, bodyNoise, logger)

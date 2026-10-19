@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -1063,8 +1064,8 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
 				h.Logger.Debug("http query: value treated as auto-detected dynamic",
 					zap.String("param", key),
-					zap.String("mock value", rv[i]),
-					zap.String("request value", av[i]),
+					logcontent.String("mock value", rv[i]),
+					logcontent.String("request value", av[i]),
 					zap.String("type class", c))
 				continue
 			}
@@ -1123,7 +1124,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
-			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
+			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), logcontent.String("mock url", mock.Spec.HTTPReq.URL))
 			continue
 		}
 
@@ -1142,8 +1143,10 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
 			h.Logger.Debug("headers missing required keys for mock name",
 				zap.String("mock name", mock.Name),
-				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
-				zap.Any("input header", input.header))
+				zap.Strings("expected header names", utils.HeaderNames(mock.Spec.HTTPReq.Header)),
+				zap.Strings("input header names", utils.HeaderNames(input.header)),
+				logcontent.Any("expected header keys", mock.Spec.HTTPReq.Header),
+				logcontent.Any("input header", input.header))
 			continue
 		}
 
@@ -1176,7 +1179,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	for i, mock := range schemaMatched {
 		mockNames[i] = mock.Name
 	}
-	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), zap.String("req body", string(body)))
+	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), logcontent.Bytes("req body", body))
 
 	// First pass: exact string match (fastest path)
 	for _, mock := range schemaMatched {
@@ -1281,12 +1284,12 @@ func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", logcontent.Bytes("Req", mockBody))
 		return false, err
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", string(reqBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", logcontent.Bytes("Req", reqBody))
 		return false, err
 	}
 

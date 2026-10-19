@@ -60,6 +60,14 @@
 #      session, so no test is required to make them, and every test that uses
 #      the connection is served them.
 #  10. No data race in any log.
+#  11. keploy's logs carry none of the application's content, though every
+#      record and replay runs with --debug (the lines the agent writes to
+#      agent-debug.log in Docker): not the token the app sends in its
+#      Authorization header, not the note the auth service answers /profile
+#      with, not the note the app writes into an order and reads back. The
+#      recording holds all three, so they flowed through keploy. With
+#      KEPLOY_LOG_CONTENT=1 a replay's log carries them, so the check can see
+#      them. Judged for this build's logs only: a release logs content.
 #
 # Which binary is this build: download-binary's build/keploy or
 # build-no-race/keploy. A published release replaying a recording that states
@@ -187,8 +195,8 @@ record() {
     rm -rf keploy keploy.yml
     start_mysql
     start_upstream
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
-        --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+    sudo -E env -u KEPLOY_PROVEN -u KEPLOY_LOG_CONTENT PATH="$PATH" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
+        --generateGithubActions=false --disable-tele --debug >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
     send POST /orders 201 '{"qty":2}'
@@ -218,6 +226,7 @@ replay() {
     local name="$1" mapping="$2" only="${3:-}" declare="${4:-}" before
     local switch=()
     [ -n "${PROVEN_REPLAY:-}" ] && switch=(KEPLOY_PROVEN=1)
+    [ -n "${CONTENT_REPLAY:-}" ] && switch+=(KEPLOY_LOG_CONTENT=1)
     [ "$mapping" = fresh ] && rm -f keploy/test-set-0/mappings.yaml
     rm -f keploy.yml
     {
@@ -229,8 +238,8 @@ replay() {
         fi
     } >keploy.yml
     before="$(newest_run)"
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
-        --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
+    sudo -E env -u KEPLOY_PROVEN -u KEPLOY_LOG_CONTENT PATH="$PATH" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
+        --generateGithubActions=false --disable-tele --debug >"$name.log" 2>&1 </dev/null
     RC=$?
     own
     rm -f keploy.yml
@@ -286,12 +295,36 @@ stated() {
     [ -z "$bad" ] || fail "the recording states another lifetime than $4 for: $(tr '\n' ';' <<<"$bad")"
 }
 
+# The application's content (11): the token (upstream/main.go), the profile's
+# note (upstream/main.go) and the order's note (app/main.go).
+CANARIES=(kp-e2e-canary-auth-5d2f9a kp-e2e-canary-body-8b3e17 kp-e2e-canary-row-c41a06)
+# no_content <log>: the log carries none of the application's content.
+no_content() {
+    local c
+    for c in "${CANARIES[@]}"; do
+        if grep -qF "$c" "$1"; then
+            fail "$1 carries the application's content ($c), though KEPLOY_LOG_CONTENT is not set: $(grep -nF "$c" "$1" | head -3 | cut -c1-400)"
+        fi
+    done
+}
+# all_content <file> <what>: the file holds every piece of it.
+all_content() {
+    local c
+    for c in "${CANARIES[@]}"; do
+        grep -qF "$c" "$1" || fail "$2 does not hold $c"
+    done
+}
+
 for p in "$APP" "$UP" 3306; do
     if listening "$p"; then echo "::error::port $p is in use"; exit 1; fi
 done
 
 record
 cp keploy/test-set-0/mocks.yaml mocks.recorded.yaml
+# 11. The content flowed: the recording holds it. This build's recorder logged
+#     none of it.
+all_content mocks.recorded.yaml "the recording"
+is_build "$RECORD_BIN" && no_content record.log
 total=$(lifetimes mocks.recorded.yaml | wc -l)
 with=$(lifetimes mocks.recorded.yaml | awk -F'\t' '$4 != "none"' | wc -l)
 echo "recorded $total HTTP and MySQL mocks, $with stating a lifetime"
@@ -323,6 +356,13 @@ is_build "$REPLAY_BIN" || judged=false
 
 # 1. The whole set.
 replay all fresh && expect_pass "the whole set" all.log
+# 11. With the switch on, the replay's log carries the content the lines
+#     carry without it as lengths and fingerprints.
+if [ "$judged" = true ] && CONTENT_REPLAY=1 replay content-on fresh; then
+    expect_pass "the whole set, with KEPLOY_LOG_CONTENT=1" content-on.log
+    all_content content-on.log "the log of a replay with KEPLOY_LOG_CONTENT=1"
+    echo "with KEPLOY_LOG_CONTENT=1 the replay's log carries the application's content in $(grep -cF -e "${CANARIES[0]}" -e "${CANARIES[1]}" -e "${CANARIES[2]}" content-on.log) lines"
+fi
 # 2. get-orders-count-1 alone: the connection's setup and the startup traffic
 #    are shared.
 replay only-count fresh get-orders-count-1 && expect_pass "get-orders-count-1 alone" only-count.log
@@ -390,6 +430,17 @@ fi
 
 # 10.
 if grep -rl 'WARNING: DATA RACE' --include='*.log' .; then fail "data race in a keploy log"; fi
+# 11. This build's replays logged none of the content (the proven run's
+#     record too).
+if [ "$judged" = true ]; then
+    checked=0
+    for l in $(find . -name '*.log' ! -name record.log ! -name upstream.log ! -name content-on.log); do
+        no_content "$l"
+        checked=$((checked + 1))
+    done
+    echo "checked $checked replay logs of this build for the application's content"
+fi
+if is_build "$RECORD_BIN" && [ -f proven/record.log ]; then no_content proven/record.log; fi
 
 if [ "$FAIL" -ne 0 ]; then
     echo "$FAIL check(s) failed"

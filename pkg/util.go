@@ -38,6 +38,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -1250,7 +1251,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
+	if ce := logger.Check(zap.DebugLevel, "Sending request to user app"); ce != nil {
+		ce.Write(zap.String("method", prepared.Request.Method), zap.String("path", prepared.Request.URL.Path),
+			logcontent.String("request", fmt.Sprintf("%v", prepared.Request)))
+	}
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1361,7 +1365,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
+	if ce := logger.Check(zap.DebugLevel, "Sending streaming request to user app"); ce != nil {
+		ce.Write(zap.String("method", prepared.Request.Method), zap.String("path", prepared.Request.URL.Path),
+			logcontent.String("request", fmt.Sprintf("%v", prepared.Request)))
+	}
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1861,8 +1868,8 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 			logger.Debug("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expectedFrame.raw),
-				zap.String("actual_frame", frame))
+				logcontent.String("expected_frame", expectedFrame.raw),
+				logcontent.String("actual_frame", frame))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expectedFrame.raw,
@@ -1975,8 +1982,8 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			logger.Debug("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expected),
-				zap.String("actual_frame", line))
+				logcontent.String("expected_frame", expected),
+				logcontent.String("actual_frame", line))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
@@ -2051,8 +2058,8 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		if line != expected {
 			logger.Debug("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.String("expected", expected),
-				zap.String("actual", line))
+				logcontent.String("expected", expected),
+				logcontent.String("actual", line))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
@@ -4741,7 +4748,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		logger.Debug("Applied replaceWith substitution",
 			zap.String("find", substr),
 			zap.String("replace", replacement),
-			zap.String("result_target", finalTarget),
+			logcontent.String("result_target", finalTarget),
 			zap.Bool("replacement_has_port", replacementHasPort))
 	}
 
@@ -4762,7 +4769,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			utils.LogError(logger, err, "failed to replace host with config host")
 			return "", err
 		}
-		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), logcontent.String("target", finalTarget))
 	}
 
 	// Parse host and port from finalTarget
@@ -4786,7 +4793,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				port = "80"
 			}
 			logger.Debug("URL has no explicit port, using scheme default",
-				zap.String("target", finalTarget), zap.String("default_port", port))
+				logcontent.String("target", finalTarget), zap.String("default_port", port))
 		}
 	} else {
 		host = finalTarget
@@ -4844,7 +4851,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		finalTarget = net.JoinHostPort(host, port)
 	}
 
-	logger.Debug("Final resolved target", zap.String("target", finalTarget))
+	logger.Debug("Final resolved target", zap.String("address", net.JoinHostPort(host, port)), logcontent.String("target", finalTarget))
 	return finalTarget, nil
 }
 
