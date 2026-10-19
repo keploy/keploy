@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -255,8 +256,10 @@ func TestHTTPResp_YAML_NonUTF8BodyRoundTrips(t *testing.T) {
 
 // TestHTTPResp_YAML_TextStreamsStillChunk guards the other direction: the UTF-8
 // guard must not disable streaming for ordinary text bodies, which is the whole
-// point of the chunk encoder.
+// point of the chunk encoder. An octet stream is kept as a frame with the
+// proven switch off (recordedFramesOf), and whole under it.
 func TestHTTPResp_YAML_TextStreamsStillChunk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
 	in := HTTPResp{
 		StatusCode: 200,
 		Header:     map[string]string{"Content-Type": "application/octet-stream"},
@@ -478,4 +481,60 @@ func TestHTTPResp_MarshalYAML_BodyABlockScalarCannotCarry(t *testing.T) {
 	require.Len(t, back["list"][0].StreamBody, 1)
 	v, _ := back["list"][0].StreamBody[0].ValueByKey("data")
 	assert.Equal(t, chunk, v)
+}
+
+// A recording keeps a body as frames only when the response is a stream by
+// keploy's one rule (HTTPStreamOf): a stream's Content-Type. Go's JSON written
+// with no Content-Type goes out as text/plain, chunked and with no
+// Content-Length, and used to be written as a list of frames for that alone;
+// the replay then took the frames for evidence of a stream. It is one
+// document, and is kept as one.
+func TestHTTPResp_MarshalYAML_ChunkedTextPlainJSONStaysFlat(t *testing.T) {
+	json := `[{"id":"cluster-1","name":"one"},{"id":"cluster-2","name":"two"}]`
+	for _, header := range []map[string]string{
+		{"Content-Type": "text/plain; charset=utf-8"},
+		{"Content-Type": "text/plain; charset=utf-8", "Transfer-Encoding": "chunked"},
+		{"Content-Type": "text/plain"},
+	} {
+		in := HTTPResp{StatusCode: 200, Header: header, Body: json + "\n", Timestamp: time.Unix(1700000000, 0).UTC()}
+		out, err := yamlLib.Marshal(in)
+		require.NoError(t, err)
+		assert.NotContains(t, string(out), "- ts:", "a chunked text/plain JSON body (header %v) was written as frames:\n%s", header, out)
+		assert.NotContains(t, string(out), "raw:", "a chunked text/plain JSON body (header %v) was written as frames:\n%s", header, out)
+
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		assert.Empty(t, got.StreamBody, "a chunked text/plain JSON body (header %v) was read back as frames", header)
+		assert.Equal(t, in.Body, got.Body, "a chunked text/plain JSON body (header %v) did not round-trip whole", header)
+	}
+
+	// A dependency's chunked text/plain answer, kept as a mock, is served
+	// back byte for byte: as frames its line endings and its last newline
+	// were lost.
+	text := "line one\r\nline two\r\n"
+	out, err := yamlLib.Marshal(HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/plain"}, Body: text})
+	require.NoError(t, err)
+	var got HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &got))
+	assert.Equal(t, text, got.Body, "a chunked text/plain body did not round-trip byte for byte:\n%s", out)
+}
+
+// A stream's Content-Type still has its body kept as frames, whatever its
+// length framing: SSE by events, NDJSON by lines.
+func TestHTTPResp_MarshalYAML_StreamContentTypesStillFrame(t *testing.T) {
+	for _, c := range []struct {
+		header map[string]string
+		body   string
+		frames int
+	}{
+		{map[string]string{"Content-Type": "text/event-stream", "Content-Length": "30"}, "data: one\n\ndata: two\n\n", 2},
+		{map[string]string{"Content-Type": "application/x-ndjson; charset=utf-8"}, "{\"n\":1}\n\n{\"n\":2}\n", 2},
+		{map[string]string{"Content-Type": "application/ndjson", "Content-Length": "16"}, "{\"n\":1}\n{\"n\":2}\n", 2},
+	} {
+		out, err := yamlLib.Marshal(HTTPResp{StatusCode: 200, Header: c.header, Body: c.body, Timestamp: time.Unix(1700000000, 0).UTC()})
+		require.NoError(t, err)
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		assert.Len(t, got.StreamBody, c.frames, "a %v body was not kept as its frames:\n%s", c.header, out)
+	}
 }

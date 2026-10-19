@@ -1380,7 +1380,12 @@ func (b *brotliReadCloser) Close() error {
 	return b.underlying.Close()
 }
 
-// DetectHTTPStreamConfig detects the streaming mode of an HTTP response based on content type and other factors.
+// DetectHTTPStreamConfig is how a test case's response is read: as a stream
+// of which format, or whole (HTTPStreamModeNone). It is keploy's one stream
+// rule (models.HTTPStreamOf) on the answer's Content-Type (the recorded one
+// when there is no answer yet, or the answer has none) and on whether the
+// recording kept its body as frames. How the answer framed its length
+// (Transfer-Encoding: chunked, no Content-Length) is no evidence of a stream.
 func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStreamConfig {
 	contentType := ""
 	if resp != nil {
@@ -1389,56 +1394,36 @@ func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStream
 	if contentType == "" && tc != nil {
 		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
 	}
+	framed := tc != nil && len(tc.HTTPResp.StreamBody) > 0
 
-	mediaType := ""
-	params := map[string]string{}
-	if contentType != "" {
-		parsedType, parsedParams, err := mime.ParseMediaType(contentType)
-		if err == nil {
-			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
-			params = parsedParams
-		} else {
-			mediaType = strings.ToLower(strings.TrimSpace(contentType))
-		}
-	}
-
-	switch mediaType {
-	case "text/event-stream":
-		if isSSETestCase(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
-		}
-		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-	case "application/x-ndjson", "application/ndjson":
+	switch models.HTTPStreamOf(contentType, framed) {
+	case models.HTTPStreamSSE:
+		return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
+	case models.HTTPStreamNDJSON:
 		return HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}
-	case "multipart/x-mixed-replace", "multipart/mixed":
-		boundary := strings.TrimSpace(params["boundary"])
+	case models.HTTPStreamMultipart:
+		boundary := boundaryFromContentTypeHeader(contentType)
 		if boundary == "" && tc != nil {
 			boundary = boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type"))
 		}
 		if boundary != "" {
 			return HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: boundary}
 		}
-	case "text/plain":
-		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-		}
-		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-		}
-	case "application/octet-stream":
-		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
-		}
-		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
-		}
+	case models.HTTPStreamText:
+		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
+	case models.HTTPStreamBinary:
+		return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
 	}
 
 	return HTTPStreamConfig{Mode: HTTPStreamModeNone}
 }
 
-// IsHTTPStreamingTestCase returns true if the testcase response is identified as a stream format
-// supported by replay-time incremental validators.
+// IsHTTPStreamingTestCase reports whether a test case's recorded response is a
+// stream by keploy's one stream rule (DetectHTTPStreamConfig, on its recorded
+// Content-Type and frames): such a test case is replayed after its set's other
+// test cases, with a stream's mock window (effectiveStreamMockWindow), and its
+// answer read frame by frame. Every other one runs in its recorded order and
+// is read whole.
 func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 	if tc == nil {
 		return false
@@ -1607,23 +1592,6 @@ func CollectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNois
 	return keys
 }
 
-func isSSETestCase(tc *models.TestCase, resp *http.Response) bool {
-	if tc != nil {
-		respContentType := getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
-		if hasSSEContentType(respContentType) {
-			return true
-		}
-		acceptHeader := getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept")
-		if hasSSEContentType(acceptHeader) {
-			return true
-		}
-	}
-	if resp != nil && hasSSEContentType(resp.Header.Get("Content-Type")) {
-		return true
-	}
-	return false
-}
-
 func getHeaderValueCaseInsensitive(headers map[string]string, key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	for k, v := range headers {
@@ -1639,12 +1607,16 @@ func hasSSEContentType(value string) bool {
 }
 
 // IsSSERequest checks whether a test case targets an SSE endpoint based on
-// the recorded response Content-Type or request Accept header.
+// the recorded response Content-Type or request Accept header. It picks the
+// port the request is sent to (an app may serve SSE on its own port, and a
+// CORS preflight to it asks for text/event-stream in its Accept), not
+// whether the response is a stream (models.HTTPStreamOf).
 func IsSSERequest(tc *models.TestCase) bool {
 	if tc == nil || tc.Kind != models.HTTP {
 		return false
 	}
-	return isSSETestCase(tc, nil)
+	return hasSSEContentType(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")) ||
+		hasSSEContentType(getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept"))
 }
 
 func boundaryFromContentTypeHeader(contentType string) string {
@@ -1656,31 +1628,6 @@ func boundaryFromContentTypeHeader(contentType string) string {
 		return ""
 	}
 	return strings.TrimSpace(params["boundary"])
-}
-
-func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) bool {
-	if resp != nil {
-		for _, te := range resp.TransferEncoding {
-			if strings.EqualFold(strings.TrimSpace(te), "chunked") {
-				return true
-			}
-		}
-		if strings.Contains(strings.ToLower(resp.Header.Get("Transfer-Encoding")), "chunked") {
-			return true
-		}
-		if resp.ContentLength == -1 {
-			return true
-		}
-	}
-
-	if tc != nil {
-		respTE := strings.ToLower(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Transfer-Encoding"))
-		if strings.Contains(respTE, "chunked") {
-			return true
-		}
-	}
-
-	return false
 }
 
 type expectedSSEFrame struct {
@@ -1782,7 +1729,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	readToEnd := provenswitch.On()
-	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
+	expectedQueue := extractExpectedRawQueue(expectedResp, models.HTTPStreamNDJSON, canonicalizeNDJSONLine, true)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
@@ -1882,7 +1829,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 
 func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	readToEnd := provenswitch.On()
-	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
+	expectedQueue := extractExpectedRawQueue(expectedResp, models.HTTPStreamText, canonicalizePlainTextLine, false)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
@@ -2054,12 +2001,27 @@ func expectedBinaryBytes(expectedResp models.HTTPResp) []byte {
 	return []byte(expectedResp.Body)
 }
 
+// expectedStreamFrames are a recorded stream's frames: those its recording
+// kept. Under the proven switch, for a stream whose recording kept none (an
+// application/stream+json body, which a recording keeps whole, or a test case
+// carried as JSON, which keeps no frames), they are its body split into the
+// frames of the format the answer is read in (models.SplitStreamBody), so the
+// two are compared alike: without them every frame of the answer would be one
+// past the recording.
+func expectedStreamFrames(expectedResp models.HTTPResp, format models.HTTPStreamFormat) []models.HTTPStreamChunk {
+	if len(expectedResp.StreamBody) > 0 || !provenswitch.On() {
+		return expectedResp.StreamBody
+	}
+	return models.SplitStreamBody(format, expectedResp.Body)
+}
+
 func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
-	if len(expectedResp.StreamBody) == 0 {
+	frames := expectedStreamFrames(expectedResp, models.HTTPStreamSSE)
+	if len(frames) == 0 {
 		return nil
 	}
-	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
-	for _, chunk := range expectedResp.StreamBody {
+	queue := make([]expectedSSEFrame, 0, len(frames))
+	for _, chunk := range frames {
 		if len(chunk.Data) == 0 {
 			continue
 		}
@@ -2100,12 +2062,13 @@ func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
 	return queue
 }
 
-func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	if len(expectedResp.StreamBody) == 0 {
+func extractExpectedRawQueue(expectedResp models.HTTPResp, format models.HTTPStreamFormat, canonicalizer func(string) string, ignoreEmpty bool) []string {
+	frames := expectedStreamFrames(expectedResp, format)
+	if len(frames) == 0 {
 		return nil
 	}
-	queue := make([]string, 0, len(expectedResp.StreamBody))
-	for _, chunk := range expectedResp.StreamBody {
+	queue := make([]string, 0, len(frames))
+	for _, chunk := range frames {
 		raw, ok := streamChunkFieldValue(chunk, "raw")
 		if !ok {
 			continue
