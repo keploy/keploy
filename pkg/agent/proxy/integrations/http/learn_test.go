@@ -263,6 +263,34 @@ func TestLearnMatchFollowsAVariable(t *testing.T) {
 	}
 }
 
+// A value sent under an operator's key (an extended-JSON {"$oid": ...}) is a
+// variable named after the key above it, the value's own name: "order", not
+// "$oid".
+func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":{"$oid":"o-1"}}`, nil, `{}`),
+		learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1"}`),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":{"$oid":"o-9"}}`, nil), db, n, opts); served == nil || miss != nil {
+		t.Fatalf("the first call is paired: %+v", miss)
+	}
+	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/orders/o-9", "", nil), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	use := db.consumed[1]
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
+	}
+	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order.$oid"}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
+		t.Fatalf("binds %+v, want %+v", use.Spec.LearnedBinds(), want)
+	}
+}
+
 func TestLearnMatchMissReasons(t *testing.T) {
 	h, n, opts := learnOn(t)
 	for _, tc := range []struct {

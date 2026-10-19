@@ -376,3 +376,83 @@ func TestAValueComesFromWhereItWasSentWhole(t *testing.T) {
 		t.Fatalf("the value comes from %+v, want the earliest of two places of one kind", p)
 	}
 }
+
+// A run's name and a test's name never meet, whichever is named first: a
+// test's own variable at a place named like the run's takes another name, and
+// a run's variable first named after a test took its name takes another.
+func TestARunsNameAndATestsNameNeverMeet(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	// The run's first: run-x, then a test's own at body.run-x.
+	tr := NewTracker()
+	tr.Served(0, sent("mock-1", t0, "body.x", "body.x", "rec-x", "live-x"))
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	run, _ := tr.RunName("mock-1", "body.x", nil)
+	own, _ := tr.Name(n, "mock-5", "body.run-x", nil)
+	if run != "run-x" || own == run {
+		t.Fatalf("run's first: the run's is %q, the test's own %q; want run-x and another", run, own)
+	}
+	// The test's first: its own run-x, then the run's, first named after.
+	tr = NewTracker()
+	tr.Served(0, sent("mock-1", t0, "body.x", "body.x", "rec-x", "live-x"))
+	tr.Begin()
+	n, _, _, _ = tr.Test()
+	own, _ = tr.Name(n, "mock-5", "body.run-x", nil)
+	tr.End()
+	tr.Begin()
+	run, _ = tr.RunName("mock-1", "body.x", nil)
+	if own != "run-x" || run == own {
+		t.Fatalf("test's first: the test's own is %q, the run's %q; want run-x and another", own, run)
+	}
+}
+
+// A run's place is named the run's name whatever test number asks: a late
+// call of a test that ended uses the set's name, which no test owns.
+func TestARunsPlaceIsNamedForAStaleTest(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	tr.Begin()
+	stale, _, _, _ := tr.Test()
+	run, _ := tr.RunName("mock-1", "body._id", nil)
+	tr.End()
+	tr.Begin()
+	if name, ok := tr.Name(stale, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("an ended test's call names the run's place %q (%v), want %q", name, ok, run)
+	}
+	if name, ok := tr.Name(stale, "mock-5", "body._id", nil); ok {
+		t.Fatalf("an ended test's call named its own variable %q", name)
+	}
+}
+
+// Named names a place by the variables bound or used there, never by an
+// echo: an echo is its call's alone.
+func TestNamedSkipsAnEcho(t *testing.T) {
+	e := Earlier{Mock: "mock-1", Seen: []Seen{
+		{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id"}},
+		{Side: Request, Place: "body.ref", Leaf: Leaf{Path: "body.ref"}},
+	}}
+	named := Named(e, models.MockVariables{
+		"echoed": {Bind: "body.id", Echo: true},
+		"ref":    {Bind: "body.ref"},
+	})
+	if named.Seen[0].Name != "" || named.Seen[1].Name != "ref" {
+		t.Fatalf("Named named the places %q and %q; want none for the echo, ref for ref", named.Seen[0].Name, named.Seen[1].Name)
+	}
+}
+
+// A variable is named by the key above an operator's key ($date, $oid): the
+// value's own name, not its encoding's.
+func TestAVariableIsNamedAboveADollarKey(t *testing.T) {
+	for place, want := range map[string]string{
+		"body.created.$date":     "created",
+		"body.order.$oid":        "order",
+		"body.items[0].ref.$oid": "ref",
+		"body.created":           "created",
+		"body.$date":             "var",
+	} {
+		if got := varName(place); got != want {
+			t.Errorf("varName(%q) = %q, want %q", place, got, want)
+		}
+	}
+}
