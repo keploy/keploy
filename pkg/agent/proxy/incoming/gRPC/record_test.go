@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,47 +74,146 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 	assert.Equal(t, responseAt, streams[0].GRPCResp.Timestamp)
 }
 
-func TestForwardAndTeeStampsResponsesAfterClientWrite(t *testing.T) {
-	logger := zap.NewNop()
+// The frame that ends a call's stream (its trailers) is stamped before its
+// client can see it: the bytes before its last byte are written, then it is
+// stamped and handed to the parser, and its last byte goes to the client once
+// the clock reads past the stamp. Stamped after its write, as it was, the
+// stamp came after the client had the trailers and could send its next call.
+func TestForwardAndTeeStampsAStreamsEndBeforeItsClientCanSeeIt(t *testing.T) {
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			if tick != 0 {
+				stubQuantizedClock(t, tick)
+			}
+			srcRead, srcWrite := net.Pipe()
+			dstRead, dstWrite := net.Pipe()
+			for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
+				require.NoError(t, c.SetDeadline(time.Now().Add(5*time.Second)))
+				defer c.Close()
+			}
+			ch := make(chan frameChunk, 1)
+			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil)
+
+			_, resp := pingCall(t)
+			awaitTickStart(tick)
+			sentAt := clockNow()
+			go func() { _, _ = srcWrite.Write(resp) }()
+
+			// The client has every byte of the response but the last.
+			_, err := io.ReadFull(dstRead, make([]byte, len(resp)-1))
+			require.NoError(t, err)
+			var chunk frameChunk
+			select {
+			case chunk = <-ch:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the stream's end was not stamped before its client had its last byte")
+			}
+			assert.Equal(t, resp, chunk.data, "the stamped chunk is not the response up to its end")
+			assert.False(t, chunk.timestamp.Before(sentAt), "stamped at %v, before the app sent it (%v)", chunk.timestamp, sentAt)
+
+			_, err = io.ReadFull(dstRead, make([]byte, 1))
+			require.NoError(t, err)
+			saw := clockNow()
+			assert.True(t, chunk.timestamp.Before(saw), "stamped at %v, not before the clock its client saw the end by (%v)", chunk.timestamp, saw)
+		})
+	}
+}
+
+// Several calls end in one read, beside the frames of a call still running
+// (one connection carries them all). The read is stamped once, before its
+// client can see the first of those ends, and handed to the parser whole: an
+// end stamped after the one before it had reached the client could be
+// stamped after the client acted on that one
+// (TestRecordIncoming_ASecondEndInAReadIsStampedBeforeTheFirstReachesItsClient).
+// The client gets every byte, in order.
+func TestForwardAndTeeStampsAReadOfSeveralEndsOnce(t *testing.T) {
 	srcRead, srcWrite := net.Pipe()
 	dstRead, dstWrite := net.Pipe()
 	for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
-		require.NoError(t, c.SetDeadline(time.Now().Add(5*time.Second)))
+		require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
 		defer c.Close()
 	}
-
-	ch := make(chan frameChunk, 1)
-	go forwardAndTee(srcRead, dstWrite, ch, logger, "app→client", true, nil)
-
-	payload := []byte("response-frame")
-	writeDone := make(chan error, 1)
+	ch := make(chan frameChunk, 8)
+	done := make(chan struct{})
 	go func() {
-		_, err := srcWrite.Write(payload)
-		writeDone <- err
+		defer close(done)
+		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil)
 	}()
+	_, resp1 := echoCall(t, 1, "one")
+	_, resp3 := echoCall(t, 3, "two")
+	running := headersFrameBytes(t, 5, []hpack.HeaderField{{Name: ":status", Value: "200"}}, false)
+	read := append(append(append([]byte{}, resp1...), resp3...), running...)
+	go func() { _, _ = srcWrite.Write(read) }()
 
-	select {
-	case err := <-writeDone:
+	got := make([]byte, 0, len(read))
+	for len(got) < len(read) {
+		b := make([]byte, 1)
+		_, err := io.ReadFull(dstRead, b)
 		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("source write did not complete")
+		got = append(got, b...)
+		if len(got) == len(resp1) {
+			require.Len(t, ch, 1, "the first end reached its client before the read was stamped")
+		}
 	}
+	srcWrite.Close()
+	<-done
+	close(ch)
+	var teed []frameChunk
+	for c := range ch {
+		teed = append(teed, c)
+	}
+	require.Len(t, teed, 1, "the read was not stamped once")
+	assert.Equal(t, read, teed[0].data)
+	assert.Equal(t, read, got)
+}
 
-	time.Sleep(100 * time.Millisecond)
-	cutoff := time.Now()
+// The scanner finds the end of every frame that ends a stream, wherever the
+// reads cut the frames: in a header, in a payload, at a frame's edge.
+func TestEndScannerFindsEveryEndWhereverTheReadsCut(t *testing.T) {
+	_, resp1 := echoCall(t, 1, "one")
+	emptyEnd := dataFrameBytes(t, 3, true, nil) // a DATA frame with no payload that ends its stream
+	padded := frameBytes(t, func(fr *http2.Framer) error {
+		return fr.WriteDataPadded(5, true, []byte("x"), make([]byte, 7))
+	})
+	notEnd := dataFrameBytes(t, 7, false, []byte("more"))
+	// Flag 0x1 is ACK on these: not an end.
+	settingsAck := frameBytes(t, func(fr *http2.Framer) error { return fr.WriteSettingsAck() })
+	pingAck := frameBytes(t, func(fr *http2.Framer) error { return fr.WritePing(true, [8]byte{}) })
+	stream := append(append(append(append(append(append([]byte{}, resp1...), emptyEnd...), settingsAck...), notEnd...), pingAck...), padded...)
+	want := []int{len(resp1), len(resp1) + len(emptyEnd), len(stream)}
+	for cut := 0; cut <= len(stream); cut++ {
+		var s endScanner
+		var got []int
+		for _, e := range s.scan(stream[:cut]) {
+			got = append(got, e)
+		}
+		for _, e := range s.scan(stream[cut:]) {
+			got = append(got, cut+e)
+		}
+		require.Equal(t, want, got, "reads cut at %d", cut)
+	}
+	var s endScanner
+	var got []int
+	for i := range stream {
+		if e := s.scan(stream[i : i+1]); len(e) > 0 {
+			got = append(got, i+e[0])
+		}
+	}
+	assert.Equal(t, want, got, "a byte a read")
 
-	buf := make([]byte, len(payload))
-	_, err := io.ReadFull(dstRead, buf)
-	require.NoError(t, err)
-	assert.Equal(t, payload, buf)
-
-	select {
-	case chunk := <-ch:
-		assert.Equal(t, payload, chunk.data)
-		assert.False(t, chunk.timestamp.Before(cutoff),
-			"response timestamp should be captured after the proxy writes to the client")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for teed frame chunk")
+	// A frame longer than 64 KiB: its length's first byte counts.
+	big := append([]byte{0x01, 0x11, 0x70, byte(http2.FrameData), byte(http2.FlagDataEndStream), 0, 0, 0, 9}, make([]byte, 0x011170)...)
+	big = append(big, resp1...)
+	for _, cut := range []int{0, 2, 9, 30000, len(big) - len(resp1) - 1, len(big) - len(resp1), len(big) - 1} {
+		var s endScanner
+		var got []int
+		for _, e := range s.scan(big[:cut]) {
+			got = append(got, e)
+		}
+		for _, e := range s.scan(big[cut:]) {
+			got = append(got, cut+e)
+		}
+		require.Equal(t, []int{len(big) - len(resp1), len(big)}, got, "a frame over 64 KiB, reads cut at %d", cut)
 	}
 }
 
@@ -171,6 +271,13 @@ type grpcIngress struct {
 
 func startGRPCIngress(t *testing.T) *grpcIngress {
 	t.Helper()
+	return startGRPCIngressOn(t, nil)
+}
+
+// startGRPCIngressOn is startGRPCIngress with the ingress's end of the client
+// connection wrapped by wrap, when it is not nil.
+func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress {
+	t.Helper()
 	g := &grpcIngress{m: syncMock.New(nil), tcCh: make(chan *models.TestCase), recorded: make(chan struct{}),
 		stop: time.Now().Add(time.Hour)}
 	remove := g.m.AddWatermark(caughtUp{})
@@ -178,6 +285,9 @@ func startGRPCIngress(t *testing.T) *grpcIngress {
 	var cliProxy, appProxy net.Conn
 	g.cliApp, cliProxy = net.Pipe()
 	appProxy, g.appApp = net.Pipe()
+	if wrap != nil {
+		cliProxy = wrap(cliProxy)
+	}
 	go func() {
 		defer close(g.recorded)
 		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, g.tcCh, 50051, "", false, false)
@@ -383,8 +493,9 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 // waits in its write of the next chunk, which is never noted, and the chunk
 // before it ends mid-frame. That one is let go once its frames are handled:
 // the frame it ends in is stamped by the chunk that completes it, after its
-// write, so nothing it holds can be from before the stop. Held, it would keep
-// the stop waiting on a client that never reads again.
+// write (a frame that ends no stream), so nothing it holds can be from before
+// the stop. Held, it would keep the stop waiting on a client that never reads
+// again.
 func TestRecordIncoming_AClientThatStopsReadingMidFrameHoldsNoStop(t *testing.T) {
 	g := startGRPCIngress(t)
 	req, _ := pingCall(t)
@@ -413,6 +524,45 @@ func TestRecordIncoming_AClientThatStopsReadingMidFrameHoldsNoStop(t *testing.T)
 	<-wrote
 
 	g.waitFor(t, "clear while the client does not read", func(st syncMock.BacklogState) bool { return !st.Pending && st.Progress >= 2 })
+}
+
+// A client that stops reading inside the frame that ends a call's stream holds
+// no stop, wherever it stops. Before the frame's last byte, the forwarder
+// waits in the write of the bytes before it, and nothing of the response is
+// noted yet. At the last byte, the frame is stamped and handed to the parser
+// before that byte's write, which waits on the client: the call is pending
+// only until it is captured and taken, as any call is, never on the client.
+func TestRecordIncoming_AClientThatStopsReadingInAStreamsEndHoldsNoStop(t *testing.T) {
+	for name, unread := range map[string]int{"before the end's last byte": 5, "at the end's last byte": 1} {
+		t.Run(name, func(t *testing.T) {
+			g := startGRPCIngress(t)
+			req, resp := pingCall(t)
+			go func() { _, _ = g.cliApp.Write(req) }()
+			_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+			require.NoError(t, err)
+			g.waitFor(t, "the request chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 1 && !st.Pending })
+
+			go func() { _, _ = g.appApp.Write(resp) }()
+			_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)-unread))
+			require.NoError(t, err)
+			// The client reads no more.
+			if unread > 1 {
+				g.waitFor(t, "clear while the client does not read", func(st syncMock.BacklogState) bool { return !st.Pending && st.Progress >= 1 })
+				select {
+				case tc := <-g.tcCh:
+					t.Fatalf("a call was captured whose end its client never had: %v", tc.GrpcReq.Headers.PseudoHeaders[":path"])
+				case <-time.After(50 * time.Millisecond):
+				}
+				return
+			}
+			select {
+			case <-g.tcCh:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the call whose end was stamped was not captured")
+			}
+			g.waitFor(t, "clear once the call was taken, though its last byte waits on the client", func(st syncMock.BacklogState) bool { return !st.Pending && st.Progress >= 2 })
+		})
+	}
 }
 
 // The tee that memory pressure stops tells the parser so: the rest of the
@@ -458,14 +608,25 @@ func TestForwardAndTeeTellsTheParserWhenTheTeeStops(t *testing.T) {
 	assert.Len(t, ch, 0, "chunks teed after the tee stopped")
 }
 
-// The forwarder notes each chunk it tees as being built from no later than
-// the chunk's stamp, and releases it when it cannot hand it on. A chunk
-// stamped after its write is noted once the write returns: a write blocked on
-// a client that stopped reading would otherwise hold every stop, though what
-// it carries is stamped after the write.
+// The forwarder notes each chunk it tees as being built before it reads the
+// chunk's stamp (the note is in when the stamp is read), and releases it when
+// it cannot hand it on. What it sends the client (toClient) is noted once the
+// write that may wait on the client returns: a write blocked on a client that
+// stopped reading would otherwise hold every stop. That holds for a read that
+// ends a stream too: it is noted after the write of the bytes before the first
+// end's last byte (TestRecordIncoming_AClientThatStopsReadingInAStreamsEndHoldsNoStop).
 func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
-	for _, stampAfterWrite := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stampAfterWrite=%v", stampAfterWrite), func(t *testing.T) {
+	_, end := pingCall(t)
+	for _, tc := range []struct {
+		name     string
+		toClient bool
+		payload  []byte
+	}{
+		{"toClient=false", false, []byte("frame")},
+		{"toClient=true, a read that ends no stream", true, []byte("frame")},
+		{"toClient=true, a read that ends a stream", true, end},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			srcRead, srcWrite := net.Pipe()
 			dstRead, dstWrite := net.Pipe()
 			defer srcWrite.Close()
@@ -473,25 +634,25 @@ func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
 
 			notes := make(chan time.Time, 4)
 			var released atomic.Int32
-			building := func(at time.Time) func() {
-				notes <- at
+			building := func(time.Time) func() {
+				notes <- clockNow() // when the note is in
 				return func() { released.Add(1) }
 			}
 			ch := make(chan frameChunk, 1)
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", stampAfterWrite, building)
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building)
 			}()
 
-			go func() { _, _ = srcWrite.Write([]byte("frame")) }()
-			unblocked := time.Now() // the forwarder's write can return from here on
-			_, err := io.ReadFull(dstRead, make([]byte, 5))
+			go func() { _, _ = srcWrite.Write(tc.payload) }()
+			unblocked := clockNow() // the forwarder's write can return from here on
+			_, err := io.ReadFull(dstRead, make([]byte, len(tc.payload)))
 			require.NoError(t, err)
 			chunk := <-ch
 			notedAt := <-notes
 			assert.False(t, notedAt.After(chunk.timestamp), "noted at %v, after its stamp %v", notedAt, chunk.timestamp)
-			if stampAfterWrite {
+			if tc.toClient {
 				assert.False(t, notedAt.Before(unblocked), "noted at %v, before its write could return (%v)", notedAt, unblocked)
 			}
 			require.NotNil(t, chunk.built)
@@ -508,7 +669,7 @@ func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
 			for range notes {
 				extra++
 			}
-			if stampAfterWrite {
+			if tc.toClient {
 				assert.Equal(t, 0, extra, "a chunk whose write failed was noted")
 				assert.Equal(t, int32(1), released.Load())
 			} else {
@@ -589,4 +750,323 @@ func grpcPayloadBytes(msg []byte) []byte {
 	binary.BigEndian.PutUint32(payload[1:5], uint32(len(msg)))
 	copy(payload[5:], msg)
 	return payload
+}
+
+// heldAfterEndConn is the ingress's end of a client connection whose write
+// that hands the client the last byte of end returns only once gate opens: the
+// forwarder descheduled just after it gave its client a whole response, as on
+// a loaded host. A pipe's write returns once the client has read all of it.
+type heldAfterEndConn struct {
+	net.Conn
+	end  []byte
+	gate <-chan struct{}
+
+	mu   sync.Mutex
+	sent []byte
+	held bool
+}
+
+func (c *heldAfterEndConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.mu.Lock()
+	c.sent = append(c.sent, p[:n]...)
+	hold := !c.held && bytes.HasSuffix(c.sent, c.end)
+	c.held = c.held || hold
+	c.mu.Unlock()
+	if hold {
+		<-c.gate
+	}
+	return n, err
+}
+
+// echoCall is one unary call on stream id, without the connection preface: its
+// request, and the response with its trailers.
+func echoCall(t *testing.T, id uint32, msg string) (req, resp []byte) {
+	t.Helper()
+	req = append(headersFrameBytes(t, id, []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":path", Value: "/svc.Echo/" + msg},
+		{Name: ":authority", Value: "localhost:50051"},
+		{Name: "content-type", Value: "application/grpc"},
+	}, false), dataFrameBytes(t, id, true, grpcPayloadBytes([]byte(msg)))...)
+	resp = append(append(headersFrameBytes(t, id, []hpack.HeaderField{
+		{Name: ":status", Value: "200"},
+		{Name: "content-type", Value: "application/grpc"},
+	}, false), dataFrameBytes(t, id, false, grpcPayloadBytes([]byte(msg)))...),
+		headersFrameBytes(t, id, []hpack.HeaderField{{Name: "grpc-status", Value: "0"}}, true)...)
+	return req, resp
+}
+
+// A client that sends its next call only once it has the whole of the
+// previous response (its trailers), on the same connection, as gRPC clients
+// do, is sequential, and so are the app's calls for the two. The forwarder
+// stamped the frames it sends the client after its write had returned: a
+// forwarder descheduled there, once its client had the trailers, stamped them
+// late, and the call's window ([request, trailers]) ran into the next call's.
+// Under the proven switch the record derives each test's calls from those
+// windows (models.DeriveWindowMappings), and a call made while two windows are
+// open goes to the one that opened first: the next call's dependency call went
+// to the test before it.
+//
+// What ends a stream is stamped before the byte that ends it reaches the
+// client, and the client gets that byte only once the clock reads past the
+// stamp: the window holds every call the app made for the call, and nothing
+// its client does on the answer.
+func TestRecordIncoming_AResponseEndsBeforeItsClientCanSeeIt(t *testing.T) {
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			if tick != 0 {
+				stubQuantizedClock(t, tick)
+			}
+			aResponseEndsBeforeItsClientCanSeeIt(t, tick)
+		})
+	}
+}
+
+func aResponseEndsBeforeItsClientCanSeeIt(t *testing.T, tick time.Duration) {
+	gate := make(chan struct{})
+	opened := false
+	open := func() {
+		if !opened {
+			opened = true
+			close(gate)
+		}
+	}
+	defer open()
+	req1, resp1 := echoCall(t, 1, "first")
+	req2, resp2 := echoCall(t, 3, "next")
+	g := startGRPCIngressOn(t, func(c net.Conn) net.Conn {
+		return &heldAfterEndConn{Conn: c, end: resp1, gate: gate}
+	})
+	calls := map[string]time.Time{} // the app's dependency call for each, stamped as a parser stamps it
+	serve := func(req, resp []byte, name string) {
+		_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+		require.NoError(t, err)
+		calls[name] = clockNow()
+		go func() { _, _ = g.appApp.Write(resp) }()
+	}
+
+	awaitTickStart(tick)
+	go func() { _, _ = g.cliApp.Write(append([]byte(http2.ClientPreface), req1...)) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(http2.ClientPreface)))
+	require.NoError(t, err)
+	serve(req1, resp1, "first")
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp1)))
+	require.NoError(t, err)
+	sawEnd := clockNow()
+
+	// The client has the first call's trailers: its next call.
+	go func() { _, _ = g.cliApp.Write(req2) }()
+	serve(req2, resp2, "next")
+	open()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp2)))
+	require.NoError(t, err)
+
+	got := map[string]*models.TestCase{}
+	for len(got) < 2 {
+		select {
+		case tc := <-g.tcCh:
+			got[strings.TrimPrefix(tc.GrpcReq.Headers.PseudoHeaders[":path"], "/svc.Echo/")] = tc
+		case <-time.After(10 * time.Second):
+			t.Fatalf("captured %d of 2 calls", len(got))
+		}
+	}
+	first, next := got["first"], got["next"]
+	require.NotNil(t, first)
+	require.NotNil(t, next)
+	const ts = "15:04:05.000000"
+	assert.True(t, first.GrpcResp.Timestamp.Before(sawEnd), "the first call's window ends at %s, not before its client had read its trailers (%s)",
+		first.GrpcResp.Timestamp.Format(ts), sawEnd.Format(ts))
+	assert.True(t, first.GrpcResp.Timestamp.Before(next.GrpcReq.Timestamp), "the first call's window ends at %s, not before the next call's begins (%s), though the next was sent only once the first was answered",
+		first.GrpcResp.Timestamp.Format(ts), next.GrpcReq.Timestamp.Format(ts))
+
+	// What a recording made without --sync maps each test to.
+	derived := models.DeriveWindowMappings(
+		[]models.TestWindow{models.RecordedWindow(withName(first, "first")), models.RecordedWindow(withName(next, "next"))},
+		[]models.WindowedMock{
+			{Name: "first", Kind: models.HTTP, At: calls["first"], Res: calls["first"], TestMock: true},
+			{Name: "next", Kind: models.HTTP, At: calls["next"], Res: calls["next"], TestMock: true},
+		})
+	for _, tc := range derived.Tests {
+		var owns []string
+		for _, m := range tc.Mocks {
+			owns = append(owns, m.Name)
+		}
+		assert.Equal(t, []string{tc.ID}, owns, "%s's test owns the calls %v, want only the one its own call made", tc.ID, owns)
+	}
+	assert.Empty(t, derived.Concurrent, "recorded as open together, though the client sent one call at a time")
+}
+
+// withName is tc named name.
+func withName(tc *models.TestCase, name string) *models.TestCase {
+	c := *tc
+	c.Name = name
+	return &c
+}
+
+// windowsTick is Windows' default timer tick: how often its time.Now moves on
+// unless a process asks for a finer one.
+const windowsTick = 15625 * time.Microsecond
+
+// stubQuantizedClock has the forwarder, and the stamps a test takes with
+// clockNow, read a clock of tick's resolution until the test ends: real time
+// cut down to the tick, as Windows' time.Now is. The forwarder's waits are
+// real sleeps on it.
+func stubQuantizedClock(t *testing.T, tick time.Duration) {
+	t.Helper()
+	prev := stubbedClock.Swap(&forwardClock{
+		now:   func() time.Time { return time.Now().Truncate(tick) },
+		sleep: time.Sleep,
+	})
+	t.Cleanup(func() { stubbedClock.Store(prev) })
+}
+
+// awaitTickStart returns at the start of the clock's next tick: what a run
+// does in its first few milliseconds then falls in one tick, as it does on a
+// coarse clock unless the forwarder waits for the clock. At once for the
+// system clock (tick 0).
+func awaitTickStart(tick time.Duration) {
+	if tick > 0 {
+		time.Sleep(time.Until(time.Now().Truncate(tick).Add(tick)))
+	}
+}
+
+// clockName names a run by the clock it runs on.
+func clockName(tick time.Duration) string {
+	if tick == 0 {
+		return "on the system clock"
+	}
+	return "on a clock of " + tick.String() + " ticks"
+}
+
+// The forwarder is descheduled after it reads the clock, before its next
+// step, as on a loaded host; a stop asks meanwhile. A read that ends a stream
+// is noted before its stamp is read: a stop that asks before the note is in
+// finds the call ends after its own instant, and nothing of it is lost. Noted
+// after its stamp, a stop with an instant after the stamp heard "clear" while
+// the call was on its way, and the call came after the stream had ended.
+func TestRecordIncoming_AStopBetweenAReadAndItsNoteLosesNothing(t *testing.T) {
+	var armed atomic.Bool
+	reached := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(gate) }) }
+	defer open()
+	prev := stubbedClock.Swap(&forwardClock{now: func() time.Time {
+		n := time.Now()
+		if armed.CompareAndSwap(true, false) {
+			reached <- struct{}{}
+			<-gate
+		}
+		return n
+	}, sleep: time.Sleep})
+	defer stubbedClock.Store(prev)
+
+	g := startGRPCIngress(t)
+	req, resp := pingCall(t)
+	go func() { _, _ = g.cliApp.Write(req) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+	require.NoError(t, err)
+	g.waitFor(t, "the request chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 1 && !st.Pending })
+
+	// The forwarder reads the response, writes it up to its end's last byte,
+	// and is held at its next read of the clock.
+	armed.Store(true)
+	go func() { _, _ = g.appApp.Write(resp) }()
+	go func() { _, _ = io.ReadFull(g.cliApp, make([]byte, len(resp))) }()
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the forwarder never read its clock for the response")
+	}
+	g.stop = time.Now().Add(time.Millisecond)
+	for !time.Now().After(g.stop) {
+		time.Sleep(100 * time.Microsecond)
+	}
+	st := g.backlog()
+	open()
+	var tc *models.TestCase
+	select {
+	case tc = <-g.tcCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no test case came of the call")
+	}
+	require.False(t, st.Pending, "setup: the stop asked before the forwarder noted the response")
+	assert.True(t, tc.GrpcResp.Timestamp.After(g.stop), "the stop heard clear, then a call that ended before it came (at %v, the stop %v): lost to a stream the stop ended",
+		tc.GrpcResp.Timestamp, g.stop)
+}
+
+// Two calls in flight on one connection (streams 1 and 3); the app answers
+// both, and the forwarder reads both answers in one read. The client reads the
+// first answer and, on it, sends a third call, and the app makes the third
+// call's dependency call, all before the client reads the second answer, so
+// the forwarder is still in the write that carries it. The second call's
+// window must not run past that dependency call: the app had answered it
+// before the third call was sent. Stamped end by end, the second end was
+// stamped only after the first had reached its client and the client had read
+// on, and the second call's test took the third call's dependency call.
+func TestRecordIncoming_ASecondEndInAReadIsStampedBeforeTheFirstReachesItsClient(t *testing.T) {
+	gate := make(chan struct{})
+	opened := false
+	open := func() {
+		if !opened {
+			opened = true
+			close(gate)
+		}
+	}
+	defer open()
+	req1, resp1 := echoCall(t, 1, "first")
+	req2, resp2 := echoCall(t, 3, "second")
+	req3, resp3 := echoCall(t, 5, "third")
+	g := startGRPCIngressOn(t, func(c net.Conn) net.Conn {
+		return &heldAfterEndConn{Conn: c, end: resp1, gate: gate}
+	})
+	calls := map[string]time.Time{} // each call's dependency call, stamped as a parser stamps it
+	go func() { _, _ = g.cliApp.Write(append(append([]byte(http2.ClientPreface), req1...), req2...)) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(http2.ClientPreface)+len(req1)+len(req2)))
+	require.NoError(t, err)
+	calls["first"], calls["second"] = clockNow(), clockNow()
+	go func() { _, _ = g.appApp.Write(append(append([]byte{}, resp1...), resp2...)) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp1)))
+	require.NoError(t, err)
+
+	// On the first answer, the client's next call.
+	go func() { _, _ = g.cliApp.Write(req3) }()
+	_, err = io.ReadFull(g.appApp, make([]byte, len(req3)))
+	require.NoError(t, err)
+	calls["third"] = clockNow()
+	open()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp2)))
+	require.NoError(t, err)
+	go func() { _, _ = g.appApp.Write(resp3) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp3)))
+	require.NoError(t, err)
+
+	got := map[string]*models.TestCase{}
+	for len(got) < 3 {
+		select {
+		case tc := <-g.tcCh:
+			got[strings.TrimPrefix(tc.GrpcReq.Headers.PseudoHeaders[":path"], "/svc.Echo/")] = tc
+		case <-time.After(10 * time.Second):
+			t.Fatalf("captured %d of 3 calls", len(got))
+		}
+	}
+	var windows []models.TestWindow
+	var made []models.WindowedMock
+	for _, name := range []string{"first", "second", "third"} {
+		require.NotNil(t, got[name], name)
+		windows = append(windows, models.RecordedWindow(withName(got[name], name)))
+		made = append(made, models.WindowedMock{Name: name, Kind: models.HTTP, At: calls[name], Res: calls[name], TestMock: true})
+	}
+	// The first two were in flight together: which of them owns each of their
+	// calls is decided by time alone (the record says so). The third's is its
+	// own.
+	for _, tc := range models.DeriveWindowMappings(windows, made).Tests {
+		for _, m := range tc.Mocks {
+			if m.Name == "third" {
+				assert.Equal(t, "third", tc.ID, "the third call's dependency call went to the %s call's test", tc.ID)
+			}
+		}
+	}
 }
