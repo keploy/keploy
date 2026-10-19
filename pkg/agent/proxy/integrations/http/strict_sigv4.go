@@ -18,16 +18,15 @@ import (
 //
 //	AWS4-HMAC-SHA256 Credential=<key id>/<date>/<region>/<service>/<terminator>, SignedHeaders=<h1;h2;...>, Signature=<64 hex>
 //
-//   - the algorithm, the key id, the region, the service, the terminator
-//     (aws4_request) and the signed headers exactly: another account, region,
-//     service or set of signed headers is another call;
-//   - the date by the clock: it is the day the request was signed on, which
-//     the clock the test runs on decides (design v14 §3.4: frozen at its
-//     recorded time, or real time for a REAL test or a shape keploy cannot
-//     freeze), so it may differ from the recording's only when each side's
-//     date is the day of its own signing time (X-Amz-Date, else Date), as
-//     SigV4 requires; any other difference is compared;
-//   - the signature not at all: it is a function of the rest and the time.
+//   - the algorithm, the region, the service, the terminator (aws4_request)
+//     and the signed headers exactly: another region, service or set of
+//     signed headers is another call;
+//   - the access key id, the date and the signature not at all (founder
+//     ruling on SF-3, 2026-10-19): a replay runs with the credentials of
+//     where it runs (a CI's, not the recording machine's) and on the day it
+//     runs, and the signature is a function of the rest and the time.
+//     Compared, every replay with other AWS credentials or on another day
+//     missed.
 //
 // x-amz-content-sha256, the payload's hash a signature covers, must be the
 // SHA-256 of the body the client sent when the recording's is a hash (the
@@ -136,19 +135,14 @@ func sigV4Day(amzDate, date string) string {
 }
 
 // sigV4ScopeDiffs are the parts in which a live credential differs from the
-// recorded one, named at prefix: the key id, region, service and terminator
-// exactly; the date only where it is not each side's own signing day (recDay,
-// liveDay: sigV4Day).
-func sigV4ScopeDiffs(prefix string, rec, live sigV4Scope, recDay, liveDay string) []strictField {
+// recorded one, named at prefix: the region, service and terminator exactly;
+// the access key id and the date not at all.
+func sigV4ScopeDiffs(prefix string, rec, live sigV4Scope) []strictField {
 	var out []strictField
 	part := func(name, r, l string) {
 		if r != l {
 			out = append(out, field(valueDiff(prefix+"."+name, r, l)))
 		}
-	}
-	part("access_key_id", rec.keyID, live.keyID)
-	if rec.date != live.date && (recDay == "" || liveDay == "" || rec.date != recDay || live.date != liveDay) {
-		part("date", rec.date, live.date)
 	}
 	part("region", rec.region, live.region)
 	part("service", rec.service, live.service)
@@ -159,15 +153,14 @@ func sigV4ScopeDiffs(prefix string, rec, live sigV4Scope, recDay, liveDay string
 // sigV4AuthorizationDiffs compares a recorded Authorization header with the
 // live one (its lines joined with ",") by their SigV4 parts
 // (header.authorization.<part>); ok is false when either is not SigV4, and
-// the header is then compared whole, as any header. recDay and liveDay are
-// each side's signing day (sigV4Day).
-func sigV4AuthorizationDiffs(rec, live, recDay, liveDay string) (out []strictField, ok bool) {
+// the header is then compared whole, as any header.
+func sigV4AuthorizationDiffs(rec, live string) (out []strictField, ok bool) {
 	ra, rok := parseSigV4Authorization(rec)
 	la, lok := parseSigV4Authorization(live)
 	if !rok || !lok {
 		return nil, false
 	}
-	out = sigV4ScopeDiffs("header.authorization", ra.scope, la.scope, recDay, liveDay)
+	out = sigV4ScopeDiffs("header.authorization", ra.scope, la.scope)
 	if ra.signedHeaders != la.signedHeaders {
 		out = append(out, field(valueDiff("header.authorization.signed_headers", ra.signedHeaders, la.signedHeaders)))
 	}
@@ -189,7 +182,6 @@ func samePayloadHash(rec string, live []string, sent []byte) bool {
 // presignedSigV4 is a SigV4 presigned URL's signing parameters.
 type presignedSigV4 struct {
 	scope sigV4Scope
-	day   string
 }
 
 // The parameters of a SigV4 presigned URL that are read by its grammar.
@@ -223,14 +215,15 @@ func parsePresignedSigV4(q url.Values) (presignedSigV4, bool) {
 	if !ok {
 		return presignedSigV4{}, false
 	}
-	day := sigV4Day(date, "")
-	if day == "" {
+	// Its signing time must read as one (the grammar), though it is not
+	// compared.
+	if sigV4Day(date, "") == "" {
 		return presignedSigV4{}, false
 	}
 	if sig, ok := one(amzSignature); !ok || !isSHA256Hex(sig) {
 		return presignedSigV4{}, false
 	}
-	return presignedSigV4{scope: scope, day: day}, true
+	return presignedSigV4{scope: scope}, true
 }
 
 func firstOf(v []string) string {
@@ -253,12 +246,5 @@ func presignedDiffs(rec, live url.Values) (byGrammar map[string]bool, out []stri
 		return nil, nil
 	}
 	return map[string]bool{amzCredential: true, amzDate: true, amzSignature: true},
-		sigV4ScopeDiffs("query."+amzCredential, rp.scope, lp.scope, rp.day, lp.day)
-}
-
-// sigV4Days are the signing days of a recorded and a live request (sigV4Day),
-// from their X-Amz-Date or Date headers: recH holds the recorded headers by
-// lowercased name, liveH the live ones.
-func sigV4Days(recH map[string]string, liveH map[string][]string) (string, string) {
-	return sigV4Day(recH["x-amz-date"], recH["date"]), sigV4Day(strings.Join(liveH["x-amz-date"], ","), strings.Join(liveH["date"], ","))
+		sigV4ScopeDiffs("query."+amzCredential, rp.scope, lp.scope)
 }

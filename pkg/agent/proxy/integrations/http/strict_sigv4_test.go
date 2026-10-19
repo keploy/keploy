@@ -52,7 +52,7 @@ func TestStrictSigV4SignatureAndSigningTimeMayDiffer(t *testing.T) {
 	}
 }
 
-// Every other part of the credential scope, and the signed headers, are
+// The region, the service, the terminator and the signed headers are
 // compared exactly, each named where it differs.
 func TestStrictSigV4ComparesTheCredentialScope(t *testing.T) {
 	body := "hello"
@@ -61,7 +61,6 @@ func TestStrictSigV4ComparesTheCredentialScope(t *testing.T) {
 		auth string
 		want string
 	}{
-		{sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), "header.authorization.access_key_id"},
 		{sigV4("AKID", "20261015", "eu-west-1", "s3", signed, sig(2)), "header.authorization.region"},
 		{sigV4("AKID", "20261015", "us-east-1", "sqs", signed, sig(2)), "header.authorization.service"},
 		{strings.Replace(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), "aws4_request", "aws5_request", 1), "header.authorization.terminator"},
@@ -78,32 +77,32 @@ func TestStrictSigV4ComparesTheCredentialScope(t *testing.T) {
 	}
 }
 
-// The credential's date is the day the request was signed on, which the
-// clock the test runs on decides: it may differ from the recording's only
-// when each side's date is the day of its own signing time (X-Amz-Date, else
-// Date). Anything else is compared.
-func TestStrictSigV4TheDateFollowsTheSigningTime(t *testing.T) {
+// The access key id and the date are never compared (founder ruling on
+// SF-3): a replay runs with the credentials of where it runs, a CI's, not
+// the recording machine's, and on the day it runs, whatever its signing time
+// says. Compared, every replay with other AWS credentials or on another day
+// missed.
+func TestStrictSigV4NeverComparesTheAccessKeyOrTheDate(t *testing.T) {
 	body := "hello"
-	auth := func(date string, n int) string { return sigV4("AKID", date, "us-east-1", "s3", signed, sig(n)) }
-	rec := recorded("put", "/bucket/key", awsCall(auth("20261015", 1), "20261015T235959Z", hashOf(body)), body)
-
-	// A test on the real clock signs on another day.
-	if got, diag := strictMatch(t, sent("/bucket/key", awsCall(auth("20261016", 2), "20261016T000003Z", hashOf(body)), body), nil, nil, nil, rec); got == nil {
-		t.Fatalf("a call signed on another day was not served: differs %v", differs(diag))
+	auth := func(key, date string, n int) string { return sigV4(key, date, "us-east-1", "s3", signed, sig(n)) }
+	rec := recorded("put", "/bucket/key", awsCall(auth("AKID", "20261015", 1), "20261015T235959Z", hashOf(body)), body)
+	for _, tc := range []struct {
+		name string
+		live map[string]string
+	}{
+		{"other credentials", awsCall(auth("CIKEY", "20261015", 2), "20261015T101533Z", hashOf(body))},
+		{"another day", awsCall(auth("AKID", "20261023", 2), "20261023T081500Z", hashOf(body))},
+		{"a date that is not its signing day", awsCall(auth("AKID", "20261016", 2), "20261015T101010Z", hashOf(body))},
+		{"no signing time", map[string]string{"Authorization": auth("AKID", "20261016", 2), "X-Amz-Content-Sha256": hashOf(body)}},
+		{"other credentials on another day", awsCall(auth("CIKEY", "20261101", 2), "20261101T120000Z", hashOf(body))},
+	} {
+		if got, diag := strictMatch(t, sent("/bucket/key", tc.live, body), nil, nil, nil, rec); got == nil {
+			t.Fatalf("%s: not served: differs %v", tc.name, differs(diag))
+		}
 	}
-	// A date that is not the request's own signing day is compared.
-	got, diag := strictMatch(t, sent("/bucket/key", awsCall(auth("20261016", 2), "20261015T101010Z", hashOf(body)), body), nil, nil, nil, rec)
-	if got != nil || !hasField(differs(diag), "header.authorization.date") {
-		t.Fatalf("a date that is not the request's signing day: served %v, differs %v", got != nil, differs(diag))
-	}
-	// A request with no signing time says no day: its date is compared.
-	noTime := map[string]string{"Authorization": auth("20261016", 2), "X-Amz-Content-Sha256": hashOf(body)}
-	if got, diag := strictMatch(t, sent("/bucket/key", noTime, body), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "header.authorization.date") {
-		t.Fatalf("a date with no signing time: served %v, differs %v", got != nil, differs(diag))
-	}
-	// The Date header is the signing time of a request without X-Amz-Date.
-	byDate := recorded("put", "/bucket/key", map[string]string{"Authorization": auth("20261015", 1), "Date": "Thu, 15 Oct 2026 10:10:10 GMT"}, body)
-	if got, diag := strictMatch(t, sent("/bucket/key", map[string]string{"Authorization": auth("20261016", 2), "Date": "Fri, 16 Oct 2026 08:00:00 GMT"}, body), nil, nil, nil, byDate); got == nil {
+	// A request dated by its Date header, the same.
+	byDate := recorded("put", "/bucket/key", map[string]string{"Authorization": auth("AKID", "20261015", 1), "Date": "Thu, 15 Oct 2026 10:10:10 GMT"}, body)
+	if got, diag := strictMatch(t, sent("/bucket/key", map[string]string{"Authorization": auth("CIKEY", "20261016", 2), "Date": "Fri, 16 Oct 2026 08:00:00 GMT"}, body), nil, nil, nil, byDate); got == nil {
 		t.Fatalf("a call dated by its Date header was not served: differs %v", differs(diag))
 	}
 }
@@ -200,12 +199,17 @@ func TestStrictSigV4ReadsAPresignedURL(t *testing.T) {
 	if got, diag := strictMatch(t, sent(presigned("AKID/20261016/us-east-1/s3/aws4_request", "20261016T000003Z", 900, 2), nil, ""), nil, nil, nil, rec); got == nil {
 		t.Fatalf("a URL presigned on another day was not served: differs %v", differs(diag))
 	}
+	// Nor its access key id or its date (SF-3).
+	for _, cred := range []string{"OTHER/20261015/us-east-1/s3/aws4_request", "AKID/20261016/us-east-1/s3/aws4_request"} {
+		if got, diag := strictMatch(t, sent(presigned(cred, "20261015T101533Z", 900, 2), nil, ""), nil, nil, nil, rec); got == nil {
+			t.Fatalf("a URL presigned with credential %s was not served: differs %v", cred, differs(diag))
+		}
+	}
 	for _, tc := range []struct {
 		path, want string
 	}{
 		{presigned("AKID/20261015/eu-west-1/s3/aws4_request", "20261015T101533Z", 900, 2), "query.X-Amz-Credential.region"},
-		{presigned("OTHER/20261015/us-east-1/s3/aws4_request", "20261015T101533Z", 900, 2), "query.X-Amz-Credential.access_key_id"},
-		{presigned("AKID/20261016/us-east-1/s3/aws4_request", "20261015T101533Z", 900, 2), "query.X-Amz-Credential.date"},
+		{presigned("AKID/20261015/us-east-1/sqs/aws4_request", "20261015T101533Z", 900, 2), "query.X-Amz-Credential.service"},
 		{presigned("AKID/20261015/us-east-1/s3/aws4_request", "20261015T101533Z", 3600, 2), "query.X-Amz-Expires"},
 	} {
 		got, diag := strictMatch(t, sent(tc.path, nil, ""), nil, nil, nil, rec)
@@ -248,8 +252,8 @@ func TestStrictSigV4ThePayloadHashLeavesTheSwitchedList(t *testing.T) {
 // signed headers: a learner that reads the header whole (L, at record's full
 // round) sees the signature drift on every SigV4 call and learns
 // header.authorization, and the parts are read before that noise. Only the
-// signature and the signing day may then differ; with the noise checked
-// first, another account, region or service was served.
+// signature, the access key id and the date may then differ; with the noise
+// checked first, another region or service was served.
 func TestStrictSigV4ALearnedAuthorizationKeepsTheScope(t *testing.T) {
 	body := "hello"
 	rec := recorded("put", "/bucket/key", awsCall(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(1)), "20261015T101010Z", hashOf(body)), body)
@@ -261,12 +265,10 @@ func TestStrictSigV4ALearnedAuthorizationKeepsTheScope(t *testing.T) {
 		auth string
 		want string
 	}{
-		{sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), "header.authorization.access_key_id"},
 		{sigV4("AKID", "20261015", "eu-west-1", "s3", signed, sig(2)), "header.authorization.region"},
 		{sigV4("AKID", "20261015", "us-east-1", "sqs", signed, sig(2)), "header.authorization.service"},
 		{strings.Replace(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), "aws4_request", "aws5_request", 1), "header.authorization.terminator"},
 		{sigV4("AKID", "20261015", "us-east-1", "s3", "host;x-amz-date", sig(2)), "header.authorization.signed_headers"},
-		{sigV4("AKID", "20261016", "us-east-1", "s3", signed, sig(2)), "header.authorization.date"},
 		// A live value that is no SigV4 is compared whole: the noise was
 		// learned for the recording's signature.
 		{"Bearer token", "header.authorization"},

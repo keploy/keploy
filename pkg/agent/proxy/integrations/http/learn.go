@@ -1290,21 +1290,17 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 
 // sigV4PartsHold reports whether a live request holds the AWS SigV4 parts of
 // the recorded one the strict matcher compares before learned noise
-// (founder decision 25): of a SigV4 Authorization (sigV4AuthorizationDiffs:
-// its key id, region, service, terminator and signed headers, its date by
-// its own signing day; never its signature), and of a presigned URL's
+// (founder decision 25, as ruled on SF-3): of a SigV4 Authorization
+// (sigV4AuthorizationDiffs: its region, service, terminator and signed
+// headers; never its access key id, its date or its signature), and of a
+// presigned URL's
 // X-Amz-Credential (presignedDiffs). A request recorded with neither holds.
 // Noise learned at either place is its signature's and signing time's, and
 // excuses none of these.
 func sigV4PartsHold(rec, live httpParts) bool {
 	if rv, ok := rec.header["authorization"]; ok {
 		if _, sigV4 := parseSigV4Authorization(rv); sigV4 {
-			liveH := make(map[string][]string, len(live.header))
-			for k, v := range live.header {
-				liveH[k] = []string{v}
-			}
-			recDay, liveDay := sigV4Days(rec.header, liveH)
-			diffs, ok := sigV4AuthorizationDiffs(rv, live.header["authorization"], recDay, liveDay)
+			diffs, ok := sigV4AuthorizationDiffs(rv, live.header["authorization"])
 			if !ok || len(diffs) > 0 {
 				return false
 			}

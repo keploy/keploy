@@ -181,3 +181,46 @@ func TestPinLiveDestination(t *testing.T) {
 		t.Fatal("the destination was not pinned under the switch")
 	}
 }
+
+// Another parser's exact pass holds its recordings to the HTTP parser's
+// strict rule: an SDK's call with other AWS credentials, on another day, is
+// the recording; one to another region, with another signed-header set, or
+// with another value of a header outside the noise is not.
+func TestStrictFitsHoldsAnotherParsersRecordingsToTheStrictRule(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	rec := sqsSend("plain", "d", nil)
+	fits := func(c VariableCall) bool {
+		t.Helper()
+		got, err := h.StrictFits(context.Background(), c, sdkNoise(), []*models.Mock{rec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got) == 1
+	}
+	if !fits(sqsCall("d")) {
+		t.Fatal("an SDK's call of the recording, signed with its own date and signature, does not fit")
+	}
+	other := func(edit func(h http.Header)) VariableCall {
+		c := sqsCall("d")
+		h := c.Header.Clone()
+		edit(h)
+		c.Header = h
+		return c
+	}
+	if !fits(other(func(h http.Header) {
+		h.Set("Authorization", strings.Replace(h.Get("Authorization"), "AKIAEXAMPLE", "AKIACISECRET", 1))
+	})) {
+		t.Fatal("a call signed with other credentials does not fit (the access key is not compared)")
+	}
+	for name, edit := range map[string]func(h http.Header){
+		"another region":         func(h http.Header) { h.Set("Authorization", strings.Replace(h.Get("Authorization"), "us-east-1", "eu-west-1", 1)) },
+		"other signed headers":   func(h http.Header) { h.Set("Authorization", strings.Replace(h.Get("Authorization"), "content-type;", "", 1)) },
+		"another operation":      func(h http.Header) { h.Set("X-Amz-Target", "AmazonSQS.SendMessageBatch") },
+		"another header's value": func(h http.Header) { h.Set("Content-Type", "application/json") },
+	} {
+		if fits(other(edit)) {
+			t.Fatalf("%s: the call fits the recording", name)
+		}
+	}
+}
