@@ -409,31 +409,14 @@ func TestComposeDownProject(t *testing.T) {
 			}
 		})
 	}
-	// In-process, the project is the one the library's up ran, which needs
-	// no daemon; an assignment in the command, which no shell reads there,
-	// is not it. Through the docker CLI, the shell reads the assignment.
-	t.Run("the compose library's own", func(t *testing.T) {
-		t.Setenv("COMPOSE_PROJECT_NAME", "")
-		a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
-			container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n"), composeRunnerVal: &fakeComposeStack{}}
-		want := "x"
-		if docker.ComposeLibrarySupported {
-			want = "fake"
-		}
-		if got := a.composeDownProject(context.Background()); got != want {
-			t.Fatalf("project %q; want %q (compose library linked: %v)", got, want, docker.ComposeLibrarySupported)
-		}
-	})
 	t.Run("keploy's environment, in-process", func(t *testing.T) {
 		t.Setenv("COMPOSE_PROJECT_NAME", "real")
 		a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
 			container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n")}
-		want := "x"
-		if docker.ComposeLibrarySupported {
-			want = "real"
-		}
-		if got := a.composeDownProject(context.Background()); got != want {
-			t.Fatalf("project %q; want %q (compose library linked: %v)", got, want, docker.ComposeLibrarySupported)
+		// The command's own assignment is what a shell reads, and the shell
+		// out is the only runner now.
+		if got := a.composeDownProject(context.Background()); got != "x" {
+			t.Fatalf("project %q; want %q", got, "x")
 		}
 	})
 	// A saturated daemon takes the app's inspect's whole bound: the agent's
