@@ -293,3 +293,19 @@ func kernelRelease() string {
 	}
 	return unix.ByteSliceToString(u.Release[:])
 }
+
+// The hooks load without a verifier log: the kernel's formatting of it was
+// nearly all of the load's time (hookLoadOptions). cilium/ebpf asks for a log
+// only to explain a rejection.
+func TestTheHooksLoadWithoutAVerifierLog(t *testing.T) {
+	opts := hookLoadOptions()
+	if opts.Programs.LogLevel != 0 {
+		t.Errorf("the hooks load with verifier log level %v, want none", opts.Programs.LogLevel)
+	}
+	if opts.Programs.LogSizeStart != 0 {
+		t.Errorf("the hooks load with a %d-byte verifier log buffer, want none", opts.Programs.LogSizeStart)
+	}
+	if opts.Programs.LogDisabled {
+		t.Error("the hooks load with the verifier log disabled: a rejection would carry no log at all")
+	}
+}
