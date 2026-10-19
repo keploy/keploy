@@ -226,42 +226,32 @@ type MockManager struct {
 	// Previous-test mocks continue to be dropped to prevent cross-test
 	// bleed.
 	//
-	// Zero until either the replayer seeds this set's cutoff (see
-	// cutoffSeeded, installed by the boundary staging call) or the first
-	// SetMocksWithWindow call with a non-zero start arrives — whichever comes
-	// first, which in production is the seed. After that it is sticky within
-	// the set (only goes earlier, never later), and the set boundary REPLACES
-	// it with the next set's seeded value rather than clearing it: the clear
-	// used to happen in ResetForReplaySession, then moved to staging, and
-	// staging is also where the seed lands. Read under swapMu.RLock.
+	// BeginTestSet sets it to the request time of the set's earliest
+	// RECORDED test, or to zero when the set's tests carry none; a test's
+	// window then lowers it when it starts earlier (it only goes earlier
+	// within a set, never later), and a zero one takes the first test's
+	// start. The next set's begin replaces it. Read under swapMu.RLock.
 	firstWindowStart time.Time
 
 	// testFiredThisSet is the TIER-ROUTING half of what firstWindowStart used
-	// to answer alone. They are separate now because they are seeded at
-	// different moments: SeedStartupCutoff sets the cutoff from the set's
-	// earliest RECORDED test before any test has run, while routing must keep
-	// reading "nothing has fired" until a real window actually arrives.
-	// Deriving routing from a non-zero cutoff would make the seed itself look
-	// like a fired test and send the set's bootstrap traffic to the per-test
-	// engine over a tree staging just emptied. Written under swapMu.
+	// to answer alone. They are separate because they are set at different
+	// moments: BeginTestSet sets the cutoff from the set's earliest RECORDED
+	// test before any test has run, while routing must keep reading "nothing
+	// has fired" until a real window actually arrives. Deriving routing from a
+	// non-zero cutoff would make the begin itself look like a fired test and
+	// send the set's bootstrap traffic to the per-test engine over a per-test
+	// tree the begin left empty. Written under swapMu.
 	testFiredThisSet bool
 
-	// boundaryPending marks that ResetForReplaySession has run and the next
-	// set's mocks have not arrived yet. It is what lets the window bits be
-	// cleared by staging instead of by the reset, without a stray BaseTime
-	// call mid-set being able to deactivate a live test's window. Written
-	// under swapMu.
-	boundaryPending bool
-
-	// setFence marks that the reset before the next set boundary started a
+	// setFence marks that the reset before the next set's begin started a
 	// test set (ArmSetFence), not a re-registration of the current one: the
-	// boundary staging starts a new set generation (setGen) and drops what the
-	// previous set's pool was consumed of and nobody drained. Written under
-	// swapMu.
+	// set's begin (BeginTestSet) starts a new set generation (setGen) and
+	// drops what the previous set's pool was consumed of and nobody drained.
+	// Written under swapMu.
 	setFence bool
 
 	// setGen is the test-set generation: every staging stamps it on the mocks
-	// it pools (TestModeInfo.StagedSet), a fenced set boundary moves it, and
+	// it pools (TestModeInfo.StagedSet), a fenced set begin moves it, and
 	// a consume of a mock pooled under an earlier one is refused
 	// (flagMockAsUsed), so no consume of the previous set's pool, however it
 	// races the boundary, reaches this set's drain. Starts at 1 (0 stamps
@@ -277,44 +267,30 @@ type MockManager struct {
 	// again: a staging leaves them out (withoutBootCarry), and every consume
 	// door refuses another consume of one (takeBootOnce, bootConsumed), a
 	// copy a staging filed before the consume landed included. Emptied at a
-	// fenced set boundary; RestartExactKey forgets its names. Guarded by
+	// fenced set begin; RestartExactKey forgets its names. Guarded by
 	// bootTakenMu, a leaf.
 	bootTakenMu sync.Mutex
 	bootTaken   map[carryKey]struct{}
 
 	// scopeFiredThisSet is testFiredThisSet for keploy mock replay's scopes:
-	// set by a scope that opens a test, cleared at the set boundary. It
+	// set by a scope that opens a test, cleared as a set begins. It
 	// stays set, unlike scopeOpen, so a startup tier a staging builds between
 	// scope tests is not the app's startup (TreeDb.bootBuilt). Written under
 	// swapMu.
 	scopeFiredThisSet bool
 
-	// cutoffSeeded parks the startup-init cutoff the replayer supplies for the
-	// NEXT set, until that set's staging call installs it.
-	//
-	// The seed cannot be written straight into firstWindowStart: staging clears
-	// firstWindowStart at the boundary, and the replayer seeds BEFORE staging in
-	// the same UpdateMockParams call (SeedStartupCutoff then
-	// SetMocksWithWindow), so a directly-written seed was wiped microseconds
-	// later — for every set. Parking it separately lets staging INSTALL the
-	// value instead of clearing to zero, which is also what stops set N+1 from
-	// inheriting set N's cutoff: sets are recorded in chronological order, so
-	// the next set's cutoff is always LATER and a running-minimum guard against
-	// the live value would refuse it. Written under swapMu.
-	cutoffSeeded time.Time
-
 	// recordedWindows is the current set's recorded test windows — every test
-	// of the set, selected or not — as seeded by SeedRecordedWindows. nil when
-	// the replayer sent none or nothing registered carry-over
-	// (see SeedRecordedWindows). It changes at the same moments as the startup
-	// cutoff: parked in windowsSeeded until the set's staging call installs it.
-	// Stored under swapMu, read lock-free (RecordedWindows).
+	// of the set, selected or not — as its begin installs them (BeginTestSet).
+	// nil when the set has none or nothing registered carry-over
+	// (models.CarryOverRegistered: a carry-over predicate or a StagingRelease
+	// need): every reader is the carry-over tier or the parser of a kind that
+	// paces by the windows, and such a kind registers one. Stored under
+	// swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
-	// testWindows is the last set's recorded test windows as seeded, kept
-	// whether or not the release rule uses them: where a recorded mock falls
-	// among them (InRecordedTestWindow).
-	testWindows   atomic.Pointer[models.WindowSchedule]
-	windowsSeeded *models.WindowSchedule
+	// testWindows is the current set's recorded test windows, kept whether or
+	// not the release rule uses them: where a recorded mock falls among them
+	// (InRecordedTestWindow).
+	testWindows atomic.Pointer[models.WindowSchedule]
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -331,10 +307,11 @@ type MockManager struct {
 	sigMu     sync.Mutex
 	windowSig chan struct{}
 
-	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
-	// models.BaseTime sentinel): a new set, or the same set staged again after
-	// an agent replacement. State a consumer builds from one staging snapshot
-	// is valid for one epoch. Written under swapMu, read lock-free.
+	// stagingEpoch changes at every staging of a pool served outside the tests
+	// (BeginTestSet, StagePool, SetScopeMocks): a new set, the same set begun
+	// again after an agent replacement, or the pool between tests of keploy
+	// mock replay. State a consumer builds from one staging snapshot is valid
+	// for one epoch. Written under swapMu, read lock-free.
 	stagingEpoch atomic.Uint64
 
 	// carry is the carry-over tier: carry-over mocks (models.IsCarryOver: a
@@ -414,10 +391,9 @@ type MockManager struct {
 	// hitIdx counts matches by mock name for SessionMockHitCounts, so the
 	// hot MarkMockAsUsed path bumps a counter in O(1). Each staging
 	// re-indexes the names it stages (rebuildHitIndex), and a name keeps its
-	// counter until a set boundary (the set's initial staging after
-	// ResetForReplaySession; see boundaryPending) or a staging that leaves
-	// it out. A name staged outside a staging call is seeded by
-	// bumpHitCount's slow path. hitSeeds counts those seeds, so a rebuild can
+	// counter until a set begins (BeginTestSet) or a staging leaves it out.
+	// A name staged outside a staging call is seeded by bumpHitCount's slow
+	// path. hitSeeds counts those seeds, so a rebuild can
 	// tell whether one landed while it read the index.
 	//
 	// The counts live here, not on the mocks: matchers copy pooled mocks
@@ -569,7 +545,7 @@ func (m *MockManager) IsClosed() bool {
 //     reset at the test-set boundary so "dropped for this test-set"
 //     stays meaningful in metrics.
 //     (The tier-routing window and the startup-init cutoff used to be cleared
-//     here too. They are now cleared by the next set's initial staging call, so
+//     here too. The next set's begin (BeginTestSet) replaces them now, so
 //     that the window bits and the mock trees they describe change together
 //     rather than leaving a gap where the bits describe a set whose mocks have
 //     not been swapped in yet. See the note in the body.)
@@ -650,9 +626,9 @@ func (m *MockManager) ResetForReplaySession() {
 	// that must be closed before AgentOwnsConsumed is ever defaulted on.
 	//
 	// Unlike the window bits below, this genuinely belongs here rather than at
-	// the next set's staging call: it is read by UpdateMockParams, which runs
-	// BEFORE staging, so a late clear would still serve the previous set's
-	// history to the first filter of the new one.
+	// the next set's begin: the agent's filter reads it before the begin
+	// stages anything, so a late clear would still serve the previous set's
+	// history to the new set's first filter.
 	//
 	// This also runs MID-SET on the agent-replacement repair path, which calls
 	// MockOutgoing again (pkg/service/replay). That is safe, but only because
@@ -667,8 +643,8 @@ func (m *MockManager) ResetForReplaySession() {
 	// consumedIndex are deliberately NOT cleared here, so the client's
 	// post-bring-up GetConsumedMocks drain still recovers everything the app
 	// consumed during bootstrap, and that is what the latched sends carry.
-	// A reset that starts another test set says so (ArmSetFence), and its
-	// boundary staging drops them instead: they were consumed of the previous
+	// A reset that starts another test set says so (ArmSetFence), and the
+	// set's begin drops them instead: they were consumed of the previous
 	// set's pool.
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
@@ -682,26 +658,12 @@ func (m *MockManager) ResetForReplaySession() {
 	}
 	m.consumedMu.Unlock()
 
-	m.swapMu.Lock()
-	m.boundaryPending = true
-	// A parked cutoff belongs to the set that seeded it and must never outlive
-	// it. UpdateMockParams can abort between SeedStartupCutoff and
-	// SetMocksWithWindow (the "no mocks stored for client ID" bail and the
-	// loadPerTestMocks error path), leaving a park with no staging call to
-	// consume it — and since sets are recorded chronologically the stale value
-	// is always the EARLIER one, so it would win any running-minimum guard and
-	// the next set would run on the aborted set's cutoff.
-	m.cutoffSeeded = time.Time{}
-	// Same for a parked window seed: it belongs to the set that sent it.
-	m.windowsSeeded = nil
-	m.swapMu.Unlock()
-
-	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
-	// cleared here. They are cleared by the next set's initial staging call
-	// instead — see SetMocksWithWindow's isInitialStaging branch.
+	// NOTE: the window bits, the startup-init cutoff and the recorded windows
+	// are deliberately NOT cleared here. The next set's begin replaces them
+	// (BeginTestSet), with the trees.
 	//
 	// Clearing them here left the manager half torn down for the whole gap
-	// between this reset and that staging call: the bits already said "nothing
+	// between this reset and that begin: the bits already said "nothing
 	// has fired" while the trees still held the PREVIOUS set's mocks, so a
 	// query arriving in the gap was routed to the startup engine and answered
 	// out of the previous set's startup tier. That gap is real whenever the
@@ -711,10 +673,8 @@ func (m *MockManager) ResetForReplaySession() {
 	// against a live app is what crash-loops it.
 	//
 	// Deferring makes the two flip TOGETHER. Through the gap the manager is
-	// consistently the previous set — previous bits, previous trees — and
-	// staging then replaces both. The single caller (Proxy.Mock) always
-	// follows this reset with a BaseTime staging call, so the deferral cannot
-	// strand the bits.
+	// consistently the previous set — previous bits, previous trees — and the
+	// next set's begin then replaces both.
 }
 
 // runIdleSweeper is the background loop that calls SweepIdleConnections
@@ -896,8 +856,8 @@ func (m *MockManager) InFlightFrom(start time.Time) (from time.Time, ok bool) {
 }
 
 // InRecordedTestWindow reports whether a mock recorded at t was recorded
-// inside the window of some recorded test of the set (SeedRecordedWindows);
-// known is false when the replay seeded none (integrations.TestWindows).
+// inside the window of some recorded test of the set (BeginTestSet);
+// known is false when the set began with none (integrations.TestWindows).
 func (m *MockManager) InRecordedTestWindow(t time.Time) (inside, known bool) {
 	s := m.testWindows.Load()
 	if s.Len() == 0 || t.IsZero() {
@@ -1116,7 +1076,83 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&filtered, &unfiltered)
-	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end, false)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end, stageTest)
+}
+
+// BeginTestSet begins a test set, before any of its tests and before the
+// application starts: the set's state starts afresh, as its own, and filtered
+// and unfiltered are staged as the pool served until the set's first test
+// begins (StagePool).
+//
+// firstTestStart is the request time of the set's earliest RECORDED test, or
+// zero when its tests carry none: the startup-init cutoff
+// (FirstTestWindowStart) from the set's first test on, whichever test runs
+// first. windows is the recorded window of every test of the set
+// (RecordedWindows, InRecordedTestWindow). Nothing has fired in the set
+// (HasFirstTestFired), no scope of keploy mock replay has opened, no test
+// window is open, the hit counts start over, and no staged mock states its
+// lifetime yet (StatesLifetimes). After a reset that starts another test set
+// (ArmSetFence) the set generation moves, and what the previous set's pool
+// was consumed of goes (dropPreviousSetConsumes).
+//
+// The previous set's bits and trees are replaced together, in this one call:
+// until it, the manager is consistently the previous set (see
+// ResetForReplaySession), which is what an application kept alive across the
+// set boundary is served.
+func (m *MockManager) BeginTestSet(firstTestStart time.Time, windows []models.TestWindow, filtered, unfiltered []*models.Mock) {
+	defer m.signalWindowChange()
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	ownForStaging(&filtered, &unfiltered)
+	m.testFiredThisSet = false
+	m.scopeFiredThisSet = false
+	m.firstWindowStart = firstTestStart
+	m.installRecordedWindows(windows)
+	// The previous set's recording is not this one's.
+	m.statedKinds.Store(nil)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, stageSet)
+}
+
+// installRecordedWindows installs the set's recorded test windows; the
+// caller holds swapMu. The schedule the release rule reads (recordedWindows)
+// is kept only while a kind has registered a carry-over predicate
+// (models.CarryOverRegistered): with none registered it (about 92 bytes a
+// test, for the whole set) would be read by nobody. The learn step reads them
+// whatever the release rule does (testWindows).
+func (m *MockManager) installRecordedWindows(ws []models.TestWindow) {
+	if len(ws) == 0 {
+		m.testWindows.Store(nil)
+		m.recordedWindows.Store(nil)
+		return
+	}
+	m.testWindows.Store(models.NewWindowSchedule(ws))
+	if !models.CarryOverRegistered() {
+		m.recordedWindows.Store(nil)
+		if m.logger != nil {
+			m.logger.Debug("recorded test windows not kept: no kind registered a carry-over predicate",
+				zap.Int("windows", len(ws)))
+		}
+		return
+	}
+	m.recordedWindows.Store(models.NewWindowSchedule(ws))
+}
+
+// StagePool stages the pool served outside every test of the current set:
+// filtered and unfiltered all go to the startup tier (unfiltered to the
+// session tier as well), and it closes any test window, so tier-aware parsers
+// answer what comes from the startup tier.
+// The set itself goes on: its startup cutoff, its recorded windows and
+// whether a test has fired are left as they are. It starts a new staging
+// epoch, and the carry-over tier starts empty.
+//
+// It is what a set begins with (BeginTestSet), and what keploy mock replay
+// serves between its tests.
+func (m *MockManager) StagePool(filtered, unfiltered []*models.Mock) {
+	defer m.signalWindowChange()
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	ownForStaging(&filtered, &unfiltered)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, stagePool)
 }
 
 // SetScopeMocks stages the pool of keploy mock replay, with the proven switch
@@ -1133,8 +1169,8 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 // recorded times) changes. Tier-aware parsers route the test's calls to the
 // per-test tier and report a miss as one inside a test.
 //
-// !open: the pool between tests, staged exactly as a models.BaseTime staging
-// stages it (everything in the startup tier), which closes the window, less
+// !open: the pool between tests, staged exactly as StagePool stages it
+// (everything in the startup tier), which closes the window, less
 // every per-test mock served while a test was open (scopeConsumed): a test's
 // recording answers no call after its test ended. Between tests is routed as
 // before any test, as it was before tests opened windows, and what is served
@@ -1142,7 +1178,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 // A begin stages a test's own mocks afresh, so a test run again is served its
 // whole recording.
 //
-// Like a models.BaseTime staging, each call starts a new staging epoch. A
+// Like StagePool, each call starts a new staging epoch. A
 // reader that takes swapMu (WindowSnapshot, GetPerTestMocksInWindow) sees the
 // trees and the window of one staging; the others see each change as it
 // lands, the trees before the window, as with any staging.
@@ -1154,19 +1190,19 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 		served := m.scopeServed()
 		filtered, unfiltered = withoutScopeServed(filtered, served), withoutScopeServed(unfiltered, served)
 		ownForStaging(&filtered, &unfiltered)
-		m.setMocksWithWindowLocked(filtered, unfiltered, nil, models.BaseTime, time.Now(), false)
+		m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, stagePool)
 		return
 	}
 	ownForStaging(&filtered, &unfiltered)
-	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
-	// the zero-window staging below leaves alone.
+	// The epoch and carry-over bookkeeping a pool staging resets, which the
+	// zero-window staging below leaves alone.
 	m.stagingEpoch.Add(1)
 	m.carry.reset()
 	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
 	// A zero window is no time window: the per-test tier takes filtered as
 	// it is, the startup tier is rebuilt empty, and the published window
 	// stays zero, published with the open scope.
-	m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, true)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, stageScope)
 }
 
 // scopeIsOpen reports whether a test begun without a worker pid is open
@@ -1270,6 +1306,21 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 	return out
 }
 
+// staging is what a call of setMocksWithWindowLocked stages.
+type staging int
+
+const (
+	// stageTest is a test's window, [start, end] (SetMocksWithWindow), or no
+	// window at all when either is zero.
+	stageTest staging = iota
+	// stagePool is the pool served outside every test (StagePool).
+	stagePool
+	// stageSet is the pool a set begins with (BeginTestSet).
+	stageSet
+	// stageScope opens a test with no time bounds (SetScopeMocks).
+	stageScope
+)
+
 // setMocksWithWindowLocked is SetMocksWithWindow without the window-change
 // signal. The caller holds swapMu and owns the mocks (mockOwner).
 //
@@ -1277,9 +1328,11 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 // the startup tier this call builds, and is stamped with the rest of the
 // staging, before any tier is published.
 //
-// scope opens a test with no time bounds (SetScopeMocks); it is published
-// with the window, and every other staging closes one.
-func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope bool) {
+// st says what is staged. A scope opens a test with no time bounds
+// (SetScopeMocks); it is published with the window, and every other staging
+// closes one. A pool (stagePool, stageSet) opens none and leaves the window
+// as it is.
+func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, st staging) {
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
@@ -1288,13 +1341,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// any test fired) from stale previous-test mocks. Once set, only
 	// moves earlier — a later test's start can never push it forward
 	// because that would re-categorise genuine startup mocks as stale.
-	//
-	// Skip models.BaseTime (2000-01-01) — Runner/Replayer fire one
-	// initial SetMocksWithWindow with [BaseTime, Now] to stage mocks
-	// before any test runs; that sentinel isn't a real test start
-	// and caching it would defeat the "recorded before test 1"
-	// comparison below (everything is trivially after 2000).
-	if !start.IsZero() && !start.Equal(models.BaseTime) {
+	// A pool is staged with no window, so it never sets it.
+	if !start.IsZero() {
 		if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
 			m.firstWindowStart = start
 		}
@@ -1310,31 +1358,29 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// don't notice the split.
 	var startupInit []*models.Mock
 
-	// Runner/Replayer's initial SetMocksWithWindow call fires with
-	// start=models.BaseTime before any test runs — to stage mocks for
-	// the app-startup window (Hibernate init, HikariCP pool warm-up,
-	// JDBC driver handshake) that fires AFTER the app launches but
-	// BEFORE the first test request. Wave-3 C1/C3 fix: every per-test
-	// mock seen DURING this staging window is, by definition, bootstrap
-	// traffic — no real test has fired yet, so there is no "per-test"
-	// tier to populate. Route the whole `filtered` slice straight into
-	// the startup tree. The next SetMocksWithWindow call — the first
-	// real test — re-partitions: mocks with req ∈ [start, end] move
-	// to filtered; mocks with req < firstWindowStart stay in startup;
-	// mocks with firstWindowStart <= req < start are stale previous-
-	// test bleed and get dropped.
-	isInitialStaging := start.Equal(models.BaseTime)
-	// A set boundary: the first staging after ResetForReplaySession. A
-	// BaseTime staging without one is a mid-set stage (see boundaryPending).
-	setBoundary := isInitialStaging && m.boundaryPending
-	// A boundary staging that starts another test set (ArmSetFence): it
-	// starts a new set generation as it publishes the new trees, and drops
-	// what the previous set's pool was consumed of (dropPreviousSetConsumes).
+	// A pool (a set's begin, or keploy mock replay between its tests) is
+	// staged before the application starts or between tests, to answer the
+	// app-startup window (Hibernate init, HikariCP pool warm-up, JDBC driver
+	// handshake) that fires AFTER the app launches but BEFORE the first test
+	// request. Wave-3 C1/C3 fix: every per-test mock staged in a pool is, by
+	// definition, served outside a test — there is no "per-test" tier to
+	// populate. Route the whole `filtered` slice straight into the startup
+	// tree. The next SetMocksWithWindow call — the first real test —
+	// re-partitions: mocks with req ∈ [start, end] move to filtered; mocks
+	// with req < firstWindowStart stay in startup; mocks with
+	// firstWindowStart <= req < start are stale previous-test bleed and get
+	// dropped.
+	isInitialStaging := st == stagePool || st == stageSet
+	// A set begins: the hit counts start over.
+	setBoundary := st == stageSet
+	// A begin of another test set (ArmSetFence): it starts a new set
+	// generation as it publishes the new trees, and drops what the previous
+	// set's pool was consumed of (dropPreviousSetConsumes).
 	fenced := setBoundary && m.setFence
 	if fenced {
 		m.setFence = false
 	}
-	if scope {
+	if st == stageScope {
 		m.scopeFiredThisSet = true
 	}
 	if !fenced {
@@ -1357,44 +1403,17 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 	}
 	if isInitialStaging {
-		// Every staging call starts a new epoch, boundary or not: whatever a
-		// consumer built from the previous staging snapshot is stale now.
+		// Every pool starts a new epoch: whatever a consumer built from the
+		// previous staging snapshot is stale now.
 		m.stagingEpoch.Add(1)
 		// The carry-over tier and its lookahead bookkeeping belong to that
 		// snapshot too.
 		m.carry.reset()
 		m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
-		// Staging is the set boundary as far as routing is concerned: this is
-		// where the previous set's window bits and startup-init cutoff go, so
-		// they are replaced in the same call that replaces the trees rather
-		// than in ResetForReplaySession (see the note there). Until this
-		// point the manager still describes the previous set, consistently.
-		// Only when a set boundary is actually pending. A BaseTime call that
-		// is NOT preceded by a reset is a mid-set stage, and deactivating a
-		// live test's window there would mis-route it to the startup engine.
-		if m.boundaryPending {
-			m.boundaryPending = false
-			m.testFiredThisSet = false
-			m.scopeFiredThisSet = false
-			// Install this set's seeded cutoff. Zero when nothing was seeded,
-			// which is exactly the historical clear.
-			m.firstWindowStart = m.cutoffSeeded
-			m.cutoffSeeded = time.Time{}
-			// Install this set's recorded windows, or none: a set the replayer
-			// did not seed must not inherit the previous set's.
-			m.recordedWindows.Store(m.windowsSeeded)
-			m.windowsSeeded = nil
-			m.windowMu.Lock()
-			m.windowStart = time.Time{}
-			m.windowEnd = time.Time{}
-			m.windowMu.Unlock()
-			// The previous set's recording is not this one's.
-			m.statedKinds.Store(nil)
-		}
 		// Wave-3 H3 fix: include BOTH filtered (per-test) and unfiltered
-		// (session + connection) mocks in the startup pool during initial
-		// staging. Rationale: during Runner/Replayer's pre-test staging
-		// no test has fired, so tier-aware parsers (Postgres v3
+		// (session + connection) mocks in the startup pool of a pool
+		// staging. Rationale: before the set's first test no test has
+		// fired, so tier-aware parsers (Postgres v3
 		// dispatcher) route ALL live queries to the startup engine —
 		// `!IsTestWindowActive && !HasFirstTestFired` falls through to
 		// StartupTransactional with no fallback. If a session-tagged
@@ -1436,8 +1455,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// window does not hold (loaded ahead of their window, or mapped to this
 	// test from a gap); they are offered to the carry-over tier below instead
 	// of being dropped. Nil while nothing is registered.
-	// Carry-over also needs the recorded windows the replayer seeds at staging
-	// (SeedRecordedWindows): without them there is no release rule to hold a
+	// Carry-over also needs the recorded windows the set began with
+	// (BeginTestSet): without them there is no release rule to hold a
 	// mock by, and a closed window's mocks are dropped as they always were.
 	carryOn := models.CarryOverRegistered() && !isInitialStaging && !start.IsZero() && !end.IsZero() &&
 		m.recordedWindows.Load().Len() > 0
@@ -1545,8 +1564,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
 	// *models.Mock pointer can appear in BOTH startupInit and
-	// unfilteredForTree during initial staging (see the BaseTime branch
-	// above that copies unfiltered→startupInit); the session tier's build
+	// unfilteredForTree during a pool staging (see the pool branch above
+	// that copies unfiltered→startupInit); the session tier's build
 	// below stamps mk.TestModeInfo.ID with its index in the unfiltered
 	// slice, which would invalidate any startup-tier
 	// reference that relied on the original stamp. A mock pointer's
@@ -1573,8 +1592,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 		// Tier-local key: copy TestModeInfo and stamp the startup-tree
 		// ID on the copy. mk.TestModeInfo.ID is left untouched so the
-		// session tier's build, which stamps the same mock during
-		// BaseTime staging, does not corrupt the startup tree's idIndex.
+		// session tier's build, which stamps the same mock during a pool
+		// staging, does not corrupt the startup tree's idIndex.
 		key := tierKey(mk, idx)
 		newStartup.insert(key, mk)
 		newStartupKeys[mk] = key
@@ -1588,7 +1607,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// redundant with walking the new input slices and departing kinds are
 	// published nowhere.
 	//
-	// The old startup tree is walked too: during BaseTime staging
+	// The old startup tree is walked too: during a pool staging
 	// filteredForTree is nil, so a kind whose mocks all live in the startup tier
 	// never appears in filteredByKind either, and reading only the two by-kind
 	// maps misses it in both directions.
@@ -1614,7 +1633,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 
 	// Build both remaining tiers before publishing anything: building stamps
 	// tree IDs and sort orders, and one staged mock can sit in more than one
-	// tier (startup and session during BaseTime staging), so stamping after
+	// tier (startup and session during a pool staging), so stamping after
 	// a tier went live would write into a mock its readers may be copying.
 	filteredBuild := m.buildTier(filteredForTree, true)
 	unfilteredBuild := m.buildTier(unfilteredForTree, false)
@@ -1727,7 +1746,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// walks the filtered tree, the unfiltered tree and every connection tree,
 	// finds nothing and seeds nothing — repeating that walk on every call for a
 	// mock whose count never moves. Session and connection mocks copied into
-	// startup during BaseTime staging are already covered via unfilteredForTree;
+	// startup during a pool staging are already covered via unfilteredForTree;
 	// the ones that miss are those the startup tier alone holds.
 	m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, explicitStartup)
 
@@ -1739,35 +1758,25 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 	}
 
-	// Wave-3 H3 fix: do NOT publish the BaseTime sentinel as an active
-	// window. Runner/Replayer's initial SetMocksWithWindow fires with
-	// start=models.BaseTime BEFORE any test runs, solely to stage
-	// bootstrap mocks into the startup tree. If we wrote BaseTime into
-	// m.windowStart, IsTestWindowActive (which only rejects zero-time)
-	// would flip true and tier-routing parsers (Postgres v3 dispatcher)
-	// would mis-route bootstrap traffic to the per-test engine — whose
-	// per-test tree is empty during initial staging because all filtered
-	// input was routed to the startup tree above. Symptom: startup-tier
-	// queries (listmonk's first `select count(*) from settings`) get
-	// `candidates=0` / KP001 misses even though the mock is present in
-	// the startup index.
+	// Wave-3 H3 fix: a pool opens no window. It is staged outside every
+	// test, solely to answer bootstrap (or between-test) traffic from the
+	// startup tree; an open window would flip IsTestWindowActive and
+	// tier-routing parsers (Postgres v3 dispatcher) would mis-route that
+	// traffic to the per-test engine — whose per-test tree is empty after a
+	// pool staging because all filtered input was routed to the startup tree
+	// above. Symptom: startup-tier queries (listmonk's first
+	// `select count(*) from settings`) get `candidates=0` / KP001 misses even
+	// though the mock is present in the startup index. A pool is staged with
+	// a zero window, which closes the one a test left open. The next
+	// SetMocksWithWindow call — a test — publishes its own, at which point
+	// IsTestWindowActive becomes true and the dispatcher routes to PerTest as
+	// intended.
 	//
-	// Keep windowStart/windowEnd at their current (zero for a fresh
-	// manager) values during initial staging. The next
-	// SetMocksWithWindow call — the first real test — overwrites them
-	// with real timestamps, at which point IsTestWindowActive becomes
-	// true and the dispatcher routes to PerTest as intended.
-	//
-	// A scope is closed by every staging but the one that opens it, BaseTime
-	// staging included: that staging moves the pool to the startup tier, so a
-	// test window left open over it would route the test's calls to an empty
-	// per-test tier.
+	// A scope is closed by every staging but the one that opens it.
 	m.windowMu.Lock()
-	if !isInitialStaging {
-		m.windowStart = start
-		m.windowEnd = end
-	}
-	m.scopeOpen = scope
+	m.windowStart = start
+	m.windowEnd = end
+	m.scopeOpen = st == stageScope
 	m.windowMu.Unlock()
 	// Counter reflects pre-filtering drops for THIS test; legacy
 	// match-time filtering in GetFilteredMocksInWindow will add zero
@@ -1808,7 +1817,7 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 // FilterByTimeStampThreeTier), in addition to the familiar
 // filtered+unfiltered pair. This lets callers that have already done
 // the Lifetime-aware partition avoid relying on SetMocksWithWindow's
-// internal firstWindowStart/BaseTime heuristic to re-derive the
+// internal firstWindowStart heuristic to re-derive the
 // startup tier from the union of filtered+unfiltered.
 //
 // Semantic equivalence to SetMocksWithWindow:
@@ -1816,7 +1825,7 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 //     (same pre-filter the legacy entry does).
 //   - `unfiltered` lands in the session (unfiltered) tree.
 //   - `startup` joins the dedicated startup tree, AFTER the internal
-//     BaseTime/firstWindowStart heuristic has routed `filtered` and
+//     firstWindowStart heuristic has routed `filtered` and
 //     `unfiltered` into it, under keys offset so the two cannot collide.
 //     The heuristic still fires so legacy callers that pass a nil
 //     startup slice still get the automatic startup-preservation
@@ -1832,12 +1841,12 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 	defer m.swapMu.Unlock()
 	ownForStaging(&filtered, &unfiltered, &startup)
 	// The legacy staging rebuilds the startup tree with the
-	// BaseTime/firstWindowStart heuristic applied to the filtered/unfiltered
+	// firstWindowStart heuristic applied to the filtered/unfiltered
 	// inputs, and adds the explicit `startup` slice to it: connection-scoped
 	// mocks the caller partitioned that the heuristic can't derive on its
 	// own. The slice is stamped, filed and indexed for counting with the
 	// rest of the staging, before any tier is published.
-	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end, false)
+	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end, stageTest)
 }
 
 // GetSessionMocks returns the UNION of startup-tier and session-tier
@@ -1853,12 +1862,12 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 // order still see bootstrap traffic before regular session mocks, which
 // matches pre-wave-2 behaviour.
 //
-// N-R1 fix: during Runner/Replayer's initial BaseTime staging call the
-// startup tree is deliberately over-populated with the full unfiltered
-// slice (to keep session-tagged bootstrap DDL like listmonk's
-// `DROP TYPE IF EXISTS` reachable by the dispatcher's StartupTransactional
-// engine before the first test fires — see the isInitialStaging branch
-// in SetMocksWithWindow). That means the SAME *Mock pointer lives in
+// N-R1 fix: a pool staging (a set's begin, StagePool) deliberately
+// over-populates the startup tree with the full unfiltered slice (to keep
+// session-tagged bootstrap DDL like listmonk's `DROP TYPE IF EXISTS`
+// reachable by the dispatcher's StartupTransactional engine before the first
+// test fires — see the pool branch in setMocksWithWindowLocked). That means
+// the SAME *Mock pointer lives in
 // both m.startup and m.unfiltered during the pre-first-test window, and
 // a naive concat here would double-count it in the union — skewing
 // consumedIndex accounting on the one replay path that
@@ -2185,7 +2194,7 @@ func clampCursor(cur, n int) int {
 
 // ResetStatefulCursors drops every per-request stateful cursor so the next
 // stateful sequence starts from its first recorded response. The agent calls it
-// once per test-set (on the staging call) via the StatefulCursorResetter
+// once per test-set (as the set begins) via the StatefulCursorResetter
 // capability, so a sequence spans a whole test-set but does not carry across
 // sets. Safe to call when no cursors exist.
 func (m *MockManager) ResetStatefulCursors() {
@@ -2362,11 +2371,10 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 }
 
 // HasFirstTestFired reports whether at least one real test window has
-// been set on this manager — i.e. some SetMocksWithWindow call arrived
-// with a non-zero start that was NOT the models.BaseTime sentinel used
-// for pre-test staging. Sticky within a test set; ResetForReplaySession
-// clears it at each set boundary, so the next set reads false until its
-// own first test fires.
+// been set on this manager in the current test set — i.e. some
+// SetMocksWithWindow call arrived with a non-zero start since the set began.
+// Sticky within a test set; BeginTestSet clears it, so the next set reads
+// false until its own first test fires.
 //
 // Parsers use this to distinguish "app bootstrap" from "between tests"
 // when IsTestWindowActive() returns false. Before the first test fires
@@ -2375,8 +2383,8 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // teardown).
 //
 // Concurrency: firstWindowStart is written only under swapMu.Lock() — in
-// SetMocksWithWindow when a real window arrives, and in
-// ResetForReplaySession at the set boundary. A reader here takes
+// SetMocksWithWindow when a real window arrives, and in BeginTestSet as a
+// set begins. A reader here takes
 // swapMu.RLock so it cannot observe a torn time.Time or a half-applied
 // reset. An inherently-racy pre-check is tolerable — a caller that needs strict window/pool atomicity
 // consults GetPerTestMocksInWindow, which snapshots both under swapMu.
@@ -2403,14 +2411,15 @@ func (m *MockManager) HasFirstTestFired() bool {
 	return m.testFiredThisSet || m.scopeOpen
 }
 
-// FirstTestWindowStart returns this set's startup-init cutoff: the earliest
-// test window start observed, or — from the boundary staging call onward — the
-// value the replayer seeded via SeedStartupCutoff.
+// FirstTestWindowStart returns this set's startup-init cutoff: the request
+// time of the set's earliest recorded test, which the set began with
+// (BeginTestSet), or the earliest test window start observed when that is
+// earlier or the set began with none.
 //
-// It is NOT "zero until a non-BaseTime SetMocksWithWindow lands". In production
-// the seed arrives first, so this returns a non-zero cutoff throughout the
-// staging window. A non-zero value here does not mean a test has fired; use
-// HasFirstTestFired for that.
+// It is NOT "zero until a test's SetMocksWithWindow lands": a set begins with
+// its cutoff, so this returns a non-zero one before any test has run. A
+// non-zero value here does not mean a test has fired; use HasFirstTestFired
+// for that.
 //
 // Exposed so the agent's tier-aware strictMockWindow filter can
 // distinguish:
@@ -3094,8 +3103,8 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
 // mirrorStartup keeps the startup tier's copy of a recording in step with the
-// session tier's. Staging at BaseTime files the session pool in BOTH tiers as
-// one shared pointer (see SetMocksWithWindow's isInitialStaging branch), and
+// session tier's. A pool staging files the session pool in BOTH tiers as
+// one shared pointer (see the pool branch in setMocksWithWindowLocked), and
 // GetSessionMocks — every parser's view of the reusable pool — lists the two
 // tiers as one, telling them apart by pointer. When a match replaced the
 // session tier's entry with an updated copy (a fresh sort order, learned
@@ -3647,108 +3656,9 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 	return false
 }
 
-// SeedStartupCutoff sets the startup-init cutoff from the set's earliest
-// RECORDED test, before any test of that set has run.
-//
-// The cutoff decides whether a mock was recorded before this set's tests began.
-// Derived from the first EXECUTED window it gets that wrong whenever the first
-// executed test is not the earliest recorded one — a --test-sets selection, an
-// ignored test, or the streaming deferral all do that. The cutoff then lands
-// late, and mocks belonging to a test that is NOT being run fall before it, get
-// classified as startup-init, and are served as bootstrap traffic.
-//
-// The manager cannot derive this itself: the mocks it is staged with include
-// the bootstrap ones, so their minimum timestamp cannot separate "recorded
-// before the tests began" from "recorded during the earliest test". The caller
-// supplies it — the replayer already loads test cases sorted by request
-// timestamp, so it is testCases[0]'s request time.
-//
-// Seeds only when nothing has been recorded for this set yet, and never marks a
-// test as fired: routing must still read "nothing has fired" until a real
-// window arrives. A later real window that turns out to be earlier still lowers
-// the cutoff through the running minimum in SetMocksWithWindow.
-func (m *MockManager) SeedStartupCutoff(start time.Time) {
-	if start.IsZero() || start.Equal(models.BaseTime) {
-		return
-	}
-	m.swapMu.Lock()
-	defer m.swapMu.Unlock()
-	if m.boundaryPending {
-		// This set has not been staged yet, so firstWindowStart still describes
-		// the PREVIOUS set and comparing against it is meaningless. Park the
-		// value; staging installs it.
-		//
-		// Unconditionally, NOT as a running minimum: the reset clears the park,
-		// so anything already here belongs to this same set, and a minimum
-		// would be backwards anyway — later sets always seed later, so an
-		// earlier value would win every comparison.
-		m.cutoffSeeded = start
-		return
-	}
-	// Already staged: apply directly, keeping the running-minimum semantics.
-	// Parking it here instead would strand the value until the NEXT boundary,
-	// where it would install a cutoff belonging to the wrong set.
-	if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
-		m.firstWindowStart = start
-	}
-}
-
-// SeedRecordedWindows installs the recorded [request, response] window of every
-// test of the set being staged (MockFilterParams.RecordedWindows), the
-// unselected and ignored ones included.
-//
-// It follows SeedStartupCutoff's rules, for the same reason: the replayer sends
-// it in the staging call, before SetMocksWithWindow, so at a set boundary the
-// value is parked and the staging call installs it together with the new trees.
-// Seeded mid-set (no boundary pending) it applies at once. An empty ws is
-// ignored.
-//
-// Consumers read it through RecordedWindows, to release traffic that the test
-// windows do not pace by themselves at the recorded window it belongs to.
-//
-// It is kept only while a kind has registered a carry-over predicate or a
-// StagingRelease need (models.CarryOverRegistered): every reader is the
-// carry-over tier or the parser of a kind that paces by the windows, and such
-// a kind registers one.
-// With none registered the schedule (about 92 bytes a test, for the whole set)
-// would be read by nobody, so it is not built, the staging call's windows are
-// garbage once the call returns, and no schedule is left installed or parked.
-func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
-	if len(ws) == 0 {
-		// A set with none: the learn step knows none, not the previous
-		// set's.
-		m.testWindows.Store(nil)
-		return
-	}
-	// The learn step tells the pool's mocks from a test's by them, whatever
-	// the release rule does with them (InRecordedTestWindow).
-	m.testWindows.Store(models.NewWindowSchedule(ws))
-	if !models.CarryOverRegistered() {
-		m.swapMu.Lock()
-		m.windowsSeeded = nil
-		if !m.boundaryPending {
-			m.recordedWindows.Store(nil)
-		}
-		m.swapMu.Unlock()
-		if m.logger != nil {
-			m.logger.Debug("recorded test windows not kept: no kind registered a carry-over predicate or a StagingRelease need",
-				zap.Int("windows", len(ws)))
-		}
-		return
-	}
-	s := models.NewWindowSchedule(ws)
-	m.swapMu.Lock()
-	defer m.swapMu.Unlock()
-	if m.boundaryPending {
-		m.windowsSeeded = s
-		return
-	}
-	m.recordedWindows.Store(s)
-}
-
 // RecordedWindows returns the current set's recorded test windows, or nil when
-// the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only
-// callers) or no kind registered a carry-over predicate: consumers then treat
+// the set began with none (keploy mock replay, SetFilteredMocks-only callers)
+// or no kind registered a carry-over predicate: consumers then treat
 // everything as released, as before. The returned schedule is immutable.
 func (m *MockManager) RecordedWindows() *models.WindowSchedule {
 	// Under exact serving what the view shows is due: a test's push is its
@@ -3785,9 +3695,9 @@ func (m *MockManager) WindowChanged() <-chan struct{} {
 }
 
 // StagingEpoch identifies the current staging snapshot. It changes at every
-// staging call (SetMocksWithWindow with models.BaseTime): a new test set, or the
-// same set staged again for a replacement agent; and at every SetScopeMocks,
-// which re-stages the pool as a test of keploy mock replay begins or ends. Anything a consumer derived
+// staging of a pool (BeginTestSet, StagePool): a new test set, or the same set
+// begun again for a replacement agent; and at every SetScopeMocks, which
+// re-stages the pool as a test of keploy mock replay begins or ends. Anything a consumer derived
 // from a staging snapshot — a per-set delivery queue — must be rebuilt when it
 // changes. Zero until the first staging call.
 func (m *MockManager) StagingEpoch() uint64 {
@@ -4380,11 +4290,11 @@ func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*m
 // ArmSetFence tells the manager that the session ResetForReplaySession just
 // reset starts a test set of the replay (models.OutgoingOptions.StartsTestSet),
 // not a re-registration of the current set with an agent the replay took for
-// replaced. The set's boundary staging then drops what was consumed before it
-// and not drained: the previous set's pool's consumes, under that set's mock
-// names, which every set numbers afresh, so a drain must never hand them to
-// this one (a Deleted mock-7 there drops this set's unrelated mock-7 from
-// every load). Until that staging installs the set's pool, whatever the app
+// replaced. The set's begin (BeginTestSet) then drops what was consumed before
+// it and not drained: the previous set's pool's consumes, under that set's
+// mock names, which every set numbers afresh, so a drain must never hand them
+// to this one (a Deleted mock-7 there drops this set's unrelated mock-7 from
+// every load). Until that begin installs the set's pool, whatever the app
 // consumes is still of the previous one. A re-registration arms nothing: it
 // comes before any of the set's tests, and what the app consumed as it
 // started is the set's own.
@@ -4396,7 +4306,7 @@ func (m *MockManager) ArmSetFence() {
 
 // dropPreviousSetConsumes starts a new set generation and empties what the
 // previous set's pool was consumed of and nobody drained, at a fenced set
-// boundary (ArmSetFence), right before the staging publishes the new trees:
+// begin (ArmSetFence), right before the begin publishes the new trees:
 // the consumes not drained yet, the agent-owned history a session that
 // outlived the reset kept adding to, and bootTaken. The generation moves
 // under consumedMu, with the drop, so a consume of the previous set's pool
@@ -4491,32 +4401,26 @@ func (m *MockManager) withoutBootCarry(mocks []*models.Mock) []*models.Mock {
 	return out
 }
 
-// stagingCarryOverRange is CarryOverLoadRange for a set's staging call, before
-// its app starts: the app's startup is the window then. A carry-over mock
+// StartupCarryOverRange is CarryOverLoadRange for a set's begin, before its
+// app starts: the app's startup is the window then. A carry-over mock
 // recorded at t is reachable from it while the release window of
 // t - models.CarryOverLookahead is the startup band, before the set's first
 // recorded window: up to carryLoadHorizon of a start before every window,
 // the first window's start plus the lookahead, that end excluded. It is
-// loaded from the startup cutoff on: those recorded before the cutoff are in
-// the startup band the staging reads anyway. The cutoff and windows are the
-// set's as seeded for it (cutoffSeeded, windowsSeeded) while its staging has
-// not installed them, else the installed ones (a set staged again). ok is
-// false with no recorded windows, no cutoff, or an empty range.
-func (m *MockManager) stagingCarryOverRange() (from, to time.Time, ok bool) {
-	m.swapMu.RLock()
-	cutoff, sched := m.firstWindowStart, m.recordedWindows.Load()
-	if m.boundaryPending {
-		cutoff, sched = m.cutoffSeeded, m.windowsSeeded
-	}
-	m.swapMu.RUnlock()
-	if sched.Len() == 0 || cutoff.IsZero() {
+// loaded from the set's startup cutoff (firstTestStart) on: those recorded
+// before it are in the startup band the begin reads anyway. windows are the
+// set's recorded windows, as it begins with them (MockManager.BeginTestSet).
+// ok is false with nothing registered, no recorded windows, no cutoff, or an
+// empty range.
+func StartupCarryOverRange(firstTestStart time.Time, windows []models.TestWindow) (from, to time.Time, ok bool) {
+	if !models.CarryOverRegistered() || len(windows) == 0 || firstTestStart.IsZero() {
 		return time.Time{}, time.Time{}, false
 	}
-	to = carryLoadHorizon(sched, models.BaseTime)
-	if to.Before(cutoff) {
+	to = carryLoadHorizon(models.NewWindowSchedule(windows), time.Time{})
+	if to.Before(firstTestStart) {
 		return time.Time{}, time.Time{}, false
 	}
-	return cutoff, to, true
+	return firstTestStart, to, true
 }
 
 // carryLoadHorizon is the latest recorded time a registered mock can have and
@@ -4543,15 +4447,11 @@ var maxRecordedTime = time.Unix(0, math.MaxInt64)
 // ones into the carry-over tier and advances the range.
 //
 // ok is false when there is nothing to load: no registered kind, no recorded
-// windows (the replayer did not send them), or an empty range. A staging call
-// (start at models.BaseTime) loads what the app's startup reaches
-// (stagingCarryOverRange).
+// windows (the set began with none), no window, or an empty range. A set's
+// begin loads what the app's startup reaches (StartupCarryOverRange).
 func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool) {
 	if !models.CarryOverRegistered() || start.IsZero() {
 		return time.Time{}, time.Time{}, false
-	}
-	if start.Equal(models.BaseTime) {
-		return m.stagingCarryOverRange()
 	}
 	sched := m.recordedWindows.Load()
 	if sched.Len() == 0 {

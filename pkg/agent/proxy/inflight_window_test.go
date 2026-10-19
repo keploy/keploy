@@ -52,11 +52,11 @@ func TestTheManagerGivesACallInFlightWhenATestBeginsToThatTest(t *testing.T) {
 	for _, seeded := range []bool{true, false} {
 		mm := NewMockManager(nil, nil, zap.NewNop())
 		mm.ResetForReplaySession()
-		mm.SeedStartupCutoff(winStart(1))
+		var windows []models.TestWindow
 		if seeded {
-			mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
+			windows = windowsOf("test-1", "test-2")
 		}
-		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.BeginTestSet(winStart(1), windows, nil, nil)
 		mm.SetMocksWithWindow(recording(), nil, winStart(2), winEnd(2))
 		want := []string{"fetch-late", "fetch-o2", "own-2"}
 		if !seeded {
@@ -89,9 +89,7 @@ func TestHTTPServesACallInFlightWhenItsTestBegins(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
-	mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(winStart(1), windowsOf("test-1", "test-2"), nil, nil)
 	mm.SetMocksWithWindow([]*models.Mock{httpMock("own-2", 2010, 2011), httpMock("fetch-o2", 1500, 2050)}, nil, winStart(2), winEnd(2))
 
 	inWindow, err := mm.GetPerTestMocksInWindow()
@@ -132,9 +130,7 @@ func TestACarryOverMockInFlightStaysOnTheCarryOverTier(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
-	mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(winStart(1), windowsOf("test-1", "test-2"), nil, nil)
 	mm.SetMocksWithWindow([]*models.Mock{inFlightMock("own-2", 2010, 2011), send, session}, nil, winStart(2), winEnd(2))
 
 	for name, read := range map[string]func() ([]*models.Mock, error){
@@ -226,9 +222,7 @@ func TestACallInFlightConsumedThroughMarkMockAsUsedIsTheWindowsOwn(t *testing.T)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
-	mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(winStart(1), windowsOf("test-1", "test-2"), nil, nil)
 	mm.SetMocksWithWindow([]*models.Mock{inFlight, stale}, nil, winStart(2), winEnd(2))
 	mm.GetConsumedMocks()
 	if !mm.MarkMockAsUsed(*inFlight) {
@@ -294,9 +288,7 @@ func TestACallInFlightIsItsTestsOwnForTheStatefulCursor(t *testing.T) {
 		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 		t.Cleanup(mm.Close)
 		mm.ResetForReplaySession()
-		mm.SeedStartupCutoff(winStart(1))
-		mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
-		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.BeginTestSet(winStart(1), windowsOf("test-1", "test-2"), nil, nil)
 		mm.SetMocksWithWindow(recording, nil, winStart(2), winEnd(2))
 		return mm
 	}
@@ -345,9 +337,7 @@ func TestALearnStepCountsACallInFlightAsItsTestsOwn(t *testing.T) {
 		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 		t.Cleanup(mm.Close)
 		mm.ResetForReplaySession()
-		mm.SeedStartupCutoff(winStart(1))
-		mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
-		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.BeginTestSet(winStart(1), windowsOf("test-1", "test-2"), nil, nil)
 		mm.SetMocksWithWindow([]*models.Mock{batch(sentAt)}, nil, winStart(2), winEnd(2))
 		mm.SetServedObserver(p.learnTracker.ServedMock)
 		p.ContinueTestErrorCapture()
@@ -394,8 +384,7 @@ func TestUnderExactServingALearnStepCountsAMappedCallInFlightAsItsTestsOwn(t *te
 	p.learnTracker = learn.NewTracker()
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
-	mm.SetMocksWithWindow([]*models.Mock{m}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, windowsOf("test-1", "test-2"), []*models.Mock{m}, nil)
 	mm.SetServedObserver(p.learnTracker.ServedMock)
 	mm.ServeExactTest("test-1", nil)
 	mm.ServeExactPool(models.PoolKeyNone, nil, m)
@@ -461,9 +450,7 @@ func TestTheManagerStagesAPollInTheWindowItsAnswerIsIn(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
-	mm.SeedRecordedWindows(windowsOf("test-1", "test-2", "test-3"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(winStart(1), windowsOf("test-1", "test-2", "test-3"), nil, nil)
 	mm.SetMocksWithWindow(recording(), nil, winStart(2), winEnd(2))
 	want := []string{"boot-poll", "gap-poll", "own-2", "poll-b"}
 	if got, _ := mm.GetFilteredMocks(); !equalStrings(names(got), want) {

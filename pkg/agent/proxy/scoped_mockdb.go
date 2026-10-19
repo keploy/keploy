@@ -38,10 +38,10 @@ import (
 // (DeleteFilteredMock) does not collide.
 //
 // The STARTUP tier is filtered too, and that is not obvious: it sounds like a
-// shared bootstrap tier, but SetMocksWithWindow puts the whole per-test slice
-// into it during BaseTime staging — and in `keploy mock replay`, the one mode
-// where worker scoping exists, the pool is staged once at BaseTime and never
-// re-partitioned, so the startup tier IS the whole pool. Leaving it unfiltered
+// shared bootstrap tier, but a pool staging (BeginTestSet, StagePool) puts the
+// whole per-test slice into it — and in `keploy mock replay`, the one mode
+// where worker scoping exists, the pool is staged once as the set begins and
+// never re-partitioned, so the startup tier IS the whole pool. Leaving it unfiltered
 // let a worker read, and DELETE, another worker's mocks. The file used to say
 // startup passed through unfiltered while also filtering GetSessionMocks, which
 // is defined as startup ∪ session — so the same mock was filtered through one

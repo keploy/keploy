@@ -369,36 +369,20 @@ type MockStreamHeader struct {
 	UnfilteredCount int `json:"unfilteredCount"`
 }
 
+// MockFilterParams is a test's filter, which begins the test on the agent
+// (POST /updatemockparams): the mocks it is served are the ones recorded in its
+// window [AfterTime, BeforeTime], or the ones its mapping names. A test set
+// begins with TestSetBegin, before any of its tests.
 type MockFilterParams struct {
 	AfterTime time.Time `json:"afterTime,omitempty"`
 	// ExactMapping makes MockMapping the test's whole recording even when
 	// it is empty: a test recorded with no call is served no per-test mock,
 	// only the reusable tier. Without it an empty mapping means "none
 	// supplied", which leaves the whole pool armed.
-	ExactMapping bool `json:"exactMapping,omitempty"`
-	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED test
-	// in the set being staged, which the replayer knows because it loads test
-	// cases sorted by request timestamp. The agent seeds the manager's
-	// startup-init cutoff from it so that cutoff follows the set's recorded
-	// shape rather than whichever test happens to fire first — a --test-sets
-	// selection, an ignored test or the streaming deferral otherwise leave it
-	// late, and mocks from a test that never runs get served as bootstrap.
-	// Zero means "not supplied"; the cutoff then falls back to the fired
-	// windows, which is the pre-existing behaviour.
-	FirstRecordedTestStart time.Time `json:"firstRecordedTestStart,omitempty"`
-	// RecordedWindows is the [request, response] window of EVERY recorded test
-	// of the set being staged, the unselected and ignored ones included. Sent
-	// on the staging call only, beside FirstRecordedTestStart; the agent
-	// applies it through the proxy's optional SeedRecordedWindows capability,
-	// so traffic the test windows do not pace by themselves (a broker's server
-	// push, and what the application publishes while handling it) can be
-	// released by the recorded window it belongs to (models.WindowSchedule).
-	// Empty means "not supplied": everything is then released at once, which
-	// is the pre-existing behaviour.
-	RecordedWindows []TestWindow `json:"recordedWindows,omitempty"`
-	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
-	MockMapping     []string     `json:"mockMapping,omitempty"`
-	UseMappingBased bool         `json:"useMappingBased"`
+	ExactMapping    bool      `json:"exactMapping,omitempty"`
+	BeforeTime      time.Time `json:"beforeTime,omitempty"`
+	MockMapping     []string  `json:"mockMapping,omitempty"`
+	UseMappingBased bool      `json:"useMappingBased"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase
@@ -432,18 +416,10 @@ type MockFilterParams struct {
 }
 
 // ExactServing is what a keploy test filter asks of exact serving, under the
-// proven switch.
+// proven switch. The set's pool is named as the set begins (ExactPool).
 type ExactServing struct {
-	// Stage is the set's staging call: the agent stages every mock of the
-	// set once (the rest of the filter says how, as without exact serving),
-	// then serves Pool between test cases.
-	Stage bool `json:"stage,omitempty"`
-	// Pool is, on the staging call, the set's pool: every mock no test
-	// case's mapping lists. It answers between test cases, beside the
-	// protocol-phase mocks.
-	Pool []string `json:"pool,omitempty"`
 	// Test opens this test case, which owns the data-plane mocks of Owned
-	// (its mapping). Without Stage, an empty Test serves the pool again.
+	// (its mapping). An empty Test serves the set's pool again.
 	Test  string   `json:"test,omitempty"`
 	Owned []string `json:"owned,omitempty"`
 	// Ahead is, on a call that serves the pool (no Test), the mocks of the
@@ -453,13 +429,20 @@ type ExactServing struct {
 	// each at most once, as that test case's own: one answered then counts
 	// as answered when it opens. An agent that predates it ignores it.
 	Ahead []string `json:"ahead,omitempty"`
-	// Worker is, on the staging call, the set's worker scope
-	// (Mapping.Worker): the mocks no test case owns, each with its place
-	// (MockEntry.Place). The agent stages them with the pool, and each
-	// answers from its place in the set's run on (once the test case it is
-	// placed after has begun; from the start for an empty place), whether a
-	// test case is open or not, after the open test case's own, at most one
-	// request in the staging.
+}
+
+// ExactPool is a test set's exact serving, under the proven switch: the agent
+// stages every mock of the set once, then serves Pool between test cases.
+type ExactPool struct {
+	// Pool is every mock no test case's mapping lists. It answers between
+	// test cases, beside the protocol-phase mocks.
+	Pool []string `json:"pool,omitempty"`
+	// Worker is the set's worker scope (Mapping.Worker): the mocks no test
+	// case owns, each with its place (MockEntry.Place). The agent stages them
+	// with the pool, and each answers from its place in the set's run on
+	// (once the test case it is placed after has begun; from the start for an
+	// empty place), whether a test case is open or not, after the open test
+	// case's own, at most one request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
 }
 
@@ -469,7 +452,67 @@ type ExactServing struct {
 // variables its dependency calls bound stay readable until the next test
 // case's filter begins the next scope: keploy test reads them after it.
 func (p MockFilterParams) BeginsTestVariables() bool {
-	return p.Exact == nil || p.Exact.Stage || p.Exact.Test != ""
+	return p.Exact == nil || p.Exact.Test != ""
+}
+
+// TestSetBegin begins a test set on the agent (POST /testset/begin), before
+// the application starts and before any of the set's tests: the agent starts
+// the set's state afresh (its startup cutoff, its recorded windows, its
+// stateful cursors, the test variables) and stages the mocks the application
+// is served until the set's first test begins (MockFilterParams). It reads
+// them from the mocks stored for the set (StoreMocks), which it must hold.
+type TestSetBegin struct {
+	TestSetID string `json:"testSetId"`
+	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED
+	// test of the set, selected or not. What was recorded before it is the
+	// application's startup traffic, which the set begins with; the rest is
+	// read test by test, as each test's window comes. It also cuts the
+	// set's per-test mocks into startup and stale previous-test traffic
+	// (MockManager.FirstTestWindowStart) from the set's first test on,
+	// whichever test runs first: a --test-sets selection, an ignored test
+	// or the streaming deferral would otherwise leave the cut late. Zero
+	// when no test of the set carries a request time: the set then begins
+	// with every mock of the recording, and the cut follows the first test
+	// that runs.
+	FirstRecordedTestStart time.Time `json:"firstRecordedTestStart,omitempty"`
+	// RecordedWindows is the [request, response] window of EVERY recorded
+	// test of the set, the unselected and ignored ones included, so that
+	// traffic the test windows do not pace by themselves (a broker's server
+	// push, and what the application publishes while handling it) can be
+	// released by the recorded window it belongs to (models.WindowSchedule).
+	// Empty: everything is released at once.
+	RecordedWindows []TestWindow `json:"recordedWindows,omitempty"`
+	// StartupMockNames are the mocks the set's mapping lists as its startup
+	// (Mapping.StartupMockNames). The set begins with them as well as with
+	// what was recorded before its first test.
+	StartupMockNames []string `json:"startupMockNames,omitempty"`
+	// UseMappingBased, StrictMockWindow, AgentOwnsConsumed and
+	// TotalConsumedMocks say how the set's mocks are filtered, as on each
+	// test's filter (MockFilterParams).
+	UseMappingBased    bool                 `json:"useMappingBased"`
+	StrictMockWindow   bool                 `json:"strictMockWindow,omitempty"`
+	AgentOwnsConsumed  bool                 `json:"agentOwnsConsumed,omitempty"`
+	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// Exact is keploy test's exact serving, under the proven switch: nil for
+	// every other caller, and always without the switch.
+	Exact *ExactPool `json:"exact,omitempty"`
+}
+
+// The agent's routes that begin and end a test set.
+const (
+	BeginTestSetPath = "/testset/begin"
+	EndTestSetPath   = "/testset/end"
+)
+
+// BeginTestSetReq is the body of POST /testset/begin.
+type BeginTestSetReq struct {
+	TestSet TestSetBegin `json:"testSet"`
+}
+
+// EndTestSetReq is the body of POST /testset/end: the set's tests are over,
+// and the agent lets go of the mocks stored for it.
+type EndTestSetReq struct {
+	TestSetID string `json:"testSetId"`
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent

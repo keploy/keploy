@@ -107,7 +107,7 @@ func TestSeededDestinationsAreKnownAtEveryStaging(t *testing.T) {
 	ctx := context.Background()
 	stage := func(p *Proxy) {
 		t.Helper()
-		if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()); err != nil {
+		if err := p.BeginTestSet(ctx, time.Time{}, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -188,7 +188,7 @@ func TestASeededHTTP2DestinationIsOfferedH2WhileTheAppStarts(t *testing.T) {
 					session()
 					p.SeedRecordedDestinations(set.seed)
 				}
-				if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()); err != nil {
+				if err := p.BeginTestSet(ctx, time.Time{}, nil, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				if !p.replayTargetHasHTTP2Mock(set.host, 8443) {
@@ -232,7 +232,7 @@ func TestUnderExactServingTheOpenTestsHTTP2MocksOfferH2(t *testing.T) {
 		if err := p.Mock(ctx, models.OutgoingOptions{}); err != nil {
 			t.Fatalf("Mock: %v", err)
 		}
-		if err := p.SetMocksWithWindow(ctx, staged, nil, models.BaseTime, time.Now()); err != nil {
+		if err := p.BeginTestSet(ctx, time.Time{}, nil, staged, nil); err != nil {
 			t.Fatal(err)
 		}
 		return p, p.getMockManager()

@@ -275,3 +275,38 @@ func TestASkippedConnectionFailureIsLeftOutOfTheStepReportByName(t *testing.T) {
 		t.Fatalf("expected entries = %+v; the skipped mock-acme must keep no kind", entries)
 	}
 }
+
+// The runner begins a set on the agent before its first step, with the
+// mapping's startup mocks, and ends it when it lets the set go: the agent
+// then lets go of the mocks stored for it.
+func TestTheRunnerBeginsAndEndsTheSetOnTheAgent(t *testing.T) {
+	instr := &setupInstr{}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		mappingDB: &stubMappingDB{
+			mappings:      map[string][]models.MockEntry{"step-1": {{Name: "mock-1"}}},
+			startup:       []models.MockEntry{{Name: "mock-boot"}},
+			hasMeaningful: true,
+		},
+		mockDB: &skippingMockDB{filtered: []*models.Mock{{Name: "mock-1", Kind: models.HTTP}, {Name: "mock-boot", Kind: models.HTTP}}},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err != nil {
+		t.Fatalf("setupTestSet: %v", err)
+	}
+	if len(instr.begun) != 1 {
+		t.Fatalf("the set began %d times, want once", len(instr.begun))
+	}
+	b := instr.begun[0]
+	if b.TestSetID != "test-set-0" || !reflect.DeepEqual(b.StartupMockNames, []string{"mock-boot"}) || !b.UseMappingBased {
+		t.Fatalf("the set began with %+v; want test-set-0, mapping-based, with its startup mock", b)
+	}
+	if len(instr.ended) != 0 {
+		t.Fatalf("the set ended before the runner let it go: %v", instr.ended)
+	}
+	setup.cleanup()
+	if !reflect.DeepEqual(instr.ended, []string{"test-set-0"}) {
+		t.Fatalf("ended %v, want test-set-0 once the runner let it go", instr.ended)
+	}
+}

@@ -48,8 +48,13 @@ type Instrumentation interface {
 	// StoreMocks pushes the loaded set into the proxy. Used by Replay.
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 
-	// UpdateMockParams selects which mocks the proxy serves (whole pool, or —
-	// via MockMapping — a single scoped test's mocks). Used by Replay.
+	// BeginTestSet begins the mock set on the agent: the whole pool is served
+	// until a test's scope narrows it. EndTestSet ends it once the test
+	// command is done. Used by Replay.
+	BeginTestSet(ctx context.Context, begin models.TestSetBegin) error
+	EndTestSet(ctx context.Context, testSetID string) error
+
+	// UpdateMockParams selects which mocks the proxy serves for one test.
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 
 	// GetConsumedMocks / GetMockErrors report which mocks were served and which

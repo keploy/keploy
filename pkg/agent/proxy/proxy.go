@@ -244,9 +244,8 @@ type Proxy struct {
 	// (missLoss); the next test's carries them, so its read is incomplete.
 	pendingLost bool
 	// missCutPending is set, under the proven switch, by a test set's Mock,
-	// and taken by its first staging (SetMocksWithWindow from
-	// models.BaseTime), which cuts what was missed until then
-	// (cutMissesAtSetStart).
+	// and taken by the set's begin (BeginTestSet), which cuts what was missed
+	// until then (cutMissesAtSetStart).
 	missCutPending atomic.Bool
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
@@ -4392,7 +4391,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// with the current one's.
 	if provenswitch.On() {
 		// A new test set: what is missed until its mocks are staged is not
-		// its (cutMissesAtSetStart, at the set's staging).
+		// its (cutMissesAtSetStart, at the set's begin).
 		p.missCutPending.Store(true)
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
@@ -4517,30 +4516,52 @@ func (p *Proxy) SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
 	}
-	// A test set's staging (from models.BaseTime, the first since its Mock,
-	// under the proven switch): what was missed until its mocks were in is
-	// not the set's (cutMissesAtSetStart).
-	if start.Equal(models.BaseTime) && p.missCutPending.CompareAndSwap(true, false) {
-		p.cutMissesAtSetStart(ctx)
-	}
-	if p.asyncEngine != nil && opensTestWindow(start) {
-		// Engine owns the "first window doesn't count" rule.
+	if p.asyncEngine != nil {
+		// A test's window, which is what the async lanes count; a test
+		// recorded without times (a zero start) still opens one. Engine owns
+		// the "first window doesn't count" rule.
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
 }
 
-// opensTestWindow reports whether a staging from start opens a test's window,
-// which is what the async lanes count (async.Engine.AdvanceWindow): a test
-// set's staging, from the models.BaseTime sentinel, stages its mocks before
-// any test runs and opens none, as the mock manager reads it too
-// (setMocksWithWindowLocked). Counting it served every async epoch one test
-// early: an epoch received after test k started, effective from test k+1, was
-// served to test k. A test recorded without times (a zero start) still opens
-// one.
-func opensTestWindow(start time.Time) bool {
-	return !start.Equal(models.BaseTime)
+// BeginTestSet begins a test set on the underlying MockManager
+// (MockManager.BeginTestSet) and stages filtered and unfiltered as the pool
+// the set begins with. Satisfies the agent's TestSetStager extension
+// interface. The pool opens no test window, so the async lanes do not count
+// it (async.Engine.AdvanceWindow): counting it served every async epoch one
+// test early, an epoch received after test k started, effective from test
+// k+1, served to test k.
+func (p *Proxy) BeginTestSet(ctx context.Context, firstTestStart time.Time, windows []models.TestWindow, filtered, unFiltered []*models.Mock) error {
+	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
+	recorded.add(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.BeginTestSet(firstTestStart, windows, filtered, unFiltered)
+		p.dnsCache.Purge()
+	}
+	// The set's first begin since its Mock, under the proven switch: what was
+	// missed until its mocks were in is not the set's (cutMissesAtSetStart).
+	if p.missCutPending.CompareAndSwap(true, false) {
+		p.cutMissesAtSetStart(ctx)
+	}
+	return nil
 }
+
+// StagePool stages the pool served outside every test of the current set on
+// the underlying MockManager (MockManager.StagePool). Satisfies the agent's
+// TestSetStager extension interface. Like a set's begin, it opens no test
+// window.
+func (p *Proxy) StagePool(_ context.Context, filtered, unFiltered []*models.Mock) error {
+	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
+	recorded.add(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.StagePool(filtered, unFiltered)
+		p.dnsCache.Purge()
+	}
+	return nil
+}
+
+var _ agent.TestSetStager = (*Proxy)(nil)
 
 // SetScopeMocks stages the pool of a keploy mock replay test begun (open) or
 // ended (!open) without a worker pid, with the proven switch off: see
@@ -4556,7 +4577,7 @@ func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.
 	}
 	if p.asyncEngine != nil && open {
 		// A test begun opens a window; one ended opens none (see
-		// opensTestWindow).
+		// BeginTestSet).
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
@@ -4564,10 +4585,10 @@ func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.
 
 var _ agent.ScopeStager = (*Proxy)(nil)
 
-// FirstTestWindowStart returns the earliest test window start observed
-// by the underlying MockManager, or zero before any non-BaseTime
-// SetMocksWithWindow has landed. Satisfies the agent's optional
-// FirstWindowStartReader extension interface.
+// FirstTestWindowStart returns the underlying MockManager's startup-init
+// cutoff (MockManager.FirstTestWindowStart): the set's earliest recorded
+// test, or the earliest test window start observed. Satisfies the agent's
+// optional FirstWindowStartReader extension interface.
 //
 // Used by the agent's tier-aware strictMockWindow filter to preserve
 // startup-init mocks (req < firstWindowStart) while still dropping
@@ -4581,34 +4602,12 @@ func (p *Proxy) FirstTestWindowStart() time.Time {
 	return time.Time{}
 }
 
-// SeedStartupCutoff seeds the underlying MockManager's startup-init cutoff from
-// the earliest RECORDED test of the set being staged. Satisfies the agent's
-// optional StartupCutoffSeeder extension interface.
-//
-// Without it the cutoff follows whichever test fires FIRST, so a --test-sets
-// selection, an ignored test or the streaming deferral leaves it late and mocks
-// from a test that never runs are served as bootstrap traffic.
-func (p *Proxy) SeedStartupCutoff(start time.Time) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedStartupCutoff(start)
-	}
-}
-
 // SeedStatementCatalog hands the underlying MockManager the stored set's
 // statement catalog (MockManager.SeedStatementCatalog). Satisfies the agent's
 // optional StatementCatalogSeeder extension interface.
 func (p *Proxy) SeedStatementCatalog(mocks []*models.Mock) {
 	if m := p.getMockManager(); m != nil {
 		m.SeedStatementCatalog(mocks)
-	}
-}
-
-// SeedRecordedWindows hands the underlying MockManager the recorded window of
-// every test of the set being staged. Satisfies the agent's optional
-// RecordedWindowsSeeder extension interface.
-func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedRecordedWindows(ws)
 	}
 }
 
@@ -4833,7 +4832,7 @@ var (
 )
 
 // cutMissesAtSetStart drops, once a test set's mocks are staged (its first
-// staging since its Mock, under the proven switch), what was missed before:
+// begin since its Mock, under the proven switch), what was missed before:
 // after the previous set's last read (a call its application made as it
 // stopped, or later still, where keploy did not stop it), and while this set's
 // mocks were not in yet (a warm application's call, which missed for keploy's
@@ -4841,7 +4840,7 @@ var (
 // set's first test would read it as made before this set (beforeSetMiss), and
 // fail the set with it. It is said, with the calls, as a miss no test is
 // charged with is. An application keploy starts for the set starts after the
-// staging, so none of its startup is cut. The drain is flushed first, so a miss
+// begin, so none of its startup is cut. The drain is flushed first, so a miss
 // it holds is cut with the rest; a flush that cannot complete (the drain
 // stopped, the staging given up) cuts what is filed. A call matched before the
 // staging whose miss reaches the drain only after the flush is not cut: it is

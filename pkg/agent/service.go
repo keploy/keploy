@@ -396,37 +396,31 @@ type PcapStreamer interface {
 	SubscribePcap(w io.Writer, flush func()) (func(), error)
 }
 
-// WindowedProxy is the optional extension implemented by proxies that
-// support per-test [req,res] window enforcement (Option-1 strict
-// containment). Callers MUST type-assert from Proxy and gracefully
-// fall back when the assertion fails — this keeps third-party Proxy
-// implementations compiling without the extra methods.
+// TestSetStager is the optional extension implemented by proxies whose mock
+// manager follows a test set's lifecycle: it begins a set, and stages the pool
+// served outside every test of the set.
 //
-//	if wp, ok := p.(WindowedProxy); ok {
-//	    _ = wp.SetMocksWithWindow(ctx, f, u, start, end)
-//	} else {
-//	    _ = p.SetMocks(ctx, f, u)
-//	}
+// BeginTestSet starts the set's state afresh: its startup-init cutoff
+// (firstTestStart, the request time of the set's earliest RECORDED test, zero
+// when its tests carry none), the recorded window of every test of the set
+// (windows), and whether a test has fired; and stages filtered and unfiltered
+// as the pool the set begins with, which opens no test window. StagePool
+// stages a pool between tests of the current set, which closes any test
+// window and leaves the set's state as it is.
 //
-// StartupCutoffSeeder is the optional extension implemented by proxies whose
-// mock manager can be told the earliest RECORDED test start of the set being
-// staged, before any test of that set has run.
-//
-// Optional in the same style as WindowedProxy: the agent type-asserts for it and
-// simply does not seed when the assertion fails, so no existing proxy breaks and
-// third-party proxies keep compiling. Not seeding leaves the cutoff derived from
-// the fired windows, which is the pre-existing behaviour.
-type StartupCutoffSeeder interface {
-	SeedStartupCutoff(start time.Time)
+// A proxy without it is staged through SetMocks: no window, no startup tier.
+type TestSetStager interface {
+	BeginTestSet(ctx context.Context, firstTestStart time.Time, windows []models.TestWindow, filtered, unFiltered []*models.Mock) error
+	StagePool(ctx context.Context, filtered, unFiltered []*models.Mock) error
 }
 
 // StatementCatalogSeeder is the optional extension implemented by proxies whose
 // mock manager can hold the stored set's statement catalog (the first recorded
 // mock of each statement the agent keeps on disk), describe-only, for the
-// parsers' integrations.StatementCatalog capability. Optional in the same style
-// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and a
-// statement prepared at app start that its recordings hold only inside tests
-// is then described from what the parser may serve, as before.
+// parsers' integrations.StatementCatalog capability. Optional: an agent whose
+// proxy lacks it does not seed, and a statement prepared at app start that its
+// recordings hold only inside tests is then described from what the parser may
+// serve, as before.
 type StatementCatalogSeeder interface {
 	SeedStatementCatalog(mocks []*models.Mock)
 }
@@ -442,30 +436,21 @@ type RecordedDestinationsSeeder interface {
 	SeedRecordedDestinations(mocks []*models.Mock)
 }
 
-// RecordedWindowsSeeder is the optional extension implemented by proxies whose
-// mock manager can be told the recorded window of every test of the set being
-// staged (models.MockFilterParams.RecordedWindows). Optional in the same style
-// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and
-// consumers then release everything at once, the pre-existing behaviour.
-type RecordedWindowsSeeder interface {
-	SeedRecordedWindows(ws []models.TestWindow)
-}
-
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
-// successive recorded responses in record order). The agent calls it once per
-// test-set, on the staging call, so a stateful sequence replays from its first
-// recorded response in each test-set rather than carrying a cursor across sets.
-// Optional in the same style as StartupCutoffSeeder: a proxy that lacks it is a
-// no-op (a proxy without stateful cursors has nothing to reset).
+// successive recorded responses in record order). The agent calls it as each
+// test-set begins, so a stateful sequence replays from its first recorded
+// response in each test-set rather than carrying a cursor across sets. A proxy
+// that lacks it is a no-op (a proxy without stateful cursors has nothing to
+// reset).
 type StatefulCursorResetter interface {
 	ResetStatefulCursors()
 }
 
 // VariableResetter is the optional extension implemented by proxies whose mock
 // manager keeps the test variables a replay binds (package variables). Under
-// the proven switch the agent calls it when a scope begins: on the staging call
-// of a test-set, and at the begin of each test of keploy mock replay. A proxy
+// the proven switch the agent calls it when a scope begins: as a test-set
+// begins, and at the begin of each test of keploy mock replay. A proxy
 // that lacks it follows no variables, so it has none to forget.
 type VariableResetter interface {
 	ResetVariables()
@@ -569,14 +554,24 @@ type ExactKeyRestarter interface {
 // its mapping names, so its window has no recorded-time bounds; it is open
 // while the test runs. Between tests the pool is served as before the first
 // test, less every per-test mock served while a test was open, which the
-// proxy leaves out. A proxy without it is staged through WindowedProxy with
-// the models.BaseTime sentinel, which opens no window, so its tier-aware
-// parsers answer a test's calls from the startup tier, which then holds the
-// test's mocks and the reusable tier.
+// proxy leaves out. A proxy without it is staged as a pool (TestSetStager),
+// which opens no window, so its tier-aware parsers answer a test's calls from
+// the startup tier, which then holds the test's mocks and the reusable tier.
 type ScopeStager interface {
 	SetScopeMocks(ctx context.Context, filtered, unFiltered []*models.Mock, open bool) error
 }
 
+// WindowedProxy is the optional extension implemented by proxies that
+// support per-test [req,res] window enforcement (Option-1 strict
+// containment). Callers MUST type-assert from Proxy and gracefully
+// fall back when the assertion fails — this keeps third-party Proxy
+// implementations compiling without the extra methods.
+//
+//	if wp, ok := p.(WindowedProxy); ok {
+//	    _ = wp.SetMocksWithWindow(ctx, f, u, start, end)
+//	} else {
+//	    _ = p.SetMocks(ctx, f, u)
+//	}
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.

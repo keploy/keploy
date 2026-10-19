@@ -2,8 +2,8 @@ package models
 
 import "fmt"
 
-// A test set's staging call (the replayer's call before the app starts, with
-// the window BaseTime to now) reads from the agent's on-disk store only the
+// A test set's begin (the replayer's call before the app starts, POST
+// /testset/begin) reads from the agent's on-disk store only the
 // per-test mocks recorded before the set's first test: the app's startup
 // traffic. Reading the whole window brought every mock of the recording into
 // the agent's memory only to stage it as startup traffic, and a long

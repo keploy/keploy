@@ -274,8 +274,15 @@ func (f *composeInstr) StoreMocks(_ context.Context, filtered, unfiltered []*mod
 	return nil
 }
 
-func (f *composeInstr) UpdateMockParams(context.Context, models.MockFilterParams) error {
+func (f *composeInstr) BeginTestSet(context.Context, models.TestSetBegin) error {
 	f.record("stage")
+	return nil
+}
+
+func (f *composeInstr) EndTestSet(context.Context, string) error { return nil }
+
+func (f *composeInstr) UpdateMockParams(context.Context, models.MockFilterParams) error {
+	f.record("filter")
 	return nil
 }
 func (f *composeInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {

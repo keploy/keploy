@@ -234,15 +234,15 @@ func TestUnderTheSwitchWindowOwnershipReadsBothPoolsAndEveryTestCase(t *testing.
 	}
 }
 
-// stagedPoolAndWorker is the set's staging call's pool and worker scope
-// (models.ExactServing), each worker entry "name@place".
+// stagedPoolAndWorker is the pool and worker scope the set began with
+// (models.ExactPool), each worker entry "name@place".
 func stagedPoolAndWorker(h *prRun) (pool, worker []string) {
 	h.instr.mu.Lock()
 	defer h.instr.mu.Unlock()
-	for _, p := range h.instr.allParams {
-		if p.Exact != nil && p.Exact.Stage {
-			pool, worker = p.Exact.Pool, nil
-			for _, e := range p.Exact.Worker {
+	for _, b := range h.instr.begins {
+		if b.Exact != nil {
+			pool, worker = b.Exact.Pool, nil
+			for _, e := range b.Exact.Worker {
 				worker = append(worker, e.Name+"@"+e.Place)
 			}
 		}

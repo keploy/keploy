@@ -80,20 +80,18 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
 }
 
-// stageForExactServing stages every mock of the replay on the proxy, once:
-// exact serving decides what each read shows. A new session's stateful
-// cursors start afresh (two rounds never share one). It reports whether it
-// staged: with no recording stored yet there is nothing to stage.
+// stageForExactServing stages every mock of the replay on the proxy, once, as
+// the replay's set begins: exact serving decides what each read shows. A new
+// session's stateful cursors start afresh (two rounds never share one). It
+// reports whether it staged: with no recording stored yet there is nothing to
+// stage.
 func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	if _, stored := a.clientMocks.Load(uint64(0)); !stored {
 		// Nothing to stage yet: the CLI stores the recording before it
 		// sends the table, and the next serve stages it.
 		return false, nil
 	}
-	if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
-		r.ResetStatefulCursors()
-	}
-	if err := a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}); err != nil {
+	if err := a.beginTestSet(ctx, models.TestSetBegin{}, nil); err != nil {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
 	}
 	return true, nil
@@ -185,10 +183,10 @@ func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
 }
 
 // serveKeployTestExactly is a keploy test filter under the proven switch
-// (models.ExactServing): the set's staging call stages every mock once and
-// serves the set's pool; a test case's call serves it exactly its own mocks;
-// any other call serves the pool again, between test cases. A keploy test
-// run has one key, models.PoolKeyNone.
+// (models.ExactServing): a test case's call serves it exactly its own mocks;
+// any other call serves the set's pool again (named as the set began,
+// beginTestSetExactly), between test cases. A keploy test run has one key,
+// models.PoolKeyNone.
 func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFilterParams) error {
 	es, err := a.exactServer()
 	if err != nil {
@@ -202,7 +200,6 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 	// and told it is not verified (its consumption read fails).
 	var unknown error
 	switch {
-	case ex.Stage:
 	case ex.Test != "":
 		// A test case opens all the same with a connection whose held
 		// requests cannot be told: its end finds it. The listener's drops
@@ -219,58 +216,6 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		unknown = a.settledSince(ctx, true, "the test case")
 	}
 	switch {
-	case ex.Stage:
-		staging := params
-		staging.Exact = nil
-		// Exact serving goes on, with no pool, before the stage lands: no
-		// staged mock is ever served outside it, and none still staged from
-		// the previous set answers under one of this set's pool names
-		// (names are unique only within a set). The set's pool is served
-		// once its mocks are in. The previous set's worker scope goes for
-		// the same reason, before that view is installed.
-		a.scopeMu.Lock()
-		a.testWorker, a.testBegun = nil, nil
-		a.scopeMu.Unlock()
-		if err := a.serveWorkerExactly(es); err != nil {
-			return err
-		}
-		if err := es.ServeExactPool(models.PoolKeyNone, nil); err != nil {
-			return err
-		}
-		if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
-			r.ResetStatefulCursors()
-		}
-		// The pool's per-test mocks are staged with the set's startup
-		// traffic: the staging call reads, of the on-disk store, only what
-		// was recorded before the set's first test (stagingStartupCutoff),
-		// and each test reads its own as it opens (ServeExactTest). A call
-		// recorded while no test was open, between tests or after the last
-		// one, is the pool's, served by name from the staged mocks; were it
-		// not staged, its replay would find no mock. The pool is what no
-		// test owns, never the whole recording.
-		//
-		// The set's worker scope (models.Mapping.Worker) is staged by name
-		// with the pool: its mocks answer from their places on.
-		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...)); err != nil {
-			return fmt.Errorf("stage the test set's mocks: %w", err)
-		}
-		// A miss on a call that is the recording of a test not begun yet
-		// (a worker's call made early) is told from the on-disk store: a
-		// test's own are staged only as it opens.
-		if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
-			if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
-				return fmt.Errorf("set the test set's recording source: %w", err)
-			}
-		}
-		a.scopeMu.Lock()
-		a.testPool = append([]string(nil), ex.Pool...)
-		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
-		a.testBegun = map[string]bool{}
-		a.scopeMu.Unlock()
-		if err := a.serveWorkerExactly(es); err != nil {
-			return err
-		}
-		return es.ServeExactPool(models.PoolKeyNone, append([]string(nil), ex.Pool...))
 	case ex.Test != "":
 		var owned []*models.Mock
 		if len(ex.Owned) > 0 {

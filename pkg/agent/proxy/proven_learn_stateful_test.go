@@ -100,7 +100,7 @@ func TestALearnStepServesAReusableStatefulSequenceInOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := newCursorManager(t)
-			mgr.SetMocksWithWindow(pool(tc.noise), nil, models.BaseTime, time.Now())
+			mgr.BeginTestSet(time.Time{}, nil, pool(tc.noise), nil)
 			if tc.exact {
 				mgr.ServeExactPool("between", []string{"a1", "a2", "a3", "b1", "b2"})
 			}
@@ -130,7 +130,7 @@ func TestALearnStepReusedStatedMockKeepsEveryEchoItWasServedWith(t *testing.T) {
 			}
 			mm := NewMockManager(nil, nil, zap.NewNop())
 			t.Cleanup(mm.Close)
-			mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+			mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}}, nil, nil)
 			if tier == "perTest" {
 				mm.SetMocksWithWindow([]*models.Mock{m}, nil, now.Add(-time.Hour), now.Add(time.Hour))
 			} else {

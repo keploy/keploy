@@ -407,9 +407,8 @@ func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
 
 // LoadStaged returns, in recorded order, the mocks a
 // models.StagingWithStartup need declares with request timestamp in
-// [from, to] (inclusive): what the set's staging call stages beside the
-// startup band (LoadBefore), from the band's cutoff to the end of the
-// staging's window. It reads only those entries.
+// [from, to] (inclusive): what a set's begin stages beside the startup band
+// (LoadBefore), from the band's cutoff on. It reads only those entries.
 func (d *DiskMocks) LoadStaged(from, to time.Time) ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {

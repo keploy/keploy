@@ -17,6 +17,13 @@ type Service interface {
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
+	// BeginTestSet begins a test set, from the mocks stored for it
+	// (StoreMocks), before the application starts and before any of its
+	// tests; EndTestSet ends it once its tests are over.
+	BeginTestSet(ctx context.Context, begin models.TestSetBegin) error
+	EndTestSet(ctx context.Context, testSetID string) error
+	// UpdateMockParams begins a test of the current set: the mocks it is
+	// served are the ones params name.
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.

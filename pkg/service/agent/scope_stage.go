@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
@@ -45,11 +44,11 @@ import (
 // (Postgres v3 before integrations' live tier reads) keeps serving, on a
 // connection opened earlier, the pool of that moment.
 //
-// A proxy that is not a ScopeStager is staged with the models.BaseTime
-// sentinel, which opens no window: the pool a begin always staged, and for a
-// test recorded with no call, the reusable tier only.
+// A proxy that is not a ScopeStager is staged a pool between tests
+// (stagePool), which opens no window: the pool a begin always staged, and for
+// a test recorded with no call, the reusable tier only.
 func (a *Agent) stageScope(ctx context.Context, names []string, open bool) error {
-	params := models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}
+	var params models.MockFilterParams
 	if open {
 		// Exact: an empty mapping is the test's whole recording, not "none
 		// supplied" (which would stage the whole pool as the test's own).
@@ -57,9 +56,9 @@ func (a *Agent) stageScope(ctx context.Context, names []string, open bool) error
 	}
 	stager, ok := a.Proxy.(coreAgent.ScopeStager)
 	if !ok {
-		return a.UpdateMockParams(ctx, params)
+		return a.stagePool(ctx, params)
 	}
-	filtered, unfiltered, err := a.mocksForParams(ctx, params)
+	filtered, unfiltered, err := a.poolMocks(ctx, params, poolRead{})
 	if err != nil {
 		return err
 	}

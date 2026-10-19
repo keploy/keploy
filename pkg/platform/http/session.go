@@ -67,11 +67,18 @@ type sessionStep struct {
 // configures the agent wholesale (a test set's mocks replace the last set's).
 // They are made again in the order the kinds were first made in, except
 // readiness, which releases the app and so goes last.
+//
+// A set's begin and its tests' filters are kinds of their own: the latest
+// test's filter replaces the one before it, never the set's begin, so a
+// restarted agent is told the set began (its startup cutoff, its recorded
+// windows, its pool) before it is told which test runs. A set's begin forgets
+// the previous set's last test filter (forget).
 const (
 	stepRealDeps     = "real-deps"
 	stepTestSetHook  = "before-test-set-compose"
 	stepMockOutgoing = "mock-outgoing"
 	stepStoreMocks   = "store-mocks"
+	stepBeginTestSet = "begin-test-set"
 	stepMockParams   = "update-mock-params"
 	stepScopeTable   = "scope-table"
 	stepSetTable     = "set-table"
@@ -79,13 +86,6 @@ const (
 	stepTestBegins   = "test-begins"
 	stepAgentReady   = "agent-ready"
 )
-
-// stepExactStage is a set's staging under exact serving (KEPLOY_PROVEN,
-// models.ExactServing.Stage): it stages the set's mocks once, and each test
-// case's filter after it only says what is served. It is a kind of its own,
-// so the latest of those filters does not replace it, and a restarted agent
-// is staged before it is told what to serve.
-const stepExactStage = "exact-stage"
 
 // staleStreamGrace is how long setting a restarted agent up waits for the
 // streams to see their old agent gone (its connection closing) before it cuts
@@ -158,6 +158,19 @@ func (s *agentSession) record(kind string, apply func(ctx context.Context) error
 		}
 	}
 	s.steps = append(s.steps, sessionStep{kind: kind, apply: apply})
+}
+
+// forget drops the recorded call of kind, if any: a call that undoes it was
+// made.
+func (s *agentSession) forget(kind string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.steps {
+		if s.steps[i].kind == kind {
+			s.steps = append(s.steps[:i], s.steps[i+1:]...)
+			return
+		}
+	}
 }
 
 // sessionStream is one stream's place in its session: the run it belongs to,
@@ -450,12 +463,10 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 // changing the consumed-mocks map it hands over.
 func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
-	params.RecordedWindows = slices.Clone(params.RecordedWindows)
 	params.MockMapping = slices.Clone(params.MockMapping)
 	params.Variables = slices.Clone(params.Variables)
 	if params.Exact != nil {
 		ex := *params.Exact
-		ex.Pool = slices.Clone(ex.Pool)
 		ex.Owned = slices.Clone(ex.Owned)
 		ex.Ahead = slices.Clone(ex.Ahead)
 		params.Exact = &ex
@@ -463,13 +474,17 @@ func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 	return params
 }
 
-// mockParamsStep is the step kind a mock filter is recorded under: a set's
-// staging under exact serving is its own (stepExactStage).
-func mockParamsStep(params models.MockFilterParams) string {
-	if params.Exact != nil && params.Exact.Stage {
-		return stepExactStage
+// copyTestSetBegin is begin sharing no memory with it.
+func copyTestSetBegin(begin models.TestSetBegin) models.TestSetBegin {
+	begin.TotalConsumedMocks = maps.Clone(begin.TotalConsumedMocks)
+	begin.RecordedWindows = slices.Clone(begin.RecordedWindows)
+	begin.StartupMockNames = slices.Clone(begin.StartupMockNames)
+	if begin.Exact != nil {
+		ex := *begin.Exact
+		ex.Pool = slices.Clone(ex.Pool)
+		begin.Exact = &ex
 	}
-	return stepMockParams
+	return begin
 }
 
 // resumeStream is called when a stream's connection ended. Once the session

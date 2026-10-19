@@ -61,6 +61,8 @@ type rearmInstr struct {
 	// lastParams is what the most recent UpdateMockParams carried, so a test can
 	// assert what the repair actually sent.
 	lastParams models.MockFilterParams
+	// lastBegin is what the most recent BeginTestSet carried.
+	lastBegin models.TestSetBegin
 
 	// statsBlock / outgoingBlock, when non-nil, block that call until closed or
 	// until the call's own context expires — a WEDGED agent, not a dead one.
@@ -150,6 +152,17 @@ func (f *rearmInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfi
 	}
 	return nil
 }
+
+// BeginTestSet counts as a filter send: the set's begin and the tests'
+// filters are what the repair re-sends after the store.
+func (f *rearmInstr) BeginTestSet(_ context.Context, b models.TestSetBegin) error {
+	f.mu.Lock()
+	f.lastBegin = b
+	f.mu.Unlock()
+	return f.updateMockParams()
+}
+
+func (f *rearmInstr) EndTestSet(context.Context, string) error { return nil }
 
 func (f *rearmInstr) UpdateMockParams(_ context.Context, p models.MockFilterParams) error {
 	f.mu.Lock()
@@ -259,7 +272,7 @@ func TestEnsureAgentHoldsStoredMocks_ReRegistersReplacementAgent(t *testing.T) {
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("re-registration against the replacement agent should succeed, got: %v", err)
 	}
 	// A re-registration of the set, not a set boundary: what the app
@@ -289,7 +302,7 @@ func TestEnsureAgentHoldsStoredMocks_FailsLoudlyWhenReRegistrationUnconfirmed(t 
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil)
+	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil)
 	if err == nil {
 		t.Fatal("an unconfirmed re-registration must fail the test set instead of firing tests mockless")
 	}
@@ -313,7 +326,7 @@ func TestEnsureAgentHoldsStoredMocks_NoOpWhenAgentHoldsCorpus(t *testing.T) {
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("an agent holding the corpus must pass the guard, got: %v", err)
 	}
 
@@ -329,7 +342,7 @@ func TestEnsureAgentHoldsStoredMocks_SkipsProbeForEmptyCorpus(t *testing.T) {
 	f := &rearmInstr{}
 	r := newRearmReplayer(f)
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, nil, nil, map[string]models.MockState{}, false, []*models.TestCase{{}}, nil); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, nil, nil, map[string]models.MockState{}, false, []*models.TestCase{{}}, nil, nil); err != nil {
 		t.Fatalf("an empty corpus must be a no-op, got: %v", err)
 	}
 
@@ -348,7 +361,7 @@ func TestEnsureAgentHoldsStoredMocks_ProbeFailureFallsThroughToReRegistration(t 
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("re-registration should succeed once the agent answers again, got: %v", err)
 	}
 
@@ -377,7 +390,7 @@ func TestEnsureAgentHoldsStoredMocks_SkipsWhenAgentCannotReportStats(t *testing.
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("an agent that cannot report stats must not fail the test set, got: %v", err)
 	}
 
@@ -400,7 +413,7 @@ func TestEnsureAgentHoldsStoredMocks_AcceptsUnconfirmableReRegistration(t *testi
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 	f.afterFirstStats = func() { f.statsUnsupported = true }
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("an unconfirmable re-registration must not fail the test set, got: %v", err)
 	}
 
@@ -429,7 +442,7 @@ func TestEnsureAgentHoldsStoredMocks_ProbeHonoursCallerCancellation(t *testing.T
 	done := make(chan struct{})
 	go func() {
 		_ = r.ensureAgentHoldsStoredMocks(ctx, "run-1", "test-set-0", models.OutgoingOptions{},
-			filtered, unfiltered, consumed, false, cases, nil)
+			filtered, unfiltered, consumed, false, cases, nil, nil)
 		close(done)
 	}()
 	select {
@@ -465,7 +478,7 @@ func TestEnsureAgentHoldsStoredMocks_BoundsTheWholeGuardAgainstAWedgedAgent(t *t
 	done := make(chan error, 1)
 	go func() {
 		done <- r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-			models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil)
+			models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil)
 	}()
 
 	select {
@@ -486,7 +499,7 @@ func TestEnsureAgentHoldsStoredMocks_ReRunsBeforeTestSetComposeOnRepair(t *testi
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 	if got := h.beforeCalls(); got != 1 {
@@ -511,7 +524,7 @@ func TestEnsureAgentHoldsStoredMocks_NoHookWhenAgentIsHealthy(t *testing.T) {
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("healthy path failed: %v", err)
 	}
 	if got := h.beforeCalls(); got != 0 {
@@ -536,12 +549,12 @@ func TestEnsureAgentHoldsStoredMocks_RepairDoesNotDeferToTheReplacementsOwnHisto
 	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 
 	f.mu.Lock()
-	p := f.lastParams
+	p := f.lastBegin
 	f.mu.Unlock()
 
 	if p.AgentOwnsConsumed {
@@ -562,8 +575,8 @@ func TestSendMockFilterParamsKeepsAgentOwnsConsumedOnTheNormalPath(t *testing.T)
 	r := newRearmReplayer(f)
 	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
 
-	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
-		consumed, false, recordedSetShape{}); err != nil {
+	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, time.Now().Add(-time.Second), time.Now(),
+		consumed, false); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
 
@@ -592,13 +605,13 @@ func TestConsumedHistoryRebuildSticksAfterARepair(t *testing.T) {
 
 	// The repair.
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 
 	// A subsequent ORDINARY per-test send, which passes rebuildConsumed=false.
-	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
-		consumed, false, recordedSetShape{}); err != nil {
+	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, time.Now().Add(-time.Second), time.Now(),
+		consumed, false); err != nil {
 		t.Fatalf("per-test send failed: %v", err)
 	}
 
@@ -632,7 +645,7 @@ func TestRepairLatchesBeforeItResetsTheAgentsMockManager(t *testing.T) {
 
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, nil); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 
@@ -670,7 +683,7 @@ func TestEnsureAgentHoldsStoredMocks_TheWatchKeepsToAReplacementSetUpAgain(t *te
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &acceptsWatch{}
-			_ = newRearmReplayer(tc.f).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, w)
+			_ = newRearmReplayer(tc.f).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, w)
 			if w.accepts != tc.accepts {
 				t.Fatalf("%d Accept(s), want %d", w.accepts, tc.accepts)
 			}

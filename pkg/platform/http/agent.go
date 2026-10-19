@@ -1453,11 +1453,72 @@ func decodeStoreMocksResp(res *http.Response) error {
 	return nil
 }
 
+// BeginTestSet begins a test set on the agent (models.TestSetBegin), from the
+// mocks stored for it (StoreMocks), before the application starts and before
+// any of the set's tests.
+func (a *AgentClient) BeginTestSet(ctx context.Context, begin models.TestSetBegin) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := copyTestSetBegin(begin)
+			// The previous set's last test is no test of this one.
+			a.session().forget(stepMockParams)
+			a.session().record(stepBeginTestSet, func(c context.Context) error { return a.BeginTestSet(c, recorded) })
+		}
+	}()
+	// Only a successful answer that says so sets it again below.
+	a.consumedPerTest.Store(false)
+	res, err := a.postAgentJSON(ctx, models.BeginTestSetPath, "begin the test set", models.BeginTestSetReq{TestSet: begin})
+	if err != nil {
+		return err
+	}
+	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
+	return nil
+}
+
+// EndTestSet ends a test set on the agent: its tests are over, and the agent
+// lets go of the mocks stored for it.
+func (a *AgentClient) EndTestSet(ctx context.Context, testSetID string) error {
+	_, err := a.postAgentJSON(ctx, models.EndTestSetPath, "end the test set", models.EndTestSetReq{TestSetID: testSetID})
+	return err
+}
+
+// postAgentJSON posts body, as JSON, to the agent's path and checks its
+// answer (agentRespErr); op names the call in errors.
+func (a *AgentClient) postAgentJSON(ctx context.Context, path, op string, body any) (*http.Response, error) {
+	requestJSON, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to %s: marshal the request: %w", op, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+path, bytes.NewBuffer(requestJSON))
+	if err != nil {
+		return nil, fmt.Errorf("failed to %s: create the request: %w", op, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to %s: %w", op, err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, res.Body)
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close the agent's response body", zap.String("call", op))
+		}
+	}()
+	rawBody, err := readAgentBody(res)
+	if err != nil {
+		return nil, fmt.Errorf("failed to %s: read the agent's answer: %w", op, err)
+	}
+	if err := agentRespErr(op, res, rawBody); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
-			a.session().record(mockParamsStep(recorded), func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
+			a.session().record(stepMockParams, func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
 		}
 	}()
 	// Only a successful answer that says so sets it again below; a call that

@@ -67,7 +67,7 @@ func TestHasMocksByKind_Tiers(t *testing.T) {
 	// Startup tier.
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
-	mm.SetMocksWithWindow(nil, []*models.Mock{h2MockForTest("boot", "vault.svc:8200")}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{h2MockForTest("boot", "vault.svc:8200")})
 	if !mm.HasMocksByKind(models.HTTP2, destPred("vault.svc", 8200)) {
 		t.Fatal("startup-tier Http2 mock for vault.svc:8200 must match")
 	}

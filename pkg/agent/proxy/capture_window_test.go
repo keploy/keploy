@@ -286,9 +286,9 @@ func TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets(t *testing.T) {
 // What the application missed after a set's last read (a call it made as it
 // stopped, or later still), and while the next set's mocks were not staged yet
 // (a warm application's call that missed for keploy's staging), is not the
-// next set's: its staging cuts it, saying so, so its first test does not read
-// it as made before that set. A staging that is not a set's first since its
-// Mock (a test's window, a re-stage within the set) cuts nothing: what was
+// next set's: its begin cuts it, saying so, so its first test does not read
+// it as made before that set. A begin that is not the set's first since its
+// Mock (the set begun again), and a test's window, cut nothing: what was
 // missed between two tests is the next test's.
 func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -313,13 +313,13 @@ func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) 
 		t.Fatal(err)
 	}
 	p.SendError(mockMiss("GET /health"))
-	if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now()); err != nil {
+	if err := p.BeginTestSet(context.Background(), time.Time{}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	p.SendError(mockMiss("insert on events"))
 	flushDrain(p)
-	// A second staging of the set from BaseTime cuts nothing.
-	if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now()); err != nil {
+	// The set begun again (a replacement agent's repair) cuts nothing.
+	if err := p.BeginTestSet(context.Background(), time.Time{}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	p.BeginTestErrorCapture()

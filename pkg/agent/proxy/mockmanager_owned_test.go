@@ -94,13 +94,13 @@ func TestStagingDoesNotWriteIntoMocksReadersHold(t *testing.T) {
 	wg.Wait()
 }
 
-// The race that reaches production: BaseTime staging (the first staging call of
-// every test set, which runs while the application boots) puts each staged
+// The race that reaches production: a set's begin (the first staging of every
+// test set, which runs while the application boots) puts each staged
 // session mock in the startup tier and the session tier. The startup tier was
 // published first and the session tier's build then stamped tree IDs into the
 // same mocks, while bootstrap traffic was matched against the startup tier.
 // The callers here hand over fresh mocks on every call, as the agent does.
-func TestBaseTimeStagingPublishesNoMockItStillStamps(t *testing.T) {
+func TestBeginTestSetPublishesNoMockItStillStamps(t *testing.T) {
 	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 	fresh := func() []*models.Mock {
 		out := make([]*models.Mock, 0, 200)
@@ -111,7 +111,7 @@ func TestBaseTimeStagingPublishesNoMockItStillStamps(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
-	mm.SetMocksWithWindow(nil, fresh(), models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, fresh())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -133,7 +133,7 @@ func TestBaseTimeStagingPublishesNoMockItStillStamps(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for ctx.Err() == nil {
-			mm.SetMocksWithWindow(nil, fresh(), models.BaseTime, time.Now())
+			mm.BeginTestSet(time.Time{}, nil, nil, fresh())
 		}
 	}()
 	wg.Wait()
@@ -211,9 +211,7 @@ func TestThreeTierStagingPublishesNoMockItStillStamps(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
-	mm.SeedRecordedWindows(carryWindows())
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(winStart(1), carryWindows(), nil, nil)
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup

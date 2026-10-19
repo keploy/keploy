@@ -3323,11 +3323,10 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 }
 
 // IsTestWindow reports whether [afterTime, beforeTime] is a test's window: a
-// staging call's starts at models.BaseTime (the set's, a scope's, an exact
-// staging's), and a call with no window has a zero bound. The mock manager
-// reads its start so (SetMocksWithWindow).
+// call with no window has a zero bound. The mock manager reads its start so
+// (SetMocksWithWindow).
 func IsTestWindow(afterTime, beforeTime time.Time) bool {
-	return !afterTime.IsZero() && !afterTime.Equal(models.BaseTime) && !beforeTime.IsZero()
+	return !afterTime.IsZero() && !beforeTime.IsZero()
 }
 
 // FilterTcsMocksMappingInWindow is FilterTcsMocksMapping for the test window

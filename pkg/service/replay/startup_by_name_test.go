@@ -139,19 +139,21 @@ func TestABootConsumerIsServedByNameFromTheStartupSection(t *testing.T) {
 	if status := r.run(t); status != models.TestSetStatusPassed {
 		t.Fatalf("the by-name replay: status %q, want PASSED", status)
 	}
+	begun, began := agent.startupAtBegin()
+	inTest1, staged := agent.startupAt(r.cases[0].HTTPReq.Timestamp)
 	for _, at := range []struct {
-		when  string
-		after time.Time
-	}{{"while the app starts", models.BaseTime}, {"in test-1", r.cases[0].HTTPReq.Timestamp}} {
-		got, ok := agent.startupAt(at.after)
-		if !ok {
+		when string
+		got  []string
+		ok   bool
+	}{{"while the app starts", begun, began}, {"in test-1", inTest1, staged}} {
+		if !at.ok {
 			t.Fatalf("the agent was never staged %s", at.when)
 		}
 		// The store holds only what the mapping lists, so the boot
 		// consumer's fetches reach the agent because the startup section
 		// lists them, and each staging serves them from the startup tier.
-		if !slices.Contains(got, "kafka-boot") || !slices.Contains(got, "kafka-late") {
-			t.Fatalf("%s the startup tier holds %v; the boot consumer is not served kafka-boot and kafka-late", at.when, got)
+		if !slices.Contains(at.got, "kafka-boot") || !slices.Contains(at.got, "kafka-late") {
+			t.Fatalf("%s the startup tier holds %v; the boot consumer is not served kafka-boot and kafka-late", at.when, at.got)
 		}
 	}
 }
@@ -226,8 +228,9 @@ func (m *byNameMockDB) GetFilteredMocks(_ context.Context, _ string, _, _ time.T
 }
 
 // managedAgent is the harness's agent with a real keploy agent behind it: the
-// mocks it is stored and every filter call reach the agent, which stages them
-// on a real mock manager. The startup tier is read after every call.
+// mocks it is stored, the set's begin and every filter call reach the agent,
+// which stages them on a real mock manager. The startup tier is read after
+// every call.
 type managedAgent struct {
 	*prInstr
 	agent *agentsvc.Agent
@@ -235,6 +238,9 @@ type managedAgent struct {
 
 	mu      sync.Mutex
 	startup map[time.Time][]string
+	// begun is the startup tier after the set's last begin.
+	begun []string
+	began bool
 }
 
 func newManagedAgent(t *testing.T, instr *prInstr) *managedAgent {
@@ -286,6 +292,23 @@ func (f *managedAgent) StoreMocks(ctx context.Context, filtered, unfiltered []*m
 	return f.agent.StoreMocksStream(ctx, models.MockStreamHeader{FilteredCount: len(filtered), UnfilteredCount: len(unfiltered)}, gob.NewDecoder(&buf))
 }
 
+func (f *managedAgent) BeginTestSet(ctx context.Context, begin models.TestSetBegin) error {
+	if err := f.prInstr.BeginTestSet(ctx, begin); err != nil {
+		return err
+	}
+	if err := f.agent.BeginTestSet(ctx, begin); err != nil {
+		return err
+	}
+	names, err := f.startupNames()
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.begun, f.began = names, true
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *managedAgent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	if err := f.prInstr.UpdateMockParams(ctx, params); err != nil {
 		return err
@@ -293,18 +316,34 @@ func (f *managedAgent) UpdateMockParams(ctx context.Context, params models.MockF
 	if err := f.agent.UpdateMockParams(ctx, params); err != nil {
 		return err
 	}
-	startup, err := f.mm.GetStartupMocks()
+	names, err := f.startupNames()
 	if err != nil {
 		return err
-	}
-	names := make([]string, 0, len(startup))
-	for _, mk := range startup {
-		names = append(names, mk.Name)
 	}
 	f.mu.Lock()
 	f.startup[params.AfterTime] = names
 	f.mu.Unlock()
 	return nil
+}
+
+// startupNames is the names the startup tier holds.
+func (f *managedAgent) startupNames() ([]string, error) {
+	startup, err := f.mm.GetStartupMocks()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(startup))
+	for _, mk := range startup {
+		names = append(names, mk.Name)
+	}
+	return names, nil
+}
+
+// startupAtBegin is the startup tier's names after the set's last begin.
+func (f *managedAgent) startupAtBegin() ([]string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.begun, f.began
 }
 
 // startupAt is the startup tier's names after the filter call whose window
@@ -336,9 +375,15 @@ func (p *managerProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock
 	p.mm.SetMocksWithWindow(f, u, start, end)
 	return nil
 }
-func (p *managerProxy) SeedStartupCutoff(t time.Time)              { p.mm.SeedStartupCutoff(t) }
-func (p *managerProxy) SeedRecordedWindows(ws []models.TestWindow) { p.mm.SeedRecordedWindows(ws) }
-func (p *managerProxy) FirstTestWindowStart() time.Time            { return p.mm.FirstTestWindowStart() }
+func (p *managerProxy) BeginTestSet(_ context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
+	p.mm.BeginTestSet(first, ws, f, u)
+	return nil
+}
+func (p *managerProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.mm.StagePool(f, u)
+	return nil
+}
+func (p *managerProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *managerProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }

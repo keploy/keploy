@@ -12,11 +12,23 @@ import (
 	"go.uber.org/zap"
 )
 
-// paramsInstr records the filter params a step sends. Its embedded interface is
-// nil: only UpdateMockParams is called.
+// paramsInstr records the filter params a step sends, and the sets it begins
+// and ends. Its embedded interface is nil: only those are called.
 type paramsInstr struct {
 	Instrumentation
-	last models.MockFilterParams
+	last  models.MockFilterParams
+	begun []models.TestSetBegin
+	ended []string
+}
+
+func (f *paramsInstr) BeginTestSet(_ context.Context, b models.TestSetBegin) error {
+	f.begun = append(f.begun, b)
+	return nil
+}
+
+func (f *paramsInstr) EndTestSet(_ context.Context, id string) error {
+	f.ended = append(f.ended, id)
+	return nil
 }
 
 func (f *paramsInstr) UpdateMockParams(_ context.Context, p models.MockFilterParams) error {

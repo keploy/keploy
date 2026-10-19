@@ -47,16 +47,15 @@ func loadedFromDisk(t *testing.T, logs *observer.ObservedLogs) []int64 {
 	return out
 }
 
-// The set's staging call, sent before the app starts with the window BaseTime to
-// now, reads from the on-disk store only the mocks recorded before the set's
-// first test. The proxy files whatever it is staged with as app-startup traffic,
-// so reading the whole window brought every mock of the recording into the
-// agent's memory: 81,738 of them OOM-killed a 1200Mi agent on a prod recording.
-func TestStagingReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
+// A set begins, before the app starts, with only the mocks recorded before the
+// set's first test read from the on-disk store: the app's startup traffic. A
+// set used to be staged with the window 2000-01-01 to now, and reading that
+// window brought every mock of the recording into the agent's memory only to
+// file it as startup traffic: 81,738 of them OOM-killed a 1200Mi agent on a
+// prod recording.
+func TestBeginTestSetReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
 	a, p, logs := stagingStore(t)
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(2 * time.Hour),
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
 	})
@@ -64,13 +63,35 @@ func TestStagingReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{2}) {
-		t.Fatalf("the staging call read %v mocks from disk; want the 2 recorded before the first test", got)
+		t.Fatalf("the set's begin read %v mocks from disk; want the 2 recorded before the first test", got)
 	}
-	if len(p.windowed) != 1 {
-		t.Fatalf("staged %d times, want once", len(p.windowed))
+	if len(p.begun) != 1 {
+		t.Fatalf("began %d times, want once", len(p.begun))
 	}
-	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the staging call staged %v; want the app-startup mocks %v", got, want)
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-auth", "boot-config"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the set began with %v; want the app-startup mocks %v", got, want)
+	}
+	if !p.firsts[0].Equal(stageT0) {
+		t.Fatalf("the set began with cutoff %v, want its first recorded test %v", p.firsts[0], stageT0)
+	}
+}
+
+// The mapping's startup mocks are the set's too, wherever they were recorded.
+func TestBeginTestSetReadsTheMappingsStartupMocks(t *testing.T) {
+	a, p, logs := stagingStore(t)
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
+		FirstRecordedTestStart: stageT0,
+		StartupMockNames:       []string{"test-a", "boot-auth"},
+		StrictMockWindow:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("the set's begin read %v mocks from disk; want the 2 recorded before the first test and test-a", got)
+	}
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-auth", "boot-config", "test-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the set began with %v; want %v", got, want)
 	}
 }
 
@@ -94,23 +115,32 @@ func TestATestStillReadsItsWindowAndTheStartupMocks(t *testing.T) {
 	}
 }
 
-// A set whose tests carry no request time has no first test to cut at, so its
-// staging call reads the window it names.
-func TestStagingWithoutARecordedTestTimeReadsItsWindow(t *testing.T) {
-	a, p, logs := stagingStore(t)
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:        models.BaseTime,
-		BeforeTime:       stageT0.Add(2 * time.Hour),
-		StrictMockWindow: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
-		t.Fatalf("the staging call read %v mocks from disk; want all 5 in its window", got)
-	}
-	if len(p.windowed[0][0]) != 5 {
-		t.Fatalf("the staging call staged %v; want all 5", p.windowed[0][0])
+// A set whose tests carry no request time has no first test to cut at, so it
+// begins with every mock; and so does a set replayed with the lax window, whose
+// tests may be served any mock of the recording.
+func TestBeginTestSetWithoutACutReadsEveryMock(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		begin models.TestSetBegin
+	}{
+		{"no recorded test time", models.TestSetBegin{StrictMockWindow: true}},
+		{"lax", models.TestSetBegin{FirstRecordedTestStart: stageT0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p, logs := stagingStore(t)
+			if tc.name == "lax" {
+				t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "0")
+			}
+			if err := a.BeginTestSet(context.Background(), tc.begin); err != nil {
+				t.Fatal(err)
+			}
+			if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
+				t.Fatalf("the set's begin read %v mocks from disk; want all 5", got)
+			}
+			if len(p.begun[0][0]) != 5 {
+				t.Fatalf("the set began with %v; want all 5", p.begun[0][0])
+			}
+		})
 	}
 }
 
@@ -145,11 +175,11 @@ func (p *catalogProxy) SeedStatementCatalog(mocks []*models.Mock) {
 
 // Storing a set hands the proxy its statement catalog, once: the first
 // recording of each statement on disk, those recorded inside tests included,
-// which the staging's startup band does not reach. An app that prepares at
+// which the begin's startup band does not reach. An app that prepares at
 // start a statement it runs only inside a test is described from it. The
-// staging, a test's own call and a scope staging (its begin and end, each a
-// call from BaseTime) leave it as stored, and the next set's store replaces it,
-// with none when that store keeps nothing on disk.
+// set's begin, a test's own call and a scope staging (its begin and end)
+// leave it as stored, and the next set's store replaces it, with none when
+// that store keeps nothing on disk.
 func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
 	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
 	p := &catalogProxy{recordingProxy: &recordingProxy{}}
@@ -176,16 +206,14 @@ func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
 		t.Fatalf("the catalog is %v; want the first recording of each statement, in recorded order: %v", got, want)
 	}
 
-	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(2 * time.Hour),
+	if err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-select"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the staging call staged %v; want only the startup mocks %v (the catalog serves nothing)", got, want)
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-select"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the set began with %v; want only the startup mocks %v (the catalog serves nothing)", got, want)
 	}
 	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
 		AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true,
@@ -212,7 +240,7 @@ func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
 	}
 }
 
-// Under the proven switch the set's exact staging stages, with the app's
+// Under the proven switch the set's exact begin stages, with the app's
 // startup traffic, the per-test mocks of its pool that the on-disk store
 // holds: calls recorded while no test was open (a poll between tests, a
 // publish after the last test), which no test owns and the pool serves by
@@ -231,26 +259,24 @@ func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
 		stageMock("poll-later", "/poll", stageT0.Add(time.Hour)))
 	core, logs := observer.New(zap.DebugLevel)
 	a.logger = zap.New(core)
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(2 * time.Hour),
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
-		Exact:                  &models.ExactServing{Stage: true, Pool: []string{"boot-config", "boot-auth", "poll-later"}},
+		Exact:                  &models.ExactPool{Pool: []string{"boot-config", "boot-auth", "poll-later"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.windowed) != 1 {
-		t.Fatalf("staged %d times, want once", len(p.windowed))
+	if len(p.begun) != 1 {
+		t.Fatalf("began %d times, want once", len(p.begun))
 	}
-	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config", "poll-later"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the exact staging staged %v; want the startup mocks and the pool's poll %v, and no test's own", got, want)
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-auth", "boot-config", "poll-later"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the exact begin staged %v; want the startup mocks and the pool's poll %v, and no test's own", got, want)
 	}
 	// The pool's mocks the startup band read already are not read again: the
-	// staging reads three mocks from disk, and says one came for the pool.
+	// begin reads three mocks from disk, and says one came for the pool.
 	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{3}) {
-		t.Fatalf("the exact staging read %v mocks from disk; want 3, each once", got)
+		t.Fatalf("the exact begin read %v mocks from disk; want 3, each once", got)
 	}
 	staged := logs.FilterMessageSnippet("staged the set's app-startup mocks from the on-disk store").All()
 	if len(staged) != 1 {
@@ -281,11 +307,11 @@ func (p *workerExactProxy) SetRecordingSource(src func(kind models.Kind, keys []
 	return nil
 }
 
-// Under the proven switch the set's exact staging stages the worker scope's
+// Under the proven switch the set's exact begin stages the worker scope's
 // mocks (models.Mapping.Worker) by name from the on-disk store, as it does the
 // pool's: a worker call recorded after the set's first test is in no startup
 // band, and unstaged, it would miss wherever the replay made it. Before the
-// staging lands, the previous set's worker scope is withdrawn: names are
+// begin stages, the previous set's worker scope is withdrawn: names are
 // unique only within a set.
 func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
@@ -302,28 +328,26 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 		stageMock("test-a", "/q", stageT0.Add(time.Second)),
 		stageMock("w-delete", "/delete", stageT0.Add(30*time.Second)),
 		stageMock("w-poll", "/poll", stageT0.Add(time.Hour)))
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(2 * time.Hour),
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
-		Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"},
+		Exact: &models.ExactPool{Pool: []string{"boot-config"},
 			Worker: []models.MockEntry{{Name: "w-delete"}, {Name: "w-poll", Place: "test-a"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-config", "w-delete", "w-poll"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the exact staging staged %v; want the startup mock and the worker scope's %v, and no test's own", got, want)
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-config", "w-delete", "w-poll"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the exact begin staged %v; want the startup mock and the worker scope's %v, and no test's own", got, want)
 	}
 	if want := [][]string{{}, {"w-delete"}}; !reflect.DeepEqual(p.workers, want) {
-		t.Fatalf("the proxy was told the worker scopes %v; want %v: none before the staging, then the one placed at the set's start", p.workers, want)
+		t.Fatalf("the proxy was told the worker scopes %v; want %v: none before the begin stages, then the one placed at the set's start", p.workers, want)
 	}
 	// A miss's diagnosis reads the on-disk store through the source the
-	// staging set: the test's own recording, staged only as it opens, is
-	// there before it.
+	// begin set: the test's own recording, staged only as it opens, is there
+	// before it.
 	if p.source == nil {
-		t.Fatal("the staging set no recording source over the on-disk store")
+		t.Fatal("the begin set no recording source over the on-disk store")
 	}
 	var onDisk []string
 	found := false
@@ -341,28 +365,28 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	if !found {
 		t.Fatalf("the recording source visited %v, none of them test-a's own", onDisk)
 	}
-	// The next set's staging withdraws this set's worker scope before its
-	// view goes on: none of its names is reachable in the next set.
-	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime: models.BaseTime, BeforeTime: stageT0.Add(2 * time.Hour), FirstRecordedTestStart: stageT0, StrictMockWindow: true,
-		Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"}},
+	// The next set's begin withdraws this set's worker scope before its view
+	// goes on: none of its names is reachable in the next set.
+	if err := a.BeginTestSet(context.Background(), models.TestSetBegin{
+		FirstRecordedTestStart: stageT0, StrictMockWindow: true,
+		Exact: &models.ExactPool{Pool: []string{"boot-config"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.workers[2:]; !reflect.DeepEqual(got, [][]string{{}, {}}) {
-		t.Fatalf("the next set's staging told the proxy %v; want the previous set's worker scope withdrawn", got)
+		t.Fatalf("the next set's begin told the proxy %v; want the previous set's worker scope withdrawn", got)
 	}
 }
 
-// A set's staging call also stages, beside the startup band, the per-test
-// mocks a parser declares it needs staged whatever their recorded time
+// A set's begin also stages, beside the startup band, the per-test mocks a
+// parser declares it needs staged whatever their recorded time
 // (models.StagingWithStartup): here the pushes of a broker kind, one
 // recorded before the first test, one at its start, one inside it and one in
-// the gap after it. It reads only those of its window, never the rest of the
-// recording nor a push past the window's end, and a test's own call is
-// unchanged. The mock manager files them as startup traffic, and the first
-// test refiles that tier to what was recorded before it.
-func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
+// the gap after it. It reads only those, never the rest of the recording, and
+// a test's own call is unchanged. The mock manager files them as startup
+// traffic, and the first test refiles that tier to what was recorded before
+// it.
+func TestBeginTestSetAlsoStagesTheMocksAParserDeclares(t *testing.T) {
 	isPush := func(m *models.Mock) bool { return m.Spec.Metadata["commandType"] == "MESSAGE" }
 	defer models.RegisterStagingNeed(agentPulsar, models.StagingNeed{Use: models.StagingWithStartup, Match: isPush})()
 	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
@@ -377,8 +401,7 @@ func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
 		agentBroker("push-in-a", agentPulsar, "MESSAGE", stageT0.Add(1500*time.Millisecond)),
 		agentBroker("send-in-a", agentPulsar, "SEND", stageT0.Add(1600*time.Millisecond)),
 		agentBroker("push-gap", agentPulsar, "MESSAGE", stageT0.Add(30*time.Second)),
-		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
-		agentBroker("push-past-window", agentPulsar, "MESSAGE", stageT0.Add(3*time.Hour)))
+		stageMock("test-b", "/q", stageT0.Add(time.Minute)))
 	core, logs := observer.New(zap.DebugLevel)
 	a.logger = zap.New(core)
 	startupNames := func() []string {
@@ -394,9 +417,7 @@ func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
 		return sortedNames(names)
 	}
 
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(2 * time.Hour),
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
 	})
@@ -404,14 +425,14 @@ func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
-		t.Fatalf("the staging call read %v mocks from disk; want the 2 startup mocks and the 3 later pushes of its window", got)
+		t.Fatalf("the set's begin read %v mocks from disk; want the 2 startup mocks and the 3 later pushes", got)
 	}
 	staged := logs.FilterMessage("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs").All()
 	if len(staged) != 1 || staged[0].ContextMap()["startupMocks"] != int64(2) || staged[0].ContextMap()["declaredMocks"] != int64(3) {
-		t.Fatalf("staging logged %v; want 2 startup mocks and 3 declared ones", staged)
+		t.Fatalf("the begin logged %v; want 2 startup mocks and 3 declared ones", staged)
 	}
 	if got, want := startupNames(), []string{"boot-config", "push-at-cut", "push-boot", "push-gap", "push-in-a"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the staging call filed %v as startup traffic; want %v", got, want)
+		t.Fatalf("the set's begin filed %v as startup traffic; want %v", got, want)
 	}
 
 	// The first test's call is unchanged: its window and the startup band.
@@ -431,23 +452,21 @@ func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
 	}
 }
 
-// With no kind declaring a need, the staging call reads the startup band
-// only, as before.
-func TestStagingWithNoDeclaredNeedReadsOnlyTheStartupBand(t *testing.T) {
+// With no kind declaring a need, the set's begin reads the startup band only,
+// as before.
+func TestBeginTestSetWithNoDeclaredNeedReadsOnlyTheStartupBand(t *testing.T) {
 	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
 	p := &recordingProxy{}
 	a := diskAgent(t, p,
 		agentBroker("push-boot", agentPulsar, "MESSAGE", stageT0.Add(-time.Second)),
 		agentBroker("push-gap", agentPulsar, "MESSAGE", stageT0.Add(30*time.Second)))
-	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(time.Hour),
+	if err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := sortedNames(p.windowed[0][0]); !reflect.DeepEqual(got, []string{"push-boot"}) {
+	if got := sortedNames(p.begun[0][0]); !reflect.DeepEqual(got, []string{"push-boot"}) {
 		t.Fatalf("staged %v; want only the startup band", got)
 	}
 }

@@ -69,14 +69,14 @@ func newCursorManager(t *testing.T) *MockManager {
 	return mgr
 }
 
-// `keploy mock replay` stages its pool once, at BaseTime, which files every
+// `keploy mock replay` begins its set with the whole pool, which files every
 // recording in the startup AND the session tier. The first match replaces the
 // session tier's copy and leaves the startup tier's, so a pointer union listed
 // each matched recording twice and the cursor walked 1,1,2,2,3.
-func TestStatefulCursor_BaseTimeStagingServesRecordOrder(t *testing.T) {
+func TestStatefulCursor_APoolServesRecordOrder(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
-	mgr.SetMocksWithWindow(nil, counterPool(base, "r1", "r2", "r3"), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, counterPool(base, "r1", "r2", "r3"))
 
 	if got, want := readCounter(t, mgr, 6), "r1,r2,r3,r3,r3,r3"; got != want {
 		t.Fatalf("served %s, want %s", got, want)
@@ -90,16 +90,16 @@ func TestStatefulCursor_BaseTimeStagingServesRecordOrder(t *testing.T) {
 	}
 }
 
-// `keploy test` stages at BaseTime, then once per test with a fresh copy of the
+// `keploy test` begins the set, then stages once per test with a fresh copy of the
 // same pool; a sequence spans the whole test-set.
 func TestStatefulCursor_KeployTestBootstrapThenTests(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
 	fresh := func() []*models.Mock { return counterPool(base, "r1", "r2", "r3") }
-	mgr.SetMocksWithWindow(nil, fresh(), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, fresh())
 
 	// Two bootstrap reads before the first test: the second is where the
-	// BaseTime-staged pool first holds a matched recording twice.
+	// pool the set began with first holds a matched recording twice.
 	got := []string{readCounter(t, mgr, 2)}
 	for test := 0; test < 2; test++ {
 		start := base.Add(time.Duration(10+10*test) * time.Second)
@@ -119,7 +119,7 @@ func TestStatefulCursor_ScopedWorkersEachWalkTheirOwnRecordings(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
 	pool := append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...)
-	mgr.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, pool)
 
 	p := &Proxy{}
 	p.SetMappedUniverse([]string{"a1", "a2", "b1", "b2"})
@@ -151,7 +151,7 @@ func TestStatefulCursor_ScopedWorkersEachWalkTheirOwnRecordings(t *testing.T) {
 func TestSessionUnionListsARecordingOnceAfterAMatchReplacesIt(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
-	mgr.SetMocksWithWindow(nil, counterPool(base, "r1", "r2", "r3"), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, counterPool(base, "r1", "r2", "r3"))
 
 	before, err := mgr.GetSessionMocks()
 	if err != nil || len(before) != 3 {
@@ -203,7 +203,7 @@ func TestSessionUnionListsARecordingOnceAfterAMatchReplacesIt(t *testing.T) {
 func TestStartupTierFollowsSessionUpdatesAndDeletes(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
-	mgr.SetMocksWithWindow(nil, counterPool(base, "r1", "r2", "r3"), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, counterPool(base, "r1", "r2", "r3"))
 
 	sess, _ := mgr.GetSessionMocks()
 	old := sess[0]
@@ -251,7 +251,7 @@ func livePool(t *testing.T) *MockManager {
 	t.Helper()
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
-	mgr.SetMocksWithWindow(nil, append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...))
 	starts.Default.SetTable("", liveSets())
 	t.Cleanup(starts.Default.Reset)
 	return mgr
@@ -302,7 +302,7 @@ func TestStatefulCursor_LiveSuiteAppFollowsTheOpenTest(t *testing.T) {
 // actually held, not the caller's stale pointer.
 func TestStartupTierFollowsTheCopyAnUpdateReplaced(t *testing.T) {
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(nil, counterPool(time.Now().Add(-time.Hour), "r1", "r2", "r3"), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, counterPool(time.Now().Add(-time.Hour), "r1", "r2", "r3"))
 	snap, _ := mgr.GetSessionMocks()
 	p := snap[0]
 	a, b := *p, *p
@@ -321,7 +321,7 @@ func TestStartupTierFollowsTheCopyAnUpdateReplaced(t *testing.T) {
 func TestStartupTierStaysInStepUnderConcurrentUpdates(t *testing.T) {
 	for round := 0; round < 200; round++ {
 		mgr := newCursorManager(t)
-		mgr.SetMocksWithWindow(nil, counterPool(time.Now().Add(-time.Hour), "r1", "r2", "r3"), models.BaseTime, time.Now())
+		mgr.BeginTestSet(time.Time{}, nil, nil, counterPool(time.Now().Add(-time.Hour), "r1", "r2", "r3"))
 		snap, _ := mgr.GetSessionMocks()
 		p := snap[0]
 		var wg sync.WaitGroup
@@ -349,7 +349,7 @@ func TestStartupTierStaysInStepUnderConcurrentUpdates(t *testing.T) {
 // dropped and rebuilt on the next keyed lookup.
 func TestStartupTierKeyIndexSurvivesAMirroredUpdate(t *testing.T) {
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(nil, counterPool(time.Now().Add(-time.Hour), "r1", "r2", "r3"), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, counterPool(time.Now().Add(-time.Hour), "r1", "r2", "r3"))
 	ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"counter"} }}
 	walk := func() []*models.Mock {
 		var out []*models.Mock
@@ -381,7 +381,7 @@ func TestStartupTierKeyIndexSurvivesAMirroredUpdate(t *testing.T) {
 func TestStatefulCursor_AllowKeepAliveAcrossTests(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
-	mgr.SetMocksWithWindow(nil, append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...), models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...))
 	p := &Proxy{}
 	p.SetMappedUniverse([]string{"a1", "a2", "b1", "b2"})
 	w := uint32(os.Getpid())
@@ -446,8 +446,8 @@ func readOrMiss(t *testing.T, db integrations.MockMemDb, n int) string {
 // last, within the pool they are served from, and never across tests: a test
 // is served its own recordings in record order and then its last one again;
 // the next test starts its own over; a test that recorded none of them misses
-// rather than being answered with another test's. Staged once at BaseTime
-// (`keploy mock replay` with no test open), every test's recordings are the
+// rather than being answered with another test's. Staged once as the set
+// begins (`keploy mock replay` with no test open), every test's recordings are the
 // pool, in record order.
 func TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
@@ -458,14 +458,14 @@ func TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly(t *testing
 
 	t.Run("no test open", func(t *testing.T) {
 		mgr := newCursorManager(t)
-		mgr.SetMocksWithWindow(pool(), nil, models.BaseTime, time.Now())
+		mgr.BeginTestSet(time.Time{}, nil, pool(), nil)
 		if got, want := readOrMiss(t, mgr, 6), "a1,a2,a3,b1,b2,b2"; got != want {
 			t.Fatalf("served %s, want %s", got, want)
 		}
 	})
 	t.Run("keploy test", func(t *testing.T) {
 		mgr := newCursorManager(t)
-		mgr.SetMocksWithWindow(pool(), nil, models.BaseTime, time.Now())
+		mgr.BeginTestSet(time.Time{}, nil, pool(), nil)
 		var got []string
 		for _, tc := range []struct {
 			from time.Time
@@ -482,7 +482,7 @@ func TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly(t *testing
 	})
 	t.Run("scoped workers", func(t *testing.T) {
 		mgr := newCursorManager(t)
-		mgr.SetMocksWithWindow(pool(), nil, models.BaseTime, time.Now())
+		mgr.BeginTestSet(time.Time{}, nil, pool(), nil)
 		p := &Proxy{}
 		p.SetMappedUniverse([]string{"a1", "a2", "a3", "b1", "b2"})
 		const workerA, workerB = 4101, 4202
@@ -525,7 +525,7 @@ func TestStatefulCursor_ADifferentCallConsumesTheRecordingItTakes(t *testing.T) 
 	}
 	mgr := newCursorManager(t)
 	pool := []*models.Mock{event("e1", "aaaa1111", base), event("e2", "bbbb2222", base.Add(time.Second))}
-	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, pool, nil)
 	mgr.SetMocksWithWindow(pool, nil, base.Add(-time.Second), base.Add(10*time.Second))
 	h := httpint.New(zap.NewNop())
 	var got []string
@@ -553,7 +553,7 @@ func TestStatefulCursor_ATestsOwnRecordingComesBeforeTheStartupBand(t *testing.T
 	own := perTestCounterPool(base.Add(time.Minute), "a1")
 	pool := append(boot, own...)
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, pool, nil)
 	if got := readOrMiss(t, mgr, 1); got != "boot" {
 		t.Fatalf("at startup the call was served %s, want boot", got)
 	}
@@ -628,9 +628,9 @@ func TestStatefulCursor_NoTestOpenServesEveryRecordingAsReusable(t *testing.T) {
 			for _, stated := range []bool{false, true} {
 				mgr := newCursorManager(t)
 				if stated {
-					mgr.SetMocksWithWindow(tc.pool(true), nil, models.BaseTime, time.Now())
+					mgr.BeginTestSet(time.Time{}, nil, tc.pool(true), nil)
 				} else {
-					mgr.SetMocksWithWindow(nil, tc.pool(false), models.BaseTime, time.Now())
+					mgr.BeginTestSet(time.Time{}, nil, nil, tc.pool(false))
 				}
 				if got := postOrMiss(t, mgr, tc.calls...); got != tc.want {
 					t.Errorf("stated %v: served %s, want %s", stated, got, tc.want)
@@ -664,7 +664,7 @@ func TestStatefulCursor_AScopedTestOwnsItsMappedRecordingsOnly(t *testing.T) {
 		searchMock("a2", `{"id":"aaaa2222"}`, base.Add(time.Second), true),
 	}
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, pool, nil)
 	p := &Proxy{}
 	p.SetMappedUniverse([]string{"a1", "a2"})
 	const worker = 4101
@@ -692,7 +692,7 @@ func TestStatefulCursor_AScopedTestRunAgainIsServedItsRecordingsAgain(t *testing
 		searchMock("a2", `{"id":"aaaa2222"}`, base.Add(time.Second), true),
 	}
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, pool, nil)
 	p := &Proxy{}
 	p.SetMappedUniverse([]string{"a1", "a2"})
 	const worker = 4101
@@ -730,10 +730,10 @@ func TestStatefulCursor_AScopedTestRunAgainIsServedItsRecordingsAgain(t *testing
 func TestStatefulCursor_ALiveTestRunAgainIsServedItsRecordingsAgain(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow([]*models.Mock{
+	mgr.BeginTestSet(time.Time{}, nil, []*models.Mock{
 		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
 		searchMock("a2", `{"id":"aaaa2222"}`, base.Add(time.Second), true),
-	}, nil, models.BaseTime, time.Now())
+	}, nil)
 	starts.Default.SetTable("", liveSets())
 	t.Cleanup(starts.Default.Reset)
 	pid := uint32(os.Getpid())
@@ -762,7 +762,7 @@ func TestStatefulCursor_TheStartupRecordingInsideATestIsNotConsumed(t *testing.T
 		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
 	}
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, pool, nil)
 	mgr.SetMocksWithWindow(pool, nil, base.Add(-time.Second), base.Add(10*time.Second))
 	if got, want := postOrMiss(t, mgr, `{"id":"0000boot"}`, `{"id":"0000boot"}`, `{"id":"1111boot"}`), "boot,boot,boot"; got != want {
 		t.Fatalf("the startup call inside the test was served %s, want %s", got, want)
@@ -776,7 +776,7 @@ func TestStatefulCursor_TheStartupRecordingInsideATestIsNotConsumed(t *testing.T
 func TestStatefulCursor_APidlessTestOwnsItsStagedPoolOnly(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 	mgr := newCursorManager(t)
-	mgr.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, nil, nil)
 	mgr.SetScopeMocks([]*models.Mock{searchMock("a1", `{"id":"aaaa1111"}`, base, true)},
 		[]*models.Mock{searchMock("boot", `{"id":"0000boot"}`, base.Add(-time.Minute), true)}, true)
 	if got, want := postOrMiss(t, mgr, `{"id":"0000boot"}`, `{"id":"1111boot"}`), "boot,boot"; got != want {

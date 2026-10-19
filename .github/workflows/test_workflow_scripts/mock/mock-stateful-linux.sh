@@ -15,7 +15,7 @@
 # Without the switch (today's default; the flip deletes these replays with the
 # switch), it replays with the dependency DOWN:
 #   1. unscoped: one driver reads it six times and must get 1,2,3,4,5,5. This
-#      is the pool `keploy mock replay` stages once at BaseTime; a duplicate of
+#      is the pool `keploy mock replay` begins its set with; a duplicate of
 #      each matched recording used to make it 1,1,2,2,3,3.
 #   2. two CONCURRENT workers, each registered under its own pid and scope: t1
 #      must get 1,2,3 and t2 4,5 -- each walks only its own test's recordings,

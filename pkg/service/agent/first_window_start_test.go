@@ -3,8 +3,6 @@ package agent
 import (
 	"testing"
 	"time"
-
-	"go.keploy.io/server/v3/pkg/models"
 )
 
 func TestEffectiveFirstWindowStart(t *testing.T) {
@@ -39,11 +37,6 @@ func TestEffectiveFirstWindowStart(t *testing.T) {
 			name:     "no windowed proxy never derives, even with a real window",
 			windowed: false, readerVal: zero, afterTime: t7, want: zero,
 			why: "strict is live on this path; deriving here preserves every stale mock",
-		},
-		{
-			name:     "BaseTime means no window",
-			windowed: true, readerVal: zero, afterTime: models.BaseTime, want: zero,
-			why: "matches the manager's own guard",
 		},
 		{
 			name:     "zero AfterTime means no window",

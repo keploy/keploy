@@ -1,7 +1,7 @@
 package replay
 
-// RunTestSet-level tests for server-push pacing: the staging call's recorded
-// windows (O1) and the prune/mapping attribution of mocks consumed outside
+// RunTestSet-level tests for server-push pacing: the recorded windows a set
+// begins with (O1) and the prune/mapping attribution of mocks consumed outside
 // their own window (§8).
 
 import (
@@ -13,7 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// TestRunTestSetStagesEveryRecordedWindow: the staging call carries the window of
+// TestRunTestSetStagesEveryRecordedWindow: the set's begin carries the window of
 // EVERY recorded test — the deselected and ignored ones too, since the traffic a
 // deselected test's handler produced is still released at that test's place in
 // the recording — and the per-test calls carry none.
@@ -28,30 +28,18 @@ func TestRunTestSetStagesEveryRecordedWindow(t *testing.T) {
 
 	h.instr.mu.Lock()
 	params := append([]models.MockFilterParams(nil), h.instr.allParams...)
+	begins := append([]models.TestSetBegin(nil), h.instr.begins...)
 	h.instr.mu.Unlock()
 
-	var staging []models.MockFilterParams
-	perTest := 0
-	for _, p := range params {
-		if p.AfterTime.Equal(models.BaseTime) {
-			staging = append(staging, p)
-			continue
-		}
-		perTest++
-		if len(p.RecordedWindows) != 0 {
-			t.Fatalf("a per-test call carried %d recorded windows; they belong to the staging call only",
-				len(p.RecordedWindows))
-		}
+	if len(begins) != 1 {
+		t.Fatalf("the set began %d times, want once", len(begins))
 	}
-	if len(staging) != 1 {
-		t.Fatalf("%d staging calls, want 1", len(staging))
+	if len(params) != 1 {
+		t.Fatalf("%d per-test calls, want 1 (test-2 only)", len(params))
 	}
-	if perTest != 1 {
-		t.Fatalf("%d per-test calls, want 1 (test-2 only)", perTest)
-	}
-	got := staging[0].RecordedWindows
+	got := begins[0].RecordedWindows
 	if len(got) != len(h.cases) {
-		t.Fatalf("staging carried %d recorded windows, want %d (every recorded test, selected or not)",
+		t.Fatalf("the set began with %d recorded windows, want %d (every recorded test, selected or not)",
 			len(got), len(h.cases))
 	}
 	for i, tc := range h.cases {
@@ -60,8 +48,8 @@ func TestRunTestSetStagesEveryRecordedWindow(t *testing.T) {
 			t.Fatalf("window %d = %+v, want %s [%v, %v]", i, w, tc.Name, tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp)
 		}
 	}
-	if !staging[0].FirstRecordedTestStart.Equal(h.cases[0].HTTPReq.Timestamp) {
-		t.Fatal("the startup cutoff seed moved")
+	if !begins[0].FirstRecordedTestStart.Equal(h.cases[0].HTTPReq.Timestamp) {
+		t.Fatal("the set's startup cutoff moved")
 	}
 }
 

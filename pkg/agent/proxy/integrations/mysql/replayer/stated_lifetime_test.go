@@ -29,6 +29,16 @@ func (p *windowedProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Moc
 	return nil
 }
 
+func (p *windowedProxy) BeginTestSet(_ context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
+	p.mm.BeginTestSet(first, ws, f, u)
+	return nil
+}
+
+func (p *windowedProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.mm.StagePool(f, u)
+	return nil
+}
+
 func (p *windowedProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *windowedProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
@@ -94,7 +104,10 @@ func TestStatedExecuteIsServedOnlyToItsOwnTest(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			stage(models.BaseTime, time.Now())
+			// The set begins, as keploy test begins it.
+			if err := a.BeginTestSet(ctx, models.TestSetBegin{StrictMockWindow: true, AgentOwnsConsumed: true}); err != nil {
+				t.Fatal(err)
+			}
 
 			dctx := &wire.DecodeContext{
 				PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{},
@@ -175,7 +188,6 @@ func TestACallInFlightIsItsTestsOwnToTheMySQLMatcher(t *testing.T) {
 			}
 			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 			t.Cleanup(mm.Close)
-			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: w1s, End: w1e}, {TestCase: "test-2", Start: w2s, End: w2e}})
 			cfg := &config.Config{}
 			cfg.Agent.Mode = models.MODE_TEST
 			a := agentSvc.New(zap.NewNop(), nil, &inFlightProxy{windowedProxy{mm: mm}}, nil, nil, cfg)
@@ -189,7 +201,10 @@ func TestACallInFlightIsItsTestsOwnToTheMySQLMatcher(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			stage(models.BaseTime, time.Now())
+			windows := []models.TestWindow{{TestCase: "test-1", Start: w1s, End: w1e}, {TestCase: "test-2", Start: w2s, End: w2e}}
+			if err := a.BeginTestSet(ctx, models.TestSetBegin{RecordedWindows: windows, StrictMockWindow: true, AgentOwnsConsumed: true}); err != nil {
+				t.Fatal(err)
+			}
 			stage(w1s, w1e)
 			stage(w2s, w2e)
 			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: map[uint32]string{}, NextStmtID: 100}

@@ -67,7 +67,7 @@ func exactSends(p []models.MockFilterParams) []string {
 	var out []string
 	for _, s := range p {
 		switch ex := s.Exact; {
-		case ex == nil || ex.Stage:
+		case ex == nil:
 		case ex.Test != "":
 			out = append(out, "open "+ex.Test)
 		default:

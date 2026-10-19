@@ -52,7 +52,7 @@ func TestFirstPassesServeWhatTheFullScanServes(t *testing.T) {
 				return nil
 			}
 			for _, s := range []*diffSide{ref, fast} {
-				s.stage(models.BaseTime, time.Now())
+				s.stage(time.Time{}, time.Time{})
 			}
 			for w := 0; w < windows; w++ {
 				start, end := diffWindow(w)
@@ -342,8 +342,10 @@ func newDiffSide(pool []*models.Mock) *diffSide {
 // stage stages the window [start, end] as the agent does in lax mode: fresh
 // copies, per-test mocks inside the window in the per-test tier and the rest
 // promoted to the session pool after the reusable mocks, each part in recorded
-// order, and per-test mocks already consumed left out.
+// order, and per-test mocks already consumed left out. A zero start begins
+// the set, with every per-test mock in its pool.
 func (s *diffSide) stage(start, end time.Time) {
+	begin := start.IsZero()
 	for _, st := range s.mm.GetConsumedMocks() {
 		if st.Usage == models.Deleted {
 			s.consumed[st.Name] = true
@@ -360,7 +362,7 @@ func (s *diffSide) stage(start, end time.Time) {
 			continue
 		}
 		at := c.Spec.ReqTimestampMock
-		if start.Equal(models.BaseTime) || at.IsZero() || (!at.Before(start) && !at.After(end)) || at.Before(diffBase) {
+		if begin || at.IsZero() || (!at.Before(start) && !at.After(end)) || at.Before(diffBase) {
 			perTest = append(perTest, c)
 		} else {
 			promoted = append(promoted, c)
@@ -368,6 +370,10 @@ func (s *diffSide) stage(start, end time.Time) {
 	}
 	for _, part := range [][]*models.Mock{perTest, reusable, promoted} {
 		sort.SliceStable(part, func(i, j int) bool { return part[i].Spec.ReqTimestampMock.Before(part[j].Spec.ReqTimestampMock) })
+	}
+	if begin {
+		s.mm.BeginTestSet(time.Time{}, nil, perTest, append(reusable, promoted...))
+		return
 	}
 	s.mm.SetMocksWithWindow(perTest, append(reusable, promoted...), start, end)
 }

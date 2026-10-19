@@ -856,7 +856,7 @@ func TestAMySQLLoginRefusedThenRetriedIsLetInOnEveryConnection(t *testing.T) {
 			}
 
 			p.BeginTestErrorCapture()
-			mm.SetMocksWithWindow(nil, session(), models.BaseTime, time.Now().Add(time.Hour)) // boot
+			mm.BeginTestSet(time.Time{}, nil, nil, session()) // boot
 			for i := 1; i <= 3; i++ {
 				loginOK("at boot", i)
 			}

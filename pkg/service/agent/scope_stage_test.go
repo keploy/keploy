@@ -46,6 +46,16 @@ func (p *stageProxy) SetScopeMocks(_ context.Context, f, u []*models.Mock, open 
 	return nil
 }
 
+func (p *stageProxy) BeginTestSet(_ context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
+	p.mm.BeginTestSet(first, ws, f, u)
+	return nil
+}
+
+func (p *stageProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.mm.StagePool(f, u)
+	return nil
+}
+
 func (p *stageProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }
@@ -101,7 +111,7 @@ func newStageReplay(t *testing.T, perTest, session []*models.Mock, table map[str
 	if err := a.SetScopeTable(ctx, table); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}); err != nil {
+	if err := a.BeginTestSet(ctx, models.TestSetBegin{}); err != nil {
 		t.Fatal(err)
 	}
 	return a, p
@@ -218,7 +228,7 @@ func twoTests(t *testing.T) (*Agent, *stageProxy) {
 // A test begun without a worker pid opens a test window over its own mocks:
 // tier-aware parsers (Postgres v3, Mongo v2) route its calls to the test's own
 // tier and report a miss as one inside a test. Before the fix the begin
-// re-staged the pool at BaseTime, which opens no window, so they answered from
+// re-staged the pool, which opens no window, so they answered from
 // the startup tier a connection had indexed earlier: another test's recording,
 // with no miss.
 func TestScopeBeginOpensTheTestsWindow(t *testing.T) {
@@ -246,8 +256,7 @@ func TestScopeBeginOpensTheTestsWindow(t *testing.T) {
 }
 
 // A scope's begin stages the test's own recording, which its mapping names
-// (ExactMapping), with a staging call's window (models.BaseTime to now), no
-// test's. A poll placed at its answer (models.PlaceOf) is staged for the test
+// (ExactMapping), with no window. A poll placed at its answer (models.PlaceOf) is staged for the test
 // whose mapping names it alone: before, every one of the recording was
 // staged as each test's own, the later tests' among them.
 func TestScopeBeginStagesAPollPlacedAtItsAnswerOnlyForTheTestItsMappingNames(t *testing.T) {
@@ -362,7 +371,7 @@ func TestScopeEndDoesNotReArmAMappedMockServedOnce(t *testing.T) {
 }
 
 // Between tests the pool is served as it always was: a recording of no test
-// consumed between tests is served again after the next test, as a BaseTime
+// consumed between tests is served again after the next test, as a pool
 // staging re-arms its startup tier.
 func TestScopeBetweenTestsServesTheMocksOfNoTestAsBefore(t *testing.T) {
 	a, p := twoTests(t)
@@ -442,8 +451,22 @@ type recordingProxy struct {
 	coreAgent.Proxy
 	windowed [][2][]string
 	scoped   [][2][]string
+	begun    [][2][]string
+	pools    [][2][]string
+	firsts   []time.Time
 	opens    []bool
 	starts   []time.Time
+}
+
+func (p *recordingProxy) BeginTestSet(_ context.Context, first time.Time, _ []models.TestWindow, f, u []*models.Mock) error {
+	p.begun = append(p.begun, [2][]string{namesOf(f), namesOf(u)})
+	p.firsts = append(p.firsts, first)
+	return nil
+}
+
+func (p *recordingProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.pools = append(p.pools, [2][]string{namesOf(f), namesOf(u)})
+	return nil
 }
 
 func namesOf(ms []*models.Mock) []string {
@@ -489,29 +512,29 @@ func TestScopeEndStagesThePoolTheEndAlwaysStaged(t *testing.T) {
 	if err := a.SetScopeTable(ctx, map[string][]string{"TestA": {"mock-a"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}); err != nil {
+	if err := a.BeginTestSet(ctx, models.TestSetBegin{}); err != nil {
 		t.Fatal(err)
 	}
 	scopeEnd(t, a, "TestA")
-	if len(p.windowed) != 1 || len(p.scoped) != 1 || p.opens[0] {
-		t.Fatalf("stagings: windowed %v, scoped %v (open %v); want the set's staging, then one closing scope staging", p.windowed, p.scoped, p.opens)
+	if len(p.begun) != 1 || len(p.windowed) != 0 || len(p.scoped) != 1 || p.opens[0] {
+		t.Fatalf("stagings: begun %v, windowed %v, scoped %v (open %v); want the set's begin, then one closing scope staging", p.begun, p.windowed, p.scoped, p.opens)
 	}
-	if got, want := p.scoped[0], p.windowed[0]; len(got[0]) != len(want[0]) || len(got[1]) != len(want[1]) {
-		t.Fatalf("the end staged %v, want what the set's BaseTime staging staged, %v", got, want)
+	if got, want := p.scoped[0], p.begun[0]; len(got[0]) != len(want[0]) || len(got[1]) != len(want[1]) {
+		t.Fatalf("the end staged %v, want what the set began with, %v", got, want)
 	} else {
 		for tier := range got {
 			for i := range got[tier] {
 				if got[tier][i] != want[tier][i] {
-					t.Fatalf("the end staged %v, want what the set's BaseTime staging staged, %v", got, want)
+					t.Fatalf("the end staged %v, want what the set began with, %v", got, want)
 				}
 			}
 		}
 	}
 }
 
-// A proxy that cannot stage a scope is staged with the BaseTime sentinel, as
-// it always was: the test's mapped mocks only, or none for a test recorded
-// with no call.
+// A proxy that cannot stage a scope is staged a pool between tests
+// (TestSetStager.StagePool), which opens no window: the test's mapped mocks
+// only, or none for a test recorded with no call.
 func TestScopeWithoutAScopeStagerIsStagedAsBefore(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "")
 	rp := &legacyProxy{}
@@ -528,15 +551,15 @@ func TestScopeWithoutAScopeStagerIsStagedAsBefore(t *testing.T) {
 	scopeBegin(t, a, "TestA")
 	scopeEnd(t, a, "TestA")
 	scopeBegin(t, a, "TestC")
-	if len(rp.starts) != 3 || !rp.starts[0].Equal(models.BaseTime) || !rp.starts[1].Equal(models.BaseTime) || !rp.starts[2].Equal(models.BaseTime) {
-		t.Fatalf("stagings started at %v; want three BaseTime stagings", rp.starts)
+	if len(rp.pools) != 3 || len(rp.windowed) != 0 {
+		t.Fatalf("staged %d pools and %d windows; want three pools", len(rp.pools), len(rp.windowed))
 	}
-	if got := rp.windowed[0][0]; len(got) != 1 || got[0] != "mock-a" {
+	if got := rp.pools[0][0]; len(got) != 1 || got[0] != "mock-a" {
 		t.Fatalf("the begin staged %v; want the test's mapped mocks only, as before", got)
 	}
 	// A test recorded with no call is staged no per-test mock: before the fix
 	// its begin left the whole pool armed.
-	if got := rp.windowed[2][0]; len(got) != 0 {
+	if got := rp.pools[2][0]; len(got) != 0 {
 		t.Fatalf("TestC's begin staged %v; want no per-test mock", got)
 	}
 }
@@ -597,7 +620,17 @@ func TestScopeWorkerScopeStagesNothingGlobal(t *testing.T) {
 type legacyProxy struct {
 	coreAgent.Proxy
 	windowed [][2][]string
+	pools    [][2][]string
 	starts   []time.Time
+}
+
+func (p *legacyProxy) BeginTestSet(context.Context, time.Time, []models.TestWindow, []*models.Mock, []*models.Mock) error {
+	return nil
+}
+
+func (p *legacyProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.pools = append(p.pools, [2][]string{namesOf(f), namesOf(u)})
+	return nil
 }
 
 func (p *legacyProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock, start, _ time.Time) error {
@@ -658,8 +691,8 @@ func TestScopeStagingIsSwitchOffOnly(t *testing.T) {
 	if len(p.exactTests) != 1 || p.exactTests[0] != "TestA" || p.exactPools != pools+1 {
 		t.Fatalf("under the switch the begin and the end served exactly tests %v, and the end the pool %d times; want TestA, then its pool once", p.exactTests, p.exactPools-pools)
 	}
-	if len(p.windowed) != 1 || !p.starts[0].Equal(models.BaseTime) {
-		t.Fatalf("under the switch the recording was staged %d times, starting %v; want once, whole, for exact serving", len(p.windowed), p.starts)
+	if len(p.begun) != 1 || len(p.windowed) != 0 {
+		t.Fatalf("under the switch the recording was begun %d times and staged %d windows; want begun once, whole, for exact serving", len(p.begun), len(p.windowed))
 	}
 }
 

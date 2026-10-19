@@ -32,6 +32,11 @@ func (s paramsSvc) UpdateMockParams(context.Context, models.MockFilterParams) er
 	return nil
 }
 
+func (s paramsSvc) BeginTestSet(context.Context, models.TestSetBegin) error {
+	*s.events = append(*s.events, "begin")
+	return nil
+}
+
 func (s paramsSvc) StartTestVariables(bs []models.VariableBinding) error {
 	ev := "reset"
 	for _, b := range bs {
@@ -175,21 +180,27 @@ func TestAnAgentThatCannotBindRefusesGivenValues(t *testing.T) {
 	}
 }
 
-// Under exact serving keploy test sends three filters: the set's staging, a
-// test case's open, and the pool call between test cases. The staging and
+// Under exact serving keploy test begins the set, then sends two filters: a
+// test case's open, and the pool call between test cases. The set's begin and
 // the open begin a test's variables; the pool call begins none, so what the
 // test case's dependency calls bound stays readable until the next open, and
 // keploy test reads it after the pool call. A pool call that gives values is
 // refused before it applies: they would be bound nowhere.
 func TestExactServingsPoolCallKeepsTheTestCasesVariables(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	var begun []string
+	a := &Agent{logger: zap.NewNop(), svc: paramsSvc{events: &begun}}
+	rec := httptest.NewRecorder()
+	a.BeginTestSet(rec, httptest.NewRequest(http.MethodPost, "/agent"+models.BeginTestSetPath, strings.NewReader(`{"testSet":{"testSetId":"test-set-0","exact":{"pool":["mock-9"]}}}`)))
+	if rec.Code != http.StatusOK || strings.Join(begun, " ") != "begin reset" {
+		t.Fatalf("the set's begin: status %d, events %v; want 200 and \"begin reset\"", rec.Code, begun)
+	}
 	for _, tc := range []struct {
 		name   string
 		body   string
 		code   int
 		events string
 	}{
-		{"staging", `{"filterParams":{"exact":{"stage":true,"pool":["mock-9"]}}}`, http.StatusOK, "filter reset"},
 		{"a test case's open", `{"filterParams":{"exact":{"test":"test-1","owned":["mock-1"]},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusOK, "filter reset bind:id=u1"},
 		{"the pool call", `{"filterParams":{"exact":{}}}`, http.StatusOK, "filter"},
 		{"a pool call that gives values", `{"filterParams":{"exact":{},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusUnprocessableEntity, ""},

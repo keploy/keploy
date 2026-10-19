@@ -53,12 +53,12 @@ func equalNames(t *testing.T, what string, got []*models.Mock, want ...string) {
 }
 
 // stagedManager is a manager staged as the agent stages a replay under the
-// switch: every mock of the set, once, at BaseTime.
+// switch: every mock of the set, once, as the set begins.
 func stagedManager(t *testing.T, perTest, session []*models.Mock) *MockManager {
 	t.Helper()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SetMocksWithWindow(perTest, session, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, perTest, session)
 	return mm
 }
 
@@ -103,15 +103,14 @@ func TestAnOpenTestIsServedItsOwnMocksAndTheProtocolPhase(t *testing.T) {
 	}
 }
 
-// Before exact serving, a per-test begin re-staged at BaseTime filed the
-// test's mocks into the startup tier (isInitialStaging keyed on the time
-// alone), so a per-test read found none and a tier-routing parser (Postgres
+// Before exact serving, a per-test begin re-staged the pool, which filed the
+// test's mocks into the startup tier, so a per-test read found none and a tier-routing parser (Postgres
 // v3) served the test from the startup engine. Under exact serving the
 // per-test reads hold the open test's mocks and the window is active.
 func TestAPerTestReadFindsTheOpenTestsMocks(t *testing.T) {
 	b := exactMock("b", time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{b}, nil)
-	mm.SetMocksWithWindow([]*models.Mock{b.ShallowCopy()}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{b.ShallowCopy()}, nil)
 	if pt, _ := mm.GetPerTestMocksInWindow(); len(pt) != 0 || mm.WindowSnapshot().Active {
 		t.Fatalf("the pre-exact staging this test pins changed: per-test %v, active %v", exactNames(pt), mm.WindowSnapshot().Active)
 	}
@@ -596,7 +595,7 @@ func TestOutsideEveryTestAStagingIsNeverHalfRead(t *testing.T) {
 				}
 			}
 		}()
-		mm.SetMocksWithWindow(nil, set(round), models.BaseTime, time.Now())
+		mm.BeginTestSet(time.Time{}, nil, nil, set(round))
 		close(stop)
 		wg.Wait()
 		mm.ServeExactPool("k", []string{"m0"})
@@ -709,7 +708,7 @@ func TestOutsideEveryTestTheNextStagingAnswersAfresh(t *testing.T) {
 	}
 	stale := *read[0]
 	next := exactMock("m2", time.Hour, models.LifetimeSession) // another set's m2
-	mm.SetMocksWithWindow(nil, []*models.Mock{exactMock("m1", time.Hour-time.Second, models.LifetimeSession), next}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{exactMock("m1", time.Hour-time.Second, models.LifetimeSession), next})
 	mm.ServeExactPool("k", []string{"m1", "m2"})
 	if mm.DeleteUnFilteredMock(stale) {
 		t.Fatal("a recording read from the previous staging was consumed in the next")
@@ -747,7 +746,7 @@ func TestAnEvictedStagedMockIsTheStagingsOrTheViews(t *testing.T) {
 	mm.ServeExactPool("k", []string{"p"})
 	sess, _ = mm.GetSessionMocks()
 	equalNames(t, "gap 2: the handshake is back, the data-plane mock is the staging's", sess, "handshake")
-	mm.SetMocksWithWindow([]*models.Mock{p}, []*models.Mock{hs}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{p}, []*models.Mock{hs})
 	mm.ServeExactPool("k", []string{"p"})
 	sess, _ = mm.GetSessionMocks()
 	equalNames(t, "the next staging", sess, "p", "handshake")
@@ -816,8 +815,7 @@ func TestUnderExactServingWhatTheViewShowsIsDue(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
-	mm.SetMocksWithWindow([]*models.Mock{msg}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{w1, w2}, []*models.Mock{msg}, nil)
 	if mm.RecordedWindows().Len() != 2 {
 		t.Fatal("without exact serving the seeded windows pace push")
 	}
@@ -1358,7 +1356,7 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 		t.Fatalf("a worker mock answered again after its one request: %s", got)
 	}
 	// The next staging answers afresh.
-	mm.SetMocksWithWindow(nil, []*models.Mock{own, boot, later, pool}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{own, boot, later, pool})
 	mm.ServeExactWorker([]string{"w-boot"})
 	mm.ServeExactPool("k", nil)
 	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
@@ -1447,7 +1445,7 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	}
 	// The next staging begins afresh: no test of it has begun, and a
 	// recording named in the previous one is named again.
-	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, all)
 	mm.ServeExactPool("k", nil)
 	if mm.StagedOwnerBegun("own") || mm.StagedOwnerBegun("consumed") {
 		t.Error("a test begun in the previous staging is read as begun in the next")

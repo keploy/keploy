@@ -25,7 +25,7 @@ func TestStagingDoesNotRaceWithHitCounting(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		pool = append(pool, newMockForTest("m"+string(rune('a'+i)), at.Add(-time.Minute), models.LifetimePerTest))
 	}
-	mm.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, pool, nil)
 	mm.SetMocksWithWindow(pool, nil, at, at.Add(time.Second))
 	// Snapshot once so this test isolates the manager's side: the callers'
 	// whole-mock copies of live pooled mocks are covered, as far as counting
@@ -63,7 +63,7 @@ func TestStagingDoesNotRaceWithHitCounting(t *testing.T) {
 			default:
 				if i%8 == 0 { // a set boundary now and then
 					mm.ResetForReplaySession()
-					mm.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+					mm.BeginTestSet(time.Time{}, nil, pool, nil)
 				}
 				mm.SetMocksWithWindow(pool, nil, at, at.Add(time.Second))
 			}
