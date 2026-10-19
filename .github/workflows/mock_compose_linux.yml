@@ -189,10 +189,12 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh"
 
-  # keploy's wait for the agent docker compose starts follows the agent's
-  # start, not a clock: its container paused as it starts, then starved, each
-  # for far longer than KEPLOY_AGENT_READY_TIMEOUT, and `keploy record` must
-  # still record every call (pkg.WatchAgentStart).
+  # keploy's waits for its agent follow the agent's start, not a clock
+  # (pkg.WatchAgentStart): its container starved from its start under docker
+  # compose, and, under docker run, paused once it says its server listens
+  # while its health check is held off, each for far longer than the budget
+  # KEPLOY_AGENT_READY_TIMEOUT once gave, and `keploy record` must still
+  # record every call. Each leg fails on a keploy whose wait a clock bounds.
   compose_agent_boot_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
