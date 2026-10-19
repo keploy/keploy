@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -148,20 +149,24 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 	return globalVariables
 }
 
+// sendRequest sends a collection's request to capture its answer. Its URL
+// can carry the collection's api keys and tokens in its query, and url.Parse's
+// and client.Do's errors quote it whole, so each is logged naming it by its
+// shape, as logurl.Error does.
 func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (models.HTTPResp, error) {
 
 	var err error
 	if basePath != "" {
 		req.URL, err = utils.ReplaceBaseURL(req.URL, basePath)
 		if err != nil {
-			pi.logger.Error("failed to replace hostname", zap.Error(err))
+			pi.logger.Error("failed to replace hostname", zap.Error(logurl.Error(err)))
 			return models.HTTPResp{}, err
 		}
 	}
 
 	httpReq, err := http.NewRequest(string(req.Method), req.URL, strings.NewReader(req.Body))
 	if err != nil {
-		pi.logger.Error("failed to create HTTP request", zap.Error(err))
+		pi.logger.Error("failed to create HTTP request", zap.Error(logurl.Error(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -181,7 +186,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		pi.logger.Error("failed to send HTTP request", zap.Error(err))
+		pi.logger.Error("failed to send HTTP request", zap.Error(logurl.Error(err)))
 		return models.HTTPResp{}, err
 	}
 
