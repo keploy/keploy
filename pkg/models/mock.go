@@ -288,6 +288,13 @@ type TestModeInfo struct {
 	// consume of a copy an earlier view served (a previous attempt of the
 	// same test) is refused. Runtime-only, like the fields above.
 	ServedIn uint64 `json:"-" bson:"-"`
+
+	// StagedSet is the agent's test-set generation whose staging pooled the
+	// mock (MockManager.ArmSetFence); zero on a mock no staging pooled. A
+	// consume of a mock pooled for an earlier set (a consume racing the next
+	// set's staging) is refused: it was of that set's pool, under that set's
+	// mock names. Runtime-only, like the fields above.
+	StagedSet uint64 `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -634,6 +641,19 @@ type PostgresV3QuerySpec struct {
 	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
 	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 
+	// Literals holds the constants an extended-protocol statement carries
+	// in its SQL text (the SQL its Parse sent), in their order there, as
+	// their text values; a NULL constant is a NULL cell. SQLNormalized has
+	// them as $N placeholders and SQLAstHash ignores them, so without
+	// Literals a recording cannot say which values it was made for: a
+	// statement built by string concatenation (pgjdbc's Statement, which
+	// pgjdbc sends over the extended protocol) recorded for
+	// name = 'alice' would match a replay for name = 'carol'. Nil for a
+	// statement with no constants, and for a simple-Query invocation,
+	// whose constants are its BindValues; a recording made before the
+	// field existed has none either.
+	Literals PostgresV3Cells `json:"literals,omitempty" yaml:"literals,omitempty" bson:"literals,omitempty"`
+
 	// ResultFormats — per-column format codes the client requested at
 	// Bind time (via the Bind packet's ResultFormatCodes field).
 	// Semantics match PG wire: len=0 means "all text", len=1 means
@@ -689,6 +709,7 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 		PrecedingTxState  string                 `yaml:"precedingTxState,omitempty"`
 		BindValues        PostgresV3Cells        `yaml:"bindValues,omitempty"`
 		BindFormats       []int                  `yaml:"bindFormats,omitempty"`
+		Literals          PostgresV3Cells        `yaml:"literals,omitempty"`
 		ResultFormats     []int                  `yaml:"resultFormats,omitempty"`
 		Response          *PostgresV3Response    `yaml:"response,omitempty"`
 		SideEffects       *PostgresV3SideEffects `yaml:"sideEffects,omitempty"`
@@ -705,6 +726,7 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 		PrecedingTxState:  q.PrecedingTxState,
 		BindValues:        q.BindValues,
 		BindFormats:       q.BindFormats,
+		Literals:          q.Literals,
 		ResultFormats:     q.ResultFormats,
 		Response:          q.Response,
 		SideEffects:       q.SideEffects,
@@ -1000,6 +1022,10 @@ type MockState struct {
 	Timestamp        int64     `json:"timestamp"`
 	ReqTimestampMock string    `json:"reqTimestampMock,omitempty"`
 	ResTimestampMock string    `json:"resTimestampMock,omitempty"`
+	// AnswerPlaced says the mock is placed at its answer (IsAnswerPlaced):
+	// the replay attributes it by its response time, never by the in-flight
+	// rule.
+	AnswerPlaced bool `json:"answerPlaced,omitempty"`
 	// Lifetime carries the recorder-derived mock tier (per-test, session,
 	// connection, …) through GetConsumedMocks so the test-mode mapping
 	// writer can carve out session/connection mocks from its

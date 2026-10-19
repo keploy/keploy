@@ -550,7 +550,16 @@ func (ts *TestYaml) ReplaceFiles(ctx context.Context, files []yaml.File) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return replaceFiles(ts.logger, files)
+	// The recordings the group replaces, named before it is stored, for
+	// the re-key rule (rekey.go).
+	rks := ts.beginRekeys(files)
+	if err := replaceFiles(ts.logger, files); err != nil {
+		return err
+	}
+	for _, k := range rks {
+		k.done(ts.logger)
+	}
+	return nil
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
@@ -730,6 +739,14 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		}
 	}()
 
+	// The recording this write replaces, named before anything of it (its
+	// assets included) is replaced, for the re-key rule (rekey.go). A name
+	// just claimed replaces none.
+	var rk *rekey
+	if !reservedPlaceholder {
+		rk = ts.beginRekey(testSetID, tcsName, filepath.Join(tcsPath, tcsName+"."+ts.Format.FileExtension()))
+	}
+
 	err = ts.saveAssets(testSetID, tc, tcsName)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
@@ -819,6 +836,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	writeSucceeded = true
+	rk.done(ts.logger)
 	// Propagate the auto-assigned name back onto tc so callers can observe
 	// what was actually persisted. Wrappers around InsertTestCase (e.g.
 	// k8s-proxy's testDBWrapper) key per-session dedupe and broadcast state
@@ -1024,6 +1042,14 @@ func (ts *TestYaml) ChangePath(path string) {
 }
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// The test case file is rewritten where it lies, outside upsert: it is
+	// re-keyed once, after (SetRewrite).
+	rw := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	defer rw.Done()
+	return ts.updateAssertions(ctx, testCaseID, testSetID, assertions)
+}
+
+func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	// Read whichever format the testcase was recorded in.
 	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)

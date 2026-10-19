@@ -54,6 +54,13 @@ const (
 	// from one that has stopped making progress, which alone it kills.
 	AgentTeardownProgressFile = "/tmp/keploy-agent-teardown.json"
 
+	// AgentBootProgressFile is where a containerised agent reports its
+	// start's progress until its control-plane server listens
+	// (utils.ReportBootProgress): keploy reads it out of the container to
+	// tell an agent still starting from one that has stopped making
+	// progress, which alone it gives up on.
+	AgentBootProgressFile = "/tmp/keploy-agent-boot.json"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
@@ -112,6 +119,11 @@ func agentHealthcheckStartPeriod() time.Duration {
 	}
 	return def
 }
+
+// agentStopGracePeriod is how long compose waits for keploy's agent to stop
+// before it kills it (the agent service's stop_grace_period): far longer than
+// any drain. The agent goes by events, not by it.
+const agentStopGracePeriod = "24h"
 
 // ComposeServiceHook is called for each keploy-managed Docker Compose service
 // node during generation so a downstream caller (the enterprise low-latency hook)
@@ -767,6 +779,13 @@ func (idc *Impl) generateKeployVolumes() []string {
 	return volumes
 }
 
+// composeLiteral is s written so that compose reads it back as s. A command
+// list is read by no shell, but compose interpolates every string of a file
+// it loads ($VAR, ${VAR}, from the operator's environment), and reads $$ as
+// one $: the agent's arguments (a caller's ExtraArgs, its config path) reach
+// it as they were given.
+func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
+
 // GenerateKeployAgentService creates a Docker Compose service configuration for keploy-agent
 // based on the SetupOptions and returns it as a yaml.Node that can be appended to a compose file
 func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error) {
@@ -888,6 +907,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	if opts.RecordRequests {
 		command = append(command, "--record-requests")
+	}
+	if opts.SettleReads {
+		command = append(command, "--settle-reads")
 	}
 	// The proven model's staging switch: the agent container is not given
 	// KEPLOY_PROVEN, so it travels as a flag.
@@ -1118,7 +1140,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		for _, cmd := range command {
 			commandNode.Content = append(commandNode.Content, &yaml.Node{
 				Kind:  yaml.ScalarNode,
-				Value: cmd,
+				Value: composeLiteral(cmd),
 				Tag:   "!!str", // Explicitly mark as string
 			})
 		}
@@ -1166,6 +1188,23 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		&yaml.Node{Kind: yaml.ScalarNode, Value: "healthcheck"},
 		healthcheckNode,
 	)
+
+	// stop_grace_period, for `keploy record`: compose stops the agent with
+	// the project, also when the app exits on its own
+	// (--abort-on-container-exit), and the agent then waits for the
+	// recording that holds its streams to save what it captured
+	// (models.DrainsOnAgentStopHeader): it goes once that drain is through,
+	// has stalled, or its client is gone, all of them events. Compose's
+	// default grace (10s) would kill it mid-drain, at a backlog that takes
+	// longer than that to hand over. This grace only bounds an agent that
+	// never goes; it does not decide when one does. Nothing else holds the
+	// agent at a stop under compose, so other commands keep compose's grace.
+	if opts.Mode == models.MODE_RECORD && !opts.MockMode {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "stop_grace_period"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: agentStopGracePeriod},
+		)
+	}
 
 	// Inject Pprof Environment Variables and Mounts if enabled on host
 	// This logic has been automated to support offline profiling via file dumps.

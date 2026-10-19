@@ -504,39 +504,35 @@ func isUnassertedMockEntry(m models.MockEntry, mockKindByName map[string]models.
 	return false
 }
 
-// shouldEmitFailureLogs reports whether the response-diff logs are printed for
-// a test whose per-test mock set diverged.
-//
-// Historically a divergence meant "re-record", so the diff was suppressed as
-// noise and the test was quietly demoted to OBSOLETE. Under
-// --assert-dependencies that same test is about to be marked FAILED, and
-// suppressing its diffs would hand the user a red test with no explanation.
-// Knob off (the default) is byte-identical to before.
-func shouldEmitFailureLogs(mockSetMismatch, assertDependencies bool) bool {
-	return !mockSetMismatch || assertDependencies
-}
-
 // dependencyAssertionRejects reports whether the opt-in dependency assertion
 // (config.Test.AssertDependencies / --assert-dependencies) turns a diverged
 // per-test mock set into a real test failure.
 //
 // A diverged set means an expected per-test mock was not observed during the
 // test's window — the app stopped making an outgoing call the recording says
-// it makes. Today that is demoted to OBSOLETE and the run still exits 0
-// (keploy-consumer-design-v2.md §5, false-pass row 0). Default false keeps
-// that behaviour for every existing user; opting in fails the test, the test
-// set, and the process exit code.
+// it makes. A test whose response failed too is demoted to OBSOLETE, which
+// leaves it, and its test set, not judged (FailureInfo.MappingStale; it used to
+// exit 0: keploy-consumer-design-v2.md §5, false-pass row 0, now closed); one
+// whose response matched passes. Default false keeps that for every existing
+// user; opting in fails the test, the test set, and the process exit code.
 func dependencyAssertionRejects(mockSetMismatch, assertDependencies bool) bool {
 	return mockSetMismatch && assertDependencies
 }
 
 // demoteToObsolete reports whether a non-passing test whose mock set diverged
-// keeps the historical silent demotion to OBSOLETE (which does NOT fail the
-// test set and does NOT affect the exit code) rather than being marked FAILED.
+// is demoted to OBSOLETE (the recorded mapping may be stale) rather than being
+// marked FAILED. OBSOLETE does not fail the test set: the test has no verdict
+// (FailureInfo.MappingStale), and a set that would otherwise pass is not
+// judged, so keploy exits non-zero all the same (testsWithStaleMapping). A set
+// with a verdict of its own (a FAILED test, a partial run) keeps it, and its
+// reason names the tests not judged.
 //
-// Three independent opt-ins veto the demotion: --schema-noise-strict
-// (strictMockReject), --assert-dependencies (depAssertFail) and
-// --strict-failure. All default false, so the default verdict is unchanged.
+// Two independent opt-ins veto the demotion of a wrong answer:
+// --assert-dependencies (depAssertFail) and --strict-failure. A third,
+// --schema-noise-strict (strictMockReject), fails a test whose answer
+// MATCHED while its expected mock was rejected for a drifted request field
+// (resolveTestOutcome); it leaves a wrong answer to the other two. All default
+// false.
 func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFailure bool) bool {
 	return mockSetMismatch && !strictMockReject && !depAssertFail && !strictFailure
 }
@@ -553,8 +549,10 @@ func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFa
 // asserting, on its own.
 //
 // failsSet is deliberately separate from "status == FAILED": OBSOLETE does not
-// fail the test set, and that asymmetry IS the silent-green hole
-// (keploy-consumer-design-v2.md §5, false-pass row 0).
+// fail the test set. That asymmetry was the silent-green hole
+// (keploy-consumer-design-v2.md §5, false-pass row 0); it is closed by an
+// OBSOLETE test having no verdict, which leaves its set not judged
+// (testsWithStaleMapping) rather than PASSED.
 func resolveTestStatus(responseMatched, mockSetMismatch, strictMockReject, depAssertFail, strictFailure bool) (status models.TestStatus, failsSet bool) {
 	if responseMatched {
 		return models.TestStatusPassed, false

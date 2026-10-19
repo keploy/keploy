@@ -293,6 +293,22 @@ type MockCursor interface {
 	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
+// StatementCatalog is an optional MockMemDb capability: the stored set's
+// statement catalog, the first recorded mock of each statement
+// (models.StatementKey) among the per-test mocks the agent keeps on disk, by
+// kind, in recorded order. The agent seeds it once, when the set's mocks are
+// stored. A client may prepare at app start a statement it runs only inside
+// tests, whose mocks the startup staging does not load: a parser answers that
+// prepare (a PostgreSQL Describe's row shape) from the catalog when no mock it
+// may serve holds the statement. The catalog is describe-only: a parser never
+// serves one of its mocks as a call's answer, nor consumes it, and never
+// changes one (the mocks are shared). The agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it: a wrapper that drops it leaves
+// a prepare at app start without the statement's shape.
+type StatementCatalog interface {
+	StatementCatalog(kind models.Kind) []*models.Mock
+}
+
 // VariableStore is an optional MockMemDb capability: the table of the test
 // variables the replay has bound (package variables), which a matcher reads
 // to follow a mock's declared variable places under the proven switch. The
@@ -316,12 +332,35 @@ type ExactConsumedReader interface {
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
-// proven switch): the name of a staged mock of kind, which the open test does
-// not own, for which match reports true, whatever the open view shows; "" for
-// none, or with no test open. For a miss's diagnosis only: the mock is never
-// handed out, nor served.
+// proven switch): the name of a staged mock of kind that the open view does
+// not show and no call of the set consumed, for which match reports true: a
+// recording another test owns, or a worker-scope one not reached yet; "" for
+// none. A parser names it on a miss (MockMismatchReport.NotOwned): the call
+// is that recording, made where it was not recorded. For a miss's diagnosis
+// only: the mock is never handed out, nor served.
 type StagedFinder interface {
 	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+}
+
+// StagedKeyFinder is StagedFinder that also looks, when what is staged holds
+// no recording match accepts, in the recordings of kind the store keeps on
+// disk indexed under any of keys (models.RequestKeys): a test's own are
+// staged only as it opens, so a call made before its test would find none
+// there. Only those keys' recordings are read. A parser asks by keys every
+// recording its comparison would accept is indexed under at least one of.
+// For a miss's diagnosis only.
+type StagedKeyFinder interface {
+	FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string
+}
+
+// BegunOwnerReader is an optional MockMemDb extension under exact serving:
+// whether a staged mock (one StagedFinder names) is owned by a test that has
+// begun in the current staging. A parser whose answer depends on what a test
+// caused (an SQS poll, whose message a test sent) reads it to tell a call made
+// after that test, which is the recording made later than recorded, from one
+// made before it, which rightly finds nothing.
+type BegunOwnerReader interface {
+	StagedOwnerBegun(name string) bool
 }
 
 // StagedReader is an optional MockMemDb capability: every mock staged in the
@@ -349,6 +388,35 @@ type TestWindows interface {
 	// SameRecordedTestWindow reports whether a and b are inside one recorded
 	// test's window; known is false when the replay sent none.
 	SameRecordedTestWindow(a, b time.Time) (same, known bool)
+}
+
+// VariableScopes is an optional MockMemDb capability, beside VariableStore:
+// the scope a call binds test variables in, by the mock that answers it. Under
+// exact serving, between tests, the next test's calls in flight the pool view
+// answers (InAheadScope) bind in that test's scope, begun early
+// (AheadVariables); every other call, in the store's (VariableStore). A
+// matcher reads both scopes before it reads the pool, as it reads one.
+type VariableScopes interface {
+	AheadVariables() *variables.Table
+	InAheadScope(m *models.Mock) bool
+}
+
+// InFlightOwner is an optional MockMemDb capability: whether a mock was in
+// flight when the test the replay runs now began, sent in the gap before that
+// test's recorded window and answered inside it (models.SentInGapAnsweredBy),
+// which the store serves as that test's own (GetPerTestMocksInWindow). Its
+// request was recorded outside every recorded test's window, and it is still
+// no start-up or between-tests call of the pool's: the learn step counts it
+// the open test's (TestWindows alone, by its request time, cannot).
+type InFlightOwner interface {
+	InFlightIntoOpenTest(m *models.Mock) bool
+}
+
+// InFlightIntoOpenTest reports whether db says m was in flight when the open
+// test began (InFlightOwner); false for a db that cannot tell.
+func InFlightIntoOpenTest(db MockMemDb, m *models.Mock) bool {
+	o, ok := db.(InFlightOwner)
+	return ok && o.InFlightIntoOpenTest(m)
 }
 
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
@@ -432,8 +500,12 @@ type MockReader interface {
 	// --- Unification API (primary going forward). ---
 
 	// GetPerTestMocksInWindow returns only those per-test (Lifetime ==
-	// LifetimePerTest) mocks whose Spec.ReqTimestampMock falls inside
-	// the current window [start, end]. Mocks whose Spec.ResTimestampMock
+	// LifetimePerTest) mocks placed inside the current window [start,
+	// end] (models.PlaceOf: Spec.ReqTimestampMock, or Spec.ResTimestampMock
+	// for a mock placed at its answer), and those in flight when the
+	// window's test began: sent in the gap before the window
+	// (models.WindowSchedule.GapBefore) and answered at or after start
+	// (models.InFlightEligible). Mocks whose Spec.ResTimestampMock
 	// is EARLIER than Spec.ReqTimestampMock are excluded as invalid.
 	// Response timestamps after `end` are tolerated (async straggle).
 	// If no window has been set (zero values), falls back to the full
@@ -450,14 +522,15 @@ type MockReader interface {
 	//
 	// GetSessionMocks returns the session-scoped mock pool snapshot
 	// (Lifetime == LifetimeSession) plus any startup-tier mocks (those
-	// whose Spec.ReqTimestampMock predated the first test window).
+	// placed before the first test window, models.PlaceOf).
 	// Session mocks are reusable across every test — never
 	// window-filtered, never consumed on match.
 	GetSessionMocks() ([]*models.Mock, error)
 
 	// GetStartupMocks returns the startup-tier mock pool snapshot —
-	// app-bootstrap recordings whose Spec.ReqTimestampMock predates the
-	// first HTTP test window (Flyway migrations, Hibernate metadata
+	// app-bootstrap recordings placed before the first HTTP test window
+	// (models.PlaceOf: Spec.ReqTimestampMock, or the answer's for a mock
+	// placed at its answer) (Flyway migrations, Hibernate metadata
 	// boot, HikariCP pool warm-up). Strictly disjoint from
 	// GetSessionScopedMocks, GetPerTestMocksInWindow, and
 	// GetConnectionMocks; a mock lives in exactly one of the four

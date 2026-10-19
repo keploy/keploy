@@ -2,9 +2,11 @@
 package provider
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -384,6 +386,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		_ = cmd.Flags().MarkHidden("mock-mode")
 		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("record-requests")
+		// Internal orchestrator→agent flag: a run that learns noise settles
+		// each test's calls before its misses are read (SetupOptions.SettleReads).
+		cmd.Flags().Bool("settle-reads", c.cfg.Agent.SettleReads, "Internal: settle a test's calls before a replay reads its misses. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("settle-reads")
 		// Internal orchestrator→agent flag: the proven model's staging switch.
 		// The CLI reads KEPLOY_PROVEN, but the agent does not inherit it (sudo
 		// drops the environment, the agent container is not given it), so the
@@ -516,12 +522,14 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
-		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
-		// Default false is deliberate: today an expected-but-unconsumed mock
-		// demotes the test to OBSOLETE without failing the test set, so
-		// defaulting this true would flip existing suites red on upgrade.
-		// See keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
-		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test is demoted to OBSOLETE today and the run still exits 0. Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
+		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping. By default such a test is demoted to OBSOLETE and reported not judged: keploy cannot tell a regression from a stale mapping, so the test set is not judged and keploy exits non-zero; re-record, or run with --disable-mapping --update-test-mapping. The per-test mappingDiff block is still written for diagnostics.")
+		// Default false is deliberate: a response-matched test whose
+		// expected mock went unconsumed passes today, so defaulting this true
+		// would flip existing suites red on upgrade. With it off, a
+		// response-failing one is demoted to OBSOLETE and reported not judged;
+		// with it on, that test is FAILED instead. See
+		// keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
+		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test still passes when its response matched (a response-failing one is demoted to OBSOLETE and reported not judged). Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of the test cases that pass from what they consumed (a test case that does not pass keeps its recorded mapping)")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
@@ -1287,6 +1295,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.logger.Info("Color encoding is disabled")
 	}
 
+	// Under the proven switch a deleted setting's flag is unknown, and its
+	// keploy.yml key is ignored, with one notice (U18, deleted.go). Not for
+	// the agent: its CLI forwards no deleted flag.
+	if cmd.Name() != "agent" {
+		if err := c.checkDeletedSettings(cmd); err != nil {
+			utils.LogError(c.logger, err, "refusing a deleted flag")
+			return err
+		}
+	}
+
 	// Validate --storage-format flag (applies to all commands via persistent flag)
 	c.cfg.StorageFormat = strings.ToLower(strings.TrimSpace(c.cfg.StorageFormat))
 	if c.cfg.StorageFormat == "" {
@@ -1576,6 +1594,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "refusing a deleted passthrough flag")
 			return err
 		}
+		if cmd.Name() == "test" {
+			if err := refuseHealthPollTimeout(cmd); err != nil {
+				utils.LogError(c.logger, err, "refusing a deleted readiness flag")
+				return err
+			}
+		}
 
 		// Before the command type: refusing an engine does not depend on it,
 		// and the --cmd-type checks would otherwise answer a podman command
@@ -1803,7 +1827,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Test.SelectedFromCommandLine = cmd.Flags().Changed("testsets") && len(config.TestSetNames(testSets)) > 0
 			// Whether the bound on the app's answer is the user's own
 			// (config.Test.APITimeoutSet): the flag, or keploy.yml.
-			c.cfg.Test.APITimeoutSet = cmd.Flags().Changed("api-timeout") || viper.InConfig("test.apiTimeout")
+			c.cfg.Test.APITimeoutSet = cmd.Flags().Changed("api-timeout") ||
+				viper.InConfig("test.apiTimeout") && !c.generatedAPITimeout()
 
 			// get disable-mapping flag value
 			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
@@ -2030,6 +2055,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		dropPassthroughKeys(c.logger, c.cfg, cmd.Name())
+		if cmd.Name() == "test" {
+			dropHealthPollTimeout(c.logger, c.cfg)
+		}
 
 	case "normalize":
 		var err error
@@ -2121,6 +2149,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.RecordRequests = recordRequests
+
+		settleReads, err := cmd.Flags().GetBool("settle-reads")
+		if err != nil {
+			errMsg := "failed to read the settle-reads flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.SettleReads = settleReads
 
 		proven, err := cmd.Flags().GetBool(provenswitch.AgentFlag)
 		if err != nil {
@@ -2831,4 +2867,64 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 	}
 
 	return nil
+}
+
+// GeneratedAPITimeoutDefault is the apiTimeout keploy wrote into every
+// keploy.yml it generated before v3.6.62, when it wrote the whole default
+// config.
+const GeneratedAPITimeoutDefault = 5
+
+// generatedAPITimeout reports whether keploy.yml's test.apiTimeout is the
+// default an older keploy wrote into it, not a bound the user chose (row W1,
+// the coordinator's ruling): the value is GeneratedAPITimeoutDefault, and the
+// keploy.yml that holds it starts with keploy's "# Generated by Keploy"
+// header. Any other value, or a file without the header, is the user's.
+// Under the proven switch it says so once, and how to keep a bound.
+func (c *CmdConfigurator) generatedAPITimeout() bool {
+	if viper.GetUint64("test.apiTimeout") != GeneratedAPITimeoutDefault {
+		return false
+	}
+	file, ok := GeneratedDefault(c.cfg.ConfigPath, "test.apiTimeout", GeneratedAPITimeoutDefault)
+	if !ok {
+		return false
+	}
+	if provenswitch.On() {
+		c.logger.Info(fmt.Sprintf("keploy.yml's test.apiTimeout: %d is the default an older keploy wrote into it, not a bound you chose, so keploy test waits for your app's answer to each test however long it takes. "+
+			"To keep a bound, pass --api-timeout, or remove the \"# Generated by Keploy\" line from %s.", GeneratedAPITimeoutDefault, file))
+	}
+	return true
+}
+
+// GeneratedDefault reports whether the keploy.yml in configPath sets key to
+// value, the default an older keploy wrote into every keploy.yml it generated,
+// and so not a setting the user chose (row W1): the file starts with keploy's
+// "# Generated by Keploy" header, and holds the value itself (not an override
+// file). It returns the file. keploy's enterprise build reads its own
+// defaults so (record.autoReplay.apiTimeout).
+func GeneratedDefault(configPath, key string, value uint64) (string, bool) {
+	file := loader.Find(configPath)
+	if file == "" || !startsWithGeneratedHeader(file) {
+		return "", false
+	}
+	own := viper.New()
+	own.SetConfigType("yml")
+	if loader.Read(own, file) != nil || !own.InConfig(key) || own.GetUint64(key) != value {
+		// The value came from elsewhere (the override file): the user's.
+		return "", false
+	}
+	return file, true
+}
+
+// startsWithGeneratedHeader reports whether file's first line is keploy's
+// generated-config header (utils.GetVersionAsComment).
+func startsWithGeneratedHeader(file string) bool {
+	f, err := os.Open(file)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	line, _ := bufio.NewReader(io.LimitReader(f, 256)).ReadString('\n')
+	// An editor may have put a byte-order mark before it.
+	line = strings.TrimPrefix(line, "\xef\xbb\xbf")
+	return strings.HasPrefix(line, "# Generated by Keploy")
 }

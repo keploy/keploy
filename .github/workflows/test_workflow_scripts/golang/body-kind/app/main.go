@@ -33,7 +33,44 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write(body)
 	})
-	if err := http.ListenAndServe(":8092", nil); err != nil {
+	// GET /upgrade: a 101 (Switching Protocols), then the protocol it switched
+	// to on the connection (HTTP/2's client preface, as an h2c tunnel's server
+	// sends it), and the connection closed at once (api-server's tunnel
+	// closes it 10 s later, when its peer has not answered in HTTP/2).
+	http.HandleFunc("/upgrade", func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: keploy-e2e\r\n\r\n")
+		_, _ = rw.WriteString("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+		_ = rw.Flush()
+	})
+	// CONNECT: a 200 (Connection Established), then the tunnel, as an HTTP
+	// proxy relays it (the start of a TLS server's answer), and the
+	// connection closed at once. A CONNECT names no path, so it is answered
+	// before the mux, which routes by path.
+	app := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.DefaultServeMux.ServeHTTP(w, r)
+			return
+		}
+		// A CONNECT's target is an authority, never a path (RFC 9110 §9.3.6).
+		if r.RequestURI != "upstream.invalid:443" {
+			http.Error(w, "want CONNECT upstream.invalid:443, got CONNECT "+r.RequestURI, http.StatusBadRequest)
+			return
+		}
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		_, _ = rw.WriteString("\x16\x03\x03\x00\x2aserver hello of the tunnelled connection")
+		_ = rw.Flush()
+	})
+	if err := http.ListenAndServe(":8092", app); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

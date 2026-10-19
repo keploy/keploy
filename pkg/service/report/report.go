@@ -154,7 +154,10 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// `keploy report --test-case <obsolete>` announce a pass for a test
 		// that was demoted, and the dependency notice below then printed
 		// directly under a line asserting it passed.
-		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, testStatusLabel(t.Status), t.TimeTaken)
+		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, resultLabel(t), t.TimeTaken)
+		// A test keploy could not judge says why, right under its status:
+		// whatever its row's status, nothing vouches for it.
+		fmt.Fprint(r.out, notJudgedLines(t))
 		// A test keploy skipped for a reason says why, right under its status.
 		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
 			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
@@ -170,6 +173,15 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		return fmt.Errorf("failed while flushing in printTests: %w", err)
 	}
 	return nil
+}
+
+// resultLabel is testStatusLabel for t, a test keploy could not judge
+// (TestResult.VerdictUnknown) said so: its row's status is no verdict.
+func resultLabel(t models.TestResult) string {
+	if len(t.VerdictUnknown()) > 0 {
+		return "NOT JUDGED ⚠️ (" + string(t.Status) + ")"
+	}
+	return testStatusLabel(t.Status)
 }
 
 // testStatusLabel renders a status for the one-line, no-diff form of
@@ -891,9 +903,18 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 
 // shouldRenderDiff reports whether a test result is admitted to the per-test
 // detail renderer at all. A test case that failed on a template variable is
-// FAILED: keploy test never demotes it to OBSOLETE.
+// FAILED: keploy test never demotes it to OBSOLETE. A wrong answer demoted to
+// OBSOLETE (FailureInfo.MappingStale) is admitted too: it is not judged, and
+// fails its run.
 func shouldRenderDiff(result models.TestResult) bool {
-	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps()
+	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps() || demotedWrongAnswer(result)
+}
+
+// demotedWrongAnswer reports whether t is a wrong answer keploy test demoted to
+// OBSOLETE and left not judged (FailureInfo.MappingStale): its answer differed,
+// so it has a diff to show.
+func demotedWrongAnswer(t models.TestResult) bool {
+	return t.Status == models.TestStatusObsolete && t.FailureInfo.MappingStale != ""
 }
 
 // rendersDepNoticeOnly reports whether an admitted result is summarised in the
@@ -908,8 +929,12 @@ func shouldRenderDiff(result models.TestResult) bool {
 // meant 100% of obsolete tests grew a failure block where before this slice
 // they rendered nothing at all in `keploy report`. The brief asked for a
 // compact notice; this is that, for every non-FAILED status.
+//
+// A wrong answer demoted to OBSOLETE and left not judged (demotedWrongAnswer)
+// is the exception: its answer differed, and the diff is what its user reads
+// before re-recording.
 func rendersDepNoticeOnly(result models.TestResult) bool {
-	return result.Status != models.TestStatusFailed
+	return result.Status != models.TestStatusFailed && !demotedWrongAnswer(result)
 }
 
 // partitionDepNotices splits the admitted results into the ones that get the
@@ -1038,9 +1063,10 @@ func (r *Report) writeDepNoticeSummary(notices, admitted []models.TestResult) er
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
 func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
-	// Header with risk level and categories. Unconditionally "failed":
-	// partitionDepNotices keeps every non-FAILED status out of this renderer.
-	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+	// Header with risk level and categories. "failed", or "not judged" for a
+	// demoted wrong answer: partitionDepNotices keeps every other non-FAILED
+	// status out of this renderer.
+	header := failedTestHeading(test)
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -1057,6 +1083,7 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 	}
 
 	sb.WriteString(header + "\n")
+	sb.WriteString(demotedLines(test))
 
 	// Mock-miss diagnostics FIRST: when an outgoing call had no matching
 	// mock, the response diff below is usually a downstream symptom (the app
@@ -1365,7 +1392,7 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 
 // createFormattedPrinter: use r.printer (initialized in New)
 func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPrinter) string {
-	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+	header := failedTestHeading(test)
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -1381,7 +1408,36 @@ func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPr
 		header += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
 	}
 
-	return printer.Sprintf(header + "\n")
+	return printer.Sprintf(header+"\n") + demotedLines(test)
+}
+
+// failedTestHeading is the first words of a rendered test's header: "Testrun
+// failed", or "Testrun not judged" for a wrong answer demoted to OBSOLETE
+// (demotedWrongAnswer), which has no verdict.
+func failedTestHeading(test models.TestResult) string {
+	if demotedWrongAnswer(test) {
+		return fmt.Sprintf("Testrun not judged for %s/%s", test.Name, test.TestCaseID)
+	}
+	return fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+}
+
+// demotedLines is notJudgedLines for a demoted wrong answer's rendered diff,
+// under its header; "" for any other test.
+func demotedLines(test models.TestResult) string {
+	if !demotedWrongAnswer(test) {
+		return ""
+	}
+	return notJudgedLines(test)
+}
+
+// notJudgedLines says, under a rendered test's header, why it has no verdict
+// (TestResult.VerdictUnknown), one line each; "" for a judged test.
+func notJudgedLines(test models.TestResult) string {
+	var sb strings.Builder
+	for _, why := range test.VerdictUnknown() {
+		fmt.Fprintf(&sb, "  not judged: %s\n", strings.TrimPrefix(why, "not judged: "))
+	}
+	return sb.String()
 }
 
 // addStatusCodeDiffs adds status code differences to the diff printer

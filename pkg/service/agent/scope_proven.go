@@ -107,6 +107,21 @@ type provenWire struct {
 	// from (nil before the first test's end: the run's mark).
 	losses     captureLossMark
 	testLosses models.CaptureLosses
+	// scopeTests is, by the id of the keyer's scope each test was
+	// (containerkey's Scope), the test's attempt: a mock stamped late, its
+	// container's read the daemon did not answer, is charged to the attempt
+	// its request was sent in (unreadMock). unreadOutside is what such
+	// mocks of the time outside tests, or of an attempt whose window is
+	// gone, charged no test with: the run's (UnchargedCaptureLosses).
+	scopeTests    map[uint64]scopeTest
+	unreadOutside models.CaptureLosses
+}
+
+// scopeTest is one attempt of a test: its ID, and its window's start, which
+// tells it from another attempt of the same test (a retry).
+type scopeTest struct {
+	id    string
+	start time.Time
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -195,6 +210,9 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	a.provenMu.Lock()
 	a.proven = provenWire{losses: losses}
 	a.provenMu.Unlock()
+	// A mock its stamp could not name the container of is its own test's
+	// in a record, whenever it is stamped (unreadMock).
+	containerkey.Default.OnUnreadMock(a.unreadMock)
 	if t := a.realTracker(); t != nil {
 		// A test the last session left open is no test of this one.
 		t.Interrupt()
@@ -522,6 +540,13 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// The test is a scope of its own from here (containerkey); closeOpen
 	// goes back to the run's however the test closes.
 	containerkey.Default.BeginTest()
+	scope := containerkey.Default.Scope()
+	a.provenMu.Lock()
+	if a.proven.scopeTests == nil {
+		a.proven.scopeTests = map[uint64]scopeTest{}
+	}
+	a.proven.scopeTests[scope] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
+	a.provenMu.Unlock()
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
@@ -780,6 +805,12 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	mark, test := a.proven.losses, a.proven.testLosses
 	a.provenMu.Unlock()
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
+	if !a.replaying() {
+		// A record charges a container read the daemon did not answer by
+		// the mock its stamp marked (unreadMock), its own test's whenever
+		// it came, not by the count, which may come after its test ended.
+		lost, now = lost.Without(models.CaptureLossContainerUnread), now.Without(models.CaptureLossContainerUnread)
+	}
 	if err == nil && now != nil {
 		// The next test's own losses count from here.
 		a.provenMu.Lock()
@@ -855,6 +886,77 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		outcome = models.ScopeOutcomeFailed
 	}
 	return ev, outcome
+}
+
+// unreadMock charges, in a record, the test a mock's request was sent in
+// (scope: the keyer's Scope id then) with the mock, which its stamp could
+// not name the container of: the Docker daemon did not answer keploy's read
+// of it (what names it). Whenever the stamp came, the test's window says it
+// is not judged: still open, as it closes; closed, now, until the CLI reads
+// the windows at the run's end. A mock of the time outside tests is the
+// run's (UnchargedCaptureLosses). In a replay a use's count charges it
+// (chargeCaptureLosses): its call is answered in its test.
+func (a *Agent) unreadMock(scope uint64, what string) {
+	if a.replaying() {
+		return
+	}
+	loss := models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: what}}
+	a.provenMu.Lock()
+	t, inTest := a.proven.scopeTests[scope]
+	a.provenMu.Unlock()
+	if inTest && a.chargeAttempt(t, loss) {
+		return
+	}
+	a.provenMu.Lock()
+	a.proven.unreadOutside = a.proven.unreadOutside.Plus(loss)
+	a.provenMu.Unlock()
+}
+
+// chargeAttempt charges attempt t of a test with loss: on its window, still
+// open (as it closes) or closed. It reports whether t has a window: an
+// attempt withdrawn at its begin has none, and another attempt of the same
+// test (a retry) is not charged with it.
+func (a *Agent) chargeAttempt(t scopeTest, loss models.CaptureLosses) bool {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: 0, name: t.id}
+	if start, open := a.workerOpen[k]; open && start.Equal(t.start) {
+		if a.scopeMeta == nil {
+			a.scopeMeta = make(map[scopeKey]scopeMeta)
+		}
+		meta := a.scopeMeta[k]
+		meta.unread = meta.unread.Plus(loss)
+		a.scopeMeta[k] = meta
+		return true
+	}
+	for i := len(a.scopeWindows) - 1; i >= 0; i-- {
+		w := &a.scopeWindows[i]
+		if w.Name == t.id && w.PID == 0 && w.Start.Equal(t.start) {
+			w.Evidence = withUnread(w.Evidence, loss)
+			return true
+		}
+	}
+	return false
+}
+
+// withUnread is ev (a copy, nil for none) with loss, mocks whose container the
+// Docker daemon did not answer the read of: what leaves the test not judged,
+// and said in its reason.
+func withUnread(ev *models.ScopeEvidence, loss models.CaptureLosses) *models.ScopeEvidence {
+	out := &models.ScopeEvidence{}
+	if ev != nil {
+		c := *ev
+		out = &c
+	}
+	out.CannotCapture = out.CannotCapture.Plus(loss)
+	text := loss.NotJudgedText()
+	switch {
+	case out.Reason == "":
+		out.Reason = "keploy: " + text + "."
+	default:
+		out.Reason = strings.TrimSpace(out.Reason + " Also " + text + ".")
+	}
+	return out
 }
 
 // failClosedWindow marks the latest closed window of id failed, with why.

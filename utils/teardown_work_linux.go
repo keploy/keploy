@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -94,6 +95,23 @@ func (p *threadProbe) moved() bool {
 	moved := !p.seen || runnable || m != p.last
 	p.last, p.seen = m, true
 	return moved
+}
+
+// describe reads how the stage's thread stands: its state (stat), and the
+// kernel function it sleeps in (wchan), which the kernel gives as "0" for a
+// thread that runs, and to a reader it does not let see kernel addresses.
+func (p *threadProbe) describe() (state, wait string) {
+	if b, err := os.ReadFile(p.dir + "/stat"); err == nil {
+		if st, _, _, ok := parseTaskStat(b); ok {
+			state = string(st)
+		}
+	}
+	if b, err := os.ReadFile(p.dir + "/wchan"); err == nil {
+		if w := strings.TrimSpace(string(b)); w != "" && w != "0" {
+			wait = w
+		}
+	}
+	return state, wait
 }
 
 // markThread adds the task at dir (a /proc/<pid>/task/<tid> directory) to m,

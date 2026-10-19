@@ -91,6 +91,21 @@ type TestDB interface {
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
+// RecordedStartReader is an optional TestDB capability: the request time of the
+// earliest test case a test set ever recorded, which can predate every test case
+// the set holds now. A zero time means the TestDB does not know it.
+//
+// A set's startup traffic is what was recorded before its first test, and the
+// replayer otherwise takes that test from the test cases it is handed. That is
+// wrong when the set's earlier test cases are gone while its mock file is not:
+// k8s-proxy's auto-replay deletes a round's test cases from the recording's set
+// once they are written back, and keeps adding to the same mock file. The next
+// round's first test is then a late one, everything recorded before it counts
+// as startup traffic, and the agent stages most of the recording.
+type RecordedStartReader interface {
+	RecordedFirstTestStart(ctx context.Context, testSetID string) (time.Time, error)
+}
+
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)

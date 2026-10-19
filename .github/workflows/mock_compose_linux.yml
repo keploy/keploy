@@ -123,6 +123,72 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-container-keys-linux.sh"
 
+  # A compose app that exits on its own during `keploy record`: compose stops
+  # the project, keploy's agent with it (--abort-on-container-exit). The agent
+  # must wait for the recording to save what it captured: every test case,
+  # mock and mapping, each stream read to the agent's end marker. The app
+  # answers N calls and exits; keploy must exit 0 on its own, with all N.
+  compose_app_exits_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: app exits on its own (docker_compose)
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run compose app-exits e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-app-exits-linux.sh"
+
+  # Under KEPLOY_PROVEN=1 keploy stops a compose app itself (P101-c): compose
+  # runs without --abort-on-container-exit, keploy interrupts the app's
+  # container at each set's end and at the recording's end, waits for its
+  # stop on events (a kill only when it made no progress), reads the set's
+  # end from the live agent, and starts the app again for the next set. A
+  # changed shutdown publish fails its set; an app that exits on its own is
+  # APP_HALTED; an interrupted keploy leaves no container or network behind.
+  compose_proven_setend_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: proven set-end stop (docker_compose)
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run compose proven set-end stop e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh"
+
   # An app's own host entries (a compose service's extra_hosts, docker run
   # --add-host): Docker refuses them on an app that joins keploy's agent
   # container's network, so keploy moves them onto the agent container, and

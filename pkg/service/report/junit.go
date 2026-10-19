@@ -225,10 +225,12 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 		}
 
 		// A case keploy could not judge is an <error>, whatever its row's
-		// status says, unless the row already fails it or keploy skipped
-		// it (TestResult.VerdictUnknown): nothing vouches for it, so its
-		// artifact must not read green. Its dependency detail is kept, as a
-		// passing case's is.
+		// status says, unless the row fails it on what was compared or
+		// keploy skipped it (TestResult.VerdictUnknown: a FAILED row with
+		// nothing of its answer to compare, AnswerStalled, is one keploy
+		// could not judge): nothing vouches for it, so its artifact must
+		// not read green. Its dependency detail is kept, as a passing
+		// case's is.
 		if why := t.VerdictUnknown(); len(why) > 0 {
 			errs++
 			tc.Error = &junitError{Message: notJudgedMessage, Type: "NotJudged", Text: strings.Join(why, "\n")}
@@ -341,15 +343,30 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			},
 		})
 	}
-	// The calls its application made after its last test that no mock
-	// answered failed the set while its tests may all have passed: a case
-	// of its own, failed, naming them.
+	// The calls its application made outside every test that no mock
+	// answered (after its last test, or before its first as it started)
+	// failed the set while its tests may all have passed: a case of its own,
+	// failed, naming them.
 	if calls := rep.UnclaimedCalls; len(calls) > 0 {
 		lines := make([]string, 0, len(calls))
+		message := "a call after the last test got no recorded answer"
+		before := false
+		for _, c := range calls {
+			before = before || c.BeforeSet
+		}
+		if before {
+			message = "a call outside every test got no recorded answer"
+		}
 		for _, c := range calls {
 			l := strings.TrimSpace(c.Protocol + " " + c.ActualSummary)
 			if c.Destination != "" {
 				l += " to " + c.Destination
+			}
+			switch {
+			case c.BeforeSet:
+				l = "before the first test: " + l
+			case before:
+				l = "after the last test: " + l
 			}
 			lines = append(lines, l)
 		}
@@ -360,7 +377,7 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			Classname: name,
 			Time:      fmtSeconds(0),
 			Failure: &junitFailure{
-				Message: "a call after the last test got no recorded answer",
+				Message: message,
 				Type:    "UnclaimedCall",
 				Text:    strings.Join(lines, "\n"),
 			},

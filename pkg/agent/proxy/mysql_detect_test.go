@@ -242,8 +242,10 @@ func TestProbeClientSpeaksFirstPreservesBytes(t *testing.T) {
 	}
 }
 
-// A silent client in front of a non-MySQL server must fall through to
-// generic dispatch with the upstream conn and its bytes intact.
+// A silent client in front of a non-MySQL server that greets first, a
+// server-first protocol (SMTP), is said to be one (reasonServerFirst, which
+// handleConnection relays from the greeting, P250), with the upstream conn
+// and its bytes intact, with the switch off or on.
 func TestProbeSilentClientNonMysqlServer(t *testing.T) {
 	p := testProxy(t)
 	banner := []byte("220 smtp.example.com ESMTP Postfix\r\n")
@@ -259,8 +261,8 @@ func TestProbeSilentClientNonMysqlServer(t *testing.T) {
 	if probe.IsMySQL {
 		t.Fatal("SMTP banner classified as MySQL")
 	}
-	if probe.Reason != "greeting-not-mysql" {
-		t.Errorf("reason = %q, want greeting-not-mysql", probe.Reason)
+	if probe.Reason != reasonServerFirst {
+		t.Errorf("reason = %q, want %s", probe.Reason, reasonServerFirst)
 	}
 	if p.mysqlPorts.Has(port) {
 		t.Error("non-MySQL port must not be learned as MySQL")
@@ -287,9 +289,13 @@ func TestProbeSilentClientNonMysqlServer(t *testing.T) {
 		t.Fatalf("the next dial read %q, %v; want the banner the probe already read", got, err)
 	}
 	// And the verdict is cached, so the next connection to this port
-	// skips the probe entirely rather than re-paying the wait + dial.
+	// skips the probe entirely rather than re-paying the wait + dial; the
+	// destination is marked, so that connection is relayed too (P250).
 	if !p.mysqlPorts.IsKnownNotMysql(port) {
 		t.Error("negative verdict was not cached")
+	}
+	if !p.serverFirstDests.has(dstAddr) {
+		t.Error("the server-first destination was not marked")
 	}
 }
 

@@ -3,13 +3,17 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -277,15 +281,21 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimeSession)
 	cfg := exactMock("cfg", time.Second, models.LifetimeSession)
 	cfg.Spec.Metadata = map[string]string{"type": "config"}
-	mm := stagedManager(t, nil, []*models.Mock{a, cfg})
+	w := exactMock("w", 2*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{a, cfg, w})
+	mm.ServeExactWorker([]string{"w"})
 	mm.ServeExactPool("-", []string{"a"})
 	mm.ServeExactTest("T", []*models.Mock{a})
 	mm.ResetForReplaySession()
 	if test, _, _, ok := mm.ExactTestOutcome(); !ok || test != "" {
 		t.Fatalf("the previous session's test is still read: %q %v", test, ok)
 	}
+	// Its worker scope goes too, from this view and every one after it.
 	sess, _ := mm.GetSessionMocks()
 	equalNames(t, "after the reset", sess, "cfg")
+	mm.ServeExactPool("-", nil)
+	sess, _ = mm.GetSessionMocks()
+	equalNames(t, "a view installed after the reset", sess, "cfg")
 	if mm.WindowSnapshot().FirstTestFired || mm.WindowSnapshot().Active {
 		t.Fatal("the next session starts with a test fired or open")
 	}
@@ -918,5 +928,616 @@ func TestAGenericTestMockIsReportedAsATestMock(t *testing.T) {
 	}
 	if state == nil || !state.DataPlane || state.Type != "config" {
 		t.Fatalf("reported %+v, want a test mock of type config", state)
+	}
+}
+
+// A call in flight when a test began (recorded in the gap before its window,
+// answered once it had begun) is that test's, and the replayed app may ask for
+// it in the gap, as it did at record. The pool view just before the test
+// answers it then (ServeExactPool's ahead), once, as the test's own: when the
+// test opens it counts as answered, first, and the test is served it no
+// more. Not answered in the gap, the test is served it as its own. A pool
+// view without ahead shows it nowhere, as before.
+func TestTheGapBeforeATestAnswersItsCallInFlight(t *testing.T) {
+	fetch := exactMock("fetch", 0, models.LifetimePerTest)
+	own := exactMock("own-2", time.Second, models.LifetimePerTest)
+	pool := exactMock("pool", 2*time.Second, models.LifetimeSession)
+
+	t.Run("answered in the gap", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		pt, _ := mm.GetPerTestMocksInWindow()
+		equalNames(t, "per-test in the gap", pt, "fetch")
+		if !mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("the call in flight was refused in the gap")
+		}
+		if mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("the call in flight answered twice in the gap")
+		}
+		if mm.OwnedByOpenTest(pt[0]) || mm.InFlightIntoOpenTest(pt[0]) {
+			t.Fatal("no test is open in the gap")
+		}
+		// A tier-routing parser reads only the reusable tiers with no test
+		// open: they show the call in flight too, until it answers.
+		mm2 := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm2.ServeExactPool("-", []string{"pool"}, fetch)
+		for name, read := range map[string]func() ([]*models.Mock, error){
+			"GetSessionMocks": mm2.GetSessionMocks, "GetSessionScopedMocks": mm2.GetSessionScopedMocks, "GetStartupMocks": mm2.GetStartupMocks,
+		} {
+			if rs, _ := read(); !strings.Contains(strings.Join(exactNames(rs), ","), "fetch") {
+				t.Fatalf("%s in the gap shows %v; want the call in flight", name, exactNames(rs))
+			}
+		}
+		// The replay drains the test that ended after the pool call: the
+		// gap's answer is not in it.
+		if names := consumedNames(mm.GetConsumedMocks()); len(names) != 0 {
+			t.Fatalf("the ended test's drain read %v; the gap's answer is the next test's", names)
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		if names := consumedNames(mm.GetConsumedMocks()); strings.Join(names, ",") != "fetch" {
+			t.Fatalf("test-2's drain read %v; want the gap's answer, flagged as test-2 opened", names)
+		}
+		if !mm.InFlightIntoOpenTest(fetch) || mm.InFlightIntoOpenTest(own) {
+			t.Fatal("test-2's call in flight is its own in flight, and only it")
+		}
+		pt, _ = mm.GetPerTestMocksInWindow()
+		equalNames(t, "per-test in test-2", pt, "own-2")
+		if !mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("test-2's own mock was refused")
+		}
+		mm.ServeExactPool("-", []string{"pool"})
+		test, consumed, unconsumed, ok := mm.ExactTestOutcome()
+		if !ok || test != "test-2" || strings.Join(consumed, ",") != "fetch,own-2" || len(unconsumed) != 0 {
+			t.Fatalf("outcome %q consumed %v unconsumed %v", test, consumed, unconsumed)
+		}
+	})
+
+	t.Run("not answered in the gap", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		pt, _ := mm.GetPerTestMocksInWindow()
+		equalNames(t, "per-test in test-2", pt, "fetch", "own-2")
+		if !mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("the call in flight was refused in its test")
+		}
+		mm.ServeExactPool("-", []string{"pool"})
+		if _, consumed, unconsumed, _ := mm.ExactTestOutcome(); strings.Join(consumed, ",") != "fetch" || strings.Join(unconsumed, ",") != "own-2" {
+			t.Fatalf("consumed %v unconsumed %v", consumed, unconsumed)
+		}
+	})
+
+	t.Run("a pool view without ahead", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"})
+		if pt, _ := mm.GetPerTestMocksInWindow(); len(pt) != 0 {
+			t.Fatalf("the gap serves %v; want none", exactNames(pt))
+		}
+		if mm.DeleteFilteredMock(*fetch) {
+			t.Fatal("a call no view shows was answered")
+		}
+	})
+
+	t.Run("a pool view named again keeps what the gap answered", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		pt, _ := mm.GetPerTestMocksInWindow()
+		if !mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("the call in flight was refused in the gap")
+		}
+		mm.AheadVariables().Bind(models.VariableBinding{Name: "id", Value: "live-7", Mock: "fetch"})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		if pt, _ := mm.GetPerTestMocksInWindow(); len(pt) != 0 {
+			t.Fatalf("the gap, named again, serves %v; the call in flight answered once", exactNames(pt))
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		pt, _ = mm.GetPerTestMocksInWindow()
+		equalNames(t, "per-test in test-2", pt, "own-2")
+		if names := consumedNames(mm.GetConsumedMocks()); strings.Join(names, ",") != "fetch" {
+			t.Fatalf("test-2's drain read %v; want the gap's answer once", names)
+		}
+		mm.StartVariables(nil)
+		if got := boundNames(mm.BoundVariables()); got != "id" {
+			t.Fatalf("test-2 begins with %q bound; want what its call in flight bound before the gap was named again", got)
+		}
+	})
+
+	t.Run("a gap answer for a test that did not open is no consume of the one that did", func(t *testing.T) {
+		for _, next := range []string{"another pool view", "another test"} {
+			mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+			mm.ServeExactPool("-", []string{"pool"}, fetch)
+			pt, _ := mm.GetPerTestMocksInWindow()
+			if !mm.DeleteFilteredMock(*pt[0]) {
+				t.Fatal("the call in flight was refused in the gap")
+			}
+			if next == "another pool view" {
+				mm.ServeExactPool("-", []string{"pool"})
+			}
+			mm.ServeExactTest("test-3", []*models.Mock{own})
+			if names := consumedNames(mm.GetConsumedMocks()); len(names) != 0 {
+				t.Fatalf("%s: test-3's drain read %v; the gap answered test-2's call", next, names)
+			}
+		}
+	})
+
+	t.Run("what the gap's answers bound is the next test's", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.StartVariables(nil)
+		mm.Variables().Bind(models.VariableBinding{Name: "t1", Value: "v1", Mock: "own-1"})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		// The next test's calls in flight bind in its scope, begun early
+		// (AheadVariables, which the matcher picks for them: InAheadScope).
+		if !mm.InAheadScope(fetch) || mm.InAheadScope(own) || mm.InAheadScope(pool) {
+			t.Fatal("only the next test's call in flight binds in its scope in the gap")
+		}
+		mm.AheadVariables().Bind(models.VariableBinding{Name: "id", Value: "live-7", Recorded: "rec-7", Mock: "fetch"})
+		mm.AheadVariables().Bind(models.VariableBinding{Name: "stray", Value: "s", Mock: "unanswered"})
+		if got := boundNames(mm.BoundVariables()); got != "t1" {
+			t.Fatalf("the ended test reads %s; the next test's calls bind in a scope of their own", got)
+		}
+		pt, _ := mm.GetPerTestMocksInWindow()
+		if !mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("the call in flight was refused in the gap")
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		mm.StartVariables([]models.VariableBinding{{Name: "g", Value: "given"}, {Name: "id", Value: "from-the-request"}})
+		got := mm.BoundVariables()
+		if boundNames(got) != "g,id" {
+			t.Fatalf("test-2 begins with %s; want its given values and what its answered call in flight bound", boundNames(got))
+		}
+		for _, b := range got {
+			if b.Name == "id" && (b.Value != "from-the-request" || !b.Given) {
+				t.Fatalf("a given value wins over a carried one: %+v", b)
+			}
+		}
+		// Not given, it is carried as bound.
+		mm2 := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm2.ServeExactPool("-", []string{"pool"}, fetch)
+		mm2.AheadVariables().Bind(models.VariableBinding{Name: "id", Value: "live-7", Recorded: "rec-7", Mock: "fetch"})
+		pt, _ = mm2.GetPerTestMocksInWindow()
+		mm2.DeleteFilteredMock(*pt[0])
+		mm2.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		mm2.StartVariables(nil)
+		if got := mm2.BoundVariables(); len(got) != 1 || got[0].Value != "live-7" || got[0].Given {
+			t.Fatalf("test-2 begins with %+v; want id bound to live-7, as made", got)
+		}
+	})
+
+	t.Run("several answered in the gap count first, in the order they answered", func(t *testing.T) {
+		poll := exactMock("poll", 500*time.Millisecond, models.LifetimePerTest)
+		mm := stagedManager(t, []*models.Mock{fetch, poll, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"}, fetch, poll)
+		pt, _ := mm.GetPerTestMocksInWindow()
+		byName := map[string]*models.Mock{}
+		for _, mk := range pt {
+			byName[mk.Name] = mk
+		}
+		// Answered in the other order than recorded.
+		for _, name := range []string{"poll", "fetch"} {
+			if !mm.DeleteFilteredMock(*byName[name]) {
+				t.Fatalf("%s was refused in the gap", name)
+			}
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, poll, own})
+		if names := consumedNames(mm.GetConsumedMocks()); strings.Join(names, ",") != "poll,fetch" {
+			t.Fatalf("test-2's drain read %v; want the gap's answers in the order they answered", names)
+		}
+		pt, _ = mm.GetPerTestMocksInWindow()
+		if !mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("test-2's own mock was refused")
+		}
+		mm.ServeExactPool("-", []string{"pool"})
+		if _, consumed, _, _ := mm.ExactTestOutcome(); strings.Join(consumed, ",") != "poll,fetch,own-2" {
+			t.Fatalf("test-2 consumed %v; want the gap's answers first, in their order", consumed)
+		}
+	})
+
+	t.Run("the consume flagged as the test opens is the copy the gap served", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		pt, _ := mm.GetPerTestMocksInWindow()
+		served := *pt[0]
+		served.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+		if !mm.DeleteFilteredMock(served) {
+			t.Fatal("the call in flight was refused in the gap")
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		states := mm.GetConsumedMocks()
+		if len(states) != 1 || states[0].Name != "fetch" {
+			t.Fatalf("test-2's drain read %v", consumedNames(states))
+		}
+		if _, ok := states[0].ReqBodyNoise["body.at"]; !ok {
+			t.Fatalf("the consume carries %v; want what the served copy detected (body.at)", states[0].ReqBodyNoise)
+		}
+	})
+
+	t.Run("a copy the gap served answers nothing in the test", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{fetch, own}, []*models.Mock{pool})
+		mm.ServeExactPool("-", []string{"pool"}, fetch)
+		pt, _ := mm.GetPerTestMocksInWindow()
+		mm.ServeExactTest("test-2", []*models.Mock{fetch, own})
+		if mm.DeleteFilteredMock(*pt[0]) {
+			t.Fatal("a copy read in the gap, unanswered there, answered in the test: it was served in another view")
+		}
+	})
+}
+
+func consumedNames(states []models.MockState) []string {
+	out := make([]string, 0, len(states))
+	for _, st := range states {
+		out = append(out, st.Name)
+	}
+	return out
+}
+
+func boundNames(bs []models.VariableBinding) string {
+	out := make([]string, 0, len(bs))
+	for _, b := range bs {
+		out = append(out, b.Name)
+	}
+	return strings.Join(out, ",")
+}
+
+// varMock is an HTTP recording of POST path with body {"key":"k-1"}, the
+// variable key at body.key (bound there, or used there when use: bound by an
+// earlier call), its answer carrying it at body.echo.
+func varMock(name, path string, use bool, lifetime models.Lifetime) *models.Mock {
+	return varMockOf(name, path, "k-1", use, lifetime)
+}
+
+// varMockOf is varMock with key recorded as recorded.
+func varMockOf(name, path, recorded string, use bool, lifetime models.Lifetime) *models.Mock {
+	v := models.MockVariable{Recorded: recorded, Answer: []string{"body.echo"}}
+	if use {
+		v.Use = []string{"body.key"}
+	} else {
+		v.Bind = "body.key"
+	}
+	resp := `{"echo":"` + recorded + `"}`
+	m := &models.Mock{Version: "api.keploy.io/v1beta1", Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{"type": models.HTTPClient},
+		HTTPReq: &models.HTTPReq{Method: "POST", URL: "http://deps" + path,
+			Header: map[string]string{"Host": "deps", "Content-Type": "application/json"}, Body: `{"key":"` + recorded + `"}`},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Content-Length": strconv.Itoa(len(resp))}, Body: resp},
+		Variables:        models.MockVariables{"key": v},
+		ReqTimestampMock: exactT0, ResTimestampMock: exactT0.Add(time.Millisecond),
+	}}
+	m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = lifetime, true
+	return m
+}
+
+// postKey sends POST path with body {"key":key} through the real HTTP
+// integration and returns the status and body answered.
+func postKey(t *testing.T, mm *MockManager, path, key string) string {
+	t.Helper()
+	body := `{"key":"` + key + `"}`
+	resp, got, _ := serveOne(t, httpint.New(zap.NewNop()), mm, "POST "+path+" HTTP/1.1\r\nHost: deps\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if resp == nil {
+		return "no answer"
+	}
+	return strconv.Itoa(resp.StatusCode) + " " + string(got)
+}
+
+// A call of the gap that is not the next test's in flight reads the variables
+// the test that ended bound, as it does with no call named in flight: a pool
+// recording that uses one is answered with its value.
+func TestACallOfTheGapReadsTheEndedTestsVariables(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, named := range []bool{false, true} {
+		own := varMock("own-1", "/charge", false, models.LifetimePerTest)
+		beat := varMock("beat", "/beat", true, models.LifetimeSession)
+		fetch := exactMock("fetch", time.Second, models.LifetimePerTest)
+		mm := stagedManager(t, []*models.Mock{own, fetch}, []*models.Mock{beat})
+		mm.ServeExactTest("test-1", []*models.Mock{own})
+		mm.StartVariables(nil)
+		if got := postKey(t, mm, "/charge", "x-1"); got != `200 {"echo":"x-1"}` {
+			t.Fatalf("test-1's call was answered %s", got)
+		}
+		var ahead []*models.Mock
+		if named {
+			ahead = []*models.Mock{fetch}
+		}
+		mm.ServeExactPool("-", []string{"beat"}, ahead...)
+		if got := postKey(t, mm, "/beat", "x-1"); got != `200 {"echo":"x-1"}` {
+			t.Fatalf("named %v: the pool's call in the gap was answered %s; want key read from test-1's binding", named, got)
+		}
+		if b, ok := mm.Variables().Lookup("key"); !ok || b.Value != "x-1" {
+			t.Fatalf("named %v: the gap reads key as %+v, %v", named, b, ok)
+		}
+		if got := boundNames(mm.BoundVariables()); got != "key" {
+			t.Fatalf("named %v: test-1's variables read %q after the pool call", named, got)
+		}
+	}
+}
+
+// The next test's call in flight, answered in the gap before it, binds in that
+// test's scope, begun early, not the ended test's: it is answered whatever the
+// ended test bound, and what it binds is the next test's, exactly as when it
+// is answered inside that test. A later call of the next test that uses the
+// variable is answered with the call in flight's value.
+func TestTheNextTestsCallInFlightBindsInItsScopeInTheGap(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		name           string
+		live, recorded string // the call in flight's key: live, and as recorded
+	}{
+		{"another value of the variable", "x-2", "k-2"},
+		{"the same value recorded as another", "x-1", "k-2"},
+		{"the same value as recorded alike", "x-1", "k-1"},
+	} {
+		for _, inGap := range []bool{true, false} {
+			own1 := varMock("own-1", "/charge", false, models.LifetimePerTest)
+			fetch := varMockOf("fetch", "/poll", c.recorded, false, models.LifetimePerTest)
+			own2 := varMockOf("own-2", "/use", c.recorded, true, models.LifetimePerTest)
+			mm := stagedManager(t, []*models.Mock{own1, fetch, own2}, nil)
+			mm.ServeExactTest("test-1", []*models.Mock{own1})
+			mm.StartVariables(nil)
+			if got := postKey(t, mm, "/charge", "x-1"); got != `200 {"echo":"x-1"}` {
+				t.Fatalf("%s: test-1's call was answered %s", c.name, got)
+			}
+			want := `200 {"echo":"` + c.live + `"}`
+			if inGap {
+				mm.ServeExactPool("-", nil, fetch)
+				if got := postKey(t, mm, "/poll", c.live); got != want {
+					t.Fatalf("%s: the call in flight was answered %s in the gap; want %s", c.name, got, want)
+				}
+				mm.ServeExactTest("test-2", []*models.Mock{fetch, own2})
+				mm.StartVariables(nil)
+			} else {
+				mm.ServeExactPool("-", nil)
+				mm.ServeExactTest("test-2", []*models.Mock{fetch, own2})
+				mm.StartVariables(nil)
+				if got := postKey(t, mm, "/poll", c.live); got != want {
+					t.Fatalf("%s (control): the call in flight was answered %s in test-2; want %s", c.name, got, want)
+				}
+			}
+			if got := boundNames(mm.BoundVariables()); got != "key" {
+				t.Fatalf("%s, in the gap %v: test-2 holds %q bound; want key, the call in flight's", c.name, inGap, got)
+			}
+			if got := postKey(t, mm, "/use", c.live); got != want {
+				t.Fatalf("%s, in the gap %v: test-2's call that uses key was answered %s; want %s", c.name, inGap, got, want)
+			}
+		}
+	}
+}
+
+// The set's worker scope (ServeExactWorker): a worker-scope mock the run has
+// reached the place of answers whether a test is open or not, after the open
+// test's own, and at most one request in the staging, through whichever door
+// a parser consumes it: a consume in a test spends it for the gap after and
+// the next test too. One the run has not reached the place of answers
+// nothing, in a test or out of one, until a later ServeExactWorker names it.
+func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	boot := httpCall("w-boot", time.Second, "/receive")
+	later := httpCall("w-later", 2*time.Second, "/receive")
+	pool := httpCall("pool", 3*time.Second, "/pool")
+	mm := stagedManager(t, nil, []*models.Mock{own, boot, later, pool})
+
+	// The set's start: only the boot one is reached.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	sess, _ := mm.GetSessionScopedMocks()
+	equalNames(t, "before the first test", sess, "w-boot", "pool")
+
+	// A test opens: its own mock first, then the reached worker mock; the
+	// pool is not shown in a test, nor the worker mock not reached yet.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if pt, _ := mm.GetPerTestMocksInWindow(); len(pt) == 0 || pt[0].Name != "own" {
+		t.Fatalf("in a test the test's own mock is not read first: %v", exactNames(pt))
+	}
+	sess, _ = mm.GetSessionScopedMocks()
+	if names := strings.Join(exactNames(sess), ","); strings.Contains(names, "pool") || strings.Contains(names, "w-later") || !strings.Contains(names, "w-boot") {
+		t.Fatalf("in a test the reusable read shows %v; want w-boot, and neither the pool nor w-later", names)
+	}
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the reached worker mock did not answer in a test: %s", got)
+	}
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock answered twice in a test: %s", got)
+	}
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock whose place the run has not reached answered: %s", got)
+	}
+
+	// T1 ends: w-later's place (after T1) is reached. w-boot, spent in T1,
+	// stays spent in the gap and the next test.
+	mm.ServeExactWorker([]string{"w-boot", "w-later"})
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock spent in a test answered again in the gap after: %s", got)
+	}
+	mm.ServeExactWorker([]string{"w-boot", "w-later"})
+	mm.ServeExactTest("T2", nil)
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a worker mock placed after T1 did not answer in T2: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock answered again after its one request: %s", got)
+	}
+	// The next staging answers afresh.
+	mm.SetMocksWithWindow(nil, []*models.Mock{own, boot, later, pool}, models.BaseTime, time.Now())
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", nil)
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the next staging's worker mock did not answer: %s", got)
+	}
+}
+
+// A miss's diagnosis (FindStagedNotOwned) names a staged recording the open
+// view does not show and no call of the set consumed: another test's, in a
+// test or between tests, and a worker-scope one whose place the run has not
+// reached. It never names one the view shows (the pool between tests, a
+// reached worker mock), the open test's own, or one a call already consumed.
+// Each recording is named for one miss at most, as it answers one call at
+// most: two identical calls made elsewhere name its two recordings, in
+// recorded order, and a third names none. The next staging starts afresh.
+func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	other := httpCall("other", time.Second, "/delete")
+	inT1 := httpCall("other-in-t1", 1500*time.Millisecond, "/archive")
+	consumed := httpCall("consumed", 1700*time.Millisecond, "/notify")
+	boot := httpCall("w-boot", 2*time.Second, "/receive")
+	later := httpCall("w-later", 3*time.Second, "/receive")
+	pool := httpCall("pool", 4*time.Second, "/pool")
+	pollA := httpCall("poll-a", 5*time.Second, "/jobs")
+	pollB := httpCall("poll-b", 6*time.Second, "/jobs")
+	all := []*models.Mock{own, other, inT1, consumed, boot, later, pool, pollA, pollB}
+	mm := stagedManager(t, nil, all)
+	find := func(name string) string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+	}
+	jobs := func() string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
+	}
+
+	// The set's start, no test open: any test's recording is named, and the
+	// worker mock not reached; the pool and the reached worker mock are shown.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	for name, want := range map[string]string{"other": "other", "w-later": "w-later", "w-boot": "", "pool": ""} {
+		if got := find(name); got != want {
+			t.Errorf("before the first test, %s: found %q, want %q", name, got, want)
+		}
+	}
+	if got := find("other"); got != "" {
+		t.Errorf("a recording already named was named for a second miss: %q", got)
+	}
+	if a, b, none := jobs(), jobs(), jobs(); a != "poll-a" || b != "poll-b" || none != "" {
+		t.Errorf("three identical calls named %q, %q, %q; want poll-a, poll-b, then none", a, b, none)
+	}
+
+	// A test open: never its own, still another test's.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := find("own"); got != "" {
+		t.Errorf("in T1 its own recording was named: %q", got)
+	}
+	if got := find("other-in-t1"); got != "other-in-t1" {
+		t.Errorf("in T1 another test's recording was not named: %q", got)
+	}
+
+	// Its owner is not a test that has begun until it begins.
+	if mm.StagedOwnerBegun("consumed") || !mm.StagedOwnerBegun("own") {
+		t.Errorf("owners begun: consumed %v, own %v; want only own's test begun", mm.StagedOwnerBegun("consumed"), mm.StagedOwnerBegun("own"))
+	}
+
+	// Another test consumes its recording: no later miss names it.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T2", []*models.Mock{consumed})
+	if !mm.StagedOwnerBegun("consumed") {
+		t.Error("consumed's test began, and its owner is not read as begun")
+	}
+	if !mm.DeleteFilteredMock(*consumed) {
+		t.Fatal("T2 could not consume its own recording")
+	}
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := find("consumed"); got != "" {
+		t.Errorf("a recording its test consumed was named after: %q", got)
+	}
+	// Nor one the worker scope spent.
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the reached worker mock did not answer: %s", got)
+	}
+	if got := find("w-boot"); got != "" {
+		t.Errorf("a spent worker mock was named: %q", got)
+	}
+	// The next staging begins afresh: no test of it has begun, and a
+	// recording named in the previous one is named again.
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.ServeExactPool("k", nil)
+	if mm.StagedOwnerBegun("own") || mm.StagedOwnerBegun("consumed") {
+		t.Error("a test begun in the previous staging is read as begun in the next")
+	}
+	if got := find("other"); got != "other" {
+		t.Errorf("the next staging did not name a recording the previous one named: %q", got)
+	}
+}
+
+// A recording of a test not begun yet, which the agent keeps on disk and the
+// trees do not hold, is named from the recording source by its request key
+// (FindStagedNotOwnedByKeys), read on each such miss and kept by nobody. The
+// source's mocks take the same filters as the trees': never the open test's
+// own, each named once; and one passed over by name (named already, the open
+// test's) is never decoded. Without keys only the trees are looked in, and a
+// session reset drops the source.
+func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
+	pool := httpCall("pool", 0, "/pool")
+	onDisk := httpCall("t2-delete", time.Second, "/delete")
+	own := httpCall("t1-own", 2*time.Second, "/delete")
+	mm := stagedManager(t, nil, []*models.Mock{pool})
+	var asked, decoded []string
+	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		asked = append(asked, string(kind)+" "+strings.Join(keys, ","))
+		if kind != models.HTTP || len(keys) != 1 || keys[0] != "DELETE /delete" {
+			return nil
+		}
+		for _, m := range []*models.Mock{onDisk, own} {
+			m := m
+			if !visit(m.Name, func() (*models.Mock, error) { decoded = append(decoded, m.Name); return m, nil }) {
+				break
+			}
+		}
+		return nil
+	})
+	find := func(key, name string) string {
+		var keys []string
+		if key != "" {
+			keys = []string{key}
+		}
+		return mm.FindStagedNotOwnedByKeys(models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := find("", "t2-delete"); got != "" || len(asked) != 0 {
+		t.Fatalf("with no key the source was read (%v), naming %q", asked, got)
+	}
+	if got := find("DELETE /delete", "t2-delete"); got != "t2-delete" {
+		t.Fatalf("a recording kept on disk was not named before its test: %q", got)
+	}
+	if got := find("DELETE /delete", "t2-delete"); got != "" {
+		t.Fatalf("a recording kept on disk was named twice: %q", got)
+	}
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := find("DELETE /delete", "t1-own"); got != "" {
+		t.Fatalf("the open test's own recording was named from the source: %q", got)
+	}
+	if len(asked) != 3 {
+		t.Fatalf("the source was read %v; want once per keyed miss", asked)
+	}
+	// t2-delete was decoded once, as the first miss named it: the second
+	// miss passed it over by name (and decoded t1-own, which is not that
+	// call), and the third passed over both, named and the open test's own.
+	if want := []string{"t2-delete", "t1-own"}; !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded %v; want %v: a recording named already, or the open test's own, is passed over by name", decoded, want)
+	}
+	mm.ResetForReplaySession()
+	mm.ServeExactPool("k", nil)
+	if got := find("DELETE /delete", "t2-delete"); got != "" || len(asked) != 3 {
+		t.Fatalf("after a session reset the source was still read (%v), naming %q", asked, got)
+	}
+}
+
+// A pool view's ahead (the next test's call in flight, ServeExactPool) is the
+// view's own: answered in the gap as that test's, it is flagged consumed only
+// once that test opens. An identical second call in the gap is an extra call,
+// and never names it as a recording made elsewhere, answered or not.
+func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
+	ahead := httpCall("t2-fetch", time.Second, "/fetch")
+	mm := stagedManager(t, nil, []*models.Mock{ahead})
+	mm.ServeExactPool("k", nil, ahead)
+	named := func() string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
+	}
+	if got := named(); got != "" {
+		t.Fatalf("before it answered, the next test's call in flight was named as made elsewhere: %q", got)
+	}
+	if got := pollFirst(t, mm, "t2-fetch"); got != "t2-fetch" {
+		t.Fatalf("the call in flight did not answer in the gap: %s", got)
+	}
+	if got := named(); got != "" {
+		t.Fatalf("an identical second call in the gap named the next test's call in flight %q, which answered here already", got)
 	}
 }

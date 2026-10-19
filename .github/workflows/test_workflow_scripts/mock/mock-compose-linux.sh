@@ -280,6 +280,11 @@ assert_agent_guarded rec.log
 MOCKS=$(priced_mocks)
 echo "recorded /price/ mocks: $MOCKS"
 [ "$MOCKS" -eq 3 ] || { echo "FAIL: expected 3 recorded /price/ calls, got $MOCKS — the app was released before the proxy was armed"; FAIL=1; }
+# Compose stops the agent with the project, and it closes its mock stream
+# without a word that it handed over every mock: the recording is saved, and
+# keploy says it cannot confirm it whole, naming the set.
+grep "keploy cannot confirm this recording holds them all" rec.log | grep -q '"mock-set": "e2e"' ||
+  { echo "FAIL: a compose recording whose agent closed its stream unconfirmed was saved without saying so"; FAIL=1; }
 cleanup
 
 # Step 2 runs the form keploy's docs give, `sudo docker compose up`. keploy is

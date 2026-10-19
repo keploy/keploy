@@ -1,5 +1,6 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 # This script tests the grpc-secret sample application with Keploy's sanitize functionality.
 # It records gRPC requests with secrets in headers and body, sanitizes them, and validates test results.
@@ -66,6 +67,7 @@ wait_for_port_release() {
     local timeout_seconds=${2:-15}
 
     echo "Waiting for port ${port} to be released..."
+    local i
     for ((i=0; i<timeout_seconds; i++)); do
         if ! (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
             echo "Port ${port} is free"
@@ -97,7 +99,9 @@ check_for_errors() {
     echo "Checking for errors in $logfile..."
     if [ -f "$logfile" ]; then
         # Check for ERROR lines (excluding non-critical ones)
-        if awk '/ERROR/ && !/Unsupported DNS query type/ { exit 0 } END { exit 1 }' "$logfile"; then
+        # A flag, not `exit 0` in the rule: END runs after that exit, and its own
+        # exit 1 won, so this check never failed a log.
+        if awk '/ERROR/ && !/Unsupported DNS query type/ { found = 1 } END { exit !found }' "$logfile"; then
             echo "Error found in $logfile"
             cat "$logfile"
             exit 1
@@ -111,39 +115,17 @@ check_for_errors() {
     echo "No critical errors found in $logfile."
 }
 
-# Kills the keploy process gracefully
+# Stops the recording this lane started: a SIGTERM to its pipeline's keploy
+# (rec_keploy, do_record_iteration's), never to whichever process named
+# keploy pgrep finds on the host, and no SIGKILL sweep of every keploy two
+# seconds later. A stop drains what the agent captured for as long as that
+# takes, and its log is checked for what keploy says on the way out;
+# wait_recording_end bounds a stop that hangs, on its progress.
 kill_keploy_process() {
-    pid=$(pgrep keploy | head -n 1)
-    if [ -n "$pid" ]; then
-        echo "$pid Keploy PID"
-        echo "Killing keploy"
-        
-        # Try graceful shutdown first
-        if ! kill "$pid" 2>/dev/null; then
-            echo "Graceful kill failed, trying with sudo..."
-            if ! sudo kill "$pid" 2>/dev/null; then
-                echo "Sudo kill failed, trying SIGKILL..."
-                if ! sudo kill -9 "$pid" 2>/dev/null; then
-                    echo "Warning: Could not kill keploy process $pid"
-                else
-                    echo "Successfully killed keploy with SIGKILL"
-                fi
-            else
-                echo "Successfully killed keploy with sudo"
-            fi
-        else
-            echo "Successfully killed keploy gracefully"
-        fi
-        
-        # Wait and verify the process is gone
-        sleep 2
-        if pgrep keploy >/dev/null; then
-            echo "Warning: Keploy process may still be running"
-            pgrep keploy | xargs -r sudo kill -9 2>/dev/null || true
-        fi
-    else
-        echo "No keploy process found to kill"
-    fi
+    local pid=${rec_keploy:?kill_keploy_process: no recording of this lane to stop}
+    echo "$pid Keploy PID"
+    echo "Stopping keploy"
+    kill "$pid" 2>/dev/null || sudo kill "$pid" 2>/dev/null || echo "Warning: could not signal keploy process $pid"
 }
 
 # Send all 4 gRPC requests
@@ -339,8 +321,13 @@ do_record_iteration() {
     ensure_grpc_secret_stopped
 
     # shellcheck disable=SC2086
-    "$RECORD_BIN" record $extra_flags -c "./grpc-secret" --generateGithubActions=false > >(tee "${app_name}.txt") 2>&1 &
-    local record_pid=$!
+    "$RECORD_BIN" record $extra_flags -c "./grpc-secret" --generateGithubActions=false 2>&1 | tee "${app_name}.txt" &
+    # tee ends once keploy and everything it started (the agent, the app)
+    # have exited: they all write to it. Waiting for keploy alone, through a
+    # process substitution's tee, checked the log before its last lines
+    # were in it.
+    local rec_pid=$! rec_keploy
+    rec_keploy=$(jobs -p %%)
 
     send_grpc_requests &
     local request_pid=$!
@@ -348,7 +335,9 @@ do_record_iteration() {
 
     kill_keploy_process
 
-    wait "${record_pid}" || true
+    # Wait for the recording to end, not for keploy's own exit: the log is
+    # complete only once every process writing to it has ended.
+    wait_recording_end "$rec_pid" "${app_name}.txt" || exit 1
     ensure_grpc_secret_stopped
 
     check_for_errors "${app_name}.txt"

@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
@@ -203,6 +204,68 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 	return true, wrapped, p.relayReal(ctx, src, br, dec, dstAddr, connID, predialed)
 }
 
+// realLabelAt is the mock.real entry (proven switch) that a connection to
+// dstAddr reaches by its address alone (realdeps.Decider.AtAccept), and
+// whether there is one: not for an address several name entries share, which
+// only a client's bytes would name.
+func (p *Proxy) realLabelAt(dstAddr string) (string, bool) {
+	st := p.realList()
+	if st == nil {
+		return "", false
+	}
+	dst, err := containerkey.ParseAddrPort(dstAddr)
+	if err != nil {
+		return "", false
+	}
+	dec := (&realdeps.Decider{List: st.list, Book: st.book}).AtAccept(dst, "")
+	if dec.Verdict != realdeps.Real {
+		return "", false
+	}
+	return dec.Label, true
+}
+
+// treeRealConn is a caller's connection to a mock.real destination that a
+// listener of the run's own tree serves (serveTreeListener): it is relayed to
+// that listener, live, and counted as mock.real counts a relay to the
+// destination itself (relayReal). The caller's bytes use the destination
+// (Tracker.Sent), and the listener's answer to it reaches it
+// (Tracker.Answered).
+type treeRealConn struct {
+	net.Conn
+	p     *Proxy
+	label string
+	id    int64
+	// live: the live handler serves it, and may capture it as a test case
+	// (Tracker.SentLive).
+	live bool
+}
+
+func (c *treeRealConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		if c.live {
+			c.p.realTracker.SentLive(c.id, c.label)
+		} else {
+			c.p.realTracker.Sent(c.id, c.label)
+		}
+	}
+	return n, err
+}
+
+func (c *treeRealConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		c.p.realTracker.Answered(c.label)
+	}
+	return n, err
+}
+
+// CloseWrite forwards a half-close to the connection underneath, as
+// liveReader does: an embedded net.Conn does not promote it.
+func (c *treeRealConn) CloseWrite() error {
+	return util.CloseWriteIfPossible(c.Conn)
+}
+
 // relayReal dials a REAL connection's destination and relays every byte to
 // it (realdeps.Relay). A dial that fails is the app's to see, as it would be
 // without keploy: its connection is reset, and the test's REAL row counts the
@@ -246,6 +309,14 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 			p.realTracker.Incomplete(dstAddr, why)
 			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
 		},
+		// The app's side over, the connection waits on the real server's
+		// answer: no work of keploy's, which a test's end, and a set's
+		// end, do not wait on (integrations.MarkIdle), as a record waits
+		// on no real server. Unmarked, an app that ended its side (stopped
+		// at the run's last set, or giving up on a call) held each end's
+		// read until the watchdog gave up, while the destination stayed
+		// silent.
+		AwaitsAnswer: func() func() { return integrations.MarkIdle(ctx) },
 	}
 	if err := r.Run(ctx); err != nil && !isNetworkClosedErr(err) && !errors.Is(err, context.Canceled) {
 		logger.Debug("a mock.real connection ended with an error", zap.Error(err))
@@ -329,10 +400,11 @@ func (p *Proxy) realAtHandshake(dest *agent.NetworkAddress) (string, bool) {
 // containerRepoOfConn is the image repository of the container accepted
 // connection connID reaches, for a list with container: entries: the one the
 // keyer placed it at, waiting, if the index did not place it at its accept,
-// for the containers the index was placing then (containerkey.Keyer.Placed,
-// never a configuration's read), so a container Docker started a moment
-// before is a mock.real destination, not a dependency recorded under its
-// key. Else what the index says of addr now (containerRepoAt).
+// for the containers the index was placing then and, placing none there, for
+// a list of the daemon asked then (containerkey.Keyer.Placed, never a
+// configuration's read), so a container Docker started a moment before is a
+// mock.real destination, not a dependency recorded under its key. Else what
+// the index says of addr now (containerRepoAt).
 func (p *Proxy) containerRepoOfConn(ctx context.Context, st *realState, addr string, connID int64) string {
 	if !st.list.HasContainers() {
 		return ""

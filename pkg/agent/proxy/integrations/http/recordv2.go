@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -648,6 +649,9 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 
 	var respBody []byte
+	// wire is the body as the server sent it, encoded (respBody once decoded):
+	// what a digest over the encoded bytes was computed over.
+	var wire []byte
 	if respParsed.Body != nil {
 		respBody, err = io.ReadAll(respParsed.Body)
 		// A body its client read in part is recorded as far as it read it:
@@ -659,6 +663,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			}
 			cut = true
 		}
+		wire = respBody
 		if enc := respParsed.Header.Get("Content-Encoding"); enc != "" {
 			// Read in part, a body with no length of its own (close-delimited)
 			// cannot be known to be whole either: it decodes as far as it goes.
@@ -690,7 +695,6 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		"operation": req.Method,
 		"connID":    connID,
 	}
-
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
 			zap.Any("metadata", utils.GetReqMeta(req)))
@@ -721,6 +725,16 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
+		}
+	}
+
+	// The digest headers the body matched as the server sent it, which a
+	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
+	// once the exchange is known to be recorded: passthrough traffic is not.
+	// Not of a body its client read only in part: no digest is of a part.
+	if !cut && !m.RespReadInPart {
+		if note := bodydigest.Note(pkg.ToYamlHTTPHeader(respParsed.Header), respBody, wire); note != "" {
+			meta[models.MetadataBodyDigestsKey] = note
 		}
 	}
 

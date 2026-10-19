@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -250,6 +251,8 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	//Add the content length to the headers.
 	var respBody []byte
+	// wire is the body as the server sent it, encoded (respBody once decoded).
+	var wire []byte
 	//Checking if the body of the response is empty or does not exist.
 	if respParsed.Body != nil { // Read
 		respBody, err = io.ReadAll(respParsed.Body)
@@ -257,6 +260,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}
+		wire = respBody
 
 		if respParsed.Header.Get("Content-Encoding") != "" {
 			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
@@ -282,7 +286,6 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"operation": req.Method,
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
-
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -315,6 +318,13 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
+	}
+
+	// The digest headers the body matched as the server sent it, which a
+	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
+	// once the exchange is known to be recorded: passthrough traffic is not.
+	if note := bodydigest.Note(pkg.ToYamlHTTPHeader(respParsed.Header), respBody, wire); note != "" {
+		meta[models.MetadataBodyDigestsKey] = note
 	}
 
 	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the

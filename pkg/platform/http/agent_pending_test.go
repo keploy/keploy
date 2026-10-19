@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,5 +142,116 @@ func TestAgentClient_StreamsSayTheyDrainAfterTheStop(t *testing.T) {
 	}
 	if g := reopen(context.Background()); g != "/incoming=" {
 		t.Errorf("a stream not marked to drain reconnected with the header: %s", g)
+	}
+}
+
+// The frame streams of a recording that watches for the agent's word of a stop
+// (models.WithAgentStopNotice: keploy record under docker compose) ask an agent
+// this client did not start to hold a stop for them
+// (models.DrainsOnAgentStopHeader), a reconnection too. A stream to an agent
+// this client started asks for the hold its own stop drains under instead.
+func TestAgentClient_StreamsAskAComposeAgentForItsWordOfAStop(t *testing.T) {
+	seen := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path + "=" + r.Header.Get(models.DrainsOnAgentStopHeader) + "/" + r.Header.Get(models.DrainsAfterStopHeader)
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	open := func(ctx context.Context) []string {
+		grp, gctx := errgroup.WithContext(ctx)
+		ctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+		_, _ = a.GetIncoming(ctx, models.IncomingOptions{})
+		_, _ = a.GetOutgoing(ctx, models.OutgoingOptions{})
+		if ch, err := a.GetMappings(ctx, models.IncomingOptions{}); err == nil {
+			for range ch {
+			}
+		}
+		if _, err := a.reopenStream(ctx, "incoming", http.MethodPost, "/incoming", []byte("{}")); err == nil {
+			t.Fatal("the agent answered 404, yet the stream reopened")
+		}
+		var got []string
+		for len(seen) > 0 {
+			got = append(got, <-seen)
+		}
+		return got
+	}
+	marked := models.WithAgentStopNotice(models.WithDrainsAfterStop(context.Background()))
+	got := open(marked)
+	if len(got) < 3 {
+		t.Fatalf("streams %v, want the three and a reconnection", got)
+	}
+	for _, g := range got {
+		if !strings.HasSuffix(g, "=true/") {
+			t.Errorf("a stream to a compose agent did not ask for its word of a stop: %s", g)
+		}
+	}
+	for _, g := range open(models.WithDrainsAfterStop(context.Background())) {
+		if !strings.HasSuffix(g, "=/") {
+			t.Errorf("a stream not watching for the agent's word asked for it: %s", g)
+		}
+	}
+	a.startedAgent.Store(true)
+	for _, g := range open(marked) {
+		if !strings.HasSuffix(g, "=/true") {
+			t.Errorf("a stream to an agent this client started: %s, want only the after-stop hold", g)
+		}
+	}
+}
+
+// WatchAgentStop closes once the agent answers its wait (204): a stop reached
+// it and it waits for this client. A request that fails is made again (an
+// agent compose starts again); an agent without the route (404) is not asked
+// again, and the watch never closes.
+func TestWatchAgentStopClosesOnTheAgentsWord(t *testing.T) {
+	saved := agentStopNoticeRetry
+	agentStopNoticeRetry = time.Millisecond
+	defer func() { agentStopNoticeRetry = saved }()
+
+	var asks atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != models.StopNoticePath {
+			http.NotFound(w, r)
+			return
+		}
+		if asks.Add(1) == 1 {
+			// The first wait fails as an agent going away mid-request does.
+			http.Error(w, "going away", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	select {
+	case <-a.WatchAgentStop(ctx):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("the watch did not close on the agent's word")
+	}
+	if n := asks.Load(); n != 2 {
+		t.Fatalf("asked %d times, want the failed wait and the answered one", n)
+	}
+
+	var old atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		old.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer legacy.Close()
+	b := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: legacy.URL}}}
+	watch := b.WatchAgentStop(ctx)
+	deadline := time.Now().Add(30 * time.Second)
+	for old.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-watch:
+		t.Fatal("the watch closed for an agent that predates the route")
+	default:
+	}
+	if n := old.Load(); n != 1 {
+		t.Fatalf("an agent without the route was asked %d times, want once", n)
 	}
 }

@@ -347,9 +347,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	winStart, winEnd := mockDb.CurrentTestWindow()
 	windowActive := !winStart.IsZero() && !winEnd.IsZero()
 	// mockInCurrentWindow reports whether a mock's recorded request timestamp
-	// lies within the active outer-test window. When no window is active
-	// (initial staging / between tests) every mock is treated as in-window
-	// so behaviour matches the pre-fix path.
+	// lies within the active outer-test window, or the mock was in flight
+	// when the window's test began (sent in the gap before it and answered
+	// inside it: integrations.InFlightOwner), which the windowed read serves
+	// as the test's own. When no window is active (initial staging / between
+	// tests) every mock is treated as in-window so behaviour matches the
+	// pre-fix path.
 	mockInCurrentWindow := func(mk *models.Mock) bool {
 		if !windowActive {
 			return true
@@ -358,7 +361,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if req.IsZero() {
 			return true
 		}
-		return !req.Before(winStart) && !req.After(winEnd)
+		if !req.Before(winStart) && !req.After(winEnd) {
+			return true
+		}
+		return integrations.InFlightIntoOpenTest(mockDb, mk)
 	}
 
 	// pool is the full merged pool, filled on first need. When the in-window
@@ -1194,8 +1200,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					ev, seen := evaluated[key]
 					if !seen {
 						// remove this log and if block
-						if actMsg != nil {
-							logger.Debug("Trying to match the mock with com-stmt-execute request", zap.String("mock_name", mock.Name), zap.Any("Req", actMsg))
+						if ce := logger.Check(zap.DebugLevel, "Trying to match the mock with com-stmt-execute request"); ce != nil && actMsg != nil {
+							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg)))
 						}
 
 						var expectedQuery, actualQuery string
@@ -2199,6 +2205,31 @@ func queryPacketText(packet mysql.PacketBundle) string {
 func preparePacketText(packet mysql.PacketBundle) string {
 	msg, _ := packet.Message.(*mysql.StmtPreparePacket)
 	return msg.Query
+}
+
+// maskedAttributeValue stands for a query attribute's value in the debug log
+// (executeForLog), the mismatch summary (formatExecParams) and a strict
+// miss's field diffs (maskAttributeDiffs).
+const maskedAttributeValue = "[masked]"
+
+// executeForLog is a COM_STMT_EXECUTE as the debug log shows it: its query
+// attributes' values (its parameters sent with a name; a statement's own are
+// sent unnamed) masked. The client names an attribute (a password, a
+// tenant's token), and what redacts a log goes by what a value looks like,
+// not by such a name: one only its name says is a secret was logged in the
+// clear.
+func executeForLog(p *mysql.StmtExecutePacket) *mysql.StmtExecutePacket {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.Parameters = slices.Clone(p.Parameters)
+	for i := range c.Parameters {
+		if c.Parameters[i].Name != "" && c.Parameters[i].Value != nil {
+			c.Parameters[i].Value = maskedAttributeValue
+		}
+	}
+	return &c
 }
 
 // typesSentByBoth reports whether both COM_STMT_EXECUTEs carry their

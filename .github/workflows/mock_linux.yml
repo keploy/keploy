@@ -515,6 +515,38 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
 
+      # Container keys a release recorded in the legacy form (v3.6.126 to
+      # v3.6.130 hashed a container's configuration with its secrets),
+      # replayed by this build: each recorded key is compared in its own form,
+      # so a container configured the same matches its recording and one
+      # configured otherwise misses. Pinned to the last release that wrote
+      # that form: a later one writes the current form. Should the leg break
+      # for a reason that is not the legacy form (the recorder and this build
+      # drift apart), either keep supporting recordings v3.6.130 and earlier
+      # made under the switch, or retire the legacy form whole
+      # (containerkey's legacyFingerprint, SameKey's legacy branch,
+      # LegacyKeyFromContext, and this leg) -- never weaken the leg.
+      - name: Download keploy v3.6.130 (the last release that wrote legacy container keys)
+        id: legacy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p legacy-keploy
+          URL="https://github.com/keploy/keploy/releases/download/v3.6.130/keploy_linux_amd64.tar.gz"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 "$URL" -o legacy-keploy/keploy.tar.gz
+          tar -xzf legacy-keploy/keploy.tar.gz -C legacy-keploy
+          chmod +x legacy-keploy/keploy
+          echo "path=$PWD/legacy-keploy/keploy" >> "$GITHUB_OUTPUT"
+
+      - name: Run proven strict-HTTP e2e (container keys recorded in the legacy form)
+        if: ${{ !cancelled() && steps.legacy.outcome == 'success' }}
+        env:
+          RECORD_BIN: ${{ steps.legacy.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+          LEGACY_KEYS: "1"
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
+
       - name: Run proven strict-HTTP e2e (AWS SigV4 against LocalStack)
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -626,7 +658,9 @@ jobs:
 
       # A publish the app makes after it answered a test is judged in the test
       # open when it is made (P101): a changed one fails that test, the set,
-      # and keploy test.
+      # and keploy test; so does one the app no longer makes, on a connection
+      # of its own opened and closed inside the test (P091). One it makes as
+      # it starts, before the set's first test, fails the set (F2).
       - name: Run proven after-answer e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -685,9 +719,9 @@ jobs:
           # Both binaries run, whichever fails: one's failure does not hide
           # the other's results.
           rc=0
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff' -test.v | tee /tmp/pidmap.out || rc=1
-          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
-          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff|TestUnderTheSwitchTheAgentSeesTheApplicationListen|TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime|TestUnderTheSwitchTheAgentCountsARestartAndNamesIt' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
+          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestUnderTheSwitchTheAgentSeesTheApplicationListen TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime TestUnderTheSwitchTheAgentCountsARestartAndNamesIt TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
           done
           exit $rc

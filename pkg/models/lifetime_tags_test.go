@@ -34,6 +34,11 @@ func TestDeriveLifetimeTakesTheStatedLifetime(t *testing.T) {
 		{"MySQL SET stated session, though typed mocks", stated(MySQL, "mocks", MetadataLifetimeSession, "c1"), LifetimeSession},
 		{"MySQL prepare stated connection", stated(MySQL, "connection", MetadataLifetimeConnection, "c1"), LifetimeConnection},
 		{"connection stated with no connID is session", stated(MySQL, "connection", MetadataLifetimeConnection, ""), LifetimeSession},
+		// A post-record hook tagged it config over its recorder's stated
+		// per-test (enterprise's SQS config calls): the tag wins.
+		{"HTTP stated per-test, then tagged config", stated(HTTP, "config", MetadataLifetimePerTest, ""), LifetimeSession},
+		{"HTTP/2 stated per-test, then tagged config", stated(HTTP2, "config", MetadataLifetimePerTest, ""), LifetimeSession},
+		{"MySQL stated per-test, then tagged config", stated(MySQL, "config", MetadataLifetimePerTest, "c1"), LifetimeSession},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mock.DeriveLifetime()
@@ -162,5 +167,89 @@ func TestReusableByStatementOnly(t *testing.T) {
 		if got := tc.mock.ReusableByStatementOnly(); got != tc.want {
 			t.Errorf("%s: ReusableByStatementOnly() = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A prepared statement's lifecycle recorded before lifetimes were stated
+// (tagged "mocks", or untagged) belongs to its recorded connection, as the
+// recorder states it now, under the strict mock window and the lax one alike:
+// a statement the app prepares at start is executed in any test, and its
+// EXECUTEs look its query up by the recorded connection, which a session
+// mock does not give them. With no connID it is the session's. A statement's
+// data (COM_STMT_EXECUTE, COM_QUERY) keeps the lifetime it had, a stated
+// lifetime still wins, a mock of two requests is not one command, and another
+// kind's mock is untouched. Such a mock is a protocol-phase mock too
+// (IsProtocolPhase), as a stated one is.
+func TestALegacyPreparedStatementLifecycleIsItsConnections(t *testing.T) {
+	mysqlMock := func(tag, command, connID, stated string) *Mock {
+		md := map[string]string{}
+		if tag != "" {
+			md["type"] = tag
+		}
+		if connID != "" {
+			md["connID"] = connID
+		}
+		if stated != "" {
+			md[MetadataLifetimeKey] = stated
+		}
+		return &Mock{Kind: MySQL, Spec: MockSpec{Metadata: md, MySQLRequests: []mysql.Request{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: command}}}}}}
+	}
+	for _, strict := range []bool{true, false} {
+		t.Run(map[bool]string{true: "strict", false: "lax"}[strict], func(t *testing.T) {
+			prev := laxKindFallbackDisabledCache
+			laxKindFallbackDisabledCache = strict
+			t.Cleanup(func() { laxKindFallbackDisabledCache = prev })
+			data := LifetimePerTest
+			if !strict {
+				data = LifetimeSession // the lax kind fallback, as before
+			}
+			two := mysqlMock("mocks", "COM_STMT_PREPARE", "c1", "")
+			two.Spec.MySQLRequests = append(two.Spec.MySQLRequests, two.Spec.MySQLRequests[0])
+			for _, tc := range []struct {
+				name string
+				mock *Mock
+				want Lifetime
+			}{
+				{"PREPARE on a connection", mysqlMock("mocks", "COM_STMT_PREPARE", "c1", ""), LifetimeConnection},
+				{"CLOSE on a connection", mysqlMock("mocks", "COM_STMT_CLOSE", "c1", ""), LifetimeConnection},
+				{"RESET on a connection", mysqlMock("mocks", "COM_STMT_RESET", "c1", ""), LifetimeConnection},
+				{"an untagged PREPARE", mysqlMock("", "COM_STMT_PREPARE", "c1", ""), LifetimeConnection},
+				{"PREPARE naming no connection", mysqlMock("mocks", "COM_STMT_PREPARE", "", ""), LifetimeSession},
+				{"EXECUTE", mysqlMock("mocks", "COM_STMT_EXECUTE", "c1", ""), data},
+				{"a query", mysqlMock("mocks", "COM_QUERY", "c1", ""), data},
+				{"PREPARE stated per-test", mysqlMock("mocks", "COM_STMT_PREPARE", "c1", MetadataLifetimePerTest), LifetimePerTest},
+				{"two requests", two, data},
+			} {
+				tc.mock.DeriveLifetime()
+				if got := tc.mock.TestModeInfo.Lifetime; got != tc.want {
+					t.Errorf("%s: Lifetime = %v, want %v", tc.name, got, tc.want)
+				}
+			}
+			// Another kind's mock with a PREPARE header is not MySQL's.
+			other := mysqlMock("mocks", "COM_STMT_PREPARE", "c1", "")
+			other.Kind = Postgres
+			other.DeriveLifetime()
+			if other.TestModeInfo.Lifetime == LifetimeConnection {
+				t.Error("a non-MySQL mock with a PREPARE header was made its connection's")
+			}
+		})
+	}
+	// An untagged one counts in the legacy-fallback telemetry, as the kind
+	// fallback it replaces did; a tagged one does not.
+	before := LegacyKindFallbackFires()
+	mysqlMock("", "COM_STMT_PREPARE", "c1", "").DeriveLifetime()
+	if got := LegacyKindFallbackFires() - before; got != 1 {
+		t.Errorf("an untagged legacy PREPARE counted %d legacy-fallback fires, want 1", got)
+	}
+	before = LegacyKindFallbackFires()
+	mysqlMock("mocks", "COM_STMT_PREPARE", "c1", "").DeriveLifetime()
+	if got := LegacyKindFallbackFires() - before; got != 0 {
+		t.Errorf("a tagged legacy PREPARE counted %d legacy-fallback fires, want 0", got)
+	}
+	if !mysqlMock("mocks", "COM_STMT_CLOSE", "c1", "").IsProtocolPhase() {
+		t.Error("a legacy CLOSE is no protocol-phase mock, though a stated one is")
+	}
+	if mysqlMock("mocks", "COM_STMT_EXECUTE", "c1", "").IsProtocolPhase() {
+		t.Error("an EXECUTE is a protocol-phase mock")
 	}
 }

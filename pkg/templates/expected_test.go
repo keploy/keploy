@@ -1156,3 +1156,47 @@ func TestExpected_ACaptureCarriesItsPlaceholdersType(t *testing.T) {
 	}
 	assert.Equal(t, map[string]string{"n": TypeInt, "id": TypeString, "price": TypeFloat}, got)
 }
+
+// ExpectedStart resolves an answer's headers as Expected does, its captures
+// first and its uses at each key's value after them, on a copy of the run: a
+// use of a key a cookie of the same answer captures takes the captured value,
+// and the run moves no value. A use of a key the body captures is the app's,
+// the body never having come; a header the answer lacks keeps its expected
+// value. Only the headers that hold a placeholder are returned.
+func TestExpectedStart_AHeaderIsResolvedAsTheMainPathResolvesIt(t *testing.T) {
+	r := NewRun(nil, map[string]interface{}{"id": "REC", "sid": "S1"}, nil)
+	exp := models.HTTPResp{
+		StatusCode: 201,
+		Header: map[string]string{
+			"Content-Type": "application/json",
+			"Location":     "/orders/{{string .id}}",
+			"Set-Cookie":   "sid={{capture string .sid}}; Path=/",
+			"X-Sid":        "{{string .sid}}",
+			"X-Order":      "{{string .id}}",
+		},
+		Body: `{"id":"{{capture string .id}}"}`,
+	}
+	answer := models.HTTPResp{StatusCode: 201, Header: map[string]string{
+		"Content-Type": "application/json",
+		"Location":     "/orders/NEW",
+		"Set-Cookie":   "sid=S2; Path=/",
+		"X-Sid":        "S1",
+	}}
+	got := r.ExpectedStart(exp, answer, ExpectOptions{})
+	assert.Equal(t, map[string]string{
+		"Location":   "/orders/NEW",
+		"Set-Cookie": "sid=S2; Path=/",
+		"X-Sid":      "S2",
+		"X-Order":    "REC",
+	}, got)
+	assert.Equal(t, map[string]string{"id": "REC", "sid": "S1"}, r.Values(), "the run moved")
+}
+
+// A run that defines only secrets resolves a header that holds one.
+func TestExpectedStart_ASecretOnlyRunResolvesItsHeaders(t *testing.T) {
+	r := NewRun(nil, nil, map[string]interface{}{"key": "k-123"})
+	exp := models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Key": "{{.secret.key}}", "X-Plain": "p"}}
+	got := r.ExpectedStart(exp, models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Key": "k-123"}}, ExpectOptions{})
+	assert.Equal(t, map[string]string{"X-Key": "k-123"}, got)
+	assert.Nil(t, NewRun(nil, nil, nil).ExpectedStart(exp, models.HTTPResp{}, ExpectOptions{}), "a set with no template resolved a header")
+}

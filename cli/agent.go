@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/go-chi/chi/v5"
@@ -12,6 +13,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	klog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -83,6 +85,38 @@ func agentFailed(ctx context.Context, err error) bool {
 // running the agent command in-process points it at its own directory, not
 // at a path every process on the host shares.
 var containerTeardownProgressFile = kdocker.AgentTeardownProgressFile
+
+// containerBootProgressFile is where a containerised agent reports its start
+// (kdocker.AgentBootProgressFile), a variable for the same reason.
+var containerBootProgressFile = kdocker.AgentBootProgressFile
+
+// reportBoot has the agent report its start's progress, for the CLI that waits
+// for it to be ready: it gives up on an agent's start only once that has
+// stopped making progress, and fails it at once on a failure the agent
+// reports (utils.FailBoot) (utils.ReportBootProgress). The ERRORs the agent
+// logs while it starts go in the report as detail, until the start is over
+// (utils.BootOver). A native agent writes next to its teardown progress file
+// (--teardown-progress-file, flagPath, checked as that is); a containerised
+// one into its own container (containerBootProgressFile).
+func reportBoot(ctx context.Context, logger *zap.Logger, flagPath string, isDocker bool) {
+	klog.ObserveErrors(utils.NoteBootError)
+	go func() {
+		select {
+		case <-utils.BootOver():
+		case <-ctx.Done():
+		}
+		klog.ObserveErrors(nil)
+	}()
+	utils.BootStep("the agent's process runs")
+	switch {
+	case flagPath != "":
+		if err := utils.ReportBootProgressTo(ctx, logger, flagPath); err != nil {
+			logger.Debug("not reporting the agent's start's progress: the CLI that waits for it gives its process a minute of runnable time to make its first report", zap.Error(err))
+		}
+	case isDocker:
+		utils.ReportBootProgress(ctx, logger, containerBootProgressFile)
+	}
+}
 
 // reportTeardown has the agent report its teardown's progress, for the CLI
 // that stops it: it kills a stopping agent only once that has stopped making
@@ -171,6 +205,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				logger.Debug("could not read the teardown-progress-file flag", zap.Error(pfErr))
 			}
 			reportTeardown(ctx, logger, progressFile, isDocker)
+			reportBoot(ctx, logger, progressFile, isDocker)
 
 			startAgentCh := make(chan int)
 			daemonSet := isDaemonSetAgent()
@@ -185,6 +220,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			router, err := newAgentRouter(logger, a, tokenFile, isDocker, daemonSet)
 			if err != nil {
 				utils.LogError(logger, err, "refusing to start the agent")
+				utils.FailBoot(fmt.Errorf("refusing to start the agent: %w", err))
 				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
@@ -203,21 +239,32 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// client, whose drain then ends and closes the streams; a client
 			// that must stop the agent regardless asks it over its API, or
 			// escalates (utils.DieOnEscalation), and either ends this wait.
-			utils.SetSignalHold(func() {
-				if routes.RecordingClients() == 0 {
-					return
-				}
-				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished")
-				routes.WaitForRecordingClients()
-			})
+			//
+			// An agent something else stops (docker compose, with the app's
+			// project, also when the app exits on its own) is not stopped by
+			// its client, and the client learns of the stop only from the
+			// agent: its streams ask for that (models.DrainsOnAgentStopHeader).
+			// While such a client holds a stream and this agent has something
+			// for it to save, the stop says so to it (routes.AnnounceStop:
+			// the client then drains the streams, and closes them) and waits
+			// for it, as for a client that stops the agent itself.
+			utils.SetSignalHold(routes.HoldStop(logger))
 			go func() {
 				select {
 				case <-ctx.Done():
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case p := <-startAgentCh:
-					if err := agent.SetupAgentHook.AfterSetup(ctx); err != nil {
+					// The hooks can take long without a step (enterprise
+					// stages its shims here): a stage of the start
+					// (utils.BeginBootWork). Their failure is the start's:
+					// the agent lives on, without its server.
+					endHooks := utils.BeginBootWork("the pre-server startup hooks")
+					err := agent.SetupAgentHook.AfterSetup(ctx)
+					endHooks()
+					if err != nil {
 						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
+						utils.FailBoot(fmt.Errorf("failed to execute the agent's pre-server startup hooks: %w", err))
 						return
 					}
 					// Kubernetes DaemonSet mode is push-based: the agent captures
@@ -236,6 +283,8 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					// port handoff never blocks.
 					if daemonSet {
 						logger.Info("running as a Kubernetes DaemonSet agent; not starting the control-plane HTTP server (push architecture has no inbound HTTP consumers)")
+						// Its start is over: no server to listen.
+						utils.MarkBootReady()
 						return
 					}
 					routes.StartAgentServer(ctx, logger, p, isDocker, router)
@@ -249,6 +298,10 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					return nil
 				}
 				utils.LogError(logger, err, "failed to setup agent")
+				// Reported as its start's failure, unless it started: the
+				// CLI that waits for it fails the start with it at once,
+				// with the code it exits with.
+				utils.FailBoot(err)
 				// The specific code when the failure carries one: the CLI
 				// that launched this agent reads it back as its own
 				// (pkg/platform/http AgentClient.Setup), which is how a user

@@ -5,6 +5,8 @@ package replay
 // their own window (§8).
 
 import (
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -207,6 +209,78 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 	}
 }
 
+// A carry-over mock the agent flagged CarryOver, consumed before the set's
+// first test (a message the app received as it started, a publish it made
+// then), is consumed once: the agent is told it is consumed, not re-armed as a
+// readiness gate's per-test consume is, which would serve it again in every
+// test. The mapping records it in the startup section, which a mapping-mode
+// replay names in every test's call, one recorded after the first test began
+// too. The readiness gate's consume is still re-armed. (The prune keeps both,
+// as it kept them before: a re-armed consume leaves a placeholder.)
+func TestRunTestSetConsumesACarryOverMockConsumedBeforeTheFirstTestOnce(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	pinWindows(h)
+	h.replayer.config.Test.RemoveUnusedMocks = true
+	byTest := map[string][]models.MockState{
+		// The setup drain, before every window.
+		"": {
+			consumedAt("boot-poll", 500, models.Deleted, true),     // recorded before every window
+			consumedAt("crossed-send", 1500, models.Deleted, true), // in the gap after test-1
+			consumedAt("gate-select", 1050, models.Deleted, false), // test-1's, consumed by the readiness gate
+		},
+		"test-1": {consumedAt("own-1", 1060, models.Deleted, false)},
+		"test-2": {consumedAt("own-2", 2050, models.Deleted, false)},
+	}
+	byStart := map[time.Time]string{}
+	for _, tc := range h.cases {
+		byStart[tc.HTTPReq.Timestamp] = tc.Name
+	}
+	h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+		h.instr.mu.Lock()
+		after := h.instr.windowAfter
+		h.instr.mu.Unlock()
+		return byTest[byStart[after]]
+	}}
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %q, want PASSED", status)
+	}
+	h.instr.mu.Lock()
+	var firstTest models.MockFilterParams
+	for _, p := range h.instr.allParams {
+		if p.AfterTime.Equal(h.cases[0].HTTPReq.Timestamp) {
+			firstTest = p
+			break
+		}
+	}
+	h.instr.mu.Unlock()
+	told := firstTest.TotalConsumedMocks
+	for _, n := range []string{"boot-poll", "crossed-send"} {
+		if st, ok := told[n]; !ok || st.Usage != models.Deleted {
+			t.Errorf("%s is not consumed for the agent (%+v): it would be served again in every test", n, st)
+		}
+	}
+	if _, ok := told["gate-select"]; ok {
+		t.Error("the readiness gate's consume was not re-armed for test-1, which owns it")
+	}
+	for _, n := range []string{"boot-poll", "crossed-send"} {
+		if _, ok := h.mocks.kept[n]; !ok {
+			t.Errorf("%s pruned: the app consumed it as it started", n)
+		}
+	}
+	m := h.mappings.last
+	if m == nil {
+		t.Fatal("no mapping written")
+	}
+	startup := map[string]bool{}
+	for _, e := range m.Startup {
+		startup[e.Name] = true
+	}
+	if !startup["boot-poll"] || !startup["crossed-send"] {
+		t.Errorf("startup section %+v; want boot-poll and crossed-send, both consumed as the app started", m.Startup)
+	}
+}
+
 // What the running test consumed is attributed by recorded window before the
 // write decides whose entries it takes: its own mocks, and a flagged mock
 // recorded in the gap after its window, are its; a flagged mock of an earlier
@@ -331,5 +405,115 @@ func TestCarryOverAttributionEdges(t *testing.T) {
 	none.mapConsumed(m2, "test-2", attrAt(2000), attrAt(2100), []models.MockState{consumedAt("in", 2050, models.Deleted, true)})
 	if !mappedNames(m2, "test-2")["in"] {
 		t.Fatal("with no windows a flagged mock must be mapped as before")
+	}
+}
+
+// A call in flight when a test began (sent in the gap before it) is that
+// test's in the mapping, though answered after the test ended, where the
+// window filter alone drops it; one answered inside the window the filter
+// keeps, once. One sent and answered in the gap is mapped to no test.
+func TestCarryOverAttributionMapsACallInFlightWhenItsTestBegan(t *testing.T) {
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	withRes := func(name string, req, res int) models.MockState {
+		st := consumedAt(name, req, models.Deleted, false)
+		st.ResTimestampMock = models.FormatMockTimestamp(attrAt(res))
+		return st
+	}
+	// The mapping filter keeps every DNS, session and connection mock
+	// whatever its times, so one sent in the gap and answered late is listed
+	// once, by it; a connection failure is no test's but its own window's.
+	sessionLate := withRes("session-late", 1550, 2500)
+	sessionLate.Lifetime = models.LifetimeSession
+	connLate := withRes("conn-late", 1560, 2500)
+	connLate.Lifetime = models.LifetimeConnection
+	dnsLate := withRes("dns-late", 1570, 2500)
+	dnsLate.Kind = models.DNS
+	failureLate := withRes("failure-late", 1580, 2500)
+	failureLate.Kind = models.ConnectionFailure
+	a := newCarryOverAttribution(cases)
+	mapping := &models.Mapping{}
+	a.mapConsumed(mapping, "test-2", attrAt(2000), attrAt(2100), []models.MockState{
+		withRes("own-2", 2050, 2051),
+		withRes("fetch-late", 1500, 2500), // answered after test-2 ended
+		withRes("fetch-in", 1600, 2050),   // answered inside test-2
+		withRes("gap-only", 1700, 1800),
+		sessionLate, connLate, dnsLate, failureLate,
+	})
+	var names []string
+	for _, tc := range mapping.TestCases {
+		if tc.ID == "test-2" {
+			for _, e := range tc.Mocks {
+				names = append(names, e.Name)
+			}
+		}
+	}
+	sort.Strings(names)
+	if want := []string{"conn-late", "dns-late", "fetch-in", "fetch-late", "own-2", "session-late"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("test-2 maps %v; want %v: own-2, the two calls in flight when it began, and what the filter always keeps, each once", names, want)
+	}
+}
+
+// A poll placed at its answer (MockState.AnswerPlaced) is mapped by its
+// answer: one sent inside test-1 and answered inside test-2 is test-2's, and
+// one sent in the gap before test-2 and answered after test-2 ended is not
+// test-2's, as the in-flight rule would have it: its answer is in no test's
+// window. Asked as the app booted and answered in a test, it is not start-up
+// traffic.
+func TestCarryOverAttributionMapsAPollPlacedAtItsAnswerByItsAnswer(t *testing.T) {
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	poll := func(name string, req, res int) models.MockState {
+		st := consumedAt(name, req, models.Deleted, false)
+		st.ResTimestampMock = models.FormatMockTimestamp(attrAt(res))
+		st.AnswerPlaced = true
+		return st
+	}
+	a := newCarryOverAttribution(cases)
+	mapping := &models.Mapping{}
+	a.mapConsumed(mapping, "test-2", attrAt(2000), attrAt(2100), []models.MockState{
+		poll("poll-b", 1050, 2050),
+		poll("poll-late", 1500, 2500),
+	})
+	var names []string
+	for _, tc := range mapping.TestCases {
+		if tc.ID == "test-2" {
+			for _, e := range tc.Mocks {
+				names = append(names, e.Name)
+			}
+		}
+	}
+	if !reflect.DeepEqual(names, []string{"poll-b"}) {
+		t.Fatalf("test-2 maps %v; want the poll answered inside it alone", names)
+	}
+	// One flagged CarryOver (consumed out of its window, its kind also
+	// registering carry-over) is mapped by its answer's window: asked in
+	// test-2, answered in test-3, consumed in test-4, it is test-3's.
+	cases4 := append(cases[:2:2],
+		&models.TestCase{Name: "test-3", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(3000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(3100)}},
+		&models.TestCase{Name: "test-4", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(4000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(4100)}})
+	a4 := newCarryOverAttribution(cases4)
+	m4 := &models.Mapping{}
+	for i, tc := range cases4[:3] {
+		a4.mapConsumed(m4, tc.Name, attrAt(1000*(i+1)), attrAt(1000*(i+1)+100), []models.MockState{consumedAt("own-"+tc.Name, 1000*(i+1)+50, models.Deleted, false)})
+	}
+	flagged := consumedAt("poll-3", 2020, models.Updated, true)
+	flagged.ResTimestampMock = models.FormatMockTimestamp(attrAt(3050))
+	flagged.AnswerPlaced = true
+	a4.mapConsumed(m4, "test-4", attrAt(4000), attrAt(4100), []models.MockState{flagged})
+	if !mappedNames(m4, "test-3")["poll-3"] || mappedNames(m4, "test-2")["poll-3"] {
+		t.Fatalf("the flagged poll is mapped to test-2 %v, test-3 %v; want test-3 alone, its answer's", mappedNames(m4, "test-2"), mappedNames(m4, "test-3"))
+	}
+	boot := poll("boot-poll", 500, 1050)
+	if bootAsked(boot, attrAt(1000)) {
+		t.Fatal("a poll asked as the app booted and answered in test-1 is start-up traffic")
+	}
+	boot.AnswerPlaced = false
+	if !bootAsked(boot, attrAt(1000)) {
+		t.Fatal("a call asked as the app booted is no longer start-up traffic")
 	}
 }

@@ -235,6 +235,9 @@ func (countingMappingDB) Upsert(context.Context, string, string, []models.MockEn
 func (countingMappingDB) UpsertBatch(context.Context, string, map[string][]models.MockEntry) error {
 	return nil
 }
+func (countingMappingDB) UpsertWorker(context.Context, string, []models.MockEntry) error {
+	return nil
+}
 
 // TestResolveMappingEntries_DroppedAsyncMockDoesNotRevoke guards the blast
 // radius of the revoke path.
@@ -585,4 +588,29 @@ func TestMarkSkippedMock_TagsTheEntryAsReleasable(t *testing.T) {
 		t.Errorf("the skip was not registered as a BENIGN drop (present=%v lost=%v); it would either "+
 			"burn the ~500ms correlation spin or, if lost, revoke a healthy test", present, lost)
 	}
+}
+
+// Each test's mocks, as its mapping resolves them, are told to the capture
+// watch (consumeMappingsFor's mapped): a delta mapping too, so a mock stamped
+// late is charged to the test its mapping names.
+func TestConsumeMappingsTellsEachTestsResolvedMocks(t *testing.T) {
+	r := &Recorder{logger: zap.NewNop(), config: &config.Config{}, mappingDb: &countingMappingDB{}}
+	var correlationMap, asyncMockIDs sync.Map
+	var droppedMockIDs droppedMockSet
+	var shortPoolByTest sync.Map
+	correlationMap.Store("m1", models.MockEntry{Name: "mock-1"})
+	correlationMap.Store("m2", models.MockEntry{Name: "mock-2"})
+	mappings := make(chan models.TestMockMapping, 2)
+	mappings <- models.TestMockMapping{TestName: "test-1", MockIDs: []string{"m1"}}
+	mappings <- models.TestMockMapping{TestName: "test-1", MockIDs: []string{"m2"}} // a delta
+	close(mappings)
+	var told []string
+	require.NoError(t, r.consumeMappingsFor(context.Background(), "set-0", mappings,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, nil, &shortPoolByTest,
+		func(test string, entries []models.MockEntry) {
+			for _, e := range entries {
+				told = append(told, test+"/"+e.Name)
+			}
+		}))
+	assert.Equal(t, []string{"test-1/mock-1", "test-1/mock-2"}, told)
 }

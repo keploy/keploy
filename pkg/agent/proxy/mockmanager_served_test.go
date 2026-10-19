@@ -15,11 +15,11 @@ func TestServedCountsCountEveryAnswer(t *testing.T) {
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	defer mm.Close()
 	for i := 0; i < 2; i++ {
-		if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Usage: models.Updated}); err != nil {
+		if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Usage: models.Updated}, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-2", Usage: models.Deleted}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-2", Usage: models.Deleted}, 0); err != nil {
 		t.Fatal(err)
 	}
 	got := mm.ServedCounts()

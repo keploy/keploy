@@ -32,6 +32,10 @@ type pairTarget struct {
 	// received all of them once its own count (tcpi_bytes_received, which a
 	// FIN also moves) reaches it.
 	want uint64
+	// finCounted: want counts the application's FIN, which its socket had
+	// sent when the wait began (FIN_WAIT1, CLOSING, LAST_ACK): the last of
+	// want may be that FIN. Otherwise every byte of want is data.
+	finCounted bool
 	// gone: the application's socket was already gone (closed, or reset)
 	// when the wait began. Its FIN, after everything it wrote, or a reset,
 	// is what the proxy's side waits for.
@@ -46,7 +50,9 @@ type pairTarget struct {
 // received every byte the application had written to it when the wait began,
 // so that a call written to a connection opened long before (a pooled one) is
 // in the proxy's hands before a test's end reads what the test did. Writes
-// made after it began cannot hold it back. A connection the proxy closed
+// made after it began cannot hold it back. A connection the proxy serves with
+// no session (pairedConn.noSession) is not waited on: nothing on it is
+// captured. A connection the proxy closed
 // short of what was written (anything that arrives at it now is answered
 // with a reset) is a capture loss (models.CaptureLossAppBytesLost), and does
 // not hold it back; so is one it closed with bytes unread, whenever a wait
@@ -151,6 +157,12 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) erro
 // pairTarget reads, from the application's socket, how much it had written
 // to pc: nil when there is nothing to wait for.
 func (p *Proxy) pairTarget(ds *diagSock, pc *pairedConn) (*pairTarget, error) {
+	if pc.noSession.Load() {
+		// Marked since upTo took it: nothing on it is captured. One marked
+		// after this look is released by pairReached, which reads the mark
+		// after the connection's side.
+		return nil, nil
+	}
 	want, d, err := appWritten(ds, pc.app, pc.proxy)
 	if err == nil {
 		p.paired.visible.Store(true)
@@ -168,7 +180,7 @@ func (p *Proxy) pairTarget(ds *diagSock, pc *pairedConn) (*pairTarget, error) {
 		}
 		return nil, fmt.Errorf("%w: the application's socket %s (TCP state %d) has no tcp_info", models.ErrProxyConnsUnsupported, pc.app, d.state)
 	}
-	return &pairTarget{pc: pc, want: want}, nil
+	return &pairTarget{pc: pc, want: want, finCounted: d.state == tcpFinWait1 || d.state == tcpClosing || d.state == tcpLastAck}, nil
 }
 
 // appWritten is how many bytes (and a FIN) the application had written to
@@ -204,6 +216,18 @@ func appWritten(ds *diagSock, app, proxy netip.AddrPort) (uint64, diagTCP, error
 func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 	pc := t.pc
 	ps, closed := pc.side()
+	if pc.noSession.Load() {
+		// The proxy serves it with no session (serveWithoutSession), marked
+		// after the wait took it: a wait takes its connections before their
+		// handlers have all classified them. Nothing on it is captured, so
+		// no wait holds it, as none would have had the mark come first; its
+		// close, which resets the application's socket when the bytes on it
+		// were never read, is no loss and no unknown. Read after its side:
+		// the handler marks it before it closes it, so a side read closed
+		// (pc.done, or atClose stored by closing) is one whose mark, if
+		// any, is seen here.
+		return true, nil
+	}
 	if ps.err != nil {
 		return false, fmt.Errorf("%w: read the proxy's socket from %s: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err)
 	}
@@ -233,12 +257,21 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// when the wait began). One short with the orphan still waiting
 		// for a FIN (FIN_WAIT1/2): that FIN, or a byte the orphan will
 		// refuse, is on its way, and no event of the wait's says which.
+		// One short with the orphan gone says no more: the kernel destroys
+		// an orphan it has no timewait bucket for, or no room for under its
+		// orphan and memory limits, without a refusal (TCPTimeWaitOverflow,
+		// TCPAbortOnMemory), as it destroys one that refused a byte.
 		// Otherwise what arrives now is answered with a reset: a loss.
+		// Without the FIN counted, one short is a byte of data, which an
+		// orphan refuses: a loss, whatever its state.
 		d, took, err := orphanTookFIN(pc)
+		oneShort := t.finCounted && t.want-ps.received == 1
 		switch {
 		case took:
 			return true, nil
-		case err == nil && t.want-ps.received == 1 && (d.state == tcpFinWait1 || d.state == tcpFinWait2):
+		case errors.Is(err, errNoSocket) && oneShort:
+			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and its orphaned socket is gone: the kernel destroys one it has no room for, or one that refused a byte, alike", models.ErrProxyConnsUnsupported, pc.app)
+		case err == nil && oneShort && (d.state == tcpFinWait1 || d.state == tcpFinWait2):
 			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and that FIN, or a byte its orphaned socket will refuse, is still on its way", models.ErrProxyConnsUnsupported, pc.app)
 		}
 		p.pairLost(pc, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
@@ -381,7 +414,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
 	case err != nil:
 		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
-		p.pairLost(pc, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: no test's end can be verified from now on", zap.Error(err))
+		p.pairLost(pc, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: from now on it cannot vouch that every call of a test is in its hands", zap.Error(err))
 	case unread == 0:
 	case tc == nil || tc.tlsLayer.Load() == nil:
 		p.pairLost(pc, unreadLost)
@@ -479,7 +512,7 @@ func (p *Proxy) pairLost(pc *pairedConn, msg string, fields ...zap.Field) {
 	p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
-		zap.String("next_step", "the test that was open, and every later one, is not verified; check the agent's log for why the connection ended"),
+		zap.String("next_step", "keploy cannot vouch for the calls of the test that was open (under the proven switch, it and every later test are not verified); check the agent's log for why the connection ended"),
 	}, fields...)...)
 }
 
@@ -506,9 +539,19 @@ func (p *Proxy) checkPairedBytes(app, proxy net.Conn) {
 	}
 }
 
+// PairedBytesErr is why the bytes on the proxy's paired connections cannot be
+// counted, nil while they can: found at the proxy's start (its canary,
+// checkPairedBytes), or since, by a failure that makes every later wait on a
+// paired connection unknown (agent.PairedBytesChecker).
+func (p *Proxy) PairedBytesErr() error {
+	p.paired.mu.Lock()
+	defer p.paired.mu.Unlock()
+	return p.paired.err
+}
+
 func (p *Proxy) pairedBytesUnsupported(err error) {
 	p.paired.fail(fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err))
-	p.logger.Warn("keploy cannot tell whether the bytes the application wrote to the connections its proxy holds have reached the proxy: no test's end can be verified while one is open",
+	p.logger.Warn("keploy cannot tell whether the bytes the application wrote to the connections its proxy holds have reached the proxy: while one is open, it cannot vouch that every call of a test is in its hands",
 		zap.Error(err),
 		zap.String("next_step", "the kernel needs sock_diag for TCP (inet_diag and tcp_diag) in the agent's network namespace"))
 }

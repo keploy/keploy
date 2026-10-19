@@ -1,6 +1,9 @@
 package models
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // mockMismatchReporterKey is the unexported context key under which the proxy
 // stashes its mock-mismatch reporter for the duration of a MockOutgoing call.
@@ -39,4 +42,21 @@ func ReportMockMismatch(ctx context.Context, err error) bool {
 	}
 	report(err)
 	return true
+}
+
+// MismatchReported is a miss its parser already reported (ReportMockMismatch)
+// and returns as well: the connection handler then ends the connection, and
+// logs the miss, as it does for a miss returned unreported, without reporting
+// it a second time (IsMismatchReported).
+type MismatchReported struct{ Err error }
+
+func (m MismatchReported) Error() string { return m.Err.Error() }
+
+func (m MismatchReported) Unwrap() error { return m.Err }
+
+// IsMismatchReported reports whether err is a miss its parser already
+// reported (MismatchReported).
+func IsMismatchReported(err error) bool {
+	var m MismatchReported
+	return errors.As(err, &m)
 }

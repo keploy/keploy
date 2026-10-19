@@ -1,6 +1,9 @@
 // A test application whose /a-publish answers 200 ms after it starts a
 // publish to a broker that it does not wait for (fire and forget), with SUFFIX
 // appended to the message; /b-other takes 3 s; /c-ping answers at once.
+// With SHUTDOWN_PUBLISH set it publishes "shutdown" as it is stopped; with
+// IGNORE_INT set it ignores SIGINT; ONE_SIGNAL, HANG_ON_STOP and
+// SHUTDOWN_CPU shape how it stops (below).
 //
 // PROTO says how it publishes:
 //   - http: an HTTP POST on a connection of its own (no keep-alive);
@@ -25,8 +28,10 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -95,6 +100,12 @@ func publish(broker, msg string, written chan<- struct{}) {
 	var once sync.Once
 	wrote := func() { once.Do(func() { close(written) }) }
 	defer wrote()
+	// NOPUBLISH: the app no longer makes the call (a replay of a recording
+	// that has it must fail).
+	if os.Getenv("NOPUBLISH") != "" {
+		log.Printf("%s: not published (NOPUBLISH)", msg)
+		return
+	}
 	switch os.Getenv("PROTO") {
 	case "tcpkeep":
 		log.Printf("%s: broker said %s on the kept connection", msg, line(msg, wrote))
@@ -140,6 +151,14 @@ func main() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		log.Printf("ready: broker said %d on the pooled connection", resp.StatusCode)
+	}
+	// STARTUP_PUBLISH: as it starts, before it listens, the app publishes
+	// "startup" (with SUFFIX) and waits for the broker's reply, as an app that
+	// announces itself at boot does: a call made before the set's first test.
+	// A publish no one answers is logged, and the app goes on.
+	if os.Getenv("STARTUP_PUBLISH") != "" {
+		publish(broker, "startup"+os.Getenv("SUFFIX"), make(chan struct{}))
+		log.Printf("startup published")
 	}
 	pub := func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
@@ -198,5 +217,73 @@ func main() {
 	http.HandleFunc("/c-ping", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "pong")
 	})
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// SHUTDOWN_PUBLISH: as it is stopped (SIGINT, SIGTERM), after its last
+	// answer, the app publishes "shutdown" (with SUFFIX), waits for the
+	// broker's reply and exits 0, as an app whose shutdown flushes a queue
+	// does. The call is made only once keploy stops the app.
+	// IGNORE_INT: the app ignores SIGINT, as one with no graceful stop does
+	// (a container's init with no handler for it): only a kill ends it.
+	if os.Getenv("IGNORE_INT") != "" {
+		signal.Ignore(syscall.SIGINT)
+	}
+	// SHUTDOWN_CPU: as it is stopped (SIGINT, SIGTERM), the app works this
+	// much CPU time and exits 0, as one whose shutdown flushes what it holds
+	// in memory does: starved of CPU, that takes many times as long.
+	if work, err := time.ParseDuration(os.Getenv("SHUTDOWN_CPU")); err == nil && os.Getenv("SHUTDOWN_PUBLISH") == "" {
+		stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		go func() { log.Fatal(http.ListenAndServe(":8080", nil)) }()
+		<-stop.Done()
+		burnCPU(work)
+		log.Printf("shutdown worked %s of CPU", work)
+		return
+	}
+	if os.Getenv("SHUTDOWN_PUBLISH") == "" {
+		log.Fatal(http.ListenAndServe(":8080", nil))
+	}
+	stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	srv := &http.Server{Addr: ":8080"}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+	<-stop.Done()
+	// ONE_SIGNAL: once stopped, the app lets a second signal end it, as Go's
+	// signal.NotifyContext documents (its stop called): a second signal cuts
+	// its shutdown.
+	if os.Getenv("ONE_SIGNAL") != "" {
+		cancel()
+	}
+	_ = srv.Shutdown(context.Background())
+	// HANG_ON_STOP: once stopped, the app never ends, and makes no progress
+	// on its way out.
+	if os.Getenv("HANG_ON_STOP") != "" {
+		time.Sleep(24 * time.Hour)
+	}
+	// SHUTDOWN_DELAY: its shutdown takes this long before it publishes.
+	if d, err := time.ParseDuration(os.Getenv("SHUTDOWN_DELAY")); err == nil {
+		time.Sleep(d)
+	}
+	done := make(chan struct{})
+	publish(broker, "shutdown"+os.Getenv("SUFFIX"), done)
+	log.Printf("shutdown published")
+}
+
+// burnCPU works until this process has used work more CPU time.
+func burnCPU(work time.Duration) {
+	used := func() time.Duration {
+		var ru syscall.Rusage
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+		return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
+	}
+	for start, x := used(), uint64(1); used()-start < work; {
+		for i := 0; i < 1<<16; i++ {
+			x = x*6364136223846793005 + 1442695040888963407
+		}
+		if x == 0 {
+			log.Print("unreachable")
+		}
+	}
 }

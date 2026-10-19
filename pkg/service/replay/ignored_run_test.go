@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -165,5 +166,52 @@ func TestARunThatVerifiedNothingPrintsNoMismatchTable(t *testing.T) {
 	}
 	if n := logs.FilterMessage("Some testsets failed due to mock differences.").Len(); n != 0 {
 		t.Fatalf("a run that verified nothing said %d times that mock differences failed it", n)
+	}
+}
+
+// countingHooks counts the run-level AfterTestRun calls made on the hooks it
+// wraps.
+type countingHooks struct {
+	TestHooks
+	afterTestRuns atomic.Int32
+}
+
+func (c *countingHooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+	c.afterTestRuns.Add(1)
+	return c.TestHooks.AfterTestRun(ctx, testRunID, testSetIDs, coverage)
+}
+
+// Under docker compose without a kept stack (mocking off), the agent is part
+// of each test set's stack and goes down with it, and the last set listed
+// calls the after-test-run hook while its agent is up. A last set that runs
+// nothing (here ignored whole) leaves no agent: the run's hooks still run
+// once at its end, report and all, and only their call to the agent is left
+// out, so a run whose agent is gone logs no ERROR for it.
+func TestAComposeRunWhoseLastSetRanNothingStillRunsItsHooks(t *testing.T) {
+	run := newBasePathRun(t, "", "test-1")
+	cfg := run.replayer.config
+	cfg.Command = "docker compose up"
+	cfg.CommandType = string(utils.DockerCompose)
+	cfg.Test.Mocking = false
+	cfg.Test.IgnoredTests = map[string][]string{"test-set-0": {}}
+	run.replayer.instrument, run.replayer.noAgent = true, false
+	run.replayer.hookImpl = newHooks(run.replayer.logger, cfg, run.agent, false)
+	run.agent.setupOK = true
+	hooks := &countingHooks{TestHooks: run.replayer.hookImpl}
+	run.replayer.SetTestHooks(hooks)
+
+	if _, err := run.start(t); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if n := hooks.afterTestRuns.Load(); n != 1 {
+		t.Fatalf("the run's AfterTestRun hooks ran %d time(s), want once", n)
+	}
+	if n := run.agent.afterTestRuns.Load(); n != 0 {
+		t.Fatalf("the agent's after-test-run hook was called %d time(s), with no agent left to answer it", n)
+	}
+	for _, e := range run.logs.All() {
+		if e.Level >= zap.ErrorLevel && e.Message == "failed to call AfterTestRun hook" {
+			t.Fatalf("the run logged an ERROR for the agent's hook: %v", e.ContextMap())
+		}
 	}
 }

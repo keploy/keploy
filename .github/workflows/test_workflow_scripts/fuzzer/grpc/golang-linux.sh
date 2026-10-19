@@ -150,12 +150,14 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
+    # Keploy's own lines, the CLI's ("Keploy:") and the agent's and its other
+    # modes' ("Keploy(agent):"). Matching "Keploy:" alone let every agent ERROR by.
     # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    if grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:' | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       # Print the specific errors that caused the failure
       echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:' | grep -v "failed to read symbols, skipping coverage calculation"
       echo "----------------------"
       exit 1
     fi

@@ -1314,6 +1314,49 @@ func matchesAny(want, answer string, candidates []Leaf) string {
 	return "the answer holds " + candidates[0].Raw(answer)
 }
 
+// ExpectedStart is exp's headers made ready to judge the start of an answer
+// whose body never came: answer holds the status and headers that did. Each
+// header that holds a placeholder is resolved as Expected resolves it
+// against answer's headers, its captures first and then its uses at each
+// key's value after them, on a copy of the run, so r moves no value. A
+// header that uses a key exp's body captures is taken as the answer has it:
+// the value that use stands for is in the body that never came, so the
+// header cannot be judged. Only the headers that hold a placeholder are
+// returned, by their name as Expected reads it (a secret in a name at its
+// value); a header the answer lacks keeps its expected value.
+func (r *Run) ExpectedStart(exp, answer models.HTTPResp, opts ExpectOptions) map[string]string {
+	if r.Empty() {
+		return nil
+	}
+	answer.Body = ""
+	f := r.fork()
+	resolved := f.Expected(exp, answer, opts).Resp.Header
+	bodyCaptures := map[string]bool{}
+	for _, p := range Find(exp.Body) {
+		if p.Capture {
+			bodyCaptures[p.Key] = true
+		}
+	}
+	out := map[string]string{}
+	for name, v := range f.renamed(exp.Header) {
+		ps := Find(v)
+		if len(ps) == 0 {
+			continue
+		}
+		out[name] = resolved[name]
+		for _, p := range ps {
+			if p.Capture || !bodyCaptures[p.Key] {
+				continue
+			}
+			if live, found := headerLookup(answer.Header, name); found {
+				out[name] = live
+			}
+			break
+		}
+	}
+	return out
+}
+
 // ExpectedNoAnswer is exp with each use placeholder holding this run's value,
 // for a test case that got no answer to capture from (it failed before one
 // came) or that never captures (a streamed response). Captures stay as

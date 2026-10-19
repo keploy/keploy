@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"slices"
@@ -1044,17 +1045,17 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	ctx := context.Background()
 	x, y := liveReq("POST", "/orders", `{"id":"x"}`), liveReq("POST", "/orders", `{"id":"y"}`)
 	pool, _ := splitVariableMocks([]*models.Mock{first, second})
-	hitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, db.table.Gen(), nil, nil, nil)
-	hitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hitsX, _, _ := h.variablePass(ctx, x, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
+	hitsY, _, _ := h.variablePass(ctx, y, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	hx, _ := h.pickHit(hitsX, db, true)
 	hy, _ := h.pickHit(hitsY, db, true)
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hx, db, &db.table); err != nil || p != nil || retry {
+	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry {
 		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hy, db, &db.table); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || !retry {
 		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
 	}
 	ok, stub, diag := matchVar(t, h, db, y)
@@ -1074,12 +1075,12 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
 	ctx := context.Background()
 	pool, _ := splitVariableMocks(db.perTest)
-	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	if len(hits) == 0 {
 		t.Fatal("the straggler should fit")
 	}
 	db.table.Reset() // the next test begins
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, &db.table); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
 		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
 	}
 	if got := db.table.Snapshot(); len(got) != 0 {
@@ -1102,11 +1103,11 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	}
 	pool, _ := splitVariableMocks(db.perTest)
 	read := liveReq("GET", "/orders/l1", "")
-	hits, _, _ := h.variablePass(ctx, read, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hits, _, _ := h.variablePass(ctx, read, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, &db.table); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
 		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
 	}
 	if ok, _, _ := matchVar(t, h, db, read); ok {
@@ -1891,5 +1892,41 @@ func TestVariables_RecordingsOfOneInstantTakeTurnsInRecordedOrder(t *testing.T) 
 	// Without stateful mocks the first recorded answers, by the same order.
 	if g := charge(newHTTP(), &varDb{session: staged()}, 0, false); g != "t-c" {
 		t.Fatalf("stateful mocks off: answered by %s, want t-c", g)
+	}
+}
+
+// A DIGEST HEADER A VARIABLE SETS holds the variable's value: the serializer
+// recomputes the response's noted digests over the body it sends
+// (bodydigest.Apply), and a header whose value is the variable's is not one of
+// them. Its note is dropped from the served copy, not from the pooled mock.
+func TestVariables_ADigestHeaderAVariableSetsIsNotRecomputed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	recBody := `{"id":"r1"}`
+	sum := md5.Sum([]byte(recBody))
+	recTag := `"` + hex.EncodeToString(sum[:]) + `"`
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"tag":`+strconv.Quote(recTag)+`}`, 201, recBody,
+		models.MockVariables{"tag": bindV(recTag, "body.tag", "header.ETag")}), 1)
+	m.Spec.HTTPResp.Header["ETag"] = recTag
+	m.Spec.HTTPResp.Header["Content-MD5"] = base64.StdEncoding.EncodeToString(sum[:])
+	m.Spec.Metadata = map[string]string{models.MetadataBodyDigestsKey: "content-md5=content-md5;etag=etag/md5/s"}
+	db := &varDb{perTest: []*models.Mock{m}}
+	const liveTag = `"live-tag-7"`
+	ok, stub, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"tag":`+strconv.Quote(liveTag)+`}`))
+	if !ok {
+		t.Fatal("should match")
+	}
+	if got := stub.Spec.Metadata[models.MetadataBodyDigestsKey]; got != "content-md5=content-md5" {
+		t.Fatalf("the served copy's note is %q; want the ETag the variable set dropped from it", got)
+	}
+	if got := m.Spec.Metadata[models.MetadataBodyDigestsKey]; got != "content-md5=content-md5;etag=etag/md5/s" {
+		t.Fatalf("the pooled mock's note was written: %q", got)
+	}
+	raw, err := h.buildMockResponseBytes(stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Etag: "+liveTag+"\r\n") && !strings.Contains(string(raw), "ETag: "+liveTag+"\r\n") {
+		t.Fatalf("the served ETag is not the variable's value %s:\n%s", liveTag, raw)
 	}
 }

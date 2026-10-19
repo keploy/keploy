@@ -358,7 +358,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				// taking the request to end it): every frame it had for this
 				// drain is through.
 				if marker {
-					r.logger.Debug(streamEndedLog, zap.String("frames", o.kind))
+					r.logger.Debug(StreamEndedLog, zap.String("frames", o.kind))
 				}
 				return
 			}
@@ -451,6 +451,14 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // the AGENT (a RevokedTests control frame this function never sees) and a
 // revoked test is deleted, not shipped with a short pool.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, revokeTest, shortPoolByTest, nil)
+}
+
+// consumeMappingsFor is consumeMappings, telling mapped, when set, each test's
+// mocks as its mapping resolves them: the capture watch charges a test with a
+// mock of its whose container the Docker daemon did not answer the read of
+// (captureWatch.mapped), whenever that mapping comes.
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -548,6 +556,9 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 		if len(realMockEntries) == 0 {
 			continue
 		}
+		if mapped != nil {
+			mapped(mapping.TestName, realMockEntries)
+		}
 
 		flushMu.Lock()
 		// Union, don't replace: the agent emits a test's mocks when its window
@@ -610,6 +621,12 @@ type Recorder struct {
 	// write mocks the recording captured (mocksNotWritten): the recording is
 	// incomplete, and ends as failed.
 	captureLost atomic.Bool
+	// endCut, under the proven switch, is why the recording's end is cut:
+	// keploy's agent went before it had handed over what it captured (its
+	// stream ended without its end marker, or its drain stalled). The
+	// test-set's config says so, as for a stop that killed the app (P101-b-k,
+	// P101-c).
+	endCut atomic.Pointer[string]
 	// mocksLossSaid is set once mocksNotWritten has said the mock store
 	// could not write mocks the recording captured.
 	mocksLossSaid atomic.Bool
@@ -642,6 +659,20 @@ type Recorder struct {
 // hand over something captured before a time (AgentClient.BacklogBefore).
 type backlogReader interface {
 	BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error)
+}
+
+// agentStopWatcher is an agent client that can be told when a stop signal has
+// reached an agent something else stops, and the agent waits for this
+// recording to drain its streams (AgentClient.WatchAgentStop).
+type agentStopWatcher interface {
+	WatchAgentStop(ctx context.Context) <-chan struct{}
+}
+
+// composeAgentEnder sees an agent docker compose stops to its end once this
+// recording has drained it: its exit waited for while its teardown makes
+// progress, and a wedged one killed and said (AgentClient.EndComposeAgent).
+type composeAgentEnder interface {
+	EndComposeAgent(release bool)
 }
 
 // drainStallLooks is how many looks in a row a drain makes at a backlog the
@@ -685,6 +716,7 @@ type backlogLooks struct {
 // compose or kubelet stops): frames from before the stop still coming would
 // not tell its backlog from this CLI's own lag in taking what it had sent.
 func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
+	r.noteEndCut("keploy's agent ended its " + kind + " stream before it said it had handed over all it captured, so what it still held is not in the recording")
 	if !looks.Held() && !startedAgent(r.instrumentation) {
 		r.logger.Warn("the keploy agent ended its stream before it said it held nothing more: what it still held, if anything, is lost",
 			zap.String("frames", kind),
@@ -1491,6 +1523,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var stopReason string
 	// defining all the channels and variables required for the record
 	var runAppError models.AppError
+	// stopKilled is why keploy's stop of the app at the recording's end had
+	// to kill it, under the proven switch (models.AppError.StopKilled): set
+	// by the app's runner, read by the stop once the runner is drained.
+	var stopKilled atomic.Pointer[string]
 	var appErrChan = make(chan models.AppError, 1)
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
@@ -1565,6 +1601,78 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The moment the recording is stopped (a stop signal, the record timer,
+	// a caller's cancel each end ctx first) is when the application's
+	// shutdown begins: what it records from then on is the shutdown's
+	// (MockEntry.AtStop).
+	if windowMaps != nil {
+		go func() {
+			<-ctx.Done()
+			windowMaps.noteStop(time.Now())
+		}()
+	}
+
+	// Bounded drains: a goroutine wedged under contention that ignores its
+	// cancel() must not hang teardown forever (which would swallow SIGINT and
+	// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
+	//
+	// The frame streams drain through the stop until what the agent held at
+	// it is through (forwardUntilDrained): wait for them while they make
+	// progress, however long that takes, and give up only on a stall.
+	// It reports whether it joined every frame drain: one it gave up on, a
+	// stall, may still hold its stream to the agent open.
+	drainFrames := func() (joined bool) {
+		reqCtxCancel()
+		defer r.reportDrainProgress(drainProgressEvery)()
+		err, timedOut := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop request processing")
+		}
+		if timedOut {
+			r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
+		}
+		return !timedOut
+	}
+	// Under docker compose the agent is a service of the app's own stack
+	// (keploy injects it), so taking the stack down takes the agent, and
+	// everything it has not handed over yet, with it: at 110 req/s for 30 s
+	// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
+	// first, once (composeDrain): by the stop, before it takes the stack down
+	// (the app keeps running meanwhile, but what it serves after the stop is
+	// not recorded: forwardUntilDrained), or earlier, when the agent says
+	// compose is stopping it (agentGoing: the app exited on its own, or a
+	// container of its project did, and compose stops the project). The agent
+	// then waits for the drain, and goes once its streams close: what it
+	// could not capture (mock.real), and what it lost after the last test
+	// case, are read first, while it is still up, as of an agent this client
+	// started. Its exit is then seen to (composeAgentEnder): it goes once the
+	// streams close, and one wedged in its stop is killed, rather than held
+	// for compose's grace, which waits on it. After a drain the stop began,
+	// the reads come with the stack still up.
+	var composeDrain sync.Once
+	drainComposeAgent := func(agentGoing bool) {
+		composeDrain.Do(func() {
+			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
+			if agentGoing {
+				if recordingStarted {
+					r.reportRealRun(ctx)
+					capWatch.afterTestCases(ctx)
+				}
+				joined := drainFrames()
+				if e, ok := r.instrumentation.(composeAgentEnder); ok {
+					// A drain given up on a stall may hold its stream open,
+					// and the agent waits for that stream: it is told to go.
+					e.EndComposeAgent(!joined)
+				}
+				return
+			}
+			drainFrames()
+			if recordingStarted {
+				r.reportRealRun(ctx)
+				capWatch.afterTestCases(ctx)
+			}
+		})
+	}
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -1616,38 +1724,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// response or the recorder context is cancelled — there is
 		// no on-disk file on the agent and no fetch step here.
 
-		// Bounded drains: a goroutine wedged under contention that ignores its
-		// cancel() must not hang teardown forever (which would swallow SIGINT and
-		// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
-		//
-		// The frame streams drain through the stop until what the agent held at
-		// it is through (forwardUntilDrained): wait for them while they make
-		// progress, however long that takes, and give up only on a stall.
-		drainFrames := func() {
-			reqCtxCancel()
-			defer r.reportDrainProgress(drainProgressEvery)()
-			if err, _ := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress); err != nil {
-				utils.LogError(r.logger, err, "failed to stop request processing")
-			}
-		}
-		// Under docker compose the agent is a service of the app's own stack
-		// (keploy injects it), so taking the stack down takes the agent, and
-		// everything it has not handed over yet, with it: at 110 req/s for 30 s
-		// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
-		// first. The app keeps running meanwhile, but what it serves after the
-		// stop is not recorded (forwardUntilDrained).
+		// Under docker compose the agent is drained first (drainComposeAgent),
+		// before the stack it is a service of is taken down.
 		composeAgent := r.config.CommandType == string(utils.DockerCompose)
 		if composeAgent {
-			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
-			drainFrames()
-			// Read while the agent, which the app's stack carries, still
-			// runs: what it could not capture (mock.real), and what it
-			// lost after the last test case.
-			if recordingStarted {
-				r.reportRealRun(ctx)
-				capWatch.afterTestCases(ctx)
+			// Under the switch the app's stop is keploy's own and leaves the
+			// agent up (P101-c): the app is stopped first, so what it does as
+			// it stops is recorded with the rest, and the drain then takes
+			// it. Its stop says, in the app's run, whether it had to kill.
+			if s, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
+				// An app that exited on its own needs no stop.
+				if _, err := s.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+					r.logger.Warn("keploy could not stop the application's container before saving what the agent captured", zap.Error(err))
+				}
 			}
+			drainComposeAgent(false)
 		}
+		windowMaps.noteStop(time.Now())
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
@@ -1661,6 +1754,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
+		}
+		// The stop had to kill the app, or the agent went before it had
+		// handed over what it captured: the recording's end is cut, and the
+		// recording says so.
+		why := stopKilled.Load()
+		if why == nil {
+			why = r.endCut.Load()
+		}
+		if why != nil && recordingStarted && newTestSetID != "" {
+			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
 
 		setupCtxCancel()
@@ -1790,7 +1893,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// The test cases the set keeps are final: map them (a no-op unless
 		// this recording derives its mappings from its test windows).
 		if recordingStarted && newTestSetID != "" {
-			windowMaps.write(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly, r.mappingsStreamed.Load())
+			windowMaps.writeFor(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly, r.mappingsStreamed.Load(), capWatch.mapped)
 		}
 
 		/*
@@ -2118,12 +2221,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Instrument will setup the environment and start the hooks and proxy
 	setupOpts := models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace, RecordBufferHalfCloseGrace: r.config.Record.RecordBuffer.HalfCloseGrace}
 	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh agent.
-	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, attempt int) error {
-		o := setupOpts
-		if attempt > 1 {
-			o.AgentReadyTimeout = 120 * time.Second
-		}
-		return r.instrumentation.Setup(c, r.config.Command, o)
+	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, _ int) error {
+		return r.instrumentation.Setup(c, r.config.Command, setupOpts)
 	})
 	if err == nil && !setupGate.Up() {
 		// The interrupt came first, as the setup finished, and stopped the
@@ -2153,6 +2252,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
+			noteStopKilled(&stopKilled, runAppError)
 			if (runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == models.AppError{}) {
 				return nil
 			}
@@ -2232,8 +2332,18 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	// Under docker compose the agent is stopped with the app's project, and
+	// this client learns of that only from the agent: its streams ask the
+	// agent to say so (models.WithAgentStopNotice), and agentStopping closes
+	// when it does.
+	streamCtx := reqCtx
+	var agentStopping <-chan struct{}
+	if w, ok := r.instrumentation.(agentStopWatcher); ok && r.config.CommandType == string(utils.DockerCompose) {
+		streamCtx = models.WithAgentStopNotice(reqCtx)
+		agentStopping = w.WatchAgentStop(reqCtx)
+	}
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx)
+	frames, err := r.GetTestAndMockChans(streamCtx)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -2249,6 +2359,20 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// What the agent could not capture is counted from here: the agent is
 	// capturing, and a native app has not started.
 	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
+	if agentStopping != nil {
+		// Compose is stopping the agent (the app exited on its own, or a
+		// container of its project did), and the agent waits for this drain
+		// before it goes: drain it now, not once compose has taken it down
+		// with the project, which it waits on the agent to do.
+		go func() {
+			select {
+			case <-agentStopping:
+				r.logger.Info("docker compose is stopping the keploy agent with the app's project; saving what it captured before it goes")
+				drainComposeAgent(true)
+			case <-reqCtx.Done():
+			}
+		}()
+	}
 
 	/*
 	 * THE FORWARDERS NOW OUTLIVE THIS FUNCTION, so every path out of it has
@@ -2626,6 +2750,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()))
 				}
+				// Before the mock is published to its mappings: a mapping
+				// that resolves it finds what its stamp said.
+				capWatch.saved(mock)
 				if tempID != "" && mock.Name != "" {
 					correlationMap.Store(tempID, models.MockEntry{
 						Name:             mock.Name,
@@ -2646,7 +2773,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	})
 
 	errGrp.Go(func() error {
-		return r.consumeMappings(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs,
+		return r.consumeMappingsFor(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs,
 			func(testName string) {
 				// Reuse the deferred-orphan revoke path the agent's own
 				// capacity-drop uses: finalize deletes these test cases instead
@@ -2654,7 +2781,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedMu.Lock()
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
-			}, &shortPoolByTest)
+			}, &shortPoolByTest, capWatch.mapped)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no
@@ -2667,6 +2794,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	if r.config.CommandType != string(utils.DockerCompose) && ctx.Err() == nil {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
+			noteStopKilled(&stopKilled, runAppError)
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
 			}
@@ -3224,7 +3352,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				if !ok && ender != nil && ender.StreamEnded(models.MappingStream) {
 					// The agent ended it at its marker, every mapping it owed
 					// from before the stop on it.
-					r.logger.Debug(streamEndedLog, zap.String("frames", "mappings"))
+					r.logger.Debug(StreamEndedLog, zap.String("frames", "mappings"))
 					return nil
 				}
 				if !ok {
@@ -3233,6 +3361,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					// (whenever that came: see forwardUntilDrained), and the
 					// mappings it still held are lost.
 					if mapCtx.Err() == nil {
+						r.noteEndCut("keploy's agent ended its mapping stream before the recording had saved its mappings, so those it still held are not in the recording")
 						r.logger.Warn("the keploy agent ended its mapping stream before the recording had saved its mappings: those it still held, if any, are lost",
 							zap.String("next_step", "the agent was stopped before the recording had saved its mappings (docker compose stops it with the project, also when the app exits on its own; kubelet with its pod): stop the recording, not the app or the agent. A test left without its mapping replays with no mocks"))
 					}

@@ -78,12 +78,12 @@ func TestAnAbandonedHandshakeIsATestsOwnAndLeavesItNotJudged(t *testing.T) {
 		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
 	}
 	txt := at(1).NotJudgedText()
-	for _, want := range []string{"not judged: ", "hung up on 1 TLS handshake(s)", "without a word", "NODE_EXTRA_CA_CERTS", "(to a:443)"} {
+	for _, want := range []string{"not judged: ", "hung up on 1 TLS handshake(s)", "without a word", "NODE_EXTRA_CA_CERTS", "--cacert", "CURLOPT_CAINFO", "(to a:443)"} {
 		if !strings.Contains(txt, want) {
 			t.Fatalf("%q lacks %q", txt, want)
 		}
 	}
-	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || strings.Contains(r, "TCP address") {
+	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || !strings.Contains(r, "NODE_EXTRA_CA_CERTS") || !strings.Contains(r, "--cacert") || !strings.Contains(r, "CURLOPT_CAINFO") || strings.Contains(r, "TCP address") {
 		t.Fatalf("remedy %q: trust keploy's CA, and nothing of a Unix socket", r)
 	}
 	if r := append(at(1), CaptureLoss{Kind: CaptureLossUnixSocket, Count: 1}).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || !strings.Contains(r, "TCP address") {
@@ -216,5 +216,86 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 	}
 	if text := notJudged.NotJudgedText(); !strings.Contains(text, "cannot see the application's calls over Unix sockets") || !strings.Contains(text, "no trampoline") {
 		t.Fatalf("NotJudgedText = %q", text)
+	}
+	// Its remedy is keploy's report's: reaching the dependencies over TCP
+	// leaves every test not judged all the same.
+	if r := notJudged.NotJudgedRemedy(); !strings.Contains(r, "report the reason to keploy") || strings.Contains(r, "TCP") {
+		t.Fatalf("remedy %q, want the report's own, never a move to TCP", r)
+	}
+	if r := append(notJudged, CaptureLoss{Kind: CaptureLossUnixSocket, Count: 1}).NotJudgedRemedy(); !strings.Contains(r, "reach that dependency over a TCP address") || !strings.Contains(r, UnixUnseenRemedy) {
+		t.Fatalf("remedy %q, want both: a Unix socket's call seen, and the report's", r)
+	}
+}
+
+// A server-first connection keploy passed through (P250) leaves the test it
+// carried bytes in not judged, that test only, and says what it was and how
+// to reach it by design.
+func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
+	k := CaptureLossServerFirst
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("NotJudged %v PerTest %v runScoped %v; want a test's own loss that leaves it not judged", k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	before := CaptureLosses{{Kind: k, Count: 2, What: "to 10.0.0.9:25"}}
+	now := CaptureLosses{{Kind: k, Count: 5, What: "to 10.0.0.9:25"}}
+	charged := now.Charged(nil, nil, before)
+	if len(charged) != 1 || charged[0].Count != 3 {
+		t.Fatalf("charged %+v; want what passed in this test only", charged)
+	}
+	_, notJudged := charged.Split()
+	text := notJudged.NotJudgedText()
+	for _, want := range []string{"server-first protocol", "passed through for real", "sent data on them 3 time(s)", "to 10.0.0.9:25"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("%q does not say %q", text, want)
+		}
+	}
+	if !strings.Contains(notJudged.NotJudgedRemedy(), "mock.real") {
+		t.Fatalf("remedy %q", notJudged.NotJudgedRemedy())
+	}
+}
+
+// A connection a destination refused at accept, relayed (P250), is a loss of
+// its own kind: not judged, the test's own, with its text and remedy.
+func TestARefusalAtAcceptIsALossOfItsOwnKind(t *testing.T) {
+	k := CaptureLossRefusedAtAccept
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("NotJudged %v PerTest %v runScoped %v", k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	l := CaptureLosses{{Kind: k, Count: 1, What: "to 10.0.0.9:6379"}}
+	_, notJudged := l.Split()
+	if text := notJudged.NotJudgedText(); !strings.Contains(text, "refused the application's connections at accept") || strings.Contains(text, "server-first") {
+		t.Fatalf("text %q", text)
+	}
+	if remedy := notJudged.NotJudgedRemedy(); !strings.Contains(remedy, "refused") || strings.Contains(remedy, "mock.real") {
+		t.Fatalf("remedy %q", remedy)
+	}
+}
+
+// A use of a container whose configuration's read the Docker daemon did not
+// answer is the test's own loss, and leaves it not judged: the text names
+// the container and says the daemon did not answer, and the remedy is to
+// make its inspect answer.
+func TestAContainerReadTheDaemonDidNotAnswerLeavesItsTestNotJudged(t *testing.T) {
+	k := CaptureLossContainerUnread
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() {
+		t.Fatal("an unread container is a test's own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "container pg (postgres:16)"}}
+	}
+	if got := at(3).Charged(at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the previous test", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := at(1).NotJudgedText()
+	for _, want := range []string{"not judged: ", "did not answer keploy's read of a container's configuration (1 time(s)", "(container pg (postgres:16))"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "docker inspect") || strings.Contains(r, "trust keploy's CA") {
+		t.Fatalf("remedy %q: make the container's inspect answer, and nothing of TLS", r)
 	}
 }

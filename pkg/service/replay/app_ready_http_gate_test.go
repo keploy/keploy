@@ -880,3 +880,60 @@ func mustAtoi(t *testing.T, s string) int {
 	}
 	return n
 }
+
+// The reserved probe must not run an app handler. Echo routes GET
+// /keploy/__readiness_probe__ to a `/:param` route (v4.9.0, as samples-go's
+// echo-sql registers it), and that handler then queries its database before
+// the first test opens a window: no recorded mock answers a call keploy made
+// up, so the probe's query missed. Routers answer an OPTIONS for a GET-only
+// route themselves (Echo 204, gin and net/http 404 or 405), without a handler.
+func TestTheReservedProbeDoesNotRunACatchAllHandler(t *testing.T) {
+	var handlerRuns, probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
+		if r.Method != http.MethodGet { // a GET-only route, as an app registers it
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		handlerRuns.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	if !gateOnAppAddress(context.Background(), zap.NewNop(), gateCfg(10*time.Second), host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("a serving app must pass the gate")
+	}
+	if probes.Load() == 0 {
+		t.Fatal("the app never received the probe")
+	}
+	if n := handlerRuns.Load(); n != 0 {
+		t.Fatalf("the readiness probe ran the app's catch-all GET handler %d time(s); it must be a request no handler serves", n)
+	}
+}
+
+// A configured health path is the operator's endpoint, so it is requested as
+// they would request it: with GET.
+func TestAConfiguredHealthPathIsRequestedWithGet(t *testing.T) {
+	got := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got <- r.Method:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	cfg := gateCfg(10 * time.Second)
+	cfg.Test.HealthPath = "/healthz"
+	if !gateOnAppAddress(context.Background(), zap.NewNop(), cfg, host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("gate should pass against a serving app")
+	}
+	if m := <-got; m != http.MethodGet {
+		t.Fatalf("the configured health path was requested with %s, want GET", m)
+	}
+}

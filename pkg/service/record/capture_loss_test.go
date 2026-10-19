@@ -151,13 +151,46 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 	if fmt.Sprint(w.uncapturable) != "[test-2]" {
 		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
 	}
-	during := logs.FilterMessageSnippet("abandoned its handshake: such calls are not in the mocks").All()
+	during := logs.FilterMessageSnippet("abandoned its handshake, or while the Docker daemon did not answer").All()
 	if len(during) != 1 || !strings.Contains(fmt.Sprint(during[0].ContextMap()["next_step"]), "trust keploy's CA") {
 		t.Fatalf("%d WARNs for the test case, want 1 with the CA-trust remedy: %+v", len(during), during)
 	}
 	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
-	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") {
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") ||
+		!strings.Contains(late[0].Message, "Go's http.Transport keeps such a spare") || !strings.HasPrefix(fmt.Sprint(late[0].ContextMap()["next_step"]), "if the client does not trust keploy's CA: ") {
 		t.Fatalf("%d lines for the late one, want one WARN naming 1 handshake: %+v", len(late), late)
+	}
+}
+
+// Data the application sends over a server-first protocol keploy passes
+// through (P250) is said for the test case it was sent in, never a failure;
+// some sent after the last test case is said too, charged to none, as such,
+// and not as an abandoned TLS handshake.
+func TestARecordingSaysAServerFirstProtocolItPassedThrough(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	sf := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossServerFirst, Count: n, What: "to 10.0.0.9:25"}}
+	}
+	// The base, each test case's check, then the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, sf(2), sf(2), sf(3)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want nothing tainted and the recording kept", w)
+	}
+	if fmt.Sprint(w.uncapturable) != "[test-2]" {
+		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
+	}
+	if n := len(logs.FilterMessageSnippet("abandoned its handshake with keploy's proxy").All()); n != 0 {
+		t.Fatalf("%d late lines call it an abandoned TLS handshake", n)
+	}
+	late := logs.FilterMessageSnippet("keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded").All()
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "sent data on them 1 time(s)") || !strings.Contains(fmt.Sprint(late[0].ContextMap()["next_step"]), "mock.real") {
+		t.Fatalf("%d lines for the late one, want one WARN naming 1 send and mock.real: %+v", len(late), late)
 	}
 }
 
@@ -227,5 +260,112 @@ func TestARecordingThatCalledWhatKeployCannotCaptureWarnsAndDoesNotFail(t *testi
 	warns := logs.FilterMessageSnippet("keploy cannot capture").All()
 	if len(warns) != 1 || fmt.Sprint(warns[0].ContextMap()["testCases"]) != "[test-2 test-3]" {
 		t.Fatalf("WARN lines %+v, want one naming test-2 and test-3", warns)
+	}
+}
+
+// fakeAgentWatch is a watch of which agent process answers: replaced says
+// another answered after the first.
+type fakeAgentWatch struct {
+	replaced bool
+	stopped  bool
+}
+
+func (w *fakeAgentWatch) Replacement() (models.AgentReplacement, bool) {
+	if !w.replaced {
+		return models.AgentReplacement{First: "a"}, false
+	}
+	return models.AgentReplacement{First: "a", Next: "b"}, true
+}
+func (w *fakeAgentWatch) Accept() {}
+func (w *fakeAgentWatch) Stop()   { w.stopped = true }
+
+// watchingInstr is a countingInstr whose agent client watches which agent
+// process answers it.
+type watchingInstr struct {
+	*countingInstr
+	watch   *fakeAgentWatch
+	watched int
+}
+
+func (w *watchingInstr) WatchAgentInstance() models.AgentInstanceWatch {
+	w.watched++
+	return w.watch
+}
+
+// P056: an agent started again in its place while the recording ran counts
+// from nothing, and what the one before counted it could not capture, or
+// captured but had not handed over, went with it: the recording is not
+// verified, and fails. One process answering for all of it passes, and the
+// watch is begun once and ended.
+func TestARecordingWhoseAgentWasStartedAgainIsNotVerified(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, replaced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replaced=%v", replaced), func(t *testing.T) {
+			instr := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: replaced}}
+			_, failed, logs := record3(t, instr)
+			if failed != replaced {
+				t.Fatalf("failed %v; want %v", failed, replaced)
+			}
+			if n := logs.FilterMessageSnippet("keploy's agent was started again while it recorded").Len(); (n == 1) != replaced {
+				t.Fatalf("%d 'started again' ERROR(s) with replaced=%v", n, replaced)
+			}
+			if instr.watched != 1 || !instr.watch.stopped {
+				t.Fatalf("watched %d time(s), stopped %v; want once, then stopped", instr.watched, instr.watch.stopped)
+			}
+		})
+	}
+	// With the switch off nothing is watched.
+	t.Setenv(provenswitch.Env, "")
+	off := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: true}}
+	if _, failed, _ := record3(t, off); failed || off.watched != 0 {
+		t.Fatalf("switch off: failed %v, watched %d time(s); want neither", failed, off.watched)
+	}
+}
+
+// A mock stamped after its test case was checked (its hold let the test case
+// go before the read of its container's configuration stalled) charges its
+// own test case, by the mapping that holds it, whenever that comes: test-1
+// is not judged, naming the container, and test-2, checked while the stall
+// was counted, is untouched. The count of the kind charges nothing (it came
+// after test-1's check), and a marked mock no test case holds is said apart.
+// Nothing fails the recording.
+func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	unread := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: n, What: "container pg (postgres:16)"}}
+	}
+	// The base, test-1's check, test-2's check (the stall counted by then),
+	// and the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, unread(1), unread(2)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	w.afterTestCase(context.Background(), "test-1")
+	w.afterTestCase(context.Background(), "test-2")
+	marked := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Spec: models.MockSpec{Metadata: map[string]string{models.ContainerUnreadMetadata: "container pg (postgres:16)"}}}
+	}
+	w.saved(marked("mock-7"))                                // stamped late, saved after both checks
+	w.saved(&models.Mock{Name: "mock-8"})                    // its container named
+	w.saved(marked("mock-9"))                                // a startup mock no test case holds
+	w.mapped("test-1", []models.MockEntry{{Name: "mock-7"}}) // test-1's delta mapping, binned by its request
+	w.mapped("test-2", []models.MockEntry{{Name: "mock-8"}})
+	w.mapped("test-1", []models.MockEntry{{Name: "mock-7"}}) // named again: charged once
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want nothing tainted and the recording kept", w)
+	}
+	charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
+	if len(charged) != 1 || fmt.Sprint(charged[0].ContextMap()["testCases"]) != "[test-1]" ||
+		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "(1 time(s)") ||
+		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "pg (postgres:16)") ||
+		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["next_step"]), "docker inspect") {
+		t.Fatalf("%d WARNs for test cases, want one naming test-1 alone, once, with pg and the inspect remedy: %+v", len(charged), charged)
+	}
+	apart := logs.FilterMessageSnippet("mocks no test case holds").All()
+	if len(apart) != 1 || !strings.Contains(fmt.Sprint(apart[0].ContextMap()["reason"]), "pg (postgres:16)") {
+		t.Fatalf("%d WARNs for the mock no test case holds, want one naming pg: %+v", len(apart), apart)
+	}
+	if n := logs.FilterMessageSnippet("after the last test case").Len(); n != 0 {
+		t.Fatalf("%d lines charged the count after the last test case: the mocks charge it", n)
 	}
 }

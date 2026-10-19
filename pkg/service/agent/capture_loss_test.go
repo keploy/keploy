@@ -5,10 +5,14 @@ package agent
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -489,4 +493,131 @@ func TestAnAbandonedHandshakeLeavesOnlyItsTestNotJudged(t *testing.T) {
 	un, err := a.UnchargedCaptureLosses(ctx)
 	require.NoError(t, err)
 	require.Empty(t, un, "it was charged to its test")
+}
+
+// stalledIndex is a container index whose read of the container at addr
+// stalled: the daemon did not answer it (containerkey's stallResolver).
+type stalledIndex struct {
+	addr string
+	c    containerkey.Container
+}
+
+func (r stalledIndex) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return r.c, dst.String() == r.addr, nil
+}
+func (stalledIndex) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (stalledIndex) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (stalledIndex) AwaitReadsOf(context.Context, []string)             {}
+func (stalledIndex) Bind(context.Context)                               {}
+func (stalledIndex) Watch(context.Context, *zap.Logger)                 {}
+func (stalledIndex) Endpoint() string                                   { return "unix:///fake.sock" }
+func (stalledIndex) FingerprintsOrStall(context.Context, string) (string, string, bool, string) {
+	return "", "", false, "pg (postgres:16)"
+}
+
+// In keploy mock record, a mock stamped after its test ended (the read of
+// its container's configuration stalled past the test's end) charges that
+// test, by the scope its request was sent in: its window says it is not
+// judged, naming the container, and the next test, open as the stall came,
+// is untouched, as is the run's. The count of the kind charges nothing.
+func TestARecordChargesALateUnreadMockToItsOwnTestAndNoOther(t *testing.T) {
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(stalledIndex{addr: "172.17.0.7:5432", c: containerkey.Container{ID: "pg", Image: "postgres:16", Port: 5432}})
+	ctx := context.Background()
+	a, p := wireAgent(t, models.MODE_RECORD)
+	require.NoError(t, a.resetSession(ctx))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	sent := time.Now() // TestA's request to pg
+	containerkey.Default.Name(nil, "c1", "172.17.0.7:5432")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	// The stall resolves now, with TestB open: TestA's mock is stamped.
+	m := &models.Mock{ConnectionID: "c1", Spec: models.MockSpec{ReqTimestampMock: sent}}
+	containerkey.Default.Stamp(m)
+	require.Equal(t, "container pg (postgres:16)", m.Spec.Metadata[containerkey.UnreadKey])
+	// The count of the kind grew too, as the use was counted: no test is
+	// charged by it.
+	a.Proxy = lossProxy{wireProxy: p, losses: models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: "container pg (postgres:16)"}}}
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: "passed"})
+	require.Nil(t, serr)
+	uncharged, err := a.UnchargedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Empty(t, uncharged, "the run is charged nothing: the mock is its own test's")
+	// One of the time outside tests is the run's.
+	outside := &models.Mock{ConnectionID: "c1", Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	containerkey.Default.Stamp(outside)
+	uncharged, err = a.UnchargedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: "container pg (postgres:16)"}}, uncharged, "a mock of the time outside tests is the run's")
+
+	wa := windowOf(t, a, "o::TestA")
+	require.Equal(t, models.ScopeOutcomePassed, wa.Outcome, "a record never fails a test")
+	require.NotNil(t, wa.Evidence)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: "container pg (postgres:16)"}}, wa.Evidence.CannotCapture)
+	require.Contains(t, wa.Evidence.Reason, "not judged")
+	require.Contains(t, wa.Evidence.Reason, "pg (postgres:16)")
+	wb := windowOf(t, a, "o::TestB")
+	require.True(t, wb.Evidence == nil || len(wb.Evidence.CannotCapture) == 0, "the next test is untouched: %+v", wb.Evidence)
+}
+
+// A mock of the open test stamped while it is open, its container's read
+// stalled, is on the test's window as it closes.
+func TestARecordChargesAnUnreadMockOfTheOpenTestAsItCloses(t *testing.T) {
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(stalledIndex{addr: "172.17.0.7:5432", c: containerkey.Container{ID: "pg", Image: "postgres:16", Port: 5432}})
+	ctx := context.Background()
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	require.NoError(t, a.resetSession(ctx))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	containerkey.Default.Name(nil, "c1", "172.17.0.7:5432")
+	containerkey.Default.Stamp(&models.Mock{ConnectionID: "c1", Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	w := windowOf(t, a, "o::TestA")
+	require.NotNil(t, w.Evidence)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: "container pg (postgres:16)"}}, w.Evidence.CannotCapture)
+}
+
+// A test run twice (a retry) is two attempts: a mock of the first stamped
+// late, as the second is open, charges the first attempt's window, never the
+// second's, which is the test's recording.
+func TestARecordChargesALateUnreadMockToItsOwnAttemptNotARetry(t *testing.T) {
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(stalledIndex{addr: "172.17.0.7:5432", c: containerkey.Container{ID: "pg", Image: "postgres:16", Port: 5432}})
+	ctx := context.Background()
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	require.NoError(t, a.resetSession(ctx))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	sent := time.Now() // the first attempt's request to pg
+	containerkey.Default.Name(nil, "c1", "172.17.0.7:5432")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "failed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestA")) // the retry
+	require.Nil(t, serr)
+	containerkey.Default.Stamp(&models.Mock{ConnectionID: "c1", Spec: models.MockSpec{ReqTimestampMock: sent}})
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	ws, err := a.FinalScopeWindows(ctx)
+	require.NoError(t, err)
+	var attempts []models.ScopeWindow
+	for _, w := range ws {
+		if w.Name == "o::TestA" {
+			attempts = append(attempts, w)
+		}
+	}
+	require.Len(t, attempts, 2)
+	require.NotNil(t, attempts[0].Evidence, "the first attempt's mock charges the first attempt")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: "container pg (postgres:16)"}}, attempts[0].Evidence.CannotCapture)
+	require.True(t, attempts[1].Evidence == nil || len(attempts[1].Evidence.CannotCapture) == 0, "the retry is untouched: %+v", attempts[1].Evidence)
 }

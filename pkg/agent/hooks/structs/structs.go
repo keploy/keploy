@@ -27,6 +27,11 @@ const (
 	// of the watch's epochs, and refuse datagrams to UDP port 443 (QUIC), so
 	// clients fall back to TCP.
 	FlagProvenUDP uint32 = 1 << 2
+	// FlagProvenReady (bit 3), set under the proven switch with the
+	// readiness watch's programs attached (readywatch.go): the hooks report a
+	// member's TCP listen, and count its listens, connects, process forks and
+	// execs, the evidence keploy test waits on before its first test.
+	FlagProvenReady uint32 = 1 << 3
 )
 
 type BpfSpinLock struct{ Val uint32 }

@@ -141,3 +141,74 @@ func TestStatedExecuteIsServedOnlyToItsOwnTest(t *testing.T) {
 		})
 	}
 }
+
+// inFlightProxy is windowedProxy that also says, from the manager's recorded
+// windows, when the gap before a test's window began (coreAgent.InFlightPlanner),
+// as proxy.Proxy does: the agent's filter keeps the calls in flight then.
+type inFlightProxy struct{ windowedProxy }
+
+func (p *inFlightProxy) InFlightFrom(start time.Time) (time.Time, bool) {
+	return p.mm.InFlightFrom(start)
+}
+
+// A call in flight when test-2 began, sent in the gap before its window and
+// answered inside it, is test-2's own to the MySQL matcher, as it is to the
+// windowed read (proxy.MockManager.GetPerTestMocksInWindow): two recordings
+// of one statement, the one in flight and then test-2's own, answer in record
+// order, exactly as they do with both inside test-2's window.
+func TestACallInFlightIsItsTestsOwnToTheMySQLMatcher(t *testing.T) {
+	const query = "SELECT v FROM kv WHERE id = 1"
+	w1s, w1e := diffWindow(0)
+	w2s, w2e := diffWindow(1)
+	for place, sentAt := range map[string]time.Time{
+		"in flight":     w1e.Add(3 * time.Millisecond), // in the gap, 4ms-10ms
+		"in its window": w2s.Add(500 * time.Microsecond),
+	} {
+		t.Run(place, func(t *testing.T) {
+			first := diffMock("first", "c1", []mysql.Request{queryReq(query)}, sentAt, models.LifetimePerTest, "mocks")
+			first.Spec.ResTimestampMock = w2s.Add(time.Millisecond) // answered inside test-2's window
+			own := diffMock("own", "c1", []mysql.Request{queryReq(query)}, w2s.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+			for _, m := range []*models.Mock{first, own} {
+				m.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+				m.TestModeInfo = models.TestModeInfo{}
+				m.DeriveLifetime()
+			}
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: w1s, End: w1e}, {TestCase: "test-2", Start: w2s, End: w2e}})
+			cfg := &config.Config{}
+			cfg.Agent.Mode = models.MODE_TEST
+			a := agentSvc.New(zap.NewNop(), nil, &inFlightProxy{windowedProxy{mm: mm}}, nil, nil, cfg)
+			ctx := context.Background()
+			if err := a.StoreMocks(ctx, []*models.Mock{first, own}, nil); err != nil {
+				t.Fatal(err)
+			}
+			stage := func(start, end time.Time) {
+				t.Helper()
+				if err := a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: start, BeforeTime: end, StrictMockWindow: true, AgentOwnsConsumed: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stage(models.BaseTime, time.Now())
+			stage(w1s, w1e)
+			stage(w2s, w2e)
+			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: map[uint32]string{}, NextStmtID: 100}
+			conn := context.WithValue(ctx, models.ClientConnectionIDKey, "c1")
+			var got []string
+			for i := 0; i < 2; i++ {
+				resp, ok, _, err := replayer.MatchCommandForTest(conn, zap.NewNop(), queryReq(query), mm, dctx, nil, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !ok || resp == nil {
+					got = append(got, "MISS")
+					continue
+				}
+				got = append(got, resp.Payload)
+			}
+			if strings.Join(got, ",") != "first,own" {
+				t.Fatalf("served %v, want [first own]: record order, the call in flight first", got)
+			}
+		})
+	}
+}

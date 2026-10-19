@@ -84,6 +84,10 @@ type resolvedWindow struct {
 	// From then on it owned only what no other request claimed (see
 	// exclusiveEnd). An int64, not a time.Time: the ring keeps 8192 of these.
 	sharedFrom int64
+	// recording is the manager's count of ended recordings as it was
+	// resolved (SyncMockManager.recording): a mock or a mapping that goes
+	// back to it once its recording has ended is let go.
+	recording uint32
 }
 
 // unixNanoOrZero is t in Unix nanoseconds, 0 for the zero time.
@@ -219,7 +223,8 @@ type SyncMockManager struct {
 	// rescues, the memory-pressure wipe) preserve it instead of pruning. The
 	// effect is that static-dedup pruning only begins from the (N+1)-th test
 	// case, keeping the boot-through-Nth-test mock corpus complete. Mirrors
-	// firstReqSeen's lifecycle (set forward-only within a record session).
+	// firstReqSeen's lifecycle (set forward-only within a record session,
+	// and cleared as the next one starts: StartRecordSession).
 	resolvedTestCount int
 
 	// recentWindows is a COUNT-bounded ring of the most recently
@@ -268,6 +273,52 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
+	// stopFound is the windows of the requests in flight that began by the
+	// instant a recording stops at (NoteStop), less those that ended since:
+	// the requests its stop found in flight. They stay the stopping
+	// recording's, which may still take one whose response comes as it
+	// drains, until it has ended (EndStoppedRecording), which gives up those
+	// still open (LostToStop). Guarded by mu.
+	stopFound map[*Window]struct{}
+	// stopAt is the latest instant a stop not yet ended was noted at
+	// (NoteStop), zero when none is; endedStopAt is the last ended stop's
+	// (EndStoppedRecording). recording counts the recordings that have
+	// ended: each resolved window keeps the count it was resolved at
+	// (resolvedWindow.recording), and what goes back to one of an ended
+	// recording's is let go. Guarded by mu.
+	stopAt, endedStopAt time.Time
+	recording           uint32
+	// endedLaneEpoch and endedMappingGen are the output lane's epoch
+	// (revokeEpoch) and the mapping stream's generation (mappingGen) as the
+	// last recording ended: while both are still the ones bound, that
+	// recording's streams are, and what goes back to its test cases goes to
+	// them (goneLocked). Guarded by mu.
+	endedLaneEpoch  uint64
+	endedMappingGen uint64
+	// leftovers is the request times, in Unix nanoseconds, of the requests
+	// the stops of recordings that ended found in flight, until the next
+	// incoming stream takes them (TakeLeftovers). Guarded by mu.
+	leftovers map[int64]struct{}
+	// testSpans is, under the proven switch, the spans of the last
+	// maxRecentWindows windows whose request became a test case, as its test
+	// case states them (noteTestSpanLocked); testSpansNext is the one the next
+	// replaces once it is full. spanWatch is the channels TestSpanAt handed
+	// out for open windows, each closed and dropped as its window leaves the
+	// open ones (windowLeftLocked). Guarded by mu.
+	testSpans     []testSpan
+	testSpansNext int
+	spanWatch     map[*Window]chan struct{}
+	// exchangeHolds is the exchanges parsers hold while they cannot yet tell
+	// what they are (HoldExchanges), each by its earliest request time in
+	// Unix nanoseconds; exchangeHoldsNext numbers them. holdsStopping is
+	// closed (holdsStopped) as a recording's stop first asks what is pending
+	// (BacklogBefore), and a new one made for the next recording
+	// (SetOutputChannel). Guarded by holdsMu, a leaf.
+	holdsMu           sync.Mutex
+	exchangeHolds     map[uint64]int64
+	exchangeHoldsNext uint64
+	holdsStopping     chan struct{}
+	holdsStopped      bool
 	// held is the per-test mocks a reaper would have dropped (past the stale
 	// horizon, or a duplicate's leftovers) while a window still open may own
 	// them: no resolved window owns them, and every one is requested at or
@@ -315,6 +366,11 @@ type SyncMockManager struct {
 	// sampled on leftOutTold, which only grows.
 	keptLeftOut atomic.Uint64
 	leftOutTold atomic.Uint64
+	// owedLetGo counts the mocks owed back to a test case of a recording that
+	// had ended, its streams no longer bound, let go rather than handed to a
+	// later recording's stream (handOwedLocked); goneLetGo, its late mocks
+	// let go so (goneLocked).
+	owedLetGo, goneLetGo atomic.Uint64
 	// lossTallies are the tallies open (OpenLossTally): each counts the
 	// losses told while it is open, less those of them taken back. lossEpoch
 	// is the number of tallies ever opened, the last one's epoch; a window
@@ -721,6 +777,9 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	m.pendingRevokes = nil
 	m.revokeEpoch.Store(epoch)
 	m.droppedMu.Unlock()
+	// The new session's holds are told of its own stop, not the last one's
+	// (HoldExchanges): a hold from before keeps the channel it took.
+	m.newHoldsSession()
 	m.outChanMu.Unlock()
 }
 
@@ -1877,6 +1936,9 @@ const (
 	// flushClaimed: in a resolved kept window's part after its yield, which a
 	// request in flight claims: held for that request.
 	flushClaimed
+	// flushGone: in a window of a recording that has ended, whose streams
+	// are no longer bound (goneLocked): let go.
+	flushGone
 )
 
 // attributedReusable reports whether mock is attributed as a reusable mock,
@@ -1913,6 +1975,8 @@ func (m *SyncMockManager) flushTakeLocked(mock *models.Mock) (take flushTake, w 
 	}
 	w, ok, shared, behind := m.ownerOrSharedLocked(mock.Spec.ReqTimestampMock)
 	switch {
+	case ok && m.goneLocked(w.recording):
+		return flushGone, w, shared, behind
 	case ok && w.keep:
 		return flushOwned, w, shared, behind
 	case ok:
@@ -1943,8 +2007,6 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		return
 	}
 
-	var mocksToSend []ownedMock
-	var lateMappings map[string][]string
 	var tally dropTally
 
 	m.mu.Lock()
@@ -1959,79 +2021,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		return
 	}
 	mappingChan := m.mappingChan
-	openFrom, open := m.openFromLocked()
-	var refs ownerRefs
-
-	keepIdx := 0
-	for i := 0; i < len(m.buffer); i++ {
-		mock := m.buffer[i]
-		if mock == nil {
-			continue
-		}
-		take, w, shared, behind := m.flushTakeLocked(mock)
-		switch take {
-		case flushReusable:
-			// Reusable across tests; flush verbatim (never renamed),
-			// matching ResolveRange's lifetime carve-out. Owned by no
-			// specific test → owner "" (a capacity drop records nothing).
-			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
-			continue
-		case flushDuplicates:
-			// A static-dedup duplicate's window (sync mode): its late mocks
-			// go the way its in-time ones went in ResolveRange — pruned,
-			// except a startup-window mock, which is rescued with no owner
-			// and no mapping (a duplicate's testName is synthetic), and one
-			// a request still in flight may own, which is held for it.
-			if isStartupMock(mock) {
-				mock.Name = "mock-" + generateRandomString(8)
-				noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
-				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
-			} else {
-				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
-			}
-			continue
-		case flushOwned:
-			mock.Name = "mock-" + generateRandomString(8)
-			if w.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
-			}
-			// Owned by the matched window's test → tag it so a capacity
-			// drop suppresses that TC.
-			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: w.testName})
-			continue
-		case flushStartup:
-			// STARTUP RESCUE: a startup-window mock the ownerWindowLocked check above
-			// didn't claim (boot traffic owns no window; an early-test mock whose
-			// window hasn't resolved yet on this ticker tick). Flush it to disk
-			// proactively rather than leaving it parked in the buffer where a dedup
-			// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
-			// is ever persisted. Owns no specific test → owner "".
-			mock.Name = "mock-" + generateRandomString(8)
-			noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
-			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
-			continue
-		case flushClaimed:
-			// In a resolved kept window's part after its yield, and a request
-			// in flight claims it: held for that request now, with the window
-			// it goes back to if that request ends without it.
-			m.holdForClaimLocked(mock, &tally, refs.of(shared, true))
-			continue
-		}
-		// Not attributable yet — a future (possibly out-of-order) request
-		// may still claim it. Keep it buffered in place.
-		m.buffer[keepIdx] = mock
-		keepIdx++
-	}
-	for i := keepIdx; i < len(m.buffer); i++ {
-		m.buffer[i] = nil
-	}
-	m.buffer = m.buffer[:keepIdx]
-	m.pruneSentClaimedLocked(&lateMappings)
-	gaveUp := m.fitHoldLocked(&tally)
-	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	mocksToSend, lateMappings, gaveUp := m.flushLocked(outChanBound, &tally)
 	hold := m.holdStateLocked()
 	m.noteTaken(mocksToSend)
 	// Owed before the mocks go: a stop asked between the two sends waits for
@@ -2068,6 +2058,93 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	// still open. Snapshot-then-send inside drainPendingRevokes keeps droppedMu
 	// off the send path — do NOT hoist it under m.mu.
 	m.drainPendingRevokes()
+}
+
+// flushLocked is FlushOwnedWindows' pass over the buffer, the startup mocks
+// sent for a claim and what is owed, with the output bound (outChanBound): what
+// to send, the late mappings to send with it, and the windows the hold's bound
+// gave up. Counted in tally. Caller holds mu, and sends after letting it go.
+func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mocksToSend []ownedMock, lateMappings map[string][]string, gaveUp []*Window) {
+	openFrom, open := m.openFromLocked()
+	var refs ownerRefs
+
+	keepIdx := 0
+	for i := 0; i < len(m.buffer); i++ {
+		mock := m.buffer[i]
+		if mock == nil {
+			continue
+		}
+		take, w, shared, behind := m.flushTakeLocked(mock)
+		switch take {
+		case flushGone:
+			// A late mock of a test case of a recording that has ended,
+			// whose streams are no longer bound: no stream of its own
+			// takes it, and the next recording's is no place for it.
+			m.goneLetGo.Add(1)
+			continue
+		case flushReusable:
+			// Reusable across tests; flush verbatim (never renamed),
+			// matching ResolveRange's lifetime carve-out. Owned by no
+			// specific test → owner "" (a capacity drop records nothing).
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			continue
+		case flushDuplicates:
+			// A static-dedup duplicate's window (sync mode): its late mocks
+			// go the way its in-time ones went in ResolveRange — pruned,
+			// except a startup-window mock, which is rescued with no owner
+			// and no mapping (a duplicate's testName is synthetic), and one
+			// a request still in flight may own, which is held for it.
+			if isStartupMock(mock) {
+				mock.Name = "mock-" + generateRandomString(8)
+				noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
+			} else {
+				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, tally, refs.of(shared, behind))
+			}
+			continue
+		case flushOwned:
+			mock.Name = "mock-" + generateRandomString(8)
+			if w.mapping {
+				if lateMappings == nil {
+					lateMappings = make(map[string][]string)
+				}
+				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+			}
+			// Owned by the matched window's test → tag it so a capacity
+			// drop suppresses that TC.
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: w.testName})
+			continue
+		case flushStartup:
+			// STARTUP RESCUE: a startup-window mock the ownerWindowLocked check above
+			// didn't claim (boot traffic owns no window; an early-test mock whose
+			// window hasn't resolved yet on this ticker tick). Flush it to disk
+			// proactively rather than leaving it parked in the buffer where a dedup
+			// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
+			// is ever persisted. Owns no specific test → owner "".
+			mock.Name = "mock-" + generateRandomString(8)
+			noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
+			continue
+		case flushClaimed:
+			// In a resolved kept window's part after its yield, and a request
+			// in flight claims it: held for that request now, with the window
+			// it goes back to if that request ends without it.
+			m.holdForClaimLocked(mock, tally, refs.of(shared, true))
+			continue
+		}
+		// Not attributable yet — a future (possibly out-of-order) request
+		// may still claim it. Keep it buffered in place.
+		m.buffer[keepIdx] = mock
+		keepIdx++
+	}
+	for i := keepIdx; i < len(m.buffer); i++ {
+		m.buffer[i] = nil
+	}
+	m.buffer = m.buffer[:keepIdx]
+	m.pruneSentClaimedLocked(&lateMappings)
+	gaveUp = m.fitHoldLocked(tally)
+	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	return mocksToSend, lateMappings, gaveUp
 }
 
 // Window is the window of a request whose headers have been read and whose
@@ -2114,6 +2191,11 @@ const (
 	LostToHoldBound LossCause = iota + 1
 	// LostToMemoryPressure: memory pressure let go of mocks it may own.
 	LostToMemoryPressure
+	// LostToStop: the request was in flight across its recording's stop, and
+	// that recording has ended (EndStoppedRecording). It is no request of the
+	// next, and the one it began in ended without it: Keep reports false, and
+	// tells no loss.
+	LostToStop
 )
 
 func (c LossCause) String() string {
@@ -2122,6 +2204,8 @@ func (c LossCause) String() string {
 		return "hold_bound"
 	case LostToMemoryPressure:
 		return "memory_pressure"
+	case LostToStop:
+		return "recording_stopped"
 	}
 	return "unknown"
 }
@@ -2164,6 +2248,9 @@ func (c LossCause) String() string {
 // The ingress carries the window to the capture hook in its ctx (WithWindow),
 // and closes it once the hook has returned, on every path: a window left open
 // keeps every later droppable mock held for it, until the bound gives it up.
+// A request in flight across its recording's stop is the stopping
+// recording's while that drains, and is given up once it has ended
+// (EndStoppedRecording): it is no request of the next one (LostToStop).
 //
 // Only HTTP/1 ingress opens windows (the incoming proxy here, and the
 // enterprise eBPF parser). gRPC capture (CaptureGRPC) opens none and resolves
@@ -2206,8 +2293,10 @@ func (m *SyncMockManager) OpenWindows() int {
 // so its test case must not be recorded. That is the loss a given-up window
 // costs, and only a kept one costs it, so it is told here, once: the manager
 // counts and warns of it (KeptRequestsLeftOut), the tallies open count it
-// (LossTally), and the window's lost is told the cause. A nil window reports
-// true.
+// (LossTally), and the window's lost is told the cause. A request in flight
+// across its recording's stop, given up once that recording ended
+// (LostToStop), is no loss of either recording, and tells none. A nil window
+// reports true.
 //
 // A caller that records one test case for many requests of a kind (a static
 // deduper: one per schema) tells the loss of the first of them only, and takes
@@ -2221,6 +2310,16 @@ func (w *Window) Keep() bool {
 		w.m.mu.Lock()
 		cause := w.cause
 		w.m.mu.Unlock()
+		if cause == LostToStop {
+			// No recording's loss: the one it began in ended without it, as
+			// a stop ends without the requests whose response has not come,
+			// and the one that started since never had it.
+			w.lost = nil
+			if ce := w.m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: left out a request that was in flight across its recording's stop: the recording that started since does not record it"); ce != nil {
+				ce.Write(zap.Time("in_flight_since", w.start))
+			}
+			return
+		}
 		w.m.reportLeftOut(w, cause)
 		var takeBack func()
 		if w.lost != nil {
@@ -2298,6 +2397,19 @@ func (w *Window) Claim() bool {
 	w.kept = true
 	w.m.noteOldestLocked()
 	return true
+}
+
+// LeftAtStop reports whether the window was given up because its request was
+// in flight across its recording's stop (LostToStop): its test case is no
+// recording's. The capture without --sync, which resolves nothing, leaves such
+// a test case out by it, as Keep does. False for a nil window.
+func (w *Window) LeftAtStop() bool {
+	if w == nil {
+		return false
+	}
+	w.m.mu.Lock()
+	defer w.m.mu.Unlock()
+	return w.givenUp && w.cause == LostToStop
 }
 
 // Yield says that from at on, the window's request is no longer the only one in
@@ -2456,6 +2568,19 @@ func (m *SyncMockManager) endWindowLocked(w *Window, t *dropTally, givenUp bool)
 	if w.idx >= 0 {
 		heap.Remove(&m.open, w.idx)
 		m.noteOldestLocked()
+		m.windowLeftLocked(w)
+	}
+	if _, found := m.stopFound[w]; found && !givenUp {
+		// Ended: no request a stop found in flight any more. One given up
+		// stays, for its loss to be told as none of either recording's
+		// (endStopFoundLocked). Its test case may still come after the
+		// stopping recording's stream stopped reading (a response that came
+		// after the stop): the next session leaves it out (TakeLeftovers).
+		delete(m.stopFound, w)
+		if m.leftovers == nil {
+			m.leftovers = make(map[int64]struct{})
+		}
+		m.leftovers[w.start.UnixNano()] = struct{}{}
 	}
 	m.releaseHeldLocked(t, givenUp, w.start)
 }
@@ -2736,8 +2861,16 @@ func (m *SyncMockManager) handOwedLocked(outChanBound bool, send *[]ownedMock, l
 	if !outChanBound || len(m.owed) == 0 {
 		return 0
 	}
-	n := len(m.owed)
+	n := 0
 	for _, o := range m.owed {
+		if m.goneLocked(o.to.recording) {
+			// Owed to a test case of a recording that has ended, whose
+			// streams are no longer bound: the next recording's is no
+			// place for it.
+			m.owedLetGo.Add(1)
+			continue
+		}
+		n++
 		o.mock.Name = "mock-" + generateRandomString(8)
 		if o.to.mapping {
 			if *late == nil {
@@ -2973,6 +3106,7 @@ func (m *SyncMockManager) giveUpForPressureLocked() (dropped int, gaveUp []*Wind
 	for _, w := range gaveUp {
 		w.givenUp, w.cause = true, LostToMemoryPressure
 		heap.Remove(&m.open, w.idx)
+		m.windowLeftLocked(w)
 	}
 	m.noteOldestLocked()
 	return m.dropHeldLocked(n, nil, true), gaveUp
@@ -3099,6 +3233,189 @@ func (h holdState) fields() []zap.Field {
 		zap.Int64("held_bytes_in_process", h.processBytes),
 		zap.Int("open_windows", h.open),
 	}
+}
+
+// StartRecordSession starts a recording: until its own first request
+// (SetFirstRequestSignaled), what the application calls is a startup call,
+// sent on as it is captured, and its first test cases are the startup window
+// again (resolvedTestCount). The manager is the process's, and outlives a
+// recording: a long-lived agent's next one, or keploy's own next session,
+// started with the earlier one's first request seen, and a call made before
+// its own first request waited, as a test's, for a test case's window that
+// never came. The last recording has ended, if nothing said so before
+// (EndStoppedRecording). Called as a record session starts (the proxy's
+// Record).
+func (m *SyncMockManager) StartRecordSession() {
+	m.mu.Lock()
+	m.firstReqSeen = false
+	m.resolvedTestCount = 0
+	m.mu.Unlock()
+	m.EndStoppedRecording()
+}
+
+// NoteStop notes that the recording stops at the instant at: the requests in
+// flight that began by then are the ones its stop found (stopFound). Its stop
+// says so at each of its asks of what is pending (BacklogBefore, with the
+// stop's instant), and at the agent's graceful shutdown (the proxy's, at the
+// shutdown's own time: for keploy record, the stop's; for keploy mock, which
+// sends it once its drain is done, later). Each ask with the stop's instant
+// notes the same requests, and none that began after it, whenever it comes:
+// an ask late in a long drain takes nothing of what began during it. An ask
+// of a stop whose recording has ended (EndStoppedRecording) notes nothing: it
+// would take the next recording's requests. A zero at notes nothing.
+func (m *SyncMockManager) NoteStop(at time.Time) {
+	if m == nil || at.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !at.After(m.endedStopAt) {
+		return
+	}
+	if at.After(m.stopAt) {
+		m.stopAt = at
+	}
+	for _, w := range m.open {
+		if w.start.After(at) {
+			continue
+		}
+		if m.stopFound == nil {
+			m.stopFound = make(map[*Window]struct{}, len(m.open))
+		}
+		m.stopFound[w] = struct{}{}
+	}
+}
+
+// TakeLeftovers returns the request times (Unix nanoseconds) of the requests
+// the last recordings that ended found in flight at their stops
+// (EndStoppedRecording), and forgets them; nil when none since the last take.
+// Each is no request of a later recording. A test case of one can still be
+// built after its recording ended: one claimed for its resolve as it ended,
+// which is left to the resolve, or one captured without --sync as its window
+// was given up, past its look (Window.LeftAtStop). It arrives at the next
+// recording's incoming stream, the first since that end, which takes these at
+// its attach and leaves such a test case out.
+func (m *SyncMockManager) TakeLeftovers() map[int64]struct{} {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.leftovers
+	m.leftovers = nil
+	return l
+}
+
+// EndStoppedRecording says the recording a stop was noted for (NoteStop) has
+// ended: its incoming stream ended, the next recording's attached, or the next
+// recording started (StartRecordSession), whichever comes first; the others
+// find it ended already. The requests its stop found that are still in flight
+// are given up (endStopFoundLocked): each is no request of the next
+// recording, whose loss accounting has not begun at any of those points. What
+// is owed back to its test cases (mocks held for a request in flight beside
+// them, which that request did not take) goes to its mock stream now, in the
+// same step that ends it, while that stream is still the one bound, and is
+// let go if none is. From then on the manager is in the next recording: what
+// goes back later to one of the ended recording's test cases (a mock owed
+// back, a late mock, a startup mock's mapping) goes to its streams while they
+// are still the ones bound, and is let go once the next recording has set its
+// own (goneLocked): never handed to the next recording's streams, where its
+// test's name may be another test's. A no-op when no stop was noted.
+func (m *SyncMockManager) EndStoppedRecording() {
+	if m == nil {
+		return
+	}
+	var t dropTally
+	var send []ownedMock
+	var late map[string][]string
+	m.mu.Lock()
+	if m.stopAt.IsZero() {
+		m.mu.Unlock()
+		return
+	}
+	gaveUp := m.endStopFoundLocked(&t)
+	outChanBound, _ := m.outChanStatus()
+	mappingChan := m.mappingChan
+	var heldGaveUp []*Window
+	if outChanBound {
+		// What goes to the ended recording's test cases now (its buffered
+		// late mocks, what is owed back, its startup mocks' mappings) goes
+		// to its streams, in the step that ends it.
+		send, late, heldGaveUp = m.flushLocked(outChanBound, &t)
+	}
+	letGo := len(m.owed) // no stream of the ended recording is bound to take them
+	m.owed = nil
+	m.recording++
+	m.endedLaneEpoch = m.revokeEpoch.Load()
+	m.endedMappingGen = m.mappingGen // its writer holds mu
+	m.endedStopAt, m.stopAt = m.stopAt, time.Time{}
+	m.publishHoldLocked()
+	hold := m.holdStateLocked()
+	m.noteTaken(send)
+	paidLate := m.oweLateMappingsLocked(mappingChan != nil, late, send)
+	m.mu.Unlock()
+	m.reportGivenUp(heldGaveUp, LostToHoldBound)
+	m.settlePool()
+	m.sendTaken(send)
+	if mappingChan != nil {
+		for tn, ids := range late {
+			if len(ids) > 0 {
+				m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
+			}
+		}
+	}
+	if ce := m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: a stopped recording ended: gave up the requests its stop found in flight, which are no requests of the next one"); ce != nil {
+		ce.Write(append(append([]zap.Field{zap.Int("given_up", gaveUp), zap.Int("owed_handed_on", len(send)), zap.Int("owed_let_go", letGo)}, t.fields()...), hold.fields()...)...)
+	}
+}
+
+// goneLocked reports whether a resolved window of recording (its count of
+// ended recordings, resolvedWindow.recording) belongs to a recording that has
+// ended and whose streams are no longer bound: one older than the last to end,
+// or the last to end once another output lane (SetOutputChannel) or another
+// mapping stream (SetMappingChannel) has been set: the next recording's. The
+// next recording's mapping stream is set as it starts, its output lane only at
+// its application's first outgoing connection, so either is the sign. What
+// goes back to such a window's test case (a late mock, one owed back, a
+// startup mock's mapping) is let go, mock and mapping alike: the next
+// recording's streams are no place for it. Until then the ended recording's
+// streams are still the ones bound, and take it. Caller holds mu.
+func (m *SyncMockManager) goneLocked(recording uint32) bool {
+	if recording == m.recording {
+		return false
+	}
+	return recording+1 != m.recording || m.revokeEpoch.Load() != m.endedLaneEpoch || m.mappingGen != m.endedMappingGen
+}
+
+// endStopFoundLocked gives up the requests a stopped recording's stop found in
+// flight that still are (stopFound), and returns how many. Each began in that
+// recording, which has ended, and is no request of the next (LostToStop).
+// Mocks are attributed by time alone: open, it held every leftover of the next
+// recording's requests (a duplicate's, a call past the stale horizon) until
+// the hold's budget gave it up, and kept there it was recorded there with
+// them, the calls it made before the stop gone to the last recording or let
+// go. A claimed one is being resolved this moment (Claim, ResolveKept) and is
+// left to its resolve. One the hold's budget or memory pressure gave up
+// meanwhile has its loss, not told yet, told as none of either recording's.
+// Caller holds mu.
+func (m *SyncMockManager) endStopFoundLocked(t *dropTally) (gaveUp int) {
+	for w := range m.stopFound {
+		if m.leftovers == nil {
+			m.leftovers = make(map[int64]struct{}, len(m.stopFound))
+		}
+		m.leftovers[w.start.UnixNano()] = struct{}{}
+		switch {
+		case w.idx >= 0 && !w.kept:
+			w.givenUp, w.cause = true, LostToStop
+			m.endWindowLocked(w, t, true)
+			gaveUp++
+		case w.givenUp && !w.told:
+			w.cause = LostToStop
+		}
+	}
+	m.stopFound = nil
+	t.windowsGivenUp += gaveUp
+	return gaveUp
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
@@ -3652,6 +3969,11 @@ func (m *SyncMockManager) pruneSentClaimedLocked(late *map[string][]string) {
 			stays = m.openClaimsStartupLocked(c.at)
 		case m.openClaimLocked(c.at, nil) || c.sent == claimSending:
 			stays = true
+		case m.goneLocked(c.owner.recording):
+			// It would go back to a test case of a recording that has
+			// ended, whose streams are no longer bound: into a mapping, or
+			// told dropped, on the next recording's streams, where that
+			// test's name may be another test's. Forgotten.
 		case c.sent == claimDropped:
 			m.recordDroppedTCFor(c.owner.testName, c.dropEpoch)
 		case c.owner.mapping:
@@ -3741,7 +4063,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	var selfW *resolvedWindow
 	self := func() *resolvedWindow {
 		if selfW == nil {
-			selfW = &resolvedWindow{start: start, end: end, testName: testName, mapping: mapping, keep: true, sharedFrom: unixNanoOrZero(sharedFrom)}
+			selfW = &resolvedWindow{start: start, end: end, testName: testName, mapping: mapping, keep: true, sharedFrom: unixNanoOrZero(sharedFrom), recording: m.recording}
 		}
 		return selfW
 	}
@@ -3881,7 +4203,11 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 				// Owned by THIS window's test → tag it so a capacity
 				// drop suppresses testName rather than orphaning it.
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: testName})
-			} else if ownerW, ok, shared, behind := m.ownerOrSharedLocked(mockTime); ok && ownerW.keep {
+			} else if ownerW, ok, shared, behind := m.ownerOrSharedLocked(mockTime); ok && m.goneLocked(ownerW.recording) {
+				// A late mock of a test case of a recording that has ended,
+				// whose streams are no longer bound: let go.
+				m.goneLetGo.Add(1)
+			} else if ok && ownerW.keep {
 				// This duplicate's window overlaps an earlier KEPT window that
 				// also contains the mock (concurrent sync-mode requests): the
 				// kept test owns it, exactly as the retroactive bin below
@@ -3955,6 +4281,12 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// did. The in-time path's startup rescue applies here too, so a
 		// startup-window mock of a duplicate is not lost for decoding late.
 		ownerW, ownerOK, shared, behind := m.ownerOrSharedLocked(mockTime)
+		if ownerOK && m.goneLocked(ownerW.recording) {
+			// A late mock of a test case of a recording that has ended,
+			// whose streams are no longer bound: let go.
+			m.goneLetGo.Add(1)
+			continue
+		}
 		if !ownerOK && claimedAway {
 			// A request in flight claims it: held for that request, owed
 			// back to the window decided first over it (this one, unless an
@@ -4117,8 +4449,12 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			m.buffer = append(m.buffer, taken...)
 		}
 		// The request is decided and has what it owns: its window ends here,
-		// not after the sends below.
+		// not after the sends below. It is a test case: its span is noted
+		// before its window leaves the open ones (TestSpanAt).
 		if w != nil && w.m == m {
+			if w.idx >= 0 {
+				m.noteTestSpanLocked(start, end)
+			}
 			m.endWindowLocked(w, &tally, false)
 		}
 	}
@@ -4151,6 +4487,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		mapping:    mapping,
 		keep:       keep,
 		sharedFrom: unixNanoOrZero(sharedFrom),
+		recording:  m.recording,
 	})
 
 	if len(m.recentWindows) > maxRecentWindows {
@@ -4312,6 +4649,12 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		// owned by a duplicate window falls through to the startup rescue
 		// and is otherwise dropped, as the duplicate's own debris is.
 		w, ok, shared, behind := m.ownerOrSharedLocked(mock.Spec.ReqTimestampMock)
+		if ok && m.goneLocked(w.recording) {
+			// A late mock of a test case of a recording that has ended,
+			// whose streams are no longer bound: let go.
+			m.goneLetGo.Add(1)
+			continue
+		}
 		if ok && w.keep {
 			if !outChanBound {
 				// Can't deliver yet; retain so a later flush sends it.

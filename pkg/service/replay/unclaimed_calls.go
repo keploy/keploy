@@ -34,7 +34,9 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) ([]models.UnmatchedCall, 
 		return nil, nil
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
-	return dataPlaneCalls(calls), err
+	// A set whose first test's read did not take what was missed before it
+	// (the read was cut short) hands it over here: still the set's.
+	return dataPlaneCalls(r.setCalls.take(calls)), err
 }
 
 // unclaimedWhy says why the calls fail the set, naming each.

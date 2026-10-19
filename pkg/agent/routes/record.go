@@ -85,6 +85,13 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 	}
 
 	r.Route(agentRoutePrefix, func(r chi.Router) {
+		// Under the proven switch every answer names this agent process, so a
+		// client can tell an agent started again in its place, which holds
+		// none of what this one saw, from this one (models.AgentInstanceHeader).
+		// With the switch off the answers are as they were.
+		if provenswitch.On() {
+			r.Use(answersAs(processInstance))
+		}
 		r.Get("/health", a.Health)
 		r.Get("/ca", a.CACert)
 		r.Post("/incoming", a.HandleIncoming)
@@ -96,6 +103,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/stop", a.Stop)
 		r.Get("/record/pending", a.HandlePending)
 		r.Post(models.StreamEndPath, a.HandleEndStreams)
+		r.Get(models.StopNoticePath, a.HandleStopNotice)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
@@ -126,6 +134,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		if provenswitch.On() {
 			r.Get("/containers", a.HandleTakesContainers)
 			r.Post("/containers", a.HandleContainers)
+			r.Get("/containers/settle", a.HandleSettleContainers)
 		}
 		// The run's mock.real, and what the run saw of it beyond its tests
 		// (real.go). Any method: with the switch off each answers the 404
@@ -145,6 +154,10 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
+		// The application's listens and its start's progress, for keploy
+		// test's readiness under the proven switch (readiness.go).
+		r.Get("/app/readiness", a.HandleAppReadiness)
+		r.Post("/app/readiness/mark", a.HandleAppReadinessMark)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct
 		// from /consumedmocks, which drains and is read once at end of run.
@@ -487,6 +500,20 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// waits for them (syncMock BacklogBefore).
 	defer syncmgr.Get().WatchTestCaseQueue(func() int { return len(tc) })()
 
+	// A recording whose stop was noted (syncMock.NoteStop) has ended once
+	// the next one's stream attaches, and once this one's stream ends: the
+	// requests its stop found in flight are no requests of the next
+	// (EndStoppedRecording). Here, before this session's tally opens, so it
+	// tells no loss of theirs.
+	syncmgr.Get().EndStoppedRecording()
+	defer syncmgr.Get().EndStoppedRecording()
+	// A request the stop of a recording that has ended found in flight is no
+	// request of this session's: a test case of one resolved as that
+	// recording ended, or captured as its window was given up, which that
+	// recording's stream no longer took, is left out here, as the recording it
+	// began in left it out. This session is the first since that end, which
+	// is where those arrive.
+	leftovers := syncmgr.Get().TakeLeftovers()
 	// Kept requests the mock manager leaves out this session because their
 	// window was given up while they were in flight (syncMock.Window.Keep),
 	// less those a later request is recorded in the place of
@@ -527,6 +554,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// Whether t is streamed, left out or lost to a broken stream, this
 		// is the last that sees it.
 		defer discardUpload(a.logger, t)
+		if _, left := leftovers[t.HTTPReq.Timestamp.UnixNano()]; left && !t.HTTPReq.Timestamp.IsZero() {
+			a.logger.Debug("Test case left out: its request was in flight across the stop of a recording that has ended",
+				zap.Time("request_time", t.HTTPReq.Timestamp))
+			return true
+		}
 		// Skip this test case if memory pressure overlapped its HTTP window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
@@ -580,6 +612,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 
 		tcsSentSoFar++
+		// From here the test case is this stream's to deliver, no longer the
+		// agent's backlog (NoticeClientsHold).
+		carriedFrame(r)
 		// Stream each test case as JSON
 		// 1. Write metadata (JSON)
 		header := textproto.MIMEHeader{}
@@ -1055,6 +1090,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	// put streams m. It reports false once the stream is no longer viable.
 	put := func(m *models.Mock) bool {
 		starts.Default.Stamp(m)
+		// From here the mock is this stream's to deliver, no longer the
+		// agent's backlog (NoticeClientsHold).
+		carriedFrame(r)
 		if err := enc.Encode(m); err != nil {
 			// enc.Encode(m) folds two distinct failure modes into
 			// one error: (a) per-mock serialization errors (an

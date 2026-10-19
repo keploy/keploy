@@ -38,6 +38,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -63,6 +64,10 @@ const (
 type HTTPStreamConfig struct {
 	Mode     HTTPStreamMode
 	Boundary string
+	// Target names the stream's request ("GET /events"), for what a stream
+	// that ended with nothing of its answer to compare says
+	// (AnswerStallError). Set only under the proven switch.
+	Target string
 }
 
 // StreamMismatchInfo holds details about a streaming frame mismatch for reporting.
@@ -363,7 +368,9 @@ type SimulationConfig struct {
 	// left out of the request: the recorded app_port does not replace the
 	// URL's port, and the recorded Host header is not sent, so the request
 	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
-	// a virtual host is not reached under the name it was recorded with.
+	// a virtual host is not reached under the name it was recorded with. (A
+	// CONNECT in authority form still asks for the target it was recorded
+	// with: its Host names that, not the app; ConnectsToAuthority.)
 	TargetFromURL bool
 	// SentTo, when set, is told where each HTTP request goes once everything
 	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
@@ -381,6 +388,14 @@ type SimulationConfig struct {
 	// never be reached at fails the test at once, saying why, instead of
 	// being re-sent as an app still starting.
 	AppPortReachability AppPortReachability
+	// StallGrace and StallClock are the stall rule on the exchange when
+	// Unbounded, under the proven switch (answerWatch): its grace
+	// (AnswerStallGrace when 0) and the runnable clock it is measured on
+	// (the process's own when nil). Tests set them.
+	StallGrace time.Duration
+	StallClock stall.Clock
+	// answer is the stall rule's watch on this exchange, for the dial.
+	answer *answerWatch
 }
 
 // AppPortReachability is implemented by an instrumentation that can tell a
@@ -712,6 +727,22 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
 	}
+	// A CONNECT in authority form (ConnectsToAuthority) names the host and
+	// port it asks to reach as its request target and as its Host (RFC 9110
+	// §9.3.6, §7.2): the Host it was recorded with, wherever the request is
+	// sent (a base path's host included: it is the proxy the CONNECT goes
+	// through, not the target). net/http would send the recorded URL's path
+	// "/" as the request target; with no path and the target as the opaque
+	// part, it sends the target, and the answer's label (describe) names it.
+	// A recording with no Host asks for the host it is sent to.
+	if ConnectsToAuthority(req.Method, req.URL) {
+		target := hostHeader
+		if target == "" {
+			target = req.URL.Host
+		}
+		req.URL.Path, req.URL.RawPath, req.URL.Opaque = "", "", target
+		req.Host = target
+	}
 	if cfg.SentTo != nil {
 		asked := req.Host
 		if asked == "" {
@@ -772,6 +803,73 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		Client:  client,
 		AppPort: appPort,
 	}, nil
+}
+
+// endAtHeaders gives an answer that switches its connection to another
+// protocol no body: a 101 (Switching Protocols), whose response ends at its
+// header section, what follows on the connection belonging to the protocol it
+// switched to (RFC 9110 §15.2.2); and a 2xx answer to CONNECT, after whose
+// header section the connection is a tunnel, its bytes those of the
+// connection it tunnels to (RFC 9110 §9.3.6). For a 101, net/http hands back
+// the connection itself as the body; for a 2xx answer to CONNECT with no
+// length, a body read until the connection closes. keploy test speaks no
+// protocol a request switches to and opens no tunnel, so it closes the
+// connection unread, as a client that will not go on does. Read as the body,
+// the next protocol's bytes (an h2c tunnel's preface, a WebSocket's frames, a
+// tunnelled TLS handshake) made a replayed answer differ from its recording,
+// which has none, once a body of another kind than the recorded one was
+// compared (pkg/matcher/http, cfea2520e); and the read lasted as long as the
+// app kept the connection open. A 101's connection is the caller's once it is
+// handed back, so for an app that waits on its peer (most WebSocket servers)
+// that was for ever: neither --api-timeout nor the proven switch's stall rule
+// closes it. A CONNECT's body is the transport's still, and they end it, but
+// the test failed all the same.
+func endAtHeaders(resp *http.Response) {
+	if resp == nil || resp.Body == nil || !switchesProtocol(resp) {
+		return
+	}
+	_ = resp.Body.Close()
+	resp.Body = http.NoBody
+}
+
+// ConnectsToAuthority reports whether a test's request, by its method and
+// URL, is a CONNECT that names its target in authority form, the host and
+// port it asks to reach (RFC 9110 §9.3.6). The capture records one as a URL of
+// that authority (its Host) with the path "/" and no query. "CONNECT /", an
+// origin-form CONNECT to the path "/", records alike, and is taken as the
+// authority form, CONNECT's own; a CONNECT with another path or a query (Go's
+// net/rpc's "CONNECT /_goRPC_") is in origin form, its path its own.
+func ConnectsToAuthority(method string, u *url.URL) bool {
+	return method == http.MethodConnect && u != nil && u.Opaque == "" &&
+		(u.Path == "/" || u.Path == "") && u.RawQuery == "" && !u.ForceQuery
+}
+
+// switchesProtocol reports whether resp's connection goes on in another
+// protocol after its header section (endAtHeaders).
+func switchesProtocol(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return true
+	}
+	return resp.Request != nil && resp.Request.Method == http.MethodConnect && resp.StatusCode/100 == 2
+}
+
+// connClosingBody is the body of the app's answer to a test request: closed,
+// it also closes the connection the request's own client (prepareHTTPRequest
+// makes one for each request) left idle. No later request uses that client,
+// so a keep-alive connection it kept would stay open to the app for the rest
+// of keploy's run, one for each test: an app that serves each connection on
+// a thread of its own holds those threads, and one that waits for its open
+// connections as it stops (Python's ThreadingTCPServer joins each one's
+// thread on its way out) cannot stop while keploy runs.
+type connClosingBody struct {
+	io.ReadCloser
+	client *http.Client
+}
+
+func (b *connClosingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.client.CloseIdleConnections()
+	return err
 }
 
 // maxConnRefusedRetries bounds how many times a replay test request is re-sent
@@ -906,7 +1004,8 @@ func IsAppNoAnswer(err error) bool {
 	return isTimedOut(err) ||
 		errors.Is(err, context.Canceled) ||
 		isAnswerCutShort(err) ||
-		isGRPCNoAnswer(err)
+		isGRPCNoAnswer(err) ||
+		errors.Is(err, ErrAnswerStalled)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -1012,6 +1111,28 @@ func answerDoesNotDecode(status int, encoding string, err error) error {
 	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
 }
 
+// decodedPart is what of a body cut part-way decodes as its Content-Encoding
+// says: the bytes gzip or br gave before the cut, which may be none. A body
+// in no encoding, or in one keploy does not decode (Decompress keeps such a
+// body as it came), is kept as it came.
+func decodedPart(encoding string, data []byte) string {
+	var r io.Reader
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return ""
+		}
+		r = zr
+	case "br":
+		r = brotli.NewReader(bytes.NewReader(data))
+	default:
+		return string(data)
+	}
+	out, _ := io.ReadAll(io.LimitReader(r, MaxDecompressedSize))
+	return string(out)
+}
+
 // SimulateHTTP sends tc's request to the app and returns its answer. It sends
 // tc as given: a test case's placeholders are rendered by the replay, on a
 // copy, before it gets here (pkg/templates), and what the app answers is
@@ -1024,18 +1145,37 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if cfg.Unbounded {
 		cfg.RequestTimeout = 0
 	}
+	// With no clock on the app's answer, the stall rule (answerWatch) ends
+	// an exchange the app makes no progress on: the whole call waits on the
+	// app, and the cut cancels the request's context.
+	cfg.answer = newAnswerWatch(cfg)
+	defer cfg.answer.stop()
+	defer cfg.answer.waiting()()
+	ctx = cfg.answer.bind(ctx)
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.countRequestBody(prepared.Request)
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		prepared.Client.CloseIdleConnections()
+		if cfg.answer.didStall() {
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
+	}
+	endAtHeaders(httpResp)
+	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
+	if cfg.answer != nil {
+		cfg.answer.answering()
+		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
 	}
 
 	defer func() {
@@ -1049,6 +1189,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Read full response body
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
+		if cfg.answer.didStall() {
+			// The answer stopped part-way: nothing whole to compare. Its
+			// status, headers and the part of its body that came, decoded
+			// as far as it decodes, go with the error, for the replay to
+			// judge the start first (AnswerBegan).
+			return &models.HTTPResp{
+				StatusCode:    httpResp.StatusCode,
+				StatusMessage: http.StatusText(httpResp.StatusCode),
+				Header:        ToYamlHTTPHeader(httpResp.Header),
+				Body:          decodedPart(httpResp.Header.Get("Content-Encoding"), respBody),
+			}, cfg.answer.err()
+		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
 	}
@@ -1095,23 +1247,53 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		cfg.RequestTimeout = 0
 	}
 
+	// With no clock on the app's answer, the stall rule (answerWatch) ends
+	// an exchange the app makes no progress on, the stream's read included:
+	// this call waits on the app, then each read of the returned Reader
+	// does, and its Close ends the watch. The cut cancels the request's
+	// context.
+	cfg.answer = newAnswerWatch(cfg)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cfg.answer.stop()
+		}
+	}()
+	defer cfg.answer.waiting()()
+	ctx = cfg.answer.bind(ctx)
+
 	// Prepare the HTTP request using the shared helper
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.countRequestBody(prepared.Request)
 
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		prepared.Client.CloseIdleConnections()
+		if cfg.answer.didStall() {
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
+	}
+	endAtHeaders(httpResp)
+	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
+	if cfg.answer != nil {
+		cfg.answer.answering()
+		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
 	}
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
+	if provenswitch.On() {
+		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
+	}
 
 	logger.Debug("detected HTTP streaming response",
 		zap.String("testcase", tc.Name),
@@ -1126,6 +1308,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		gzipReader, gzErr := gzip.NewReader(httpResp.Body)
 		if gzErr != nil {
 			httpResp.Body.Close()
+			if cfg.answer.didStall() {
+				// Not one byte of the stream came: nothing to compare.
+				return nil, cfg.answer.err()
+			}
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			// A body that ended, by its own framing, before its first byte
 			// (io.EOF), or whose first bytes are not a gzip header, is the
@@ -1148,6 +1334,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			zap.String("content_encoding", contentEncoding))
 	}
 
+	if cfg.answer != nil {
+		streamReader = &answerReader{ReadCloser: streamReader, w: cfg.answer}
+		handedOff = true
+	}
 	return &StreamingHTTPResponse{
 		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
@@ -1262,11 +1452,34 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 // Without the proven switch the comparison stops at the last recorded frame
 // (part, or byte), so a stream that goes on is not waited for. Under the
 // switch every response is compared whole (O-K): the stream is read to its
-// end, and a frame after the recorded ones is a difference (trailingFrame).
-// The read is bounded as the request is: the user's --api-timeout, or the
-// recorded duration plus 10 s (ComputeStreamingTimeoutSeconds), which fails
-// the test if the stream does not end by then.
+// end, and a frame after the recorded ones is a difference (trailingFrame),
+// as are bytes beyond a recorded binary stream. A keepalive beyond the
+// recorded ones (an SSE frame of comments alone, an NDJSON blank line) once
+// every recorded frame has come ends the read: the app kept the stream open
+// past its recording, and the test has no verdict (ErrStreamHeldOpen, row
+// W1). The read is bounded as the request is: the --api-timeout or the
+// recorded duration plus 10 s, whichever is longer
+// (ComputeStreamingTimeoutSeconds); under the
+// switch only when the user set an apiTimeout of their own, and otherwise by
+// no clock (SimulationConfig.Unbounded).
 func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	ok, body, info, err := compareHTTPStream(expectedResp, stream, cfg, jsonNoiseKeys, logger)
+	var st *AnswerStallError
+	if errors.As(err, &st) && st.Stream && info == nil {
+		// The stall rule cut the stream with every frame that came
+		// matching: judged on what came, not judged as a whole.
+		ok = true
+	}
+	if errors.As(err, &st) && !st.Stream && st.Target == "" && cfg.Target != "" {
+		// A stream with nothing of its answer to compare names its request.
+		named := *st
+		named.Target = cfg.Target
+		err = &named
+	}
+	return ok, body, info, err
+}
+
+func compareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
 	case HTTPStreamModeSSE:
 		return compareSSEStream(expectedResp, stream, jsonNoiseKeys, logger)
@@ -1282,6 +1495,33 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
 }
+
+// ErrStreamHeldOpen ends the read of a stream, under the proven switch, that
+// the app kept open past its recording (row W1): every recorded frame (gRPC:
+// message) came, and then a keepalive beyond the recorded ones. A stream is
+// read to its end and no clock ends it, so the app's keepalives do: the test
+// has no verdict (models.FailureInfo.StreamHeldOpen), never a pass, and the
+// wait does not outlast the app's next keepalive. A frame beyond the
+// recording that is no keepalive fails the test, as before.
+var ErrStreamHeldOpen = errors.New("the app kept the stream open past its recording")
+
+// ErrStreamStalled ends the read of a stream, under the proven switch, that
+// stalled short of its recording (row W1, round 2): the app neither ended it
+// nor sent the rest of its recorded answer, and sent keepalives, two in a row
+// with no frame (gRPC: message) between them. It is an ErrStreamHeldOpen
+// (errors.Is): the test has no verdict, never a pass or a failure on the rest
+// that did not come, and the wait never hangs. What came is still compared,
+// and a difference in it fails the test. An app idle for two of its
+// keepalive intervals before the rest of its answer is not judged either.
+var ErrStreamStalled error = streamStalledError{}
+
+type streamStalledError struct{}
+
+func (streamStalledError) Error() string {
+	return "the app kept the stream open and sent no more of its recording, keepalive after keepalive"
+}
+
+func (streamStalledError) Is(target error) bool { return target == ErrStreamHeldOpen }
 
 // trailingFrame is the mismatch of a frame the answer streamed after the
 // recorded ones (index of them): under the proven switch a stream is read to
@@ -1468,11 +1708,18 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		if nextExpected >= len(expectedQueue) {
 			if readToEnd {
 				// A frame of comments alone (": ping") is a keepalive: it
-				// carries no event, and how many arrive depends on how long
-				// the stream took, so one after the recorded frames is not
-				// a difference.
+				// carries no event, so one after the recorded frames is no
+				// difference. It is one beyond the recorded keepalives,
+				// which are among the recorded frames: the app kept the
+				// stream open past its recording, and the read ends there
+				// (ErrStreamHeldOpen).
 				if sseCommentsOnly(parseSSEFrame(frame)) {
-					continue
+					if nextExpected == 0 {
+						// A recording of no frame, and the app sent
+						// none: nothing of the answer to compare.
+						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
+					}
+					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
 				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
@@ -1509,7 +1756,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), nil, err
+		return false, strings.Join(actualQueue, "\n\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1542,11 +1789,36 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
+	// keepalives counts the blank lines since the last line.
+	keepalives := 0
 	for scanner.Scan() {
 		line := canonicalizeNDJSONLine(scanner.Text())
 		if line == "" {
+			// A blank line is NDJSON's keepalive. One after the recorded
+			// lines is beyond the recorded keepalives (a recording keeps
+			// none: it drops blank lines): the app kept the stream open
+			// past its recording (ErrStreamHeldOpen). Two in a row before
+			// them, with no line between, and the app stalled short of
+			// its recording (ErrStreamStalled): the lines that came
+			// matched theirs.
+			// Either with no line come is nothing of the answer to
+			// compare: it fails closed, not judged (ErrAnswerStalled).
+			if readToEnd && nextExpected >= len(expectedQueue) {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
+				}
+				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
+			}
+			keepalives++
+			if readToEnd && keepalives >= 2 {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
+				}
+				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamStalled
+			}
 			continue
 		}
+		keepalives = 0
 
 		if nextExpected >= len(expectedQueue) {
 			if readToEnd {
@@ -1589,7 +1861,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), nil, err
+		return false, strings.Join(actualQueue, "\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "line")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1655,7 +1927,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), nil, err
+		return false, strings.Join(actualQueue, "\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "line")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1682,6 +1954,8 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 	contentMatch := true
 	mismatchOffset := -1
 	buffer := make([]byte, 32*1024)
+	// cut: the stall rule cut the stream after bytes that differ came.
+	cut := false
 
 	for {
 		n, err := stream.Read(buffer)
@@ -1697,6 +1971,11 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				}
 			}
 			actualSize += n
+			if readToEnd && actualSize > expectedSize {
+				// Bytes beyond the recording: the stream differs, whether
+				// or not it goes on, so it is not read further.
+				break
+			}
 			if actualSize >= expectedSize && !readToEnd {
 				if actualSize > expectedSize {
 					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
@@ -1710,11 +1989,27 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 			break
 		}
 		if err != nil {
+			var st *AnswerStallError
+			if errors.As(err, &st) && actualSize == 0 {
+				// Cut by the stall rule with nothing of the stream
+				// come: nothing to compare.
+				return false, "0", nil, st
+			}
+			if errors.As(err, &st) && contentMatch {
+				// Cut by the stall rule, every byte that came matching.
+				return true, strconv.Itoa(actualSize), nil, st.asStream(fmt.Sprintf("%d of the %d recorded bytes came", actualSize, expectedSize))
+			}
+			if errors.As(err, &st) {
+				// What came differs: the comparison says so below, by
+				// its content (the cut, not the app, set its size).
+				cut = true
+				break
+			}
 			return false, strconv.Itoa(actualSize), nil, err
 		}
 	}
 
-	if actualSize != expectedSize {
+	if actualSize != expectedSize && !cut {
 		logger.Debug("binary stream size mismatch",
 			zap.Int("expected_size", expectedSize),
 			zap.Int("actual_size", actualSize))
@@ -2055,13 +2350,13 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 			break
 		}
 		if partErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partErr, nextExpected, len(expectedQueue), "part")
 		}
 
 		actualPart, partReadErr := readMultipartPart(part)
 		_ = part.Close()
 		if partReadErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partReadErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partReadErr, nextExpected, len(expectedQueue), "part")
 		}
 
 		if nextExpected >= len(expectedQueue) {
@@ -2618,8 +2913,10 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 // shorter CLI wait gives up while the container is still booting, tearing down
 // a bring-up that would have succeeded.
 //
-// ErrAgentNotReady is returned by an agent Setup whose agent never reported
-// healthy within AgentReadyTimeout. It is a distinct sentinel so callers can
+// ErrAgentNotReady is returned by an agent Setup whose agent's start stopped
+// making progress before it reported healthy (pkg/platform/http,
+// agent_boot_watch.go), or, for a docker compose agent, did not report healthy
+// within AgentReadyTimeout. It is a distinct sentinel so callers can
 // retry a fresh bring-up on this — a nondeterministic container-runtime stall,
 // observed intermittently on macOS Docker Desktop — WITHOUT retrying
 // deterministic failures like missing kernel privileges or a bad config.
@@ -2963,7 +3260,17 @@ func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*m
 // the first test), because there is no cutoff to preserve against. Legacy callers that don't know firstWindowStart can keep
 // calling FilterPerTestAndLaxPromoted unchanged.
 func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
+	return FilterPerTestAndLaxPromotedInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, time.Time{}, false)
+}
+
+// FilterPerTestAndLaxPromotedInFlightAware is FilterPerTestAndLaxPromotedTierAware
+// that also keeps in the per-test slice the per-test mocks in flight when the
+// window began (sent after inFlightFrom, the end of the gap before it, and
+// answered at or after afterTime); see filterByTimeStampInFlightAware.
+// strictWindow is the user's window mode (MockFilterParams.StrictMockWindow),
+// which decides that, whatever strict says. A zero inFlightFrom keeps none.
+func FilterPerTestAndLaxPromotedInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -3013,6 +3320,41 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	})
 
 	return filteredMocks
+}
+
+// IsTestWindow reports whether [afterTime, beforeTime] is a test's window: a
+// staging call's starts at models.BaseTime (the set's, a scope's, an exact
+// staging's), and a call with no window has a zero bound. The mock manager
+// reads its start so (SetMocksWithWindow).
+func IsTestWindow(afterTime, beforeTime time.Time) bool {
+	return !afterTime.IsZero() && !afterTime.Equal(models.BaseTime) && !beforeTime.IsZero()
+}
+
+// FilterTcsMocksMappingInWindow is FilterTcsMocksMapping for the test window
+// [afterTime, beforeTime]: beside the per-test mocks the mapping names, the
+// ones placed at their answer (models.IsAnswerPlaced) whose place the window
+// holds (models.PlaceOf), whatever the mapping lists. A mapping lists what a
+// test consumed; one an older keploy wrote, or a --sync recording's, lists a
+// consumer's poll under the test it was sent in, by request time, and the
+// mock manager's staging keeps a mock placed at its answer only in the
+// window that holds its answer: named for the test before, it would be
+// staged by no test. With no test's window (IsTestWindow: a staging call's
+// names the test's whole recording, ExactMapping), or no kind placed at its
+// answer, it is FilterTcsMocksMapping.
+func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time) []*models.Mock {
+	if !models.AnswerPlacedRegistered() || !IsTestWindow(afterTime, beforeTime) {
+		return FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	}
+	names := append([]string(nil), mocksPresentInMapping...)
+	for _, mk := range m {
+		if mk == nil || !models.IsAnswerPlaced(mk) {
+			continue
+		}
+		if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
+			names = append(names, mk.Name)
+		}
+	}
+	return FilterTcsMocksMapping(ctx, logger, m, names)
 }
 
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
@@ -3227,7 +3569,29 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 // it through. Third-party Proxy implementations that don't implement
 // the reader fall through to the zero-time behaviour and remain
 // functionally identical to the pre-fix blanket-drop contract.
-func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false)
+}
+
+// filterByTimeStampInFlightAware is filterByTimeStampTierAware that also keeps
+// in the per-test slice the per-test mocks in flight when the window began
+// (models.InFlightEligible): sent after inFlightFrom, the end of the gap
+// before the window (models.WindowSchedule.GapBefore), before afterTime, and
+// answered at or after it (models.SentInGapAnsweredBy). They are the window's
+// test's, as the mock manager's own window filter holds them.
+//
+// The user's window mode decides (strictWindow, MockFilterParams.
+// StrictMockWindow, through strictWindowEnabled), not strictPerCall: on a
+// windowed proxy the agent's own filter is never strict (agentStrict), and
+// the mock manager does the strict filtering, from what this slice hands it.
+// With the strict window (the default) a mock in flight is kept per-test,
+// stated lifetime or not, as the window's own mocks are. In lax mode
+// (strictMockWindow false, KEPLOY_STRICT_MOCK_WINDOW=0) one whose recorder
+// stated its lifetime is kept, since lax mode drops a stated mock out of its
+// window, and an unstated one is promoted to the session pool as every
+// unstated per-test mock out of the window is, as before. A zero inFlightFrom
+// keeps none.
+func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -3315,11 +3679,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// request-timestamp the recording is inconsistent (clock skew,
 		// serialisation bug, or file corruption). Skip it — keeping such
 		// a mock in either pool risks confusing downstream scoring.
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
+		if LeaveOutAnsweredBeforeAsked(logger, p) {
 			droppedInvalidOrder++
 			continue
 		}
@@ -3342,7 +3702,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		// In-window = request-timestamp inside [afterTime, beforeTime].
+		// In-window = placed inside [afterTime, beforeTime] (models.PlaceOf).
 		// The response may straggle past beforeTime — DB/HTTP downstream
 		// responses routinely complete a few micro-to-milliseconds after
 		// the outer test response is captured. The cross-test bleed bug
@@ -3355,11 +3715,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		//
 		// Only per-test-lifetime mocks reach this predicate — session/
 		// connection-lifetime mocks short-circuited above to the session
-		// pool. A perTest-lifetime mock with reqTimestamp inside
+		// pool. A perTest-lifetime mock placed inside
 		// [afterTime, beforeTime] lands in the per-test pool; outside
 		// the window it falls through to the strict/lax out-of-window
 		// handling below.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
@@ -3391,7 +3754,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// them to the tier built for exactly that is what both modes intend.
 		// A zero firstWindowStart still means "no cutoff yet" and falls through
 		// to the legacy behaviour below, unchanged.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
@@ -3405,6 +3768,20 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
 		// to another test: an HTTP call every test may make is declared in
 		// keploy.yaml (models.SessionCallRule).
+		// In flight when the window began: sent in the gap before it and
+		// answered at or after its start (a consumer's long poll). The
+		// window's test's, as the mock manager holds it, in the user's
+		// strict window mode, and for a stated mock in lax mode too, where
+		// it would otherwise be dropped. Lax mode promotes an unstated one
+		// to the session pool below, as every unstated per-test mock out of
+		// the window.
+		if !inFlightFrom.IsZero() && (strictWindowEnabled(strictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
+			models.SentInGapAnsweredBy(p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock, inFlightFrom, afterTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+
 		if strict || p.StatesLifetime() {
 			// Per-test, out-of-window. Genuine stale cross-test bleed
 			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
@@ -3576,11 +3953,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			filtered = append(filtered, p)
 			continue
 		}
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
+		if LeaveOutAnsweredBeforeAsked(logger, p) {
 			droppedInvalidOrder++
 			continue
 		}
@@ -3599,8 +3972,11 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			continue
 		}
 
-		// PerTest: window containment on request timestamp.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// PerTest: window containment by place (models.PlaceOf).
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filtered = append(filtered, p)
@@ -3614,7 +3990,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		// test-called today, but fixing one of two identical functions would
 		// guarantee the bug returns the moment the three-tier path is wired for
 		// postgres v3 / mysql.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			startup = append(startup, p)
 			preservedStartup++

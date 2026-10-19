@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -230,6 +231,25 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 type latchInstr struct {
 	Instrumentation
 	err error
+	// opts is what the last MockOutgoing was sent.
+	opts models.OutgoingOptions
 }
 
-func (f *latchInstr) MockOutgoing(context.Context, models.OutgoingOptions) error { return f.err }
+func (f *latchInstr) MockOutgoing(_ context.Context, opts models.OutgoingOptions) error {
+	f.opts = opts
+	return f.err
+}
+
+// A set's MockOutgoing tells the agent it starts a test set, so the agent's
+// staging of the set drops what the previous set's pool was consumed of and
+// nobody drained (models.OutgoingOptions.StartsTestSet).
+func TestMockOutgoingForTestSetSaysItStartsATestSet(t *testing.T) {
+	f := &latchInstr{}
+	r := &Replayer{logger: zap.NewNop(), instrumentation: f}
+	if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{SQLDelay: time.Second}); err != nil {
+		t.Fatalf("MockOutgoing: %v", err)
+	}
+	if !f.opts.StartsTestSet || f.opts.SQLDelay != time.Second {
+		t.Fatalf("the set's MockOutgoing was sent %+v; want the caller's options with StartsTestSet", f.opts)
+	}
+}
