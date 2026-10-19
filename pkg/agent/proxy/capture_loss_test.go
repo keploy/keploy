@@ -71,7 +71,7 @@ func TestAUseOfAContainerWhoseReadStalledIsACaptureLoss(t *testing.T) {
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	for _, on := range []bool{false, true} {
-		t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[on])
+		t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[on])
 		containerkey.Default = containerkey.NewKeyer(stalledAt{containerAt{addr: "172.17.0.7:5432", c: containerkey.Container{ID: "pg", Image: "postgres:16", Port: 5432}}})
 		p := &Proxy{}
 		p.bindContainerKeys(context.Background()) // as StartProxy does

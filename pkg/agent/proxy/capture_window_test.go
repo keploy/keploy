@@ -76,7 +76,7 @@ func TestCaptureWindow_RendezvousNoLoss(t *testing.T) {
 func TestCaptureWindow_BeginClearsStale(t *testing.T) {
 	// With the proven switch off; on, the first test reads them as the set's
 	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
 
 	p.pendingMockErrors.addBounded(mockMiss("GET /background"), maxPendingMockErrors)
@@ -100,6 +100,7 @@ func (p *Proxy) pendingLen() int {
 // SEND the app publishes then would otherwise be reported against no test.
 // Through the real drain goroutine, which files it with no window open.
 func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -147,7 +148,7 @@ func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
 func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 	// With the proven switch off; on, the first test reads them as the set's
 	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	core, logs := observer.New(zap.WarnLevel)
 	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
 
@@ -208,7 +209,7 @@ func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
 			if proven {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
 			p.errDrainDone = make(chan struct{}) // a drain that runs and never reaches the marker

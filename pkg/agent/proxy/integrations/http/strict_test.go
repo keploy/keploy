@@ -61,7 +61,7 @@ func TestStrictMatchesOnlyARequestToTheRecordedHost(t *testing.T) {
 		t.Fatalf("the miss does not name where the call went: %+v", diag.live)
 	}
 
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	if got, _ := matchOnce(t, context.Background(), getTo("/v1/items", "c.example"), a, b); got == nil || got.Name != "on-a" {
 		t.Fatalf("without the switch served %v, want on-a (the host is not compared)", got)
 	}
@@ -124,7 +124,7 @@ func TestStrictDropsTheAutoDynamicPass(t *testing.T) {
 	live := getTo("/users/456", "api.example")
 	live.url.RawQuery = "since=1700000099999"
 
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	if got, _ := matchOnce(t, context.Background(), live, path); got == nil {
 		t.Fatal("without the switch the auto-dynamic pass did not answer")
 	}

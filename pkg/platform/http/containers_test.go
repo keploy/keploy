@@ -140,7 +140,7 @@ func TestPushContainersLeavesOtherAgentsAlone(t *testing.T) {
 		t.Fatalf("an agent that reads Docker was asked %d times and given %d lists", asked.Load(), len(got))
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	uri2, asked2, got2 := standInContainersAgent(t, true)
 	b := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: uri2}})
 	b.pushContainers(t.Context())

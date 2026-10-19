@@ -97,7 +97,7 @@ func TestVariableMatch_LeavesTheRestToTheCaller(t *testing.T) {
 	db := &varDb{perTest: []*models.Mock{plain, withVar}}
 	never := func(*models.Mock) bool { t.Fatal("consumed with the switch off"); return false }
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain, withVar}, db, never)
 	if err != nil || res.Outcome != VariableNone || len(res.Rest) != 2 {
 		t.Fatalf("with the switch off the pass ran: %+v, %v", res, err)
@@ -171,7 +171,7 @@ func TestVariableMatch_AnSDKCallIsFittedOutsideTheRequestNoise(t *testing.T) {
 // not at all with the switch off.
 func TestPinLiveDestination(t *testing.T) {
 	ctx := context.Background()
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if PinLiveDestination(ctx, sqsCall("x")) != ctx {
 		t.Fatal("the destination was pinned with the switch off")
 	}

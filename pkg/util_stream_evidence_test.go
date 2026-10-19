@@ -189,7 +189,7 @@ func TestStreamJSONIsAStreamByItsContentTypeUnderTheProvenSwitch(t *testing.T) {
 	defer srv.Close()
 	recorded := models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/stream+json"}, Body: lines}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	tc := &models.TestCase{Name: "flux", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: srv.URL}, HTTPResp: storedAs(t, recorded)}
 	if IsHTTPStreamingTestCase(tc) {
 		t.Errorf("without the proven switch an application/stream+json test case is taken for a stream; want it read whole, as before")

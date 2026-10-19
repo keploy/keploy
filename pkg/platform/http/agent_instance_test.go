@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -195,6 +197,7 @@ func TestOwnConnectionsKeepsNotingTheAgentProcess(t *testing.T) {
 // again before the app ran, holds all a watch keeps to: the watch keeps to
 // it, and is told of a replacement after.
 func TestARestartedAgentSetUpAgainIsTheOneAWatchKeepsTo(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	client, agent := newRestartingClient(t, true)
 	t.Cleanup(func() { instances.Delete(agentHost(client.conf.Agent.AgentURI)) })
 	agent.mu.Lock()

@@ -304,6 +304,7 @@ func (h *encodedHooks) AfterMockInsert(_ context.Context, info *record.MockConte
 // wrote for each mock, as the test recorder does: byte for byte what is in
 // mocks.yaml, through a MockDB wrapped the way k8s-proxy wraps one.
 func TestRecord_AfterMockInsertGetsTheDocumentInMocksYAML(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	ts := time.Date(2026, 9, 30, 8, 42, 54, 0, time.UTC)
 	var mocks []*models.Mock
 	for i, body := range []string{`{"ok":true}`, "\tleading tab\nx", "line one\nline two\n"} {

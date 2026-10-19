@@ -289,7 +289,7 @@ func polls(t *testing.T, mm *MockManager, bodies ...string) string {
 // next; and it takes its turn, in record order, with test-2's own recording of
 // the same request. Each answers exactly as it does placed in test-2's window.
 func TestACallInFlightIsItsTestsOwnForTheStatefulCursor(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	staged := func(t *testing.T, recording ...*models.Mock) *MockManager {
 		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 		t.Cleanup(mm.Close)

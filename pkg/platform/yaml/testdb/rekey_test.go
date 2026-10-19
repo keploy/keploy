@@ -132,7 +132,7 @@ func TestAWriteThatRewritesARecordingReKeysIt(t *testing.T) {
 				t.Fatalf("re-keyed %v after InsertTestCase over t1", got)
 			}
 
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if err := ts.UpdateTestCase(t.Context(), namedTC("t1", "http://api.test/d"), "set-1", false); err != nil {
 				t.Fatal(err)
 			}
@@ -368,7 +368,7 @@ func TestASetRewriteReKeysEachRecordingOnceWhenItIsDone(t *testing.T) {
 		t.Fatalf("a write after the rewrite re-keyed %v", got)
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if w := BeginSetRewrite(zap.NewNop(), dir, "set-1"); w != nil {
 		t.Fatal("a rewrite without the switch")
 	}

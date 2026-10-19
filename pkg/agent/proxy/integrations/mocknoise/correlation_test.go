@@ -73,7 +73,7 @@ func TestCorrelationsFromMock(t *testing.T) {
 // detected (TestMaterializeCorrelations_NothingUnderTheProvenSwitch), and left
 // to the environment the switch-on run failed this test.
 func TestMaterializeCorrelations(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	const id = "550e8400-e29b-41d4-a716-446655440000"
 
 	echo := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"ok":true,"idempotencyKey":"`+id+`"}`)

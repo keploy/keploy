@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -24,6 +26,7 @@ import (
 // however late the scheduler runs any goroutine here: the case under test
 // does not depend on a margin of wall-clock time.
 func TestRunTestSetDrainThatGivesUpLeavesTheWatcherAlone(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	prev := testSetDrainStall
 	testSetDrainStall = 50 * time.Millisecond
 	t.Cleanup(func() { testSetDrainStall = prev })

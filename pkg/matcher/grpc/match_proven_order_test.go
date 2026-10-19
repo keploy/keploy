@@ -24,7 +24,7 @@ func TestMatch_ProvenSwitchComparesArraysInOrder(t *testing.T) {
 		Headers: headers, Trailers: trailers,
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if ok, _ := Match(tc, actual, map[string]map[string][]string{}, true, zap.NewNop(), false); !ok {
 		t.Fatal("control: with the switch off and ignoreOrdering=true a reordered array must still match, as today")
 	}
@@ -68,7 +68,7 @@ func TestMatch_ProvenSwitchComparesProtoscopeRepeatedFieldsInOrder(t *testing.T)
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tc, answer := protoscopeCase(recorded)
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if ok, _ := Match(tc, answer(c.live), map[string]map[string][]string{}, true, zap.NewNop(), false); ok != c.off {
 				t.Fatalf("switch off: matched %v, want %v", ok, c.off)
 			}

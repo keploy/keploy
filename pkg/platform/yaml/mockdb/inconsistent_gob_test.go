@@ -59,7 +59,7 @@ func TestAGobFilesMockAnsweredBeforeItWasAskedIsServedByMappingUnderTheSwitch(t 
 	if got := read(); len(got) != 3 {
 		t.Errorf("under the switch the per-test pool holds %d mocks; want all 3, the one answered before it was asked and the one outside the window too", len(got))
 	}
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	if got := read(); len(got) != 1 || got[0].Spec.ResTimestampMock.Before(got[0].Spec.ReqTimestampMock) {
 		t.Errorf("with the switch off the per-test pool is %d mocks; want the one answered after it was asked, as before", len(got))
 	}

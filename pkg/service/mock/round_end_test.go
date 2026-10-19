@@ -145,6 +145,7 @@ func recordWithMarkerAgent(t *testing.T, a *markerAgent) ([]string, bool, error,
 // stream after the drain's quiet, which a mock still on its way outlasts
 // under load. It used to be lost, silently, the run passing.
 func TestRecord_AMockStillOnItsWayWhenTheAgentSaysClearIsSaved(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	a := newMarkerAgent(3 * mockDrainQuiet)
 	got, promoted, err, code, logs := recordWithMarkerAgent(t, a)
 	require.NoError(t, err)
@@ -190,7 +191,8 @@ func TestRecord_AStreamThatClosesBeforeItsMarkerFailsTheRound(t *testing.T) {
 // leaves them for this client to end, as before markers: the run is not
 // failed for it, and it is said at WARN, a mock on its way being lost.
 func TestRecord_AnEndRequestTheAgentDoesNotTakeEndsTheRoundAsBefore(t *testing.T) {
-	a := newMarkerAgent(time.Hour) // never arrives: the stream is ended here
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
+	a := newMarkerAgent(time.Hour)  // never arrives: the stream is ended here
 	a.endErr = errors.New("the agent answered 500 Internal Server Error")
 	got, _, err, code, logs := recordWithMarkerAgent(t, a)
 	require.NoError(t, err)
@@ -220,6 +222,7 @@ func TestRecord_AnAgentGoneAtTheEndRequestFailsTheRound(t *testing.T) {
 // stops it) that ends its stream before its marker is said at WARN, as the
 // drain says such an end: the run is not failed for it.
 func TestRecord_AnAgentThisClientDidNotStartEndingBeforeItsMarkerIsAWarning(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	a := newMarkerAgent(time.Millisecond)
 	a.markerless, a.notStarted = true, true
 	_, promoted, err, code, logs := recordWithMarkerAgent(t, a)
@@ -233,6 +236,7 @@ func TestRecord_AnAgentThisClientDidNotStartEndingBeforeItsMarkerIsAWarning(t *t
 // An agent that predates markers is never asked to end the streams: the
 // round ends as it did, on the drain's quiet and the agent's clear.
 func TestRecord_AnAgentWithoutMarkersIsNotAskedToEndTheRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	a := newMarkerAgent(time.Millisecond)
 	a.oldAgent = true
 	_, promoted, err, code, _ := recordWithMarkerAgent(t, a)
@@ -681,6 +685,7 @@ func (l *markerIncoming) StreamEnded(kind models.FrameStream) bool {
 // watch ends on the agent's marker, not on the drain's quiet, which it
 // outlasted.
 func TestReplayComparesARequestStillOnItsWayWhenTheAgentSaysClear(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newRunnerInstr(t, sequentialMarks()...)
 	late := &markerIncoming{runnerInstr: instr, transit: 3 * mockDrainQuiet, endReq: make(chan struct{}),
 		tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
@@ -710,6 +715,7 @@ func TestReplayComparesARequestStillOnItsWayWhenTheAgentSaysClear(t *testing.T) 
 // suite's -- the receipt says so, and does not certify the run as isolated --
 // and no verdict on part of it passes.
 func TestReplayShortOfRequestsTheAgentCapturedFailsAsKeploys(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newRunnerInstr(t, sequentialMarks()...)
 	late := &markerIncoming{runnerInstr: instr, transit: time.Millisecond, endReq: make(chan struct{}), markerless: true, started: true,
 		tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
@@ -782,7 +788,7 @@ func TestReplayEpilogueReadsHaveNoDeadlineUnderTheSwitch(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			inst := &deadlineInstr{}
 			m := &mockService{logger: zap.NewNop(), instrumentation: inst, config: &config.Config{}}

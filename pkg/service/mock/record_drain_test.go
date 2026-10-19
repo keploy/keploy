@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -132,6 +134,7 @@ func (r *recordingMockDB) inserted() []string {
 // Emitting mock-1 after Run returns fails against that ordering and passes once
 // the drain happens before the cancel.
 func TestRecord_KeepsMockEmittedAfterRunnerExit(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	inst := &drainInstrumentation{
 		out: make(chan *models.Mock, 4),
 		// Comfortably inside mockDrainQuiet, comfortably outside the
@@ -220,6 +223,7 @@ func (d *trickleInstrumentation) NotifyGracefulShutdown(context.Context) error {
 // — the real agent-to-exit gap measured 6.5ms median, 22.8ms max — and a test
 // asserting more than the fix provides would be testing a wish.
 func TestRecord_DrainKeepsWaitingWhileMocksStillArrive(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const want = 3
 	inst := &trickleInstrumentation{
 		out:     make(chan *models.Mock, want),
@@ -245,6 +249,7 @@ func TestRecord_DrainKeepsWaitingWhileMocksStillArrive(t *testing.T) {
 // for as long as it keeps coming: a sink still draining is not cut off at a
 // fixed deadline (it used to be, at 5 s).
 func TestRecord_DrainIsNotCutOffWhileMocksStillArrive(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const want = 20
 	inst := &trickleInstrumentation{
 		out:     make(chan *models.Mock, want),
@@ -356,6 +361,7 @@ func (s *slowMockDB) InsertMock(ctx context.Context, m *models.Mock, set string)
 // like a quiet stream, and the capture was torn down with the agent still
 // holding the rest.
 func TestRecord_SlowPersistIsNotCutOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const want = 6
 	inst := &trickleInstrumentation{
 		out:     make(chan *models.Mock), // the agent's stream hands over one at a time
@@ -422,6 +428,7 @@ func (p *pendingInstrumentation) Run(_ context.Context, _ models.RunOptions) mod
 // any grace. An agent that can tell is asked, and the drain goes on while it
 // says it may still hand a mock over.
 func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	inst := &pendingInstrumentation{
 		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
 		quietFor:               4 * mockDrainQuiet,
@@ -446,6 +453,7 @@ func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
 // notice period after the stop's signal came: on the test's clock, which
 // stands still, never -- the copy comes after its notices have begun.
 func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
 	mockDrainNotice = 20 * time.Millisecond
 	utils.ResetInterruptedAgain()
@@ -512,6 +520,7 @@ func (p *unansweredInstrumentation) BacklogBefore(context.Context, time.Time) (m
 // A look the agent does not answer is never read as "nothing pending": the
 // drain waits, and the mock the parser hands over later is saved (P7).
 func TestRecord_ALookTheAgentDoesNotAnswerDoesNotLoseAMock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	inst := &unansweredInstrumentation{pendingInstrumentation{
 		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
 		quietFor:               4 * mockDrainQuiet,
@@ -621,6 +630,7 @@ func TestRecord_AnAgentThatGoesAwayWhileItHoldsAMockFailsTheRun(t *testing.T) {
 // One that ends its stream before the drain asked it is said at WARN: what it
 // held, if anything, is lost, but nothing says it held anything.
 func TestRecord_AnAgentThatGoesAwayBeforeTheDrainAsksIsSaid(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	_, logs, code, err, _ := recordGone(t, false)
 	if logs.FilterMessageSnippet("ended its mock stream before it said").FilterLevelExact(zapcore.WarnLevel).Len() != 1 || code != 0 || err != nil {
 		t.Fatalf("an agent going away before the drain asked was not said once at WARN, or failed the run (exit code %d, error %v): %v", code, err, logs.All())
@@ -1099,6 +1109,7 @@ func (c composeOneMock) GetOutgoing(ctx context.Context, o models.OutgoingOption
 // compose recording holds every mock, once it has saved it, and only then: a
 // recording it does not keep is not said to be saved.
 func TestAComposeRecordingSavedUnconfirmedIsSaid(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name   string
 		mocks  bool

@@ -99,7 +99,7 @@ func TestHandleRealRun(t *testing.T) {
 // Both are the proven model's: with the switch off they answer the 404 their
 // paths had before they existed.
 func TestTheRealRoutesAreAbsentWithoutTheSwitch(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a := &Agent{logger: zap.NewNop(), svc: &realSvc{}}
 	require.Equal(t, http.StatusNotFound, serve(a.HandleRealDeps, http.MethodPost, `{"real":[]}`).Code)
 	require.Equal(t, http.StatusNotFound, serve(a.HandleRealRun, http.MethodGet, ``).Code)
@@ -186,7 +186,7 @@ func TestHandleBeforeSimulateOfARealTestCase(t *testing.T) {
 	agent.RegisterHooks(h) // freezes, cannot put a case on real time
 	require.Equal(t, http.StatusNotImplemented, serve(a.HandleBeforeSimulate, http.MethodPost, body).Code)
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h.frozen = nil
 	require.Equal(t, http.StatusOK, serve(a.HandleBeforeSimulate, http.MethodPost, body).Code)
 	require.Equal(t, []string{"tc"}, h.frozen, "without the switch the list is not read")

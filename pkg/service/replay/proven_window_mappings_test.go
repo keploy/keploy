@@ -151,7 +151,7 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 				if on {
 					t.Setenv(provenswitch.Env, "1")
 				} else {
-					t.Setenv(provenswitch.Env, "")
+					t.Setenv(provenswitch.Env, "0")
 				}
 				core, logs := observer.New(zap.WarnLevel)
 				h := newPartialRunHarness(t, 2, 0)

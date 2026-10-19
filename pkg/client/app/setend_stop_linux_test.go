@@ -57,6 +57,7 @@ func runNative(t *testing.T, script string, cause error) models.AppError {
 // exits on the interrupt is no kill. Another stop (the teardown's own, the
 // user's) says nothing.
 func TestTheStopAtASetsEndSaysWhenItKilledANativeApp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	ignores := `trap "" INT; touch started; exec sleep 600`
 	if appErr := runNative(t, ignores, models.ErrAppStoppedForSetEnd); appErr.AppErrorType != models.ErrCtxCanceled ||
 		!strings.Contains(appErr.StopKilled, "so keploy killed it") || !strings.Contains(appErr.StopKilled, utils.TreeInterruptGrace.String()) {

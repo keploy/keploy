@@ -126,7 +126,7 @@ func TestMappedTestCaseRefusesABeginThatIsNotATime(t *testing.T) {
 // its mocks and its shape; and an entry without a begin is written byte for
 // byte as the persisted format alone.
 func TestMappedTestCaseWithoutTheSwitchIgnoresAt(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, doc := range []string{
 		"id: t1\nat: yesterday\nmock_entries:\n  - name: mock-0\n",
 		"id: t1\nat: 2026-10-06T09:30:15Z\nmock_entries:\n  - name: mock-0\n",

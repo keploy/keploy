@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -80,6 +82,7 @@ func TestAgentClient_BacklogBefore(t *testing.T) {
 // models.WithDrainsAfterStop carry DrainsAfterStopHeader, so the agent holds a
 // stop signal for them; others (keploy mock's) do not.
 func TestAgentClient_StreamsSayTheyDrainAfterTheStop(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	seen := make(chan string, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen <- r.URL.Path + "=" + r.Header.Get(models.DrainsAfterStopHeader)
@@ -151,6 +154,7 @@ func TestAgentClient_StreamsSayTheyDrainAfterTheStop(t *testing.T) {
 // (models.DrainsOnAgentStopHeader), a reconnection too. A stream to an agent
 // this client started asks for the hold its own stop drains under instead.
 func TestAgentClient_StreamsAskAComposeAgentForItsWordOfAStop(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	seen := make(chan string, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen <- r.URL.Path + "=" + r.Header.Get(models.DrainsOnAgentStopHeader) + "/" + r.Header.Get(models.DrainsAfterStopHeader)

@@ -250,7 +250,7 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 			if tc.proven {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			keepExitCode(t)
 			cfg := &config.Config{}

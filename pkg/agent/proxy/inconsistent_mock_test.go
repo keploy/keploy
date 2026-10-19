@@ -14,7 +14,7 @@ import (
 // before its request, and says so at the default level for each such mock,
 // once, naming it: not for the first alone, which left every later one silent.
 func TestTheManagerSaysOfEachMockAnsweredBeforeItWasAskedOnce(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	core, logs := observer.New(zapcore.InfoLevel)
 	mm := NewMockManager(nil, nil, zap.New(core))
 	defer mm.Close()
@@ -82,7 +82,7 @@ func TestAMockAnsweredBeforeItWasAskedIsInItsWindowOnlyUnderTheSwitch(t *testing
 	start := time.Date(2026, 10, 17, 11, 19, 51, 0, time.UTC)
 	m := newMockForTest("window-inverted", start.Add(time.Second), models.LifetimePerTest)
 	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(-37 * time.Microsecond)
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	if inRecordedWindow(m, start, start.Add(time.Minute), time.Time{}, false) {
 		t.Error("with the switch off the mock is in the window; the read leaves it out")
 	}

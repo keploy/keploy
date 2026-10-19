@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -15,6 +17,7 @@ import (
 // every other case, in strict mode and lax. Each case below is a rule that
 // hands an ordinary per-test mock to tests it was not recorded in.
 func TestWindowBoundMocksAreServedOnlyInTheirOwnWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	prevOverride, prevExplicitOff := strictWindowEnvOverride, strictWindowEnvExplicitOff
 	strictWindowEnvOverride, strictWindowEnvExplicitOff = false, false
 	t.Cleanup(func() {

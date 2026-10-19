@@ -63,7 +63,7 @@ func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 				if on {
 					t.Setenv(provenswitch.Env, "1")
 				} else {
-					t.Setenv(provenswitch.Env, "")
+					t.Setenv(provenswitch.Env, "0")
 				}
 				h := newPartialRunHarness(t, 3, 0)
 				h.instr.mockErrorsFor = misses(nil, read.fn, nil)
@@ -112,7 +112,7 @@ func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 func TestAttachMockErrors_KeepsWhatAnIncompleteReadReturned(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
-			v := ""
+			v := "0"
 			if on {
 				v = "1"
 			}
@@ -429,7 +429,7 @@ func (d drainOrder) GetConsumedMocks(ctx context.Context) ([]models.MockState, e
 // drain's. Without the switch an early row files as it always did, its calls
 // read only by the next test's drain.
 func TestUnderTheSwitchAnEarlyRowsConsumptionIsItsOwn(t *testing.T) {
-	for _, proven := range []string{"1", ""} {
+	for _, proven := range []string{"1", "0"} {
 		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			h := newPartialRunHarness(t, 2, 0)

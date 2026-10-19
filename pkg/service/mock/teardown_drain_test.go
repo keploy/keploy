@@ -57,7 +57,7 @@ func TestAMockRunsDrainWaitsWhileItsTeardownMoves(t *testing.T) {
 		{"mock-replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
 	} {
 		start := func(t *testing.T) (*teardowntest.Stop, *stallclock.ManualClock, *observer.ObservedLogs, <-chan struct{}) {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 			saved := utils.ErrCode
 			t.Cleanup(func() { utils.ErrCode = saved })
 			repo := t.TempDir()

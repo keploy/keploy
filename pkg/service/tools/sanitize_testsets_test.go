@@ -52,7 +52,7 @@ func TestSanitizeReadsTheKeployFolderItWasGiven(t *testing.T) {
 // skipped with an error line, and the run exited 0, leaving the set the user
 // meant unsanitized.
 func TestSanitizeRefusesATestSetThatIsNotRecorded(t *testing.T) {
-	for _, switchOn := range []string{"", "1"} {
+	for _, switchOn := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+switchOn, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, switchOn)
 			keployDir, test := sanitizeSet(t)
@@ -77,7 +77,7 @@ func TestSanitizeRefusesATestSetThatIsNotRecorded(t *testing.T) {
 func TestSanitizeRefusesAFolderThatIsNoTestSet(t *testing.T) {
 	for _, name := range []string{"reports", "schema", ".", "../outside"} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			keployDir, _ := sanitizeSet(t)
 			for _, dir := range []string{"reports", "schema", "../outside/tests"} {
 				if err := os.MkdirAll(filepath.Join(keployDir, dir), 0o755); err != nil {

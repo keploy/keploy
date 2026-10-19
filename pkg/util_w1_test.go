@@ -176,7 +176,7 @@ func TestAStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 
 			// Without the switch the comparison stops at the last recorded
 			// frame and reads no keepalive, as before.
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if got := readHeldOpen(t, tc.expected, tc.cfg, tc.body, tc.keepalive, 50); !got.ok || got.err != nil || got.read != 0 {
 				t.Fatalf("without the switch: %+v, want a match that read no keepalive", got)
 			}

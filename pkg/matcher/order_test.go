@@ -57,7 +57,7 @@ func TestArrayReorderedRefusesAnExplainableDriftRatherThanGreening(t *testing.T)
 }
 
 func TestResponseIgnoreOrdering(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if !ResponseIgnoreOrdering(true) || ResponseIgnoreOrdering(false) {
 		t.Fatal("switch off: the configured ignoreOrdering must pass through unchanged")
 	}

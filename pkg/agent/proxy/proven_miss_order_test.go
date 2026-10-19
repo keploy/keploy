@@ -84,7 +84,7 @@ func TestAnHTTPMissIsQueuedBeforeTheAppSeesIts502(t *testing.T) {
 			name = "switch on"
 		}
 		t.Run(name, func(t *testing.T) {
-			v := ""
+			v := "0"
 			if on {
 				v = "1"
 			}

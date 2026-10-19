@@ -66,7 +66,7 @@ func TestARecordingWhoseStopKilledSaysSoInItsConfig(t *testing.T) {
 	if plain.got() != nil {
 		t.Fatalf("a store with no read for update was written: %+v", plain.got())
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := &confStore{conf: recorded()}
 	(&Recorder{logger: zap.NewNop(), testSetConf: off}).markStopKilled(context.Background(), "test-set-0", why)
 	if off.written != nil {
@@ -107,7 +107,7 @@ func TestARecordingKeepsWhyItsEndIsCut(t *testing.T) {
 	if why := r.endCut.Load(); why == nil || *why != "the agent ended its mocks stream first" {
 		t.Fatalf("kept %v, want the first reason", why)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := &Recorder{logger: zap.NewNop()}
 	off.noteEndCut("the drain stalled")
 	if why := off.endCut.Load(); why != nil {

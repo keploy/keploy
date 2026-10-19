@@ -16,7 +16,7 @@ import (
 
 func TestStrictFailureIsAlwaysOnUnderTheProvenSwitch(t *testing.T) {
 	r := &Replayer{config: &config.Config{}}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if r.strictFailure() {
 		t.Fatal("switch off and test.strictFailure unset: the OBSOLETE demotion must stay as it is")
 	}
@@ -48,7 +48,7 @@ func TestCompareHTTPRespForReplay_ProvenSwitchFailsAnAdditiveChange(t *testing.T
 	core, logs := observer.New(zapcore.InfoLevel)
 	r := &Replayer{logger: zap.New(core), config: &config.Config{}}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if pass, _ := r.compareHTTPRespForReplay(additiveTestCase(), additiveActual(), "set", true); !pass {
 		t.Fatal("control: with the switch off an additive change still auto-passes")
 	}
@@ -83,7 +83,7 @@ func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 				if on {
 					t.Setenv(provenswitch.Env, "1")
 				} else {
-					t.Setenv(provenswitch.Env, "")
+					t.Setenv(provenswitch.Env, "0")
 				}
 				h := newPartialRunHarness(t, 1, 0)
 				h.mappings.onDisk = map[string][]models.MockEntry{"test-1": {{Name: "mock-recorded", Kind: string(models.HTTP)}}}
@@ -143,7 +143,7 @@ func TestRunTestSet_ProvenSwitchCapturesInAnArrayAtItsIndex(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
 				mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {

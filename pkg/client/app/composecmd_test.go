@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -202,6 +204,7 @@ func TestWithAgentTokenKeepsTheMockTokenThroughSudo(t *testing.T) {
 // flag's value, so a project (-p) or profile whose name starts with, or is,
 // "up" keeps its value, and the command still runs `up`.
 func TestComposeCommandRewriteFindsTheUpSubcommand(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const tmp = "docker-compose-tmp.yaml"
 	for cmd, want := range map[string]string{
 		"docker compose up":                    "docker compose -f ./docker-compose-tmp.yaml up --abort-on-container-exit --exit-code-from app",

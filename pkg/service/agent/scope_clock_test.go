@@ -235,7 +235,7 @@ func TestTheClockStaysWithoutTheSwitchAndInRecord(t *testing.T) {
 	useHooks(t, h)
 	ctx := context.Background()
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a := newClockAgent(t)
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()))
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestA", 0, time.Now()))
@@ -424,7 +424,7 @@ func TestSetTestBeginsRefusesABuildThatCannotMoveItsClock(t *testing.T) {
 	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
 	useHooks(t, &AgentHook{})
 	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	useHooks(t, &fileOnlyHooks{})
 	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
 }
@@ -497,7 +497,7 @@ func TestTheClockIsHeldByOneWorkersTest(t *testing.T) {
 // Without the switch, a test whose pool cannot narrow keeps its window and
 // its harness's verdict, as before the clock.
 func TestWithoutTheSwitchAFailedNarrowingKeepsTheVerdict(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	useHooks(t, &clockHooks{})
 	a := newClockAgent(t)
 	a.Proxy = &workerPool{}

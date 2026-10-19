@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
@@ -167,6 +169,7 @@ func TestHTTPServesAResponseTheDiskStoreKeptApart(t *testing.T) {
 // and skipped one whose response the store kept apart, answering with an empty
 // synthetic 200 instead of the recorded response.
 func TestHTTPPassThroughServesAResponseTheDiskStoreKeptApart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	at := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 	_, mm, window := stageSpilled(t, at, spilledHTTPMock("traces", "POST", "/v1/traces", at))
 
@@ -209,6 +212,7 @@ func TestHTTPDoesNotConsumeAMockWhoseResponseCannotBeLoaded(t *testing.T) {
 // application gets the synthetic 200 the path falls back to. The failure says
 // so once per mock name, at a level a default run shows.
 func TestHTTPPassThroughWarnsOnceWhenAResponseCannotBeLoaded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	at := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 	disk, mm, _ := stageSpilled(t, at, spilledHTTPMock("traces", "POST", "/v1/traces", at))
 	if err := disk.Close(); err != nil {

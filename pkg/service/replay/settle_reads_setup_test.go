@@ -62,7 +62,7 @@ func TestARunThatLearnsNoiseStartsItsAgentSettlingReads(t *testing.T) {
 // MissesUnattributed, and the run's end names its test set, once, with every
 // other set so read: nothing may learn noise from them.
 func TestTheRunsEndNamesTheTestSetsReadUnattributed(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	core, logs := observer.New(zap.WarnLevel)
 	r := &Replayer{logger: zap.New(core), config: &config.Config{}}
 	r.config.Test.LearnsNoise = true
@@ -91,7 +91,7 @@ func TestTheRunsEndNamesTheTestSetsReadUnattributed(t *testing.T) {
 // A run that learns no noise names the same sets, without saying noise is not
 // learned: it learns none either way.
 func TestTheRunsEndNamesTheSetsOfARunThatLearnsNoNoise(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	core, logs := observer.New(zap.WarnLevel)
 	r := &Replayer{logger: zap.New(core), config: &config.Config{}}
 	r.attachReadMockErrors(testMisses{asked: true, err: fmt.Errorf("%w: lost", models.ErrUnmatchedCallsUnread)}, "set-a", "t1", &models.TestResult{})

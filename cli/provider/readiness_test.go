@@ -38,7 +38,7 @@ func TestUnderTheSwitchTheHealthPollTimeoutFlagIsRefused(t *testing.T) {
 	if err := refuseHealthPollTimeout(healthPollCmd(t)); err != nil {
 		t.Fatalf("refuseHealthPollTimeout without the flag = %v", err)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if err := refuseHealthPollTimeout(healthPollCmd(t, "--health-poll-timeout", "60s")); err != nil {
 		t.Fatalf("refuseHealthPollTimeout with the switch off = %v", err)
 	}
@@ -64,7 +64,7 @@ func TestUnderTheSwitchTheHealthPollTimeoutKeyIsIgnored(t *testing.T) {
 			t.Errorf("%v: notice %v, want %v", c.set, got, c.notice)
 		}
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	cfg := &config.Config{}
 	cfg.Test.HealthPollTimeout = 90 * time.Second
 	dropHealthPollTimeout(zap.NewNop(), cfg)

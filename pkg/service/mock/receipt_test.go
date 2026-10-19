@@ -5,13 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
@@ -174,6 +175,7 @@ func mustReceipt(t *testing.T, keployDir string) *Receipt {
 // The receipt is the replay's verdict outliving the terminal it scrolled past
 // in: what ran, how, what it proved, and which recording it proved it about.
 func TestReplayWritesAReceipt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	keployDir, code, _ := replayIn(t, replayCase{covReport: profile75})
 	if code != 0 {
 		t.Fatalf("exit %d, want 0", code)
@@ -205,6 +207,7 @@ func TestReplayWritesAReceipt(t *testing.T) {
 // as not isolated -- including the one that looks clean: a miss list nobody
 // could read.
 func TestReceiptIsolation(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name string
 		c    replayCase
@@ -240,6 +243,7 @@ func TestReceiptIsolation(t *testing.T) {
 }
 
 func TestMinCoverage(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name     string
 		c        replayCase
@@ -296,6 +300,7 @@ func TestMinCoverage(t *testing.T) {
 // The terminal says what the run proved, whether or not a coverage report was
 // written -- the verdict used to exist only in the receipt.
 func TestTheReplaySaysWhatItProved(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	_, _, logs := replayIn(t, replayCase{})
 	if logs.FilterMessageSnippet("ran with every dependency answered from the recording").Len() != 1 {
 		t.Fatal("an isolated replay never said so")
@@ -312,6 +317,7 @@ func TestTheReplaySaysWhatItProved(t *testing.T) {
 // Coverage from a run that could reach real services is not offline coverage,
 // and the log must not say it is.
 func TestCoverageIsOnlyOfflineWhenIsolated(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	_, _, logs := replayIn(t, replayCase{onMiss: "passthrough", covReport: profile75})
 	if logs.FilterMessageSnippet("offline coverage").Len() != 0 {
 		t.Fatal("a passthrough run's coverage was called offline coverage")
@@ -377,6 +383,7 @@ func TestNoReceiptForAMissingSet(t *testing.T) {
 // line leaked a temp path into the receipt, and status then told agents to run
 // it.
 func TestReceiptRecordsTheUsersCommandNotTheLaunchLine(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	keployDir, _, logs := replayIn(t, replayCase{rewriteLaunch: true})
 	if r := mustReceipt(t, keployDir); r.Command != "go test ./..." {
 		t.Fatalf("receipt command = %q, want the user's %q", r.Command, "go test ./...")
@@ -392,6 +399,7 @@ func TestReceiptRecordsTheUsersCommandNotTheLaunchLine(t *testing.T) {
 // keploy exited 1, and every reader would report a proof this run had just
 // failed to repeat.
 func TestSetupFailureReplacesTheReceipt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	keployDir, _, _ := replayIn(t, replayCase{})
 	if r := mustReceipt(t, keployDir); !r.Isolated {
 		t.Fatalf("precondition: first run isolated: %+v", r)
@@ -420,6 +428,7 @@ func TestSetupFailureReplacesTheReceipt(t *testing.T) {
 // code is not the runner's: the receipt must say the tests never ran, while
 // still recording the exit the shell sees.
 func TestAKeployExitCodeIsNotTheRunners(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		code int
 		why  error
@@ -478,6 +487,7 @@ func (a *armsThenFails) Setup(ctx context.Context, cmd string, opts models.Setup
 // context too, which is exactly what keploy's agent dying under it looks like
 // from there; only the caller's context tells the two apart.
 func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		stage string
 		// What the stopped runner reports: the cancellation, or -- when its
@@ -635,6 +645,7 @@ func TestMocksFileFollowsTheLoader(t *testing.T) {
 // generic code too, but keploy arms it for no failure of its own (a Setup
 // error travels as the error), so a 1 already set is the runner's.
 func TestSetupFailureRecordsTheMirroredExitCode(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, runnerExit := range []int{7, 1} {
 		t.Run(fmt.Sprint(runnerExit), func(t *testing.T) {
 			repo := t.TempDir()
@@ -745,6 +756,7 @@ func (f *failsGroup) UpdateMockParams(ctx context.Context, p models.MockFilterPa
 // failure exit 0 -- and leave the previous receipt standing as proof of a run
 // that had just failed.
 func TestAnInternalFailureIsNotAUserInterrupt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	keployDir, _, _ := replayIn(t, replayCase{})
 	if r := mustReceipt(t, keployDir); !r.Isolated {
 		t.Fatalf("precondition: the first run is isolated: %+v", r)
@@ -789,6 +801,7 @@ func TestAnInternalFailureIsNotAUserInterrupt(t *testing.T) {
 // reached the replay as a plain cancellation: nothing mirrored, exit 0, and a
 // CI step went green on a suite that never finished.
 func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, stage := range []string{"run", "run-silent"} {
 		t.Run(stage, func(t *testing.T) {
 			keployDir, _, _ := replayIn(t, replayCase{})
@@ -832,6 +845,7 @@ func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
 // as the runner's failure wrote "the test command failed" into the receipt
 // about a suite that may never have been reached.
 func TestKeploysOwnFailureIsNotTheTestsFailing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	keployDir, code, _ := replayIn(t, replayCase{runExit: models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}, keployFails: true})
 	if code == 0 {
 		t.Fatal("an internal failure exited cleanly")
@@ -851,6 +865,7 @@ func TestKeploysOwnFailureIsNotTheTestsFailing(t *testing.T) {
 // A receipt that cannot be written must take the previous one with it: a
 // stale green receipt is a false proof, where none at all is only a gap.
 func TestAFailedWriteRemovesTheStaleReceipt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	if os.Geteuid() == 0 {
 		t.Skip("root writes through a read-only directory")
 	}
@@ -883,6 +898,7 @@ func TestAFailedWriteRemovesTheStaleReceipt(t *testing.T) {
 // .yaml: a kill between creating and renaming it leaves one behind, and
 // `git add -A` would commit it.
 func TestTheReceiptsTemporaryFileIsIgnored(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	keployDir, _, _ := replayIn(t, replayCase{})
 	gi, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
 	if err != nil {

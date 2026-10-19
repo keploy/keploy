@@ -229,7 +229,7 @@ func TestARecordingThatLostNothingPasses(t *testing.T) {
 // test case is saved, for that WARN alone); with an agent that cannot count,
 // nothing fails.
 func TestTheCaptureWatchIsOffWithoutTheSwitchOrACount(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := &countingInstr{answers: []models.CaptureLosses{nil, pid(9)}}
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), off)
@@ -323,7 +323,7 @@ func TestARecordingWhoseAgentWasStartedAgainIsNotVerified(t *testing.T) {
 		})
 	}
 	// With the switch off nothing is watched.
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: true}}
 	if _, failed, _ := record3(t, off); failed || off.watched != 0 {
 		t.Fatalf("switch off: failed %v, watched %d time(s); want neither", failed, off.watched)

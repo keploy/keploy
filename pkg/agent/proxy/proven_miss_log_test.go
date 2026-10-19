@@ -31,7 +31,7 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 		{on: true, err: other, reported: false, loud: true},
 	} {
 		t.Run(fmt.Sprintf("switch=%v/%v", tc.on, tc.err), func(t *testing.T) {
-			v := ""
+			v := "0"
 			if tc.on {
 				v = "1"
 			}
@@ -60,7 +60,7 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 // to end, but not queued a second time, where it could count against the next
 // test.
 func TestAMissItsParserReportedIsNotQueuedAgain(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	miss := models.MismatchReported{Err: fmt.Errorf("decode: %w", models.ErrNoMockMatched)}
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)

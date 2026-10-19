@@ -195,7 +195,7 @@ func TestAConnectionIsKeptBeforeItIsCountedAccepted(t *testing.T) {
 // when none holds its calls. A proxy that does not settle keeps none, as
 // before.
 func TestAProxyThatSettlesReadsKeepsEveryConnectionWithTheSwitchOff(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	for _, settles := range []bool{true, false} {
 		// For a settling proxy the kernel pairs each connection after the
 		// canary with one of the application's: an unpaired one would drop
@@ -238,7 +238,7 @@ func TestAProxyThatSettlesReadsKeepsEveryConnectionWithTheSwitchOff(t *testing.T
 // is not counted, and a settling proxy that is not counted keeps no
 // connection, as before (it settles no read).
 func TestAProxyIsCountedFromItsStartOnlyWithItsPairedBytes(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	k := &keptCounter{}
 	p, stop := startListening(t, k, func(p *Proxy) { p.settleReads = true })
 	if !p.CountedFromStart() || !p.keepsConnections() || p.PairedBytesErr() != nil {
@@ -277,7 +277,7 @@ func TestAProxyTakesSettleReadsFromItsAgentsStart(t *testing.T) {
 // never done, and a test's end waited on it for ever while the polling
 // counted as progress (review B2).
 func TestTheGenericParserEndsWhenTheApplicationCloses(t *testing.T) {
-	for _, on := range []string{"", "1"} {
+	for _, on := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
 			t.Setenv("KEPLOY_PROVEN", on)
 			tr := &inflight{}

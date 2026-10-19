@@ -163,7 +163,7 @@ func TestTestSpansAreARingOfTheLastTestCases(t *testing.T) {
 // With the switch off no span is noted: nothing is kept for a recording that
 // does not use them.
 func TestTestSpansAreNotNotedWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	t0 := time.Unix(5000, 0)
 	mgr := New(zap.NewNop())
 	w := mgr.OpenWindow(t0, nil)

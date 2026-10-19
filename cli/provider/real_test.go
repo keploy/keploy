@@ -33,7 +33,7 @@ func TestRefusePassthroughFlags(t *testing.T) {
 		require.ErrorContains(t, err, "U18", arg)
 	}
 	require.NoError(t, refusePassthroughFlags(passthroughCmd(t), passthroughFlags...))
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.NoError(t, refusePassthroughFlags(passthroughCmd(t, "--global-passthrough"), passthroughFlags...))
 }
 
@@ -52,7 +52,7 @@ func TestDropPassthroughKeys(t *testing.T) {
 		cfg.BypassRules = []models.BypassRule{{Port: 5432}}
 		return cfg
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	cfg := live()
 	dropPassthroughKeys(zap.NewNop(), cfg, "test")
 	require.Equal(t, live(), cfg)

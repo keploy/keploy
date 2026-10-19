@@ -139,7 +139,7 @@ func TestStrictComparesCredentials(t *testing.T) {
 			t.Fatalf("under the switch decode still treats %s as noise", h)
 		}
 	}
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	for _, h := range models.CredentialHeaders {
 		if _, ok := flakyHeaderNoise()[h]; !ok {
 			t.Fatalf("without the switch %s left the static list", h)
@@ -389,7 +389,7 @@ func TestStrictHasNoFuzzyFallback(t *testing.T) {
 		t.Fatalf("diag = %+v, differs %v; want the strict phase, closest a, body.amount", diag, differs(diag))
 	}
 
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	db := &mockMemDb{mocks: []*models.Mock{a, b}, updateUnFilteredReturn: true}
 	ok, stub, _, err := newHTTP().match(context.Background(), sent("/v1/charge", ct, `{"amount":250,"currency":"USD","ref":"x1"}`), db, models.FlakyHeaderNoise(), nil, nil, true, false, false, true, true)
 	if err != nil || !ok || stub.Name != "a" {

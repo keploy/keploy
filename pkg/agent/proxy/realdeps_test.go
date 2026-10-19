@@ -202,7 +202,7 @@ func TestARefusedRealDestinationFailsTheConnection(t *testing.T) {
 func TestServeRealDecidesNothingWithoutTheSwitchOrAList(t *testing.T) {
 	dst := realServer(t)
 	p := realProxy(t, []string{dst}, nil)
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	_, accepted := realConnPair(t)
 	h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, nil)
 	require.False(t, h)
@@ -220,7 +220,7 @@ func TestServeRealDecidesNothingWithoutTheSwitchOrAList(t *testing.T) {
 // list installs none.
 func TestSetRealDeps(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop()}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.Error(t, p.SetRealDeps(context.Background(), []string{"localhost:1"}))
 	t.Setenv(provenswitch.Env, "1")
 	require.ErrorIs(t, p.SetRealDeps(context.Background(), []string{"localhost"}), realdeps.ErrBadEntry)
@@ -414,7 +414,7 @@ func TestAReplaysRealConnectAnswersAsTheRealDestination(t *testing.T) {
 	require.Nil(t, d.Keep, "a dependency's connect in a replay dials nothing")
 
 	// Without the switch the list is not read: nothing is dialled.
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	d = p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
 	require.Equal(t, synhold.Accept, d.Outcome)
 	require.Nil(t, d.Keep)
@@ -655,7 +655,7 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 
 	gp := &Proxy{logger: zap.NewNop(), GlobalPassthrough: true}
 	require.Error(t, gp.KeepRealDeps(ctx, nil), "global passthrough is refused, kept or not")
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.Error(t, fresh.KeepRealDeps(ctx, nil))
 }
 

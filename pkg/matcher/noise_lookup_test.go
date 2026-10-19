@@ -37,7 +37,7 @@ func TestLearnedEntryIsExactUnderTheSwitch(t *testing.T) {
 		if on {
 			t.Setenv(provenswitch.Env, "1")
 		} else {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 		}
 		if _, noisy, _ := idx.matchKind("items[].id"); !noisy {
 			t.Fatalf("switch %v: the field itself is excused", on)

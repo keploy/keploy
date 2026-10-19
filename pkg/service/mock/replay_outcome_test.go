@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -41,6 +43,7 @@ func (d loadedMockDB) GetFilteredMocks(context.Context, string, time.Time, time.
 // empty set (nothing to verify, already warned) and --on-miss record (which
 // consumes nothing while extending the set) exiting 0.
 func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name     string
 		loaded   int
@@ -134,6 +137,7 @@ func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
 // failure as "0 consumed, 0 missed" read as a clean replay and, under --strict,
 // passed a run that could have missed every call.
 func TestReplayOutcomeReporting(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	twoConsumed := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
 	oneMiss := []models.UnmatchedCall{{Protocol: "http", Destination: "dep:9411"}}
 
@@ -300,6 +304,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 // now leaves its account as it is stopped, and that account is what the
 // replay is judged on.
 func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	twoConsumed := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
 	oneMiss := []models.UnmatchedCall{{Protocol: "http", Destination: "dep:9411"}}
 	for _, tc := range []struct {
@@ -443,6 +448,7 @@ func (cfOnlyMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Ti
 // read the kind: it is warned about as empty, and is not failed as a replay
 // that verified nothing.
 func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	cfg := instrConfig(instr, utils.Native, "pytest -q")
@@ -478,6 +484,7 @@ func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
 // none is told to record the call. A connection whose client sent nothing is
 // said to have made no call.
 func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const listPort = "if 172.17.0.1:3307 is MySQL, add 3307 to mysqlPorts in keploy.yml"
 	misses := []models.UnmatchedCall{
 		{Protocol: "MySQL", ActualSummary: "connection phase: server greeting", Destination: "172.17.0.1:3307",

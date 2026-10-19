@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -264,6 +266,7 @@ func useGobMocks(t *testing.T, h *prRun, mocks ...*models.Mock) {
 // describes the mocks as recorded: before a MockMutator changes them in
 // place, and whether or not the window filter kept them for the agent.
 func TestRunTestSetReportsTheFailedTestsPerTestMocks(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const (
 		ordersOp = "/orders.Orders/Get"
 		chargeOp = "/payments.Payments/Charge"

@@ -245,6 +245,7 @@ func stepsMarks() []models.ScopeWindow {
 }
 
 func TestRecordWritesCaseMocksStepsAndStartup(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
 	instr := newRunnerInstr(t, stepsMarks()...)
 	instr.incoming = []*models.TestCase{
@@ -288,6 +289,7 @@ func TestRecordWritesCaseMocksStepsAndStartup(t *testing.T) {
 }
 
 func TestRecordRefusesATestThatRanTwice(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newRunnerInstr(t, append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond))...)
 	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
@@ -457,6 +459,7 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 }
 
 func TestARefusedRecordLeavesTheSetExactlyAsItWas(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name  string
 		marks []models.ScopeWindow
@@ -533,7 +536,7 @@ func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
 				t.Setenv(provenswitch.Env, "1")
 				judgedBuild(t)
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			dir := t.TempDir()
 			passed, failed := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
@@ -576,7 +579,7 @@ func TestARecordThatCannotReadItsTestsKeepsNothing(t *testing.T) {
 			if proven {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			dir := t.TempDir()
 			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
@@ -611,7 +614,7 @@ func TestARecordOfTestsWithoutCallsKeepsThemUnderTheSwitch(t *testing.T) {
 				t.Setenv(provenswitch.Env, "1")
 				judgedBuild(t)
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			dir := t.TempDir()
 			w := mark("orders::TestPure", 0, 10*time.Millisecond)

@@ -51,7 +51,7 @@ func TestARecordedMocksDestinationIsDecidedByItsConnection(t *testing.T) {
 		require.Equal(t, tc.want != "", ok, "%+v %v", tc.mock.Spec.HTTPReq, tc.mock.Spec.Metadata)
 		require.Equal(t, tc.want, got)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	_, ok = p.RealDestination(https)
 	require.False(t, ok, "without the switch nothing is decided")
 }

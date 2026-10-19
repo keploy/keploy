@@ -285,7 +285,7 @@ func TestASetAHookCouldNotCheckSaysWhy(t *testing.T) {
 			if c.proven {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			app := newBPApp(t)
 			if c.wrong {
@@ -390,7 +390,7 @@ func (h uncheckedPRHooks) Unchecked(string) string { return h.why }
 func TestASetAHookCouldNotCheckWritesNothingBack(t *testing.T) {
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	t.Run("no prune", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		h := newPartialRunHarness(t, 4, 0)
 		h.replayer.config.Test.RemoveUnusedMocks = true
 		h.replayer.hookImpl = uncheckedPRHooks{why: uncheckedWhy}
@@ -402,7 +402,7 @@ func TestASetAHookCouldNotCheckWritesNothingBack(t *testing.T) {
 		}
 	})
 	t.Run("no mappings.yaml", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		for _, flag := range []bool{false, true} {
 			h := newPartialRunHarness(t, 4, 0)
 			h.replayer.config.Test.UpdateTestMapping = flag
@@ -446,7 +446,7 @@ func TestASetAHookCheckedKeepsItsReport(t *testing.T) {
 		t.Fatal("the set is marked not judged")
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h := newPartialRunHarness(t, 4, 0)
 	h.replayer.config.Test.RemoveUnusedMocks = true
 	h.replayer.hookImpl = uncheckedPRHooks{why: " \n"}

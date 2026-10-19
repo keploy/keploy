@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
@@ -198,6 +200,7 @@ func TestAnInterruptWhileWaitingIsStillAnInterrupt(t *testing.T) {
 
 // And an agent that comes up is waited for, not failed.
 func TestAnAgentThatAnswersIsReady(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	a := deadAgentClient(t, true)
 	if err := waitWithin(t, a, context.Background(), make(chan error, 1)); err != nil {
 		t.Fatalf("a healthy agent failed the setup: %v", err)

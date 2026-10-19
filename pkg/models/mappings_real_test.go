@@ -54,7 +54,7 @@ func TestMappedTestCaseRefusesARealThatIsNotAList(t *testing.T) {
 // With the switch off, real: is not read, whatever it holds, so an entry keeps
 // its mocks and its shape.
 func TestMappedTestCaseWithoutTheSwitchIgnoresReal(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, doc := range []string{
 		"id: t1\nreal: [db:5432]\nmock_entries:\n  - name: mock-0\n",
 		"id: t1\nreal: {not: a list}\nmock_entries:\n  - name: mock-0\n",

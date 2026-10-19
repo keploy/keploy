@@ -220,7 +220,7 @@ func TestMatchRequestShapeStrictUnderTheSwitch(t *testing.T) {
 	otherID := httpMock("live", "GET", "http://notify.internal.svc/v1/poll/1700000099999?cursor=1")
 	same := httpMock("live", "GET", "http://notify.internal.svc/v1/poll/1700000000000?cursor=7")
 
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	for _, live := range []*models.Mock{otherHost, otherID, same} {
 		if ok, detail := h.MatchRequestShape(live, recorded, laneNotify()); !ok {
 			t.Fatalf("without the switch %s flagged: %s", live.Spec.HTTPReq.URL, detail)

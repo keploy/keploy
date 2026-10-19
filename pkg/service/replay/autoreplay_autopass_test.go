@@ -3,6 +3,8 @@ package replay
 import (
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -26,6 +28,7 @@ func additiveResult() *models.Result {
 // On a NEWER build a backward-compatible addition is a real API evolution and
 // is waved through — today's behaviour, unchanged.
 func TestAdditiveAutoPassStillAppliesWhenBuildsMayDiffer(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
 	if !qualifiesForHTTPResponseSchemaAdditionPass(additiveResult()) {
 		t.Fatal("fixture must qualify for the additive pass, else this test proves nothing")
@@ -99,6 +102,7 @@ func TestCompareHTTPRespForReplay_AutoReplayLogsSkipOnce(t *testing.T) {
 // The same path with AutoReplay off still auto-passes — the emitFailureLogs=true
 // branch is the one real replays take, and this change must not touch it.
 func TestCompareHTTPRespForReplay_AdditivePassesWhenNotAutoReplay(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
 
 	pass, _ := r.compareHTTPRespForReplay(additiveTestCase(), additiveActual(), "set", true)
@@ -116,6 +120,7 @@ func TestCompareHTTPRespForReplay_AdditivePassesWhenNotAutoReplay(t *testing.T) 
 // by a matching of the elements, so a reordered array that only gained
 // fields still passes.
 func TestCompareHTTPRespForReplay_AnArrayChangeBesideAnAddedFieldIsNotAutoPassed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const twoItems = `{"items":[{"price":10,"n":"a"},{"price":20,"n":"b"}]}`
 	for _, c := range []struct {
 		name           string

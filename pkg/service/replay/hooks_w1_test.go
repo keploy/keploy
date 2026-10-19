@@ -31,7 +31,7 @@ func TestKeployTestBoundsTheAppsAnswerOnlyByTheUsersAPITimeout(t *testing.T) {
 			if tc.proven {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			entered, release := make(chan struct{}, 1), make(chan struct{})
 			app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

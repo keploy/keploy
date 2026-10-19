@@ -100,7 +100,7 @@ func serverFirstLoss(p *Proxy) models.CaptureLoss {
 // (CaptureLossServerFirst), which leaves its test not judged; the greeting
 // charges nothing. Without the switch nothing is counted.
 func TestAServerFirstProtocolIsRelayedFromItsGreeting(t *testing.T) {
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			served := make(chan string, 8)
@@ -122,7 +122,7 @@ func TestAServerFirstProtocolIsRelayedFromItsGreeting(t *testing.T) {
 				t.Fatalf("next_step %q; want it to name %s, what reaches it by design with the switch %q", next, want, proven)
 			}
 			counted := serverFirstLoss(p)
-			if proven == "" {
+			if proven == "0" {
 				if counted.Count != 0 {
 					t.Fatalf("without the switch a loss was counted: %+v", counted)
 				}
@@ -397,7 +397,7 @@ func TestWhichGreetingIsServerFirstFollowsTheSwitch(t *testing.T) {
 		{"HTTP/1.1 408 Request Timeout\r\n", false, false},
 		{"SSH-2.0-OpenSSH_9.6\r\n", false, false},
 	} {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		if got := serverFirstGreeting([]byte(c.greeting)); got != c.off {
 			t.Errorf("switch off: %q server-first %v, want %v", c.greeting, got, c.off)
 		}
@@ -471,7 +471,7 @@ func TestARefusalAtAcceptIsRelayedAndTeachesThePortNothing(t *testing.T) {
 	})
 
 	t.Run("switch off", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		p := testProxy(t)
 		refuse <- true
 		_, srcConn := clientPair(t)
@@ -492,7 +492,7 @@ func TestARefusalAtAcceptIsRelayedAndTeachesThePortNothing(t *testing.T) {
 // relayed as a server-first protocol, never said, never counted, and the
 // port is learned not to be MySQL.
 func TestAnH2cServersSettingsAtAcceptIsDispatchedAsBefore(t *testing.T) {
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			wrote := make(chan struct{}, 4)
@@ -565,7 +565,7 @@ func TestAnH2cServersSettingsAtAcceptIsDispatchedAsBefore(t *testing.T) {
 // of the same server-first destination does too), so the mark stays, and
 // each connection is decided by its own probe.
 func TestAMarkedDestinationThatIsAnotherServiceNowIsDispatchedAsOnMain(t *testing.T) {
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			ln, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -625,7 +625,7 @@ func TestAMarkedDestinationThatIsAnotherServiceNowIsDispatchedAsOnMain(t *testin
 			if n := logs.FilterMessage("keploy cannot record " + addr + notRecorded).Len(); n != 1 {
 				t.Fatalf("said %d times it cannot record %s; the client-first service must not be said so", n, addr)
 			}
-			if c := serverFirstLoss(p); proven != "" && c.Count != 2 {
+			if c := serverFirstLoss(p); proven != "0" && c.Count != 2 {
 				t.Fatalf("server-first loss %+v; want the 2 SMTP sends only", c)
 			}
 		})
@@ -664,7 +664,7 @@ func TestASaidOnceForgetsItsOldestDestinationOnly(t *testing.T) {
 // that speaks before the greeting. After each, its next 220 connection is
 // relayed, with the switch off and on.
 func TestAMarkedDestinationKeepsItsMarkWithoutEvidence(t *testing.T) {
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			var busy atomic.Bool

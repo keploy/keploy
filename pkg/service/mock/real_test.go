@@ -46,7 +46,7 @@ func TestCheckRealDepsRefusesAListKeployCannotRead(t *testing.T) {
 	err := m.checkRealDeps()
 	require.ErrorContains(t, err, "keploy.yml mock.real")
 	require.NoError(t, realService(nil, "localhost:5432", "container:redis").checkRealDeps())
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.NoError(t, m.checkRealDeps())
 }
 
@@ -71,7 +71,7 @@ func TestPushRealDepsHandsTheAgentTheList(t *testing.T) {
 	c.err = errors.New("refused")
 	require.ErrorIs(t, realService(c, "localhost:5432").pushRealDeps(ctx), c.err)
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	c = &realAgentClient{}
 	require.NoError(t, realService(c, "localhost:5432").pushRealDeps(ctx))
 	require.Zero(t, c.calls, "without the switch the agent is never told")
@@ -93,7 +93,7 @@ func TestRealRunIsReadUnderTheSwitchOnly(t *testing.T) {
 	got, err = realService(c).realRun(ctx)
 	require.NoError(t, err)
 	require.Nil(t, got, "with no list the agent is not asked")
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	got, err = realService(c, "db:5432").realRun(ctx)
 	require.NoError(t, err)
 	require.Nil(t, got)

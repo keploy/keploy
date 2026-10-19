@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"github.com/docker/cli/cli"
 	"github.com/docker/compose/v5/pkg/api"
 	"github.com/docker/docker/api/types/container"
@@ -23,6 +25,7 @@ import (
 // behaviour than the command string says — a stack that never aborts on app
 // exit, or an exit code that stops propagating — and nothing fails loudly.
 func TestComposeUpSemanticsAgreeWithTheInjectedFlags(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	tests := []struct {
 		name               string
 		service            string

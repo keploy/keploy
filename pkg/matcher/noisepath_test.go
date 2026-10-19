@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.uber.org/zap"
 )
 
@@ -448,6 +450,7 @@ func shortestPathFor(exp, act string) (string, bool) {
 // With ignoreOrdering the matcher pairs array elements greedily, so a positional
 // walk would invent drift on every field a reorder moved.
 func TestBodyNoiseFromJSONDiff_IgnoreOrdering(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const (
 		exp = `{"items":[{"id":"a","ts":"t1"},{"id":"b","ts":"t2"}]}`
 		// The same two elements, swapped: not a difference at all under

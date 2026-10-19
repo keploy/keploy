@@ -118,7 +118,7 @@ func TestSilentSinceHandshake(t *testing.T) {
 	}
 
 	t.Run("the switch off", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		app, srv := tcpPair(t)
 		go func() {
 			c := tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example"})

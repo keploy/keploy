@@ -15,6 +15,8 @@ import (
 	"testing/iotest"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -594,6 +596,7 @@ func (p *prRun) runTestSet(t *testing.T, serveTest bool) models.TestSetStatus {
 // k8s-proxy auto-replay sets), a complete, fully passing run must still prune
 // exactly once, or the guards below are satisfiable by never pruning at all.
 func TestRunTestSetHealthyRunPasses(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")    // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 4, 0) // never fail
 	h.replayer.config.Test.RemoveUnusedMocks = true
 	status := h.run(t)
@@ -726,6 +729,7 @@ func TestRunTestSetNoAnswerFailuresDoNotPruneMocks(t *testing.T) {
 // consumed nothing, and without mappings.yaml nothing else keeps their mocks
 // out of the delete.
 func TestRunTestSetUnrunStreamingTestsBlockThePrune(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name          string
 		failUpdateNth int // agent refuses filter params from this call (1 before the loop, then 1 per test)
@@ -860,6 +864,7 @@ func prDoesNotDecodeErr(t *testing.T, encoding string, status int, body []byte) 
 // br body with no bytes) is kept as text only, and the no-answer mark
 // (pkg.IsAppNoAnswer) reads the error, not its text.
 func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	var whole bytes.Buffer
 	zw := gzip.NewWriter(&whole)
 	if _, err := zw.Write([]byte(`{"ok":true}`)); err != nil {
@@ -907,6 +912,7 @@ func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
 // the unanswered test keeps its own, and a new file gains it on the next such
 // run. A run that stopped early writes nothing under either flag.
 func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	timeout := prClientTimeoutErr(t)
 	refused := prRefusedErr(t)
@@ -973,6 +979,7 @@ func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
 // --update-test-mapping merge, no startup backfill. Holding a create or an
 // asked-for write is logged; a default subset run on a mapped set stays quiet.
 func TestRunTestSetSubsetRunDoesNotPruneOrWriteMappings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	for _, tc := range []struct {
 		name          string
@@ -1108,6 +1115,7 @@ func TestRunTestSetUnreadableResultsBlockThePrune(t *testing.T) {
 // the tests. A set where one test keeps timing out is never pruned again, and
 // this line is the only place that says why.
 func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	timeout := prClientTimeoutErr(t)
 	refused := prRefusedErr(t)
 	ordinary := errors.New(`net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00"`)

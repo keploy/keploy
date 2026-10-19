@@ -93,7 +93,7 @@ func TestPushScopeSkipsRefuses(t *testing.T) {
 
 // With the switch off the source is never read.
 func TestPushScopeSkipsNeedsTheSwitch(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
 	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
@@ -174,7 +174,7 @@ func TestWithEvidence(t *testing.T) {
 func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	misses := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}, {Protocol: "DNS", ActualSummary: "A x"},
 		{Protocol: "MySQL", Destination: "10.9.9.9:13306", MatchPhase: models.MatchPhaseNoRequest}}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	dir, _, _ := replayIn(t, replayCase{mockErrs: misses})
 	require.Nil(t, mustReceipt(t, dir).MissedData, "absent with the switch off")
 	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
@@ -276,7 +276,7 @@ func TestAReplayWhoseAgentDiedSaysSo(t *testing.T) {
 // With the switch off a failed read is no per-test windows, as before the
 // switch existed.
 func TestAFailedWindowsReadIsNoWindowsWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	instr.windowsErr = errors.New("connection reset by peer")
 	require.NoError(t, replayErr(t, instr, utils.Native))
@@ -305,7 +305,7 @@ func TestComposeIsRefusedUnderTheSwitch(t *testing.T) {
 // an error, never "no tests".
 func TestReadWindowsWithoutAReaderIsAnErrorUnderTheSwitch(t *testing.T) {
 	m := &mockService{logger: zap.NewNop(), instrumentation: &skipPusher{}}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	w, err := m.readWindows(context.Background())
 	require.NoError(t, err)
 	require.Nil(t, w)
@@ -452,7 +452,7 @@ func TestNothingVerifiedIsTheSwitchOffRule(t *testing.T) {
 			if on {
 				provenOn(t)
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			repo := t.TempDir()
 			t.Chdir(repo)
@@ -493,7 +493,7 @@ func TestNothingCapturedNext(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	require.Contains(t, nothingCapturedNext(), "defer keploytest.T(t)()")
 	require.NotContains(t, nothingCapturedNext(), "docker")
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.Equal(t, "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command", nothingCapturedNext())
 }
 
@@ -529,7 +529,7 @@ func TestTheWholePoolIsNotArmedBeforeTheRunUnderTheSwitch(t *testing.T) {
 			if on {
 				provenOn(t)
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			repo := t.TempDir()
 			t.Chdir(repo)

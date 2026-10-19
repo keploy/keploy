@@ -18,9 +18,9 @@ import (
 // eachSwitch runs f with the proven switch off and on: the generic parser
 // reads its connection the same way under both.
 func eachSwitch(t *testing.T, f func(t *testing.T)) {
-	for _, on := range []string{"", "1"} {
+	for _, on := range []string{"0", "1"} {
 		name := "switch off"
-		if on != "" {
+		if on != "0" {
 			name = "switch on"
 		}
 		t.Run(name, func(t *testing.T) {

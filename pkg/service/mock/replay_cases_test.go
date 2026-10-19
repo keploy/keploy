@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
@@ -94,6 +96,7 @@ func TestAttributeMocksUsesTheTestRunningAtTheTime(t *testing.T) {
 
 // A replay with requests on compares what the app answered with the recorded cases and says which mocks each test used.
 func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newRunnerInstr(t, sequentialMarks()...)
 	instr.incoming = []*models.TestCase{httpCase("", "POST", "http://localhost:8080/orders", 201, `{"id":"new"}`, runnerT0.Add(5*time.Millisecond))}
 	instr.consumedMocks = []models.MockState{{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(6 * time.Millisecond).UnixNano()}}
@@ -190,6 +193,7 @@ func (l lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions)
 }
 
 func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newRunnerInstr(t, sequentialMarks()...)
 	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
@@ -239,6 +243,7 @@ func (heldIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBackl
 // stopped before it finished does: 128+N, no verdict, the last receipt left
 // standing.
 func TestReplayTheUserStoppedWhileItCollectedRequestsIsNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
 	mockDrainNotice = 20 * time.Millisecond
 	utils.ResetInterruptedAgain()

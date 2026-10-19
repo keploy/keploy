@@ -600,7 +600,7 @@ func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
 			if on {
 				t.Setenv("KEPLOY_PROVEN", "1")
 			} else {
-				t.Setenv("KEPLOY_PROVEN", "")
+				t.Setenv("KEPLOY_PROVEN", "0")
 			}
 			upstream := keepAliveHTTPUpstream(t)
 			saved := containerkey.Default
@@ -689,7 +689,7 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 			if on {
 				t.Setenv("KEPLOY_PROVEN", "1")
 			} else {
-				t.Setenv("KEPLOY_PROVEN", "")
+				t.Setenv("KEPLOY_PROVEN", "0")
 			}
 			idx := &sessionIndex{at: map[string]containerkey.Container{
 				"172.17.0.2:5432": {ID: "a", Image: "postgres:16", Port: 5432, Fingerprint: "0123456789ab"},

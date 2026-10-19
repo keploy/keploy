@@ -304,7 +304,7 @@ func TestBeforeSimulatePutsARealTestCaseOnTheRealClock(t *testing.T) {
 	h.instrumentation = struct{ Instrumentation }{}
 	require.ErrorContains(t, h.beforeSimulate(context.Background(), real, &at, "set"), "real clock")
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	s = &simInstr{}
 	h.instrumentation = s
 	require.NoError(t, h.beforeSimulate(context.Background(), real, &at, "set"))

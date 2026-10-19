@@ -12,7 +12,7 @@ import (
 // recording kept for a Content-Type keploy reads frames of, and never on how
 // the body's length was framed (which it is not even given).
 func TestHTTPStreamOf(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, c := range []struct {
 		contentType string
 		framed      bool
@@ -119,7 +119,7 @@ func TestHTTPResp_MarshalYAML_TheProvenSwitchKeepsTheRuleWhole(t *testing.T) {
 	flux := map[string]string{"Content-Type": "application/stream+json"}
 	const fluxBody = "{\"n\":1}\r\n\r\n{\"n\":2}\r\n"
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if n := framesOf(octet, "hello world"); n != 1 {
 		t.Errorf("without the proven switch an octet stream is kept as %d frames; want 1, as before", n)
 	}

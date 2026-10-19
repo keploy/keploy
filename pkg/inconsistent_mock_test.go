@@ -17,7 +17,7 @@ import (
 // or a wrong answer with nothing to point at it. The filter runs again at every
 // test of a set and sees the same mock each time, so it is said once.
 func TestAMockAnsweredBeforeItWasAskedIsLeftOutLoudlyOnce(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	core, logs := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core)
 	now := time.Now()

@@ -29,7 +29,7 @@ func TestNativeAgentArgs_CarryTheProvenSwitch(t *testing.T) {
 	a := New(zap.NewNop(), nil, &config.Config{})
 	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if args := a.nativeAgentArgs(opts); slices.Contains(args, flag) {
 		t.Fatalf("switch off, yet the native agent argv carries %s: %v", flag, args)
 	}
@@ -53,7 +53,7 @@ func TestNativeAgentArgs_CarryTheDockerEndpointUnderTheSwitch(t *testing.T) {
 	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
 	t.Setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if args := a.nativeAgentArgs(opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, "--"+containerkey.AgentFlag) }) {
 		t.Fatalf("switch off, yet the native agent argv carries the Docker endpoint: %v", args)
 	}
@@ -159,7 +159,7 @@ func countClientRequests(a *AgentClient) *clientRequests {
 }
 
 // switchStates is the switch off and on, as KEPLOY_PROVEN values.
-var switchStates = []struct{ name, env string }{{"switch off", ""}, {"switch on", "1"}}
+var switchStates = []struct{ name, env string }{{"switch off", "0"}, {"switch on", "1"}}
 
 // The CLI refuses an agent whose switch is not its own, in both directions,
 // and with the switch on an agent that predates the switch; and it takes the
@@ -174,11 +174,11 @@ func TestWaitForAgentChecksTheSwitchOfTheAnswerThatFoundItReady(t *testing.T) {
 		name, local, agent string
 		ok                 bool
 	}{
-		{"both off", "", "off", true},
+		{"both off", "0", "off", true},
 		{"both on", "1", "on", true},
-		{"off, agent predates the switch", "", "", true},
+		{"off, agent predates the switch", "0", "", true},
 		{"on, agent off", "1", "off", false},
-		{"off, agent on", "", "on", false},
+		{"off, agent on", "0", "on", false},
 		{"on, agent predates the switch", "1", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -324,7 +324,7 @@ func TestWaitForAgentWhoseStartStopsIsNotReady(t *testing.T) {
 // a definite answer; a second read of /health gives up at once, on its count,
 // rather than leaving a regression to the readiness budget.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, tc := range []struct {
 		name   string
 		health healthAnswer

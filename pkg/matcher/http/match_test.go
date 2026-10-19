@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"github.com/k0kubun/pp/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -245,6 +247,7 @@ func TestMatch_BodyNoiseWildcard_789(t *testing.T) {
 // TestMatch_CompareAll_Disabled tests that when compareAll is false (default),
 // non-JSON body differences are ignored and the match passes.
 func TestMatch_CompareAll_Disabled(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	logger := zap.NewNop()
 	tc := &models.TestCase{
 		Name: "test-compare-all-disabled",

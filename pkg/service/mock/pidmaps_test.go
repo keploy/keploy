@@ -74,6 +74,7 @@ func logged(logs *observer.ObservedLogs) string {
 // command ran are not the run's, and an agent that cannot count leaves the run
 // as it was.
 func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	refused3 := models.PIDMapRefusals{Target: 3, LastTargetTGID: 4242}
 	for _, tc := range []struct {
 		name         string
@@ -206,6 +207,7 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 // as isolated. An agent that cannot count at all is no lost count: its runs
 // pass, isolated, as before.
 func TestReplayWhoseUntrackedCountIsLostIsUnverified(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	lost := errors.New("agent returned 500: read pid_map_insert_failures[target_namespace_pids]: bad file descriptor")
 	unsupported := fmt.Errorf("%w: agent returned 501", models.ErrPIDMapRefusalsUnsupported)
 	for _, tc := range []struct {
@@ -281,6 +283,7 @@ func TestReplayWhoseUntrackedCountIsLostIsUnverified(t *testing.T) {
 // say FailedByRunner and exit 7, and keploy must not return the run as its own
 // failure -- while still SAYING the capture was not verified.
 func TestReplayUnderStrictWithAFailingRunnerAndALostCountKeepsFailedByRunner(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	lost := errors.New("agent returned 500: bad file descriptor")
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 7})
@@ -321,6 +324,7 @@ func TestReplayUnderStrictWithAFailingRunnerAndALostCountKeepsFailedByRunner(t *
 // -- no evidence of anything -- must not take that name away: it is the
 // weakest evidence and is decided last (the reviewer's B1 case).
 func TestStrictReportedMissKeepsItsNameOverALostCount(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name    string
 		counter *pidMapCounter
@@ -362,6 +366,7 @@ func TestStrictReportedMissKeepsItsNameOverALostCount(t *testing.T) {
 // Under compose the agent has stopped with the project by the time the run
 // ends, so the run's refusals come from the account it left on stopping.
 func TestComposeReplayReadsRefusalsFromWhatTheStoppedAgentLeft(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name     string
 		left     *models.PIDMapRefusals
@@ -440,6 +445,7 @@ func (p pidMapRecordInstr) GetPIDMapRefusals(ctx context.Context) (models.PIDMap
 // existing set is left as it was -- and the run fails; a recording during
 // which nothing was refused is kept as before.
 func TestRecordDuringWhichAProcessWasNotTrackedKeepsNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const set = "orders"
 	refused := models.PIDMapRefusals{Target: 1, LastTargetTGID: 99}
 	for _, tc := range []struct {

@@ -63,7 +63,7 @@ func TestHandleIncomingNamesATestCasesRealDestinations(t *testing.T) {
 		if on {
 			t.Setenv(provenswitch.Env, "1")
 		} else {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 		}
 		tcs := make(chan *models.TestCase, 1)
 		keeps := &[]bool{}

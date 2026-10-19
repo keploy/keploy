@@ -123,6 +123,7 @@ func statusOf(t *testing.T, h *prRun, test string) models.TestStatus {
 // refreshes its own (the control: a writer that never writes would pass the
 // rest).
 func TestRunTestSetKeepsAFailedTestsRecordedMapping(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name          string
 		strictFailure bool
@@ -403,6 +404,7 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 // as --strict-failure only relabels it FAILED, which the auto-noise hook may
 // pass when the differences are values only.
 func TestRunTestSetMapsByTheVerdictTheHookLeft(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	// covered consumes all of test-1's recorded mapping and one more mock; the
 	// default consumes mock-b alone, leaving mock-a unconsumed.
 	covered := []models.MockState{mongoAt("mock-a", 1010), mongoAt("mock-b", 1020), mongoAt("mock-z", 1030)}
@@ -510,6 +512,7 @@ func TestRunTestSetLeavesAFailedTestsEntryAsRecorded(t *testing.T) {
 // fails keeps its recorded mapping too, and so does one a hook passes after it
 // answered wrong with a recorded mock left unconsumed (the OBSOLETE shape).
 func TestRunTestSetKeepsAFailedStreamedTestsRecordedMapping(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, hookPasses := range []bool{false, true} {
 		name := "failed"
 		if hookPasses {
@@ -570,6 +573,7 @@ func TestRunTestSetKeepsAFailedStreamedTestsRecordedMapping(t *testing.T) {
 // recorded mapping, as in the main loop. Without the miss it is mapped from
 // what it consumed: the control.
 func TestRunTestSetKeepsTheMappingOfAStreamedPassThatSwallowedAMiss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, missed := range []bool{true, false} {
 		name := "a call no mock answered"
 		if !missed {
@@ -883,6 +887,7 @@ func TestPassingEntriesOf(t *testing.T) {
 // test-2 passes, creates the file with test-2 and the section; a run where no
 // test consumed a mock creates nothing either, quietly.
 func TestRunTestSetCreatesNoFileThatMapsNoTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	boot := models.MockState{Name: "mock-boot", Kind: models.Mongo, Usage: models.Updated, Lifetime: models.LifetimeSession}
 	for _, tc := range []struct {
 		name          string
@@ -1046,6 +1051,7 @@ func (h retryHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, te
 // not its mapping. test-2 fails the first cycle (which is what makes the
 // passing tests run again); test-3 passes every cycle and is the control.
 func TestRunTestSetRetryPassingKeepsTheMappingOfATestThatFailedALaterCycle(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 3, 0)
 	pinWindows(h)
 	h.replayer.config.RetryPassing = true

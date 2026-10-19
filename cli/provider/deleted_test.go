@@ -73,7 +73,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 				t.Fatalf("ValidateFlags: %v; want the deleted flag refused as unknown", err)
 			}
 
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if _, _, err := deletedRun(t, "", args...); err != nil {
 				t.Fatalf("without the switch: %v", err)
 			}
@@ -101,7 +101,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 			}
 		}
 
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		cfg, logs, err = deletedRun(t, yml)
 		if err != nil || !cfg.InCi || !cfg.Test.FallBackOnMiss {
 			t.Fatalf("without the switch: %v, inCi %v, fallBackOnMiss %v", err, cfg.InCi, cfg.Test.FallBackOnMiss)

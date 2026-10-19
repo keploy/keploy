@@ -84,7 +84,7 @@ func realSettlingAgentWith(t *testing.T, settles bool, hooks coreAgent.Hooks, lo
 // completed to its real proxy is in the proxy's hands: here one not yet
 // accepted. With the switch off no read waited for any call.
 func TestAnAgentThatSettlesReadsWaitsForTheCallsNotYetAcceptedWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a, p, h := realSettlingAgent(t, true)
 	require.Equal(t, 1, h.marked, "the listener of an agent that settles reads is marked at its start")
 	accepted, err := p.Accepted()
@@ -114,7 +114,7 @@ func TestAnAgentThatSettlesReadsWaitsForTheCallsNotYetAcceptedWithTheSwitchOff(t
 // With the switch off, an agent that does not settle reads its misses at
 // once, as before: its listener is not marked, and it never asks the counts.
 func TestAnAgentThatDoesNotSettleReadsAtOnceWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a, p, h := realSettlingAgent(t, false)
 	require.Zero(t, h.marked, "the listener of an agent that does not settle is not marked")
 	_, err := p.Accepted()
@@ -130,7 +130,7 @@ func TestAnAgentThatDoesNotSettleReadsAtOnceWithTheSwitchOff(t *testing.T) {
 // canary the kernel did not count. Refusing every read there would end noise
 // learning, not make it right.
 func TestAnAgentThatCannotCountReadsAtOnceAsBeforeWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, tc := range []struct {
 		name  string
 		hooks coreAgent.Hooks
@@ -175,7 +175,7 @@ func (h *countLosingHooks) ProxyConnPair(syscall.RawConn) (coreAgent.ProxyConnPa
 // a test's misses unread: it can no longer vouch for every call, and reading
 // as before would bring back the misattribution unannounced.
 func TestAnAgentThatLosesItsCountReadsUnreadWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h := &countLosingHooks{connHooks: &connHooks{}, from: 2}
 	a, p := realSettlingAgentWith(t, true, h, zap.NewNop())
 	n, err := p.Accepted()
@@ -210,7 +210,7 @@ func (p *losingProxy) CaptureLosses() models.CaptureLosses {
 // record or answer): it is answered unread, once; the next read, with no new
 // loss, settles as before.
 func TestASettledReadAfterACaptureLossIsUnreadWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a, p, h := realSettlingAgent(t, true)
 	lp := &losingProxy{Proxy: p}
 	a.Proxy = lp
@@ -250,7 +250,7 @@ func (h *hookLossHooks) CaptureLossesErr() error {
 // before the proxy got it, since the last read, leaves a settled read unread
 // with the switch off; and so does a count of losses that cannot be read.
 func TestASettledReadAfterAHooksLossIsUnreadWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h := &hookLossHooks{numberingHooks: &numberingHooks{connHooks: &connHooks{}}}
 	a, p := realSettlingAgentWith(t, true, h, zap.NewNop())
 	accepted, err := p.Accepted()
@@ -294,7 +294,7 @@ func (p *natProxy) drop() {
 // unread (the call it waits for can never settle), and every later read is
 // unread at once, never read as before.
 func TestAReadAfterTheRunDroppedToNotCountedIsUnreadWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a, p, h := realSettlingAgent(t, true)
 	np := &natProxy{Proxy: p, ch: make(chan struct{})}
 	a.Proxy = np
@@ -329,7 +329,7 @@ func TestAReadAfterTheRunDroppedToNotCountedIsUnreadWithTheSwitchOff(t *testing.
 // loss is the read's it happened before, so the next read, with none new and
 // settled, is complete.
 func TestTheLossMarkAdvancesOnAReadWhoseSettleFailed(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h := &hookLossHooks{numberingHooks: &numberingHooks{connHooks: &connHooks{}}}
 	a, p := realSettlingAgentWith(t, true, h, zap.NewNop())
 	accepted, err := p.Accepted()
@@ -371,7 +371,7 @@ func (h *droppingHooks) ProxyConnsEstablished(ctx context.Context) (uint64, erro
 // finished first: a call accepted after the drop is not kept, so the settle
 // could not have seen it.
 func TestADropDuringTheSettleLeavesTheReadUnread(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h := &droppingHooks{numberingHooks: &numberingHooks{connHooks: &connHooks{}}}
 	a, p := realSettlingAgentWith(t, true, h, zap.NewNop())
 	np := &natProxy{Proxy: p, ch: make(chan struct{})}

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -68,6 +70,7 @@ func consumedRun(t *testing.T, tests int, perTestScope bool) ([]models.MockFilte
 // with every send, exactly as before: agents from v3.0.0-beta1 through v3.3.22
 // also applied it to the session pool.
 func TestRunTestSetSendsTheWholeConsumedHistoryToAnAgentThatDoesNotSayItsScope(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const tests = 12
 	sends, snapshots := consumedRun(t, tests, false)
 	seen := map[string]bool{}
@@ -94,6 +97,7 @@ func TestRunTestSetSendsTheWholeConsumedHistoryToAnAgentThatDoesNotSayItsScope(t
 // mocks each test consumes (all of a lax-mode MySQL replay's data mocks) are
 // never read by it; they used to be re-sent, and re-decoded, with every test.
 func TestRunTestSetConsumedPayloadDoesNotGrowWithTheTestIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const tests = 30
 	sends, _ := consumedRun(t, tests, true)
 

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -112,6 +114,7 @@ func (e *emptyInstrumentation) NotifyGracefulShutdown(context.Context) error { r
 //
 // This test FAILS on the delete-first code and passes once record is staged.
 func TestRecord_ZeroCaptureDoesNotDestroyExistingSet(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const set = "orders"
 
 	db := newStatefulMockDB()
@@ -139,6 +142,7 @@ func TestRecord_ZeroCaptureDoesNotDestroyExistingSet(t *testing.T) {
 // (record is a clean rewrite, not an append), proving the staging promote does
 // not accidentally preserve stale recordings.
 func TestRecord_SuccessfulCaptureReplacesExistingSet(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const set = "orders"
 
 	db := newStatefulMockDB()

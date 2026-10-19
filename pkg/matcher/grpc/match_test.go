@@ -3,11 +3,14 @@ package grpc
 import (
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
 )
 
 func TestMatch_JSONComparison(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	logger := zaptest.NewLogger(t)
 
 	tests := []struct {
@@ -158,6 +161,7 @@ func TestMatch_JSONComparison(t *testing.T) {
 }
 
 func TestMatch_IgnoreOrdering(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	logger := zaptest.NewLogger(t)
 
 	// Test JSON array ordering differences

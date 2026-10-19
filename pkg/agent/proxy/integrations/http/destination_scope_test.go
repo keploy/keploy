@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -358,6 +360,7 @@ func TestComparedDestinations(t *testing.T) {
 // smaller than that count, so a diag that reports 19 candidates and carries 3
 // mocks would silently disable the diagnostic again.
 func TestMatchDiagCarriesTheComparedPool(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 	postMock := httpMockOnHost("mock-2", "POST", "http://192.0.2.10/api/orders", "192.0.2.10")

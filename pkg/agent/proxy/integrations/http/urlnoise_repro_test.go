@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -19,6 +21,7 @@ func putReq(path string) *req {
 // fixed. The app PUTs receipts/<user>/<uuid>.txt to S3; on replay BOTH the
 // <user> token (carries a timestamp) and the <uuid>.txt segment drift.
 func TestURLMatch_S3Receipt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 	recorded := httpMock("s3", "PUT",
@@ -130,6 +133,7 @@ func TestURLNoise_CornerCaseStillWorks(t *testing.T) {
 // TestMatch_ExactPreferredOverAutoDynamic proves the two-pass: when an EXACT mock
 // exists it wins, and a dynamic-looking sibling is not wrongly served.
 func TestMatch_ExactPreferredOverAutoDynamic(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 	db := &mockMemDb{

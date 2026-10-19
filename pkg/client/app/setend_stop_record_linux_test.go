@@ -68,7 +68,7 @@ func TestTheRecordingsStopSaysWhenItKilledTheApp(t *testing.T) {
 	if appErr := runNativeAs(t, models.MODE_TEST, ignores); appErr.StopKilled != "" {
 		t.Fatalf("a replay's teardown: run says %q", appErr.StopKilled)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if appErr := runNativeAs(t, models.MODE_RECORD, ignores); appErr.StopKilled != "" {
 		t.Fatalf("with the switch off: run says %q", appErr.StopKilled)
 	}

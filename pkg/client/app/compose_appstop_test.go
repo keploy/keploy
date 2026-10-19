@@ -368,7 +368,7 @@ func TestUnderTheSwitchComposeRunsWithoutItsAbortFlags(t *testing.T) {
 			t.Errorf("%q: %q, want %q", in, got, want)
 		}
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if got := ensureComposeExitOnAppFailure("docker compose up", "app", false); got != "docker compose up --abort-on-container-exit --exit-code-from app" {
 		t.Errorf("switch off: %q", got)
 	}

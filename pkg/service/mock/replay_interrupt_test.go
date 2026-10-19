@@ -133,7 +133,7 @@ func TestAReplayTheUserStopsBeforeItIsJudgedExits128PlusN(t *testing.T) {
 			if tc.proven {
 				provenOn(t)
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			utils.ClearInterrupted()
 			t.Cleanup(utils.ClearInterrupted)

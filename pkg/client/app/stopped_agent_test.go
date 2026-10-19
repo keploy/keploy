@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
@@ -110,6 +112,7 @@ func composeReplayApp(d docker.Client) *App {
 // unknown: consumed -1, missed -1, never isolated, and --strict failing a
 // clean run.
 func TestRunReadsTheStoppedAgentBeforeTheTeardown(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	argvLog := stubDockerCLI(t, "", 0)
 	outcome := []byte(`{"consumed":[{"name":"mock-1"}],"missed":[]}`)
 	d := &stoppedAgentDocker{files: map[string]map[string][]byte{
@@ -502,6 +505,7 @@ func TestAgentFailed(t *testing.T) {
 // stopped the project, before keploy's teardown removed it -- and for the two
 // containers that decide who failed: the agent, and the app it serves.
 func TestRunReadsHowTheAgentAndTheAppEnded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	argvLog := stubDockerCLI(t, "", 0)
 	d := &stoppedAgentDocker{states: map[string]*container.State{
 		"keploy-v3-test": ended("exited", 6, "2026-09-25T12:00:00Z", "2026-09-25T12:00:01Z"),

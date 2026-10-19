@@ -485,7 +485,7 @@ func TestUnderTheSwitchAppMarkingDoesNotMakeATreeListenerADependency(t *testing.
 
 	recorded.reset()
 	t.Cleanup(recorded.reset)
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	if served, _, _ := callTree(t, selfCallProxy(), port, uint32(os.Getppid())); served {
 		t.Fatal("with the switch off a dependency by app marking stays on the mock path")
 	}
@@ -768,7 +768,7 @@ func TestUnderTheSwitchACallToAnAppTheCallerStartedIsLiveThroughTheLiveHandler(t
 func TestOffTheSwitchNoRowIsTold(t *testing.T) {
 	recorded.reset()
 	t.Cleanup(recorded.reset)
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	s := &rowSink{}
 	p := selfCallProxy()
 	p.SetTopologySink(s)

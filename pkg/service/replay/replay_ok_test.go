@@ -38,7 +38,7 @@ func TestSchemaMatchIsIgnoredUnderTheProvenSwitch(t *testing.T) {
 				return &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: tc.body}
 			}
 
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			r := &Replayer{logger: zap.NewNop(), config: cfg}
 			if pass, _ := r.compareHTTPResp(expected(), actual(), "set", false); !pass {
 				t.Fatal("control: without the switch --schema-match passes it, as before")

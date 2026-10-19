@@ -74,7 +74,7 @@ func TestReadRealTestChargesWhatKeployCouldNotCapture(t *testing.T) {
 	read = testMisses{asked: true}
 	realReplayer(realTestInst{got: got}).readRealTest(ctx, &read)
 	require.Equal(t, testMisses{asked: true}, read, "no list, nothing read")
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	read = testMisses{asked: true}
 	realReplayer(realTestInst{got: got}, "db:5432").readRealTest(ctx, &read)
 	require.Equal(t, testMisses{asked: true}, read, "without the switch, nothing read")
@@ -116,7 +116,7 @@ func TestMockRealNeedsTheSwitchAndAConfig(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	require.Nil(t, (&Replayer{}).mockReal())
 	require.Equal(t, []string{"db:5432"}, realReplayer(nil, "db:5432").mockReal())
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.Nil(t, realReplayer(nil, "db:5432").mockReal())
 }
 

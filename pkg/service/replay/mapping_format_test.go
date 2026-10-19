@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -24,6 +26,7 @@ import (
 // the ones this run consumed (here a session mock every test shares) changes
 // which mocks a later mapping-based replay, strict or not, gives each test.
 func TestRunTestSetLeavesARecordedJSONMappingAlone(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 		t.Run(string(format)+" replay", func(t *testing.T) {

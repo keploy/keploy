@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
 )
@@ -611,6 +613,7 @@ func TestBacklogBefore_AMockBeingSentOrOwedIsPending(t *testing.T) {
 // A session or connection mock in the buffer (an untagged HTTP mock is one)
 // goes at the next flush whatever window it falls in: pending until then.
 func TestBacklogBefore_AReusableMockInTheBufferIsPendingUntilTheFlush(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	m := New(nil)
 	out := make(chan *models.Mock, 16)
 	m.SetOutputChannel(out)

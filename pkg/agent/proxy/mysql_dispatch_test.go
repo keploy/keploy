@@ -615,7 +615,7 @@ func mysqlReplayMisses(t *testing.T, session []*models.Mock, app func(net.Conn))
 // eachSwitchState runs test with the proven switch off and on: a MySQL miss is
 // queued before its connection is closed either way.
 func eachSwitchState(t *testing.T, test func(t *testing.T)) {
-	for _, on := range []string{"", "1"} {
+	for _, on := range []string{"0", "1"} {
 		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, on)
 			test(t)
@@ -784,7 +784,7 @@ func writeMySQLPacket(c net.Conn, seq uint8, payload []byte) error {
 // with caching_sha2_password, whose refusal comes at the end of a full
 // authentication. No miss is queued for any of them.
 func TestAMySQLLoginRefusedThenRetriedIsLetInOnEveryConnection(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, tc := range []struct {
 		name      string
 		plugin    mysqlmodels.AuthPluginName

@@ -124,7 +124,7 @@ func TestTheAnsweredMocksLeaveOtherDiagnosesAlone(t *testing.T) {
 		t.Fatalf("a variable miss was diagnosed again: %+v", got)
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if matched, diag := missOf(t, getTo("/reserve/book", answeredHost), db); diag != matched {
 		t.Fatalf("without the switch the diagnosis changed: %+v", diag)
 	}

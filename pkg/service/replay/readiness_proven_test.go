@@ -665,7 +665,7 @@ func TestTheListenPortIsTheContainerPortTheTestsHostPortPublishes(t *testing.T) 
 // With the switch off, an application keploy did not start is not waited
 // for, and one it started goes through waitForAppReady as always.
 func TestWithTheSwitchOffReadinessIsAsBefore(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	r := &Replayer{logger: zap.NewNop(), config: testCfg()}
 	if ready, why := r.appReady(context.Background(), nil, "test-set-0", false, false); !ready || why != "" {
 		t.Fatalf("appReady(not started) = %v %q, want ready at once", ready, why)
@@ -864,7 +864,7 @@ func TestUnderTheSwitchEverySetWaitsForItsApplication(t *testing.T) {
 		if on {
 			t.Setenv("KEPLOY_PROVEN", "1")
 		} else {
-			t.Setenv("KEPLOY_PROVEN", "")
+			t.Setenv("KEPLOY_PROVEN", "0")
 		}
 		for _, c := range []struct{ serve, first bool }{{false, true}, {false, false}, {true, true}, {true, false}} {
 			want := !c.serve || c.first || on

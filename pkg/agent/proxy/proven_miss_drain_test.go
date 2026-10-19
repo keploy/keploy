@@ -105,7 +105,7 @@ func TestSendError_NeverDropsAMiss(t *testing.T) {
 func eitherSwitch(t *testing.T, f func(t *testing.T)) {
 	for _, on := range []bool{true, false} {
 		name := "switch off"
-		v := ""
+		v := "0"
 		if on {
 			name, v = "switch on", "1"
 		}

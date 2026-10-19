@@ -175,7 +175,7 @@ func TestMergeVariable(t *testing.T) {
 // carries a variables block keeps every noise path learned, and the noise it
 // had (the round-3 reviewer's repro).
 func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	dir := t.TempDir()
 	ys := New(zap.NewNop(), dir, "")
 	ctx := context.Background()

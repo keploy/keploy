@@ -79,7 +79,7 @@ func TestContainerRoutesOnlyUnderTheSwitch(t *testing.T) {
 	for _, tc := range []struct {
 		proven string
 		want   int
-	}{{"", http.StatusNotFound}, {"1", http.StatusConflict}} {
+	}{{"0", http.StatusNotFound}, {"1", http.StatusConflict}} {
 		t.Setenv("KEPLOY_PROVEN", tc.proven)
 		r := chi.NewRouter()
 		DefaultRoutes{}.New(r, nil, zap.NewNop())

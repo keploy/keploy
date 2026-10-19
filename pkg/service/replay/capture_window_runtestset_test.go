@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -52,6 +54,7 @@ func (c continueInstr) ContinueTestErrorCapture(context.Context) error {
 // begins the capture; every later one continues it, carrying in what was
 // missed between the two tests — in the streaming phase too.
 func TestRunTestSetOpensEachTestsCaptureBeforeMovingItsMockWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name       string
 		noContinue bool
@@ -117,6 +120,7 @@ func (h *resetOnceHooks) SimulateRequest(ctx context.Context, tc *models.TestCas
 // from before the test, and those made as its mock window moved — is the
 // test's, and reopening the window for the re-send dropped them.
 func TestRunTestSetKeepsTheTestsCaptureOpenAcrossAResetResend(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 3, 0)
 	ci := &captureInstr{prInstr: h.instr}
 	h.replayer.instrumentation = continueInstr{ci}

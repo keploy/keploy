@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -391,6 +393,7 @@ func newRestartingClient(t *testing.T, restartable bool) (*AgentClient, *restart
 // session is set up on the agent compose started again, it reconnects and goes
 // on feeding the same channel, which closes when the run ends.
 func TestStreamsReconnectToARestartedAgent(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	client, agent := newRestartingClient(t, true)
 	s := client.session()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -457,6 +460,7 @@ func TestStreamsReconnectToARestartedAgent(t *testing.T) {
 // The agent's container runs before its server listens: nothing is reconnected
 // to it or made again on it until it answers, and then all of it is.
 func TestRestartedAgentIsSetUpOnceItAnswers(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	client, agent := newRestartingClient(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

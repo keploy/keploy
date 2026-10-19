@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -81,6 +83,7 @@ func TestPushSetTableSkipsAMappingWithNoBootsOrSuites(t *testing.T) {
 // mock record is such a replay, and one start given up on ended the round.
 // Any other failure of the start is not tried again.
 func TestAReplayTriesAStalledStartAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name   string
 		first  error

@@ -152,7 +152,7 @@ func TestJUnitRendersTheProvenEvidenceOfASetRunUnderTheSwitch(t *testing.T) {
 	report := func(proven bool) map[string]*models.TestReport {
 		return map[string]*models.TestReport{"test-set-0": {Total: 1, Failure: 1, Proven: proven, Tests: []models.TestResult{failed}}}
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	body := buildJUnitSuites(report(true)).Suites[0].Cases[0].Failure.Text
 	for _, want := range []string{"call with no recorded answer: HTTP POST /charges", "recorded call not made: mock mock-7 (Http)"} {
 		if !strings.Contains(body, want) {

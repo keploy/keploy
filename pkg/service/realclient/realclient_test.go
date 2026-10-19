@@ -34,7 +34,7 @@ func TestCheck(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	require.NoError(t, Check([]string{"localhost:5432"}))
 	require.ErrorContains(t, Check([]string{"localhost"}), "keploy.yml mock.real")
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	require.NoError(t, Check([]string{"localhost"}), "without the switch the key is not read")
 }
 
@@ -52,7 +52,7 @@ func TestPush(t *testing.T) {
 	require.Error(t, Push(ctx, log, struct{}{}, []string{"db:5432"}))
 	require.NoError(t, Push(ctx, log, &agent{err: models.ErrNoRealRoute}, nil))
 	require.ErrorIs(t, Push(ctx, log, &agent{err: models.ErrNoRealRoute}, []string{"db:5432"}), models.ErrNoRealRoute)
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a = &agent{}
 	require.NoError(t, Push(ctx, log, a, []string{"db:5432"}))
 	require.Empty(t, a.pushed, "nothing is pushed without the switch")
@@ -90,7 +90,7 @@ func TestRun(t *testing.T) {
 	require.Error(t, err)
 	_, err = Run(ctx, struct{}{}, []string{"db:5432"})
 	require.Error(t, err)
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	got, err = Run(ctx, &agent{}, []string{"db:5432"})
 	require.NoError(t, err)
 	require.Nil(t, got)

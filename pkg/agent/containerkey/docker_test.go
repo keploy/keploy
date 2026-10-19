@@ -949,7 +949,7 @@ func TestAgentArgsCarryTheDockerEndpointOnlyUnderTheSwitch(t *testing.T) {
 	asked := 0
 	contextEndpoint = func() string { asked++; return "unix:///home/u/.docker/desktop/docker.sock" }
 	t.Setenv("DOCKER_HOST", "")
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	if got := AgentArgs(); got != nil || asked != 0 {
 		t.Fatalf("switch off: AgentArgs() = %q, the docker CLI asked %d times", got, asked)
 	}

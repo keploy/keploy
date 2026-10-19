@@ -240,7 +240,7 @@ func TestStrictSigV4ThePayloadHashLeavesTheSwitchedList(t *testing.T) {
 			t.Fatalf("under the switch decode still treats %s as noise", h)
 		}
 	}
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	for _, h := range models.PayloadHashHeaders {
 		if _, ok := flakyHeaderNoise()[h]; !ok {
 			t.Fatalf("without the switch %s left the static list", h)

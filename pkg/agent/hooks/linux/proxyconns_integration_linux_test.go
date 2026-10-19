@@ -467,7 +467,7 @@ func TestANATedConnectionIsNotVerified(t *testing.T) {
 // TestAReadAfterTheRunDroppedToNotCountedIsUnreadWithTheSwitchOff), so
 // nothing learns noise from them.
 func TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	iptables, err := exec.LookPath("iptables")
 	if err != nil {
 		t.Skipf("no iptables here: %v", err)

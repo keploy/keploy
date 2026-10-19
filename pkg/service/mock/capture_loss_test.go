@@ -58,7 +58,7 @@ func TestAMockRunsCaptureLossesAreWhatGrewWhileItRan(t *testing.T) {
 	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 3, What: "to 10.0.0.1:443"}
 	pid := models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: 5}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := &lossCounter{after: models.CaptureLosses{tls}}
 	m := lossService(off)
 	lost, err := m.captureLossesDuring(ctx, m.captureLossBaseline(ctx))
@@ -117,7 +117,7 @@ func TestMergeCaptureLossesKeepsOnePerKind(t *testing.T) {
 func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to db:5432"}}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := &lossCounter{after: tls}
 	dir, code, _ := replayIn(t, replayCase{losses: off})
 	require.Zero(t, code)
@@ -153,7 +153,7 @@ func TestARecordingThatLostACallIsNotKeptUnderTheSwitch(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			core, logs := observer.New(zapcore.DebugLevel)
 			db := newStatefulMockDB()

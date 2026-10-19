@@ -703,7 +703,7 @@ func TestTemplatize_ANameThatIsNotRecordedIsRefused(t *testing.T) {
 			if tc.switchOn {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			s := newSetOnDisk(t, setfile.FormatYAML, createThenRead(), map[string]interface{}{})
 			plain := s.files(t)
@@ -715,7 +715,7 @@ func TestTemplatize_ANameThatIsNotRecordedIsRefused(t *testing.T) {
 		})
 	}
 	t.Run("switch off, keploy.yml", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		s := newSetOnDisk(t, setfile.FormatYAML, createThenRead(), map[string]interface{}{})
 		plain := s.files(t)
 		core, logs := observer.New(zap.WarnLevel)

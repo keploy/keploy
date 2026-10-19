@@ -424,12 +424,12 @@ func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOrWhenSettlingReads(t *t
 		want    string
 		settles bool
 	}{
-		{"switch off, counting hooks", "", &connHooks{}, "[start]", false},
+		{"switch off, counting hooks", "0", &connHooks{}, "[start]", false},
 		{"switch on, counting hooks", "1", &connHooks{}, "[mark start]", false},
 		{"switch on, hooks that cannot count", "1", loadedHooks{}, "[start]", false},
 		// An agent started for a run that learns noise (--settle-reads).
-		{"switch off, settling reads, counting hooks", "", &connHooks{}, "[mark start]", true},
-		{"switch off, settling reads, hooks that cannot count", "", loadedHooks{}, "[start]", true},
+		{"switch off, settling reads, counting hooks", "0", &connHooks{}, "[mark start]", true},
+		{"switch off, settling reads, hooks that cannot count", "0", loadedHooks{}, "[start]", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, tc.proven)
@@ -501,7 +501,7 @@ func (p *countedMarkingProxy) CountingLost() (<-chan struct{}, error) {
 // agent started settling reads settles them only where its proxy was counted
 // from its start, whatever the count says later.
 func TestHookLatchesWhetherTheProxysCallsAreCounted(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, counted := range []bool{true, false} {
 		var calls []string
 		p := &countedMarkingProxy{markingProxy: markingProxy{calls: &calls}, counted: counted}

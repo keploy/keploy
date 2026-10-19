@@ -22,7 +22,7 @@ func TestMaterializeCorrelationsFindsNoneUnderTheSwitch(t *testing.T) {
 // The learn step's noise in a request's other parts is not body noise.
 func TestStripBodyPrefixKeepsBodyNoiseOnlyUnderTheSwitch(t *testing.T) {
 	stored := map[string][]string{"body.a": {}, "header.x-trace": {}, "url.query.at": {}, "url.path.2": {}}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if got := StripBodyPrefix(stored); len(got) != 4 {
 		t.Fatalf("without the switch nothing changes: %v", got)
 	}

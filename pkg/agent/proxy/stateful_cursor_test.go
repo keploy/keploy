@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -450,6 +452,7 @@ func readOrMiss(t *testing.T, db integrations.MockMemDb, n int) string {
 // (`keploy mock replay` with no test open), every test's recordings are the
 // pool, in record order.
 func TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	pool := func() []*models.Mock {
 		return append(perTestCounterPool(base, "a1", "a2", "a3"), perTestCounterPool(base.Add(time.Minute), "b1", "b2")...)
@@ -513,6 +516,7 @@ func TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly(t *testing
 // matched with, so a test's two different calls are answered by its two
 // recordings, not the first one twice.
 func TestStatefulCursor_ADifferentCallConsumesTheRecordingItTakes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	event := func(name, id string, at time.Time) *models.Mock {
 		m := counterMock(name, at)
@@ -548,6 +552,7 @@ func TestStatefulCursor_ADifferentCallConsumesTheRecordingItTakes(t *testing.T) 
 // from the open test's own recordings first: the startup band's recording,
 // which the reusable union holds, is a sequence of its own.
 func TestStatefulCursor_ATestsOwnRecordingComesBeforeTheStartupBand(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	boot := perTestCounterPool(base, "boot")
 	own := perTestCounterPool(base.Add(time.Minute), "a1")
@@ -604,6 +609,7 @@ func postOrMiss(t *testing.T, db integrations.MockMemDb, bodies ...string) strin
 // number of the calls, and neither consumed by a call that differs nor kept
 // from one.
 func TestStatefulCursor_NoTestOpenServesEveryRecordingAsReusable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	exact, other := `{"q":"a","p":1}`, `{"q":"a","p":2}`
 	for _, tc := range []struct {
@@ -686,6 +692,7 @@ func TestStatefulCursor_AScopedTestOwnsItsMappedRecordingsOnly(t *testing.T) {
 // watch-mode rerun) is served its whole recording again, the recordings its
 // first run's calls consumed included; no call between the runs is.
 func TestStatefulCursor_AScopedTestRunAgainIsServedItsRecordingsAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	pool := []*models.Mock{
 		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
@@ -728,6 +735,7 @@ func TestStatefulCursor_AScopedTestRunAgainIsServedItsRecordingsAgain(t *testing
 // its recordings afresh; within a run each is served once, and the next test
 // is served none of them.
 func TestStatefulCursor_ALiveTestRunAgainIsServedItsRecordingsAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	mgr := newCursorManager(t)
 	mgr.SetMocksWithWindow([]*models.Mock{
@@ -756,6 +764,7 @@ func TestStatefulCursor_ALiveTestRunAgainIsServedItsRecordingsAgain(t *testing.T
 // startup recording, from the reusable union, every time: it is no test's
 // own, so it is not consumed.
 func TestStatefulCursor_TheStartupRecordingInsideATestIsNotConsumed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	pool := []*models.Mock{
 		searchMock("boot", `{"id":"0000boot"}`, base.Add(-time.Minute), true),
@@ -774,6 +783,7 @@ func TestStatefulCursor_TheStartupRecordingInsideATestIsNotConsumed(t *testing.T
 // reusable tier (one mapped to no test): served by an exact match, the
 // latter is not kept from a later call that differs.
 func TestStatefulCursor_APidlessTestOwnsItsStagedPoolOnly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	base := time.Now().Add(-time.Hour)
 	mgr := newCursorManager(t)
 	mgr.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())

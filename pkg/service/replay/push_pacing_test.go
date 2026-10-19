@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -18,6 +20,7 @@ import (
 // deselected test's handler produced is still released at that test's place in
 // the recording — and the per-test calls carry none.
 func TestRunTestSetStagesEveryRecordedWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 4, 0)
 	h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": {"test-2", "test-3"}}
 	h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-3"}}
@@ -125,6 +128,7 @@ func mappedNames(m *models.Mapping, test string) map[string]bool {
 // (gap) window follows that test's verdict. The failing test itself is not
 // mapped: it keeps its recorded mapping (mapping_verdicts.go).
 func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 3, 0)
 	pinWindows(h)
 	h.replayer.config.Test.RemoveUnusedMocks = true
@@ -218,6 +222,7 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 // too. The readiness gate's consume is still re-armed. (The prune keeps both,
 // as it kept them before: a re-armed consume leaves a placeholder.)
 func TestRunTestSetConsumesACarryOverMockConsumedBeforeTheFirstTestOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 2, 0)
 	pinWindows(h)
 	h.replayer.config.Test.RemoveUnusedMocks = true

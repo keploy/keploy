@@ -46,7 +46,7 @@ func runAgentFlags(t *testing.T, args ...string) (on, called bool) {
 // on (provenswitch.AgentArgs), and pin its switch on from it: the agent never
 // sees KEPLOY_PROVEN itself.
 func TestAgentProvenFlagPinsTheSwitchOn(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	on, called := runAgentFlags(t, "--"+provenswitch.AgentFlag)
 	if !called || !on {
 		t.Fatalf("`keploy agent --proven` pinned=%v on=%v: the agent would run the old paths while the CLI runs the new ones", called, on)
@@ -243,7 +243,7 @@ func TestDockerModeAgentTakesPushedContainers(t *testing.T) {
 		t.Fatal("a native agent took pushed containers")
 	}
 	// Without the switch nothing is touched.
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	runAgentFlags(t, "--is-docker")
 	if calls != 1 {
 		t.Fatal("a docker-mode agent without the switch touched container keys")

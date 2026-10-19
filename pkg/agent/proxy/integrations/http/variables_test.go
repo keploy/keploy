@@ -288,7 +288,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, FieldDiffs: rep.FieldDiffs, VariablePlaces: rep.VariablePlaces}); got != "PUT /orders/{}" {
 			t.Fatalf("the miss's shape is %q, want PUT /orders/{}", got)
 		}
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		if off := h.buildHTTPMismatchReport(r, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil {
 			t.Fatalf("with the switch off a miss carries no places, got %v", off.VariablePlaces)
 		}

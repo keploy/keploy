@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -18,6 +20,7 @@ import (
 // and its remedy. A wrong answer the demotion does not take stays FAILED and
 // fails its set, and a right answer is PASSED whatever its mocks did.
 func TestADemotedWrongAnswerLeavesItsTestAndSetNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, c := range []struct {
 		name      string
 		streaming bool
@@ -112,6 +115,7 @@ func TestADemotedWrongAnswerLeavesItsTestAndSetNotJudged(t *testing.T) {
 // re-record first. A set not judged only for a stale mapping carries no
 // application logs: the application is not at fault.
 func TestAStaleMappingLeavesTheSetsOwnVerdict(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	type row struct {
 		entry, consumed []string
 		wrong           bool

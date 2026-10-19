@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"go.keploy.io/server/v3/pkg/agent/routes"
@@ -238,6 +240,7 @@ func (m *prSkippingMockDB) GetTestSetMocks(context.Context, string, time.Time, t
 // a kind-less entry naming a connection failure the decoders skipped is also
 // left out of the test's expected side, as one with the kind is.
 func TestRunTestSetKeepsTheMappingsConnectionFailures(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.mockDB = &prSkippingMockDB{skipped: map[string]models.Kind{"cf-kindless": models.ConnectionFailure, "mock-acme": "Acme-Queue"}}
@@ -335,6 +338,7 @@ func TestRunTestSetKeepsTheMappingsConnectionFailures(t *testing.T) {
 // and --update-test-mapping carries it forward, in a test's entries and in the
 // startup section, as it does one whose entry gives its kind.
 func TestRunTestSetKeepsTheMappingsDecodedConnectionFailures(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	at := time.Now().Add(-time.Hour)
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	h := newPartialRunHarness(t, 2, 0)
@@ -484,6 +488,7 @@ func TestKeepConnFailureMappingsLeavesTheStartupSectionToAWriteWithOne(t *testin
 // its mapping file is read once, for the run, as before, and written from what
 // the run consumed alone.
 func TestRunTestSetReadsTheMappingFileOnceWithoutConnectionFailures(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.hookImpl = prHooks{consumed: session}

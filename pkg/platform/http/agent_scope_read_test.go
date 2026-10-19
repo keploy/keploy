@@ -40,7 +40,7 @@ func TestAgentClient_GetScopeWindowsIsTheFinalRead(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].Name != "TestA" {
 		t.Fatalf("got %+v, %v", got, err)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if got, err := a.GetScopeWindows(ctx); err != nil || len(got) != 1 {
 		t.Fatalf("switch off: got %+v, %v", got, err)
 	}
@@ -49,7 +49,7 @@ func TestAgentClient_GetScopeWindowsIsTheFinalRead(t *testing.T) {
 	}
 
 	status = http.StatusNotFound
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if got, err := a.GetScopeWindows(ctx); err != nil || got != nil {
 		t.Fatalf("switch off, an older agent: got %+v, %v, want no windows and no error", got, err)
 	}

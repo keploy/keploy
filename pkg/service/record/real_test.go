@@ -62,7 +62,7 @@ func TestReportRealRunSaysWhatKeployCouldNotCapture(t *testing.T) {
 	logs, failed = rec(realRunInst{run: models.RealRun{Incomplete: []models.CaptureIncomplete{inc}}})
 	require.Zero(t, logs.Len(), "no list, nothing asked")
 	require.False(t, failed)
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	logs, failed = rec(realRunInst{run: models.RealRun{Incomplete: []models.CaptureIncomplete{inc}}}, "db:5432")
 	require.Zero(t, logs.Len(), "no switch, nothing asked")
 	require.False(t, failed)

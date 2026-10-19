@@ -309,7 +309,7 @@ func (h *anchorHooks) SetFreezeAnchor(_ context.Context, at time.Time) error {
 
 func TestScopeTableAnchorsTheClockAtTheFirstSuiteStart(t *testing.T) {
 	// The per-start table is the old wire's: the proven switch refuses it.
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	h := &anchorHooks{}
 	prev := agent.ActiveHooks
 	agent.ActiveHooks = h
@@ -383,7 +383,7 @@ func TestScopeWindowsFinalReadIsTheRunsLast(t *testing.T) {
 // With the switch off any final value other than 1 is the plain read, as
 // before the final read existed.
 func TestScopeWindowsWithTheSwitchOffReadAnyOtherFinalPlainly(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	svc := &windowsSvc{}
 	a := &Agent{logger: zap.NewNop(), svc: svc}
 	rec := httptest.NewRecorder()
@@ -443,7 +443,7 @@ func TestScopeTableCarriesThePoolSlices(t *testing.T) {
 	if rec.Code != http.StatusOK || svc.pool == nil || len(svc.pool) != 0 {
 		t.Fatalf("a table without slices: status %d, pool %v, want an empty pool", rec.Code, svc.pool)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	svc = &poolSvc{}
 	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {
 		t.Fatalf("switch off: status %d, pool %v", rec.Code, svc.pool)

@@ -117,7 +117,7 @@ func TestReplayClockRouteIsTheSwitchs(t *testing.T) {
 		return rec
 	}()
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodPut} {
 		svc := &beginsSvc{}
 		rec := serve(svc, m)

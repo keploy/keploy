@@ -305,7 +305,7 @@ func replayH2Through(t *testing.T, proven bool) []byte {
 	if proven {
 		t.Setenv(provenswitch.Env, "1")
 	} else {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 	}
 	cfg := config.New()
 	cfg.Agent.Mode = models.MODE_TEST

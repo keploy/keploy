@@ -260,7 +260,7 @@ func TestHTTPResp_YAML_NonUTF8BodyRoundTrips(t *testing.T) {
 // point of the chunk encoder. An octet stream is kept as a frame with the
 // proven switch off (recordedFramesOf), and whole under it.
 func TestHTTPResp_YAML_TextStreamsStillChunk(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	in := HTTPResp{
 		StatusCode: 200,
 		Header:     map[string]string{"Content-Type": "application/octet-stream"},

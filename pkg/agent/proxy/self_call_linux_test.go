@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -36,6 +38,7 @@ func selfCallProxy() *Proxy {
 // test set's recorded mock for that dependency would be skipped for whatever is
 // live there. (The hardening guard in serveTreeListener.)
 func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	recorded.reset()
 	defer recorded.reset()
 

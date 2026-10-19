@@ -38,7 +38,7 @@ func TestMatch_ABodyOfAnotherKindIsCompared(t *testing.T) {
 		{"nothing answered with plain text", resp("", ""), resp(noMock, "text/plain; charset=utf-8")},
 		{"plain text answered with nothing", resp("ok", "text/plain"), resp("", "text/plain")},
 	} {
-		for _, proven := range []string{"", "1"} {
+		for _, proven := range []string{"0", "1"} {
 			t.Run(tc.name+"/proven="+proven, func(t *testing.T) {
 				t.Setenv(provenswitch.Env, proven)
 				exp, act := tc.expected, tc.actual
@@ -79,7 +79,7 @@ func TestMatch_ProvenSwitchComparesANonJSONBody(t *testing.T) {
 		t.Fatal("KEPLOY_PROVEN=1: the recorded non-JSON body did not match")
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if !match(other, false) {
 		t.Fatal("control: with the switch off and no --compare-all a non-JSON body is not compared, as before")
 	}
@@ -91,7 +91,7 @@ func TestMatch_ProvenSwitchComparesANonJSONBody(t *testing.T) {
 // A body the test case's noise excludes whole is not compared, whatever its
 // kind: the user's own exclusion.
 func TestMatch_ANoisedBodyStaysExcludedWhateverItsKind(t *testing.T) {
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Setenv(provenswitch.Env, proven)
 		exp := resp(`{"n":7}`, "application/json")
 		exp.Header["Content-Length"] = ""
@@ -126,7 +126,7 @@ func TestMatch_ATextBodyThatChangedFailsOnlyUnderTheSwitch(t *testing.T) {
 		return false
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if ok, res := match(&models.TestCase{Name: "text", HTTPResp: exp}); !ok || !contentLengthNormal(res) {
 		t.Fatalf("switch off: a text body of the recorded kind must stay uncompared with its length excused, as today: %+v", res)
 	}
@@ -140,7 +140,7 @@ func TestMatch_ATextBodyThatChangedFailsOnlyUnderTheSwitch(t *testing.T) {
 		t.Fatal("KEPLOY_PROVEN=1: the Content-Length of a text body that changed was excused")
 	}
 
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Setenv(provenswitch.Env, proven)
 		noised := &models.TestCase{Name: "noised", HTTPResp: exp, Noise: map[string][]string{"body": {}}}
 		if ok, res := match(noised); !ok {

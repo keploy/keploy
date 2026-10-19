@@ -24,7 +24,7 @@ func TestGetAlias_LinuxCarriesTheProvenSwitch(t *testing.T) {
 	opts := models.SetupOptions{KeployContainer: "keploy-test", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, ClientNSPID: 4242, Mode: models.MODE_TEST}
 	flag := " --" + provenswitch.AgentFlag
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off, err := getAlias(context.Background(), zap.NewNop(), opts, false)
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
@@ -102,7 +102,7 @@ func TestGenerateKeployAgentService_CarriesTheProvenSwitch(t *testing.T) {
 		return composeCommand(t, svc)
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, arg := range command(t) {
 		if arg == flag {
 			t.Fatalf("switch off, yet the compose agent command carries %s", flag)

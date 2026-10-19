@@ -272,7 +272,7 @@ func (relayParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDs
 // the application makes it. The old probe dropped its connection after its
 // greeting wait and generic dispatch dialled a second one.
 func TestHandleConnectionRelaysAPooledConnectionOverTheProbesUpstream(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	addr, conns, accepted := acceptingServer(t, silentUntilAsked)
 
 	cfg := config.New()
@@ -505,7 +505,7 @@ func TestProbeClosesItsUpstreamTheDestinationEnded(t *testing.T) {
 // handed on — the destination sees the close — instead of leaving it open.
 func TestHandleConnectionClosesTheProbesUpstreamNothingTook(t *testing.T) {
 	noCollector(t)
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	closed := make(chan struct{}, 1)
 	addr, conns, accepted := acceptingServer(t, func(c net.Conn) {
 		defer c.Close()

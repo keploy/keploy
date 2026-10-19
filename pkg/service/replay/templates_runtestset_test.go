@@ -2585,6 +2585,7 @@ func (h wholeHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, te
 // lacks, though no stream comparison runs and the matcher does not read a
 // body that is not JSON.
 func TestRunTestSet_AStreamedCaseAnsweredWholeIsAssertedFrameByFrame(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const live = "usr_LIVE001"
 	for _, c := range []struct {
 		name, body, failsAt, why string
@@ -3065,7 +3066,7 @@ func TestRunTestSet_AUseInAnArrayNoiseUntiesIsRefused(t *testing.T) {
 			if c.proven {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
 				mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
@@ -3200,6 +3201,7 @@ func TestRunTestSet_AStreamedUseInAnArrayIsAssertedAtItsIndex(t *testing.T) {
 // is not logged, and its comparison rows stay as compared: SCHEMA_ADDED
 // beside TEMPLATE_VARIABLE.
 func TestRunTestSet_TheAdditiveSchemaPassNeverPassesATemplateFailure(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, c := range []struct {
 		name, answerID string
 		want           models.TestStatus
@@ -3286,6 +3288,7 @@ func (m *mappedDB) Get(context.Context, string) (map[string][]models.MockEntry, 
 // TEMPLATE_VARIABLE category and HIGH risk saved, and the log line says why
 // it is not obsolete. Any other failure is demoted as before (the control).
 func TestRunTestSet_ATemplateFailureIsNeverDemotedToObsolete(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, c := range []struct {
 		name string
 		// readBack is test-2's expected body; the app answers
@@ -3405,6 +3408,7 @@ func (h *consumingHooks) GetConsumedMocks(context.Context) ([]models.MockState, 
 // streamed test cases run in their own loop, which demotes a failed test
 // case whose mock set diverged as the main loop does (P2).
 func TestRunTestSet_AStreamedTemplateFailureIsNeverDemotedToObsolete(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	const (
 		rec   = `{"orders":[{"id":"{{string .orderA}}","status":"paid"}]}`
 		other = `{"orders":[{"id":"ord_OTHER","status":"paid"}]}`
@@ -3475,6 +3479,7 @@ func TestRunTestSet_AStreamedTemplateFailureIsNeverDemotedToObsolete(t *testing.
 // them once with a next step. Done as written, the steps give the set back,
 // and the next run replays it.
 func TestRunTestSet_ASetAnInterruptedTemplatizeLeftIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
 		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 			a.record(r)

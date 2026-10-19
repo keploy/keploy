@@ -29,7 +29,7 @@ func TestSeeProcessTellsTheBuildEachProcess(t *testing.T) {
 		t.Fatalf("OnProcess saw %v", seen)
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	seeProcess(43)
 	if len(seen) != 2 {
 		t.Fatalf("with the switch off OnProcess saw %v", seen)

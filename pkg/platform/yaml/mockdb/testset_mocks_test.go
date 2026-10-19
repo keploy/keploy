@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -358,6 +360,7 @@ func readersAgree(t *testing.T, ys *MockYaml, c testSetMocksCase) models.TestSet
 }
 
 func TestGetTestSetMocksMatchesTheSinglePoolReaders(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_STRICT_MOCK_WINDOW"))) {
 	case "1", "true", "yes", "on":
 		// It turns off the lax kind fallback, so mock-8 is per-test, and it

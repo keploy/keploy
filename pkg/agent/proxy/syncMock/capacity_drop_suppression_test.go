@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -295,7 +297,8 @@ func TestResolveRangeInWindowDropAttributesOwner(t *testing.T) {
 // records no TC. Guards `ownedMock{mock: mock}` (no owner) at the lifetime
 // carve-out append — tag it with testName and DroppedTCCount()==0 goes to 1.
 func TestResolveRangeSessionCarveOutRecordsNothing(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it states the proven switch, which the process holds.
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 
 	mgr := fullOutChanManager(t)
 
@@ -453,7 +456,8 @@ func TestDeleteMocksStrictlyBeforeDropAttributesOwner(t *testing.T) {
 // when capacity-dropped. Guards against that carve-out being mis-tagged with a
 // real test name.
 func TestDeleteMocksStrictlyBeforeSessionCarveOutRecordsNothing(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it states the proven switch, which the process holds.
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 
 	mgr := fullOutChanManager(t)
 

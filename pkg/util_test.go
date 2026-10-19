@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"github.com/andybalholm/brotli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -319,6 +321,7 @@ func TestSimulateHTTP_MultipartRebuildWithFileNames_315(t *testing.T) {
 }
 
 func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	ctx := context.Background()
 	logger := zap.NewNop()
 
@@ -629,6 +632,7 @@ func TestSimulateHTTP_NDJSONStreamMatch_WithStructuredExpectedBody_318A(t *testi
 }
 
 func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	ctx := context.Background()
 	logger := zap.NewNop()
 
@@ -706,6 +710,7 @@ func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
 }
 
 func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	ctx := context.Background()
 	logger := zap.NewNop()
 	const boundary = "myCustomBoundary"
@@ -796,6 +801,7 @@ func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
 }
 
 func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	ctx := context.Background()
 	logger := zap.NewNop()
 
@@ -1626,6 +1632,7 @@ func TestFilterByTimeStamp_StrictMode(t *testing.T) {
 // risks confusing the matcher's scoring. See filterByTimeStamp's
 // "defensive sanity check" in pkg/util.go.
 func TestFilterByTimeStamp_DropsInvalidTimestampOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	logger := zap.NewNop()
 	ctx := context.Background()
 

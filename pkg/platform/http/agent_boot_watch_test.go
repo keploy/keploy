@@ -767,7 +767,7 @@ func TestTheReleaseEndsAtOnceOnALatchedCASetupFailure(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	a := clientFor(srv.URL)
 	err := a.MakeAgentReadyForDockerCompose(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "read-only file system") || readies.Load() != 1 {
@@ -794,7 +794,7 @@ func TestTheReleaseEndsOnTheWatchWhileAReadyRequestHangs(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(block) })
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	a := clientFor(srv.URL)
 	a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 	c.set(true, utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, true)
@@ -845,7 +845,7 @@ func TestTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 			}))
 			t.Cleanup(srv.Close)
-			t.Setenv("KEPLOY_PROVEN", "")
+			t.Setenv("KEPLOY_PROVEN", "0")
 			a := clientFor(srv.URL)
 			a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 			c.set(true, tc.report, true)

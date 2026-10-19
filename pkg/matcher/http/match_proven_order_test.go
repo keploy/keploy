@@ -25,7 +25,7 @@ func TestMatch_ProvenSwitchComparesArraysInOrder(t *testing.T) {
 		}
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if ok, _ := Match(tc, actual(), nil, true, false, zap.NewNop(), false); !ok {
 		t.Fatal("control: with the switch off and ignoreOrdering=true a reordered array must still match, as today")
 	}

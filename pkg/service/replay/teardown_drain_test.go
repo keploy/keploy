@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/teardowntest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
@@ -92,6 +93,10 @@ func (s stoppingAppInstr) Run(ctx context.Context, _ models.RunOptions) models.A
 // gives one that stops moving up on its bound of keploy's runnable time.
 func TestATestSetsDrainWaitsWhileItsTeardownMoves(t *testing.T) {
 	start := func(t *testing.T) (*teardowntest.Stop, *stall.ManualClock, *observer.ObservedLogs, <-chan struct{}) {
+		// Under the switch the set's end stops its app and waits for it to
+		// exit before this drain (stopAppBeforeSetEnd), so the drain never
+		// waits on the app's stop.
+		t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 		h := newPartialRunHarness(t, 2, 0)
 		core, logs := observer.New(zap.InfoLevel)
 		h.replayer.logger = zap.New(core)

@@ -23,7 +23,7 @@ import (
 // builds. A client tells an agent started again in this one's place by its
 // answers alone. With the switch off no answer carries it.
 func TestEveryAnswerNamesTheAgentProcessUnderTheSwitch(t *testing.T) {
-	for _, proven := range []string{"", "1"} {
+	for _, proven := range []string{"0", "1"} {
 		t.Run(provenswitch.Env+"="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			for build := 1; build <= 2; build++ {

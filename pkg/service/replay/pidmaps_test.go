@@ -270,6 +270,7 @@ func TestTheRunMarksThePIDMapsBeforeTheAppStarts(t *testing.T) {
 // complete entries with --update-test-mapping. Neither is done, whatever the
 // flags; both are, as before, for a test set nothing was refused in.
 func TestACaptureIncompleteTestSetDoesNotPruneOrWriteMappings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	refused := []models.PIDMapRefusals{{}, {Target: 2, LastTargetTGID: 77}}
 	for _, tc := range []struct {
@@ -420,6 +421,7 @@ func TestALostPIDMapCountLeavesOneTestSetUnverified(t *testing.T) {
 // recording has mocks for. Neither is done, with the reason said; an agent
 // that cannot count prunes and writes as before.
 func TestAnUnverifiedTestSetDoesNotPruneOrWriteMappings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	lost := errors.New("agent returned 500: bad file descriptor")
 	for _, tc := range []struct {
@@ -607,7 +609,7 @@ func TestUnderTheSwitchASetWhoseCountIsLostIsNotJudged(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			core, logs := observer.New(zapcore.WarnLevel)
 			h := newPartialRunHarness(t, 3, 0)

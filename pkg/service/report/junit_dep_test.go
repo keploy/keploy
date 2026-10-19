@@ -336,7 +336,7 @@ func TestBuildFailureNamesTheProvenEvidence(t *testing.T) {
 			UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-7", Kind: "Http", ConsumedBy: "test-2"}},
 		},
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if body := buildFailure(r).Text; strings.Contains(body, "no recorded answer") || strings.Contains(body, "mock-7") {
 		t.Fatalf("switch off: the body changed:\n%s", body)
 	}
@@ -401,7 +401,7 @@ func TestBuildFailureSaysWhyAGRPCBodyFailedUnderTheSwitch(t *testing.T) {
 		if on {
 			t.Setenv(provenswitch.Env, "1")
 		} else {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 		}
 		if got := strings.Contains(buildFailure(res).Text, "--proto-file"); got != on {
 			t.Fatalf("switch %v: the body names the proto-files way out %v, want %v", on, got, on)

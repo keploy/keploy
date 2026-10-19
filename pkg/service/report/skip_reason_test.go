@@ -129,7 +129,7 @@ func TestProcessLegacySummaryCountsIgnored(t *testing.T) {
 		if on {
 			t.Setenv(provenswitch.Env, "1")
 		} else {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 		}
 		r := New(zap.NewNop(), &config.Config{DisableANSI: true}, nil, nil)
 		var buf bytes.Buffer

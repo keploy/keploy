@@ -35,7 +35,7 @@ func waitArmed(t *testing.T, clk *stall.ManualClock, w *answerWatch) {
 // The stall rule is on only under the proven switch with no bound of the
 // user's (Unbounded): otherwise nothing is watched.
 func TestTheAnswerStallRuleIsOnOnlyWithNoBoundOfTheUsers(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if w := newAnswerWatch(SimulationConfig{Unbounded: true}); w != nil {
 		t.Fatal("a watch without the switch")
 	}

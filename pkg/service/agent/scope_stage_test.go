@@ -87,7 +87,7 @@ func stageSessionMock(name, path string) *models.Mock {
 // table, and the set staged.
 func newStageReplay(t *testing.T, perTest, session []*models.Mock, table map[string][]string) (*Agent, *stageProxy) {
 	t.Helper()
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	p := &stageProxy{mm: mm}
@@ -472,7 +472,7 @@ func (p *recordingProxy) SetMappedUniverse([]string) {}
 // fix, the set's whole pool in the same order: what the tests served is left
 // out by the proxy (MockManager.SetScopeMocks), not by the agent.
 func TestScopeEndStagesThePoolTheEndAlwaysStaged(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	p := &recordingProxy{}
 	cfg := &config.Config{}
 	cfg.Agent.Mode = models.MODE_TEST
@@ -513,7 +513,7 @@ func TestScopeEndStagesThePoolTheEndAlwaysStaged(t *testing.T) {
 // it always was: the test's mapped mocks only, or none for a test recorded
 // with no call.
 func TestScopeWithoutAScopeStagerIsStagedAsBefore(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	rp := &legacyProxy{}
 	cfg := &config.Config{}
 	cfg.Agent.Mode = models.MODE_TEST
@@ -562,7 +562,7 @@ func (p *workerProxy) ClearWorkerScope(pid uint32) { p.cleared = append(p.cleare
 // as before: its begin and end stage nothing on the global pool, whether its
 // test recorded calls or none.
 func TestScopeWorkerScopeStagesNothingGlobal(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	p := &workerProxy{}
 	cfg := &config.Config{}
 	cfg.Agent.Mode = models.MODE_TEST
@@ -666,7 +666,7 @@ func TestScopeStagingIsSwitchOffOnly(t *testing.T) {
 // With the per-test mocks in the agent's on-disk store (strict mock window), a
 // begin reads only what it serves: the test's own mocks.
 func TestScopeBeginReadsOnlyItsMocksFromDisk(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	p := &recordingProxy{}
 	a := diskAgent(t, p,
 		stageMock("mock-a", "/q", stageT0),

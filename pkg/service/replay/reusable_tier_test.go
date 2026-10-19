@@ -3,6 +3,8 @@ package replay
 import (
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -120,6 +122,7 @@ func TestSubsetExcludesReusableTier(t *testing.T) {
 // of ANY reusable/startup tier (session/connection/config) or DNS — not just
 // config — so a reused mock can't falsely fail the streaming assertion.
 func TestIsMockSubsetWithConfig_ReusableTiers(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	expected := []string{"pt-1"}
 	cases := []struct {
 		name     string

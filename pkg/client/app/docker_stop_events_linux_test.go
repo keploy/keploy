@@ -333,7 +333,7 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 // the app's exit event, and only under the switch: with it off, the stop is
 // as it was.
 func TestOnlyASwitchedStopThatSaysItsKillsWaitsOnTheExitEvent(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if stopsByEvents(true) {
 		t.Fatal("with the switch off, a set's end stop waits on events")
 	}

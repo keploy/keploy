@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
@@ -36,6 +38,7 @@ import (
 // mock manager. The boot consumer is served both fetches while the app starts
 // and in test-1.
 func TestABootConsumerIsServedByNameFromTheStartupSection(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	boot := func(name string, ms int) *models.Mock {
 		return &models.Mock{
 			Version: "api.keploy.io/v1beta1", Name: name, Kind: models.KAFKA,
@@ -171,6 +174,7 @@ func entryNames(entries []models.MockEntry) []string {
 // mapping: a wrong answer stays FAILED. A mock outside its entry that is not
 // startup traffic still demotes it to OBSOLETE.
 func TestAStreamingTestsStartupConsumptionIsNoMismatch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	kafka := func(name string, ms int) models.MockState {
 		st := mongoAt(name, ms)
 		st.Kind = models.KAFKA

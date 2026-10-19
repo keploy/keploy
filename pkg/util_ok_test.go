@@ -85,7 +85,7 @@ func TestCompareHTTPStream_ProvenSwitchReadsTheStreamToItsEnd(t *testing.T) {
 				return ok, info
 			}
 
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if ok, _ := compare(tc.same); !ok {
 				t.Fatal("control: the recorded stream does not match without the switch")
 			}

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -29,6 +30,7 @@ func missingMeta() []models.DepMetaResult {
 }
 
 func TestBuildDepResults(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	tests := []struct {
 		name          string
 		expected      []models.MockEntry
@@ -982,6 +984,7 @@ func TestResolveTestStatus(t *testing.T) {
 // a failure by flipping that input, so a function that only saw the flipped
 // value could never be tested for it.
 func TestResolveTestOutcome(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	tests := []struct {
 		name               string
 		responseMatched    bool
@@ -1774,6 +1777,7 @@ func TestWarnDependencyAssertionInert_NilLatchIsSafe(t *testing.T) {
 }
 
 func TestVetoFlagName(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	tests := []struct {
 		depAssertFail bool
 		strictFailure bool

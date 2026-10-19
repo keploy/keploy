@@ -35,7 +35,7 @@ func TestATestSetThatIsNotRecordedIsRefused(t *testing.T) {
 		if tc.switchOn {
 			t.Setenv(provenswitch.Env, "1")
 		} else {
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 		}
 		for _, selected := range [][]string{{"test-set-1", "test-set-3"}, {"test-set-3"}} {
 			conf := &config.Config{}
@@ -64,7 +64,7 @@ func TestATestSetThatIsNotRecordedIsRefused(t *testing.T) {
 // does not turn a run that passed red on upgrade: the rest of the selection is
 // replayed, and every recorded set when it names none.
 func TestAStaleKeployYmlSelectionIsWarnedAndLeftOut(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	for _, tc := range []struct {
 		selected []string
 		want     []string

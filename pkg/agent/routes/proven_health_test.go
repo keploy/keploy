@@ -12,7 +12,7 @@ import (
 // /agent/health reports the agent's proven switch, so the CLI can refuse an
 // agent whose switch is not its own.
 func TestHealthReportsTheProvenSwitch(t *testing.T) {
-	for _, tc := range []struct{ env, want string }{{"", "off"}, {"1", "on"}} {
+	for _, tc := range []struct{ env, want string }{{"0", "off"}, {"1", "on"}} {
 		t.Setenv(provenswitch.Env, tc.env)
 		rec := httptest.NewRecorder()
 		(&Agent{logger: zap.NewNop()}).Health(rec, httptest.NewRequest(http.MethodGet, "/agent/health", nil))

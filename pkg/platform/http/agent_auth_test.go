@@ -293,7 +293,7 @@ func TestExportMockScopeEnv_DropsAnInheritedClaimMarker(t *testing.T) {
 	// With the switch off there are no claims, and the environment is left
 	// as it was.
 	t.Setenv(models.TestPIDEnv, "4242")
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_TEST}, 16789)
 	require.Equal(t, "4242", os.Getenv(models.TestPIDEnv))
 }

@@ -1380,7 +1380,8 @@ func TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan(t *testing.T) {
 // must now flush mocks that own a recent KEPT window (and session mocks)
 // while still dropping the duplicate's own debris.
 func TestDeleteMocksStrictlyBeforeRescuesLateKeptMock(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it states the proven switch, which the process holds.
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 
 	ch := make(chan *models.Mock, 8)
 	mapCh := make(chan models.TestMockMapping, 8)
@@ -1482,7 +1483,8 @@ func TestDeleteMocksStrictlyBeforeRescuesLateKeptMock(t *testing.T) {
 // flush too; not-yet-attributable per-test mocks stay buffered for a
 // future window.
 func TestFlushOwnedWindowsPersistsLateMocksDuringRecording(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it states the proven switch, which the process holds.
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 
 	ch := make(chan *models.Mock, 8)
 	mapCh := make(chan models.TestMockMapping, 8)
@@ -2139,7 +2141,7 @@ func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
 		if on {
 			t.Setenv("KEPLOY_PROVEN", "1")
 		} else {
-			t.Setenv("KEPLOY_PROVEN", "")
+			t.Setenv("KEPLOY_PROVEN", "0")
 		}
 		mgr := New(zap.NewNop())
 		ch := make(chan *models.Mock, 1)

@@ -753,7 +753,7 @@ func TestAnUnpairedConnectionIsRefusedAsACaptureLoss(t *testing.T) {
 // one that was not counted (no sock_diag, here) pairs nothing. Neither takes
 // a capture loss: the call is routed.
 func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	for _, counted := range []bool{true, false} {
 		wrong := namedUpstream(t, "wrong")
 		f := &fakeCounter{} // pairs none
@@ -821,7 +821,7 @@ func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.
 // refused), the count reads dropped and never "not counted from the start"
 // meanwhile, the WARN is said once, and its channel closed once.
 func TestNATdConnectionsHandledAtOnceAllDropTheCount(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
+	t.Setenv("KEPLOY_PROVEN", "0")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

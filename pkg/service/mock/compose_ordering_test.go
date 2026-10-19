@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -350,6 +352,7 @@ func waitForEvent(t *testing.T, instr *composeInstr, event string, done <-chan e
 // dependency calls straight past an unarmed proxy, and the recording is short
 // or the replay misses.
 func TestComposeOrdering(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name    string
 		wantSeq []string
@@ -412,6 +415,7 @@ func TestComposeOrdering(t *testing.T) {
 // type and now does so only for compose — a behaviour change beyond the
 // ordering fix, and the one an agent-in-a-container mode would notice first.
 func TestNonComposeOrderingIsUntouched(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name    string
 		cmdType utils.CmdType
@@ -478,6 +482,7 @@ func TestComposeProjectThatDiesFailsFast(t *testing.T) {
 // instead, so the same crash exited 7 or 1 depending on which of two racing
 // paths noticed it first.
 func TestComposeProjectThatDiesMirrorsItsExitCode(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 7})
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -507,6 +512,7 @@ func TestComposeProjectThatDiesMirrorsItsExitCode(t *testing.T) {
 // user their tests failed, and the agent's own reason -- the remedy -- was
 // lost.
 func TestComposeAgentThatCannotStartIsKeploysFailure(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name string
 		run  func(Service, context.Context) error
@@ -560,6 +566,7 @@ func TestComposeAgentThatCannotStartIsKeploysFailure(t *testing.T) {
 // verdict. Mirrored, it failed a suite that never finished, in the suite's
 // name, and said nothing about the agent.
 func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	for _, tc := range []struct {
 		name string
 		run  func(Service, context.Context) error
@@ -623,6 +630,7 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 // break out. The native branch has no such hazard: Run is called inline there,
 // and a panic simply propagates.
 func TestComposePanicInRunStillDeliversAnExit(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := newInstr(t, agentUpAfterRun, false, models.AppError{})
 	instr.runPanics = true
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
@@ -660,6 +668,7 @@ func (*stalledStartInstr) WatchAgentStart(context.Context) <-chan error {
 // a start that stopped ends it, with that, while the project still runs and
 // the agent never answers; no budget of wall time does.
 func TestComposeStartEndsOnTheAgentsStalledStart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	instr := &stalledStartInstr{newInstr(t, agentNeverUp, true, models.AppError{})}
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr.composeInstr, utils.DockerCompose, "docker compose up"))
 	ctx, cancel := context.WithCancel(context.Background())

@@ -28,7 +28,7 @@ func TestRunTestSet_FullyIgnoredSetHasARowPerTest(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			h := newPartialRunHarness(t, 3, 0)
 			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {}}
@@ -92,7 +92,7 @@ func TestRunTestSet_IgnoredTestCarriesItsReason(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			h := newPartialRunHarness(t, 2, 0)
 			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-2"}}
@@ -140,7 +140,7 @@ func TestRunTestSet_AQuarantinedTestIsSaidAndSummarised(t *testing.T) {
 			if on {
 				t.Setenv(provenswitch.Env, "1")
 			} else {
-				t.Setenv(provenswitch.Env, "")
+				t.Setenv(provenswitch.Env, "0")
 			}
 			h := newPartialRunHarness(t, 2, 0)
 			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-2"}}
@@ -188,7 +188,7 @@ func TestPrintSummaryListsTheQuarantinedTests(t *testing.T) {
 // it off, as before.
 func TestIgnoredKind(t *testing.T) {
 	grpcCase := &models.TestCase{Kind: models.GRPC_EXPORT}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if got := ignoredKind(grpcCase); got != models.HTTP {
 		t.Fatalf("switch off: %s, want HTTP as before", got)
 	}

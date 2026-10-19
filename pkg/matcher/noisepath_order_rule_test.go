@@ -19,7 +19,7 @@ func TestBodyNoiseFromJSONDiff_OrderRuleRefusesReorderPlusDrift(t *testing.T) {
 	)
 
 	t.Run("switch off: today's positional walk learns the reorder as noise", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
+		t.Setenv(provenswitch.Env, "0")
 		paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
 		if len(skipped) != 0 || len(paths) == 0 {
 			t.Fatalf("paths=%v skipped=%+v: the control must reproduce the false pass the rule closes", paths, skipped)

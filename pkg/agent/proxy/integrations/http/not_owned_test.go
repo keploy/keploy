@@ -100,7 +100,7 @@ func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 	if r := miss(t); !r.NotOwned || r.ClosestMock != "other-test-delete" {
 		t.Fatalf("under the switch the miss names %q (not owned: %v), want other-test-delete", r.ClosestMock, r.NotOwned)
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if r := miss(t); r.NotOwned {
 		t.Fatalf("without the switch the miss is named not owned: %+v", r)
 	}

@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -30,6 +31,9 @@ import (
 // frozen clock went back past the test cases run before it, its window was
 // its request time plus the stream timeout, and its row had no mocks.
 func TestRunTestSetRunsAChunkedTextPlainJSONTestInItsRecordedOrder(t *testing.T) {
+	// The order is read from the per-test mock windows the run sends the
+	// agent, which the proven model's exact serving does not send.
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newPartialRunHarness(t, 5, 0)
 	base := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
 	for i, tc := range h.cases {

@@ -72,7 +72,7 @@ func call(t *testing.T, handle http.HandlerFunc, body string) *httptest.Response
 }
 
 func TestTheWireIsServedOnlyUnderTheSwitch(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	svc := &wireSvc{}
 	a := &Agent{logger: zap.NewNop(), svc: svc}
 	rec := call(t, a.HandleScopeBegin, `{"name":"TestA","canSkip":true}`)
@@ -168,7 +168,7 @@ func TestAProvenAgentRefusesARunList(t *testing.T) {
 
 // An agent without the switch refuses a skip list it would ignore.
 func TestAnAgentWithoutTheSwitchRefusesASkipList(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	a := &Agent{logger: zap.NewNop(), svc: &wireSvc{}}
 	rec := call(t, a.HandleScopeGate, `{"run":null,"skip":{"a::T":"r"}}`)
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "KEPLOY_PROVEN") {
@@ -224,7 +224,7 @@ func TestRefusalsAreRecorded(t *testing.T) {
 	require.Equal(t, models.ScopeErrNoCaller, svc.refusals[0].Code)
 	require.Equal(t, models.RunRefusal{Code: "go_test_parallel", Message: "go test runs up to 8 test binaries at once", Remedy: "add -p 1"}, svc.refusals[1])
 	require.Equal(t, http.StatusBadRequest, call(t, a.HandleRefusal, `{"code":""}`).Code)
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := call(t, a.HandleRefusal, `{"code":"x","message":"y"}`)
 	require.Equal(t, http.StatusNotFound, off.Code)
 	require.Equal(t, "404 page not found\n", off.Body.String())
@@ -254,7 +254,7 @@ func TestTheWireReadsNoPidOrRunnerClock(t *testing.T) {
 		t.Fatalf("the body did not reach the wire as it came: %+v / %+v", svc.begun, svc.ended)
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	call(t, a.HandleScopeBegin, `{"name":"TestB","canSkip":true,"pid":4242}`)
 	if len(marks) != 1 || marks[0] != 0 {
 		t.Fatalf("off the switch the begin marks the runner's clock as before, got %v", marks)

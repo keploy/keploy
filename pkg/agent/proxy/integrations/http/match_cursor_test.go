@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -27,6 +29,7 @@ func cursorMock(name string, ts time.Time) *models.Mock {
 // the first forever (the 1,1,1 false pass). Selection must follow recorded
 // request time, not pool/slice order, so the recordings are supplied shuffled.
 func TestMatch_StatefulCursorSaturate(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 	base := time.Unix(1_700_000_000, 0)
@@ -58,6 +61,7 @@ func TestMatch_StatefulCursorSaturate(t *testing.T) {
 // serve the SAME response every time (the legacy first-match behaviour), which
 // is exactly the false pass the feature closes.
 func TestMatch_StatefulCursorDisabledIsLegacy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 	base := time.Unix(1_700_000_000, 0)
@@ -93,6 +97,7 @@ func TestMatch_StatefulCursorDisabledIsLegacy(t *testing.T) {
 // read many more times than it was recorded must keep being served (saturate),
 // never a miss — and at N=1 the behaviour is identical to legacy reuse.
 func TestMatch_StatefulCursorSingleRecordingSaturates(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 
@@ -120,6 +125,7 @@ func TestMatch_StatefulCursorSingleRecordingSaturates(t *testing.T) {
 // per-call set restarts the sequence (served 1,2,1,2); keyed by the request,
 // the sequence carries on through it (1,2,3,4).
 func TestMatch_StatefulCursorKeyIsTheRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	h := newHTTP()
 	ctx := context.Background()
 	base := time.Unix(1_700_000_000, 0)

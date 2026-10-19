@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -20,6 +22,7 @@ import (
 // waiting at a port keploy could not tie to the recording, or a dependency's
 // TCP health check), or a DNS lookup's, which the proxy answers itself.
 func TestStrictFailsOnlyOnAMissThatCountsAgainstATest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	silent := models.UnmatchedCall{Protocol: "MySQL", ActualSummary: "connection phase: server greeting",
 		Destination: "172.17.0.1:3307", MatchPhase: models.MatchPhaseNoRequest}
 	dns := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A dep.example"}
@@ -70,6 +73,7 @@ func TestStrictFailsOnlyOnAMissThatCountsAgainstATest(t *testing.T) {
 // nothing made no call, so neither reached a real service. Its receipt says
 // so, as --strict passing it does.
 func TestAMissThatCountsAgainstNoTestLeavesTheRunIsolated(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // this tests the paths with the proven switch off
 	silent := models.UnmatchedCall{Protocol: "MySQL", Destination: "172.17.0.1:3307", MatchPhase: models.MatchPhaseNoRequest}
 	dns := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A dep.example"}
 	for _, tc := range []struct {
