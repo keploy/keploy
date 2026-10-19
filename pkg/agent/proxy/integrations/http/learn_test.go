@@ -744,6 +744,71 @@ func TestWhatFLearnsTheVariablePassFollows(t *testing.T) {
 	}
 }
 
+// A value sent again at a key holding a dot (a filter's "suite._id") is
+// followed like any other: F learns its use at that key, quoted, and the
+// variable pass answers the call with this run's value, and only a call that
+// sends it.
+func TestWhatFLearnsAtADottedKeyTheVariablePassFollows(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	search := func(id string) string { return `{"filter":{"suite._id":"` + id + `","suite":{"kind":"e2e"}}}` }
+	f := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/suites", `{"suite":{"id":"s-1"}}`, nil, `{}`),
+		learnRecorded("mock-1", time.Second, "POST", "/v1/events/search", search("s-1"), nil, `{"suite":"s-1","state":"new"}`),
+	}}
+	recordings := map[string]*models.Mock{}
+	for _, m := range f.perTest {
+		recordings[m.Name] = m
+	}
+	for _, r := range []*req{live("POST", "/v1/suites", `{"suite":{"id":"s-9"}}`, nil), live("POST", "/v1/events/search", search("s-9"), nil)} {
+		if served, miss, _ := h.learnMatch(ctx, r, f, n, opts); served == nil || miss != nil {
+			t.Fatalf("F: %+v", miss)
+		}
+	}
+	if want := (models.MockVariables{"id": {Recorded: "s-1", Use: []string{`body.filter["suite._id"]`}, Answer: []string{"body.suite"}}}); !reflect.DeepEqual(f.consumed[1].Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", f.consumed[1].Spec.Learned(), want)
+	}
+	written := func() []*models.Mock {
+		out := map[string]*models.Mock{}
+		for name, m := range recordings {
+			c := *m
+			c.Spec.Variables = models.MockVariables{}
+			out[name] = &c
+		}
+		for _, st := range f.consumed {
+			for vn, v := range st.Spec.Learned() {
+				out[st.Name].Spec.Variables[vn] = v
+			}
+			for target, vs := range st.Spec.LearnedBinds() {
+				for vn, v := range vs {
+					out[target].Spec.Variables[vn] = v
+				}
+			}
+		}
+		return []*models.Mock{out["mock-0"], out["mock-1"]}
+	}
+
+	ci := &varDb{perTest: written()}
+	if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/suites", `{"suite":{"id":"s-55"}}`, nil)); !ok {
+		t.Fatalf("the create in CI: %+v", diag)
+	}
+	ok, stub, diag := matchVar(t, h, ci, live("POST", "/v1/events/search", search("s-55"), nil))
+	if !ok || stub.Spec.HTTPResp.Body != `{"suite":"s-55","state":"new"}` {
+		t.Fatalf("the search in CI: ok %v diag %+v", ok, diag)
+	}
+
+	ci = &varDb{perTest: written()}
+	if ok, _, _ := matchVar(t, h, ci, live("POST", "/v1/suites", `{"suite":{"id":"s-55"}}`, nil)); !ok {
+		t.Fatal("the create in CI")
+	}
+	ok, _, diag = matchVar(t, h, ci, live("POST", "/v1/events/search", search("s-56"), nil))
+	if ok || diag == nil || diag.phase != models.MatchPhaseVariable {
+		t.Fatalf("a search for another id is a variable miss: ok %v diag %+v", ok, diag)
+	}
+}
+
 // Only a test's own calls carry its variables: a value a pool call sent is
 // refused where a later call uses it, never learned as noise.
 func TestLearnMatchAVariableFromThePoolIsRefused(t *testing.T) {

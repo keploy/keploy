@@ -58,11 +58,12 @@ const (
 
 // Leaf is one learnable value of a request or a response.
 type Leaf struct {
-	// Path names the leaf exactly: object keys dot-joined, an array position
-	// bracketed ("body.items[0].id", "header.authorization",
-	// "url.query.page", "url.path.2"). What L learns is stored under it, so
-	// what drifted in one element of an array is learned for that element
-	// alone: F saw nothing of the others.
+	// Path names the leaf exactly: object keys dot-joined, a key holding '.',
+	// '[' or ']' quoted (KeyStep), an array position bracketed
+	// ("body.items[0].id", `body.filter["suite._id"]`,
+	// "header.authorization", "url.query.page", "url.path.2"). What L learns
+	// is stored under it, so what drifted in one element of an array is
+	// learned for that element alone: F saw nothing of the others.
 	Path string
 	// Noise is the leaf's name in the request matcher's noise dialect, which
 	// has no array positions ("body.items[].id"), the one keploy.yml's body
@@ -70,9 +71,10 @@ type Leaf struct {
 	Noise string
 	Type  Type
 	Value string
-	// Unnamed: no path names the leaf alone (a JSON key holding '.', '[' or
-	// ']'), so nothing can be learned about it, and a drift there is a change
-	// L refuses.
+	// Unnamed: no path names the leaf alone (a form field or a query
+	// parameter whose name holds '.', '[' or ']', the keys of a body), so
+	// nothing can be learned about it, and a drift there is a change L
+	// refuses.
 	Unnamed bool
 }
 

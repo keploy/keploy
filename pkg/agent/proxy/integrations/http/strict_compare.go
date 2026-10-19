@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -622,7 +623,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			lc, inLive := lv[key]
 			switch {
 			case inRec && inLive:
-				k.jsonDiffs(rc, lc, exact+"."+key, childRisk, childShape, learned, out)
+				k.jsonDiffs(rc, lc, exact+learn.KeyStep(key), childRisk, childShape, learned, out)
 			case k.n.body.Covers(childRisk, scalarText(rc), false) || (inRec && isScalar(rc) && k.redacted(scalarText(rc))):
 			case !inLive:
 				*out = append(*out, shaped("body."+childRisk, childShape, models.DiffKindMissingInLive, "", ""))

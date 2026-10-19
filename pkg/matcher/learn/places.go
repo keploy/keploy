@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -11,9 +12,9 @@ import (
 // VarPlace is the leaf's place in the grammar a mock's variables are written
 // in (variables.Parse): body.<json path>, url.path[<n>], url.query.<name>,
 // header.<name>. ok is false for a leaf no variable place can name: a field
-// of a form or multipart body, a JSON key no path names alone (Unnamed), a
-// whole body that is not JSON. jsonBody says whether the leaf's request (or
-// answer) has a JSON body.
+// of a form or multipart body, a leaf no path names alone (Unnamed), a JSON
+// leaf under an empty key, a whole body that is not JSON. jsonBody says
+// whether the leaf's request (or answer) has a JSON body.
 func VarPlace(l Leaf, jsonBody bool) (string, bool) {
 	if l.Unnamed {
 		return "", false
@@ -62,15 +63,15 @@ func LeafPath(place string) (string, bool) {
 				b.WriteString("[" + strconv.Itoa(s.Index) + "]")
 				continue
 			}
-			b.WriteString("." + s.Key)
+			b.WriteString(KeyStep(s.Key))
 		}
 		return b.String(), true
 	}
 	return "", false
 }
 
-// jsonSegs reads a JSON leaf path after its root (".a.b[0].c"), as
-// jsonLeaves writes it.
+// jsonSegs reads a JSON leaf path after its root (".a.b[0].c",
+// `["a.b"].c`), as jsonLeaves writes it (KeyStep).
 func jsonSegs(s string) ([]templates.PathSeg, bool) {
 	var out []templates.PathSeg
 	for i := 0; i < len(s); {
@@ -86,6 +87,20 @@ func jsonSegs(s string) ([]templates.PathSeg, bool) {
 			out = append(out, templates.PathSeg{Key: s[i+1 : j]})
 			i = j
 		case '[':
+			if i+1 < len(s) && s[i+1] == '"' {
+				var key string
+				dec := json.NewDecoder(strings.NewReader(s[i+1:]))
+				if err := dec.Decode(&key); err != nil {
+					return nil, false
+				}
+				end := i + 1 + int(dec.InputOffset())
+				if end >= len(s) || s[end] != ']' {
+					return nil, false
+				}
+				out = append(out, templates.PathSeg{Key: key})
+				i = end + 1
+				continue
+			}
 			end := strings.IndexByte(s[i:], ']')
 			if end < 0 {
 				return nil, false
