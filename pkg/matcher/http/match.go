@@ -972,18 +972,14 @@ var testSuiteAssertions = map[string]bool{
 // patternError is a header_matches pattern's compile error as its line logs
 // it. regexp's error quotes the pattern, an expected header value, so with
 // logcontent off the line says only what is wrong with it ("missing closing
-// )").
+// )"). regexp's compile errors are *syntax.Error; any other is logged as
+// logcontent.Error logs it.
 func patternError(err error) zap.Field {
 	var se *syntax.Error
-	switch {
-	case err == nil:
-		return zap.Skip()
-	case logcontent.On():
-		return zap.Error(err)
-	case errors.As(err, &se):
+	if !logcontent.On() && errors.As(err, &se) {
 		return zap.String("error", "error parsing regexp: "+string(se.Code))
 	}
-	return logcontent.String("error", err.Error())
+	return logcontent.Error(err)
 }
 
 // logUnreadableAssertion says that an assertion's value is not of the shape it

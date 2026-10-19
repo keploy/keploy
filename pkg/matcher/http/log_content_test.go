@@ -1,6 +1,7 @@
 package http
 
 import (
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -199,6 +200,18 @@ func TestAssertionMatch_APatternThatDoesNotCompileSaysWhy(t *testing.T) {
 		if got := logs.FilterMessage(line).All()[0].ContextMap()["error"]; got != want {
 			t.Fatalf("the line says %q, want %q", got, want)
 		}
+	})
+}
+
+// A pattern's error that is not regexp's own is logged as logcontent.Error
+// logs it: by its kind, and its text only with the switch on. None is today,
+// as regexp's compile errors are *syntax.Error; the line still may not carry
+// the pattern if one ever is.
+func TestPatternError_AnErrorNotRegexpsIsLoggedByItsKind(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		logger.Error("header_matches assertion failed", patternError(fmt.Errorf("compile %q: too complex", "("+canary)))
+		logtest.Check(t, logs, canary, on, "header_matches assertion failed")
 	})
 }
 
