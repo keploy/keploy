@@ -2,6 +2,7 @@ package variables
 
 import (
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -266,8 +267,9 @@ func TestTable_Start(t *testing.T) {
 }
 
 // A value bound before the first scope began is the run's: every scope sees
-// it, and a scope's own bindings go with the scope. A value bound between
-// two scopes is not the run's, and a new set forgets the run's.
+// it, and a scope's own bindings go with the scope when the next begins. A
+// value bound between two scopes is the ended scope's, never the run's, and a
+// new set forgets the run's.
 func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 	var tb Table
 	tb.KeepRun()
@@ -277,20 +279,26 @@ func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 	if b, ok := tb.Lookup("session"); !ok || b.Value != "live-1" {
 		t.Fatalf("a test does not see the start-up's binding: %+v %v", b, ok)
 	}
-	tb.Close()
-	if _, ok := tb.Lookup("order"); ok {
-		t.Fatal("a test's binding outlived the test")
-	}
+	// The test ended: the gap before the next reads and binds in its scope.
 	tb.Bind(Binding{Name: "job", Value: "j-1", Recorded: "j-r"})
+	if _, ok := tb.Lookup("order"); !ok {
+		t.Fatal("the gap after a test does not read the test's binding")
+	}
 	tb.Reset()
 	if _, ok := tb.Lookup("session"); !ok {
 		t.Fatal("session, bound before the first test, is gone in the next test")
+	}
+	if _, ok := tb.Lookup("order"); ok {
+		t.Fatal("a test's binding outlived the next test's start")
 	}
 	if _, ok := tb.Lookup("job"); ok {
 		t.Fatal("job, bound between two tests, became the run's")
 	}
 	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "other", Value: "live-1", Recorded: "x"}}); ok {
 		t.Fatal("a test bound the run's value to another variable")
+	}
+	if got := len(tb.Snapshot()); got != 1 {
+		t.Fatalf("the test's snapshot holds %d bindings, want the run's one", got)
 	}
 	tb.NewSet()
 	if _, ok := tb.Lookup("session"); ok {
@@ -302,6 +310,135 @@ func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 	tb.Reset()
 	if b, _ := tb.Lookup("session"); b.Value != "live-2" {
 		t.Fatalf("the next set's test sees %q, want the new set's start-up value", b.Value)
+	}
+}
+
+// A table that does not keep the run's (no KeepRun: the switch is off, or
+// the set was never begun) forgets at the first scope what was bound before
+// it, as before.
+func TestTable_WithoutKeepRunTheFirstScopeForgetsTheStartUp(t *testing.T) {
+	var tb Table
+	tb.Bind(Binding{Name: "session", Value: "live-1", Recorded: "rec-1"})
+	tb.Start(nil)
+	if _, ok := tb.Lookup("session"); ok {
+		t.Fatal("a table that keeps no run's kept a start-up binding into the first scope")
+	}
+}
+
+// The gap after a scope is that scope's (the proxy's gap rule): its bindings
+// stay in force until the next scope begins, a call checked in it still
+// binds there once it ended, and what the gap binds is forgotten with it.
+func TestTable_TheGapIsTheEndedScopes(t *testing.T) {
+	for _, keepRun := range []bool{false, true} {
+		var tb Table
+		if keepRun {
+			tb.KeepRun()
+		}
+		tb.Start(nil)
+		gen := tb.Gen()
+		if _, _, _, ok := tb.BindAll(gen, []Binding{{Name: "key", Value: "x-1", Recorded: "k-1"}}); !ok {
+			t.Fatalf("keepRun %v: test 1 could not bind key", keepRun)
+		}
+		// Test 1 ended; nothing ends its scope until test 2 begins.
+		if b, ok := tb.Lookup("key"); !ok || b.Value != "x-1" {
+			t.Fatalf("keepRun %v: the gap reads key as %+v, %v; want test 1's x-1", keepRun, b, ok)
+		}
+		if _, _, stale, ok := tb.BindAll(gen, []Binding{{Name: "late", Value: "l-1", Recorded: "l-r"}}); stale || !ok {
+			t.Fatalf("keepRun %v: a call checked in test 1, answered in the gap, did not bind (stale %v)", keepRun, stale)
+		}
+		tb.Start(nil)
+		if _, ok := tb.Lookup("key"); ok {
+			t.Fatalf("keepRun %v: test 2 reads test 1's key", keepRun)
+		}
+		if _, ok := tb.Lookup("late"); ok {
+			t.Fatalf("keepRun %v: test 2 reads what test 1's late call bound in the gap", keepRun)
+		}
+		if _, _, stale, _ := tb.BindAll(gen, []Binding{{Name: "late2", Value: "l-2", Recorded: "l-r2"}}); !stale {
+			t.Fatalf("keepRun %v: a call checked in test 1 bound in test 2", keepRun)
+		}
+	}
+}
+
+// The start-up binds a run's name once: a second start-up Bind of it, before
+// or after a scope began, leaves the first in force.
+func TestTable_AStartUpBindsARunNameOnce(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	if _, took := tb.Bind(Binding{Name: "session", Value: "v-1", Recorded: "r"}); !took {
+		t.Fatal("the start-up could not bind session")
+	}
+	if have, took := tb.Bind(Binding{Name: "session", Value: "v-2", Recorded: "r"}); took || have.Value != "v-1" {
+		t.Fatalf("a second start-up bind of session took (%v), in force %q", took, have.Value)
+	}
+	tb.Reset()
+	if have, took := tb.Bind(Binding{Name: "session", Value: "v-3", Recorded: "r"}); took || have.Value != "v-1" {
+		t.Fatalf("a test bound the run's session again (%v), in force %q", took, have.Value)
+	}
+	if b, _ := tb.Lookup("session"); b.Value != "v-1" {
+		t.Fatalf("session reads %q, want the start-up's v-1", b.Value)
+	}
+}
+
+// A scope begun early (the next test's calls in flight, answered in the gap
+// before it) reads the run's bindings of the table it reads them of, whenever
+// the start-up bound them: it is refused a value of theirs for another
+// variable, as the test is. What it binds is its scope's, never the run's,
+// and a new set forgets the run's for it too.
+func TestTable_AScopeBegunEarlyReadsTheRuns(t *testing.T) {
+	var vars, ahead Table
+	vars.KeepRun()
+	ahead.ReadRunOf(&vars)
+	ahead.ReadRunOf(&ahead) // a table never reads its own run's of itself
+	ahead.Start(nil)
+	vars.Bind(Binding{Name: "session", Value: "S", Recorded: "s-1", Mock: "boot"})
+	if b, ok := ahead.Lookup("session"); !ok || b.Value != "S" {
+		t.Fatalf("the scope begun early reads session as %+v, %v; want the run's S", b, ok)
+	}
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []Binding{{Name: "order", Value: "S", Recorded: "o-1"}}); ok {
+		t.Fatal("a call in flight bound the run's value to another variable")
+	}
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []Binding{{Name: "poll", Value: "P", Recorded: "p-1", Mock: "fetch"}}); !ok {
+		t.Fatal("a call in flight could not bind its own variable")
+	}
+	if _, ok := vars.Lookup("poll"); ok {
+		t.Fatal("what a call in flight bound became the run's")
+	}
+	if got := len(ahead.Snapshot()); got != 2 {
+		t.Fatalf("the scope begun early holds %d bindings in force, want its own and the run's", got)
+	}
+	c := ahead.Clone()
+	vars.NewSet()
+	if _, ok := ahead.Lookup("session"); ok {
+		t.Fatal("the scope begun early reads the previous set's run's")
+	}
+	if _, ok := c.Lookup("session"); !ok {
+		t.Fatal("a clone does not hold the run's it read when it was made")
+	}
+}
+
+// Calls of the scope begun early and of the start-up bind at once: one lock
+// at a time, so none waits on the other.
+func TestTable_AScopeBegunEarlyAndTheRunBindConcurrently(t *testing.T) {
+	var vars, ahead Table
+	vars.KeepRun()
+	ahead.ReadRunOf(&vars)
+	ahead.Start(nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			vars.Bind(Binding{Name: "run-" + strconv.Itoa(i), Value: "R" + strconv.Itoa(i), Recorded: "r" + strconv.Itoa(i)})
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			ahead.BindAll(ahead.Gen(), []Binding{{Name: "own-" + strconv.Itoa(i), Value: "O" + strconv.Itoa(i), Recorded: "o" + strconv.Itoa(i)}})
+			ahead.Snapshot()
+		}(i)
+	}
+	wg.Wait()
+	if got := len(ahead.Snapshot()); got != 16 {
+		t.Fatalf("the scope begun early holds %d bindings, want 8 of its own and 8 of the run's", got)
 	}
 }
 

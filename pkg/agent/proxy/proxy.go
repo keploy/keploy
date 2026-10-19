@@ -4147,6 +4147,13 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 			mm.ArmSetFence()
 		}
 	}
+	if provenswitch.On() {
+		// A new test set, as for the learn step above: its variables begin
+		// with none bound, the previous set's run's neither (its mocks
+		// reuse the names), and what its start-up binds before its first
+		// test is the run's, which each of its tests reads.
+		p.getMockManager().NewVariableSet()
+	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
 	// never sent /agent/scope/end cannot leak an allowlist that mis-scopes a
