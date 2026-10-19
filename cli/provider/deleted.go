@@ -38,8 +38,16 @@ type DeletedSetting struct {
 var (
 	deletedMu sync.RWMutex
 	// deleted are the rows nothing reads (U18 "Read by nothing in a path
-	// here", §1 rule 4); keploy's enterprise build adds its own
+	// here", §1 rule 4), and the rows exact serving (S12) replaced, which
+	// the flip deletes (P220); keploy's enterprise build adds its own
 	// (RegisterDeletedSettings). The other rows are their own changes'.
+	//
+	// The S12 rows were ignored under the switch, each said once per run,
+	// while the switch was a staging gate. Linux runs the proven model by
+	// default now, so there they are deleted as U18 says: unknown flags and
+	// ignored keys. The code that reads them stays for the platforms that
+	// keep the switch off (Windows and macOS, P221) and for KEPLOY_PROVEN=0,
+	// where they work as before.
 	deleted = []DeletedSetting{{
 		Row:     "read by nothing",
 		Flags:   []string{"fallBack-on-miss", "in-ci"},
@@ -48,6 +56,31 @@ var (
 		Ignore: func(cfg *config.Config) {
 			cfg.Test.FallBackOnMiss = false
 			cfg.InCi = false
+		},
+	}, {
+		Row:     "mappings always; only record writes them",
+		Flags:   []string{"disable-mapping", "update-test-mapping"},
+		Keys:    []string{"disableMapping", "test.updateTestMapping"},
+		Instead: "each test case is served exactly the mocks its recorded mapping lists, and only keploy record writes mappings.yaml: record a test set whose mapping is stale again",
+		Ignore: func(cfg *config.Config) {
+			cfg.DisableMapping = false
+			cfg.Test.UpdateTestMapping = false
+		},
+	}, {
+		Row:     "nothing is pruned",
+		Flags:   []string{"remove-unused-mocks"},
+		Keys:    []string{"test.removeUnusedMocks", "test.preserveFailedMocks"},
+		Instead: "a passing test leaves none of its own mocks unconsumed, and the pool's mocks are other runs' too, so keploy test deletes no mock: remove it",
+		Ignore: func(cfg *config.Config) {
+			cfg.Test.RemoveUnusedMocks = false
+			cfg.Test.PreserveFailedMocks = false
+		},
+	}, {
+		Row:     "exact consumption",
+		Keys:    []string{"test.disableStatefulMocks"},
+		Instead: "a test's own mocks answer once each, in recorded order, and the pool keeps its cursors: remove it",
+		Ignore: func(cfg *config.Config) {
+			cfg.Test.DisableStatefulMocks = false
 		},
 	}}
 )
@@ -108,6 +141,23 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 			zap.String("next_step", "remove them from keploy.yml, or unset them in the environment"))
 	}
 	return nil
+}
+
+// hideDeletedFlags hides, under the proven switch, the flags of the deleted
+// settings cmd has from its --help: there each is an unknown flag, which
+// checkDeletedSettings refuses, so --help must not offer it. Without the
+// switch --help is as it was. AddFlags calls it once cmd has all its flags.
+func hideDeletedFlags(cmd *cobra.Command) {
+	if !provenswitch.On() {
+		return
+	}
+	for _, row := range deletedSettings() {
+		for _, name := range row.Flags {
+			if cmd.Flags().Lookup(name) != nil {
+				_ = cmd.Flags().MarkHidden(name)
+			}
+		}
+	}
 }
 
 // zeroSetting reports whether v, a setting's value, is its zero value: unset,

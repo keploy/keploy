@@ -500,6 +500,18 @@ func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next str
 	return nil
 }
 
+// mockDifferencesNextStep is what to do about test sets that failed on mock
+// differences. With the switch off a stale mapping can be remapped; under it
+// a test is served exactly its recorded mapping, which only a record writes,
+// and the remap flags are deleted (U18, P220).
+func mockDifferencesNextStep() string {
+	const next = "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record'."
+	if provenswitch.On() {
+		return next
+	}
+	return next + " A failed test keeps its recorded mapping (--update-test-mapping updates only a passing test's); to remap tests whose mapping is stale, run with --disable-mapping --update-test-mapping, which serves each its recorded window and maps the ones that pass."
+}
+
 // noteMappingAlwaysUsed says once per run that disableMapping does not apply
 // under the proven switch.
 func (r *Replayer) noteMappingAlwaysUsed() {

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -42,6 +43,11 @@ func deletedRunKeepingViper(t *testing.T, read bool, args ...string) (*config.Co
 		// What PreProcessFlags' viper.Unmarshal reads from it.
 		cfg.InCi = viper.GetBool("inCi")
 		cfg.Test.FallBackOnMiss = viper.GetBool("test.fallBackOnMiss")
+		cfg.DisableMapping = viper.GetBool("disableMapping")
+		cfg.Test.UpdateTestMapping = viper.GetBool("test.updateTestMapping")
+		cfg.Test.RemoveUnusedMocks = viper.GetBool("test.removeUnusedMocks")
+		cfg.Test.PreserveFailedMocks = viper.GetBool("test.preserveFailedMocks")
+		cfg.Test.DisableStatefulMocks = viper.GetBool("test.disableStatefulMocks")
 	}
 	core, logs := observer.New(zap.WarnLevel)
 	c := NewCmdConfigurator(zap.New(core), cfg)
@@ -71,6 +77,9 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 			_, _, err := deletedRun(t, "", args...)
 			if err == nil || !strings.Contains(err.Error(), "unknown flag") || !strings.Contains(err.Error(), "U18") {
 				t.Fatalf("ValidateFlags: %v; want the deleted flag refused as unknown", err)
+			}
+			if !utils.IsUsageError(err) {
+				t.Fatalf("the refusal %v is not a usage error (exit 8), as cobra's unknown flag is", err)
 			}
 
 			t.Setenv(provenswitch.Env, "0")
@@ -167,6 +176,129 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 			t.Fatalf("the notice %v does not name test.fuzzyMatch", said)
 		}
 	})
+}
+
+// The settings exact serving replaced (U18 rows of S12) are deleted where the
+// proven model is the default (P220): under the switch their flags are
+// unknown flags, which keploy refuses, and their keploy.yml keys are ignored
+// and cleared, with the one notice naming each. With the switch off (Windows
+// and macOS, or KEPLOY_PROVEN=0) they are taken as before.
+func TestUnderTheSwitchTheSettingsExactServingReplacedAreDeleted(t *testing.T) {
+	for _, flag := range []string{"--disable-mapping", "--update-test-mapping", "--remove-unused-mocks"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			_, _, err := deletedRun(t, "", flag)
+			if err == nil || !strings.Contains(err.Error(), "unknown flag: "+flag) || !strings.Contains(err.Error(), "U18") {
+				t.Fatalf("ValidateFlags: %v; want %s refused as an unknown flag", err, flag)
+			}
+			if !utils.IsUsageError(err) {
+				t.Fatalf("the refusal %v is not a usage error (exit 8), as cobra's unknown flag is", err)
+			}
+			t.Setenv(provenswitch.Env, "0")
+			if _, _, err := deletedRun(t, "", flag); err != nil {
+				t.Fatalf("without the switch %s was refused: %v", flag, err)
+			}
+		})
+	}
+
+	yml := "disableMapping: true\ntest:\n  updateTestMapping: true\n  removeUnusedMocks: true\n  preserveFailedMocks: true\n  disableStatefulMocks: true\n"
+	set := func(cfg *config.Config) []string {
+		var on []string
+		for name, v := range map[string]bool{
+			"disableMapping":       cfg.DisableMapping,
+			"updateTestMapping":    cfg.Test.UpdateTestMapping,
+			"removeUnusedMocks":    cfg.Test.RemoveUnusedMocks,
+			"preserveFailedMocks":  cfg.Test.PreserveFailedMocks,
+			"disableStatefulMocks": cfg.Test.DisableStatefulMocks,
+		} {
+			if v {
+				on = append(on, name)
+			}
+		}
+		return on
+	}
+	t.Setenv(provenswitch.Env, "1")
+	cfg, logs, err := deletedRun(t, yml)
+	if err != nil {
+		t.Fatalf("ValidateFlags: %v", err)
+	}
+	if kept := set(cfg); len(kept) != 0 {
+		t.Fatalf("deleted keys were kept under the switch: %v", kept)
+	}
+	said := logs.FilterMessageSnippet("settings keploy deletes are ignored").All()
+	if len(said) != 1 {
+		t.Fatalf("said %d times, want once", len(said))
+	}
+	ignored := strings.Join(toStrings(said[0].ContextMap()["ignored"]), "\n")
+	for _, key := range []string{"disableMapping, from keploy.yml", "test.updateTestMapping, from keploy.yml", "test.removeUnusedMocks, from keploy.yml", "test.preserveFailedMocks, from keploy.yml", "test.disableStatefulMocks, from keploy.yml"} {
+		if !strings.Contains(ignored, key) {
+			t.Fatalf("the notice does not name %q: %s", key, ignored)
+		}
+	}
+
+	t.Setenv(provenswitch.Env, "0")
+	cfg, logs, err = deletedRun(t, yml)
+	if err != nil {
+		t.Fatalf("without the switch: %v", err)
+	}
+	if kept := set(cfg); len(kept) != 5 {
+		t.Fatalf("without the switch only %v were kept, want all five", kept)
+	}
+	if n := len(logs.FilterMessageSnippet("settings keploy deletes are ignored").All()); n != 0 {
+		t.Fatalf("without the switch the notice was said %d times", n)
+	}
+}
+
+// Under the switch a deleted setting's flag is an unknown flag, so --help
+// does not list it either: a user who reads it there and passes it is refused
+// (exit 8). --strict-failure, which the switch already holds on, says it
+// changes nothing there instead of giving those flags as its remedy. Without
+// the switch --help is as it was.
+func TestUnderTheSwitchHelpListsNoDeletedFlag(t *testing.T) {
+	deletedFlags := map[string][]string{
+		"test":   {"disable-mapping", "update-test-mapping", "remove-unused-mocks", "fallBack-on-miss"},
+		"record": {"disable-mapping"},
+	}
+	for _, on := range []bool{true, false} {
+		value := "0"
+		if on {
+			value = "1"
+		}
+		t.Run("KEPLOY_PROVEN="+value, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, value)
+			for name, flags := range deletedFlags {
+				c := NewCmdConfigurator(zap.NewNop(), config.New())
+				cmd := &cobra.Command{Use: name}
+				if err := c.AddFlags(cmd); err != nil {
+					t.Fatalf("AddFlags(%s): %v", name, err)
+				}
+				for _, flag := range flags {
+					f := cmd.Flags().Lookup(flag)
+					if f == nil {
+						t.Fatalf("keploy %s has no --%s", name, flag)
+					}
+					// --fallBack-on-miss is deprecated, so hidden either way.
+					if hidden := f.Hidden || f.Deprecated != ""; hidden != on && flag != "fallBack-on-miss" {
+						t.Errorf("keploy %s --help lists --%s: %v, want %v", name, flag, !hidden, !on)
+					}
+					if on && !(f.Hidden || f.Deprecated != "") {
+						t.Errorf("under the switch keploy %s --help lists the deleted --%s", name, flag)
+					}
+				}
+				if name != "test" {
+					continue
+				}
+				usage := cmd.Flags().Lookup("strict-failure").Usage
+				gives := strings.Contains(usage, "--disable-mapping") || strings.Contains(usage, "--update-test-mapping")
+				if on && (gives || !strings.Contains(usage, "changes nothing")) {
+					t.Errorf("under the switch --strict-failure's help gives the deleted flags, or does not say it changes nothing: %q", usage)
+				}
+				if !on && !gives {
+					t.Errorf("without the switch --strict-failure's help lost its remedy: %q", usage)
+				}
+			}
+		})
+	}
 }
 
 func toStrings(v interface{}) []string {

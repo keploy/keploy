@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -31,6 +32,7 @@ func TestRefusePassthroughFlags(t *testing.T) {
 		err := refusePassthroughFlags(passthroughCmd(t, arg), passthroughFlags...)
 		require.ErrorContains(t, err, "mock.real", arg)
 		require.ErrorContains(t, err, "U18", arg)
+		require.True(t, utils.IsUsageError(err), "%s: the refusal %v is not a usage error (exit 8), as an unknown flag is", arg, err)
 	}
 	require.NoError(t, refusePassthroughFlags(passthroughCmd(t), passthroughFlags...))
 	t.Setenv(provenswitch.Env, "0")

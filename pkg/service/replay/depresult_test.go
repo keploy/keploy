@@ -1397,6 +1397,9 @@ func TestAttachDepResults_NilResultIsSafe(t *testing.T) {
 }
 
 func TestDependencyAssertionInertReason(t *testing.T) {
+	// The switch-off reasons; under the switch a set without mappings is told
+	// only to re-record (TestUnderTheSwitchANoMappingsSetIsToldToReRecord).
+	t.Setenv(provenswitch.Env, "0")
 	tests := []struct {
 		name                string
 		instrument          bool
@@ -1575,6 +1578,9 @@ func TestDependencyAssertionInertReason(t *testing.T) {
 //   - "a healthy test set says nothing" dies when the `reason == ""` early
 //     return goes, warning on every well-formed suite.
 func TestWarnDependencyAssertionInert(t *testing.T) {
+	// The switch-off wording ("--assert-dependencies is inert ..."); it is
+	// the switch that asks for the assertion under it.
+	t.Setenv(provenswitch.Env, "0")
 	tests := []struct {
 		name                string
 		assertDeps          bool
@@ -2005,4 +2011,14 @@ func TestNoEligibleDepsAndCheckedAreTheSameQuestion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Under the proven switch only a record writes mappings.yaml, and the remap
+// flags are deleted (U18, P220): a set without a usable one is told to
+// re-record, not to run with --update-test-mapping.
+func TestUnderTheSwitchANoMappingsSetIsToldToReRecord(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := dependencyAssertionInertReason(true, false, true, false, false, false)
+	assert.Contains(t, got, "re-record it")
+	assert.NotContains(t, got, "--update-test-mapping")
 }

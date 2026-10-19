@@ -30,6 +30,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Canonical protocol names. Parsers must use these so report consumers can
@@ -361,6 +362,12 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		// if it passes (both are `keploy test` flags a mock run does not have).
 		if mockMode.Load() {
 			return "Request structure changed since recording. Re-record the mock set with '" + RecordCommand() + "'."
+		}
+		// Under the proven switch a test is served exactly the mocks its
+		// recorded mapping lists, only a record writes mappings.yaml, and the
+		// remap flags are deleted (U18, P220).
+		if provenswitch.On() {
+			return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "'."
 		}
 		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}

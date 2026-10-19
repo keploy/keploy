@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Every report shape whose hint tells the user to record again.
@@ -72,6 +73,7 @@ func TestHintTextInMockMode(t *testing.T) {
 // after mock mode was on, so a flag left over from one setup cannot leak into
 // a later one.
 func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
 	SetMockMode(true)
 	SetMockMode(false)
 	if got := RecordCommand(); got != "keploy record" || MockMode() {
@@ -87,5 +89,17 @@ func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
 		if r.NextSteps != want[name] {
 			t.Errorf("%s: hint changed outside mock mode:\n got  %q\n want %q", name, r.NextSteps, want[name])
 		}
+	}
+}
+
+// Under the proven switch a changed request is re-recorded: the remap flags
+// are deleted where it is the default (U18, P220), so the hint does not name
+// them.
+func TestUnderTheSwitchAChangedRequestIsReRecordedNotRemapped(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	SetMockMode(false)
+	r := rerecordReports()["structure changed"]
+	if want := "Request structure changed since recording. Re-record the test set with 'keploy record'."; r.NextSteps != want {
+		t.Fatalf("under the switch:\n got  %q\n want %q", r.NextSteps, want)
 	}
 }

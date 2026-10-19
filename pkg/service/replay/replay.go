@@ -1412,7 +1412,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			} else {
 				r.logger.Info("Some testsets failed due to mock differences.",
 					zap.String("test_sets", testSets),
-					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record'. A failed test keeps its recorded mapping (--update-test-mapping updates only a passing test's); to remap tests whose mapping is stale, run with --disable-mapping --update-test-mapping, which serves each its recorded window and maps the ones that pass."))
+					zap.String("next_step", mockDifferencesNextStep()))
 			}
 
 			r.mockMismatchFailures.PrintFailuresTable()

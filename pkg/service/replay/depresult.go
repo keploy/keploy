@@ -893,6 +893,10 @@ func dependencyAssertionInertReason(instrument, useMappingBased, isMappingEnable
 		return "not instrument mode: the per-test mock mapping is never armed for --base-path / remote-agent runs, so which mock a request consumed is not attributable to a single test"
 	case !isMappingEnabled:
 		return "mapping is disabled (test.disableMapping / --disable-mapping): there is no per-test expectation to assert against"
+	case !useMappingBased && provenswitch.On():
+		// Only a record writes mappings.yaml under the switch, and the
+		// remap flags are deleted (U18, P220).
+		return "this test set has no usable mappings.yaml (recorded before test-mock mapping existed, or the mapping database is unavailable): re-record it"
 	case !useMappingBased:
 		return "this test set has no usable mappings.yaml (recorded before test-mock mapping existed, or the mapping database is unavailable): re-record it, or run once with --update-test-mapping"
 	case consumedFetchFailed:

@@ -189,6 +189,9 @@ func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigura
 }
 
 func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
+	// Under the proven switch the deleted settings' flags are unknown flags,
+	// so --help does not list them (hideDeletedFlags), once cmd has them all.
+	defer hideDeletedFlags(cmd)
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
@@ -522,7 +525,13 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
-		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping. By default such a test is demoted to OBSOLETE and reported not judged: keploy cannot tell a regression from a stale mapping, so the test set is not judged and keploy exits non-zero; re-record, or run with --disable-mapping --update-test-mapping. The per-test mappingDiff block is still written for diagnostics.")
+		strictFailureHelp := "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping. By default such a test is demoted to OBSOLETE and reported not judged: keploy cannot tell a regression from a stale mapping, so the test set is not judged and keploy exits non-zero; re-record, or run with --disable-mapping --update-test-mapping. The per-test mappingDiff block is still written for diagnostics."
+		if provenswitch.On() {
+			// The proven model holds every response-failing test FAILED
+			// (strictFailure), and deletes the remap flags (P220).
+			strictFailureHelp = "Under the proven model, keploy's default on Linux, every response-failing test is FAILED, never demoted to OBSOLETE, so this flag changes nothing. It mattered with the proven model off (KEPLOY_PROVEN=0)."
+		}
+		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, strictFailureHelp)
 		// Default false is deliberate: a response-matched test whose
 		// expected mock went unconsumed passes today, so defaulting this true
 		// would flip existing suites red on upgrade. With it off, a
@@ -1300,11 +1309,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	// Under the proven switch a deleted setting's flag is unknown, and its
 	// keploy.yml key is ignored, with one notice (U18, deleted.go). Not for
-	// the agent: its CLI forwards no deleted flag.
+	// the agent: its CLI forwards no deleted flag. The refusal is a usage
+	// error (exit 8), as cobra's own unknown flag is.
 	if cmd.Name() != "agent" {
 		if err := c.checkDeletedSettings(cmd); err != nil {
 			utils.LogError(c.logger, err, "refusing a deleted flag")
-			return err
+			return utils.UsageError(err)
 		}
 	}
 

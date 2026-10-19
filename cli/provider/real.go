@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -25,14 +26,15 @@ var passthroughFlags = []string{"global-passthrough", "opportunistic-tls-interce
 const passthroughHint = "list the destinations keploy reaches for real in keploy.yml mock.real (localhost:5432, auth.example.com:443, container:redis); every other call is recorded and mocked"
 
 // refusePassthroughFlags refuses, under the proven switch, a deleted
-// passthrough flag the user gave.
+// passthrough flag the user gave: a usage error (exit 8), as an unknown flag
+// is.
 func refusePassthroughFlags(cmd *cobra.Command, names ...string) error {
 	if !provenswitch.On() {
 		return nil
 	}
 	for _, n := range names {
 		if f := cmd.Flags().Lookup(n); f != nil && f.Changed {
-			return fmt.Errorf("--%s is not used with %s (U18): %s", n, provenswitch.Env, passthroughHint)
+			return utils.UsageError(fmt.Errorf("--%s is not used with %s (U18): %s", n, provenswitch.Env, passthroughHint))
 		}
 	}
 	return nil

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -488,4 +489,18 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 			t.Fatal("a failed read was not returned: the calls would be reported as never made")
 		}
 	})
+}
+
+// A set that failed on mock differences is told to remap a stale mapping
+// only where the remap flags still exist: with the switch off. Under it they
+// are deleted (U18, P220), and only a record writes mappings.yaml.
+func TestTheMockDifferencesRemedyNamesTheRemapFlagsOnlyWithTheSwitchOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	if on := mockDifferencesNextStep(); strings.Contains(on, "--disable-mapping") || strings.Contains(on, "--update-test-mapping") || !strings.Contains(on, "re-record") {
+		t.Fatalf("under the switch the remedy is %q; want re-record, without the deleted remap flags", on)
+	}
+	t.Setenv(provenswitch.Env, "0")
+	if off := mockDifferencesNextStep(); !strings.Contains(off, "--disable-mapping --update-test-mapping") {
+		t.Fatalf("with the switch off the remedy is %q; want the remap flags, as before", off)
+	}
 }
