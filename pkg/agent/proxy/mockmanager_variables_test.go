@@ -106,7 +106,7 @@ func TestMockBeginsTheSetsVariablesUnderTheSwitch(t *testing.T) {
 			t.Fatal(err)
 		}
 		mm := p.getMockManager()
-		mm.Variables().Bind(models.VariableBinding{Name: "session", Value: "S", Recorded: "s-1", Mock: "boot"})
+		mm.Variables().BindAll(mm.Variables().Gen(), []models.VariableBinding{{Name: "session", Value: "S", Recorded: "s-1", Mock: "boot"}})
 		mm.StartVariables(nil)
 		_, kept := mm.Variables().Lookup("session")
 		if kept != on {

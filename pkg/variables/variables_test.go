@@ -273,14 +273,18 @@ func TestTable_Start(t *testing.T) {
 func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 	var tb Table
 	tb.KeepRun()
-	tb.Bind(Binding{Name: "session", Value: "live-1", Recorded: "rec-1"})
+	bind := func(b Binding) bool {
+		_, _, _, ok := tb.BindAll(tb.Gen(), []Binding{b})
+		return ok
+	}
+	bind(Binding{Name: "session", Value: "live-1", Recorded: "rec-1"})
 	tb.Reset()
-	tb.Bind(Binding{Name: "order", Value: "o-1", Recorded: "o-r"})
+	bind(Binding{Name: "order", Value: "o-1", Recorded: "o-r"})
 	if b, ok := tb.Lookup("session"); !ok || b.Value != "live-1" {
 		t.Fatalf("a test does not see the start-up's binding: %+v %v", b, ok)
 	}
 	// The test ended: the gap before the next reads and binds in its scope.
-	tb.Bind(Binding{Name: "job", Value: "j-1", Recorded: "j-r"})
+	bind(Binding{Name: "job", Value: "j-1", Recorded: "j-r"})
 	if _, ok := tb.Lookup("order"); !ok {
 		t.Fatal("the gap after a test does not read the test's binding")
 	}
@@ -304,7 +308,7 @@ func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 	if _, ok := tb.Lookup("session"); ok {
 		t.Fatal("the run's binding outlived its set")
 	}
-	if _, took := tb.Bind(Binding{Name: "session", Value: "live-2", Recorded: "rec-2"}); !took {
+	if !bind(Binding{Name: "session", Value: "live-2", Recorded: "rec-2"}) {
 		t.Fatal("the next set's start-up could not bind the run's variable anew")
 	}
 	tb.Reset()
@@ -318,7 +322,7 @@ func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 // it, as before.
 func TestTable_WithoutKeepRunTheFirstScopeForgetsTheStartUp(t *testing.T) {
 	var tb Table
-	tb.Bind(Binding{Name: "session", Value: "live-1", Recorded: "rec-1"})
+	tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "live-1", Recorded: "rec-1"}})
 	tb.Start(nil)
 	if _, ok := tb.Lookup("session"); ok {
 		t.Fatal("a table that keeps no run's kept a start-up binding into the first scope")
@@ -359,23 +363,52 @@ func TestTable_TheGapIsTheEndedScopes(t *testing.T) {
 	}
 }
 
-// The start-up binds a run's name once: a second start-up Bind of it, before
-// or after a scope began, leaves the first in force.
+// The start-up binds a run's name once, with BindAll as every call: a second
+// start-up call that binds it to another value, before or after a scope
+// began, is refused with the first in force, and so is Bind.
 func TestTable_AStartUpBindsARunNameOnce(t *testing.T) {
 	var tb Table
 	tb.KeepRun()
-	if _, took := tb.Bind(Binding{Name: "session", Value: "v-1", Recorded: "r"}); !took {
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "v-1", Recorded: "r"}}); !ok {
 		t.Fatal("the start-up could not bind session")
 	}
-	if have, took := tb.Bind(Binding{Name: "session", Value: "v-2", Recorded: "r"}); took || have.Value != "v-1" {
-		t.Fatalf("a second start-up bind of session took (%v), in force %q", took, have.Value)
+	if _, with, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "v-2", Recorded: "r"}}); ok || with.Value != "v-1" {
+		t.Fatalf("a second start-up bind of session took (%v), in force %q", ok, with.Value)
 	}
 	tb.Reset()
+	if _, with, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "v-3", Recorded: "r"}}); ok || with.Value != "v-1" {
+		t.Fatalf("a test bound the run's session again (%v), in force %q", ok, with.Value)
+	}
 	if have, took := tb.Bind(Binding{Name: "session", Value: "v-3", Recorded: "r"}); took || have.Value != "v-1" {
-		t.Fatalf("a test bound the run's session again (%v), in force %q", took, have.Value)
+		t.Fatalf("Bind bound the run's session again (%v), in force %q", took, have.Value)
 	}
 	if b, _ := tb.Lookup("session"); b.Value != "v-1" {
 		t.Fatalf("session reads %q, want the start-up's v-1", b.Value)
+	}
+}
+
+// Bind keeps BindAll's rule that two variables recorded with two values never
+// share one live value, the run's included: a start-up's value is a call's.
+func TestTable_BindKeepsTwoVariablesApart(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	if _, took := tb.Bind(Binding{Name: "run-session", Value: "S", Recorded: "s-1"}); !took {
+		t.Fatal("run-session could not bind")
+	}
+	if with, took := tb.Bind(Binding{Name: "run-token", Value: "S", Recorded: "t-1"}); took || with.Name != "run-session" {
+		t.Fatalf("Bind took run-token with run-session's live value, though recorded as two values (%v, evidence %+v)", took, with)
+	}
+	tb.Reset()
+	if with, took := tb.Bind(Binding{Name: "order", Value: "S", Recorded: "o-1"}); took || with.Name != "run-session" {
+		t.Fatalf("Bind took order with the run's live value (%v, evidence %+v)", took, with)
+	}
+	if _, took := tb.Bind(Binding{Name: "again", Value: "S", Recorded: "s-1"}); !took {
+		t.Fatal("a variable recorded with run-session's value could not take its live value")
+	}
+	var given Table
+	given.Start([]Binding{{Name: "id", Value: "u1"}})
+	if _, took := given.Bind(Binding{Name: "order", Value: "u1", Recorded: "r"}); !took {
+		t.Fatal("a given value blocked another variable from taking it")
 	}
 }
 
@@ -390,7 +423,7 @@ func TestTable_AScopeBegunEarlyReadsTheRuns(t *testing.T) {
 	ahead.ReadRunOf(&vars)
 	ahead.ReadRunOf(&ahead) // a table never reads its own run's of itself
 	ahead.Start(nil)
-	vars.Bind(Binding{Name: "session", Value: "S", Recorded: "s-1", Mock: "boot"})
+	vars.BindAll(vars.Gen(), []Binding{{Name: "session", Value: "S", Recorded: "s-1", Mock: "boot"}})
 	if b, ok := ahead.Lookup("session"); !ok || b.Value != "S" {
 		t.Fatalf("the scope begun early reads session as %+v, %v; want the run's S", b, ok)
 	}
@@ -428,7 +461,7 @@ func TestTable_AScopeBegunEarlyAndTheRunBindConcurrently(t *testing.T) {
 		wg.Add(2)
 		go func(i int) {
 			defer wg.Done()
-			vars.Bind(Binding{Name: "run-" + strconv.Itoa(i), Value: "R" + strconv.Itoa(i), Recorded: "r" + strconv.Itoa(i)})
+			vars.BindAll(vars.Gen(), []Binding{{Name: "run-" + strconv.Itoa(i), Value: "R" + strconv.Itoa(i), Recorded: "r" + strconv.Itoa(i)}})
 		}(i)
 		go func(i int) {
 			defer wg.Done()
@@ -450,7 +483,7 @@ func TestTable_TwoVariablesNeverShareALiveValue(t *testing.T) {
 	const live = "1792000000000"
 	var tb Table
 	tb.KeepRun()
-	tb.Bind(Binding{Name: "session", Value: "S", Recorded: "s-1"})
+	tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "S", Recorded: "s-1"}})
 	tb.Reset()
 	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "created", Value: live, Recorded: "1"}, {Name: "polled", Value: live, Recorded: "2"}}); ok {
 		t.Fatal("two variables recorded with two values bound one live value in one call")
