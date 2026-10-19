@@ -1324,12 +1324,12 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 		return err
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
+		p.logger.Debug("mysql mock outgoing finished with error", parserErrorFields(err)...)
 		p.sendMockNotFoundError(err)
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
 		}
-		return err
+		return parserFailed{err}
 	}
 	return nil
 }
@@ -2449,24 +2449,31 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				// What follows the handler (its error's logging) is
 				// recovered here, as the handler is in handleRecovered.
 				defer util.Recover(p.logger, clientConn, nil)
-				err := p.handleRecovered(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF {
-					// Network closed errors are expected when client closes connection (e.g., app shutdown)
-					// Only log as error if it's not a shutdown/network closed error
-					if isShutdownError(err) || isNetworkClosedErr(err) {
-						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
-					} else {
-						if errors.As(err, new(reportedMiss)) {
-							p.logger.Debug("failed to handle the client connection: no mock matched its call", zap.Error(err))
-						} else if refusedLocally(err) {
-							p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", zap.Error(err))
-						} else {
-							utils.LogError(p.logger, err, "failed to handle the client connection")
-						}
-					}
-				}
+				p.logHandlerError(p.handleRecovered(clientConnCtx, clientConn))
 				return nil
 			})
+		}
+	}
+}
+
+// logHandlerError logs what a connection's handler returned, as the accept
+// loop does once the connection is done.
+func (p *Proxy) logHandlerError(err error) {
+	if err == nil || err == io.EOF {
+		return
+	}
+	// Network closed errors are expected when client closes connection (e.g., app shutdown)
+	// Only log as error if it's not a shutdown/network closed error
+	fields := handlerErrorFields(err)
+	if isShutdownError(err) || isNetworkClosedErr(err) {
+		p.logger.Debug("failed to handle the client connection (connection closed)", fields...)
+	} else {
+		if errors.As(err, new(reportedMiss)) {
+			p.logger.Debug("failed to handle the client connection: no mock matched its call", fields...)
+		} else if refusedLocally(err) {
+			p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", fields...)
+		} else if !errors.Is(err, context.Canceled) {
+			p.logger.Error("failed to handle the client connection", fields...)
 		}
 	}
 }
@@ -4824,7 +4831,7 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 						n := discarded.Add(1)
 						if n == 1 || n%100 == 0 {
 							p.logger.Debug("discarding mock error outside active test",
-								zap.Error(err), zap.Int64("totalDiscarded", n))
+								append(parserErrorFields(err), zap.Int64("totalDiscarded", n))...)
 						}
 					}
 				}
@@ -4960,21 +4967,55 @@ func missSummaries(errs []error) (shapes, calls []string) {
 		}
 		// No report, no call to shape: the miss is named by its kind. Its
 		// text is whatever the parser said, which can quote the call (net/http
-		// quotes a malformed request line whole).
-		shapes = append(shapes, unshapedMiss(err))
+		// quotes a malformed header line whole).
+		shapes = append(shapes, errorKind(err))
 		calls = append(calls, err.Error())
 	}
 	return shapes, calls
 }
 
-// unshapedMiss names a miss that has no report by its kind: a ParserError's
-// type ("mock not found"), or the error's Go type.
-func unshapedMiss(err error) string {
+// errorKind names a parser's error, or a miss the proxy made of one, for a
+// line that may not carry its text: a ParserError's type ("mock not found"),
+// a miss's, or the error's Go type.
+func errorKind(err error) string {
 	var pe models.ParserError
 	if errors.As(err, &pe) {
 		return string(pe.ParserErrorType)
 	}
+	if isMockMiss(err) {
+		return string(models.ErrMockNotFound)
+	}
 	return fmt.Sprintf("%T", err)
+}
+
+// parserErrorFields are how a line logs a parser's error, or a miss the proxy
+// made of one: by its kind, and its text only as logcontent allows. The text
+// is whatever the parser said, which can quote the call it could not read
+// (net/http quotes a malformed header line whole, a decoder the packet).
+func parserErrorFields(err error) []zap.Field {
+	return []zap.Field{zap.String("error_kind", errorKind(err)), logcontent.String("error", err.Error())}
+}
+
+// parserFailed is a parser's MockOutgoing error as the connection's handler
+// returns it, so that the accept loop logs it as parserErrorFields does.
+type parserFailed struct{ err error }
+
+func (f parserFailed) Error() string { return f.err.Error() }
+
+func (f parserFailed) Unwrap() error { return f.err }
+
+// handlerErrorFields are how the accept loop logs what a connection's handler
+// returned: a parser's error as parserErrorFields does, anything else whole.
+func handlerErrorFields(err error) []zap.Field {
+	var failed parserFailed
+	if errors.As(err, &failed) {
+		return parserErrorFields(failed.err)
+	}
+	var missed reportedMiss
+	if errors.As(err, &missed) {
+		return parserErrorFields(missed.err)
+	}
+	return []zap.Field{zap.Error(err)}
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
@@ -5224,13 +5265,13 @@ func (p *Proxy) SendError(err error) {
 		default:
 		}
 		p.noteMissLost(err, missLostDrainStopped)
-		p.logger.Error("keploy's error drain stopped; a call no mock answered could not be reported to its test", zap.Error(err))
+		p.logger.Error("keploy's error drain stopped; a call no mock answered could not be reported to its test", parserErrorFields(err)...)
 		return
 	}
 	select {
 	case p.errChannel <- err:
 	default:
-		p.logger.Error("Error channel is full, dropping error", zap.Error(err))
+		p.logger.Error("Error channel is full, dropping error", parserErrorFields(err)...)
 		p.noteMissLost(err, missLostNoDrainChanFull)
 	}
 }
@@ -5272,9 +5313,9 @@ func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
 	}
 	quiet := provenswitch.On() && isMockMiss(err)
 	if quiet {
-		logger.Debug("failed to mock the outgoing message", zap.Error(err))
-	} else {
-		utils.LogError(logger, err, "failed to mock the outgoing message")
+		logger.Debug("failed to mock the outgoing message", parserErrorFields(err)...)
+	} else if !errors.Is(err, context.Canceled) {
+		logger.Error("failed to mock the outgoing message", parserErrorFields(err)...)
 	}
 	// A miss its parser reported before answering the app (an HTTP 502) is
 	// queued for its test already; queued again it would count twice, the
@@ -5285,7 +5326,7 @@ func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
 	if quiet {
 		return reportedMiss{err}
 	}
-	return err
+	return parserFailed{err}
 }
 
 // mismatchLog is how the mock-mismatch line is logged: Warn, so a replay
@@ -5379,7 +5420,7 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		}
 		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", parserErrorFields(err)...)
 	}
 	p.SendError(proxyErr)
 }
