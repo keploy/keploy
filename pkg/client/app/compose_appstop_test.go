@@ -444,7 +444,7 @@ func TestComposeAwaitTeardownHoldsTheRunAfterKeploysStop(t *testing.T) {
 		{"keploy did not stop the app, which runs on", false, false, nil, cancelled, nil, composeNoWait, 0},
 		{"keploy did not stop the app, which compose only created", false, false, exited("created", 0), cancelled, nil, composeNoWait, 0},
 		{"the app exited on its own, before the watch took it", false, false, exited("exited", 3), context.Background(), nil, composeHaltCame, 1},
-		{"the app halted", true, true, nil, cancelled, nil, composeNoWait, 0},
+		{"the app halted", true, true, nil, cancelled, nil, composeNoWait, 1},
 		{"keploy's teardown ends the run", true, false, nil, cancelled, nil, composeTeardownCame, 0},
 		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 0},
 	} {
@@ -458,7 +458,7 @@ func TestComposeAwaitTeardownHoldsTheRunAfterKeploysStop(t *testing.T) {
 			if got := a.composeAwaitTeardown(tc.ctx, tc.halt, func() { ended++ }); got != tc.want || ended != tc.ended {
 				t.Fatalf("composeAwaitTeardown = %d, ending the run %d times; want %d, %d", got, ended, tc.want, tc.ended)
 			}
-			if tc.ended > 0 {
+			if tc.app != nil && tc.ended > 0 {
 				if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
 					t.Fatalf("the halt kept is %+v; want the app's exit, code 3", h)
 				}
@@ -599,5 +599,143 @@ func TestComposeHaltEndRunsOnce(t *testing.T) {
 	rec.mu.Unlock()
 	if lists != 1 || downs != 0 {
 		t.Fatalf("the project was stopped %d times (and taken down %d); want once, stopped", lists, downs)
+	}
+}
+
+// fakeAppDocker answers the inspect of the app's container with running,
+// and records its start (StartComposeApp), which makes it run. With locked
+// set, it says each call it gets while the stop lock is free.
+type fakeAppDocker struct {
+	docker.Client
+	mu      sync.Mutex
+	running bool
+	started int
+	locked  func(call string)
+}
+
+// underStopLock is a fakeAppDocker's locked: it fails t when a docker call
+// runs while a's stop lock is free, made outside it.
+func underStopLock(t *testing.T, a *App) func(string) {
+	return func(call string) {
+		if a.composeApp.stopMu.TryLock() {
+			a.composeApp.stopMu.Unlock()
+			t.Errorf("%s ran outside the stop lock", call)
+		}
+	}
+}
+
+func (d *fakeAppDocker) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	if d.locked != nil {
+		d.locked("the inspect")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st := &container.State{Status: "exited", Running: d.running}
+	if d.running {
+		st.Status = "running"
+	}
+	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: st}}, nil
+}
+
+func (d *fakeAppDocker) ContainerStart(context.Context, string, container.StartOptions) error {
+	if d.locked != nil {
+		d.locked("the start")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.running = true
+	d.started++
+	return nil
+}
+
+func (d *fakeAppDocker) startedCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.started
+}
+
+// The watch decides an exit under the stop lock, as keploy's stops and starts
+// are made: a die that comes as keploy's stop is under way (the lock held,
+// stopping not yet set) is keploy's once the stop is through; one that
+// comes as keploy starts the app again finds it running once the start is
+// through. Unserialised, the first was a halt beside a clean stop, and the
+// second a halt of an app keploy had just started.
+func TestComposeAppDiedIsDecidedUnderTheStopLock(t *testing.T) {
+	die := events.Message{Type: events.ContainerEventType, Action: events.ActionDie, Actor: events.Actor{ID: "app", Attributes: map[string]string{"exitCode": "137"}}}
+	for _, tc := range []struct {
+		name  string
+		while func(a *App, d *fakeAppDocker)
+	}{
+		{"keploy's stop under way", func(a *App, _ *fakeAppDocker) { a.composeApp.stopping.Store(true) }},
+		{"keploy's start under way", func(a *App, d *fakeAppDocker) {
+			d.mu.Lock()
+			d.running = true
+			d.mu.Unlock()
+			a.composeApp.stopping.Store(false)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &fakeAppDocker{}
+			a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+			a.composeApp.stopMu.Lock()
+			decided := make(chan bool, 1)
+			go func() { decided <- a.composeAppDied(context.Background(), die) }()
+			tc.while(a, d)
+			a.composeApp.stopMu.Unlock()
+			if <-decided || a.composeAppHalt() != nil {
+				t.Fatal("an exit that came as keploy's stop or start was under way was taken for a halt")
+			}
+		})
+	}
+}
+
+// keploy's start of the app, the watch's decision of an exit, and the run's
+// reading of how its up ended are each made under the stop lock: the docker
+// calls they make run while it is held.
+func TestTheComposeAppsTransitionsAreMadeUnderTheStopLock(t *testing.T) {
+	die := events.Message{Type: events.ContainerEventType, Action: events.ActionDie, Actor: events.Actor{ID: "app", Attributes: map[string]string{"exitCode": "1"}}}
+	t.Run("keploy's start", func(t *testing.T) {
+		d := &fakeAppDocker{}
+		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		d.locked = underStopLock(t, a)
+		a.composeApp.stopping.Store(true)
+		if err := a.StartComposeApp(context.Background()); err != nil || d.startedCount() != 1 || a.composeApp.stopping.Load() {
+			t.Fatalf("the start: %v, started %d, stopping %v", err, d.startedCount(), a.composeApp.stopping.Load())
+		}
+	})
+	t.Run("the watch's decision", func(t *testing.T) {
+		d := &fakeAppDocker{}
+		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		d.locked = underStopLock(t, a)
+		if !a.composeAppDied(context.Background(), die) {
+			t.Fatal("an exit keploy did not ask for was not a halt")
+		}
+	})
+	t.Run("the run's reading", func(t *testing.T) {
+		d := &fakeAppDocker{}
+		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		d.locked = underStopLock(t, a)
+		if got := a.composeAwaitTeardown(context.Background(), nil, func() {}); got != composeHaltCame {
+			t.Fatalf("an up that returned on the app's own exit ended %d; want a halt (%d)", got, composeHaltCame)
+		}
+	})
+}
+
+// The run decides how its up ended under the stop lock too: an up that
+// returned as keploy's stop of the app was under way (the app already gone,
+// stopping not yet set) is keploy's stop once the stop is through, held for
+// keploy's teardown, not a halt.
+func TestComposeAwaitTeardownIsDecidedUnderTheStopLock(t *testing.T) {
+	d := &fakeAppDocker{}
+	a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.composeApp.stopMu.Lock()
+	ended := make(chan composeTeardownWait, 1)
+	go func() { ended <- a.composeAwaitTeardown(ctx, nil, func() {}) }()
+	a.composeApp.stopping.Store(true)
+	a.composeApp.stopMu.Unlock()
+	cancel()
+	if got := <-ended; got != composeTeardownCame {
+		t.Fatalf("an up that returned on keploy's stop under way ended %d; want held for keploy's teardown (%d)", got, composeTeardownCame)
 	}
 }
