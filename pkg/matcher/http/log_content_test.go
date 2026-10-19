@@ -132,24 +132,90 @@ func TestAbsMatch_TheBodyComparedBySizeIsNotLogged(t *testing.T) {
 // An assertion that fails is logged by its name and the header it judged,
 // not the values it compared, unless KEPLOY_LOG_CONTENT is set.
 func TestAssertionMatch_AFailedAssertionIsLoggedWithoutTheValuesItCompared(t *testing.T) {
-	for want, assertion := range map[string]map[models.AssertionType]interface{}{
-		"json_equal assertion failed":      {models.JsonEqual: true},
-		"json_contains assertion failed":   {models.JsonContains: map[string]interface{}{"note": canary + "-expected"}},
-		"header_equal assertion failed":    {models.HeaderEqual: map[string]interface{}{"X-Note": canary + "-expected"}},
-		"header_contains assertion failed": {models.HeaderContains: map[string]interface{}{"X-Note": canary + "-expected"}},
-		"header_matches assertion failed":  {models.HeaderMatches: map[string]interface{}{"X-Note": "^" + canary + "-expected$"}},
+	const unreadable = " assertion cannot be read, so it fails the test case: its value is not "
+	for _, tc := range []struct {
+		name, want string
+		assertion  map[models.AssertionType]interface{}
+	}{
+		{"json_equal", "json_equal assertion failed", map[models.AssertionType]interface{}{models.JsonEqual: true}},
+		{"json_contains", "json_contains assertion failed", map[models.AssertionType]interface{}{models.JsonContains: map[string]interface{}{"note": canary + "-expected"}}},
+		{"header_equal", "header_equal assertion failed", map[models.AssertionType]interface{}{models.HeaderEqual: map[string]interface{}{"X-Note": canary + "-expected"}}},
+		{"header_contains", "header_contains assertion failed", map[models.AssertionType]interface{}{models.HeaderContains: map[string]interface{}{"X-Note": canary + "-expected"}}},
+		{"header_matches", "header_matches assertion failed", map[models.AssertionType]interface{}{models.HeaderMatches: map[string]interface{}{"X-Note": "^" + canary + "-expected$"}}},
+		// regexp's error quotes the pattern it cannot compile.
+		{"header_matches, a pattern that does not compile", "header_matches assertion failed",
+			map[models.AssertionType]interface{}{models.HeaderMatches: map[string]interface{}{"X-Note": "(" + canary + "-expected"}}},
+		// A value of a shape the assertion does not take is still the
+		// expected body or header value: the line names its type.
+		{"status_code_in, a string", "status_code_in" + unreadable + "a list of status codes",
+			map[models.AssertionType]interface{}{models.StatusCodeIn: canary + "-expected"}},
+		{"header_equal, a list", "header_equal" + unreadable + "a map of header names to values",
+			map[models.AssertionType]interface{}{models.HeaderEqual: []interface{}{"X-Note: " + canary + "-expected"}}},
+		{"header_equal, a string", "header_equal" + unreadable + "a map of header names to values",
+			map[models.AssertionType]interface{}{models.HeaderEqual: canary + "-expected"}},
+		{"header_contains, a list", "header_contains" + unreadable + "a map of header names to substrings",
+			map[models.AssertionType]interface{}{models.HeaderContains: []interface{}{"X-Note: " + canary + "-expected"}}},
+		{"header_matches, a list", "header_matches" + unreadable + "a map of header names to patterns",
+			map[models.AssertionType]interface{}{models.HeaderMatches: []interface{}{"X-Note: ^" + canary + "-expected$"}}},
+		{"json_contains, a list", "json_contains" + unreadable + "a JSON object, as a map or a string",
+			map[models.AssertionType]interface{}{models.JsonContains: []interface{}{canary + "-expected"}}},
+		{"json_contains, a JSON array", "json_contains" + unreadable + "a JSON object, as a map or a string",
+			map[models.AssertionType]interface{}{models.JsonContains: `["` + canary + `-expected"]`}},
+		{"header_exists, a string", "header_exists: unsupported format, expected slice or map",
+			map[models.AssertionType]interface{}{models.HeaderExists: canary + "-expected"}},
 	} {
-		t.Run(want, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			logtest.Each(t, func(t *testing.T, on bool) {
 				logger, logs := logtest.Observe()
-				tc := canaryCase("a", canary+"-recorded")
-				tc.Assertions = assertion
+				recorded := canaryCase("a", canary+"-recorded")
+				recorded.Assertions = tc.assertion
 				actual := canaryCase("a", canary+"-live").HTTPResp
-				if pass, _ := AssertionMatch(tc, &actual, logger); pass {
+				if pass, _ := AssertionMatch(recorded, &actual, logger); pass {
 					t.Fatal("an answer that differs passed the assertion")
 				}
-				logtest.Check(t, logs, canary, on, want)
+				logtest.Check(t, logs, canary, on, tc.want)
 			})
 		})
 	}
+}
+
+// A header_matches pattern that does not compile still says why with the
+// switch off: regexp's reason, without the pattern its error quotes.
+func TestAssertionMatch_APatternThatDoesNotCompileSaysWhy(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		recorded := canaryCase("a", canary+"-recorded")
+		recorded.Assertions = map[models.AssertionType]interface{}{models.HeaderMatches: map[string]interface{}{"X-Note": "(" + canary}}
+		actual := canaryCase("a", canary+"-live").HTTPResp
+		if pass, _ := AssertionMatch(recorded, &actual, logger); pass {
+			t.Fatal("a pattern that does not compile passed")
+		}
+		const line = "header_matches assertion failed"
+		logtest.Check(t, logs, canary, on, line)
+		want := "error parsing regexp: missing closing )"
+		if on {
+			want += ": `(" + canary + "`"
+		}
+		if got := logs.FilterMessage(line).All()[0].ContextMap()["error"]; got != want {
+			t.Fatalf("the line says %q, want %q", got, want)
+		}
+	})
+}
+
+// Two curl commands whose headers differ are logged by the headers' names,
+// not their values, unless KEPLOY_LOG_CONTENT is set.
+func TestCompareCurl_TheHeadersAreLoggedByName(t *testing.T) {
+	curl := func(v string) string {
+		return `curl --request GET \
+  --url http://app/notes \
+  --header 'Authorization: Bearer ` + v + `' \
+  --header 'Cookie: session=` + v + `'`
+	}
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		if CompareCurl(curl(canary+"-a"), curl(canary+"-b"), logger) {
+			t.Fatal("two curl commands whose headers differ matched")
+		}
+		logtest.Check(t, logs, canary, on, "test case curl headers are not equal")
+	})
 }

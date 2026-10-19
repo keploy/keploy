@@ -1147,6 +1147,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if err == nil {
 			return resp, nil
 		}
+		err = requestError(err)
 		refused := isPreResponseConnRefused(err)
 		// A reset or drop is asked about too: at a published port where the
 		// app listens only on 127.0.0.1 in its container, docker accepts the
@@ -1184,6 +1185,49 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		case <-time.After(connRefusedRetryBackoff * time.Duration(attempt+1)):
 		}
 	}
+}
+
+// sentRequestFields are the fields of the line that says a test's request is
+// sent: its method, path and header names, and with logcontent on the whole
+// request as fmt prints it. That print is no content to fingerprint with the
+// switch off: it holds the request's pointers, which differ on every run.
+func sentRequestFields(req *http.Request) []zap.Field {
+	fields := []zap.Field{zap.String("method", req.Method), zap.String("path", req.URL.Path), zap.Array("header_names", utils.SortedKeys(req.Header))}
+	if logcontent.On() {
+		fields = append(fields, zap.String("request", fmt.Sprintf("%v", req)))
+	}
+	return fields
+}
+
+// requestError is client.Do's error for a test's request as keploy logs and
+// returns it. net/http's *url.Error names the request's whole URL, and the
+// error is logged where the request fails and again by the replay that sent
+// it, so it names the URL as loggedURL does. Its Op and cause are kept, so
+// what reads it (isPreResponseConnRefused, IsTransportConnReset, errors.Is)
+// reads it as before.
+func requestError(err error) error {
+	uerr, ok := err.(*url.Error) // client.Do's error is always one
+	if !ok {
+		return err
+	}
+	if u := loggedURL(uerr.URL); u != uerr.URL {
+		return &url.Error{Op: uerr.Op, URL: u, Err: uerr.Err}
+	}
+	return err
+}
+
+// loggedURL is a test request's URL, or its request URI, as keploy's lines
+// and the errors they print name it: whole with logcontent on, and otherwise
+// without its query and fragment, whose values are the application's. The
+// path is kept, as the lines that name a call by its method and path keep it.
+func loggedURL(u string) string {
+	if logcontent.On() {
+		return u
+	}
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		return u[:i]
+	}
+	return u
 }
 
 // answerDoesNotDecode is the error of a test request whose answer came back,
@@ -1248,12 +1292,11 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.describe(prepared.Request.Method+" "+loggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
 	if ce := logger.Check(zap.DebugLevel, "Sending request to user app"); ce != nil {
-		ce.Write(zap.String("method", prepared.Request.Method), zap.String("path", prepared.Request.URL.Path),
-			logcontent.String("request", fmt.Sprintf("%v", prepared.Request)))
+		ce.Write(sentRequestFields(prepared.Request)...)
 	}
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
@@ -1362,12 +1405,11 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.describe(prepared.Request.Method+" "+loggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
 	if ce := logger.Check(zap.DebugLevel, "Sending streaming request to user app"); ce != nil {
-		ce.Write(zap.String("method", prepared.Request.Method), zap.String("path", prepared.Request.URL.Path),
-			logcontent.String("request", fmt.Sprintf("%v", prepared.Request)))
+		ce.Write(sentRequestFields(prepared.Request)...)
 	}
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
@@ -1390,7 +1432,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
 	if provenswitch.On() {
-		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
+		streamCfg.Target = prepared.Request.Method + " " + loggedURL(prepared.Request.URL.RequestURI())
 	}
 
 	logger.Debug("detected HTTP streaming response",
@@ -4851,7 +4893,9 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		finalTarget = net.JoinHostPort(host, port)
 	}
 
-	logger.Debug("Final resolved target", zap.String("address", net.JoinHostPort(host, port)), logcontent.String("target", finalTarget))
+	if ce := logger.Check(zap.DebugLevel, "Final resolved target"); ce != nil {
+		ce.Write(zap.String("address", net.JoinHostPort(host, port)), logcontent.String("target", finalTarget))
+	}
 	return finalTarget, nil
 }
 

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -47,6 +48,26 @@ func TestCaptureWindow_TheDiscardedMissesAreNamedWithoutTheValuesTheySent(t *tes
 		shapes, _ := logs.FilterMessage(msg).All()[0].ContextMap()["call_shapes"].([]interface{})
 		if len(shapes) != 1 || shapes[0] != "COM_QUERY SELECT body FROM notes WHERE tag = ?" {
 			t.Fatalf("the line names the calls %v, want their shapes", shapes)
+		}
+	})
+}
+
+// A miss with no report has no call to shape: the line names it by its kind,
+// not by its parser's text, which can quote the call (net/http quotes a
+// malformed request line whole), unless KEPLOY_LOG_CONTENT is set.
+func TestCaptureWindow_AMissWithoutAReportIsNamedByItsKind(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		p := &Proxy{logger: logger, errChannel: make(chan error, 16)}
+		miss := models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: fmt.Errorf("malformed HTTP request %q", "GET /reset?token="+canary)}
+		p.pendingMockErrors.addBounded(miss, maxPendingMockErrors)
+		p.BeginTestErrorCapture()
+		const msg = "mock mismatches made while no test's capture window was open are not attributed to a test"
+		logtest.Check(t, logs, canary, on, msg)
+		shapes, _ := logs.FilterMessage(msg).All()[0].ContextMap()["call_shapes"].([]interface{})
+		if len(shapes) != 1 || shapes[0] != string(models.ErrMockNotFound) {
+			t.Fatalf("the line names the miss %v, want its kind %q", shapes, models.ErrMockNotFound)
 		}
 	})
 }

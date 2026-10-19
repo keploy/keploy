@@ -1557,7 +1557,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							},
 						},
 					}
-					logger.Debug("Returning synthetic OK for unmocked control/DDL", logcontent.String("query", q))
+					if ce := logger.Check(zap.DebugLevel, "Returning synthetic OK for unmocked control/DDL"); ce != nil {
+						ce.Write(logcontent.String("query", q))
+					}
 
 					return generic, true, nil, nil
 				}
@@ -1898,10 +1900,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				decodeCtx.PreparedStatements[prepareOkRespCopy.StatementID] = &prepareOkRespCopy
 				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
 				decodeCtx.StmtIDToQuery[prepareOkRespCopy.StatementID] = sp.Query
-				logger.Debug("Recorded runtime PREP mapping with new statement ID",
-					zap.Uint32("original_stmt_id from mock ", originalStmtID),
-					zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
-					logcontent.String("query", strings.TrimSpace(sp.Query)))
+				// Checked first: it runs for every PREPARE replayed.
+				if ce := logger.Check(zap.DebugLevel, "Recorded runtime PREP mapping with new statement ID"); ce != nil {
+					ce.Write(zap.Uint32("original_stmt_id from mock ", originalStmtID),
+						zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
+						logcontent.String("query", strings.TrimSpace(sp.Query)))
+				}
 			}
 		}
 	}
@@ -2169,10 +2173,13 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	// from before. This tier is identifier-blind and is deliberately left as it
 	// was — it is not what this change is about, and it never returns a
 	// definitive match.
+	// The parser's error quotes the statement where it stopped ("syntax
+	// error at position 37 near 'x'"), a literal as often as not, so it is
+	// logged as the statement is.
 	actualSignature, err := live.structure()
 	if err != nil {
 		if ce := log.Check(zap.DebugLevel, "failed to get actual query structure"); ce != nil {
-			ce.Write(logcontent.String("actual Query", actualQuery), zap.Error(err))
+			ce.Write(logcontent.String("actual Query", actualQuery), logcontent.String("error", err.Error()))
 		}
 		return false, 0, expectedQuery
 	}
@@ -2180,7 +2187,7 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	expectedSignature, err := getQueryStructureCached(expectedQuery)
 	if err != nil {
 		if ce := log.Check(zap.DebugLevel, "failed to get expected query structure"); ce != nil {
-			ce.Write(logcontent.String("expected Query", expectedQuery), zap.Error(err))
+			ce.Write(logcontent.String("expected Query", expectedQuery), logcontent.String("error", err.Error()))
 		}
 		return false, 0, expectedQuery
 	}

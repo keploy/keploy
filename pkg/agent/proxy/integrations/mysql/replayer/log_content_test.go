@@ -71,6 +71,12 @@ func TestMatchCommand_AQuerysComparisonLinesCarryNoStatement(t *testing.T) {
 			[]string{"failed to get actual query structure"}},
 		"a recorded write that does not parse": {insertOf(canary), []string{insertOf(canary) + " ,,"},
 			[]string{"failed to get expected query structure"}},
+		// The parser's error quotes the token it stopped at: here, the
+		// literal.
+		"a write that does not parse at a literal": {"INSERT INTO notes (body) VALUES (5 '" + canary + "')", []string{insertOf("x")},
+			[]string{"failed to get actual query structure"}},
+		"a recorded write that does not parse at a literal": {insertOf("x"), []string{"INSERT INTO notes (body) VALUES (5 '" + canary + "')"},
+			[]string{"failed to get expected query structure"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			logtest.Each(t, func(t *testing.T, on bool) {
@@ -145,6 +151,34 @@ func TestMatchCommand_APreparesLinesCarryNoStatement(t *testing.T) {
 	})
 }
 
+// A command the matcher answers costs a Debug level that is off nothing for
+// the switch: the lines it logs for every command check their level before
+// they build a logcontent field. Each case runs a line the canary tests above
+// hold: the synthetic OK's and the recorded PREPARE's.
+func TestMatchCommand_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
+	logger := logtest.Disabled()
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	const stmt = "SELECT body FROM notes WHERE tag = ?"
+	for name, tc := range map[string]struct {
+		req   func() mysql.Request
+		mocks func() []*models.Mock
+	}{
+		"a synthetic OK": {func() mysql.Request { return comQueryReq("SET @note = 'x'") },
+			func() []*models.Mock { return []*models.Mock{readbackMock("unrelated", "SELECT 1", "x", zeroTime())} }},
+		"a recorded PREPARE": {func() mysql.Request { return stmtPrepareReq(stmt) },
+			func() []*models.Mock { return []*models.Mock{preparedMock("mock-prepare", "0", 7, stmt, zeroTime())} }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.CheckDisabledCost(t, func() {
+				db := &fakeMockDb{session: tc.mocks()}
+				if _, ok, _, err := matchCommand(ctx, logger, tc.req(), db, newDecodeCtx(), nil, nil); err != nil || !ok {
+					t.Fatalf("the command was not answered (%v)", err)
+				}
+			})
+		})
+	}
+}
+
 // noteRows is a recorded answer of one row that holds the canary; header nil
 // is a recording whose packet has none, which cannot be encoded.
 func noteRows(name, sql string, header bool) *models.Mock {
@@ -205,6 +239,38 @@ func TestReplay_TheCommandPhasesLinesCarryNoRowOrCommand(t *testing.T) {
 			"Encoded Packet",
 			"No response for the command",
 			"failed to encode the response")
+	})
+}
+
+// A command the replay serves, and one it sends no answer to, cost a Debug
+// level that is off nothing for the switch: the command phase's lines check
+// their level before they build a logcontent field.
+func TestReplay_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
+	const served = "SELECT body FROM notes WHERE id = 1"
+	db := &fakeMockDb{session: []*models.Mock{nativeHandshake(), noteRows("mock-rows", served, true)}}
+	client, agentEnd := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = Replay(context.Background(), logtest.Disabled(), agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, db, models.OutgoingOptions{})
+	}()
+	t.Cleanup(func() { _ = client.Close(); _ = agentEnd.Close(); <-done })
+	c := mysqlClient{t: t, c: client}
+	c.greetAndAnswer("app", mysql.Native)
+	if ok := c.read(); len(ok) == 0 || ok[0] != mysql.OK {
+		t.Fatalf("the client read %x after its handshake; want the recorded OK", ok)
+	}
+	longData := append(binary.LittleEndian.AppendUint32([]byte{mysql.COM_STMT_SEND_LONG_DATA}, 1), 0, 0, 'x')
+	logtest.CheckDisabledCost(t, func() {
+		// The query's answer comes after the long data is taken: the
+		// command phase reads one command at a time.
+		c.send(0, longData)
+		c.send(0, append([]byte{mysql.COM_QUERY}, served...))
+		for {
+			if p := c.read(); len(p) > 0 && p[0] == 0xfe {
+				break
+			}
+		}
 	})
 }
 

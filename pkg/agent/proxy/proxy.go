@@ -4958,10 +4958,23 @@ func missSummaries(errs []error) (shapes, calls []string) {
 			calls = append(calls, r.ActualSummary)
 			continue
 		}
-		shapes = append(shapes, err.Error())
+		// No report, no call to shape: the miss is named by its kind. Its
+		// text is whatever the parser said, which can quote the call (net/http
+		// quotes a malformed request line whole).
+		shapes = append(shapes, unshapedMiss(err))
 		calls = append(calls, err.Error())
 	}
 	return shapes, calls
+}
+
+// unshapedMiss names a miss that has no report by its kind: a ParserError's
+// type ("mock not found"), or the error's Go type.
+func unshapedMiss(err error) string {
+	var pe models.ParserError
+	if errors.As(err, &pe) {
+		return string(pe.ParserErrorType)
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.

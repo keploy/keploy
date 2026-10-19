@@ -290,11 +290,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			matched := ""
-			if stub != nil {
-				matched = stub.Name
+			// Checked first, as "Decoded HTTP request headers" is: it runs
+			// for every request replayed.
+			if ce := h.Logger.Check(zap.DebugLevel, "after matching the http request"); ce != nil {
+				matched := ""
+				if stub != nil {
+					matched = stub.Name
+				}
+				ce.Write(zap.Any("isMatched", ok), zap.String("mock", matched), logcontent.Any("stub", stub), zap.Error(err))
 			}
-			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.String("mock", matched), logcontent.Any("stub", stub), zap.Error(err))
 
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch

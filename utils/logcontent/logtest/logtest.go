@@ -8,6 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"math"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -74,6 +77,54 @@ func Check(t testing.TB, logs *observer.ObservedLogs, canary string, on bool, wa
 			t.Fatalf("with the switch on, the line %q does not carry the canary", m)
 		}
 	}
+}
+
+// Disabled is a logger whose Debug level is off, as a default run's console
+// is: a line at Debug costs it only what its fields cost to build.
+func Disabled() *zap.Logger {
+	return zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zapcore.InfoLevel))
+}
+
+// CheckDisabledCost fails t when run, which logs through Disabled, allocates
+// more with the switch off than with it on. A logcontent field that is built
+// before its line's level is checked costs a disabled line an allocation
+// that zap's own field does not, so a hot path's line must check the level
+// first. Each side is the least of a few measures, and a whole allocation
+// per run apart: another goroutine's allocations only add to a measure, and
+// a run whose own allocations vary does not move its average by one.
+//
+// It skips under -race, where sync.Pool drops what is put back at random, so
+// a run's allocations are not its code's.
+func CheckDisabledCost(t testing.TB, run func()) {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("allocations are not counted under -race: sync.Pool drops items at random there")
+	}
+	cost := func(on bool) float64 {
+		defer logcontent.Set(on)()
+		least := math.Inf(1)
+		for range 5 {
+			least = min(least, allocsPerRun(50, run))
+		}
+		return least
+	}
+	if off, on := cost(false), cost(true); off-on >= 0.5 {
+		t.Fatalf("with Debug off, a run allocates %.2f times with the switch off and %.2f with it on: a line builds a logcontent field before its level is checked", off, on)
+	}
+}
+
+// allocsPerRun is testing.AllocsPerRun's measure, not rounded down: two
+// averages a fraction apart may round to two counts.
+func allocsPerRun(runs int, f func()) float64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	f()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return float64(after.Mallocs-before.Mallocs) / float64(runs)
 }
 
 func encode(t testing.TB, e observer.LoggedEntry) string {

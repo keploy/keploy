@@ -246,7 +246,12 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return models.NewMockMismatchError(baseErr, report)
 			}
 
-			logger.Debug("Matched the command with the mock", zap.String("response_type", packetType(&resp.PacketBundle)), logcontent.Any("mock", resp))
+			// Checked first: it runs for every command replayed, and a
+			// logcontent field costs a line whose level is off an
+			// allocation that zap.Any's does not.
+			if ce := logger.Check(zap.DebugLevel, "Matched the command with the mock"); ce != nil {
+				ce.Write(zap.String("response_type", packetType(&resp.PacketBundle)), logcontent.Any("mock", resp))
+			}
 
 			// Handle prepared statement cleanup for COM_STMT_CLOSE
 			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {

@@ -3,9 +3,11 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strconv"
 	"strings"
@@ -874,7 +876,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 			default:
 				pass = false
-				logger.Error("header_exists: unsupported format, expected slice or map", zap.Any("value", value))
+				logger.Error("header_exists: unsupported format, expected slice or map", logcontent.Any("value", value))
 			}
 
 		case models.HeaderMatches:
@@ -898,7 +900,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 						zap.String("header", header),
 						logcontent.String("pattern", pattern),
 						logcontent.String("actual", act),
-						zap.Error(err),
+						patternError(err),
 					)
 				}
 			}
@@ -967,10 +969,30 @@ var testSuiteAssertions = map[string]bool{
 	"graphql_error_message_contains": true, "graphql_data_not_null": true,
 }
 
+// patternError is a header_matches pattern's compile error as its line logs
+// it. regexp's error quotes the pattern, an expected header value, so with
+// logcontent off the line says only what is wrong with it ("missing closing
+// )").
+func patternError(err error) zap.Field {
+	var se *syntax.Error
+	switch {
+	case err == nil:
+		return zap.Skip()
+	case logcontent.On():
+		return zap.Error(err)
+	case errors.As(err, &se):
+		return zap.String("error", "error parsing regexp: "+string(se.Code))
+	}
+	return logcontent.String("error", err.Error())
+}
+
 // logUnreadableAssertion says that an assertion's value is not of the shape it
-// takes, so it fails the test case rather than judge against nothing.
+// takes, so it fails the test case rather than judge against nothing. The
+// value is an expected body or header value of the wrong shape: the line
+// names its type, which is what is wrong with it, and the value itself only
+// as logcontent allows.
 func logUnreadableAssertion(logger *zap.Logger, name models.AssertionType, value interface{}, want string) {
-	logger.Error(string(name)+" assertion cannot be read, so it fails the test case: its value is not "+want, zap.Any("value", value))
+	logger.Error(string(name)+" assertion cannot be read, so it fails the test case: its value is not "+want, logcontent.Any("value", value))
 }
 
 func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error) {

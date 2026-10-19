@@ -260,6 +260,41 @@ func TestVariables_TheBoundLineCarriesNoValue(t *testing.T) {
 	})
 }
 
+// A call replay serves costs a Debug level that is off nothing for the
+// switch: the lines decodeHTTP logs for every call check their level before
+// they build a logcontent field.
+func TestDecodeHTTP_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
+	h := &HTTP{Logger: logtest.Disabled()}
+	logtest.CheckDisabledCost(t, func() {
+		db := &mockMemDb{mocks: []*models.Mock{canaryMock("mock-served", "/profile", canary+"-q", nil)},
+			updateUnFilteredReturn: true, deleteFilteredReturn: true}
+		app, proxy := tcpPair(t)
+		done := runDecode(t, proxy, func(ctx context.Context) error {
+			return h.decodeHTTP(ctx, []byte(canaryCall("GET")), proxy, nil, db, models.OutgoingOptions{})
+		})
+		if resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("the call was not served (%v)", err)
+		}
+		// Its own end, not the app's: an app's close is read as a short
+		// wait for more (proxy/util.ReadBuffConn), on every run.
+		_ = proxy.Close()
+		<-done
+	})
+}
+
+// A variable a call binds costs a Debug level that is off nothing for the
+// switch, as decodeHTTP's lines do.
+func TestVariables_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &HTTP{Logger: logtest.Disabled()}
+	logtest.CheckDisabledCost(t, func() {
+		db := &varDb{perTest: createAndReadBack("rec-1")}
+		if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"live-9","item":"pen"}`)); !ok {
+			t.Fatal("the create was not answered")
+		}
+	})
+}
+
 // A miss served from the real dependency is logged by its method and path,
 // not its query's values, unless KEPLOY_LOG_CONTENT is set.
 func TestServeOnMiss_TheServedLineCarriesNoQuery(t *testing.T) {

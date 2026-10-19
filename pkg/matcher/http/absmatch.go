@@ -487,7 +487,7 @@ func CompareCurl(curl1, curl2 string, logger *zap.Logger) bool {
 	hres := []models.HeaderResult{}
 	ok := matcher.CompareHeaders(pkg.ToHTTPHeader(headers1), pkg.ToHTTPHeader(headers2), &hres, curlHeaderNoise)
 	if !ok {
-		logger.Debug("test case curl headers are not equal", zap.Any("curlHeaderResult", hres))
+		logger.Debug("test case curl headers are not equal", zap.Array("curl1HeaderNames", utils.SortedKeys(headers1)), zap.Array("curl2HeaderNames", utils.SortedKeys(headers2)), logcontent.Any("curlHeaderResult", hres))
 		return false
 	}
 	return true

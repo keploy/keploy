@@ -2,6 +2,7 @@ package wire
 
 import (
 	"context"
+	"encoding/hex"
 	"net"
 	"testing"
 
@@ -41,6 +42,32 @@ func TestEncodeToBinary_TheEncodedPacketLineCarriesNoRow(t *testing.T) {
 			t.Fatal(err)
 		}
 		logtest.Check(t, logs, canary, on, "Encoded Packet")
+	})
+}
+
+// A binary result set's final packet, an OK in place of the EOF, can carry
+// the server's info text: it is logged as its length and fingerprint, unless
+// KEPLOY_LOG_CONTENT is set.
+func TestEncodeToBinary_TheFinalResponseLineCarriesNoInfo(t *testing.T) {
+	info := []byte(canary)
+	final := append([]byte{byte(7 + len(info)), 0x00, 0x00, 0x05, 0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, info...)
+	logtest.Each(t, func(t *testing.T, on bool) {
+		client, decodeCtx := pipeCtx(t, models.MODE_TEST)
+		rs := &mysql.BinaryProtocolResultSet{
+			ColumnCount:   0,
+			FinalResponse: &mysql.GenericResponse{Type: "OK", Data: final},
+		}
+		logger, logs := logtest.Observe()
+		bundle := &mysql.PacketBundle{Header: &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1, SequenceID: 1}, Type: "BinaryProtocolResultSet"}, Message: rs}
+		if _, err := EncodeToBinary(context.Background(), logger, bundle, client, decodeCtx); err != nil {
+			t.Fatal(err)
+		}
+		const line = "Writing final response packet for BinaryProtocolResultSet"
+		logtest.Check(t, logs, canary, on, line)
+		// With the switch on, in hex, as it was.
+		if got := logs.FilterMessage(line).All()[0].ContextMap()["final_response_hex"]; on && got != hex.EncodeToString(final) {
+			t.Fatalf("with the switch on, the line logs the packet as %v, want its hex", got)
+		}
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -124,9 +125,16 @@ func EncodeBinaryResultSet(ctx context.Context, logger *zap.Logger, resultSet *m
 	// Write the final response (EOF or OK-replacing-EOF) if present
 	if resultSet.FinalResponse != nil && (utils.IsEOFPacket(resultSet.FinalResponse.Data) || utils.IsOKReplacingEOF(resultSet.FinalResponse.Data)) {
 		if logger.Core().Enabled(zap.DebugLevel) {
+			// An OK that replaces the EOF can carry the server's info and
+			// session-state text: in hex with logcontent on, as Bytes logs
+			// it otherwise.
+			final := logcontent.Bytes("final_response", resultSet.FinalResponse.Data)
+			if logcontent.On() {
+				final = zap.String("final_response_hex", fmt.Sprintf("%x", resultSet.FinalResponse.Data))
+			}
 			logger.Debug("Writing final response packet for BinaryProtocolResultSet",
 				zap.Int("final_response_length", len(resultSet.FinalResponse.Data)),
-				zap.String("final_response_hex", fmt.Sprintf("%x", resultSet.FinalResponse.Data)),
+				final,
 				zap.Bool("is_ok_replacing_eof", utils.IsOKReplacingEOF(resultSet.FinalResponse.Data)))
 		}
 		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
