@@ -702,6 +702,23 @@ func (b *incomingBacklog) pendingBefore(before time.Time) string {
 
 func (b *incomingBacklog) progress() uint64 { return b.built.Load() }
 
+// StopAsked is the latest instant a recording's stop asked about
+// (BacklogBefore), the zero time before any did. What is noted as being
+// built after a stop asked (BuildingTestCase) was not told to it: a test case
+// from that instant or before it that comes after the stop heard "clear" is
+// lost once the stop has ended its stream. So the gRPC ingress stamps a read
+// that ends a call after this instant, when its clock is within its wait's
+// bound of it.
+func (m *SyncMockManager) StopAsked() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	if n := m.incoming.asked.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
 // BuildingTestCase notes a test case whose response came at resp being built
 // by the ingress, and returns the func that says it is done: handed to the
 // stream's queue, or given up. A recording's stop waits on it
