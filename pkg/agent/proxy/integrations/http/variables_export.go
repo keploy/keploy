@@ -137,3 +137,17 @@ func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call Vari
 	}
 	return VariableResult{Outcome: VariableServed, Served: served}, nil
 }
+
+// StrictFits are the recordings of pool that are this very call under the
+// proven switch (S1), in pool's order, as the HTTP parser's strict pass reads
+// them (strictCompare): every request field outside the run's request noise
+// (NewRequestNoise), a SigV4 signature by its grammar (region, service and
+// signed headers compared; access key id, date and signature not). For
+// another parser of HTTP mocks, whose recordings are held to the same rule
+// (the SQS parser's exact pass), which serves one with its own consume. ctx
+// has the call's destination pinned (PinLiveDestination).
+func (h *HTTP) StrictFits(ctx context.Context, call VariableCall, noise RequestNoise, pool []*models.Mock) ([]*models.Mock, error) {
+	input := call.req()
+	fits, _, err := strictCompare(ctx, input, liveDestination(ctx, input), pool, h.newStrictNoise(noise.Header, noise.Body, noise.URL))
+	return fits, err
+}

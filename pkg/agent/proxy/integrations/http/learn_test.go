@@ -1902,9 +1902,10 @@ func TestLearnMatchRefusesAnIdPickedFromAnEarlierAnswersHeaderNames(t *testing.T
 }
 
 // Noise learned on a SigV4 Authorization (its signature changes every run)
-// excuses its signature only: a later replay leaves a call signed with
-// another access key, region, service or set of signed headers to the
-// strict matcher, which compares those parts (founder decision 25).
+// excuses nothing the strict matcher compares: a later replay leaves a call
+// signed in another region, for another service or over another set of
+// signed headers to it, which compares those parts (founder decision 25);
+// another access key, as a CI's, is not compared (SF-3) and is served.
 func TestLearnedMatchLeavesASigV4CredentialToTheStrictMatcher(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	body := `{"id":"a-1"}`
@@ -1915,8 +1916,8 @@ func TestLearnedMatchLeavesASigV4CredentialToTheStrictMatcher(t *testing.T) {
 		wantServed bool
 	}{
 		{"learned, signed again in the same scope", true, sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), true},
-		{"not learned, another access key", false, sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), false},
-		{"learned, another access key", true, sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), false},
+		{"not learned, another access key", false, sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), true},
+		{"learned, another access key", true, sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), true},
 		{"learned, another region", true, sigV4("AKID", "20261015", "eu-west-1", "s3", signed, sig(2)), false},
 		{"learned, another service", true, sigV4("AKID", "20261015", "us-east-1", "sqs", signed, sig(2)), false},
 		{"learned, other signed headers", true, sigV4("AKID", "20261015", "us-east-1", "s3", "host;x-amz-date", sig(2)), false},
@@ -1970,7 +1971,7 @@ func TestTheVariablePassLeavesASigV4CredentialToTheStrictMatcher(t *testing.T) {
 		served bool
 	}{
 		{"the same scope, a new signature", sigV4("AKID", "20261014", "us-east-1", "dynamodb", "host;x-amz-content-sha256", sig(3)), true},
-		{"another access key", sigV4("OTHER", "20261014", "us-east-1", "dynamodb", "host;x-amz-content-sha256", sig(3)), false},
+		{"another access key (not compared)", sigV4("OTHER", "20261014", "us-east-1", "dynamodb", "host;x-amz-content-sha256", sig(3)), true},
 		{"another region", sigV4("AKID", "20261014", "eu-west-1", "dynamodb", "host;x-amz-content-sha256", sig(3)), false},
 		{"another service", sigV4("AKID", "20261014", "us-east-1", "sqs", "host;x-amz-content-sha256", sig(3)), false},
 		{"other signed headers", sigV4("AKID", "20261014", "us-east-1", "dynamodb", "host", sig(3)), false},
@@ -1983,9 +1984,10 @@ func TestTheVariablePassLeavesASigV4CredentialToTheStrictMatcher(t *testing.T) {
 	}
 }
 
-// Noise learned on a presigned URL's signing parameters excuses its
-// signature and signing time only: a later replay leaves a call whose
-// X-Amz-Credential names another key or region to the strict matcher.
+// Noise learned on a presigned URL's signing parameters excuses nothing the
+// strict matcher compares: a later replay leaves a call whose
+// X-Amz-Credential names another region to it; another key is not compared
+// (SF-3).
 func TestLearnedMatchLeavesAPresignedCredentialToTheStrictMatcher(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	q := func(cred, date, sig string) string {
@@ -2000,7 +2002,7 @@ func TestLearnedMatchLeavesAPresignedCredentialToTheStrictMatcher(t *testing.T) 
 		{"learned, the same scope", true, "AKID%2F20261015%2Fus-east-1%2Fs3%2Faws4_request", true},
 		{"not learned, another region", false, "AKID%2F20261015%2Feu-west-1%2Fs3%2Faws4_request", false},
 		{"learned, another region", true, "AKID%2F20261015%2Feu-west-1%2Fs3%2Faws4_request", false},
-		{"learned, another access key", true, "OTHER%2F20261015%2Fus-east-1%2Fs3%2Faws4_request", false},
+		{"learned, another access key", true, "OTHER%2F20261015%2Fus-east-1%2Fs3%2Faws4_request", true},
 	} {
 		rec := recorded("get", q("AKID%2F20261015%2Fus-east-1%2Fs3%2Faws4_request", "20261015T101010Z", sig(1)), map[string]string{}, "")
 		rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
