@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -640,8 +641,11 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // a kept-alive app never makes again in F is one). Each is read once. The
 // paired mock is not one, and neither is an exchange the learn step served
 // (earlier): its leaves and fixed parts, with what F saw at each, are read
-// instead (earlierOf). dc keeps each mock's text for the test.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) []learn.Raw {
+// instead (earlierOf). dc keeps each mock's text for the test, read with its
+// answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
+// disk and that cannot be read back, and why; no mock is then returned, since
+// what it held cannot be told.
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) (out []learn.Raw, err error) {
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -656,18 +660,29 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 		read[id] = true
 		return true
 	}
-	var out []learn.Raw
+	add := func(m *models.Mock, served bool) error {
+		r, err := dc.ReadRaw(m, served)
+		if err != nil {
+			return fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+		}
+		out = append(out, r)
+		return nil
+	}
 	for _, m := range served {
 		if m != nil && !leafed[m.Name] && once(m) {
-			out = append(out, dc.RawOf(m, true))
+			if err := add(m, true); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, m := range visible {
 		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) && once(m) {
-			out = append(out, dc.RawOf(m, false))
+			if err := add(m, false); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // orderMiss is the order rule's reading, under the proven switch outside
@@ -757,15 +772,37 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				continue
 			}
 			commit()
-			tracker.Served(test, n.servedExchange(picked, rec, recordedParts(picked), liveShape, live, out, own))
+			if e, ok := n.servedExchange(picked, nil, rec, recordedParts(picked), liveShape, live, out, own); ok {
+				tracker.Served(test, e)
+			}
 			return out, nil, nil
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
 			earlier := earlierThan(earlier, m)
-			learned := learn.Classify(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier,
-				earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows), ofPairedTest(sc.visible, m, windows)...), ofPairedTest(stagedOf(mockDb), m, windows)...), earlier), respLeaves(m.Spec.HTTPResp))
-			plan, why := learnPlan(tracker, test, m, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			// The paired mock with its answer: one the agent parked on disk
+			// (diskmocks.go) holds none until it is read back, and an echo
+			// in an answer read as empty would be learned as noise, never
+			// compared again. One that cannot be read back is learned
+			// nothing from.
+			answered, err := withResponse(m)
+			if err != nil {
+				// keploy's own store failed, not the request: no reason
+				// of the learn step's.
+				h.Logger.Warn("the learn step cannot read back a recorded answer the agent parked on disk; learning nothing from this call",
+					zap.String("mock", m.Name), zap.Error(err))
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of "+m.Name+", so it cannot tell whether the answer echoes what changed"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
+			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows), ofPairedTest(sc.visible, m, windows)...), ofPairedTest(stagedOf(mockDb), m, windows)...), earlier)
+			if err != nil {
+				h.Logger.Warn("the learn step cannot read back an earlier recorded answer the agent parked on disk; learning nothing from this call",
+					zap.String("mock", m.Name), zap.Error(err))
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
+			learned := learn.Classify(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp))
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
@@ -791,7 +828,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			tracker.Served(test, n.servedExchange(m, c.Shape, recordedParts(m), liveShape, live, out, own))
+			if e, ok := n.servedExchange(m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
+				tracker.Served(test, e)
+			}
 			return out, nil, nil
 		}
 		miss := &learnMiss{res: res, pool: sc.http}
@@ -1100,13 +1139,26 @@ func leafPaths(ls []learn.Leaf) []string {
 // (withExcused). Its path and query are read without keploy.yml's url noise:
 // what a pattern masks is still a value the app sent there, and a later call
 // that carries it carries a value that flowed.
-func (n learnNoise) servedExchange(m *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, live httpParts, served *models.Mock, own bool) learn.Earlier {
+//
+// recorded is m with its recorded answer (one the agent parked on disk read
+// back), or nil to read it back here: read as empty, the values it held would
+// be no earlier place of the test. ok is false when it cannot be read back:
+// the exchange is then not kept leaf by leaf, and a later request reads m as
+// a raw mock (earlierRaw), which learns nothing when it cannot read it
+// either.
+func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, live httpParts, served *models.Mock, own bool) (learn.Earlier, bool) {
+	if recorded == nil {
+		var err error
+		if recorded, err = withResponse(m); err != nil {
+			return learn.Earlier{}, false
+		}
+	}
 	if len(n.url) > 0 {
 		unmasked := n
 		unmasked.url = nil
 		rec, liveShape = unmasked.shape(rp, destOf(live, rp)), unmasked.shape(live, sameDest)
 	}
-	return withExcused(earlierOf(m, rec, liveShape, served, own), n, live, rp)
+	return withExcused(earlierOf(recorded, rec, liveShape, served, own), n, live, rp), true
 }
 
 // earlierOf is the exchange F just served from m (own: one of the test's own
