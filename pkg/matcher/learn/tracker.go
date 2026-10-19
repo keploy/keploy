@@ -316,8 +316,9 @@ func drifted(e Earlier) bool {
 // same for every call that uses it, no other variable's in the test
 // (variables are named per test), and none of reserved (the test case's
 // template keys). ok is false when that test has ended. A place of the run's
-// (RunName) is named the run's variable's name, whatever n. A nil tracker,
-// which knows of no test, names a variable by its place alone.
+// (RunName) is named the run's variable's name, whatever n; ok is false when
+// reserved holds that name (RunName). A nil tracker, which knows of no test,
+// names a variable by its place alone.
 func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (name string, ok bool) {
 	if t == nil {
 		name = varName(place)
@@ -330,7 +331,7 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	defer t.mu.Unlock()
 	key := mock + "\x00" + place
 	if name, ok := t.runNames[key]; ok {
-		return name, true
+		return name, !reserved[name]
 	}
 	if t.epoch != n {
 		return "", false
@@ -352,33 +353,40 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 // runPrefix begins the name of a run's variable: "run-session". A test's
 // variable is named by its place alone, so a run's name, given once for the
 // whole set when a test first uses the value, collides with none in any
-// later test; a test case's template keys are the test's own, and one of
-// this form would be read as the run's.
+// later test. A test case's template keys are the test's own, and hold no
+// '-' (templates.IsKey): none is a run's name. One given from elsewhere that
+// is cannot be renamed in its test, since the run's name is the set's (its
+// start-up's bind carries it): the place is refused there (RunName).
 const runPrefix = "run-"
 
 // RunName names the variable bound at place of mock, an exchange of the run
 // (Earlier.Run): one name for the whole set, which no test's variable takes,
-// and none a test of the set took before it.
-func (t *Tracker) RunName(mock, place string, reserved map[string]bool) string {
+// and none a test of the set took before it. reserved are the running test's
+// template keys: the name takes none of them when it is first given, and ok
+// is false when it was given earlier and reserved holds it, so that test
+// refuses the place rather than read its own key as the run's variable. A
+// nil tracker, which keeps no set, names it by its place alone, apart from
+// reserved.
+func (t *Tracker) RunName(mock, place string, reserved map[string]bool) (string, bool) {
 	if t == nil {
 		name := runPrefix + varName(place)
 		for i := 2; reserved[name]; i++ {
 			name = runPrefix + varName(place) + "-" + strconv.Itoa(i)
 		}
-		return name
+		return name, true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	key := mock + "\x00" + place
 	if name, ok := t.runNames[key]; ok {
-		return name
+		return name, !reserved[name]
 	}
 	if t.runNames == nil {
 		t.runNames, t.runTaken = map[string]string{}, map[string]bool{}
 	}
 	name := t.free(runPrefix+varName(place), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
-	return name
+	return name, true
 }
 
 // free is a name beginning with base that none of reserved, the run's names

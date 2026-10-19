@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/templates"
 )
 
 // sent is an exchange served while no test is open (the start-up's): a test's
@@ -20,7 +21,7 @@ func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	tr.Served(0, sent("mock-1", t0, "body.auth_time", "body.auth_time", "1792000000", "1792000777"))
 	tr.Served(0, sent("mock-2", t0, "body.status", "body.status", "ok", "ok"))
-	run := tr.RunName("mock-1", "body.auth_time", nil)
+	run, _ := tr.RunName("mock-1", "body.auth_time", nil)
 
 	for i := 0; i < 2; i++ {
 		tr.Begin()
@@ -49,7 +50,7 @@ func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Run {
 		t.Fatalf("the next set's start-up is not the run's: %+v", earlier)
 	}
-	if again := tr.RunName("mock-1", "body.auth_time", nil); again != run {
+	if again, _ := tr.RunName("mock-1", "body.auth_time", nil); again != run {
 		t.Fatalf("the next set's run's variable is named %q, want %q again", again, run)
 	}
 }
@@ -62,19 +63,54 @@ func TestTheRunsVariableTakesNoTemplateKey(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
 	tr.Begin()
-	run := tr.RunName("mock-1", "body._id", nil)
+	run, _ := tr.RunName("mock-1", "body._id", nil)
 	tr.End()
 	tr.Begin()
 	n, _, _, _ := tr.Test()
 	reserved := map[string]bool{"_id": true}
-	if again := tr.RunName("mock-1", "body._id", reserved); again != run || reserved[run] {
+	if again, _ := tr.RunName("mock-1", "body._id", reserved); again != run || reserved[run] {
 		t.Fatalf("the run's variable is %q in a test that reserves _id, %q before", again, run)
 	}
 	if own, _ := tr.Name(n, "mock-5", "body._id", reserved); own == run || reserved[own] {
 		t.Fatalf("the test's own variable is %q, next to the run's %q and its reserved _id", own, run)
 	}
-	if name := (*Tracker)(nil).RunName("mock-1", "body._id", map[string]bool{"run-_id": true}); name != "run-_id-2" {
+	if name, _ := (*Tracker)(nil).RunName("mock-1", "body._id", map[string]bool{"run-_id": true}); name != "run-_id-2" {
 		t.Fatalf("a nil tracker names the run's variable %q, want run-_id-2", name)
+	}
+}
+
+// A run's variable has one name for the whole set, which its start-up's
+// bind carries: a test whose test case reserves that very name (gives a value
+// under it) cannot use it there, so the place is refused in that test, never
+// renamed, and named as before in every other. keploy test's template keys
+// never take one (they hold no '-'); a name given from elsewhere may.
+func TestARunsNameATestReservesIsRefusedThere(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	tr.Begin()
+	run, ok := tr.RunName("mock-1", "body._id", nil)
+	if !ok || run != "run-_id" {
+		t.Fatalf("the run's variable is named %q (%v), want run-_id", run, ok)
+	}
+	if templates.IsKey(run) {
+		t.Fatalf("the run's name %q is a template key keploy test can give", run)
+	}
+	tr.End()
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	reserved := map[string]bool{run: true}
+	if name, ok := tr.Name(n, "mock-1", "body._id", reserved); ok {
+		t.Fatalf("a test that reserves %q named the run's place %q", run, name)
+	}
+	if name, ok := tr.RunName("mock-1", "body._id", reserved); ok {
+		t.Fatalf("a test that reserves %q named the run's variable %q", run, name)
+	}
+	tr.End()
+	tr.Begin()
+	n, _, _, _ = tr.Test()
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("the next test names the run's place %q (%v), want %q", name, ok, run)
 	}
 }
 
@@ -90,7 +126,7 @@ func TestTheRunsVariableTakesNoTestsName(t *testing.T) {
 	own, _ := tr.Name(n1, "mock-5", "body.docs.msgs.0._id", nil)
 	tr.End()
 	tr.Begin()
-	run := tr.RunName("mock-1", "body.docs.msgs.0._id", nil)
+	run, _ := tr.RunName("mock-1", "body.docs.msgs.0._id", nil)
 	n2, _, _, _ := tr.Test()
 	later, _ := tr.Name(n2, "mock-7", "body.docs.msgs.0._id", nil)
 	if own != "_id" || run == own || later == run {
