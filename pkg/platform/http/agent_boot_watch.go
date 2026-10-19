@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -291,6 +292,7 @@ func readContainerBoot(cli *engineCLI, name string) func(context.Context) (utils
 		if err != nil {
 			return utils.BootProgress{}, false
 		}
+		knowContainer(name)
 		b, err := firstTarFile(out)
 		if err != nil {
 			return utils.BootProgress{}, false
@@ -311,7 +313,11 @@ func readContainerBoot(cli *engineCLI, name string) func(context.Context) (utils
 // look.
 func containerRunning(cli *engineCLI, name string) func(context.Context) bool {
 	return runningByStatus(func(ctx context.Context) ([]byte, error) {
-		return cli.stdout(ctx, "inspect", "-f", "{{.State.Status}}", name)
+		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}}", name)
+		if err == nil {
+			knowContainer(name)
+		}
+		return out, err
 	})
 }
 
@@ -353,21 +359,85 @@ func engineSaysGone(out []byte, err error) bool {
 // it has ended, with a code no one can read any more.
 const containerGone = -1
 
+// AN AGENT'S CONTAINER THE ENGINE DOES NOT KNOW IS GONE ONLY ONCE IT WAS THERE.
+//
+// The engine says the same of a container that is not there yet as of one
+// that is not there any more: `docker inspect` of a container docker compose
+// has not created, and of one removed, both answer "No such object". Taking
+// the first for the second ended the release of the app (watchAgent's
+// endOnExit) with "the keploy agent's container is gone (removed)" at its
+// first look, for an agent whose container compose was still creating:
+// enterprise's headless test and replay stack ask for the release as soon as
+// they have started the project, and a loaded host takes more than a look to
+// create its containers (atg-with-mocks, pipeline 12070). So a container the
+// engine does not know is taken for gone only once keploy has known it to be
+// there: the engine answered a look at it (an inspect, a `cp` out of it), or
+// the agent answered from it (an answer at the address the Setup that named
+// it gave it, which only its container serves). Until then it is one still to
+// come, and the release waits for it as any wait for an agent's start waits
+// for a container the engine does not run yet: however long that takes, until
+// whatever else it waits on ends it (ctx: the project's exit, the user's stop).
+
+// knownContainers is the agent containers this process has known to be there,
+// by name. A name is a Setup's own (agentUtils.GenerateRandomContainerName),
+// and the Setup that picks it forgets what was known of the name before
+// (nameAgentContainer), so what is known of one is of its container.
+var knownContainers sync.Map // name -> struct{}
+
+// containerAt is the agent container each agent address (host:port) is
+// served from, as the Setup that named it set it up there.
+var containerAt sync.Map // host:port -> name
+
+// knowContainer notes that container name is there.
+func knowContainer(name string) {
+	if name != "" {
+		knownContainers.Store(name, struct{}{})
+	}
+}
+
+// containerKnown reports whether container name has been known to be there.
+func containerKnown(name string) bool {
+	_, ok := knownContainers.Load(name)
+	return ok
+}
+
+// answeredAt notes an answer of the agent at host (host:port): its container,
+// if keploy named the one served there, is there.
+func answeredAt(host string) {
+	if v, ok := containerAt.Load(host); ok {
+		knowContainer(v.(string))
+	}
+}
+
+// nameAgentContainer makes name the container of the agent this client sets
+// up, at its agent address: nothing is known of it yet, and an answer at that
+// address is an answer from it.
+func (a *AgentClient) nameAgentContainer(name string) {
+	knownContainers.Delete(name)
+	a.mu.Lock()
+	a.agentContainer = name
+	uri := a.conf.Agent.AgentURI
+	a.mu.Unlock()
+	if uri != "" {
+		containerAt.Store(agentHost(uri), name)
+	}
+}
+
 // containerExited reports whether container name has ended (docker inspect's
 // status is exited or dead: it will not run again unless something starts it
 // again), and its exit code; containerGone for one the engine says is not
-// there. It is asked only of an agent that has answered (watchAgent's
-// endOnExit), whose container was there: one that is gone will not answer
-// again.
+// there, once keploy has known it to be there (containerKnown): one the
+// engine has not created yet has not ended.
 func containerExited(cli *engineCLI, name string) func(context.Context) (int, bool) {
 	return func(ctx context.Context) (int, bool) {
 		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", name)
 		if err != nil {
-			if engineSaysGone(out, err) {
+			if engineSaysGone(out, err) && containerKnown(name) {
 				return containerGone, true
 			}
 			return 0, false
 		}
+		knowContainer(name)
 		f := strings.Fields(string(out))
 		if len(f) != 2 || (f[0] != "exited" && f[0] != "dead") {
 			return 0, false
@@ -638,8 +708,10 @@ func (a *AgentClient) WatchAgentStart(ctx context.Context) <-chan error {
 }
 
 // watchAgent is WatchAgentStart, ending also, with endOnExit, once the agent's
-// container has exited (watchStart's ended): a wait for an agent that answered
-// already, which a container that stopped will not answer again.
+// container has exited, or is gone once it was there (watchStart's ended): a
+// wait the agent's answer ends (the release of the app), which a container
+// that stopped will not give. It can begin before docker compose has created
+// that container, and waits for it then (containerKnown).
 func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan error {
 	a.mu.Lock()
 	container, run := a.agentContainer, a.run
