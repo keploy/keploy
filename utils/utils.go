@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -37,7 +38,9 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
 	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"helm.sh/helm/v3/pkg/strvals"
 )
 
@@ -164,18 +167,36 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta returns the metadata of the request
-func GetReqMeta(req *http.Request) map[string]string {
-	reqMeta := map[string]string{}
-	if req != nil {
-		// get request metadata
-		reqMeta = map[string]string{
-			"method": req.Method,
-			"url":    req.URL.String(),
-			"host":   req.Host,
-		}
+// ReqMeta is what a log line says of an HTTP request: its method, host and
+// path, which name the call, and its URL, whose query values are the
+// application's and so logged only as logcontent allows.
+type ReqMeta struct{ req *http.Request }
+
+// GetReqMeta returns the metadata of the request, for a log field.
+func GetReqMeta(req *http.Request) ReqMeta { return ReqMeta{req: req} }
+
+func (m ReqMeta) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	if m.req == nil {
+		return nil
 	}
-	return reqMeta
+	enc.AddString("method", m.req.Method)
+	enc.AddString("host", m.req.Host)
+	if m.req.URL != nil {
+		enc.AddString("path", m.req.URL.Path)
+		logcontent.String("url", m.req.URL.String()).AddTo(enc)
+	}
+	return nil
+}
+
+// HeaderNames is the names of h, sorted: what a log line says of headers
+// whose values it may not carry (logcontent).
+func HeaderNames[V any](h map[string]V) []string {
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {

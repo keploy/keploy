@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -65,7 +66,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
+			h.Logger.Debug("This is the complete request", logcontent.Bytes("request", reqBuf))
 
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
@@ -75,7 +76,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			h.Logger.Debug("Decoded HTTP request headers", zap.Any("headers", request.Header))
+			h.Logger.Debug("Decoded HTTP request headers", zap.Strings("header_names", utils.HeaderNames(request.Header)), logcontent.Any("headers", request.Header))
 			// Set the host header explicitly because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -123,10 +124,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			h.Logger.Debug("decodeHTTP debug logs for input",
 				zap.Any("method", input.method),
-				zap.Any("url", input.url),
-				zap.Any("header", input.header),
-				zap.Any("body", string(input.body)),
-				zap.Any("raw", string(input.raw)))
+				zap.String("path", input.url.Path),
+				logcontent.Any("url", input.url),
+				zap.Strings("header_names", utils.HeaderNames(input.header)),
+				logcontent.Any("header", input.header),
+				logcontent.Bytes("body", input.body),
+				logcontent.Bytes("raw", input.raw))
 
 			// Extract header noise from noise configuration.
 			// We make a shallow copy so that injecting default flaky headers
@@ -362,7 +365,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
+			matched := ""
+			if stub != nil {
+				matched = stub.Name
+			}
+			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.String("mock", matched), logcontent.Any("stub", stub), zap.Error(err))
 
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
@@ -415,7 +422,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.String("match_phase", report.MatchPhase),
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff),
+						logcontent.String("diff", report.Diff),
 						zap.String("next_step", report.NextSteps))
 				}
 
@@ -492,8 +499,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			responseString := string(respBytes)
-			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+			h.Logger.Debug("Mock Response sending back to client", logcontent.Bytes("response", respBytes))
 
 			_, err = clientConn.Write(respBytes)
 			if err != nil {
@@ -508,7 +514,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
-				h.Logger.Debug("This was the last response from the server:\n" + string(responseString))
+				h.Logger.Debug("This was the last response from the server", logcontent.Bytes("response", respBytes))
 				errCh <- nil
 				return
 			}

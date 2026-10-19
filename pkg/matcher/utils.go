@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -1167,7 +1168,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
+		utils.LogError(log, err, "cannot convert json string into json object", logcontent.String("json", s))
 		return nil, err
 	}
 	return result, nil

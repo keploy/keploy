@@ -14,6 +14,7 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -125,7 +126,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					zap.String("closest", report.ClosestMock),
 					zap.String("diff", report.Diff),
 					zap.String("next_step", report.NextSteps),
-					zap.Binary("preview", preview))
+					logcontent.Any("preview", preview))
 				errCh <- models.NewMockMismatchError(fmt.Errorf("generic: %w", models.ErrNoMockMatched), report)
 				return
 			}

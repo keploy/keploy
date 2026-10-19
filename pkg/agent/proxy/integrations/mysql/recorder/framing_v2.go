@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -426,7 +427,7 @@ func firstResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervis
 			return nil, framingLostAt(logger, sess, "the first packet of the %s response has sequence id 0 and is not an ERR", seq.what)
 		}
 		logger.Debug("V2: the server dropped the connection with an error of its own; its recording ends here",
-			zap.String("connID", sess.ClientConnID), zap.ByteString("err", buf[4:]))
+			zap.String("connID", sess.ClientConnID), logcontent.Bytes("err", buf[4:]))
 		return nil, errServerDropped
 	}
 	return buf, nil
@@ -847,7 +848,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 	case buf[3] == 0 && isServersOwnErr(buf):
 		h.release(decodeCtx, nil, time.Time{})
 		logger.Debug("V2: the server dropped the connection with an error of its own; its recording ends here",
-			zap.String("connID", sess.ClientConnID), zap.ByteString("err", buf[4:]))
+			zap.String("connID", sess.ClientConnID), logcontent.Bytes("err", buf[4:]))
 		return nil, errServerDropped
 	default:
 		err := framingLostAt(logger, sess, "the packet after the definitions of the %s response has sequence id %d and is neither its EOF, the next answer nor an ERR of the server's own", h.what, buf[3])

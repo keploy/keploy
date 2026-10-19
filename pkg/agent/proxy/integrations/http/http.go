@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -270,7 +271,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			}
 		}
 
-		h.Logger.Debug("This is the response body: " + string(respBody))
+		h.Logger.Debug("This is the response body", logcontent.Bytes("body", respBody))
 		//Set the content length to the headers.
 		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 	}
