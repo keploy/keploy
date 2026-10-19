@@ -2705,7 +2705,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	}
 	// A container that exits ends the wait through docker run's own exit
 	// (exited), which says why: the watch is not asked.
-	judged := watchStart(agentCtx, a.logger, read, running, nil, isDockerCmd)
+	judged := watchStart(agentCtx, a.logger, read, running, nil, isDockerCmd, false)
 
 	for {
 		select {
@@ -4000,18 +4000,31 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 	// (a CA setup failure, which the agent latches until it is started again),
 	// once its start fails or stops making progress, or once its container
 	// has exited.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	agentGone := a.watchAgent(ctx, true)
+	//
+	// The watch's verdict ends a request in flight too: an agent that takes
+	// a connection and never answers it holds the request, not the release.
+	parent := ctx
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if gone := a.watchAgent(ctx, true); gone != nil {
+		go func() {
+			select {
+			case err := <-gone:
+				cancel(fmt.Errorf("the keploy agent did not take its release of the application (/agent/ready): %w", err))
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	ticker := time.NewTicker(agentReadyRetryInterval)
 	defer ticker.Stop()
 	next := func() error {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-agentGone:
-			return fmt.Errorf("the keploy agent did not take its release of the application (/agent/ready): %w", err)
+			if parent.Err() != nil {
+				return parent.Err()
+			}
+			return context.Cause(ctx)
 		case <-ticker.C:
 			return nil
 		}

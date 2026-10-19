@@ -753,3 +753,54 @@ func TestMockStoreCleanup_SaysWhatIsLeftAndASecondInterruptEndsIt(t *testing.T) 
 		t.Fatalf("the cleanup returned %v, want models.ErrMocksNotWritten", err)
 	}
 }
+
+// watchCtxInstr is fakeInstr whose agent's start the watch follows and says
+// nothing of: it hands over the context the watch was given.
+type watchCtxInstr struct {
+	*fakeInstr
+	ctxs chan context.Context
+}
+
+func (w *watchCtxInstr) WatchAgentStart(ctx context.Context) <-chan error {
+	w.ctxs <- ctx
+	return nil
+}
+
+// A docker compose recording stops watching its agent's start once the
+// agent answers its health check, while the recording goes on: the watch
+// looks into the agent's container (docker inspect, docker cp) every second,
+// and has nothing left to judge.
+func TestStart_AComposeRecordingStopsWatchingItsAgentOnceItAnswers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	instr := &watchCtxInstr{fakeInstr: newFakeInstr(), ctxs: make(chan context.Context, 1)}
+	r := exitCodeRecorder(instr)
+	r.config.CommandType = string(utils.DockerCompose)
+	r.config.Agent.AgentURI = srv.URL + "/agent"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	var watch context.Context
+	select {
+	case watch = <-instr.ctxs:
+	case err := <-done:
+		t.Fatalf("Start returned %v before watching its agent's start", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the agent's start was not watched")
+	}
+	select {
+	case <-watch.Done():
+	case err := <-done:
+		t.Fatalf("Start returned %v before it stopped watching its agent", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the agent answered its health check, and its start was still watched")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Start returned %v: the watch ended with the recording, not once the agent answered", err)
+	default:
+	}
+	cancel()
+	<-done
+}
