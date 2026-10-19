@@ -349,8 +349,11 @@ if is_build "$RECORD_BIN"; then
     stated MySQL COM_STMT_CLOSE '.*' connection
 fi
 
-TOKEN_MISS='no matching mock for outgoing call.*POST /oauth/token'
-RATE_MISS="no matching mock for outgoing call.*SELECT v FROM settings WHERE k = 'tax_rate'"
+# The miss line names a call by its shape (actual_shape): a statement's
+# literals are written ?, and the call itself is logged as its length and
+# fingerprint (11).
+TOKEN_MISS='no matching mock for outgoing call.*"actual_shape": "POST /oauth/token"'
+RATE_MISS='no matching mock for outgoing call.*"actual_shape": "COM_QUERY SELECT v FROM settings WHERE k = \?"'
 judged=true
 is_build "$REPLAY_BIN" || judged=false
 
