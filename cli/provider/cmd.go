@@ -32,6 +32,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
@@ -400,6 +401,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// which must never decide an agent's switch.
 		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
+		// Internal orchestrator→agent flag: KEPLOY_LOG_CONTENT, which sudo
+		// drops on the way to a native agent (logcontent.AgentArgs). It only
+		// opts in: an agent started with the variable, as the agent container
+		// is, reads it itself.
+		cmd.Flags().Bool(logcontent.AgentFlag, false, "Internal: KEPLOY_LOG_CONTENT=1 of the keploy client that starts this agent, so its log lines carry the application's content. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(logcontent.AgentFlag)
 		// Internal orchestrator→agent flag: the Docker endpoint the client
 		// uses (its DOCKER_HOST), which sudo drops, for naming container
 		// destinations (containerkey.AgentArgs). Passed only under the proven
@@ -2176,6 +2183,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
 			setDockerHost(host)
+		}
+		logContent, err := cmd.Flags().GetBool(logcontent.AgentFlag)
+		if err != nil {
+			errMsg := "failed to read the log-content flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if logContent {
+			logcontent.OptIn()
 		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
