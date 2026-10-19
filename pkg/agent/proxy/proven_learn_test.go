@@ -1000,3 +1000,54 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 		t.Fatalf("learned %v; want body.processed_at", noise)
 	}
 }
+
+// (LEARN-vs-NOTOWNED) In record's full round under exact serving, a call
+// that is another test's recording exactly (a poll of test A's made in test
+// B's window) is that recording made elsewhere, not test B's own call
+// changed: it did not change. The learn step names it (NotOwned, which
+// judging reads to bake it into the worker scope, S12) before it pairs the
+// call with B's recording of the same operation: it never answers it with
+// B's recording, nor learns the value that tells the two apart as noise
+// there, which every later replay would then pass on.
+func TestALearnStepNamesACallMadeElsewhereBeforePairingIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	a := r3Mock("mock-a", now, "GET", "/v1/jobs?cursor=c1", "", `{"jobs":["j1"]}`)
+	b := r3Mock("mock-b", now.Add(time.Second), "GET", "/v1/jobs?cursor=c2", "", `{"jobs":[]}`)
+	for _, m := range []*models.Mock{a, b} {
+		m.DeriveLifetime()
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+		{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, []*models.Mock{a, b}, models.BaseTime, now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	mm.ServeExactTest("test-b", []*models.Mock{b})
+	p.ContinueTestErrorCapture() // test B begins
+
+	code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true},
+		"GET /v1/jobs?cursor=c1 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+	st := r3States(mm)
+	if _, noise := st["mock-b"].ReqBodyNoise["url.query.cursor"]; noise || code == http.StatusOK {
+		t.Fatalf("test A's call made in test B was answered from test B's recording (%d %s), which learned %v", code, body, st["mock-b"].ReqBodyNoise)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 1 || !misses[0].NotOwned || misses[0].ClosestMock != "mock-a" {
+		t.Fatalf("the call made elsewhere is a miss naming mock-a as not owned; misses %+v", misses)
+	}
+
+	// B's own call, made after it, is still B's recording's.
+	code, body = r3Send(t, p, mm, models.OutgoingOptions{Learn: true},
+		"GET /v1/jobs?cursor=c2 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+	if code != http.StatusOK || body != `{"jobs":[]}` {
+		t.Fatalf("test B's own call: %d %s", code, body)
+	}
+}

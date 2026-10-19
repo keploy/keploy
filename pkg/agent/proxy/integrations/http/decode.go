@@ -300,7 +300,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				n := h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				// A call the learn step named as a recording made elsewhere
+				// before pairing it (learnMiss.elsewhere) is that recording:
+				// it is no recording of the test's, answered or not.
+				namedElsewhere := lmiss != nil && lmiss.elsewhere != nil
+				n := 0
+				if !namedElsewhere {
+					n = h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				}
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
@@ -314,7 +321,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// recording: it did not change, so no learn-step reason
 				// explains it.
 				var elsewhere *models.Mock
-				if n == 0 && report != nil && provenswitch.On() {
+				switch {
+				case namedElsewhere && report != nil:
+					// Named once, by the learn step: a recording is named
+					// for one miss at most (integrations.StagedFinder).
+					elsewhere = lmiss.elsewhere
+				case n == 0 && report != nil && provenswitch.On():
 					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
 				}
 				if elsewhere != nil {

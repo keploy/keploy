@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -210,5 +211,57 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// (LEARN-vs-NOTOWNED) In record's full round (OutgoingOptions.Learn), the
+// HTTP parser's miss on a call the learn step named as another test's
+// recording before pairing it is that recording's (NotOwned), named once:
+// the store names a recording for one miss at most, so the miss's report
+// does not look it up again. The learn step decides the round's calls, so
+// its naming stands: no other reading of the test's answered recordings
+// (extraCall) makes the miss one call more than the test recorded.
+func TestALearnStepMissOnACallMadeElsewhereNamesItsRecordingOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const addr = "127.0.0.1:50001"
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &elsewhereDb{
+		learnDb:   &learnDb{perTest: []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2", "", nil, `{"jobs":[]}`)}},
+		elsewhere: []*models.Mock{learnRecorded("other-test-poll", -time.Second, "GET", "/v1/jobs?cursor=c1", "", nil, `{"jobs":["j1"]}`)},
+		answered:  []*models.Mock{learnRecorded("answered-poll", -2*time.Second, "GET", "/v1/jobs?cursor=c1", "", nil, `{"jobs":["j0"]}`)},
+	}
+	var reported error
+	ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err }), tr)
+	app, prox := net.Pipe()
+	defer app.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, models.OutgoingOptions{Learn: true})
+	}()
+	if _, err := io.WriteString(app, "GET /v1/jobs?cursor=c1 HTTP/1.1\r\nHost: api.test\r\nContent-Type: application/json\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatalf("the app got no answer: %v", err)
+	}
+	_ = resp.Body.Close()
+	_ = app.Close()
+	<-done
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("the app got %d for a call made elsewhere, want the miss's 502", resp.StatusCode)
+	}
+	var withReport interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(reported, &withReport) || withReport.MismatchReport() == nil {
+		t.Fatalf("the miss was reported as %v, with no mismatch report", reported)
+	}
+	if r := withReport.MismatchReport(); !r.NotOwned || r.ClosestMock != "other-test-poll" || r.Reason != "" || r.MissKind != "" || r.Recorded != 0 {
+		t.Fatalf("the miss names %q (not owned: %v, reason %q, kind %q of %d), want other-test-poll not owned", r.ClosestMock, r.NotOwned, r.Reason, r.MissKind, r.Recorded)
+	}
+	if len(db.consumed) != 0 {
+		t.Fatalf("the open test's recording was consumed for a call made elsewhere: %v", db.consumed)
 	}
 }

@@ -393,6 +393,10 @@ type learnMiss struct {
 	res     learn.Result
 	closest *models.Mock
 	pool    []*models.Mock
+	// elsewhere is the recording made elsewhere that the request is
+	// (notOwnedRecording), named, before the learn step paired it: the miss
+	// is that recording's. nil for any other miss.
+	elsewhere *models.Mock
 }
 
 // scope is what a request's scope offers: the HTTP candidates learn.Pair
@@ -888,6 +892,19 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
+			// A request that is a recording made elsewhere, exactly (another
+			// test's, or a worker-scope one whose place the run has not
+			// reached: notOwnedRecording), did not change: it is that
+			// recording, made where it was not recorded. It is named so
+			// before it is paired, as a miss on it is (S12, a2), so that no
+			// drift from this scope's recording of the same operation is
+			// learned or served for it. Only a request that matched no
+			// recording in scope exactly gets here: one that did is that
+			// recording's, as outside the learn step.
+			if elsewhere := h.madeElsewhere(ctx, input, mockDb, opts); elsewhere != nil {
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "it is "+elsewhere.Name+", a recording made elsewhere"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http, elsewhere: elsewhere}, nil
+			}
 			if stuck(m) {
 				return refused(m, res, sc)
 			}
@@ -992,6 +1009,16 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 		return r.Revision()
 	}
 	return 0
+}
+
+// madeElsewhere is the recording made elsewhere that a request of record's
+// full round is (notOwnedRecording), compared under the request noise opts
+// gives, as the miss's own diagnosis compares it; nil for none. It names the
+// recording for this request's miss: it is asked only of a request that is
+// then a miss.
+func (h *HTTP) madeElsewhere(ctx context.Context, input *req, mockDb integrations.MockMemDb, opts models.OutgoingOptions) *models.Mock {
+	rn := NewRequestNoise(h.Logger, opts)
+	return notOwnedRecording(ctx, input, mockDb, h.newStrictNoise(rn.Header, rn.Body, rn.URL))
 }
 
 // pairing is what the learn step learned on a paired mock: its noise, its

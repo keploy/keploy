@@ -2952,3 +2952,92 @@ func TestLearnMatchAViewSwappedWhileTheScopeWasReadIsLookedAtAgain(t *testing.T)
 		t.Fatalf("served %v miss %+v err %v lost %v; want answered on the second look", served, miss, err, db.lost)
 	}
 }
+
+// elsewhereDb is a learn store that also stages recordings its reads do not
+// show (integrations.StagedFinder), as exact serving keeps another test's,
+// and names each for one miss at most, as the mock manager does.
+type elsewhereDb struct {
+	*learnDb
+	elsewhere []*models.Mock
+	named     map[string]bool
+	// answered is what exact serving says the open test answered
+	// (integrations.ExactConsumedReader).
+	answered []*models.Mock
+}
+
+func (d *elsewhereDb) ConsumedTestMocks() []*models.Mock { return d.answered }
+
+func (d *elsewhereDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	for _, m := range d.elsewhere {
+		if m.Kind == kind && !d.named[m.Name] && match(m) {
+			if d.named == nil {
+				d.named = map[string]bool{}
+			}
+			d.named[m.Name] = true
+			return m.Name
+		}
+	}
+	return ""
+}
+
+// (LEARN-vs-NOTOWNED) A request that is another test's recording exactly is
+// that recording, made elsewhere: the learn step names it before it pairs the
+// request with the open test's recording of the same operation, and learns
+// and serves nothing for it. A request that is no recording made elsewhere
+// is paired as before; one the open test's own recording is exactly is that
+// recording's, whoever else recorded the same call.
+func TestLearnMatchNamesACallMadeElsewhereBeforePairingIt(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	other := func() *models.Mock {
+		return learnRecorded("other-test-poll", -time.Second, "GET", "/v1/jobs?cursor=c1", "", nil, `{"jobs":["j1"]}`)
+	}
+	own := func() *models.Mock {
+		return learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2", "", nil, `{"jobs":[]}`)
+	}
+
+	db := &elsewhereDb{learnDb: &learnDb{perTest: []*models.Mock{own()}}, elsewhere: []*models.Mock{other()}}
+	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/jobs?cursor=c1", "", nil), db, n, opts)
+	if err != nil || served != nil || miss == nil || miss.elsewhere == nil || miss.elsewhere.Name != "other-test-poll" {
+		t.Fatalf("served %v, miss %+v, err %v; want a miss naming other-test-poll", served, miss, err)
+	}
+	if len(db.consumed) != 0 || len(db.perTest) != 1 || len(db.perTest[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("the open test's recording was consumed (%v) or learned onto (%v) for a call made elsewhere", db.consumed, db.perTest)
+	}
+	if tr.Answered("own-poll") {
+		t.Fatal("the open test's recording is spent on a call made elsewhere")
+	}
+
+	// No recording elsewhere is the call: paired and learned, as before.
+	db = &elsewhereDb{learnDb: &learnDb{perTest: []*models.Mock{own()}}, elsewhere: []*models.Mock{other()}}
+	served, miss, err = h.learnMatch(ctx, live("GET", "/v1/jobs?cursor=c9", "", nil), db, n, opts)
+	if err != nil || served == nil || miss != nil {
+		t.Fatalf("a drifted call no recording elsewhere is: served %v, miss %+v, err %v", served, miss, err)
+	}
+	if len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"url.query.cursor": {}}) || db.named["other-test-poll"] {
+		t.Fatalf("consumed %v, named %v", db.consumed, db.named)
+	}
+
+	// Made elsewhere is read as a miss reads it, under keploy.yml's noise: a
+	// header it names is no difference from the recording elsewhere.
+	noisy := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": {"X-Request-Id": {}}}}
+	tr.Begin()
+	db = &elsewhereDb{learnDb: &learnDb{perTest: []*models.Mock{own()}},
+		elsewhere: []*models.Mock{learnRecorded("other-test-traced", -time.Second, "GET", "/v1/jobs?cursor=c1", "", map[string]string{"X-Request-Id": "rq-1"}, `{"jobs":["j1"]}`)}}
+	served, miss, err = h.learnMatch(ctx, live("GET", "/v1/jobs?cursor=c1", "", map[string]string{"X-Request-Id": "rq-2"}), db, h.newLearnNoise(noisy, nil, nil), noisy)
+	if err != nil || served != nil || miss == nil || miss.elsewhere == nil || miss.elsewhere.Name != "other-test-traced" {
+		t.Fatalf("under keploy.yml's header noise: served %v, miss %+v, err %v; want a miss naming other-test-traced", served, miss, err)
+	}
+
+	// The open test's own recording is the call exactly: it answers it, and
+	// the same call recorded elsewhere is not named.
+	tr.Begin()
+	db = &elsewhereDb{learnDb: &learnDb{perTest: []*models.Mock{own()}},
+		elsewhere: []*models.Mock{learnRecorded("other-test-same", -time.Second, "GET", "/v1/jobs?cursor=c2", "", nil, `{"jobs":["j9"]}`)}}
+	served, miss, err = h.learnMatch(ctx, live("GET", "/v1/jobs?cursor=c2", "", nil), db, n, opts)
+	if err != nil || served == nil || served.Name != "own-poll" || miss != nil || db.named["other-test-same"] {
+		t.Fatalf("served %v, miss %+v, err %v, named %v; want own-poll's answer", served, miss, err, db.named)
+	}
+}
