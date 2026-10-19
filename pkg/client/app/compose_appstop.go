@@ -138,6 +138,14 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 // composeAppDied reports whether m, a die event of the app's container, is
 // an exit keploy did not ask for, keeping it if so.
 func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
+	// Decided under stopMu, as keploy's stops and starts of the container
+	// are made: a stop is either not begun (the exit is a halt) or through
+	// (stopping says the exit was keploy's), and a start either not begun or
+	// through (the container runs). Unserialised, one exit got two answers:
+	// a halt to the watch and a clean stop to keploy's stop begun as the app
+	// died, or a halt of an app keploy had just started again.
+	a.composeApp.stopMu.Lock()
+	defer a.composeApp.stopMu.Unlock()
 	// An event of a run of the container that keploy has started again since
 	// is not this run's end.
 	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
@@ -209,18 +217,35 @@ const (
 // runs once). Left to the watch, the run ended as a clean stop, and its down
 // took keploy's agent down mid-drain, or the halt's exit code was lost.
 func (a *App) composeAwaitTeardown(ctx context.Context, halt <-chan struct{}, end func()) composeTeardownWait {
-	if a.composeApp.halted.Load() != nil {
+	// Decided under stopMu, as the watch decides (composeAppDied); end runs
+	// outside it: it stops the project, keploy's agent with it, which waits
+	// for the drain that keploy's own stop, waiting on stopMu, comes before.
+	a.composeApp.stopMu.Lock()
+	halted := a.composeApp.halted.Load() != nil
+	stopping := a.composeApp.stopping.Load()
+	var h composeHalt
+	exited := false
+	if !halted && !stopping {
+		if h, exited = a.composeAppExited(ctx); exited {
+			a.composeApp.halted.CompareAndSwap(nil, &h)
+		}
+	}
+	a.composeApp.stopMu.Unlock()
+	if halted {
+		// Kept by the watch, or by keploy's stop finding the app exited
+		// (which does not end the run itself): the project ends with it,
+		// once (end), not on the watch's event alone, which a daemon can
+		// drop under load.
+		end()
 		return composeNoWait
 	}
-	if !a.composeApp.stopping.Load() {
-		h, exited := a.composeAppExited(ctx)
+	if !stopping {
 		if !exited {
 			// Not an exit of the app (an up that failed leaves it only
 			// created, or the container cannot be read): the up's own end
 			// stands, as before.
 			return composeNoWait
 		}
-		a.composeApp.halted.CompareAndSwap(nil, &h)
 		a.logger.Info("the application's container exited, and keploy had not stopped it: ending the run",
 			zap.String("container", a.container), zap.Int("exitCode", h.exitCode))
 		end()
@@ -419,6 +444,11 @@ func (a *App) signalComposeApp(ctx context.Context, signal string) error {
 // the proven switch, after StopComposeApp: its exits are watched as a halt
 // again from then on.
 func (a *App) StartComposeApp(ctx context.Context) error {
+	// Under stopMu, as keploy's stops are made and the watch decides
+	// (composeAppDied): a die the watch takes during the start is told
+	// apart by the container running once it is through.
+	a.composeApp.stopMu.Lock()
+	defer a.composeApp.stopMu.Unlock()
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's
 	// calls are: a wedged daemon cannot hold the set for good.
 	sctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
