@@ -16,17 +16,22 @@ type Binding = models.VariableBinding
 // test, one test in keploy mock replay. A variable is bound once; a later binding of
 // the same name does not take (Bind). Safe for concurrent use.
 //
-// With KeepRun, a value bound before the first scope began (the run's
-// start-up, before its first test) is the run's: every scope sees it. What is
-// bound between two scopes, once one began, is forgotten when the next
-// begins.
+// A scope ends only when the next begins (Start, Reset): between two tests
+// the ended test's bindings stay in force, and a call of the gap reads and
+// binds in them (the proxy's gap rule).
+//
+// With KeepRun, a value bound before the set's first scope began (the run's
+// start-up, before its first test) is the run's: every scope of the set sees
+// it, until NewSet. What is bound once a scope began, in it or in the gap
+// after it, is that scope's, forgotten when the next begins.
 type Table struct {
 	mu   sync.Mutex
 	vals map[string]Binding
-	run  map[string]Binding
-	// open is whether a scope is open (Reset, Start; until Close), and began
-	// whether one has begun since the table was made or NewSet.
-	open  bool
+	// run are the run's bindings (KeepRun), and runOf the table whose run's
+	// bindings t reads as its run's too (ReadRunOf).
+	run   map[string]Binding
+	runOf *Table
+	// began is whether a scope has begun since the table was made or NewSet.
 	began bool
 	// keepRun: what is bound before the first scope began is the run's
 	// (KeepRun).
@@ -42,14 +47,67 @@ func (t *Table) lookup(name string) (Binding, bool) {
 	if b, ok := t.vals[name]; ok {
 		return b, true
 	}
+	if b, ok := t.run[name]; ok {
+		return b, true
+	}
+	if t.runOf != nil {
+		return t.runOf.runBinding(name)
+	}
+	return Binding{}, false
+}
+
+// runBinding is the run's binding of name, if any. It takes t.mu: a table
+// that reads t's run's (ReadRunOf) calls it under its own lock, and t never
+// locks that one.
+func (t *Table) runBinding(name string) (Binding, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	b, ok := t.run[name]
 	return b, ok
 }
 
+// runBindings is a copy of the run's bindings, nil for none. It takes t.mu,
+// as runBinding.
+func (t *Table) runBindings() map[string]Binding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.run) == 0 {
+		return nil
+	}
+	out := make(map[string]Binding, len(t.run))
+	for n, b := range t.run {
+		out[n] = b
+	}
+	return out
+}
+
+// runInForce is a copy of every run's binding t reads, its own and those of
+// the table it reads the run's of (ReadRunOf); nil for none. t.mu is held.
+func (t *Table) runInForce() map[string]Binding {
+	var from map[string]Binding
+	if t.runOf != nil {
+		from = t.runOf.runBindings()
+	}
+	if len(t.run) == 0 {
+		return from
+	}
+	if from == nil {
+		from = make(map[string]Binding, len(t.run))
+	}
+	for n, b := range t.run {
+		from[n] = b
+	}
+	return from
+}
+
 // all is every binding in force, the scope's over the run's. t.mu is held.
 func (t *Table) all() map[string]Binding {
-	out := make(map[string]Binding, len(t.vals)+len(t.run))
-	for n, b := range t.run {
+	run := t.runInForce()
+	if len(run) == 0 {
+		return t.vals
+	}
+	out := make(map[string]Binding, len(t.vals)+len(run))
+	for n, b := range run {
 		out[n] = b
 	}
 	for n, b := range t.vals {
@@ -88,18 +146,33 @@ func (t *Table) Bind(b Binding) (Binding, bool) {
 }
 
 // KeepRun makes what is bound before the first scope begins the run's, which
-// every scope sees, instead of the first scope's to forget. It is called
-// before the start-up binds anything.
+// every scope of the set sees, instead of the first scope's to forget. It is
+// called before the start-up binds anything (MockManager.NewVariableSet, as
+// a test set's mocks are set up), and holds until the table is dropped.
 func (t *Table) KeepRun() {
 	t.mu.Lock()
 	t.keepRun = true
 	t.mu.Unlock()
 }
 
-// put binds b in the open scope, or the run's when none has begun and the
-// table keeps the run's (KeepRun). t.mu is held.
+// ReadRunOf makes t read the run's bindings of from as its run's too, in
+// every scope: a table whose scope is a test's begun early (the next test's
+// calls in flight, answered in the gap before it) sees what the run's
+// start-up bound, as the test does once it begins. t keeps no run's of its
+// own from it: what t binds is its scope's. from never reads t's.
+func (t *Table) ReadRunOf(from *Table) {
+	if from == t {
+		return
+	}
+	t.mu.Lock()
+	t.runOf = from
+	t.mu.Unlock()
+}
+
+// put binds b in the scope, or the run's when none has begun and the table
+// keeps the run's (KeepRun). t.mu is held.
 func (t *Table) put(b Binding) {
-	if !t.open && !t.began && t.keepRun {
+	if !t.began && t.keepRun {
 		if t.run == nil {
 			t.run = make(map[string]Binding)
 		}
@@ -125,10 +198,7 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	if gen != t.gen {
 		return Binding{}, Binding{}, true, false
 	}
-	inForce := t.vals
-	if len(t.run) > 0 {
-		inForce = t.all()
-	}
+	inForce := t.all()
 	for i, b := range bs {
 		if have, bound := inForce[b.Name]; bound && have.Value != b.Value {
 			return b, have, false, false
@@ -203,7 +273,7 @@ func (t *Table) StartCarrying(given, carried []Binding) {
 	defer t.mu.Unlock()
 	t.gen++
 	t.vals = nil
-	t.open, t.began = true, true
+	t.began = true
 	if len(given)+len(carried) == 0 {
 		return
 	}
@@ -226,54 +296,39 @@ func (t *Table) StartCarrying(given, carried []Binding) {
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.vals = nil
-	t.open, t.began = true, true
-	t.gen++
-	t.mu.Unlock()
-}
-
-// Close ends the open scope. What is bound before the next one begins is
-// forgotten when it does: only what was bound before the first scope began
-// is the run's.
-func (t *Table) Close() {
-	t.mu.Lock()
-	t.vals = nil
-	t.open = false
+	t.began = true
 	t.gen++
 	t.mu.Unlock()
 }
 
 // NewSet forgets every binding, the run's too, and no scope has begun: the
-// next test set's replay starts (as Tracker.NewSet).
+// next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
 	t.vals, t.run = nil, nil
-	t.open, t.began = false, false
+	t.began = false
 	t.gen++
 	t.mu.Unlock()
 }
 
-// Clone is a table holding t's bindings in t's scope, sharing nothing with
-// it: a match checked against the clone binds nothing in t.
+// Clone is a table holding t's bindings in t's scope, the run's it reads
+// included, sharing nothing with it: a match checked against the clone binds
+// nothing in t.
 func (t *Table) Clone() *Table {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	c := &Table{gen: t.gen, open: t.open, began: t.began, keepRun: t.keepRun}
+	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {
 			c.vals[k] = v
 		}
 	}
-	if t.run != nil {
-		c.run = make(map[string]Binding, len(t.run))
-		for k, v := range t.run {
-			c.run[k] = v
-		}
-	}
+	c.run = t.runInForce()
 	return c
 }
 
-// Snapshot returns the bindings in force, by name.
+// Snapshot returns the bindings in force, the run's included, by name.
 func (t *Table) Snapshot() []Binding {
 	t.mu.Lock()
 	in := t.all()

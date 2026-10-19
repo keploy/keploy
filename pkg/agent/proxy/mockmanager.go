@@ -170,7 +170,10 @@ type MockManager struct {
 
 	// vars holds the test variables this replay has bound (package
 	// variables): reset as each test case of keploy test and each test of
-	// keploy mock replay begins. Read only under the proven switch.
+	// keploy mock replay begins. Under the proven switch each test set
+	// begins it anew (NewVariableSet), and what the set's start-up binds
+	// before its first test is the run's, which each of its tests reads.
+	// Read only under the proven switch.
 	vars variables.Table
 	// aheadVars holds what the next test's calls in flight bind, answered in
 	// the gap before it (ServeExactPool's ahead, exact serving): the next
@@ -2279,9 +2282,25 @@ func (m *MockManager) BoundVariables() []models.VariableBinding {
 }
 
 // ResetVariables forgets every binding of the test's scope, and the gap's.
+// The run's stay (NewVariableSet).
 func (m *MockManager) ResetVariables() {
 	m.vars.Reset()
 	m.aheadVars.Reset()
+}
+
+// NewVariableSet begins a test set's variables, as the set's mocks are set
+// up (Proxy.Mock, under the proven switch, beside the learn step's
+// Tracker.NewSet): every binding of the previous set is forgotten, its run's
+// too, and what this set's start-up binds before its first test begins is
+// the run's (variables.Table.KeepRun), which every test of the set reads,
+// as does the scope the next test's calls in flight bind in before it
+// begins (AheadVariables). A test's own bindings stay its own: each test
+// begins with none of the test before it (StartVariables, ResetVariables).
+func (m *MockManager) NewVariableSet() {
+	m.vars.NewSet()
+	m.vars.KeepRun()
+	m.aheadVars.NewSet()
+	m.aheadVars.ReadRunOf(&m.vars)
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
