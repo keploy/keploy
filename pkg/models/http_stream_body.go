@@ -251,71 +251,51 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		if !utf8.ValidString(resp.Body) {
 			return nil, false
 		}
-		kind := detectStreamBodyKind(resp.Header)
-		if kind == streamBodyKindSSE {
-			chunks := parseSSEBodyToChunks(resp.Body, resp.Timestamp)
-			if len(chunks) > 0 {
-				return chunks, true
-			}
-		} else if kind == streamBodyKindRaw {
-			contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
-			isNDJSON := strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson")
-			isTextPlain := strings.Contains(contentType, "text/plain")
-			isOctetStream := strings.Contains(contentType, "application/octet-stream")
-
-			if isOctetStream {
-				if strings.TrimSpace(resp.Body) == "" {
-					return nil, false
-				}
-				return []HTTPStreamChunk{{
-					TS: resp.Timestamp,
-					Data: []HTTPStreamDataField{{
-						Key:   "raw",
-						Value: resp.Body,
-					}},
-				}}, true
-			}
-
-			hasContentLength := getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Length") != ""
-			isChunked := strings.Contains(strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Transfer-Encoding")), "chunked")
-
-			// Only safely auto-chunk known streaming structured formats to avoid false-positives on plain text files.
-			shouldChunk := isNDJSON
-			if isTextPlain {
-				// For text/plain, it is streaming if Transfer-Encoding is chunked or Content-Length is absent.
-				if isChunked || !hasContentLength {
-					shouldChunk = true
-				} else {
-					shouldChunk = false
-				}
-			}
-
-			if shouldChunk {
-				chunks := parseRawBodyToChunks(resp.Body, resp.Timestamp, isNDJSON)
-				if len(chunks) > 0 {
-					return chunks, true
-				}
-			}
+		// A body is kept as frames only when the response is a stream by
+		// keploy's one rule (HTTPStreamOf) on its Content-Type, never on how
+		// its length was framed: a text/plain body, chunked or with no
+		// Content-Length (Go's JSON written with no Content-Type), is one
+		// document, kept whole, and replayed as one (recordedFramesOf).
+		format := recordedFramesOf(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
+		if chunks := splitStreamBody(format, resp.Body, resp.Timestamp); len(chunks) > 0 {
+			return chunks, true
 		}
 	}
 
 	return nil, false
 }
 
-// StreamChunksOf splits a streamed body into its frames the way a recording
-// stores them (StreamBody), by the response's Content-Type: SSE frames by
-// blank lines, NDJSON and streamed text by lines, an octet stream whole. It
-// is nil for a body a recording keeps flat. A replay splits what a stream
+// StreamChunksOf splits the body of a response that is a stream (HTTPStreamOf)
+// into frames by the format of its Content-Type, as a recording of the stream
+// keeps them (StreamBody): SSE frames by blank lines, NDJSON and text by
+// lines, an octet stream whole. It is nil for a body that does not split
+// (multipart, a Content-Type of no stream format), and for one that is empty
+// or not UTF-8, which a recording keeps whole. A replay splits what a stream
 // delivered with it, so frame i of a recording and frame i of an answer are
-// read alike.
+// read alike. It does not say whether a response is a stream.
 func StreamChunksOf(header map[string]string, body string) []HTTPStreamChunk {
-	chunks, _ := streamChunksForYAML(HTTPResp{Header: header, Body: body})
-	return chunks
+	if !utf8.ValidString(body) {
+		return nil
+	}
+	return SplitStreamBody(httpStreamFormatOf(getHeaderValueCaseInsensitiveModel(header, "Content-Type")), body)
 }
 
-// detectStreamBodyKind inspects the Content-Type header to decide
-// which streaming format the body uses. This determines how flat body strings
-// are reconstructed from structured chunks.
+// SplitStreamBody splits a stream's body into the frames of a format, as
+// StreamChunksOf does by a Content-Type's, whatever its bytes: it is for
+// comparing a stream, which reads the answer's bytes as they come, not for
+// keeping one (a recording keeps a body that is not UTF-8 whole).
+func SplitStreamBody(format HTTPStreamFormat, body string) []HTTPStreamChunk {
+	if body == "" {
+		return nil
+	}
+	return splitStreamBody(format, body, time.Time{})
+}
+
+// detectStreamBodyKind is the format a recording's frames were kept in, by
+// its Content-Type: how a flat body is reconstructed from them. It says
+// nothing of whether the response is a stream (HTTPStreamOf). It reads frames
+// as every keploy kept them: as SSE events under a Content-Type that names
+// text/event-stream, and as lines under the rest (recordedFramesOf).
 func detectStreamBodyKind(headers map[string]string) streamBodyKind {
 	contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(headers, "Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {

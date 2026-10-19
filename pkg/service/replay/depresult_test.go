@@ -1626,7 +1626,7 @@ func TestWarnDependencyAssertionInert(t *testing.T) {
 			// the assertion ran normally for every non-streaming test, and
 			// the set-wide sentence would be a false alarm about those.
 			wantMsg:    "does not run for this test set's streaming test cases",
-			wantReason: "streaming (SSE/chunked) test cases",
+			wantReason: "streaming test cases (server-sent events, NDJSON or multipart by their Content-Type",
 		},
 		{
 			name:       "knob OFF and streaming tests deferred: silence",
