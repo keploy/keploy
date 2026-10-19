@@ -103,6 +103,12 @@ type App struct {
 	// cached project would then address the previous stack.
 	composeRunnerMu  sync.Mutex
 	composeRunnerVal composeStack
+	// composeProjectSeen is the compose project a down of this app resolved
+	// (ComposeDown, composeDownProject: its containers' labels, else the
+	// command's or the environment's): the project its up ran, for the calls
+	// made once those containers are gone (the stale-agent probe before the
+	// next up).
+	composeProjectSeen atomic.Pointer[string]
 	// composeAPI is the Engine API client the compose library drives the
 	// stack through (docker.NewComposeAPIClient). Built with the first runner
 	// and kept for the App's life, as the docker client is: the runner is
@@ -707,7 +713,10 @@ func (a *App) ComposeDown() {
 		return
 	}
 	defer utils.BeginAgentStop()()
-	project := a.composeDownProject()
+	project := a.composeDownProject(context.Background())
+	if project != "" {
+		a.composeProjectSeen.Store(&project)
+	}
 	downCtx, downCancel := a.composeDownContext(project)
 	defer downCancel()
 
@@ -748,19 +757,18 @@ func (a *App) ComposeDown() {
 	case len(a.composeContent) > 0:
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, a.composeProjectArgs(project)...)
 		args = append(args, "down", "--timeout", "1")
 		downCmd = composeCommand(downCtx, args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
-		// Carry any -p/--project-name/--project-directory from the run command so
-		// the teardown targets the SAME project the `up` created (a user whose
-		// compose command sets an explicit project would otherwise have `down`
-		// resolve a different, cwd-derived project and leave this stack running).
+		// The SAME project the `up` created (composeProjectArgs): a down that
+		// resolved another, cwd-derived, left this stack running, and took
+		// down a stack of that name the user runs.
 		args := []string{"-f", a.composeFile}
-		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, a.composeProjectArgs(project)...)
 		args = append(args, "down", "--timeout", "1")
 		downCmd = composeCommand(downCtx, args...)
 	default:
@@ -817,7 +825,11 @@ func (a *App) ComposeDown() {
 	// both the extra docker calls and the risk below off the healthy path.
 	var stragglers []string
 	if !downSucceeded {
-		stragglers = a.sweepStragglingProjectContainers()
+		// The project read before the down: keploy's agent and app, whose
+		// labels said it, are gone by now (removed above), and resolved
+		// again the sweep took the directory's default project, a stack the
+		// user runs, and left keploy's own leftovers.
+		stragglers = a.sweepStragglingProjectContainersOf(project)
 	}
 
 	a.waitContainersRemoved(append([]string{a.keployContainer, a.container}, stragglers...), reapBarrierBudget)
@@ -844,7 +856,7 @@ var composeDownStall = stall.HangBudget
 // reads) or in keploy's environment; "" when none tells it. Each inspect has
 // its own bound (dockerInspectBudget): one a saturated daemon took the whole
 // of does not leave the next none.
-func (a *App) composeDownProject() string {
+func (a *App) composeDownProject(ctx context.Context) string {
 	if a.useComposeLibrary() {
 		a.composeRunnerMu.Lock()
 		r := a.composeRunnerVal
@@ -855,15 +867,20 @@ func (a *App) composeDownProject() string {
 			}
 		}
 	}
-	appCtx, appCancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+	appCtx, appCancel := context.WithTimeout(ctx, dockerInspectBudget)
 	defer appCancel()
 	if p := a.composeProjectLabel(appCtx); p != "" {
 		return p
 	}
-	agentCtx, agentCancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+	agentCtx, agentCancel := context.WithTimeout(ctx, dockerInspectBudget)
 	defer agentCancel()
 	if p := a.composeProjectLabelOf(agentCtx, a.keployContainer); p != "" {
 		return p
+	}
+	// Read off the labels by an earlier down, when the containers that bore
+	// them are gone (the project the up ran, so a -p of a.cmd's too).
+	if p := a.composeProjectSeen.Load(); p != nil && *p != "" {
+		return *p
 	}
 	if p := composeProjectFlag(a.cmd); p != "" {
 		return p
@@ -872,10 +889,26 @@ func (a *App) composeDownProject() string {
 	// does not reach its project, keploy's own environment does.
 	if !a.useComposeLibrary() {
 		if p := composeProjectEnvAssignment(a.cmd); p != "" {
-			return p
+			return normalizeComposeProjectName(p)
 		}
 	}
-	return strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME"))
+	return normalizeComposeProjectName(strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME")))
+}
+
+// normalizeComposeProjectName is a project name as compose-go's
+// loader.NormalizeProjectName makes it: lowercased, only [a-z0-9_-] kept, no
+// leading '_' or '-'. compose v2 refuses an unnormalized COMPOSE_PROJECT_NAME
+// at the up, as it refuses such a -p, so for a project it ran this is no
+// change; docker-compose v1 normalized the name it read, and passed raw as
+// -p to keploy's own (v2) calls, a name like "MyProj" was refused.
+func normalizeComposeProjectName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimLeft(b.String(), "_-")
 }
 
 // composeProjectEnvAssignment is COMPOSE_PROJECT_NAME as cmd's leading
@@ -905,6 +938,25 @@ func (a *App) composeProjectLabelOf(ctx context.Context, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(info.Config.Labels["com.docker.compose.project"])
+}
+
+// composeProjectArgs are the project flags of a compose call keploy makes on
+// the app's project (its down, its ps): the compose command's own -p,
+// --project-name and --project-directory, and, when it names no project, -p
+// project, the project the up ran (composeDownProject: the compose label on
+// the app's or keploy's agent's container, which compose put there). A
+// project the command set some other way does not reach keploy's own calls:
+// an assignment in the command (`COMPOSE_PROJECT_NAME=x docker compose up`),
+// which only the shell the up ran in read, or an --env-file. Resolved without
+// it, the down took the cwd's default project down, a stack the user runs,
+// and left the app's running. With no project known, the command's flags
+// alone, as before.
+func (a *App) composeProjectArgs(project string) []string {
+	flags := extractProjectFlags(a.cmd)
+	if project == "" || composeProjectFlag(a.cmd) != "" {
+		return flags
+	}
+	return append(flags, "-p", project)
 }
 
 // composeProjectFlag is the project the compose command cmd names (-p,
@@ -1143,6 +1195,12 @@ func composeServiceNames(compose *docker.Compose) []string {
 // function exists to fix. Closing it means making the teardown aware of every
 // -f the user passed, not widening this filter.
 func (a *App) sweepStragglingProjectContainers() []string {
+	return a.sweepStragglingProjectContainersOf("")
+}
+
+// sweepStragglingProjectContainersOf is sweepStragglingProjectContainers on
+// project, the project the up ran ("": resolved now, composeDownProject).
+func (a *App) sweepStragglingProjectContainersOf(project string) []string {
 	if len(a.composeServices) == 0 {
 		// Not expected: both compose setup paths populate this. Said out loud
 		// because the failure is otherwise indistinguishable from "nothing to
@@ -1157,7 +1215,7 @@ func (a *App) sweepStragglingProjectContainers() []string {
 	}
 
 	var ids []string
-	for _, st := range a.composeServiceStatesWithin(projectSweepBudget) {
+	for _, st := range a.composeServiceStatesOfWithin(projectSweepBudget, project) {
 		if st.ID == "" {
 			continue
 		}
@@ -1435,11 +1493,11 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	// document goes to `docker compose -f -` on stdin, exactly as before.
 	case len(a.composeContent) > 0:
 		args = []string{"-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, a.composeProjectArgs(a.composeDownProject(ctx))...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	case a.composeFile != "":
 		args = []string{"-f", a.composeFile}
-		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, a.composeProjectArgs(a.composeDownProject(ctx))...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	default:
 		return nil
@@ -1550,6 +1608,15 @@ func commandStderr(err error) string {
 // "not a transient dependency failure", so the run fails fast rather than
 // retrying blindly — the safe default.
 func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
+	return a.composeServiceStatesOf(ctx, "")
+}
+
+// composeServiceStatesOf is composeServiceStates of project, the project the
+// up ran ("": resolved now, composeDownProject).
+func (a *App) composeServiceStatesOf(ctx context.Context, project string) []composeServiceState {
+	if project == "" && !a.useComposeLibrary() {
+		project = a.composeDownProject(ctx)
+	}
 	// In-memory mode: ask the compose library directly, with the same project
 	// scoping the `up`/`down` use so it sees exactly this stack.
 	if a.useComposeLibrary() {
@@ -1584,16 +1651,15 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 	// Reached only where the library is not linked (darwin).
 	case len(a.composeContent) > 0:
 		args = []string{"-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, a.composeProjectArgs(project)...)
 		args = append(args, "ps", "-a", "--format", "json")
 	case a.composeFile != "":
 		args = []string{"-f", a.composeFile}
-		// Carry any -p/--project-name/--project-directory from the run command so
-		// the probe resolves the SAME project the `up` created. Without this, a user
-		// whose compose command sets an explicit project would have the probe query
-		// the default (cwd-derived) project, see nothing, and the failure would be
-		// (mis)classified as non-transient — silently disabling the retry.
-		args = append(args, extractProjectFlags(a.cmd)...)
+		// The SAME project the `up` created (composeProjectArgs). Without it,
+		// the probe queried another (cwd-derived) project, saw nothing, and the
+		// failure was (mis)classified as non-transient — silently disabling
+		// the retry.
+		args = append(args, a.composeProjectArgs(project)...)
 		args = append(args, "ps", "-a", "--format", "json")
 	default:
 		return nil
@@ -1636,9 +1702,15 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 // saturated daemon. Used by the transient-dependency-failure classifier in
 // run()'s retry loop.
 func (a *App) composeServiceStatesWithin(budget time.Duration) []composeServiceState {
+	return a.composeServiceStatesOfWithin(budget, "")
+}
+
+// composeServiceStatesOfWithin is composeServiceStatesOf bounded by its own
+// deadline, as composeServiceStatesWithin is.
+func (a *App) composeServiceStatesOfWithin(budget time.Duration, project string) []composeServiceState {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	return a.composeServiceStates(ctx)
+	return a.composeServiceStatesOf(ctx, project)
 }
 
 // parseComposeServiceStates parses `docker compose ps -a --format json` output.
