@@ -2,11 +2,13 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -87,6 +89,9 @@ func queryOf(r *models.HTTPReq) url.Values {
 // present on the live side but absent on the stripped recorded side) and
 // spuriously fail the shape match — stripping both sides keeps the comparison
 // honest while still ignoring the volatile key's value.
+//
+// The detail is logged at Info (async.Engine.LogReport), so it names each
+// request as pkg.LoggedURL does: a URL's query holds the application's values.
 func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"
@@ -94,6 +99,11 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	vol := volatileSet(lane.VolatileParams)
 	liveReq, err := mockToReq(stripVolatile(live, vol))
 	if err != nil {
+		// url.Parse's error quotes the URL it was given whole.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = &url.Error{Op: uerr.Op, URL: pkg.LoggedURL(uerr.URL), Err: uerr.Err}
+		}
 		return false, "unparseable live request: " + err.Error()
 	}
 	rec := stripVolatile(recorded, vol)
@@ -112,7 +122,7 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	}
 	if len(matched) == 0 {
 		return false, fmt.Sprintf("request shape drift: %s %s vs %s",
-			liveReq.method, liveReq.url.Path, recorded.Spec.HTTPReq.URL)
+			liveReq.method, liveReq.url.Path, pkg.LoggedURL(recorded.Spec.HTTPReq.URL))
 	}
 	return true, ""
 }

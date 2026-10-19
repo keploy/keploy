@@ -1203,7 +1203,7 @@ func sentRequestFields(req *http.Request) []zap.Field {
 // requestError is the error about a test's request URL, client.Do's or
 // url.Parse's, as keploy logs and returns it. Their *url.Error names the whole
 // URL, and the error is logged where the request fails and again by the
-// replay that sent it, so it names the URL as loggedURL does. Its Op and
+// replay that sent it, so it names the URL as LoggedURL does. Its Op and
 // cause are kept, so what reads it (isPreResponseConnRefused,
 // IsTransportConnReset, errors.Is) reads it as before.
 func requestError(err error) error {
@@ -1211,17 +1211,17 @@ func requestError(err error) error {
 	if !ok {
 		return err
 	}
-	if u := loggedURL(uerr.URL); u != uerr.URL {
+	if u := LoggedURL(uerr.URL); u != uerr.URL {
 		return &url.Error{Op: uerr.Op, URL: u, Err: uerr.Err}
 	}
 	return err
 }
 
-// loggedURL is a test request's URL, or its request URI, as keploy's lines
-// and the errors they print name it: whole with logcontent on, and otherwise
+// LoggedURL is a request's URL, or its request URI, as keploy's lines and
+// the errors they print name it: whole with logcontent on, and otherwise
 // without its query and fragment, whose values are the application's. The
 // path is kept, as the lines that name a call by its method and path keep it.
-func loggedURL(u string) string {
+func LoggedURL(u string) string {
 	if logcontent.On() {
 		return u
 	}
@@ -1293,7 +1293,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+loggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
+	cfg.answer.describe(prepared.Request.Method+" "+LoggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
 	if ce := logger.Check(zap.DebugLevel, "Sending request to user app"); ce != nil {
@@ -1406,7 +1406,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+loggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
+	cfg.answer.describe(prepared.Request.Method+" "+LoggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
 	if ce := logger.Check(zap.DebugLevel, "Sending streaming request to user app"); ce != nil {
@@ -1433,7 +1433,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
 	if provenswitch.On() {
-		streamCfg.Target = prepared.Request.Method + " " + loggedURL(prepared.Request.URL.RequestURI())
+		streamCfg.Target = prepared.Request.Method + " " + LoggedURL(prepared.Request.URL.RequestURI())
 	}
 
 	logger.Debug("detected HTTP streaming response",

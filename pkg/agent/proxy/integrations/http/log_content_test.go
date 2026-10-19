@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/logcontent/logtest"
@@ -370,4 +371,60 @@ func TestEncodeHTTP_AFailedUpstreamIsLoggedWithoutTheQuery(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A poll of an async lane that drifts from its recording is still served it,
+// and the engine's verdict names the drift by both requests' method and path:
+// not the recorded URL's query, whose values are the application's, unless
+// KEPLOY_LOG_CONTENT is set.
+func TestDecodeHTTP_AnAsyncDriftIsLoggedWithoutTheRecordedQuery(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		h := &HTTP{Logger: logger}
+		lane := models.AsyncLane{Name: "notifications", Type: "http", Match: map[string]string{"path": "/v1/poll*"}, VolatileParams: []string{"cursor"}}
+		engine := async.NewEngine(logger, []models.AsyncLane{lane}, map[string]async.AsyncParser{"http": h})
+		h.SetAsyncEngine(engine)
+		recorded := httpMock("rec", "GET", "http://notify.internal.svc/v1/poll?cursor=1&ref="+canary+"-rec")
+		recorded.Spec.Async = &models.AsyncMeta{Lane: lane.Name, Seq: 1}
+		recorded.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: `{"v":1}`}
+		engine.Load([]*models.Mock{recorded})
+		app, proxy := tcpPair(t)
+		done := runDecode(t, proxy, func(ctx context.Context) error {
+			return h.decodeHTTP(ctx, []byte("GET /v1/poll?cursor=2&ref="+canary+"-live HTTP/1.1\r\nHost: notify.internal.svc\r\n\r\n"), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
+		})
+		if resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("the poll was not served its recording (%v)", err)
+		}
+		_ = app.Close()
+		<-done
+		engine.LogReport(logger)
+		const drift = "async egress shape drift (served recorded response anyway); re-record if the request legitimately changed, or widen the lane's volatileParams / match to treat the varying part as noise"
+		logtest.Check(t, logs, canary, on, drift)
+		if got, want := logs.FilterMessage(drift).All()[0].ContextMap()["detail"], "notifications: request shape drift: GET /v1/poll vs http://notify.internal.svc/v1/poll"; !on && got != want {
+			t.Fatalf("the drift is named %q, want %q", got, want)
+		}
+	})
+}
+
+// A live poll whose URL does not parse is named in the engine's verdict by
+// url.Parse's error, which quotes the URL: without its query, unless
+// KEPLOY_LOG_CONTENT is set.
+func TestMatchRequestShape_AnUnparseablePollIsLoggedWithoutItsQuery(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		h := &HTTP{Logger: logger}
+		lane := models.AsyncLane{Name: "notifications", Type: "http", Match: map[string]string{"path": "/v1/poll*"}}
+		engine := async.NewEngine(logger, []models.AsyncLane{lane}, map[string]async.AsyncParser{"http": h})
+		recorded := httpMock("rec", "GET", "http://notify.internal.svc/v1/poll")
+		recorded.Spec.Async = &models.AsyncMeta{Lane: lane.Name, Seq: 1}
+		recorded.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: `{"v":1}`}
+		engine.Load([]*models.Mock{recorded})
+		live := httpMock("live", "GET", "http://notify.internal.svc/v1/poll%zz?ref="+canary)
+		if served, _, err := engine.Decide(context.Background(), lane, live); err != nil || served != recorded {
+			t.Fatalf("the poll was not served its recording (%v)", err)
+		}
+		engine.LogReport(logger)
+		const drift = "async egress shape drift (served recorded response anyway); re-record if the request legitimately changed, or widen the lane's volatileParams / match to treat the varying part as noise"
+		logtest.Check(t, logs, canary, on, drift)
+	})
 }

@@ -147,3 +147,25 @@ func TestReplayer_ACallAnotherTestRecordedIsNamedWithoutItsContent(t *testing.T)
 		}
 	})
 }
+
+// A test whose URL has no scheme and host for the base path to replace fails
+// unsent, and the line that says so names the URL without its query, unless
+// KEPLOY_LOG_CONTENT is set.
+func TestStart_AURLTheBasePathCannotTakeIsLoggedWithoutItsQuery(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		tc := bpRequest("test-1", closedLocalPort(t), "")
+		tc.HTTPReq.URL = "/reset?token=" + canary
+		run := newBasePathRunOf(t, "http://localhost:9000", nil, tc)
+		run.replayer.logger = logger
+		_, _ = run.start(t)
+		logtest.Check(t, logs, canary, on, "failed the test without sending it")
+		want := strconv.Quote("/reset")
+		if on {
+			want = strconv.Quote("/reset?token=" + canary)
+		}
+		if got := run.failureOf("test-1"); !strings.Contains(got, want) {
+			t.Fatalf("the report says %q, want it to name the URL as %s", got, want)
+		}
+	})
+}
