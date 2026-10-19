@@ -131,15 +131,20 @@ func (t *Table) Lookup(name string) (Binding, bool) {
 	return t.lookup(name)
 }
 
-// Bind records b unless its name is already bound. It returns the binding in
-// force afterwards and whether it is b. It is for a value of no call (a
-// start-up's, a given one): a call checked in a scope binds with BindAll,
-// which refuses a call of a scope that ended since.
+// Bind records b unless its name is already bound, or b's value is another
+// variable's that was recorded with another value (BindAll's rule, the run's
+// included). It returns the binding in force afterwards of b's name, or the
+// one b's value is, and whether it is b. A call binds with BindAll, a
+// start-up's call too (its Gen is the table's before any scope begins), which
+// also refuses a call of a scope that ended since: Bind checks no scope.
 func (t *Table) Bind(b Binding) (Binding, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if have, ok := t.lookup(b.Name); ok {
 		return have, false
+	}
+	if with, ok := collides(t.all(), b, nil); ok {
+		return with, false
 	}
 	t.put(b)
 	return b, true
@@ -204,18 +209,8 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 		if have, bound := inForce[b.Name]; bound && have.Value != b.Value {
 			return b, have, false, false
 		}
-		for _, other := range inForce {
-			if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
-				return b, other, false, false
-			}
-		}
-		for _, other := range bs[:i] {
-			if other.Name == b.Name && other.Value != b.Value {
-				return b, other, false, false
-			}
-			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
-				return b, other, false, false
-			}
+		if with, bad := collides(inForce, b, bs[:i]); bad {
+			return b, with, false, false
 		}
 	}
 	for _, b := range bs {
@@ -224,6 +219,28 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 		}
 	}
 	return Binding{}, Binding{}, false, true
+}
+
+// collides is the binding b cannot be bound beside, of those in force and
+// earlier (bound with b, before it): one of b's name with another value
+// (earlier: in force, a name already bound keeps its own), or another
+// variable, not given, recorded with another value and holding b's live
+// value, unless both are clock reads read in one second (bothClock).
+func collides(inForce map[string]Binding, b Binding, earlier []Binding) (Binding, bool) {
+	for _, other := range inForce {
+		if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
+			return other, true
+		}
+	}
+	for _, other := range earlier {
+		if other.Name == b.Name && other.Value != b.Value {
+			return other, true
+		}
+		if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
+			return other, true
+		}
+	}
+	return Binding{}, false
 }
 
 // bothClock reports whether a and b are both bindings of clock variables the
