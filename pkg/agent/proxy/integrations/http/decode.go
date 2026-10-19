@@ -128,92 +128,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				zap.Any("body", string(input.body)),
 				zap.Any("raw", string(input.raw)))
 
-			// Extract header noise from noise configuration.
-			// We make a shallow copy so that injecting default flaky headers
-			// below does not mutate the shared opts.NoiseConfig map, which
-			// may be accessed concurrently by other outgoing requests.
-			// Keys are lowercased during copy because HeadersContainKeys
-			// compares against lowercased keys.
-			var headerNoise map[string][]string
-			if opts.NoiseConfig != nil {
-				if hn, ok := opts.NoiseConfig["header"]; ok {
-					headerNoise = make(map[string][]string, len(hn))
-					for k, v := range hn {
-						lk := strings.ToLower(k)
-						if existing, ok := headerNoise[lk]; ok {
-							// Merge value slices on case-variant collision
-							// to keep behaviour deterministic.
-							headerNoise[lk] = append(existing, v...)
-						} else {
-							headerNoise[lk] = v
-						}
-					}
-				}
-			}
-
-			// Auto-inject known flaky headers (e.g. AWS SigV4) into the
-			// per-request copy so they are ignored during mock matching.
-			// This prevents mismatches caused by headers whose values or
-			// presence change on every request due to timestamps, signatures,
-			// or credential rotation (e.g. X-Amz-Security-Token from IRSA).
-			// Disable with --disableAutoHeaderNoise for strict matching.
-			if !opts.DisableAutoHeaderNoise {
-				if headerNoise == nil {
-					headerNoise = make(map[string][]string)
-				}
-				for hdr, noise := range flakyHeaderNoise() {
-					if _, exists := headerNoise[hdr]; !exists {
-						headerNoise[hdr] = noise
-					}
-				}
-			}
-
-			// User request-body noise from test.globalNoise.requestBody
-			// (root-relative dotted paths). This is a DEDICATED bucket,
-			// distinct from the "body" bucket that governs RESPONSE
-			// assertions: request-matching noise and response-assertion noise
-			// are separate axes. Reusing the response "body" bucket here would
-			// let a field noised only because it is dynamic in the response
-			// silently soften request matching too (e.g. excusing a wrong
-			// user-id under --schema-noise-strict). Keeping them separate makes
-			// strict matching a real guarantee — a path can only weaken request
-			// matching if the user puts it under requestBody on purpose.
-			//
-			// Lowercased copy for the same reason as headerNoise: the matcher's
-			// noise index matches lowercased paths. Entries are normalized to
-			// presence-only (empty regex list): request-body mock matching and
-			// drift detection are path-based, so a value-regex cannot gate here.
-			var bodyNoise map[string][]string
-			if opts.NoiseConfig != nil {
-				if bn, ok := opts.NoiseConfig["requestbody"]; ok {
-					bodyNoise = make(map[string][]string, len(bn))
-					for k, v := range bn {
-						if len(v) > 0 {
-							h.Logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
-								zap.String("field", k))
-						}
-						bodyNoise[strings.ToLower(k)] = []string{}
-					}
-				}
-			}
-
-			// User URL-path noise from test.globalNoise.url. The URL path is the
-			// one request field matched by EXACT value with no noise hook, so a
-			// non-deterministic path segment (id/uuid/timestamp/object key) made
-			// the recorded mock unmatchable and produced a "no matching mock -> 502"
-			// on replay. Each key here is a regex that wildcards the matching
-			// segment in both the mock and request paths (see MatchURLPath). The
-			// value slice is unused — like requestbody, matching is by pattern, not
-			// by a value-regex — so an entry is presence-only.
-			var urlNoise []string
-			if opts.NoiseConfig != nil {
-				if un, ok := opts.NoiseConfig["url"]; ok {
-					urlNoise = make([]string, 0, len(un))
-					for k := range un {
-						urlNoise = append(urlNoise, k)
-					}
-				}
-			}
+			noise := NewRequestNoise(h.Logger, opts)
+			headerNoise, bodyNoise, urlNoise := noise.Header, noise.Body, noise.URL
 
 			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
@@ -593,4 +509,110 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 		}
 	}
 	return []byte(statusLine + headers + "\r\n" + respBody), nil
+}
+
+// RequestNoise is what of a request may differ from its recording when it is
+// matched (decodeHTTP), from the run's options: header noise (the configured
+// header noise and, unless --disableAutoHeaderNoise, the headers known to
+// change on every call: SigV4's date and signature, an SDK's invocation id,
+// a rotating security token), request-body noise (test.globalNoise
+// .requestBody) and URL-path noise (test.globalNoise.url). Every parser of
+// HTTP calls reads it from here (NewRequestNoise), so none drifts from
+// another: the SQS parser's variable pass (VariableMatch) compared every
+// header by value, and no signed SDK call fit a recording.
+type RequestNoise struct {
+	Header map[string][]string
+	Body   map[string][]string
+	URL    []string
+}
+
+// NewRequestNoise is the request noise of a call under opts.
+func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoise {
+	// Extract header noise from noise configuration.
+	// We make a shallow copy so that injecting default flaky headers
+	// below does not mutate the shared opts.NoiseConfig map, which
+	// may be accessed concurrently by other outgoing requests.
+	// Keys are lowercased during copy because HeadersContainKeys
+	// compares against lowercased keys.
+	var headerNoise map[string][]string
+	if opts.NoiseConfig != nil {
+		if hn, ok := opts.NoiseConfig["header"]; ok {
+			headerNoise = make(map[string][]string, len(hn))
+			for k, v := range hn {
+				lk := strings.ToLower(k)
+				if existing, ok := headerNoise[lk]; ok {
+					// Merge value slices on case-variant collision
+					// to keep behaviour deterministic.
+					headerNoise[lk] = append(existing, v...)
+				} else {
+					headerNoise[lk] = v
+				}
+			}
+		}
+	}
+
+	// Auto-inject known flaky headers (e.g. AWS SigV4) into the
+	// per-request copy so they are ignored during mock matching.
+	// This prevents mismatches caused by headers whose values or
+	// presence change on every request due to timestamps, signatures,
+	// or credential rotation (e.g. X-Amz-Security-Token from IRSA).
+	// Disable with --disableAutoHeaderNoise for strict matching.
+	if !opts.DisableAutoHeaderNoise {
+		if headerNoise == nil {
+			headerNoise = make(map[string][]string)
+		}
+		for hdr, noise := range flakyHeaderNoise() {
+			if _, exists := headerNoise[hdr]; !exists {
+				headerNoise[hdr] = noise
+			}
+		}
+	}
+
+	// User request-body noise from test.globalNoise.requestBody
+	// (root-relative dotted paths). This is a DEDICATED bucket,
+	// distinct from the "body" bucket that governs RESPONSE
+	// assertions: request-matching noise and response-assertion noise
+	// are separate axes. Reusing the response "body" bucket here would
+	// let a field noised only because it is dynamic in the response
+	// silently soften request matching too (e.g. excusing a wrong
+	// user-id under --schema-noise-strict). Keeping them separate makes
+	// strict matching a real guarantee — a path can only weaken request
+	// matching if the user puts it under requestBody on purpose.
+	//
+	// Lowercased copy for the same reason as headerNoise: the matcher's
+	// noise index matches lowercased paths. Entries are normalized to
+	// presence-only (empty regex list): request-body mock matching and
+	// drift detection are path-based, so a value-regex cannot gate here.
+	var bodyNoise map[string][]string
+	if opts.NoiseConfig != nil {
+		if bn, ok := opts.NoiseConfig["requestbody"]; ok {
+			bodyNoise = make(map[string][]string, len(bn))
+			for k, v := range bn {
+				if len(v) > 0 {
+					logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
+						zap.String("field", k))
+				}
+				bodyNoise[strings.ToLower(k)] = []string{}
+			}
+		}
+	}
+
+	// User URL-path noise from test.globalNoise.url. The URL path is the
+	// one request field matched by EXACT value with no noise hook, so a
+	// non-deterministic path segment (id/uuid/timestamp/object key) made
+	// the recorded mock unmatchable and produced a "no matching mock -> 502"
+	// on replay. Each key here is a regex that wildcards the matching
+	// segment in both the mock and request paths (see MatchURLPath). The
+	// value slice is unused — like requestbody, matching is by pattern, not
+	// by a value-regex — so an entry is presence-only.
+	var urlNoise []string
+	if opts.NoiseConfig != nil {
+		if un, ok := opts.NoiseConfig["url"]; ok {
+			urlNoise = make([]string, 0, len(un))
+			for k := range un {
+				urlNoise = append(urlNoise, k)
+			}
+		}
+	}
+	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}
 }
