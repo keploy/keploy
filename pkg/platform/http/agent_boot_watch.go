@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -323,20 +324,48 @@ func runningByStatus(inspect func(context.Context) ([]byte, error)) func(context
 		switch {
 		case err == nil:
 			last.Store(strings.TrimSpace(string(out)) == "running")
-		case strings.Contains(err.Error(), "No such") || strings.Contains(string(out), "No such"):
+		case engineSaysGone(out, err):
 			last.Store(false)
 		}
 		return last.Load()
 	}
 }
 
+// engineSaysGone reports whether the engine's CLI answered a question about
+// a container (out, err) with its not being there: "No such container" or
+// "No such object", as Docker and Podman say it, in either case, on stderr
+// (which an *exec.ExitError carries) or on stdout.
+func engineSaysGone(out []byte, err error) bool {
+	said := string(out)
+	if err != nil {
+		said += "\n" + err.Error()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			said += "\n" + string(exit.Stderr)
+		}
+	}
+	said = strings.ToLower(said)
+	return strings.Contains(said, "no such container") || strings.Contains(said, "no such object")
+}
+
+// containerGone is containerExited's code for a container that is no longer
+// there at all (removed: a docker run --rm agent that exited, a compose down):
+// it has ended, with a code no one can read any more.
+const containerGone = -1
+
 // containerExited reports whether container name has ended (docker inspect's
 // status is exited or dead: it will not run again unless something starts it
-// again), and its exit code.
+// again), and its exit code; containerGone for one the engine says is not
+// there. It is asked only of an agent that has answered (watchAgent's
+// endOnExit), whose container was there: one that is gone will not answer
+// again.
 func containerExited(cli *engineCLI, name string) func(context.Context) (int, bool) {
 	return func(ctx context.Context) (int, bool) {
 		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", name)
 		if err != nil {
+			if engineSaysGone(out, err) {
+				return containerGone, true
+			}
 			return 0, false
 		}
 		f := strings.Fields(string(out))
@@ -507,7 +536,11 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 					}
 					p := cur.p
 					p.ExitCode = l.code
-					out <- startJudgment{verdict: bootExited, why: fmt.Sprintf("its container exited with code %d before it was ready", l.code), p: p}
+					why := fmt.Sprintf("its container exited with code %d", l.code)
+					if l.code == containerGone {
+						why = "its container is gone (removed)"
+					}
+					out <- startJudgment{verdict: bootExited, why: why, p: p}
 					return
 				}
 				if l.running {
@@ -515,8 +548,13 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 				} else {
 					idle++
 					if every > 0 && idle%every == 0 {
-						logger.Info("still waiting for the keploy agent: the container engine does not run its container (not started yet, paused, or stopped), and keploy waits for it to run however long that takes",
-							zap.Bool("in_a_container", inContainer), zap.Int("looks", idle))
+						if inContainer {
+							logger.Info("still waiting for the keploy agent: the container engine does not run its container (not started yet, paused, or stopped), and keploy waits for it to run however long that takes",
+								zap.Int("looks", idle))
+						} else {
+							logger.Info("still waiting for the keploy agent: its process has not begun to run (sudo may be asking for a password), and keploy waits for it however long that takes",
+								zap.Int("looks", idle))
+						}
 					}
 				}
 			case <-tick.C:
@@ -630,6 +668,9 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan err
 		if j.verdict == bootExited {
 			// The agent's process is gone, whatever it had said of its
 			// start: no failure of the start, unless its code names one.
+			if j.p.ExitCode == containerGone {
+				return errors.New("the keploy agent's container is gone (removed), and will not answer again")
+			}
 			if cause := agentExitCause(j.p.ExitCode); cause != nil {
 				return fmt.Errorf("%w: the keploy agent's container exited with code %d", cause, j.p.ExitCode)
 			}

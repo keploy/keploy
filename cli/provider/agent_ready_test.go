@@ -36,3 +36,16 @@ func TestARemovedAgentReadyTimeoutThatIsSetIsSaidToChangeNothing(t *testing.T) {
 		t.Fatalf("a variable that is not set was warned of: %q", logs.All()[0].Message)
 	}
 }
+
+// keploy's flag handling warns of it, for a command that waits for an agent
+// (keploy test here), and only once.
+func TestKeploysFlagHandlingWarnsOfARemovedAgentReadyTimeout(t *testing.T) {
+	t.Setenv(removedAgentReadyTimeout, "600")
+	_, logs, err := deletedRun(t, "")
+	if err != nil {
+		t.Fatalf("ValidateFlags: %v", err)
+	}
+	if n := logs.FilterMessageSnippet("KEPLOY_AGENT_READY_TIMEOUT is no longer read").Len(); n != 1 {
+		t.Fatalf("%d warnings of the removed variable, want 1", n)
+	}
+}
