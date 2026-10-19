@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -815,12 +817,20 @@ func TestTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		report utils.BootProgress
+		code   int
 		want   func(error) bool
 	}{
-		{"ready, then exited", utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, func(err error) bool {
-			return !errors.Is(err, pkg.ErrAgentNotReady) && strings.Contains(err.Error(), "container exited with code 137")
+		{"ready, then exited", utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, 137, func(err error) bool {
+			return !errors.Is(err, pkg.ErrAgentNotReady) && strings.Contains(err.Error(), "the keploy agent's container exited with code 137") &&
+				!strings.Contains(err.Error(), "could not start")
 		}},
-		{"its start failed, then exited", utils.BootProgress{Beat: 1, Seq: 1, Failed: true, ExitCode: utils.ExitPrivilegeRequired, Failure: "failed to load eBPF"}, func(err error) bool {
+		// A docker run --rm agent that exited: the engine no longer knows
+		// its container.
+		{"ready, then removed", utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, containerGone, func(err error) bool {
+			return !errors.Is(err, pkg.ErrAgentNotReady) && strings.Contains(err.Error(), "the keploy agent's container is gone (removed)") &&
+				!strings.Contains(err.Error(), "could not start")
+		}},
+		{"its start failed, then exited", utils.BootProgress{Beat: 1, Seq: 1, Failed: true, ExitCode: utils.ExitPrivilegeRequired, Failure: "failed to load eBPF"}, 137, func(err error) bool {
 			return errors.Is(err, utils.ErrPrivilegeRequired) && strings.Contains(err.Error(), "failed to load eBPF")
 		}},
 	} {
@@ -839,7 +849,7 @@ func TestTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 			a := clientFor(srv.URL)
 			a.agentContainer = "keploy-v3-test"
 			c.set(true, tc.report, true)
-			c.exit(137)
+			c.exit(tc.code)
 			done := make(chan error, 1)
 			go func() { done <- a.MakeAgentReadyForDockerCompose(context.Background()) }()
 			select {
@@ -1083,6 +1093,10 @@ func TestWhetherTheContainerRunsIsWhatTheEngineLastSaid(t *testing.T) {
 		{"", errors.New("i/o timeout"), false},
 		{"running\n", nil, true},
 		{"Error: No such object: keploy-v3-test\n", errors.New("exit status 1"), false},
+		{"running\n", nil, true},
+		// What the docker CLI answers of a removed container: an empty
+		// line on stdout, the message on stderr, lowercase in Docker 29.
+		{"\n", &exec.ExitError{Stderr: []byte("error: no such object: keploy-v3-test\n")}, false},
 	}
 	i := 0
 	running := runningByStatus(func(context.Context) ([]byte, error) {
@@ -1093,5 +1107,79 @@ func TestWhetherTheContainerRunsIsWhatTheEngineLastSaid(t *testing.T) {
 		if got := running(context.Background()); got != script[i].want {
 			t.Fatalf("answer %d (%q, %v): running = %v, want %v", i, script[i].out, script[i].err, got, script[i].want)
 		}
+	}
+}
+
+// engineSaysGone reads the engine's "not there" wherever its CLI puts it:
+// on stderr (an *exec.ExitError's), as Docker 29 says it, lowercase, or on
+// stdout, as older ones and Podman do; any other failure is no such answer.
+func TestEngineSaysGoneReadsTheEnginesNotThereWhereverItIsSaid(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"docker 29, on stderr", "\n", &exec.ExitError{Stderr: []byte("error: no such object: keploy-v3-x\n")}, true},
+		{"older docker, on stdout", "Error: No such object: keploy-v3-x\n", errors.New("exit status 1"), true},
+		{"podman", "", &exec.ExitError{Stderr: []byte("Error: no such container keploy-v3-x\n")}, true},
+		{"daemon down", "", &exec.ExitError{Stderr: []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n")}, false},
+		{"timed out", "", context.DeadlineExceeded, false},
+		{"running", "running\n", nil, false},
+	} {
+		if got := engineSaysGone([]byte(c.out), c.err); got != c.want {
+			t.Errorf("%s: engineSaysGone = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Against the real engine CLI, where there is one: a container it does not
+// know does not run, and has ended (containerGone), whatever the CLI's
+// version says of it, and wherever it says it.
+func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
+	cli := newEngineCLI(zap.NewNop())
+	if _, err := cli.stdout(context.Background(), "version", "--format", "{{.Server.Version}}"); err != nil {
+		t.Skipf("no container engine to ask here: %v", err)
+	}
+	name := fmt.Sprintf("keploy-v3-no-such-%d", os.Getpid())
+	n := 0
+	running := runningByStatus(func(ctx context.Context) ([]byte, error) {
+		if n++; n == 1 {
+			return []byte("running\n"), nil
+		}
+		return cli.stdout(ctx, "inspect", "-f", "{{.State.Status}}", name)
+	})
+	if !running(context.Background()) {
+		t.Fatal("setup: the first answer says it runs")
+	}
+	if running(context.Background()) {
+		t.Fatal("the engine does not know the container, and it is still taken to run")
+	}
+	if code, ended := containerExited(cli, name)(context.Background()); !ended || code != containerGone {
+		t.Fatalf("containerExited = %d, %v; want containerGone, ended", code, ended)
+	}
+}
+
+// A native agent's process that has not begun to run is sudo's, waiting on
+// its password prompt: the wait says so, not that a container engine does
+// not run a container.
+func TestANativeAgentThatHasNotBegunToRunIsSaidToWaitOnItsStart(t *testing.T) {
+	look, every := bootLook, stillWaitingLooks
+	bootLook, stillWaitingLooks = time.Millisecond, 3
+	t.Cleanup(func() { bootLook, stillWaitingLooks = look, every })
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
+	_ = watchStart(ctx, zap.New(core), read, func(context.Context) bool { return false }, nil, false, false)
+	deadline := time.Now().Add(30 * time.Second)
+	for logs.FilterMessageSnippet("still waiting for the keploy agent").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the wait said nothing")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if msg := logs.FilterMessageSnippet("still waiting for the keploy agent").All()[0].Message; !strings.Contains(msg, "its process has not begun to run") || strings.Contains(msg, "container") {
+		t.Fatalf("the line says %q; want a process that has not begun to run, and no container", msg)
 	}
 }
