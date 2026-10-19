@@ -23,8 +23,14 @@ import (
 const (
 	stallFirstReport  = 15 * time.Second
 	stallRepeatReport = 30 * time.Second
-	// stallErrorAfter is when a slow call stops being slow and starts being
-	// wedged, and therefore when the report escalates from WARN to ERROR.
+	// stallErrorFrom is the report from which a slow call is taken for a
+	// wedged one, and the report escalates from WARN to ERROR: the fifth,
+	// so a call is given at least 2 minutes, for the fifth comes once it has
+	// been blocked for 135 s at the soonest (15 s + 4 x 30 s; a timer fires
+	// late, never early). A count, not a
+	// time: a report that comes late, the watch's goroutine itself starved
+	// or the process frozen, is still the report it is, and cannot jump to
+	// ERROR before the WARNs that come first.
 	//
 	// The distinction is the whole point of the severity. ERROR means "this
 	// degraded and you need to know" — a terminal outcome — and consumers act
@@ -44,7 +50,7 @@ const (
 	// whereas a contended-but-progressing load clears this bar in seconds. It
 	// shrinks the false-ERROR window to near zero rather than proving it
 	// shut: a wait that ends because its holder lets go can still cross it.
-	// 2 minutes sits above the loads seen to return (on CI's 5.10 hosts
+	// 135 s sits above the loads seen to return (on CI's 5.10 hosts
 	// they took 15-45 s, while keploy's objects still had prints that made
 	// the verifier wait on the tracing event_mutex; others there stayed
 	// blocked past 60 s, until the run was stopped) and below the point
@@ -56,7 +62,7 @@ const (
 	// before the ERROR lands, naming the stage in progress and its thread's state
 	// (D, in the uninterruptible wait) from the agent's boot report. The ERROR is
 	// the agent's own log's word on it, for whoever reads that log.
-	stallErrorAfter = 2 * time.Minute
+	stallErrorFrom = 5
 
 	// stallStackFrames is how many of the blocked thread's innermost kernel
 	// frames a report carries: enough to name what it waits in and who asked
@@ -91,10 +97,10 @@ const (
 // reader, from those frames: a cause named here without reading it off the
 // thread was a guess, and on the hosts where it was printed most it was wrong.
 //
-// Reports start at WARN and escalate to ERROR once the call has been blocked for
-// errorAfter, so the severity distinguishes "slow" from "never coming back" — see
-// stallErrorAfter. A zero errorAfter reports at ERROR from the first tick.
-func watchStall(logger *zap.Logger, operation, thread string, first, repeat, errorAfter time.Duration) (stop func()) {
+// Reports start at WARN and escalate to ERROR from report errorFrom on, so the
+// severity distinguishes "slow" from "never coming back" — see stallErrorFrom.
+// An errorFrom of 1 or less reports at ERROR from the first report.
+func watchStall(logger *zap.Logger, operation, thread string, first, repeat time.Duration, errorFrom int) (stop func()) {
 	if logger == nil {
 		return func() {}
 	}
@@ -106,23 +112,22 @@ func watchStall(logger *zap.Logger, operation, thread string, first, repeat, err
 		start := time.Now()
 		timer := time.NewTimer(first)
 		defer timer.Stop()
+		reports := 0
 		for {
 			select {
 			case <-done:
 				return
 			case <-timer.C:
-				// Round once and branch on the SAME value that gets logged, so a
-				// line can never read "blockedFor=2m0s" while being emitted at WARN
-				// because the raw duration was a few ms short of the threshold.
-				blocked := time.Since(start).Round(time.Second)
+				reports++
 				fields := []zap.Field{
 					zap.String("operation", operation),
-					zap.Duration("blockedFor", blocked),
+					zap.Duration("blockedFor", time.Since(start).Round(time.Second)),
 				}
 				fields = append(fields, threadFields(thread, ranBefore, ranKnown)...)
-				// WARN while the call may still return, ERROR once it has been
-				// blocked long enough that it never will. See stallErrorAfter.
-				if blocked >= errorAfter {
+				// WARN while the call may still return, ERROR from report
+				// errorFrom on, by which a call that is still blocked is most
+				// likely blocked for good. See stallErrorFrom.
+				if reports >= errorFrom {
 					if runningUnderWSL() {
 						fields = append(fields, zap.String("remediation", wslRemediation))
 					}
@@ -208,17 +213,27 @@ func isNumber(s string) bool {
 // locks). The cgroup attaches (cgroup_mutex) and the raw tracepoint ones
 // (tracepoints_mutex) do not go through it yet.
 func watchedCall(logger *zap.Logger, operation string, fn func() error) error {
-	return watchedCallWith(logger, operation, stallFirstReport, stallRepeatReport, stallErrorAfter, fn)
+	return watchedCallWith(logger, operation, agentStall.first, agentStall.repeat, agentStall.errorFrom, fn)
 }
+
+// stallThresholds are a watch's: its first report, the interval of the
+// ones after, and the report from which they are ERROR.
+type stallThresholds struct {
+	first, repeat time.Duration
+	errorFrom     int
+}
+
+// agentStall is the watch the agent's calls get (watchedCall).
+var agentStall = stallThresholds{first: stallFirstReport, repeat: stallRepeatReport, errorFrom: stallErrorFrom}
 
 // watchedCallWith is watchedCall with the watch's thresholds (watchStall).
 // The goroutine stays on its thread from before the watch begins until after
 // it has stopped, so the thread the reports read is the one fn runs on, and
 // fn must make its kernel call on the calling goroutine.
-func watchedCallWith(logger *zap.Logger, operation string, first, repeat, errorAfter time.Duration, fn func() error) error {
+func watchedCallWith(logger *zap.Logger, operation string, first, repeat time.Duration, errorFrom int, fn func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	stop := watchStall(logger, operation, taskDir(unix.Gettid()), first, repeat, errorAfter)
+	stop := watchStall(logger, operation, taskDir(unix.Gettid()), first, repeat, errorFrom)
 	defer stop()
 	return fn()
 }
