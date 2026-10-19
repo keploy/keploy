@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -403,7 +404,7 @@ func TestComposeDownProject(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("COMPOSE_PROJECT_NAME", tc.env)
 			a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: tc.projects}, cmd: tc.cmd, container: "user-app", keployContainer: "keploy-v3"}
-			if got := a.composeDownProject(); got != tc.want {
+			if got := a.composeDownProject(context.Background()); got != tc.want {
 				t.Fatalf("project %q; want %q", got, tc.want)
 			}
 		})
@@ -419,7 +420,7 @@ func TestComposeDownProject(t *testing.T) {
 		if docker.ComposeLibrarySupported {
 			want = "fake"
 		}
-		if got := a.composeDownProject(); got != want {
+		if got := a.composeDownProject(context.Background()); got != want {
 			t.Fatalf("project %q; want %q (compose library linked: %v)", got, want, docker.ComposeLibrarySupported)
 		}
 	})
@@ -431,7 +432,7 @@ func TestComposeDownProject(t *testing.T) {
 		if docker.ComposeLibrarySupported {
 			want = "real"
 		}
-		if got := a.composeDownProject(); got != want {
+		if got := a.composeDownProject(context.Background()); got != want {
 			t.Fatalf("project %q; want %q (compose library linked: %v)", got, want, docker.ComposeLibrarySupported)
 		}
 	})
@@ -441,8 +442,165 @@ func TestComposeDownProject(t *testing.T) {
 		t.Setenv("COMPOSE_PROJECT_NAME", "")
 		d := &labelDocker{projects: map[string]string{"keploy-v3": "orderflow"}, slow: "user-app"}
 		a := &App{logger: zap.NewNop(), docker: d, cmd: "docker compose up", container: "user-app", keployContainer: "keploy-v3"}
-		if got := a.composeDownProject(); got != "orderflow" {
+		if got := a.composeDownProject(context.Background()); got != "orderflow" {
 			t.Fatalf("project %q; want orderflow, from the agent's label", got)
 		}
 	})
+}
+
+// keploy's own compose calls on the app's project name the project the up
+// ran: the command's -p when it names one; else the one compose put on the
+// app's (or agent's) container, as -p; else the one an assignment in the
+// command set, which only the up's shell read. Resolved by compose for the
+// down instead, it was the cwd's default project: a stack the user runs.
+func TestComposeProjectArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name, cmd string
+		projects  map[string]string
+		want      string
+	}{
+		{"the command's -p", "docker compose -p mine up", map[string]string{"user-app": "other"}, "-p mine"},
+		{"the container's label", "docker compose up", map[string]string{"user-app": "theirs"}, "-p theirs"},
+		{"with the command's --project-directory", "docker compose --project-directory ./deploy up", map[string]string{"user-app": "theirs"}, "--project-directory ./deploy -p theirs"},
+		{"an assignment in the command", "COMPOSE_PROJECT_NAME=set docker compose up", nil, "-p set"},
+		{"an assignment compose normalizes", "COMPOSE_PROJECT_NAME=_My.Proj docker compose up", nil, "-p myproj"},
+		{"none", "docker compose up", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("COMPOSE_PROJECT_NAME", "")
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: tc.projects}, cmd: tc.cmd, container: "user-app", keployContainer: "keploy-v3"}
+			if got := strings.Join(a.composeProjectArgs(a.composeDownProject(context.Background())), " "); got != tc.want {
+				t.Fatalf("project args %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The down of an app whose up an assignment in the command named the
+// project runs `docker compose ... -p <that project> down`.
+func TestComposeDownNamesTheProjectTheUpRan(t *testing.T) {
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	argvLog := stubDockerCLI(t, "", 0)
+	a := &App{logger: zap.NewNop(), docker: &inspectRecorder{}, composeFile: "/tmp/keploy-compose.yaml",
+		cmd: "COMPOSE_PROJECT_NAME=set docker compose up", container: "user-app", keployContainer: "keploy-v3", composeServices: []string{"app"}}
+	a.ComposeDown()
+	if log := recordedLog(t, argvLog); !strings.Contains(log, "ARG -p\nARG set\nARG down") {
+		t.Fatalf("the down did not name the up's project:\n%s", log)
+	}
+}
+
+// The project's inspects are bounded by the caller's context: a ps whose
+// budget ran out reads no label, and its call names the project by what the
+// command says.
+func TestComposeDownProjectIsBoundedByItsCaller(t *testing.T) {
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: map[string]string{"user-app": "theirs", "keploy-v3": "theirs"}},
+		cmd: "docker compose -p mine up", container: "user-app", keployContainer: "keploy-v3"}
+	if got := a.composeDownProject(ctx); got != "mine" {
+		t.Fatalf("project %q with the caller's budget spent; want the command's, mine", got)
+	}
+}
+
+// labelled is an inspect answer of a container of compose project p.
+func labelled(p string) container.InspectResponse {
+	return container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited"}},
+		Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": p}},
+	}
+}
+
+// A down that failed is swept in the project its up ran, read before the down
+// off keploy's agent's and the app's labels: by the sweep, keploy has removed
+// both, and the project resolved again was the directory's default, a stack
+// the user runs (its services keploy's names), while keploy's own leftovers
+// stayed for the next up. And a later call, the containers gone, names it
+// too (the stale-agent probe before the next up).
+func TestAFailedDownIsSweptInTheProjectTheUpRan(t *testing.T) {
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	ps := `{"ID":"id-db","Service":"db","State":"exited"}` + "\n"
+	a, rec, argvLog := keployStack(t, ps, 1)
+	a.cmd = "docker compose up" // the project only the labels say
+	rec.inspects = map[string]container.InspectResponse{"user-app": labelled("orderflow"), "keploy-v3": labelled("orderflow")}
+
+	a.ComposeDown()
+
+	log := recordedLog(t, argvLog)
+	if !strings.Contains(log, "ARG -p\nARG orderflow\nARG ps") {
+		t.Fatalf("the sweep after a failed down did not name the up's project:\n%s", log)
+	}
+	if !rec.didRemove("id-db") {
+		t.Fatalf("keploy's leftover in the up's project was not swept; removed %v", rec.removedIDs())
+	}
+
+	before := strings.Count(recordedLog(t, argvLog), "ARG orderflow")
+	_ = a.composeAgentContainerIDs(context.Background())
+	if strings.Count(recordedLog(t, argvLog), "ARG orderflow") != before+1 {
+		t.Fatalf("a call once the containers were gone did not name the project the down read:\n%s", recordedLog(t, argvLog))
+	}
+}
+
+type callerKey struct{}
+
+// callerDocker answers an inspect with the project label "caller" under a
+// context of the caller's (callerKey), "background" under another.
+type callerDocker struct{ inspectRecorder }
+
+func (d *callerDocker) ContainerInspect(ctx context.Context, _ string) (container.InspectResponse, error) {
+	if ctx.Value(callerKey{}) != nil {
+		return labelled("caller"), nil
+	}
+	return labelled("background"), nil
+}
+
+// The state probe and the stale-agent probe read the project under their
+// caller's context (its budget), not one of their own.
+func TestTheComposeProbesReadTheProjectUnderTheirCallersContext(t *testing.T) {
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	argvLog := stubDockerCLI(t, "", 0)
+	a := &App{logger: zap.NewNop(), docker: &callerDocker{}, composeFile: "/tmp/keploy-compose.yaml",
+		cmd: "docker compose up", container: "user-app", keployContainer: "keploy-v3", composeServices: []string{"app"}}
+	ctx := context.WithValue(context.Background(), callerKey{}, true)
+	_ = a.composeServiceStates(ctx)
+	_ = a.composeAgentContainerIDs(ctx)
+	log := recordedLog(t, argvLog)
+	if strings.Count(log, "ARG -p\nARG caller") != 2 || strings.Contains(log, "background") {
+		t.Fatalf("a probe read the project under a context of its own:\n%s", log)
+	}
+}
+
+// slowGoneDocker is a daemon slow to answer for a container keploy removed:
+// an inspect of keploy's app or agent, once removed, answers only when its
+// context ends, as a saturated daemon's does.
+type slowGoneDocker struct{ *inspectRecorder }
+
+func (d slowGoneDocker) ContainerInspect(ctx context.Context, name string) (container.InspectResponse, error) {
+	d.mu.Lock()
+	gone := (name == "user-app" || name == "keploy-v3") && slices.Contains(d.removed, name)
+	d.mu.Unlock()
+	if gone {
+		<-ctx.Done()
+		return container.InspectResponse{}, ctx.Err()
+	}
+	return d.inspectRecorder.ContainerInspect(ctx, name)
+}
+
+// A failed down mostly means a daemon that stalled, slow to answer. The sweep
+// after it takes the project the down read: one it read again, off the
+// containers keploy had just removed, spent the sweep's budget on their
+// inspects, and its ps then ran on a spent context and swept nothing.
+func TestAFailedDownIsSweptOnADaemonSlowToAnswerForGoneContainers(t *testing.T) {
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	ps := `{"ID":"id-db","Service":"db","State":"exited"}` + "\n"
+	a, rec, argvLog := keployStack(t, ps, 1)
+	a.cmd = "docker compose up"
+	rec.inspects = map[string]container.InspectResponse{"user-app": labelled("orderflow"), "keploy-v3": labelled("orderflow")}
+	a.docker = slowGoneDocker{rec}
+
+	a.ComposeDown()
+
+	if !rec.didRemove("id-db") {
+		t.Fatalf("on a slow daemon the sweep after a failed down swept nothing; removed %v\n%s", rec.removedIDs(), recordedLog(t, argvLog))
+	}
 }

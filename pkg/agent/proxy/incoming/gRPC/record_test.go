@@ -92,7 +92,7 @@ func TestForwardAndTeeStampsAStreamsEndBeforeItsClientCanSeeIt(t *testing.T) {
 				defer c.Close()
 			}
 			ch := make(chan frameChunk, 1)
-			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil)
+			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil, nil)
 
 			_, resp := pingCall(t)
 			awaitTickStart(tick)
@@ -137,7 +137,7 @@ func TestForwardAndTeeStampsAReadOfSeveralEndsOnce(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil)
+		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil, nil)
 	}()
 	_, resp1 := echoCall(t, 1, "one")
 	_, resp3 := echoCall(t, 3, "two")
@@ -200,6 +200,42 @@ func TestEndScannerFindsEveryEndWhereverTheReadsCut(t *testing.T) {
 		}
 	}
 	assert.Equal(t, want, got, "a byte a read")
+
+	// A trailers block split across frames ends its stream with the
+	// CONTINUATION frame that ends it, not with its HEADERS frame; a split
+	// block that does not end its stream ends none.
+	var block bytes.Buffer
+	enc := hpack.NewEncoder(&block)
+	require.NoError(t, enc.WriteField(hpack.HeaderField{Name: "grpc-status", Value: "0"}))
+	require.NoError(t, enc.WriteField(hpack.HeaderField{Name: "x-detail", Value: string(bytes.Repeat([]byte("d"), 60))}))
+	frag := block.Bytes()
+	splitTrailers := frameBytes(t, func(fr *http2.Framer) error {
+		if err := fr.WriteHeaders(http2.HeadersFrameParam{StreamID: 11, BlockFragment: frag[:10], EndStream: true}); err != nil {
+			return err
+		}
+		if err := fr.WriteContinuation(11, false, frag[10:30]); err != nil {
+			return err
+		}
+		return fr.WriteContinuation(11, true, frag[30:])
+	})
+	splitHeaders := frameBytes(t, func(fr *http2.Framer) error {
+		if err := fr.WriteHeaders(http2.HeadersFrameParam{StreamID: 13, BlockFragment: frag[:10]}); err != nil {
+			return err
+		}
+		return fr.WriteContinuation(13, true, frag[10:])
+	})
+	split := append(append([]byte{}, splitHeaders...), splitTrailers...)
+	for cut := 0; cut <= len(split); cut++ {
+		var s endScanner
+		var got []int
+		for _, e := range s.scan(split[:cut]) {
+			got = append(got, e)
+		}
+		for _, e := range s.scan(split[cut:]) {
+			got = append(got, cut+e)
+		}
+		require.Equal(t, []int{len(split)}, got, "a split block, reads cut at %d", cut)
+	}
 
 	// A frame longer than 64 KiB: its length's first byte counts.
 	big := append([]byte{0x01, 0x11, 0x70, byte(http2.FrameData), byte(http2.FlagDataEndStream), 0, 0, 0, 9}, make([]byte, 0x011170)...)
@@ -583,7 +619,7 @@ func TestForwardAndTeeTellsTheParserWhenTheTeeStops(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building)
+		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil)
 	}()
 	forward := func(b []byte) {
 		t.Helper()
@@ -642,7 +678,7 @@ func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building)
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, nil)
 			}()
 
 			go func() { _, _ = srcWrite.Write(tc.payload) }()
@@ -708,6 +744,495 @@ func TestRecordIncoming_ACallCompletedUnderPressureIsDecidedBeforeItsChunksGo(t 
 		t.Fatalf("after clear, a test case from before the stop came (response at %v): lost, as the stream had ended", tc.GrpcResp.Timestamp)
 	case <-g.recorded:
 	}
+}
+
+// h2Peer writes one direction of an HTTP/2 connection with one HPACK encoder
+// for all of its header blocks, as a real peer does: a field it indexes in one
+// block, it may refer to by its index in the next.
+type h2Peer struct {
+	t     *testing.T
+	block bytes.Buffer
+	enc   *hpack.Encoder
+}
+
+func newH2Peer(t *testing.T) *h2Peer {
+	p := &h2Peer{t: t}
+	p.enc = hpack.NewEncoder(&p.block)
+	return p
+}
+
+// headers is the frames of one header block on stream id: a HEADERS frame,
+// then CONTINUATION frames, the block cut into parts pieces of about one size
+// (so a cut falls inside a field), as a peer splits a block larger than a
+// frame (RFC 9113 §6.10).
+func (p *h2Peer) headers(id uint32, endStream bool, parts int, fields ...hpack.HeaderField) []byte {
+	p.t.Helper()
+	p.block.Reset()
+	for _, f := range fields {
+		require.NoError(p.t, p.enc.WriteField(f))
+	}
+	block := append([]byte(nil), p.block.Bytes()...)
+	if parts > len(block) {
+		parts = len(block)
+	}
+	var pieces [][]byte
+	for i := 0; i < parts; i++ {
+		pieces = append(pieces, block[i*len(block)/parts:(i+1)*len(block)/parts])
+	}
+	return frameBytes(p.t, func(fr *http2.Framer) error {
+		if err := fr.WriteHeaders(http2.HeadersFrameParam{StreamID: id, BlockFragment: pieces[0], EndStream: endStream, EndHeaders: len(pieces) == 1}); err != nil {
+			return err
+		}
+		for i := 1; i < len(pieces); i++ {
+			if err := fr.WriteContinuation(id, i == len(pieces)-1, pieces[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// atFirstContinuation cuts the frames of a header block before its first
+// CONTINUATION frame: its HEADERS frame, and the rest of the block.
+func atFirstContinuation(b []byte) (headers, rest []byte) {
+	size := 9 + (int(b[0])<<16 | int(b[1])<<8 | int(b[2]))
+	return b[:size], b[size:]
+}
+
+// A header block a peer splits across a HEADERS frame and CONTINUATION frames
+// (one larger than a frame: big metadata, a rich error's details) is one
+// block (RFC 9113 §6.10), and a HEADERS frame's END_STREAM ends its stream
+// only once that block has ended (§8.1). The ingress read each frame on its
+// own, and refused every CONTINUATION as following no HEADERS frame: the
+// parser gave up on that direction of the connection, so no later call on it
+// was recorded; and a split trailers block ended its call at the HEADERS
+// frame, with the call's headers copied in as its trailers (no grpc-status,
+// which replay reads as OK). Here each split block reaches the ingress in two
+// writes, its HEADERS frame and then the rest once the parser has handled the
+// first: a call ended before its block did is captured in between. Every
+// block is read whole, the call ends at its end, and the next call on the
+// connection is recorded.
+func TestRecordIncoming_AHeaderBlockSplitAcrossFramesIsReadWhole(t *testing.T) {
+	big := string(bytes.Repeat([]byte("x"), 300))
+	for _, tc := range []struct {
+		name      string
+		reqParts  int // how many frames the first call's request headers take
+		trailers  bool
+		respParts int // how many frames the first call's last header block takes
+		status    string
+	}{
+		{name: "trailers", reqParts: 1, trailers: true, respParts: 3, status: "0"},
+		{name: "an error's trailers after its answer", reqParts: 1, trailers: true, respParts: 2, status: "13"},
+		{name: "a trailers-only answer", reqParts: 1, trailers: false, respParts: 2, status: "5"},
+		{name: "request headers", reqParts: 3, trailers: true, respParts: 1, status: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := startGRPCIngress(t)
+			client, app := newH2Peer(t), newH2Peer(t)
+			path := func(id uint32) string { return "/svc.Echo/Call" + string(rune('0'+id)) }
+			requestHeaders := func(id uint32, parts int) []byte {
+				return client.headers(id, false, parts,
+					hpack.HeaderField{Name: ":method", Value: "POST"},
+					hpack.HeaderField{Name: ":scheme", Value: "http"},
+					hpack.HeaderField{Name: ":path", Value: path(id)},
+					hpack.HeaderField{Name: ":authority", Value: "localhost:50051"},
+					hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+					hpack.HeaderField{Name: "authorization", Value: "Bearer " + big},
+				)
+			}
+			ending := func(id uint32, trailers bool, parts int, status string) []byte {
+				end := []hpack.HeaderField{
+					{Name: "grpc-status", Value: status},
+					{Name: "grpc-message", Value: "message " + big},
+					{Name: "x-detail", Value: big},
+				}
+				if !trailers { // one block: headers and trailers in it
+					return app.headers(id, true, parts, append([]hpack.HeaderField{
+						{Name: ":status", Value: "200"},
+						{Name: "content-type", Value: "application/grpc"},
+					}, end...)...)
+				}
+				return app.headers(id, true, parts, end...)
+			}
+			answerStart := func(id uint32) []byte {
+				return append(app.headers(id, false, 1,
+					hpack.HeaderField{Name: ":status", Value: "200"},
+					hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+				), dataFrameBytes(t, id, false, grpcPayloadBytes([]byte("pong")))...)
+			}
+
+			got := map[string]*models.TestCase{}
+			chunks := uint64(0) // chunks sent that complete no call
+			send := func(from, to net.Conn, b []byte) {
+				go func() { _, _ = from.Write(b) }()
+				_, err := io.ReadFull(to, make([]byte, len(b)))
+				require.NoError(t, err)
+			}
+			// settle waits until the parser has let go of every chunk sent
+			// that completes no call, or a call was captured: one ended
+			// before its block did is captured here.
+			settle := func() {
+				deadline := time.Now().Add(10 * time.Second)
+				for {
+					if st := g.backlog(); st.Progress >= chunks && !st.Pending {
+						return
+					}
+					select {
+					case c := <-g.tcCh:
+						got[c.GrpcReq.Headers.PseudoHeaders[":path"]] = c
+						return
+					default:
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("the parser did not get through the chunks sent: %+v", g.backlog())
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+
+			// The first call: each split block in two writes.
+			reqHeaders := requestHeaders(1, tc.reqParts)
+			reqBody := dataFrameBytes(t, 1, true, grpcPayloadBytes([]byte("ping")))
+			if tc.reqParts > 1 {
+				head, rest := atFirstContinuation(reqHeaders)
+				send(g.cliApp, g.appApp, append([]byte(http2.ClientPreface), head...))
+				chunks++
+				settle()
+				send(g.cliApp, g.appApp, append(append([]byte{}, rest...), reqBody...))
+			} else {
+				send(g.cliApp, g.appApp, append(append([]byte(http2.ClientPreface), reqHeaders...), reqBody...))
+			}
+			chunks++
+			var start []byte
+			if tc.trailers {
+				start = answerStart(1)
+			}
+			end := ending(1, tc.trailers, tc.respParts, tc.status)
+			if tc.respParts > 1 {
+				head, rest := atFirstContinuation(end)
+				send(g.appApp, g.cliApp, append(start, head...))
+				chunks++
+				settle()
+				send(g.appApp, g.cliApp, rest)
+			} else {
+				send(g.appApp, g.cliApp, append(start, end...))
+			}
+			// The next call on the connection, in one frame a block.
+			send(g.cliApp, g.appApp, append(requestHeaders(3, 1), dataFrameBytes(t, 3, true, grpcPayloadBytes([]byte("ping")))...))
+			send(g.appApp, g.cliApp, append(answerStart(3), ending(3, true, 1, "0")...))
+
+			for len(got) < 2 {
+				select {
+				case c := <-g.tcCh:
+					got[c.GrpcReq.Headers.PseudoHeaders[":path"]] = c
+				case <-time.After(10 * time.Second):
+					var paths []string
+					for p := range got {
+						paths = append(paths, p)
+					}
+					t.Fatalf("recorded %v of the connection's two calls", paths)
+				}
+			}
+			first, next := got[path(1)], got[path(3)]
+			require.NotNil(t, first, "the call whose block was split was not recorded")
+			require.NotNil(t, next, "the next call on the connection was not recorded")
+			assert.Equal(t, tc.status, first.GrpcResp.Trailers.OrdinaryHeaders["grpc-status"], "the call's trailers: %+v", first.GrpcResp.Trailers)
+			assert.Equal(t, "message "+big, first.GrpcResp.Trailers.OrdinaryHeaders["grpc-message"])
+			assert.Equal(t, big, first.GrpcResp.Trailers.OrdinaryHeaders["x-detail"])
+			if tc.trailers {
+				assert.Equal(t, "200", first.GrpcResp.Headers.PseudoHeaders[":status"])
+				assert.Empty(t, first.GrpcResp.Trailers.PseudoHeaders, "the call's headers were taken for its trailers")
+			}
+			assert.Equal(t, "Bearer "+big, first.GrpcReq.Headers.OrdinaryHeaders["authorization"], "the call's request headers")
+			assert.Equal(t, "0", next.GrpcResp.Trailers.OrdinaryHeaders["grpc-status"])
+			assert.Equal(t, "Bearer "+big, next.GrpcReq.Headers.OrdinaryHeaders["authorization"], "the next call's headers, which refer to the split block's fields by their HPACK index")
+		})
+	}
+}
+
+// A trailers block split across two reads (its HEADERS frame with END_STREAM
+// in one, its CONTINUATION in the next) ends its call with the frame that
+// ends the block, so the call's end is the time of the chunk that carries
+// that frame. The first chunk completes no call and is let go: a stop that
+// asks then hears "clear", and the call, once its block ends, ends after
+// that stop's instant, so nothing from before the stop is lost. Ended at the
+// HEADERS frame's time instead, the call came after the stop heard "clear"
+// with an end from before it. On a clock as coarse as Windows' too, where the
+// later chunk's stamp could read the very instant the stop asked about.
+func TestRecordIncoming_AStopBetweenTheChunksOfASplitBlockLosesNothing(t *testing.T) {
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			if tick != 0 {
+				stubQuantizedClock(t, tick)
+			}
+			aStopBetweenTheChunksOfASplitBlockLosesNothing(t, tick)
+		})
+	}
+}
+
+func aStopBetweenTheChunksOfASplitBlockLosesNothing(t *testing.T, tick time.Duration) {
+	g := startGRPCIngress(t)
+	client, app := newH2Peer(t), newH2Peer(t)
+	req := append(append([]byte(http2.ClientPreface), client.headers(1, false, 1,
+		hpack.HeaderField{Name: ":method", Value: "POST"},
+		hpack.HeaderField{Name: ":scheme", Value: "http"},
+		hpack.HeaderField{Name: ":path", Value: "/svc.Echo/Call1"},
+		hpack.HeaderField{Name: ":authority", Value: "localhost:50051"},
+		hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+	)...), dataFrameBytes(t, 1, true, grpcPayloadBytes([]byte("ping")))...)
+	go func() { _, _ = g.cliApp.Write(req) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+	require.NoError(t, err)
+	g.waitFor(t, "the request chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 1 && !st.Pending })
+
+	start := append(app.headers(1, false, 1,
+		hpack.HeaderField{Name: ":status", Value: "200"},
+		hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+	), dataFrameBytes(t, 1, false, grpcPayloadBytes([]byte("pong")))...)
+	head, rest := atFirstContinuation(app.headers(1, true, 2,
+		hpack.HeaderField{Name: "grpc-status", Value: "13"},
+		hpack.HeaderField{Name: "grpc-message", Value: "an error whose message is long enough to split"},
+	))
+	first := append(append([]byte{}, start...), head...)
+	awaitTickStart(tick)
+	go func() { _, _ = g.appApp.Write(first) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(first)))
+	require.NoError(t, err)
+	g.waitFor(t, "the first response chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 2 && !st.Pending })
+
+	stop := clockNow()
+	st := g.m.BacklogBefore(stop)
+	require.False(t, st.Pending, "setup: the stop asked with nothing pending")
+
+	go func() { _, _ = g.appApp.Write(rest) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(rest)))
+	require.NoError(t, err)
+	var tc *models.TestCase
+	select {
+	case tc = <-g.tcCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no test case came of the call")
+	}
+	assert.Equal(t, "13", tc.GrpcResp.Trailers.OrdinaryHeaders["grpc-status"])
+	assert.True(t, tc.GrpcResp.Timestamp.After(stop), "the stop heard clear, then a call that ended before it came (at %v, the stop %v): lost to a stream the stop ended",
+		tc.GrpcResp.Timestamp, stop)
+}
+
+// A call whose trailers block is split, its CONTINUATION arriving in a later
+// read than its HEADERS frame, ends at that CONTINUATION (its block's end),
+// and that read is stamped before the client gets the CONTINUATION's last
+// byte, which is what lets it see the end. Stamped once written, as a read
+// that ends no stream is, the read was stamped after the client could send
+// its next call on the connection, and the next call's dependency call fell
+// in the split call's window. On the system clock and on clocks as coarse as
+// Windows'.
+func TestRecordIncoming_ASplitBlocksEndIsStampedBeforeItsClientCanSeeIt(t *testing.T) {
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			if tick != 0 {
+				stubQuantizedClock(t, tick)
+			}
+			aSplitBlocksEndIsStampedBeforeItsClientCanSeeIt(t, tick)
+		})
+	}
+}
+
+func aSplitBlocksEndIsStampedBeforeItsClientCanSeeIt(t *testing.T, tick time.Duration) {
+	gate := make(chan struct{})
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(gate) }) }
+	defer open()
+	client, app := newH2Peer(t), newH2Peer(t)
+	request := func(id uint32, name string) []byte {
+		return append(client.headers(id, false, 1,
+			hpack.HeaderField{Name: ":method", Value: "POST"},
+			hpack.HeaderField{Name: ":scheme", Value: "http"},
+			hpack.HeaderField{Name: ":path", Value: "/svc.Echo/" + name},
+			hpack.HeaderField{Name: ":authority", Value: "localhost:50051"},
+			hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+		), dataFrameBytes(t, id, true, grpcPayloadBytes([]byte(name)))...)
+	}
+	answerStart := func(id uint32) []byte {
+		return append(app.headers(id, false, 1,
+			hpack.HeaderField{Name: ":status", Value: "200"},
+			hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+		), dataFrameBytes(t, id, false, grpcPayloadBytes([]byte("pong")))...)
+	}
+	req1, req2 := request(1, "first"), request(3, "next")
+	head, rest := atFirstContinuation(app.headers(1, true, 2,
+		hpack.HeaderField{Name: "grpc-status", Value: "0"},
+		hpack.HeaderField{Name: "x-detail", Value: string(bytes.Repeat([]byte("d"), 80))},
+	))
+	first := append(answerStart(1), head...)
+	g := startGRPCIngressOn(t, func(c net.Conn) net.Conn {
+		return &heldAfterEndConn{Conn: c, end: rest, gate: gate}
+	})
+	calls := map[string]time.Time{} // each call's dependency call, stamped as a parser stamps it
+	serve := func(req []byte, name string) {
+		_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+		require.NoError(t, err)
+		calls[name] = clockNow()
+	}
+
+	awaitTickStart(tick)
+	go func() { _, _ = g.cliApp.Write(append([]byte(http2.ClientPreface), req1...)) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(http2.ClientPreface)))
+	require.NoError(t, err)
+	serve(req1, "first")
+	// The answer up to its trailers' HEADERS frame, then the rest of the
+	// block in a read of its own.
+	go func() { _, _ = g.appApp.Write(first) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(first)))
+	require.NoError(t, err)
+	g.waitFor(t, "the first response chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 2 && !st.Pending })
+	go func() { _, _ = g.appApp.Write(rest) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(rest)))
+	require.NoError(t, err)
+	sawEnd := clockNow()
+
+	// The client has the whole answer: its next call.
+	go func() { _, _ = g.cliApp.Write(req2) }()
+	serve(req2, "next")
+	resp2 := append(answerStart(3), app.headers(3, true, 1, hpack.HeaderField{Name: "grpc-status", Value: "0"})...)
+	go func() { _, _ = g.appApp.Write(resp2) }()
+	open()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp2)))
+	require.NoError(t, err)
+
+	got := map[string]*models.TestCase{}
+	for len(got) < 2 {
+		select {
+		case tc := <-g.tcCh:
+			got[strings.TrimPrefix(tc.GrpcReq.Headers.PseudoHeaders[":path"], "/svc.Echo/")] = tc
+		case <-time.After(10 * time.Second):
+			t.Fatalf("captured %d of 2 calls", len(got))
+		}
+	}
+	firstTC, nextTC := got["first"], got["next"]
+	require.NotNil(t, firstTC)
+	require.NotNil(t, nextTC)
+	assert.Equal(t, "0", firstTC.GrpcResp.Trailers.OrdinaryHeaders["grpc-status"])
+	assert.True(t, firstTC.GrpcResp.Timestamp.Before(sawEnd), "the split call's window ends at %v, not before its client had its trailers (%v)", firstTC.GrpcResp.Timestamp, sawEnd)
+	assert.True(t, firstTC.GrpcResp.Timestamp.Before(nextTC.GrpcReq.Timestamp), "the split call's window ends at %v, not before the next call's begins (%v)", firstTC.GrpcResp.Timestamp, nextTC.GrpcReq.Timestamp)
+	derived := models.DeriveWindowMappings(
+		[]models.TestWindow{models.RecordedWindow(withName(firstTC, "first")), models.RecordedWindow(withName(nextTC, "next"))},
+		[]models.WindowedMock{
+			{Name: "first", Kind: models.HTTP, At: calls["first"], Res: calls["first"], TestMock: true},
+			{Name: "next", Kind: models.HTTP, At: calls["next"], Res: calls["next"], TestMock: true},
+		})
+	for _, tc := range derived.Tests {
+		var owns []string
+		for _, m := range tc.Mocks {
+			owns = append(owns, m.Name)
+		}
+		assert.Equal(t, []string{tc.ID}, owns, "%s's test owns the calls %v, want only the one its own call made", tc.ID, owns)
+	}
+}
+
+// A read that ends a stream, noted after a stop asked, is stamped later than
+// the instant that stop asked about, on a clock as coarse as Windows' too:
+// the stop, told nothing of it, takes what comes from its instant on as its
+// own, and its stream may have ended. A read that ends none gives no call its
+// end and is not held for it.
+func TestForwardAndTeeStampsAStreamsEndAfterTheInstantAStopAskedAbout(t *testing.T) {
+	for _, tick := range []time.Duration{windowsTick, time.Millisecond} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			stubQuantizedClock(t, tick)
+			srcRead, srcWrite := net.Pipe()
+			dstRead, dstWrite := net.Pipe()
+			for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
+				require.NoError(t, c.SetDeadline(time.Now().Add(5*time.Second)))
+				defer c.Close()
+			}
+			ch := make(chan frameChunk, 2)
+			var asked atomic.Int64
+			stopAsked := func() time.Time {
+				if n := asked.Load(); n != 0 {
+					return time.Unix(0, n)
+				}
+				return time.Time{}
+			}
+			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, func(time.Time) func() { return func() {} }, stopAsked)
+
+			_, resp := pingCall(t)
+			awaitTickStart(tick)
+			stop := clockNow()
+			asked.Store(stop.UnixNano())
+			go func() { _, _ = srcWrite.Write(resp) }()
+			_, err := io.ReadFull(dstRead, make([]byte, len(resp)))
+			require.NoError(t, err)
+			chunk := <-ch
+			assert.True(t, chunk.timestamp.After(stop), "the stream's end stamped at %v, not after the instant a stop asked about (%v)", chunk.timestamp, stop)
+		})
+	}
+}
+
+// The forwarder waits for its clock to pass a stop's instant only when the
+// wait can: an instant further ahead than the wait's bound (a stop's clock
+// ahead of the forwarder's) it does not wait for, and a read that ends a
+// stream is not held for it. Waited for, every such read waited out the bound
+// and was stamped before the instant anyway. The clock moves on at every read
+// (on Windows the system's moves only at its tick, and the wait past a
+// stream's own stamp, which the forwarder always makes, would sleep).
+func TestForwardAndTeeDoesNotWaitForAStopInstantFarAhead(t *testing.T) {
+	var sleeps, reads atomic.Int64
+	base := time.Now()
+	prev := stubbedClock.Swap(&forwardClock{
+		now:   func() time.Time { return base.Add(time.Duration(reads.Add(1)) * time.Millisecond) },
+		sleep: func(d time.Duration) { sleeps.Add(1); time.Sleep(d) },
+	})
+	t.Cleanup(func() { stubbedClock.Store(prev) })
+	ahead := base.Add(time.Hour)
+	srcRead, srcWrite := net.Pipe()
+	dstRead, dstWrite := net.Pipe()
+	for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
+		require.NoError(t, c.SetDeadline(time.Now().Add(5*time.Second)))
+		defer c.Close()
+	}
+	ch := make(chan frameChunk, 1)
+	go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, func(time.Time) func() { return func() {} }, func() time.Time { return ahead })
+	_, resp := pingCall(t) // ends its stream
+	go func() { _, _ = srcWrite.Write(resp) }()
+	_, err := io.ReadFull(dstRead, make([]byte, len(resp)))
+	require.NoError(t, err)
+	<-ch
+	assert.Zero(t, sleeps.Load(), "the forwarder waited for a stop instant an hour ahead")
+}
+
+// A read that ends no stream, of either direction, gives no call its end:
+// it is not held for a stop's instant, even one the clock is about to pass
+// (the same coarse tick), so no request waits out a tick before the app gets
+// it.
+func TestForwardAndTeeHoldsOnlyAStreamsEndForAStopsInstant(t *testing.T) {
+	var sleeps atomic.Int32
+	prev := stubbedClock.Swap(&forwardClock{
+		now:   func() time.Time { return time.Now().Truncate(windowsTick) },
+		sleep: func(d time.Duration) { sleeps.Add(1); time.Sleep(d) },
+	})
+	t.Cleanup(func() { stubbedClock.Store(prev) })
+	building := func(time.Time) func() { return func() {} }
+	req, _ := pingCall(t)
+	notEnd := dataFrameBytes(t, 1, false, grpcPayloadBytes([]byte("more")))
+	for _, tc := range []struct {
+		toClient bool
+		b        []byte
+	}{{false, req}, {true, notEnd}} {
+		srcRead, srcWrite := net.Pipe()
+		dstRead, dstWrite := net.Pipe()
+		for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
+			require.NoError(t, c.SetDeadline(time.Now().Add(5*time.Second)))
+			defer c.Close()
+		}
+		ch := make(chan frameChunk, 1)
+		awaitTickStart(windowsTick)
+		asked := clockNow() // this tick
+		go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, func() time.Time { return asked })
+		go func() { _, _ = srcWrite.Write(tc.b) }()
+		_, err := io.ReadFull(dstRead, make([]byte, len(tc.b)))
+		require.NoError(t, err)
+		<-ch
+	}
+	assert.Zero(t, sleeps.Load(), "a read that ends no stream was held for a stop's instant")
 }
 
 func headersFrameBytes(t *testing.T, streamID uint32, fields []hpack.HeaderField, endStream bool) []byte {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -315,19 +316,6 @@ func instrConfig(instr *composeInstr, cmdType utils.CmdType, command string) *co
 	return cfg
 }
 
-// shortAgentBudget is how long a regression takes to surface here: an ordering
-// that waits for the agent before starting the project never sees it go
-// healthy, so the run fails when this budget expires. The 330s default would
-// make that a five-and-a-half-minute test.
-//
-// 20s, not less: a HEALTHY run spends composeAgentBootProbes ticks (~3s) in the
-// same wait, and the margin is what keeps a loaded CI runner from turning a
-// pass into a failure.
-func shortAgentBudget(t *testing.T) {
-	t.Helper()
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "20")
-}
-
 // waitForEvent blocks until the recorded sequence contains event, failing at
 // once if the subcommand returns first — that return is what a broken ordering
 // produces, and its error says why.
@@ -382,7 +370,6 @@ func TestComposeOrdering(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			instr := newInstr(t, agentUpAfterRun, true, models.AppError{})
 			svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -470,7 +457,6 @@ func TestNonComposeOrderingIsUntouched(t *testing.T) {
 // a port already taken — must be reported with what it did, not by sitting out
 // the whole agent budget waiting for an agent that is never going to start.
 func TestComposeProjectThatDiesFailsFast(t *testing.T) {
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1})
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -492,7 +478,6 @@ func TestComposeProjectThatDiesFailsFast(t *testing.T) {
 // instead, so the same crash exited 7 or 1 depending on which of two racing
 // paths noticed it first.
 func TestComposeProjectThatDiesMirrorsItsExitCode(t *testing.T) {
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 7})
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -530,7 +515,6 @@ func TestComposeAgentThatCannotStartIsKeploysFailure(t *testing.T) {
 		{"replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 			// compose's own exit status for a dependency that failed to start
 			instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1})
 			instr.agentFailure = func() error {
@@ -584,7 +568,6 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 		{"replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 137})
 			instr.runUntilReady = true
 			died := errors.New("the keploy agent stopped while the app was running: the keploy-agent container keploy-v3-x exited with code 137")
@@ -640,7 +623,6 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 // break out. The native branch has no such hazard: Run is called inline there,
 // and a panic simply propagates.
 func TestComposePanicInRunStillDeliversAnExit(t *testing.T) {
-	shortAgentBudget(t)
 	instr := newInstr(t, agentUpAfterRun, false, models.AppError{})
 	instr.runPanics = true
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
@@ -659,5 +641,37 @@ func TestComposePanicInRunStillDeliversAnExit(t *testing.T) {
 
 	if utils.ErrCode == 0 {
 		t.Error("a panicking app runner exited keploy cleanly; it must not report success")
+	}
+}
+
+// stalledStartInstr is a compose project whose agent never answers, and whose
+// start the watch gives up on (pkg.AgentStartWatcher).
+type stalledStartInstr struct {
+	*composeInstr
+}
+
+func (*stalledStartInstr) WatchAgentStart(context.Context) <-chan error {
+	out := make(chan error, 1)
+	out <- fmt.Errorf("%w: its start took no step across 30 of its beats", pkg.ErrAgentNotReady)
+	return out
+}
+
+// keploy mock's wait for the agent compose starts follows the agent's start:
+// a start that stopped ends it, with that, while the project still runs and
+// the agent never answers; no budget of wall time does.
+func TestComposeStartEndsOnTheAgentsStalledStart(t *testing.T) {
+	instr := &stalledStartInstr{newInstr(t, agentNeverUp, true, models.AppError{})}
+	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr.composeInstr, utils.DockerCompose, "docker compose up"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- svc.Record(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "did not come up") {
+			t.Fatalf("Record = %v; want the agent's stalled start", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Record waited on an agent whose start had stopped")
 	}
 }

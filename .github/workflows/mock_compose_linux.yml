@@ -189,6 +189,39 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh"
 
+  # keploy's waits for its agent follow the agent's start, not a clock
+  # (pkg.WatchAgentStart): its container starved from its start under docker
+  # compose, and, under docker run, paused once it says its server listens
+  # while its health check is held off, each for far longer than the budget
+  # KEPLOY_AGENT_READY_TIMEOUT once gave, and `keploy record` must still
+  # record every call. Each leg fails on a keploy whose wait a clock bounds.
+  compose_agent_boot_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: agent paused or starved at boot (docker_compose)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run compose agent-boot e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-agent-boot-linux.sh"
+
   # An app's own host entries (a compose service's extra_hosts, docker run
   # --add-host): Docker refuses them on an app that joins keploy's agent
   # container's network, so keploy moves them onto the agent container, and

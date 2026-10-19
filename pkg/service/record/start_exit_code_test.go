@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -260,11 +262,25 @@ func TestStart_AnAppThatDiesFailsTheRecording(t *testing.T) {
 	}
 }
 
-// A docker compose recording whose agent never answered its health check
-// fails, saying so, and stops with that reason: utils.Stop refuses a stop
-// with none.
-func TestStart_AComposeAgentThatIsNeverReadyFailsTheRun(t *testing.T) {
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "1")
+// startWatchingInstr is fakeInstr whose agent's start the watch gives up on
+// (pkg.AgentStartWatcher): it says the start stopped making progress.
+type startWatchingInstr struct {
+	*fakeInstr
+	watched atomic.Int32
+}
+
+func (s *startWatchingInstr) WatchAgentStart(ctx context.Context) <-chan error {
+	s.watched.Add(1)
+	out := make(chan error, 1)
+	out <- fmt.Errorf("%w: its start took no step across 30 of its beats", pkg.ErrAgentNotReady)
+	return out
+}
+
+// A docker compose recording whose agent's start stopped making progress
+// before it answered its health check (pkg.WatchAgentStart) fails, saying so,
+// and stops with that reason: utils.Stop refuses a stop with none. No budget
+// of wall time ends the wait: the watch of the start does.
+func TestStart_AComposeAgentWhoseStartStoppedFailsTheRun(t *testing.T) {
 	// The process's stop, as utils.NewCtx sets it, so that utils.Stop gets as
 	// far as the reason.
 	ctx, stop := context.WithCancel(context.Background())
@@ -277,17 +293,21 @@ func TestStart_AComposeAgentThatIsNeverReadyFailsTheRun(t *testing.T) {
 	}
 	addr := closed.Addr().String()
 	_ = closed.Close()
-	r := exitCodeRecorder(newFakeInstr())
+	instr := &startWatchingInstr{fakeInstr: newFakeInstr()}
+	r := exitCodeRecorder(instr)
 	r.config.CommandType = string(utils.DockerCompose)
 	r.config.Agent.AgentURI = "http://" + addr + "/agent"
 	core, logs := observer.New(zapcore.ErrorLevel)
 	r.logger = zap.New(core)
 
 	err, code := startForExitCode(t, ctx, r)
-	if code != utils.ExitKeployError || err == nil || !strings.Contains(err.Error(), "did not become ready") {
-		t.Fatalf("Start returned %v with exit code %d; want the agent's not being ready, and 1", err, code)
+	if code != utils.ExitKeployError || !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "did not come up") {
+		t.Fatalf("Start returned %v with exit code %d; want the agent's stalled start, and 1", err, code)
 	}
-	if said := logs.FilterMessage("keploy-agent did not become ready in time").Len(); said != 1 {
+	if instr.watched.Load() != 1 {
+		t.Fatalf("the agent's start was watched %d times, want once", instr.watched.Load())
+	}
+	if said := logs.FilterMessage("the keploy-agent docker compose started did not come up").Len(); said != 1 {
 		t.Fatalf("said %d times; want the stop's reason said once", said)
 	}
 	if refused := logs.FilterMessage("failed stopping keploy").Len(); refused != 0 {
@@ -326,7 +346,6 @@ func (c *composeDiesInstr) ComposeAgentFailure() error {
 func TestStart_AComposeProjectThatStopsBeforeTheAgentIsReadyFailsAtOnce(t *testing.T) {
 	// A budget the run must not wait out: the test fails on the reason if it
 	// does.
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "60")
 	closed, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -733,4 +752,55 @@ func TestMockStoreCleanup_SaysWhatIsLeftAndASecondInterruptEndsIt(t *testing.T) 
 	if err := <-done; !errors.Is(err, models.ErrMocksNotWritten) {
 		t.Fatalf("the cleanup returned %v, want models.ErrMocksNotWritten", err)
 	}
+}
+
+// watchCtxInstr is fakeInstr whose agent's start the watch follows and says
+// nothing of: it hands over the context the watch was given.
+type watchCtxInstr struct {
+	*fakeInstr
+	ctxs chan context.Context
+}
+
+func (w *watchCtxInstr) WatchAgentStart(ctx context.Context) <-chan error {
+	w.ctxs <- ctx
+	return nil
+}
+
+// A docker compose recording stops watching its agent's start once the
+// agent answers its health check, while the recording goes on: the watch
+// looks into the agent's container (docker inspect, docker cp) every second,
+// and has nothing left to judge.
+func TestStart_AComposeRecordingStopsWatchingItsAgentOnceItAnswers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	instr := &watchCtxInstr{fakeInstr: newFakeInstr(), ctxs: make(chan context.Context, 1)}
+	r := exitCodeRecorder(instr)
+	r.config.CommandType = string(utils.DockerCompose)
+	r.config.Agent.AgentURI = srv.URL + "/agent"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	var watch context.Context
+	select {
+	case watch = <-instr.ctxs:
+	case err := <-done:
+		t.Fatalf("Start returned %v before watching its agent's start", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the agent's start was not watched")
+	}
+	select {
+	case <-watch.Done():
+	case err := <-done:
+		t.Fatalf("Start returned %v before it stopped watching its agent", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the agent answered its health check, and its start was still watched")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Start returned %v: the watch ended with the recording, not once the agent answered", err)
+	default:
+	}
+	cancel()
+	<-done
 }

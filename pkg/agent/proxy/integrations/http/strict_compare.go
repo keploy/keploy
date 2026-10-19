@@ -302,7 +302,6 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 	for n := range liveH {
 		names[n] = true
 	}
-	recDay, liveDay := sigV4Days(recH, liveH)
 	var out []strictField
 	for _, name := range sortedNames(names) {
 		if name == "host" || name == "content-length" || strings.HasPrefix(name, "keploy") || k.n.header[name] {
@@ -328,7 +327,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		// SigV4 to read, and is excused below as before.
 		if name == "authorization" && !k.redacted(rv) {
 			if _, recSigV4 := parseSigV4Authorization(rv); recSigV4 {
-				parts, ok := sigV4AuthorizationDiffs(rv, lv, recDay, liveDay)
+				parts, ok := sigV4AuthorizationDiffs(rv, lv)
 				if !ok {
 					// The live one is no SigV4 (another scheme, SigV4A, a
 					// second line): noise learned on a SigV4 recording was

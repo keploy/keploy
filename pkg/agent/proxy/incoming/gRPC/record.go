@@ -66,18 +66,22 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// a gRPC call that ended before the stop is still in this pipeline, and
 	// the stop ends the stream without it.
 	building := syncMock.FromContextOrGlobal(ctx).BuildingTestCase
+	// The latest instant a stop asked about: a read that ends a stream, noted
+	// after it, is stamped later than it when the clock is within the wait's
+	// bound of it (forwardAndTee).
+	stopAsked := syncMock.FromContextOrGlobal(ctx).StopAsked
 
 	// Forward client → dest, tee copies to channel
 	go func() {
 		defer close(clientFrameCh)
-		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false, building)
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false, building, stopAsked)
 	}()
 
 	// Forward dest → client, tee copies to channel; what ends a stream is
 	// stamped before its client can see it (toClient).
 	go func() {
 		defer close(destFrameCh)
-		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true, building)
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true, building, stopAsked)
 	}()
 
 	// captureStream closes over ctx, t, appPort, synchronous, and mapping so
@@ -200,34 +204,48 @@ func release(built func()) {
 // What the app sends its client (toClient true) is noted and stamped after
 // the write that may wait on the client, so a write blocked on a client that
 // stopped reading holds no stop, but never after the client can see a stream's
-// end. A call's window ends at the frame that ends its stream (END_STREAM on
-// its trailers, endScanner): stamped once its client had it, the window ran on
-// for as long as the forwarder waited to run again after its write, and a
-// sequential client's next call, and the calls the app made for it, fell in
-// it. So a read that ends any stream is written up to, not including, the
-// last byte of the first frame in it that does; the read is then noted,
-// stamped and handed to
-// the parser whole, and the rest of it goes to the client once the clock reads
-// past the stamp (waitPast). One stamp serves every end in the read: it is
+// end. A call's window ends at the frame that ends its stream (its trailers'
+// END_STREAM, at the end of their header block: endScanner): stamped once its
+// client had it, the window ran on for as long as the forwarder waited to run
+// again after its write, and a sequential client's next call, and the calls
+// the app made for it, fell in it. So a read that ends any stream is written
+// up to, not including, the last byte of the first frame in it that does; the
+// read is then noted, stamped and handed to the parser whole, and the rest of
+// it goes to the client once the clock reads past the stamp (waitPast). One stamp serves every end in the read: it is
 // later than every byte of it the app sent, so each call's window holds every
 // call the app made for it, and earlier than the client can see any of its
 // ends, so it holds nothing the client does on one. The write of the rest
 // waits on the client with nothing noted that it holds: the parser has the
 // read already. A read that ends no stream is noted and stamped after its
 // write, as before.
-func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, toClient bool, building func(time.Time) func()) {
+func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, toClient bool, building func(time.Time) func(), stopAsked func() time.Time) {
 	buf := make([]byte, 32*1024)
 	teeActive := !recordingPaused()
 	var ends endScanner
 	// noteAndStamp notes a chunk as being built, then reads its stamp: a
 	// stop that asks before the note is in finds a stamp later than its own
-	// instant.
-	noteAndStamp := func() (func(), time.Time) {
+	// instant. On a clock as coarse as Windows' the stamp of a read that ends
+	// a stream (ends), a call's end, can read the very instant a stop asked
+	// about, which the stop counts as before it: one that asked before the
+	// note was in heard "clear", and then a call from its instant came. So
+	// that stamp is read again once the clock has passed the latest instant a
+	// stop asked about (stopAsked), when it has not and is within the wait's
+	// bound of it (clockWaitMax): an instant further ahead (a stop's clock
+	// ahead of this one's) the wait could not pass, and would only hold the
+	// read. Only a read that ends a stream gives a call its end.
+	noteAndStamp := func(ends bool) (func(), time.Time) {
 		var built func()
 		if teeActive && building != nil {
 			built = building(clockNow())
 		}
-		return built, clockNow()
+		at := clockNow()
+		if ends && teeActive && stopAsked != nil {
+			if asked := stopAsked(); !asked.IsZero() && !at.After(asked) && asked.Sub(at) < clockWaitMax {
+				waitPast(asked)
+				at = clockNow()
+			}
+		}
+		return built, at
 	}
 	write := func(b []byte, built func()) bool {
 		if len(b) == 0 {
@@ -269,7 +287,7 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 			}
 			switch {
 			case !toClient:
-				built, at := noteAndStamp()
+				built, at := noteAndStamp(false)
 				if !write(b, built) {
 					return
 				}
@@ -278,13 +296,13 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 				if !write(b, nil) {
 					return
 				}
-				built, at := noteAndStamp()
+				built, at := noteAndStamp(false)
 				tee(b, at, built)
 			default:
 				if !write(b[:first-1], nil) {
 					return
 				}
-				built, at := noteAndStamp()
+				built, at := noteAndStamp(true)
 				tee(b, at, built)
 				if teeActive {
 					waitPast(at)
@@ -306,7 +324,9 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 
 // endScanner follows the HTTP/2 frames an app sends its client across the
 // reads they arrive in, and finds where each frame that ends a stream ends: a
-// DATA or HEADERS frame with END_STREAM, whose last byte is what lets the
+// DATA frame with END_STREAM, a HEADERS frame with END_STREAM and
+// END_HEADERS, or the CONTINUATION frame that ends a header block a HEADERS
+// frame with END_STREAM began (RFC 9113 §8.1). Its last byte is what lets the
 // client see the end of its call. The app's side of a connection is frames
 // from its first byte (no preface).
 type endScanner struct {
@@ -314,6 +334,12 @@ type endScanner struct {
 	have int  // bytes held of the header of the frame in progress
 	left int  // bytes left of the payload of the frame in progress
 	ends bool // the frame in progress ends its stream
+	// blockEnds: the header block in progress was begun by a HEADERS frame
+	// with END_STREAM and without END_HEADERS. Its stream ends with the
+	// block (RFC 9113 §8.1), at the CONTINUATION frame that ends it: the
+	// client sees the end only with that frame, and the call's end is that
+	// frame's time (pkg.DefaultStreamManager).
+	blockEnds bool
 }
 
 // frameHeaderSize is an HTTP/2 frame header's length (RFC 9113 §4.1).
@@ -334,8 +360,21 @@ func (s *endScanner) scan(b []byte) []int {
 			}
 			s.left = int(s.hdr[0])<<16 | int(s.hdr[1])<<8 | int(s.hdr[2])
 			typ, flags := http2.FrameType(s.hdr[3]), http2.Flags(s.hdr[4])
-			s.ends = typ == http2.FrameData && flags.Has(http2.FlagDataEndStream) ||
-				typ == http2.FrameHeaders && flags.Has(http2.FlagHeadersEndStream)
+			switch typ {
+			case http2.FrameData:
+				s.ends = flags.Has(http2.FlagDataEndStream)
+			case http2.FrameHeaders:
+				endsStream := flags.Has(http2.FlagHeadersEndStream)
+				s.ends = endsStream && flags.Has(http2.FlagHeadersEndHeaders)
+				s.blockEnds = endsStream && !flags.Has(http2.FlagHeadersEndHeaders)
+			case http2.FrameContinuation:
+				s.ends = s.blockEnds && flags.Has(http2.FlagContinuationEndHeaders)
+				if flags.Has(http2.FlagContinuationEndHeaders) {
+					s.blockEnds = false
+				}
+			default:
+				s.ends = false
+			}
 		}
 		k := min(s.left, len(b)-i)
 		s.left -= k
@@ -365,6 +404,9 @@ func (s *endScanner) scan(b []byte) []int {
 func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func())) {
 	var buffer []byte
 	prefaceRead := isOutgoing
+	// One reader for all of the direction's frames: a header block split
+	// across a HEADERS frame and CONTINUATION frames is read as one.
+	frames := pkg.NewFrameReader()
 
 	// letGo lets go of a chunk's note once its frames are handled.
 	letGo := func(c frameChunk, handled bool) {
@@ -440,14 +482,14 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 				break
 			}
 
-			frame, consumed, err := pkg.ExtractHTTP2Frame(buffer[:frameSize])
+			frame, err := frames.ReadFrame(buffer[:frameSize])
 			if err != nil {
 				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
 				letGo(chunk, handled)
 				drainFrameChunks(ch)
 				return
 			}
-			buffer = buffer[consumed:]
+			buffer = buffer[frameSize:]
 			if len(buffer) == 0 {
 				buffer = nil
 			}

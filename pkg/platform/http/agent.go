@@ -73,6 +73,11 @@ type AgentClient struct {
 	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 
+	// agentContainer is the container Setup set the agent up to run in, in a
+	// docker mode (docker run, or as a service docker compose starts); ""
+	// natively. Under mu. WatchAgentStart watches its start.
+	agentContainer string
+
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
 	// under docker compose (the project starts it), nor for an agent another
@@ -2684,11 +2689,8 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	answers := make(chan http.Header, 1)
 	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.Agent.AgentURI, answers, 1*time.Second)
 
-	// What the agent reports of its start, looked at once a bootLook, one
-	// look at a time, off this goroutine: a look into a container goes
-	// through the engine's CLI, which a busy daemon answers slowly, or not at
-	// all. Each look asks first whether its process runs, then, once it does,
-	// reads its report: before, there is none to read.
+	// What the agent reports of its start, and whether its process runs:
+	// judged once a bootLook (watchStart).
 	read, running := readBootFile(""), alwaysRunning
 	switch {
 	case isDockerCmd:
@@ -2701,42 +2703,9 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 			running = run.sudoRanAgent
 		}
 	}
-	clk, release := stall.Process()
-	defer release()
-	judge := newBootJudge(clk)
-	// The judge judges once a bootLook by the latest it has seen (cur): the
-	// answer of the last look's question whether the process runs (runs), and
-	// the last report read. So a look that does not come back (a `docker cp`
-	// a wedged daemon never answers) holds up no rule: its silence is judged
-	// as any other.
-	runs := make(chan bool, 1)
-	looks := make(chan bootLookResult, 1)
-	lookNow := func() {
-		go func() {
-			r := running(agentCtx)
-			select {
-			case runs <- r:
-			case <-agentCtx.Done(): // the wait is over
-				return
-			}
-			l := bootLookResult{running: r}
-			if r {
-				l.p, l.ok = read(agentCtx)
-			}
-			select {
-			case looks <- l:
-			case <-agentCtx.Done():
-			}
-		}()
-	}
-	var cur bootLookResult
-	tick := time.NewTicker(bootLook)
-	defer tick.Stop()
-	looking := false
-	// lookSince is when (runnable time) the look out began; lookSaid, that
-	// it has been said to be out for long.
-	var lookSince time.Duration
-	lookSaid := false
+	// A container that exits ends the wait through docker run's own exit
+	// (exited), which says why: the watch is not asked.
+	judged := watchStart(agentCtx, a.logger, read, running, nil, isDockerCmd, false)
 
 	for {
 		select {
@@ -2779,29 +2748,8 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 			default:
 			}
 			return context.Cause(ctx)
-		case r := <-runs:
-			cur.running = r
-		case l := <-looks:
-			looking = false
-			cur.running = l.running
-			if l.ok {
-				cur.p, cur.ok = l.p, true
-			}
-		case <-tick.C:
-			if !looking {
-				looking, lookSince, lookSaid = true, clk.Runnable(), false
-				lookNow()
-			} else if !lookSaid && clk.Runnable()-lookSince >= bootSilence {
-				// Once its first report is in, a start is judged by the
-				// agent's beats, which a look that does not come back
-				// brings no more of: said once, so a wait that seems to
-				// hang says what it waits on.
-				lookSaid = true
-				a.logger.Warn("keploy's look at the agent's start has not come back for a while; the container engine may not be answering, and keploy waits on",
-					zap.Duration("runnable_time", bootSilence), zap.Bool("in_a_container", isDockerCmd))
-			}
-			verdict, why := judge.look(cur.p, cur.ok, cur.running)
-			switch verdict {
+		case j := <-judged:
+			switch j.verdict {
 			case bootFailed:
 				// The agent says its start has failed, as a retry would: it
 				// is stopped (it may live on after the failure), and the run
@@ -2810,7 +2758,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 					a.logAgentContainerDiagnostics(opts.KeployContainer)
 				}
 				a.stopAgent()
-				return a.agentReportedStartFailure(cur.p.ExitCode, why, isDockerCmd)
+				return a.agentReportedStartFailure(j.p.ExitCode, j.why, isDockerCmd)
 			case bootStalled:
 				// Setup's cleanup defer is not in scope yet, so without this
 				// the wedged agent and its goroutine leak, and any retry
@@ -2824,7 +2772,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 				// Sentinel so the caller can retry a fresh bring-up on this
 				// nondeterministic stall without retrying deterministic
 				// failures.
-				return fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, why)
+				return fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, j.why)
 			}
 		}
 	}
@@ -3041,6 +2989,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
+		a.mu.Lock()
+		a.agentContainer = opts.KeployContainer
+		a.mu.Unlock()
 		// The agent container maps host.docker.internal to the Docker host
 		// (host-gateway) where the daemon resolves it (extra_hosts.go). A
 		// daemon that does not answer its version would not start the agent
@@ -4086,12 +4037,41 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			a.session().record(stepAgentReady, func(c context.Context) error { return a.MakeAgentReadyForDockerCompose(c) })
 		}
 	}()
-	// Aligned with the agent's own healthcheck budget; see pkg.AgentReadyTimeout.
-	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
-	defer cancel()
+	// The wait follows the agent, not a clock: it goes on while the agent
+	// answers that it is not ready yet, or while its start makes progress
+	// (watchAgent), and ends at once on an answer that says it never will be
+	// (a CA setup failure, which the agent latches until it is started again),
+	// once its start fails or stops making progress, or once its container
+	// has exited.
+	//
+	// The watch's verdict ends a request in flight too: an agent that takes
+	// a connection and never answers it holds the request, not the release.
+	parent := ctx
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if gone := a.watchAgent(ctx, true); gone != nil {
+		go func() {
+			select {
+			case err := <-gone:
+				cancel(fmt.Errorf("the keploy agent did not take its release of the application (/agent/ready): %w", err))
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	ticker := time.NewTicker(agentReadyRetryInterval)
 	defer ticker.Stop()
+	next := func() error {
+		select {
+		case <-ctx.Done():
+			if parent.Err() != nil {
+				return parent.Err()
+			}
+			return context.Cause(ctx)
+		case <-ticker.C:
+			return nil
+		}
+	}
 
 	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
 
@@ -4117,13 +4097,8 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 				}
 			} else {
 				a.logger.Debug("the agent's proven switch is not readable yet, retrying...", zap.Error(err))
-				select {
-				case <-ctx.Done():
-					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						return fmt.Errorf("timeout waiting for agent to become ready")
-					}
-					return ctx.Err()
-				case <-ticker.C:
+				if err := next(); err != nil {
+					return err
 				}
 				continue
 			}
@@ -4136,28 +4111,31 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 
 		resp, err := a.client.Do(req)
 		if err == nil {
-			io.Copy(io.Discard, resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Debug("Successfully marked agent as ready")
 				return nil
 			}
+			// A CA setup failure is latched in the agent (pTls.MarkCAFailed):
+			// it answers so until it is started again, and no wait changes it.
+			if msg := strings.TrimSpace(string(body)); resp.StatusCode == http.StatusServiceUnavailable && strings.HasPrefix(msg, agentCASetupFailed) {
+				return fmt.Errorf("the keploy agent cannot release the application: %s", msg)
+			}
 			a.logger.Debug("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
 		} else {
 			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
 		}
-
-		select {
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("timeout waiting for agent to become ready")
-			}
-			return ctx.Err()
-		case <-ticker.C:
-			// retry
+		if err := next(); err != nil {
+			return err
 		}
 	}
 }
+
+// agentCASetupFailed begins the agent's answer to /agent/ready when its CA
+// setup has failed (pkg/agent/routes, MakeAgentReady): a failure it latches.
+const agentCASetupFailed = "CA setup failed:"
 
 // StreamPcapArtifacts opens long-lived chunked GETs against the
 // agent's /pcap/traffic and /pcap/keylog endpoints and writes the
