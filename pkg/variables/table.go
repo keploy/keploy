@@ -132,8 +132,8 @@ func (t *Table) Lookup(name string) (Binding, bool) {
 }
 
 // Bind records b unless its name is already bound, or b's value is another
-// variable's that was recorded with another value (BindAll's rule, the run's
-// included). It returns the binding in force afterwards of b's name, or the
+// variable's that was recorded with another value (TwoValues, BindAll's rule,
+// the run's included). It returns the binding in force afterwards of b's name, or the
 // one b's value is, and whether it is b. A call binds with BindAll, a
 // start-up's call too (its Gen is the table's before any scope begins), which
 // also refuses a call of a scope that ended since: Bind checks no scope.
@@ -194,10 +194,10 @@ func (t *Table) put(b Binding) {
 // in scope gen (Gen): each name holds one value (a name already bound, the
 // run's included, must be bound to the same value), and two variables
 // recorded with two values do not share a live value, unless both are clock
-// reads the learn step marked (Binding.Clock, models.MockVariable.Clock). It
-// returns the first binding that does not hold and the binding it collides
-// with; stale is true when a new scope began since gen (nothing is bound); ok
-// is true when every binding of bs is in force afterwards.
+// reads the learn step marked, made in one second (TwoValues). It returns the
+// first binding that does not hold and the binding it collides with; stale is
+// true when a new scope began since gen (nothing is bound); ok is true when
+// every binding of bs is in force afterwards.
 func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -223,31 +223,34 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 
 // collides is the binding b cannot be bound beside, of those in force and
 // earlier (bound with b, before it): one of b's name with another value
-// (earlier: in force, a name already bound keeps its own), or another
-// variable, not given, recorded with another value and holding b's live
-// value, unless both are clock reads read in one second (bothClock).
+// (earlier: in force, a name already bound keeps its own), or one whose
+// value b's is (TwoValues).
 func collides(inForce map[string]Binding, b Binding, earlier []Binding) (Binding, bool) {
 	for _, other := range inForce {
-		if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
+		if TwoValues(other, b) {
 			return other, true
 		}
 	}
 	for _, other := range earlier {
-		if other.Name == b.Name && other.Value != b.Value {
-			return other, true
-		}
-		if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded && !bothClock(b, other) {
+		if other.Name == b.Name && other.Value != b.Value || TwoValues(other, b) {
 			return other, true
 		}
 	}
 	return Binding{}, false
 }
 
-// bothClock reports whether a and b are both bindings of clock variables the
-// learn step marked (models.MockVariable.Clock): the one pair of variables
-// recorded with two values that may share a live value (two reads of one
-// clock in one second). Nothing about the values decides it.
-func bothClock(a, b Binding) bool { return a.Clock && b.Clock }
+// TwoValues reports whether b may not be bound beside held, a binding in
+// force or bound with it, because they are two variables that were two values
+// when the test was recorded and now share one live value: held is not a
+// given value, and is not b's name. The one pair of such variables that may
+// share a live value is two clock reads the learn step marked, made in one
+// second as their recordings say (models.ReadInOneSecond, FD-3): nothing
+// about the live values decides it. BindAll and Bind refuse such a b, and an
+// adapter that checks a call before it binds asks the same (http's
+// holdVariables).
+func TwoValues(held, b Binding) bool {
+	return !held.Given && held.Name != b.Name && held.Value == b.Value && held.Recorded != b.Recorded && !models.ReadInOneSecond(held.Clock, b.Clock)
+}
 
 // Start begins a new scope (as Reset) with the values its test case gave
 // bound, under one lock: no call of the scope binds before them. A name given

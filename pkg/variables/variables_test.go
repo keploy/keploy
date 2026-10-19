@@ -5,7 +5,9 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
 )
 
@@ -515,36 +517,85 @@ func TestTable_NewSetMakesAnEarlierCallStale(t *testing.T) {
 	}
 }
 
+// clockBinding is a binding of name to live, recorded as recorded (an RFC
+// 3339 instant to the second), with the clock read the learn step reads in
+// it when marked (models.MockVariable.Clock).
+func clockBinding(t *testing.T, name, live, recorded string, marked bool) Binding {
+	t.Helper()
+	b := Binding{Name: name, Value: live, Recorded: recorded}
+	if marked {
+		at, err := time.Parse(time.RFC3339, recorded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Clock = []models.ClockRead{{At: at, Res: time.Second}}
+	}
+	return b
+}
+
 // Two clock reads the learn step marked (Binding.Clock) may share one live
-// value though recorded with two values: two reads of one clock in one
-// second. A marked read and an unmarked variable may not, whatever the values
-// look like, in one call, across calls, or against the run's.
+// value though recorded with two values only when they were made in one
+// second, as their recordings say (FD-3: two reads of one clock in one
+// second), against the run's, in one call and across calls. Two marked reads
+// further apart (a creation time and an expiry an hour later) may not: a
+// regression that writes one as the other is refused. Nor may a marked read
+// and an unmarked variable, whichever binds first and whatever the values
+// look like.
 func TestTable_TwoClockReadsTheLearnStepMarkedMayShareALiveValue(t *testing.T) {
 	const live = "2026-10-19T08:00:00Z"
-	var tb Table
-	tb.KeepRun()
-	tb.Bind(Binding{Name: "booted", Value: live, Recorded: "2026-10-14T09:59:00Z", Clock: true})
-	tb.Reset()
-	if bad, with, _, ok := tb.BindAll(tb.Gen(), []Binding{
-		{Name: "created", Value: live, Recorded: "2026-10-14T10:00:00Z", Clock: true},
-		{Name: "polled", Value: live, Recorded: "2026-10-14T10:00:01Z", Clock: true},
-	}); !ok {
-		t.Fatalf("clock reads the learn step marked could not share a live value: %+v with %+v", bad, with)
+	b := func(name, recorded string, marked bool) Binding { return clockBinding(t, name, live, recorded, marked) }
+	created := b("created", "2026-10-14T10:00:00Z", true)
+	polled := b("polled", "2026-10-14T10:00:01Z", true)
+	expires := b("expires", "2026-10-14T11:00:00Z", true)
+	later := b("later", "2026-10-14T10:00:02Z", true)
+	order := b("order", "o-1", false)
+	stamp := b("stamp", "2026-10-14T10:00:01Z", false)
+	booted := b("booted", "2026-10-14T09:59:59Z", true)
+	session := b("session", "s-1", false)
+	type step struct {
+		run bool // bound by the start-up, before the first test
+		bs  []Binding
 	}
-	for name, b := range map[string]Binding{
-		"an unmarked variable":        {Name: "order", Value: live, Recorded: "o-1"},
-		"an unmarked one recorded so": {Name: "stamp", Value: live, Recorded: "2026-10-14T10:00:02Z"},
+	for _, c := range []struct {
+		name  string
+		steps []step
+		want  bool // the last step binds
+	}{
+		{"the run's read and a test's, a second apart", []step{{true, []Binding{booted}}, {false, []Binding{created}}}, true},
+		{"two in one call, a second apart", []step{{false, []Binding{created, polled}}}, true},
+		{"two across calls, a second apart", []step{{false, []Binding{created}}, {false, []Binding{polled}}}, true},
+		{"the later one first", []step{{false, []Binding{polled}}, {false, []Binding{created}}}, true},
+		{"an expiry an hour later, across calls", []step{{false, []Binding{created}}, {false, []Binding{expires}}}, false},
+		{"an expiry an hour later, in one call", []step{{false, []Binding{created, expires}}}, false},
+		{"an expiry an hour after the run's read", []step{{true, []Binding{created}}, {false, []Binding{expires}}}, false},
+		{"two seconds apart", []step{{false, []Binding{created}}, {false, []Binding{later}}}, false},
+		{"a marked read after an unmarked variable, across calls", []step{{false, []Binding{order}}, {false, []Binding{created}}}, false},
+		{"a marked read after an unmarked variable, in one call", []step{{false, []Binding{order, created}}}, false},
+		{"an unmarked variable after a marked read, across calls", []step{{false, []Binding{created}}, {false, []Binding{order}}}, false},
+		{"an unmarked variable after a marked read, in one call", []step{{false, []Binding{created, order}}}, false},
+		{"an unmarked one recorded as a time", []step{{false, []Binding{created}}, {false, []Binding{stamp}}}, false},
+		{"a marked read after an unmarked one recorded as a time", []step{{false, []Binding{stamp}}, {false, []Binding{created}}}, false},
+		{"an unmarked variable after the run's marked read", []step{{true, []Binding{booted}}, {false, []Binding{order}}}, false},
+		{"a marked read after the run's unmarked variable", []step{{true, []Binding{session}}, {false, []Binding{created}}}, false},
 	} {
-		if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{b}); ok {
-			t.Errorf("%s bound a clock read's live value", name)
+		var tb Table
+		tb.KeepRun()
+		began := false
+		for i, st := range c.steps {
+			if !st.run && !began {
+				tb.Reset()
+				began = true
+			}
+			bad, with, _, ok := tb.BindAll(tb.Gen(), st.bs)
+			if i < len(c.steps)-1 {
+				if !ok {
+					t.Fatalf("%s: step %d could not bind: %+v with %+v", c.name, i+1, bad, with)
+				}
+				continue
+			}
+			if ok != c.want {
+				t.Errorf("%s: bound %v, want %v (evidence %+v with %+v)", c.name, ok, c.want, bad, with)
+			}
 		}
-	}
-	var fresh Table
-	fresh.Reset()
-	if _, _, _, ok := fresh.BindAll(fresh.Gen(), []Binding{
-		{Name: "created", Value: live, Recorded: "r-1", Clock: true},
-		{Name: "order", Value: live, Recorded: "r-2"},
-	}); ok {
-		t.Error("a marked clock read and an unmarked variable shared a live value in one call")
 	}
 }

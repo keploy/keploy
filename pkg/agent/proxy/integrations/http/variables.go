@@ -59,10 +59,10 @@ type varDecl struct {
 	name     string
 	recorded string
 	echo     bool
-	// clock: the learn step marked the variable a clock read at its bind
+	// clock: the clock reads the learn step marked at the variable's bind
 	// (models.MockVariable.Clock). It is read only where the call binds the
 	// variable.
-	clock  bool
+	clock  []models.ClockRead
 	bind   *varPlace
 	use    []varPlace
 	answer []varPlace
@@ -622,7 +622,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			others = append(others, b)
 		}
 		for _, b := range others {
-			if !b.Given && b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded && !(b.Clock && d.clock) {
+			if variables.TwoValues(b, variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock}) {
 				return nil, &varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, v.value, b.Name, b.Mock, b.Place),

@@ -520,37 +520,77 @@ func TestVariables_AVariableCannotTakeAnothersValue(t *testing.T) {
 	}
 }
 
+// clockV is a variable bound at bind, recorded as recorded (an RFC 3339
+// instant to the second), with the clock read the learn step reads in it at
+// its bind when marked (MockVariable.Clock).
+func clockV(t *testing.T, recorded, bind string, marked bool) models.MockVariable {
+	t.Helper()
+	v := bindV(recorded, bind)
+	if marked {
+		at, err := time.Parse(time.RFC3339, recorded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.Clock = []models.ClockRead{{At: at, Res: time.Second}}
+	}
+	return v
+}
+
 // Two clock reads the learn step marked at their binds (MockVariable.Clock)
-// may share one live value, though recorded as two (two reads of one clock in
-// one second): both calls are answered. A clock read and a variable it did
-// not mark may not: the second is refused with the first's evidence.
+// may share one live value, though recorded as two, only when they were made
+// in one second as their recordings say (FD-3: two reads of one clock in one
+// second): both calls are answered. Two marked reads an hour apart (a
+// creation time and an expiry) may not, nor may a marked read and a variable
+// the learn step did not mark, whichever binds first: the second is refused
+// with the first's evidence. In one call as across calls.
 func TestVariables_TwoMarkedClockReadsMayShareALiveValue(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const live = "2026-10-19T08:00:00Z"
-	for _, marked := range []bool{true, false} {
+	for _, c := range []struct {
+		name                      string
+		first, second             string // recorded
+		firstMarked, secondMarked bool
+		want                      bool
+	}{
+		{"both marked, a second apart", "2026-10-14T10:00:00Z", "2026-10-14T10:00:01Z", true, true, true},
+		{"both marked, an expiry an hour later", "2026-10-14T10:00:00Z", "2026-10-14T11:00:00Z", true, true, false},
+		{"a marked read, then an unmarked variable", "2026-10-14T10:00:00Z", "2026-10-14T10:00:01Z", true, false, false},
+		{"an unmarked variable, then a marked read", "2026-10-14T10:00:00Z", "2026-10-14T10:00:01Z", false, true, false},
+	} {
+		first := clockV(t, c.first, "body.at", c.firstMarked)
+		second := clockV(t, c.second, "body.at", c.secondMarked)
+		// Across calls: the first call binds first, the second is checked
+		// against it.
 		h := newHTTP()
-		created := bindV("2026-10-14T10:00:00Z", "body.at")
-		created.Clock = true
-		polled := bindV("2026-10-14T10:00:01Z", "body.at")
-		polled.Clock = marked
 		db := &varDb{perTest: []*models.Mock{
-			at(varMock("mock-1", "POST", "http://store/orders", `{"at":"2026-10-14T10:00:00Z"}`, 201, `{}`, models.MockVariables{"created": created}), 1),
-			at(varMock("mock-2", "POST", "http://store/polls", `{"at":"2026-10-14T10:00:01Z"}`, 200, `{}`, models.MockVariables{"polled": polled}), 2),
+			at(varMock("mock-1", "POST", "http://store/orders", `{"at":"`+c.first+`"}`, 201, `{}`, models.MockVariables{"first": first}), 1),
+			at(varMock("mock-2", "POST", "http://store/polls", `{"at":"`+c.second+`"}`, 200, `{}`, models.MockVariables{"second": second}), 2),
 		}}
-		if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"at":"`+live+`"}`)); !ok {
-			t.Fatalf("marked %v: the first clock read was not answered", marked)
+		if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", `{"at":"`+live+`"}`)); !ok {
+			t.Fatalf("%s: the first call was not answered: %+v", c.name, diag)
 		}
 		ok, _, diag := matchVar(t, h, db, liveReq("POST", "/polls", `{"at":"`+live+`"}`))
-		if marked {
+		if c.want {
 			if !ok {
-				t.Fatalf("two marked clock reads could not share a live value: %+v", diag)
+				t.Fatalf("%s: across calls, the two could not share a live value: %+v", c.name, diag)
+			}
+		} else if p := wantProblem(t, ok, diag, "which is variable first's value"); p.name != "second" {
+			t.Fatalf("%s: across calls, evidence %+v", c.name, p)
+		}
+		// In one call: both are bound at one call's two places.
+		h = newHTTP()
+		db = &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "POST", "http://store/orders", `{"a":"`+c.first+`","b":"`+c.second+`"}`, 201, `{}`,
+				models.MockVariables{"first": clockV(t, c.first, "body.a", c.firstMarked), "second": clockV(t, c.second, "body.b", c.secondMarked)}), 1),
+		}}
+		ok, _, diag = matchVar(t, h, db, liveReq("POST", "/orders", `{"a":"`+live+`","b":"`+live+`"}`))
+		if c.want {
+			if !ok {
+				t.Fatalf("%s: in one call, the two could not share a live value: %+v", c.name, diag)
 			}
 			continue
 		}
-		p := wantProblem(t, ok, diag, "which is variable created's value")
-		if p.name != "polled" {
-			t.Fatalf("evidence %+v", p)
-		}
+		wantProblem(t, ok, diag, "'s value in this test")
 	}
 }
 
