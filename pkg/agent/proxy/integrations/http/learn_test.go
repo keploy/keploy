@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2056,5 +2058,221 @@ func TestLearnMatchRefusesAnIdItsAnswerHoldsFromInsideALongerValue(t *testing.T)
 		if !tc.refused && !strings.Contains(served.Spec.HTTPResp.Body, "Zq81Lm0Xwe") {
 			t.Fatalf("%s: answered %s, want this run's id", tc.name, served.Spec.HTTPResp.Body)
 		}
+	}
+}
+
+// parkedOnDisk is m as the agent keeps a mock whose answer it parked on disk
+// (diskmocks.go: an answer of responseSpillMinBytes or more): no answer on
+// the mock, read back on demand. With fail set, reading it back fails.
+func parkedOnDisk(m *models.Mock, fail bool) *models.Mock {
+	saved := m.Spec.HTTPResp
+	m.Spec.HTTPResp = nil
+	m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		if fail {
+			return nil, nil, errors.New("disk mocks: store closed")
+		}
+		return saved, nil, nil
+	})
+	return m
+}
+
+// bigAnswer is a JSON answer of more than 8 KiB holding fields: one the agent
+// parks on disk.
+func bigAnswer(fields string) string {
+	return `{` + fields + `,"padding":"` + strings.Repeat("x", 9000) + `"}`
+}
+
+// An answer the agent parked on disk is read back before the learn step
+// classifies what drifted: a value it echoes is an echo (a variable of the
+// call), never noise. Read without it, the echo was learned as noise and
+// never compared again.
+func TestLearnMatchFindsAnEchoInAnAnswerParkedOnDisk(t *testing.T) {
+	h, n, opts := learnOn(t)
+	db := &learnDb{perTest: []*models.Mock{parkedOnDisk(learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"key":"k-1","amount":5}`, nil, bigAnswer(`"id":"ch_1","idempotency_key":"k-1"`)), false)}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/charges", `{"key":"k-2","amount":5}`, nil), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	if !strings.Contains(served.Spec.HTTPResp.Body, `"idempotency_key":"k-2"`) {
+		t.Fatalf("served %.80s…: this run's value is answered where the recorded one was echoed", served.Spec.HTTPResp.Body)
+	}
+	if got := db.consumed[0].Spec; len(got.ReqBodyNoise) != 0 || len(got.Learned()) != 1 {
+		t.Fatalf("learned noise %v, variables %+v; want the echo as a variable, no noise", got.ReqBodyNoise, got.Learned())
+	}
+}
+
+// A value an earlier answer held, which the agent parked on disk, flowed
+// from there: refused (keploy cannot follow a value from an answer yet),
+// never noise, whether that answer was served by the matcher or by the learn
+// step.
+func TestLearnMatchFindsAValueAnEarlierAnswerParkedOnDiskHeld(t *testing.T) {
+	earlier := func() *models.Mock {
+		return parkedOnDisk(learnRecorded("mock-0", 0, "POST", "/v1/sessions", `{"user":"u-1"}`, nil, bigAnswer(`"token":"tok-7f3a9c"`)), false)
+	}
+	later := learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"token":"tok-7f3a9c","item":"book"}`, nil, `{}`)
+	for _, tc := range []struct {
+		what  string
+		setup func(tr *learn.Tracker, h *HTTP, n learnNoise, opts models.OutgoingOptions, ctx context.Context) *learnDb
+	}{
+		{"served by the matcher", func(tr *learn.Tracker, _ *HTTP, _ learnNoise, _ models.OutgoingOptions, _ context.Context) *learnDb {
+			tr.ServedMock(earlier())
+			return &learnDb{perTest: []*models.Mock{later.DeepCopy()}}
+		}},
+		{"served by the learn step", func(tr *learn.Tracker, h *HTTP, n learnNoise, opts models.OutgoingOptions, ctx context.Context) *learnDb {
+			db := &learnDb{perTest: []*models.Mock{earlier(), later.DeepCopy()}, observe: tr.ServedMock}
+			if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions", `{"user":"u-1"}`, nil), db, n, opts); served == nil || miss != nil || err != nil {
+				t.Fatalf("the earlier call is not answered: %+v %v", miss, err)
+			}
+			return db
+		}},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			db := tc.setup(tr, h, n, opts, ctx)
+			served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"token":"tok-0c41b2","item":"book"}`, nil), db, n, opts)
+			if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "mock-0") {
+				t.Fatalf("served %v miss %+v; want the value refused as one mock-0 answered", served, miss)
+			}
+		})
+	}
+}
+
+// An answer that cannot be read back leaves nothing learned: of the paired
+// mock (what its answer echoes cannot be told), or of an earlier one (what
+// flowed from it cannot be told). The call is a miss that says so.
+func TestLearnMatchLearnsNothingFromAnAnswerItCannotReadBack(t *testing.T) {
+	h, n, opts := learnOn(t)
+	db := &learnDb{perTest: []*models.Mock{parkedOnDisk(learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"key":"k-1"}`, nil, bigAnswer(`"id":"ch_1"`)), true)}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/charges", `{"key":"k-2"}`, nil), db, n, opts)
+	// keploy's own store failed, not the request: no reason of the learn
+	// step's (request_changed would blame the request).
+	if err != nil || served != nil || miss == nil || miss.res.Reason != "" || !strings.Contains(miss.res.Why, "cannot read") || len(db.consumed) != 0 {
+		t.Fatalf("served %v miss %+v err %v consumed %d; want a miss that learned nothing", served, miss, err, len(db.consumed))
+	}
+
+	// An earlier one, named or not (what tells it is the read's error).
+	for _, name := range []string{"mock-0", ""} {
+		tr := learn.NewTracker()
+		tr.Begin()
+		tr.ServedMock(parkedOnDisk(learnRecorded(name, 0, "POST", "/v1/sessions", `{"user":"u-1"}`, nil, bigAnswer(`"token":"tok-7f3a9c"`)), true))
+		ctx := learn.WithTracker(context.Background(), tr)
+		db = &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"note":"n-1"}`, nil, `{}`)}}
+		served, miss, err = h.learnMatch(ctx, live("POST", "/v1/orders", `{"note":"n-2"}`, nil), db, n, opts)
+		if err != nil || served != nil || miss == nil || miss.res.Reason != "" || !strings.Contains(miss.res.Why, "cannot read") || len(db.consumed) != 0 {
+			t.Fatalf("earlier mock %q: served %v miss %+v err %v; want a miss that learned nothing", name, served, miss, err)
+		}
+	}
+}
+
+// A variable's answer places are read from the answer read back from disk:
+// the call is answered with this run's value where the parked answer holds
+// the recorded one.
+func TestLearnMatchAnswersAVariableInAnAnswerParkedOnDisk(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`),
+		parkedOnDisk(learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, bigAnswer(`"id":"o-1","state":"new"`)), false),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), db, n, opts); served == nil || miss != nil {
+		t.Fatalf("the first call is paired: %+v", miss)
+	}
+	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/orders/o-9", "", nil), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	if !strings.HasPrefix(served.Spec.HTTPResp.Body, `{"id":"o-9","state":"new"`) {
+		t.Fatalf("served %.40s…: the answer holds this run's value", served.Spec.HTTPResp.Body)
+	}
+}
+
+// With no drift cache yet (a tracker before its first test: the app's
+// start-up calls in F), an earlier answer parked on disk is read back too,
+// and the learn step keeps working for the tests after it.
+func TestLearnMatchReadsAParkedAnswerBeforeTheFirstTest(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	pool := func(name string, at time.Duration, method, target, body, resp string) *models.Mock {
+		m := learnRecorded(name, at, method, target, body, nil, resp)
+		m.TestModeInfo.Lifetime = models.LifetimeSession
+		return m
+	}
+	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{
+		parkedOnDisk(pool("pool-0", 0, "GET", "/v1/config", "", bigAnswer(`"region":"eu"`)), false),
+		pool("pool-1", time.Second, "POST", "/v1/register", `{"node":"n-1"}`, `{}`),
+	}}}
+	tr := learn.NewTracker() // not begun: no drift cache
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-2"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+		t.Fatalf("start-up call: served %v miss %+v err %v", served, miss, err)
+	}
+	tr.Begin()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		db := &learnDb{perTest: []*models.Mock{
+			parkedOnDisk(learnRecorded("mock-0", 0, "GET", "/v1/config", "", nil, bigAnswer(`"region":"eu"`)), false),
+			learnRecorded("mock-1", time.Second, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{}`),
+		}}
+		if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"k-3"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+			t.Errorf("a later test's call: served %v miss %+v err %v", served, miss, err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("a later test's call never returned")
+	}
+}
+
+// An exchange the learn step served whose parked answer read back for the
+// claim and then cannot be read back again is not kept as an exchange with
+// no answer: a later value from it is refused, never learned as noise.
+func TestLearnMatchKeepsNoExchangeWhoseAnswerItCannotReadAgain(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	var reads atomic.Int32
+	m0 := learnRecorded("mock-0", 0, "POST", "/v1/sessions", `{"user":"u-1"}`, nil, bigAnswer(`"token":"tok-7f3a9c"`))
+	saved := m0.Spec.HTTPResp
+	m0.Spec.HTTPResp = nil
+	m0.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		if reads.Add(1) == 1 {
+			return saved, nil, nil
+		}
+		return nil, nil, errors.New("disk mocks: store closed")
+	})
+	later := learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"token":"tok-7f3a9c","item":"book"}`, nil, `{}`)
+	db := &learnDb{perTest: []*models.Mock{m0, later}, observe: tr.ServedMock}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions", `{"user":"u-1"}`, nil), db, n, opts); served == nil || miss != nil || err != nil {
+		t.Fatalf("the earlier call is not answered: %+v %v", miss, err)
+	}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"token":"tok-0c41b2","item":"book"}`, nil), db, n, opts); served != nil || miss == nil || miss.res.Reason != "" || !strings.Contains(miss.res.Why, "cannot read") {
+		t.Fatalf("served %v miss %+v; want refused, learning nothing", served, miss)
+	}
+}
+
+// A Mongo mock's answer, which the agent always parks on disk, is an earlier
+// place of the test too: a value an HTTP call sends that came from it is
+// refused, never noise.
+func TestLearnMatchFindsAValueAParkedMongoAnswerHeld(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	mg := &models.Mock{Name: "mock-0", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: learnAt}}
+	saved := []models.MongoResponse{{Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"cursor":{"firstBatch":[{"_id":"oid-55aa77"}]}} }`}}}}
+	mg.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) { return nil, saved, nil })
+	tr.ServedMock(mg)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"ref":"oid-55aa77"}`, nil, `{}`)}}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"ref":"oid-99bb00"}`, nil), db, n, opts)
+	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "mock-0") {
+		t.Fatalf("served %v miss %+v; want the value refused as one mock-0 answered", served, miss)
 	}
 }

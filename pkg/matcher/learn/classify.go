@@ -535,11 +535,61 @@ type DriftCache struct {
 	// mockText is each mock's text as Classify reads it (RawOf), by mock:
 	// the store's mocks are read once per test, not once per request.
 	mockText map[*models.Mock]string
+	// readText is each mock's text with its answer read back (ReadRaw), by
+	// mock: apart from mockText, which RawOf fills with a parked mock's
+	// text without its answer.
+	readText map[*models.Mock]string
 }
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[run]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}}
+	return &DriftCache{m: map[run]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
+}
+
+// ReadRaw is RawOf(m, served) with m's answer read back first when the agent
+// parked it on disk (models.Mock.HasSpilledResponse), m's text read once for
+// the test (a nil cache reads it now). RawOf reads a parked mock as it is,
+// without its answer, so a value its answer held reads as appearing nowhere.
+// err is non-nil when the answer cannot be read back: what it held cannot be
+// told, and nothing may be learned on the strength of its absence.
+func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
+	if dc == nil || !m.HasSpilledResponse() {
+		if dc == nil {
+			return ReadRaw(m, served)
+		}
+		return dc.RawOf(m, served), nil
+	}
+	dc.mu.Lock()
+	text, ok := dc.readText[m]
+	dc.mu.Unlock()
+	if ok {
+		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}, nil
+	}
+	r, err := ReadRaw(m, served)
+	if err != nil {
+		return r, err
+	}
+	dc.mu.Lock()
+	if dc.readText == nil {
+		dc.readText = map[*models.Mock]string{}
+	}
+	dc.readText[m] = r.Text
+	dc.mu.Unlock()
+	return r, nil
+}
+
+// ReadRaw is RawOf with m's answer read back first when the agent parked it
+// on disk, on a copy (the pooled mock keeps it parked); err is why it cannot
+// be read back.
+func ReadRaw(m *models.Mock, served bool) (Raw, error) {
+	if !m.HasSpilledResponse() {
+		return RawOf(m, served), nil
+	}
+	full := m.ShallowCopy()
+	if err := full.HydrateResponse(); err != nil {
+		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served}, err
+	}
+	return RawOf(full, served), nil
 }
 
 // RawOf is RawOf(m, served), m's text read once for the test (a nil cache

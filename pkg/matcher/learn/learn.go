@@ -265,7 +265,9 @@ type Result struct {
 	// Diff is that candidate's.
 	Diff Diff
 	// Reason, for a miss: models.MissRequestChanged, MissUnstableOrder or
-	// MissUnmockedCall.
+	// MissUnmockedCall; empty for one keploy could not judge because its
+	// own store could not read a recorded answer back (keploy's failure,
+	// not the request's).
 	Reason string
 	// Why, for a miss, is what differed, by path; it never holds a value.
 	Why string
