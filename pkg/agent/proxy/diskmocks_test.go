@@ -511,3 +511,44 @@ func TestLoadStaged_ReadsOnlyTheDeclaredMocksOfItsRangeInRecordedOrder(t *testin
 		t.Fatalf("LoadStaged read %v; want the declared mocks of [10s, 400s] in recorded order: %v", out, want)
 	}
 }
+
+// RangeKeys visits the on-disk mocks of a kind indexed under any key asked
+// (models.RequestKeys), once each, in recorded order, until the visit says
+// stop: none of another key, another kind, or a mock whose parser declares
+// none. It decodes only what the visit loads.
+func TestRangeKeysVisitsTheKeysAskedInRecordedOrder(t *testing.T) {
+	defer models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string { return []string{m.Name[:4], "any"} })()
+	mongo := perTestMockAt("dele-mongo", 15)
+	mongo.Kind = models.Mongo
+	s := newDiskWith(t, perTestMockAt("dele-30", 30), mongo, perTestMockAt("poll-20", 20), perTestMockAt("dele-10", 10), perTestMockAt("send-40", 40))
+	defer s.Close()
+	visit := func(kind models.Kind, keys []string, loadName string, stopAt string) (visited, loaded []string) {
+		t.Helper()
+		if err := s.RangeKeys(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+			visited = append(visited, name)
+			if name == loadName {
+				m, err := load()
+				if err != nil || m.Name != name {
+					t.Fatalf("load of %s = %v, %v", name, m, err)
+				}
+				loaded = append(loaded, m.Name)
+			}
+			return name != stopAt
+		}); err != nil {
+			t.Fatalf("RangeKeys: %v", err)
+		}
+		return visited, loaded
+	}
+	if got, loaded := visit(models.HTTP, []string{"dele"}, "dele-30", ""); !reflect.DeepEqual(got, []string{"dele-10", "dele-30"}) || !reflect.DeepEqual(loaded, []string{"dele-30"}) {
+		t.Fatalf("RangeKeys(HTTP, dele) visited %v and loaded %v; want dele-10, dele-30, and only dele-30 decoded", got, loaded)
+	}
+	if got, _ := visit(models.HTTP, []string{"send", "dele", "any"}, "", ""); !reflect.DeepEqual(got, []string{"dele-10", "poll-20", "dele-30", "send-40"}) {
+		t.Fatalf("RangeKeys(HTTP, send, dele, any) visited %v; want each HTTP mock once, in recorded order", got)
+	}
+	if got, _ := visit(models.HTTP, []string{"any"}, "", "poll-20"); !reflect.DeepEqual(got, []string{"dele-10", "poll-20"}) {
+		t.Fatalf("a visit that stopped at poll-20 went on: %v", got)
+	}
+	if got, _ := visit(models.Mongo, []string{"dele"}, "", ""); len(got) != 0 {
+		t.Fatalf("a kind with no declared keys visited %v", got)
+	}
+}

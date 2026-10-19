@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -489,4 +490,42 @@ func TestServeDNS_AnswersFitTheClient(t *testing.T) {
 	if r, err := query("tcp", 0); err != nil || !whole(r) {
 		t.Errorf("a TCP client got %v, %v; want the whole answer", r, err)
 	}
+}
+
+// Each DNS server's bind is a stage of the agent's start of its own, begun on
+// the goroutine that binds and serves, and ended there as the server settles:
+// once bound, before it serves (its thread let go), or as a bind that failed
+// returns. StartProxy's stage waits for the binds, and that wait alone shows
+// no progress.
+func TestADNSServersBindIsAStageOfTheAgentsStart(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network+" binds", func(t *testing.T) {
+			begun := recordBootWork(t)
+			s, _, _ := serveDNSOnFreePort(t, network, nil)
+			if !s.bound {
+				t.Fatalf("the %s DNS server did not bind: %v", network, s.err)
+			}
+			recs := begun()
+			if len(recs) == 0 {
+				t.Fatal("the bind began no stage of the agent's start")
+			}
+			// serveDNSOnFreePort may have found a port taken and tried again.
+			assertOneOwnStage(t, recs[len(recs)-1:], fmt.Sprintf("the %s DNS server's bind", strings.ToUpper(network)))
+		})
+	}
+	t.Run("tcp cannot bind", func(t *testing.T) {
+		held, err := net.Listen("tcp", "127.0.0.1:0") // no SO_REUSEPORT: the server cannot share it
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = held.Close() })
+		begun := recordBootWork(t)
+		s, served := serveDNSServerForTest(t, "tcp", held.Addr().(*net.TCPAddr).Port)
+		<-s.settled
+		<-served
+		if s.bound {
+			t.Fatal("a DNS server bound a port another socket holds")
+		}
+		assertOneOwnStage(t, begun(), "the TCP DNS server's bind")
+	})
 }

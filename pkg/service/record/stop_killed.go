@@ -75,3 +75,19 @@ func (r *Recorder) markStopKilled(ctx context.Context, testSetID, why string) {
 			zap.String("testSet", testSetID))
 	}
 }
+
+// composeAppStopper is an instrumentation that stops the app's container of a
+// docker compose stack, its stack running on, under the proven switch
+// (AgentClient; P101-c).
+type composeAppStopper interface {
+	StopComposeApp(ctx context.Context) (string, error)
+}
+
+// noteEndCut keeps why the recording's end is cut, under the proven switch:
+// the first reason, which the test-set's config then carries
+// (markStopKilled).
+func (r *Recorder) noteEndCut(why string) {
+	if provenswitch.On() {
+		r.endCut.CompareAndSwap(nil, &why)
+	}
+}

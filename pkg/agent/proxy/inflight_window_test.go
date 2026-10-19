@@ -409,3 +409,200 @@ func TestUnderExactServingALearnStepCountsAMappedCallInFlightAsItsTestsOwn(t *te
 		t.Fatalf("the consumed state %+v (consumed %v); want rid learned at body.rid", st.Variables, ok)
 	}
 }
+
+// registerAnswerPlacedPolls places the HTTP mocks whose metadata names them a
+// poll at their answer (models.RegisterAnswerPlaced), for the test's life.
+func registerAnswerPlacedPolls(t *testing.T) {
+	t.Helper()
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+}
+
+// answerPlacedPoll is inFlightMock as a poll placed at its answer.
+func answerPlacedPoll(name string, req, res int) *models.Mock {
+	m := inFlightMock(name, req, res)
+	m.Spec.Metadata["poll"] = "yes"
+	return m
+}
+
+// A poll placed at its answer is staged in the window that holds its answer:
+// (b) one sent inside test-1 and answered in test-2, which by its request was
+// test-1's; (e) one sent as the app boots and answered in test-2, which by
+// its request was start-up traffic; and one sent in the gap before test-2 and
+// answered in it, as the in-flight rule has it. One answered in the gap after
+// test-2 is no window's, where the in-flight rule gave it to test-2, and one
+// sent in test-2 and answered in test-3 is test-3's. The windowed read serves
+// test-2's own, the open test owns them, and a consume of one in its window is
+// not out of it.
+func TestTheManagerStagesAPollInTheWindowItsAnswerIsIn(t *testing.T) {
+	registerAnswerPlacedPolls(t)
+	// A carry-over registration for the kind, of no mock: every per-test HTTP
+	// mock consumed out of its window is then flagged (MarksOutOfWindow), so
+	// consumedOutOfWindow below says where each poll's window is.
+	t.Cleanup(models.RegisterCarryOver(models.HTTP, func(*models.Mock) bool { return false }))
+	recording := func() []*models.Mock {
+		return []*models.Mock{
+			inFlightMock("own-2", 2010, 2011),
+			answerPlacedPoll("poll-b", 1050, 2050),
+			answerPlacedPoll("boot-poll", 500, 2060),
+			answerPlacedPoll("gap-poll", 1500, 2070),
+			answerPlacedPoll("poll-to-gap", 1600, 2500),
+			answerPlacedPoll("poll-3", 2020, 3050),
+			answerPlacedPoll("boot-poll-3", 500, 3060), // asked at boot, placed past test-2
+		}
+	}
+	names := func(ms []*models.Mock) []string {
+		var out []string
+		for _, mk := range ms {
+			out = append(out, mk.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(winStart(1))
+	mm.SeedRecordedWindows(windowsOf("test-1", "test-2", "test-3"))
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow(recording(), nil, winStart(2), winEnd(2))
+	want := []string{"boot-poll", "gap-poll", "own-2", "poll-b"}
+	if got, _ := mm.GetFilteredMocks(); !equalStrings(names(got), want) {
+		t.Fatalf("test-2's per-test tier holds %v; want %v", names(got), want)
+	}
+	if startup, _ := mm.GetStartupMocks(); len(startup) != 0 {
+		t.Fatalf("the start-up tier holds %v; want none: the boot poll is test-2's", names(startup))
+	}
+	mm.SetCurrentTestWindow(winStart(2), winEnd(2))
+	inWindow, _ := mm.GetFilteredMocksInWindow()
+	if !equalStrings(names(inWindow), want) {
+		t.Fatalf("test-2's windowed read serves %v; want %v", names(inWindow), want)
+	}
+	for _, mk := range inWindow {
+		if !mm.OwnedByOpenTest(mk) {
+			t.Errorf("%s is not owned by test-2", mk.Name)
+		}
+		if mm.consumedOutOfWindow(*mk) {
+			t.Errorf("a consume of %s in test-2 is out of its window", mk.Name)
+		}
+	}
+	if !mm.consumedOutOfWindow(*answerPlacedPoll("poll-3", 2020, 3050)) {
+		t.Error("a consume in test-2 of the poll answered in test-3 is not out of its window")
+	}
+	// Its consume says it is placed at its answer, which the replay maps it
+	// by (MockState.AnswerPlaced).
+	mm.GetConsumedMocks()
+	for _, mk := range inWindow {
+		switch mk.Name {
+		case "poll-b": // a reusing parser's door
+			if !mm.MarkMockAsUsed(*mk) {
+				t.Fatal("poll-b's consume was refused")
+			}
+		case "gap-poll": // a consuming parser's door
+			if !mm.DeleteFilteredMock(*mk) {
+				t.Fatal("gap-poll's consume was refused")
+			}
+		}
+	}
+	found := map[string]bool{}
+	for _, st := range mm.GetConsumedMocks() {
+		if st.Name == "poll-b" || st.Name == "gap-poll" {
+			found[st.Name] = true
+			if !st.AnswerPlaced {
+				t.Errorf("%s's consume does not say it is placed at its answer", st.Name)
+			}
+		}
+	}
+	if !found["poll-b"] || !found["gap-poll"] {
+		t.Errorf("the consumes recorded %v; want poll-b's and gap-poll's", found)
+	}
+	mm.SetMocksWithWindow(recording(), nil, winStart(3), winEnd(3))
+	if got, _ := mm.GetFilteredMocks(); !equalStrings(names(got), []string{"boot-poll-3", "poll-3"}) {
+		t.Fatalf("test-3's per-test tier holds %v; want the polls answered in it", names(got))
+	}
+}
+
+// The on-disk store loads a poll placed at its answer with the window that
+// holds its answer, leaves it out of the start-up band when it was sent as the
+// app booted, and out of the in-flight load, which its place makes needless.
+func TestDiskMocksPlacesAPollAtItsAnswer(t *testing.T) {
+	registerAnswerPlacedPolls(t)
+	d, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	for _, mk := range []*models.Mock{
+		inFlightMock("boot-call", 400, 410),
+		answerPlacedPoll("boot-poll", 300, 2060), // the earliest asked
+		answerPlacedPoll("poll-b", 1050, 2050),
+		answerPlacedPoll("gap-poll", 1500, 2070),
+		inFlightMock("gap-call", 1600, 2080),
+		inFlightMock("own-2", 2010, 2011),
+		answerPlacedPoll("poll-3", 2020, 3050),
+	} {
+		if err := d.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Finalize()
+	load := func(ms []*models.Mock, err error) []string {
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, mk := range ms {
+			out = append(out, mk.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	if got := load(d.LoadWindow(winStart(2), winEnd(2))); !equalStrings(got, []string{"boot-poll", "gap-poll", "own-2", "poll-b"}) {
+		t.Fatalf("test-2's window loads %v", got)
+	}
+	// A mapping-mode test's load reads the polls placed in its window, and
+	// nothing else the window holds, in placed order, the bounds included.
+	inOrder := func(ms []*models.Mock, err error) []string {
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []string{}
+		for _, mk := range ms {
+			out = append(out, mk.Name)
+		}
+		return out
+	}
+	if got := inOrder(d.LoadAnswerPlaced(winStart(2), winEnd(2))); !equalStrings(got, []string{"poll-b", "boot-poll", "gap-poll"}) {
+		t.Fatalf("test-2's polls placed at their answer load %v; want poll-b, boot-poll and gap-poll, by their answers", got)
+	}
+	if got := inOrder(d.LoadAnswerPlaced(pms(2050), pms(2060))); !equalStrings(got, []string{"poll-b", "boot-poll"}) {
+		t.Fatalf("the polls answered from 2050 to 2060 load %v; want poll-b and boot-poll, answered at its bounds", got)
+	}
+	if got := inOrder(d.LoadAnswerPlaced(pms(2070), pms(2050))); len(got) != 0 {
+		t.Fatalf("an inverted window loads %v; want none", got)
+	}
+	if got := load(d.LoadBefore(winStart(1))); !equalStrings(got, []string{"boot-call"}) {
+		t.Fatalf("the start-up band loads %v; want the boot call alone", got)
+	}
+	if got := load(d.LoadInFlight(winEnd(1), winStart(2))); !equalStrings(got, []string{"gap-call"}) {
+		t.Fatalf("the in-flight load for test-2 loads %v; want the call alone", got)
+	}
+	if got := d.EarliestReqTs(); !got.Equal(pms(300)) {
+		t.Fatalf("EarliestReqTs = %v; want the boot poll's request, the earliest asked", got)
+	}
+	// The start-up band is read by place, not by request time: a poll asked
+	// as the app booted and placed just past the band's end is not in it.
+	band, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = band.Close() }()
+	for _, mk := range []*models.Mock{inFlightMock("boot-call", 400, 410), answerPlacedPoll("boot-poll", 500, 1010), inFlightMock("own-1", 1020, 1030)} {
+		if err := band.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	band.Finalize()
+	if got := load(band.LoadBefore(winStart(1))); !equalStrings(got, []string{"boot-call"}) {
+		t.Fatalf("the start-up band loads %v; want the boot call alone", got)
+	}
+}

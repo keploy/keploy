@@ -332,12 +332,35 @@ type ExactConsumedReader interface {
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
-// proven switch): the name of a staged mock of kind, which the open test does
-// not own, for which match reports true, whatever the open view shows; "" for
-// none, or with no test open. For a miss's diagnosis only: the mock is never
-// handed out, nor served.
+// proven switch): the name of a staged mock of kind that the open view does
+// not show and no call of the set consumed, for which match reports true: a
+// recording another test owns, or a worker-scope one not reached yet; "" for
+// none. A parser names it on a miss (MockMismatchReport.NotOwned): the call
+// is that recording, made where it was not recorded. For a miss's diagnosis
+// only: the mock is never handed out, nor served.
 type StagedFinder interface {
 	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+}
+
+// StagedKeyFinder is StagedFinder that also looks, when what is staged holds
+// no recording match accepts, in the recordings of kind the store keeps on
+// disk indexed under any of keys (models.RequestKeys): a test's own are
+// staged only as it opens, so a call made before its test would find none
+// there. Only those keys' recordings are read. A parser asks by keys every
+// recording its comparison would accept is indexed under at least one of.
+// For a miss's diagnosis only.
+type StagedKeyFinder interface {
+	FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string
+}
+
+// BegunOwnerReader is an optional MockMemDb extension under exact serving:
+// whether a staged mock (one StagedFinder names) is owned by a test that has
+// begun in the current staging. A parser whose answer depends on what a test
+// caused (an SQS poll, whose message a test sent) reads it to tell a call made
+// after that test, which is the recording made later than recorded, from one
+// made before it, which rightly finds nothing.
+type BegunOwnerReader interface {
+	StagedOwnerBegun(name string) bool
 }
 
 // StagedReader is an optional MockMemDb capability: every mock staged in the
@@ -477,8 +500,9 @@ type MockReader interface {
 	// --- Unification API (primary going forward). ---
 
 	// GetPerTestMocksInWindow returns only those per-test (Lifetime ==
-	// LifetimePerTest) mocks whose Spec.ReqTimestampMock falls inside
-	// the current window [start, end], and those in flight when the
+	// LifetimePerTest) mocks placed inside the current window [start,
+	// end] (models.PlaceOf: Spec.ReqTimestampMock, or Spec.ResTimestampMock
+	// for a mock placed at its answer), and those in flight when the
 	// window's test began: sent in the gap before the window
 	// (models.WindowSchedule.GapBefore) and answered at or after start
 	// (models.InFlightEligible). Mocks whose Spec.ResTimestampMock
@@ -498,14 +522,15 @@ type MockReader interface {
 	//
 	// GetSessionMocks returns the session-scoped mock pool snapshot
 	// (Lifetime == LifetimeSession) plus any startup-tier mocks (those
-	// whose Spec.ReqTimestampMock predated the first test window).
+	// placed before the first test window, models.PlaceOf).
 	// Session mocks are reusable across every test — never
 	// window-filtered, never consumed on match.
 	GetSessionMocks() ([]*models.Mock, error)
 
 	// GetStartupMocks returns the startup-tier mock pool snapshot —
-	// app-bootstrap recordings whose Spec.ReqTimestampMock predates the
-	// first HTTP test window (Flyway migrations, Hibernate metadata
+	// app-bootstrap recordings placed before the first HTTP test window
+	// (models.PlaceOf: Spec.ReqTimestampMock, or the answer's for a mock
+	// placed at its answer) (Flyway migrations, Hibernate metadata
 	// boot, HikariCP pool warm-up). Strictly disjoint from
 	// GetSessionScopedMocks, GetPerTestMocksInWindow, and
 	// GetConnectionMocks; a mock lives in exactly one of the four

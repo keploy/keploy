@@ -107,7 +107,7 @@ func reportBoot(ctx context.Context, logger *zap.Logger, flagPath string, isDock
 		}
 		klog.ObserveErrors(nil)
 	}()
-	utils.BootStep() // the process runs
+	utils.BootStep("the agent's process runs")
 	switch {
 	case flagPath != "":
 		if err := utils.ReportBootProgressTo(ctx, logger, flagPath); err != nil {
@@ -259,7 +259,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					// stages its shims here): a stage of the start
 					// (utils.BeginBootWork). Their failure is the start's:
 					// the agent lives on, without its server.
-					endHooks := utils.BeginBootWork()
+					endHooks := utils.BeginBootWork("the pre-server startup hooks")
 					err := agent.SetupAgentHook.AfterSetup(ctx)
 					endHooks()
 					if err != nil {

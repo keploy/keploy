@@ -543,6 +543,14 @@ type Test struct {
 	// nondeterminism. Left false so the CLI and cloud replay keep today's
 	// behaviour; only the auto-replay caller opts in.
 	AutoReplay bool `json:"autoReplay" yaml:"autoReplay" mapstructure:"autoReplay"`
+	// LearnsNoise says this run learns noise from the misses it reads (the
+	// enterprise auto-noise of an auto-replay or a sandbox's local replay):
+	// the replay starts its agent settling reads (models.SetupOptions.
+	// SettleReads), so a miss decided after the app answered its test (its own
+	// client gave up first) is read with that test, not the next one, whose
+	// differences it would let auto-noise learn. Set by the caller, never read
+	// from keploy.yml.
+	LearnsNoise bool `json:"-" yaml:"-" mapstructure:"-"`
 	// Learn runs the learn step in this replay (design v14 §7.2, row L;
 	// models.OutgoingOptions.Learn), under the proven switch: the agent pairs
 	// a call no recorded mock answers exactly with the mock it drifted from,

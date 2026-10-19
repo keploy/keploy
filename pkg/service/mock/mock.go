@@ -156,15 +156,6 @@ func (m *mockService) setName() string {
 // bound is the right trade.
 const agentEpilogueTimeout = 10 * time.Second
 
-// composeReleaseTimeout bounds the /agent/ready POST that releases the app.
-// MakeAgentReadyForDockerCompose retries for the whole of pkg.AgentReadyTimeout
-// (5m30s) because its other callers use it as a bring-up wait. Here the agent
-// answered /agent/health seconds ago, so there is nothing left to wait out: the
-// only 503 still reachable is a latched CA-install failure, which never clears.
-// Without a bound, an agent that dies between the two calls stalls the run for
-// five and a half minutes.
-const composeReleaseTimeout = 30 * time.Second
-
 // refuseProvenDocker refuses a docker command (docker compose, docker run,
 // docker start) under the proven switch, before anything starts. Inside a
 // container keploy cannot tell which process runs the tests (a test
@@ -232,26 +223,31 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	m.logger.Info("waiting for the keploy-agent compose service to come up",
 		zap.String("agent-uri", m.config.Agent.AgentURI))
 
-	// The budget for agent container BOOT, which is exactly what this waits on
-	// — the same constant pkg/service/record/record.go gives the same wait, and
-	// tunable through KEPLOY_AGENT_READY_TIMEOUT. It is NOT the compose
-	// ready-file healthcheck's budget; that has its own, longer start_period
+	// The wait follows the agent container's BOOT, which is exactly what this
+	// waits on, as keploy record's same wait does: it lasts while the start
+	// makes progress (and while the engine has not run the container yet:
+	// compose starts it in its own time), and ends once the start fails or
+	// stops making progress (pkg.WatchAgentStart). It is NOT the compose
+	// ready-file healthcheck's budget; that has its own start_period
 	// (agentHealthcheckStartPeriod in pkg/platform/docker).
-	agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
 	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {
 	case ready, ok := <-agentReadyCh:
 		if ok && ready {
 			return appExit, nil
 		}
-		// The ticker closes its channel when agentCtx expires.
+		// The ticker closes its channel unready only once ctx ends.
+		return nil, ctx.Err()
+	case err := <-agentStart:
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("keploy-agent did not become ready within %s", pkg.AgentReadyTimeout())
+		return nil, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
 	case appErr := <-appExit:
 		// The agent first. It is a service in the project, and when it is the
 		// one that stopped -- it could not start: no tracefs on the machine
@@ -264,9 +260,8 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 			return nil, err
 		}
 		// Otherwise the project died on its own — a bad compose file, a failed
-		// build, a port already taken. Report that now rather than sitting out
-		// the full agent budget waiting for an agent that is never going to
-		// start.
+		// build, a port already taken. Report that now rather than wait on for
+		// an agent that is never going to start.
 		//
 		// Mirror its exit code on the way out. `keploy mock` promises to
 		// propagate the wrapped runner's code, and that promise was kept only
@@ -315,9 +310,12 @@ func (m *mockService) releaseComposeApp(ctx context.Context) error {
 		return nil
 	}
 	m.logger.Debug("marking the keploy-agent ready; the compose app service is released now")
-	releaseCtx, cancel := context.WithTimeout(ctx, composeReleaseTimeout)
-	defer cancel()
-	return m.instrumentation.MakeAgentReadyForDockerCompose(releaseCtx)
+	// The release follows the agent, not a clock: it ends at once on the
+	// latched CA-install failure the agent answers, and once the agent's
+	// container has exited or its start has stopped making progress
+	// (MakeAgentReadyForDockerCompose), so an agent that dies between the
+	// health check and this call does not stall the run.
+	return m.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 }
 
 // notifyShutdown tells the agent the session is ending so connection errors are

@@ -16,6 +16,10 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -945,5 +950,195 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 				t.Fatalf("Record and Mock watched the index %d times, want %d", got, wantWatches)
 			}
 		})
+	}
+}
+
+// A client that dialled an IP literal sends no SNI and checks the MITM leaf
+// against an IP SAN, as client-go does reaching the Kubernetes API at
+// https://10.96.0.1 (dsmon F7). On replay that has to hold whether or not the
+// proxy offers h2 to the destination: the h2 hint used to be put on a context
+// rebuilt from the connection's, which dropped the destination IP, so a
+// destination with PreferH2 or a recorded Http2 mock got a leaf with no IP SAN.
+func TestHandleConnectionNamesTheLeafForAnIPLiteralDestinationOnReplay(t *testing.T) {
+	const ip = "10.96.0.1"
+	for _, tc := range []struct {
+		name     string
+		preferH2 bool
+		mocks    []*models.Mock
+		wantALPN string
+	}{
+		{name: "the destination is http/1.1", wantALPN: "http/1.1"},
+		{name: "PreferH2 is set", preferH2: true, wantALPN: "h2"},
+		{name: "the destination has a recorded Http2 mock", mocks: []*models.Mock{h2MockForTest("k8s-api", ip+":443")}, wantALPN: "h2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: ipv4Dest(t, ip+":443")}, mysqlPorts: newMysqlPortRegistry()}
+			p.setSession(&agent.Session{
+				Mode:            models.MODE_TEST,
+				OutgoingOptions: models.OutgoingOptions{Mocking: true, PreferH2: tc.preferH2, DisableMysqlAutoDetect: true},
+			})
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetUnFilteredMocks(tc.mocks)
+			p.mockManager = mm
+
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+
+			client := tls.Client(app, &tls.Config{
+				ServerName: ip, // an IP literal: crypto/tls sends no SNI for it
+				NextProtos: []string{"h2", "http/1.1"},
+				// The run's CA is minted by the handshake itself, so the leaf
+				// is verified in VerifyConnection, the way a client trusting
+				// that CA would verify it.
+				InsecureSkipVerify: true,
+				VerifyConnection: func(cs tls.ConnectionState) error {
+					roots := x509.NewCertPool()
+					if !roots.AppendCertsFromPEM(pTls.ActiveCACertPEM()) {
+						return errors.New("no MITM CA for this run")
+					}
+					leaf := cs.PeerCertificates[0]
+					if _, err := leaf.Verify(x509.VerifyOptions{DNSName: ip, Roots: roots}); err != nil {
+						return fmt.Errorf("leaf CN %q, IP SANs %v: %w", leaf.Subject.CommonName, leaf.IPAddresses, err)
+					}
+					return nil
+				},
+			})
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake with %s: %v", ip, err)
+			}
+			if got := client.ConnectionState().NegotiatedProtocol; got != tc.wantALPN {
+				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
+			}
+			_ = client.Close()
+			awaitEvent(t, done, "handleConnection returning after the client left")
+		})
+	}
+}
+
+// bootStageRecord is one stage of the agent's start the proxy began
+// (beginBootWork): the goroutine that began it, and the one that ended it.
+type bootStageRecord struct {
+	name           string
+	beganOn, endOn uint64
+	ended          bool
+}
+
+// recordBootWork stands in for utils.BeginBootWork for the rest of the test,
+// and returns what has been begun so far.
+func recordBootWork(t *testing.T) (begun func() []bootStageRecord) {
+	t.Helper()
+	var mu sync.Mutex
+	var recs []*bootStageRecord
+	was := beginBootWork
+	beginBootWork = func(name string) func() {
+		r := &bootStageRecord{name: name, beganOn: goroutineID()}
+		mu.Lock()
+		recs = append(recs, r)
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if !r.ended {
+				r.ended, r.endOn = true, goroutineID()
+			}
+		}
+	}
+	t.Cleanup(func() { beginBootWork = was })
+	return func() []bootStageRecord {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]bootStageRecord, len(recs))
+		for i, r := range recs {
+			out[i] = *r
+		}
+		return out
+	}
+}
+
+// goroutineID is the calling goroutine's id, from its stack's header.
+func goroutineID() uint64 {
+	var b [64]byte
+	f := strings.Fields(strings.TrimPrefix(string(b[:runtime.Stack(b[:], false)]), "goroutine "))
+	id, _ := strconv.ParseUint(f[0], 10, 64)
+	return id
+}
+
+// The proxy listener's start -- its bind, the kernel count's proof, the
+// handshake hold -- is a stage of the agent's start of its own, begun and
+// ended on the goroutine that does it, and over before readyChan says how it
+// went: StartProxy's stage waits for it on readyChan, and that wait alone
+// shows no progress, so a listener's start that took long on a loaded host
+// was counted as beats without progress, and the agent's start given up on.
+// So is a start that cannot listen.
+func TestTheProxyListenersStartIsAStageOfTheAgentsStart(t *testing.T) {
+	t.Run("it listens", func(t *testing.T) {
+		begun := recordBootWork(t)
+		// The shutdown closes the shared mock manager's channel: a new one,
+		// then none, for the next test.
+		mgr := syncMock.Get()
+		t.Cleanup(func() {
+			mgr.SetOutputChannel(make(chan *models.Mock))
+			mgr.SetOutputChannel(nil)
+		})
+		p := &Proxy{logger: zap.NewNop()}
+		ctx, cancel := context.WithCancel(context.Background())
+		readyChan := make(chan error, 1)
+		startErr := make(chan error, 1)
+		go func() { startErr <- p.start(ctx, readyChan) }()
+		select {
+		case err := <-readyChan:
+			if err != nil {
+				cancel()
+				t.Fatalf("start() reported not ready: %v", err)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			cancel()
+			t.Fatal("start() never said it was ready")
+		}
+		assertOneOwnStage(t, begun(), "the proxy listener's start")
+		cancel()
+		select {
+		case <-startErr:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("start() did not return after its context was cancelled")
+		}
+	})
+	t.Run("it cannot listen", func(t *testing.T) {
+		held, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+		begun := recordBootWork(t)
+		p := &Proxy{logger: zap.NewNop(), Port: uint32(held.Addr().(*net.TCPAddr).Port)}
+		readyChan := make(chan error, 1)
+		go func() { _ = p.start(context.Background(), readyChan) }()
+		select {
+		case err := <-readyChan:
+			if err == nil {
+				t.Fatal("start() said it was ready on a port another socket holds")
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("start() never said how its start went")
+		}
+		assertOneOwnStage(t, begun(), "the proxy listener's start")
+	})
+}
+
+// assertOneOwnStage fails the test unless recs is one stage, name, begun and
+// ended on one goroutine other than the test's.
+func assertOneOwnStage(t *testing.T, recs []bootStageRecord, name string) {
+	t.Helper()
+	if len(recs) != 1 || recs[0].name != name {
+		t.Fatalf("stages begun %+v, want %q alone", recs, name)
+	}
+	r := recs[0]
+	if !r.ended {
+		t.Fatalf("%q had not ended when its start was over", name)
+	}
+	if r.beganOn != r.endOn || r.beganOn == goroutineID() {
+		t.Fatalf("%q was begun on goroutine %d and ended on %d (the test is %d): want both on the goroutine doing the work", name, r.beganOn, r.endOn, goroutineID())
 	}
 }

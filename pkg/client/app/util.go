@@ -222,6 +222,13 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 //
 // Returns: the modified command with the necessary flags added
 func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbort bool) string {
+	// Under the proven switch keploy, not compose, ends the run on the app's
+	// exit, and stops the app itself with its stack running on
+	// (compose_appstop.go): the abort flags, which would take keploy's agent
+	// down with the app, are left out, the user's own too.
+	if composeStopsTheApp() {
+		return withoutComposeAbortFlags(appCmd)
+	}
 	// If the user already passed one of these flags, don't touch the command.
 	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--abort-on-container-failure") || strings.Contains(appCmd, "--exit-code-from") {
 		return appCmd
@@ -349,4 +356,22 @@ func composeProjectScope(cmd string) (projectName, projectDir string) {
 		}
 	}
 	return projectName, projectDir
+}
+
+// composeAbortFlag matches, with the space before it, a compose up flag that
+// ends the stack on a container's exit: --abort-on-container-exit,
+// --abort-on-container-failure, and --exit-code-from with its value.
+var composeAbortFlag = regexp.MustCompile(`\s+(--abort-on-container-(exit|failure)|--exit-code-from(=|\s+)\S+)(\s|$)`)
+
+// withoutComposeAbortFlags is cmd without the compose up flags that end the
+// stack on a container's exit, the rest of it as written.
+func withoutComposeAbortFlags(cmd string) string {
+	for {
+		loc := composeAbortFlag.FindStringSubmatchIndex(cmd)
+		if loc == nil {
+			return cmd
+		}
+		// Keep the space or end that followed the flag.
+		cmd = cmd[:loc[0]] + cmd[loc[8]:]
+	}
 }

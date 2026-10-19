@@ -368,7 +368,9 @@ type SimulationConfig struct {
 	// left out of the request: the recorded app_port does not replace the
 	// URL's port, and the recorded Host header is not sent, so the request
 	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
-	// a virtual host is not reached under the name it was recorded with.
+	// a virtual host is not reached under the name it was recorded with. (A
+	// CONNECT in authority form still asks for the target it was recorded
+	// with: its Host names that, not the app; ConnectsToAuthority.)
 	TargetFromURL bool
 	// SentTo, when set, is told where each HTTP request goes once everything
 	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
@@ -725,6 +727,22 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
 	}
+	// A CONNECT in authority form (ConnectsToAuthority) names the host and
+	// port it asks to reach as its request target and as its Host (RFC 9110
+	// §9.3.6, §7.2): the Host it was recorded with, wherever the request is
+	// sent (a base path's host included: it is the proxy the CONNECT goes
+	// through, not the target). net/http would send the recorded URL's path
+	// "/" as the request target; with no path and the target as the opaque
+	// part, it sends the target, and the answer's label (describe) names it.
+	// A recording with no Host asks for the host it is sent to.
+	if ConnectsToAuthority(req.Method, req.URL) {
+		target := hostHeader
+		if target == "" {
+			target = req.URL.Host
+		}
+		req.URL.Path, req.URL.RawPath, req.URL.Opaque = "", "", target
+		req.Host = target
+	}
 	if cfg.SentTo != nil {
 		asked := req.Host
 		if asked == "" {
@@ -787,25 +805,52 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
-// endAtHeaders gives a 101 (Switching Protocols) answer no body. A 101's
-// response ends at its header section, and what follows on the connection
-// belongs to the protocol it switched to (RFC 9110 §15.2.2); for a 101,
-// net/http hands back the connection itself as the body. keploy test speaks
-// no protocol a request switches to, so it closes the connection unread, as a
-// client that will not go on does. Read as the body, the next protocol's
-// bytes (an h2c tunnel's preface, a WebSocket's frames) made a replayed
-// upgrade differ from its recording, which has none, once a body of another
-// kind than the recorded one was compared (pkg/matcher/http, cfea2520e); and
-// the read lasted as long as the app kept the connection open: until it gave
-// up on its peer, or, for one that waits on it (most WebSocket servers), for
-// ever, which neither --api-timeout nor the proven switch's stall rule ends,
-// since neither closes a connection the test's request holds.
+// endAtHeaders gives an answer that switches its connection to another
+// protocol no body: a 101 (Switching Protocols), whose response ends at its
+// header section, what follows on the connection belonging to the protocol it
+// switched to (RFC 9110 §15.2.2); and a 2xx answer to CONNECT, after whose
+// header section the connection is a tunnel, its bytes those of the
+// connection it tunnels to (RFC 9110 §9.3.6). For a 101, net/http hands back
+// the connection itself as the body; for a 2xx answer to CONNECT with no
+// length, a body read until the connection closes. keploy test speaks no
+// protocol a request switches to and opens no tunnel, so it closes the
+// connection unread, as a client that will not go on does. Read as the body,
+// the next protocol's bytes (an h2c tunnel's preface, a WebSocket's frames, a
+// tunnelled TLS handshake) made a replayed answer differ from its recording,
+// which has none, once a body of another kind than the recorded one was
+// compared (pkg/matcher/http, cfea2520e); and the read lasted as long as the
+// app kept the connection open. A 101's connection is the caller's once it is
+// handed back, so for an app that waits on its peer (most WebSocket servers)
+// that was for ever: neither --api-timeout nor the proven switch's stall rule
+// closes it. A CONNECT's body is the transport's still, and they end it, but
+// the test failed all the same.
 func endAtHeaders(resp *http.Response) {
-	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols || resp.Body == nil {
+	if resp == nil || resp.Body == nil || !switchesProtocol(resp) {
 		return
 	}
 	_ = resp.Body.Close()
 	resp.Body = http.NoBody
+}
+
+// ConnectsToAuthority reports whether a test's request, by its method and
+// URL, is a CONNECT that names its target in authority form, the host and
+// port it asks to reach (RFC 9110 §9.3.6). The capture records one as a URL of
+// that authority (its Host) with the path "/" and no query. "CONNECT /", an
+// origin-form CONNECT to the path "/", records alike, and is taken as the
+// authority form, CONNECT's own; a CONNECT with another path or a query (Go's
+// net/rpc's "CONNECT /_goRPC_") is in origin form, its path its own.
+func ConnectsToAuthority(method string, u *url.URL) bool {
+	return method == http.MethodConnect && u != nil && u.Opaque == "" &&
+		(u.Path == "/" || u.Path == "") && u.RawQuery == "" && !u.ForceQuery
+}
+
+// switchesProtocol reports whether resp's connection goes on in another
+// protocol after its header section (endAtHeaders).
+func switchesProtocol(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return true
+	}
+	return resp.Request != nil && resp.Request.Method == http.MethodConnect && resp.StatusCode/100 == 2
 }
 
 // connClosingBody is the body of the app's answer to a test request: closed,
@@ -2857,40 +2902,37 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 	}
 }
 
-// DefaultAgentReadyTimeout is how long keploy waits for the in-docker
-// keploy-agent's HTTP endpoint to become reachable before giving up. This
-// bounds container BOOT only — the AgentHealthTicker gate that runs before
-// StoreMocks — not the compose ready-file healthcheck, which has its own
-// generous, env-tunable start_period floor (see agentHealthcheckStartPeriod in
-// pkg/platform/docker). Under heavy CI docker-daemon contention the agent
-// container can take ~2 minutes just to start — observed in CI as a `docker
-// run` of an already-local image taking 126s before the agent process ran. A
-// shorter CLI wait gives up while the container is still booting, tearing down
-// a bring-up that would have succeeded.
-//
-// ErrAgentNotReady is returned by an agent Setup whose agent's start stopped
-// making progress before it reported healthy (pkg/platform/http,
-// agent_boot_watch.go), or, for a docker compose agent, did not report healthy
-// within AgentReadyTimeout. It is a distinct sentinel so callers can
-// retry a fresh bring-up on this — a nondeterministic container-runtime stall,
-// observed intermittently on macOS Docker Desktop — WITHOUT retrying
-// deterministic failures like missing kernel privileges or a bad config.
+// ErrAgentNotReady is the error of an agent start that stopped making progress
+// before the agent reported healthy (pkg/platform/http, agent_boot_watch.go):
+// one keploy started itself (Setup), or one docker compose started
+// (WatchAgentStart). No budget of wall time ends a start that makes progress:
+// under heavy CI docker-daemon contention the agent container can take
+// minutes just to start, and a fixed budget (KEPLOY_AGENT_READY_TIMEOUT, 330 s,
+// since removed) tore down bring-ups that would have succeeded. It is a
+// distinct sentinel so callers can retry a fresh bring-up on this — a
+// nondeterministic container-runtime stall, observed intermittently on macOS
+// Docker Desktop — WITHOUT retrying deterministic failures like missing kernel
+// privileges or a bad config.
 var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
 
-const DefaultAgentReadyTimeout = 330 * time.Second
+// AgentStartWatcher is implemented by an instrumentation that can watch the
+// start of the agent it set up (pkg/platform/http's AgentClient): a wait for an
+// agent it did not start itself (docker compose starts it as a service of the
+// project) follows the start's progress, not a clock. WatchAgentStart sends one
+// error once the start has failed (the agent says so) or has stopped making
+// progress (ErrAgentNotReady), and nothing while it makes progress, or while
+// its process does not run yet; ctx ends it.
+type AgentStartWatcher interface {
+	WatchAgentStart(ctx context.Context) <-chan error
+}
 
-// AgentReadyTimeout returns how long to wait for the keploy-agent to become
-// ready. It defaults to DefaultAgentReadyTimeout and is overridable via the
-// KEPLOY_AGENT_READY_TIMEOUT env var (whole seconds) for tuning on unusually
-// slow or fast hosts. A non-positive / unparsable value falls back to the
-// default.
-func AgentReadyTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
+// WatchAgentStart is inst's watch of its agent's start (AgentStartWatcher), or
+// nil, which never sends, for an instrumentation that cannot watch one.
+func WatchAgentStart(ctx context.Context, inst any) <-chan error {
+	if w, ok := inst.(AgentStartWatcher); ok {
+		return w.WatchAgentStart(ctx)
 	}
-	return DefaultAgentReadyTimeout
+	return nil
 }
 
 // agentSetupAttempts bounds how many times a stalled agent bring-up is retried
@@ -3277,6 +3319,41 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
+// IsTestWindow reports whether [afterTime, beforeTime] is a test's window: a
+// staging call's starts at models.BaseTime (the set's, a scope's, an exact
+// staging's), and a call with no window has a zero bound. The mock manager
+// reads its start so (SetMocksWithWindow).
+func IsTestWindow(afterTime, beforeTime time.Time) bool {
+	return !afterTime.IsZero() && !afterTime.Equal(models.BaseTime) && !beforeTime.IsZero()
+}
+
+// FilterTcsMocksMappingInWindow is FilterTcsMocksMapping for the test window
+// [afterTime, beforeTime]: beside the per-test mocks the mapping names, the
+// ones placed at their answer (models.IsAnswerPlaced) whose place the window
+// holds (models.PlaceOf), whatever the mapping lists. A mapping lists what a
+// test consumed; one an older keploy wrote, or a --sync recording's, lists a
+// consumer's poll under the test it was sent in, by request time, and the
+// mock manager's staging keeps a mock placed at its answer only in the
+// window that holds its answer: named for the test before, it would be
+// staged by no test. With no test's window (IsTestWindow: a staging call's
+// names the test's whole recording, ExactMapping), or no kind placed at its
+// answer, it is FilterTcsMocksMapping.
+func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time) []*models.Mock {
+	if !models.AnswerPlacedRegistered() || !IsTestWindow(afterTime, beforeTime) {
+		return FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	}
+	names := append([]string(nil), mocksPresentInMapping...)
+	for _, mk := range m {
+		if mk == nil || !models.IsAnswerPlaced(mk) {
+			continue
+		}
+		if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
+			names = append(names, mk.Name)
+		}
+	}
+	return FilterTcsMocksMapping(ctx, logger, m, names)
+}
+
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
 // with its mapping membership and returns it in RECORDED order.
 //
@@ -3622,7 +3699,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 			continue
 		}
 
-		// In-window = request-timestamp inside [afterTime, beforeTime].
+		// In-window = placed inside [afterTime, beforeTime] (models.PlaceOf).
 		// The response may straggle past beforeTime — DB/HTTP downstream
 		// responses routinely complete a few micro-to-milliseconds after
 		// the outer test response is captured. The cross-test bleed bug
@@ -3635,11 +3712,14 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		//
 		// Only per-test-lifetime mocks reach this predicate — session/
 		// connection-lifetime mocks short-circuited above to the session
-		// pool. A perTest-lifetime mock with reqTimestamp inside
+		// pool. A perTest-lifetime mock placed inside
 		// [afterTime, beforeTime] lands in the per-test pool; outside
 		// the window it falls through to the strict/lax out-of-window
 		// handling below.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
@@ -3671,7 +3751,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		// them to the tier built for exactly that is what both modes intend.
 		// A zero firstWindowStart still means "no cutoff yet" and falls through
 		// to the legacy behaviour below, unchanged.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
@@ -3889,8 +3969,11 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			continue
 		}
 
-		// PerTest: window containment on request timestamp.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// PerTest: window containment by place (models.PlaceOf).
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filtered = append(filtered, p)
@@ -3904,7 +3987,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		// test-called today, but fixing one of two identical functions would
 		// guarantee the bug returns the moment the three-tier path is wired for
 		// postgres v3 / mysql.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			startup = append(startup, p)
 			preservedStartup++

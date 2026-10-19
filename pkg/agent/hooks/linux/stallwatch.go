@@ -78,6 +78,13 @@ const (
 	// resolves because the blocking task exits can still cross it. 2 minutes sits far
 	// above the slowest observed real load (~16s) and far below the point where
 	// an operator would have given up anyway.
+	//
+	// The keploy that waits for this agent's start does not wait for this ERROR,
+	// and need not: a load blocked at 0% CPU is a start that takes no step, which
+	// it gives up on after utils.TeardownStallChecks of the agent's beats, often
+	// before the ERROR lands, naming the stage in progress and its thread's state
+	// (D, in the uninterruptible wait) from the agent's boot report. The ERROR is
+	// the agent's own log's word on it, for whoever reads that log.
 	stallErrorAfter = 2 * time.Minute
 )
 

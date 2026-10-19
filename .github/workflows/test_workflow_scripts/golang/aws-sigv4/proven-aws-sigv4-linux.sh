@@ -4,12 +4,14 @@
 #
 # Every SigV4 call carries a signature over the request and the time it was
 # made, so a replay's signature is never the recording's. Under the switch
-# keploy compares the Authorization header by its parts: the scheme, the
-# credential scope (key id, region, service, terminator; the date by the
-# request's own signing time) and the signed headers exactly, the signature
-# not at all. x-amz-content-sha256 must be the hash of the body sent (or the
-# recorded literal, such as UNSIGNED-PAYLOAD), and a presigned URL's query
-# is read the same way (X-Amz-Credential, X-Amz-Signature).
+# keploy compares the Authorization header by its parts (the founder's
+# ruling on SF-3): the scheme, the region, the service, the terminator and
+# the signed headers exactly, the session token's header aside; the access
+# key id, the date and the signature not at all, nor whether the credentials
+# were temporary. A replay runs with the credentials of where it runs.
+# x-amz-content-sha256 must be the hash of the body sent (or the recorded
+# literal, such as UNSIGNED-PAYLOAD), and a presigned URL's query is read the
+# same way (X-Amz-Credential, X-Amz-Signature, X-Amz-Security-Token).
 #
 # The app's GET /run puts an object, reads it back, and reads it through a
 # presigned URL. Recorded once with LocalStack up; replayed with it stopped:
@@ -17,9 +19,13 @@
 #      call missed: the Authorization header was compared whole.)
 #   2. KEPLOY_PROVEN=1, another region: the set fails, and the report names
 #      header.authorization.region.
-#   3. KEPLOY_PROVEN=1, another access key id: the set fails, naming
-#      header.authorization.access_key_id.
-#   4. Switch off: the set passes, as on main.
+#   3. KEPLOY_PROVEN=1, another access key id (a CI's credentials): the set
+#      passes. (Before the ruling it failed, naming
+#      header.authorization.access_key_id.)
+#   4. KEPLOY_PROVEN=1, temporary credentials (a session token, signed and in
+#      the presigned URL) where the recording had static ones: the set
+#      passes.
+#   5. Switch off: the set passes, as on main.
 #
 # Readiness is LocalStack's "Ready." line, the app's port while recording, and
 # keploy's own probe of the app (--health-path) while replaying. The script
@@ -157,9 +163,11 @@ expect_pass "1 (KEPLOY_PROVEN=1, unchanged)"
 PROVEN=1 replay proven-region AWS_REGION=eu-west-1
 expect_miss "2 (KEPLOY_PROVEN=1, another region)" header.authorization.region
 PROVEN=1 replay proven-keyid AWS_ACCESS_KEY_ID=other
-expect_miss "3 (KEPLOY_PROVEN=1, another access key id)" header.authorization.access_key_id
+expect_pass "3 (KEPLOY_PROVEN=1, another access key id)"
+PROVEN=1 replay proven-session AWS_ACCESS_KEY_ID=ASIATEMPORARY AWS_SESSION_TOKEN=session-token-1
+expect_pass "4 (KEPLOY_PROVEN=1, temporary credentials)"
 PROVEN="" replay off-same
-expect_pass "4 (switch off)"
+expect_pass "5 (switch off)"
 
 if [ "$FAIL" -eq 0 ]; then
     echo "proven AWS SigV4 e2e passed"

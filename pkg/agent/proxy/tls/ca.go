@@ -1308,7 +1308,7 @@ func updateCaStore(ctx context.Context) error {
 			commandRun = true
 			c := exec.CommandContext(ctx, cmd)
 			_, err := c.CombinedOutput()
-			utils.BootStep() // a step of the agent's start: the trust store's update is done
+			utils.BootStep(cmd + " is over") // the trust store's update
 			if err != nil {
 				return err
 			}
@@ -1349,7 +1349,7 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, cacertsPath string) bool {
 	cmd := exec.CommandContext(ctx, keytoolBin, "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 	err := cmd.Run()
-	utils.BootStep() // a step of the agent's start: keytool's JVM is done
+	utils.BootStep("keytool -list is over")
 	select {
 	case <-ctx.Done():
 		return false
@@ -1448,7 +1448,7 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 
 	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 	cmdOutput, err := cmd.CombinedOutput()
-	utils.BootStep() // a step of the agent's start: keytool's JVM is done
+	utils.BootStep("keytool -import is over")
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 		return err
@@ -1482,7 +1482,7 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 	// Windows asks the user, in a dialog, whether to trust a certificate added
 	// to their ROOT store, and certutil waits for the answer: the agent's
 	// start waits for the user (utils.BeginBootPrompt), however long they take.
-	answered := utils.BeginBootPrompt()
+	answered := utils.BeginBootPrompt("Windows' prompt to trust keploy's CA")
 	userOut, userErr := userCmd.CombinedOutput()
 	answered()
 	if userErr == nil {
@@ -1495,7 +1495,7 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 
 	machineCmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
 	machineOut, machineErr := machineCmd.CombinedOutput()
-	utils.BootStep() // a step of the agent's start: certutil is done
+	utils.BootStep("certutil -addstore is over")
 	if machineErr != nil {
 		utils.LogError(logger, machineErr, "Failed to install CA certificate using certutil",
 			zap.String("user_store_output", string(userOut)),
@@ -1598,6 +1598,14 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 }
 
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
+	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, nil)
+}
+
+// certForClient is CertForClient with the connection's original destination
+// IP (nil when unknown). The leaf is named from the SNI, or the CONNECT target
+// stored for this source port; with neither, it is named for dstIP, because a
+// client that dialled an IP literal sends no SNI and checks the leaf's IP SANs.
+func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, dstIP net.IP) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -1634,6 +1642,15 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)
 
+	// The name the leaf is minted for. SrcPortToDstURL above keeps only what the
+	// client asked for (its readers treat it as the SNI), so the destination IP
+	// stands in here alone: with no SNI the client dialled an IP literal, and it
+	// verifies the leaf against an IP SAN, which cfssl makes of an IP host.
+	certHost := dstURL
+	if certHost == "" && dstIP != nil {
+		certHost = dstIP.String()
+	}
+
 	// Cache key = host + backdate bucket + CA identity. Keying on the hostname
 	// alone was wrong twice over: (1) it ignored backdate, so a frozen-time
 	// replay (NotBefore = backdate−1y) could be served a leaf minted for a
@@ -1641,13 +1658,13 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// ignored which CA signed the leaf, so a regenerated CA could serve a stale
 	// leaf. A zero backdate — the live record path — buckets to one "live" key so
 	// repeated connections to the same host still hit the cache.
-	cacheKey := certCacheKey(dstURL, backdate, caCertParsed)
+	cacheKey := certCacheKey(certHost, backdate, caCertParsed)
 
 	// Check the cert cache before generating a new certificate.
-	if dstURL != "" {
+	if certHost != "" {
 		if cached, ok := getCertCache().Get(cacheKey); ok {
 			probeCert(logger, "cache-hit", dstURL, 0)
-			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
+			logger.Debug("reusing cached certificate", zap.String("hostname", certHost))
 			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
@@ -1659,9 +1676,9 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	}()
 
 	serverReq := &csr.CertificateRequest{
-		CN: dstURL,
+		CN: certHost,
 		Hosts: []string{
-			dstURL,
+			certHost,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -1729,7 +1746,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Cache the generated certificate for reuse by subsequent connections to the
 	// same host, under the composite key (host + backdate bucket + CA identity)
 	// computed above — so a frozen-time replay and a live run never share a leaf.
-	if dstURL != "" {
+	if certHost != "" {
 		getCertCache().Add(cacheKey, &serverTLSCert)
 	}
 

@@ -3,6 +3,8 @@ package replay
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -27,8 +29,14 @@ import (
 //     (windowOwnership, models.DeriveWindowMappings), documents this keploy
 //     cannot read included.
 //   - A mapping that cannot be read refuses the set.
-//   - Every mock no test case lists is the set's pool. It answers between
-//     test cases, beside the protocol-phase mocks, with reuse or
+//   - The mocks the mapping's worker scope lists (models.Mapping.Worker; with
+//     no mappings.yaml, the test mocks recorded outside every window) are the
+//     set's own, owned by no test case: each answers from its place in the
+//     set's run on (models.MockEntry.Place), whether a test case is open or
+//     not, after the open test case's own, at most one request in the set's
+//     staging (D1, D2).
+//   - Every other mock no test case lists is the set's pool. It answers
+//     between test cases, beside the protocol-phase mocks, with reuse or
 //     cursor-saturate as recorded.
 //   - The set is staged on the agent once; a test case's call opens it, and
 //     the call after its consumption is read serves the pool again.
@@ -39,6 +47,28 @@ import (
 type exactPlan struct {
 	owned map[string][]string
 	pool  []string
+	// worker is the set's worker scope (models.Mapping.Worker): the mocks of
+	// it the agent holds, in recorded order, each with its place. The
+	// staging call hands it to the agent, which serves each from its place
+	// on.
+	worker []models.MockEntry
+	// idle names the worker-scope mocks whose recorded answer their parser
+	// declares idle (models.IsIdleAnswer): the set's end does not require
+	// them answered (D4).
+	idle map[string]bool
+	// begun names the test cases of the set's run that have begun: the
+	// worker-scope mocks placed after one of them are due by the set's end.
+	begun map[string]bool
+	// unheld names the worker-scope mocks the agent does not hold: required
+	// all the same, never asked of the agent (staged).
+	unheld map[string]bool
+	// bootSeen: keploy started the set's application for this set, so the
+	// worker-scope mocks placed at the set's start (its boot, and what the
+	// application did before the first test) are due by the set's end. An
+	// application kept alive from an earlier set (--keep-app-alive), or one
+	// keploy did not start, booted before this set's run: those are served
+	// if made, never required.
+	bootSeen bool
 	// ownsTestMocks: some test case owns a test mock (a data-plane mock the
 	// agent holds).
 	ownsTestMocks bool
@@ -49,15 +79,21 @@ type exactPlan struct {
 	// (models.ExactServing.Ahead): the replayed app may ask in the gap, as
 	// it did at record.
 	ahead map[string][]string
+	// answerPlaced names the held mocks placed at their answer
+	// (models.IsAnswerPlaced): their place is their recorded answer.
+	answerPlaced map[string]bool
 	// aheadNamed is the test case the latest pool call named the calls in
 	// flight of (serveExactPool's next), "" for none.
 	aheadNamed string
 }
 
 // noteAhead fills p.ahead from what each test case of cases owns: its mapped
-// mocks the agent holds whose recorded request is before the case's recorded
-// window, which a mapping gives a test only for a call in flight when it
-// began (models.DeriveWindowMappings).
+// mocks the agent holds placed before the case's recorded window, which a
+// mapping gives a test only for a call in flight when it began
+// (models.DeriveWindowMappings). A mock's place is its recorded request, or
+// its answer for one placed at its answer (models.PlaceOf): a parser holds
+// such a call until a window brings its recording, so one answered in the
+// window is not in flight, and is not served in the gap.
 func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*models.TestCase) {
 	if p == nil {
 		return
@@ -72,8 +108,12 @@ func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*m
 			owned[n] = true
 		}
 		for _, e := range mappings[tc.Name] {
-			req, err := models.ParseMockTimestamp(e.ReqTimestampMock)
-			if err != nil || req.IsZero() || !req.Before(start) || !owned[e.Name] {
+			at := e.ReqTimestampMock
+			if p.answerPlaced[e.Name] {
+				at = e.ResTimestampMock
+			}
+			place, err := models.ParseMockTimestamp(at)
+			if err != nil || place.IsZero() || !place.Before(start) || !owned[e.Name] {
 				continue
 			}
 			if p.ahead == nil {
@@ -82,6 +122,91 @@ func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*m
 			p.ahead[tc.Name] = append(p.ahead[tc.Name], e.Name)
 		}
 	}
+}
+
+// begin notes that test case name of the set's run has begun.
+func (p *exactPlan) begin(name string) {
+	if p == nil {
+		return
+	}
+	if p.begun == nil {
+		p.begun = map[string]bool{}
+	}
+	p.begun[name] = true
+}
+
+// staged is the worker scope the agent stages: the entries of the mocks it
+// holds, in order.
+func (p *exactPlan) staged() []models.MockEntry {
+	if p == nil {
+		return nil
+	}
+	var out []models.MockEntry
+	for _, e := range p.worker {
+		if !p.unheld[e.Name] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// isWorker reports whether name is one of the set's worker-scope mocks.
+func (p *exactPlan) isWorker(name string) bool {
+	if p == nil {
+		return false
+	}
+	for _, e := range p.worker {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// takeWorker moves, of the mocks consumed before the set's first test that
+// partitionInitialConsumed would re-arm (rearm), the worker-scope ones into
+// counted (the startup consumption, counted as consumed): the agent spent
+// each for the staging, so none is served again, and the set's end counts it
+// answered. With no plan both are returned as they are.
+func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.MockState, []models.MockState) {
+	if p == nil || len(p.worker) == 0 {
+		return counted, rearm
+	}
+	var keep []models.MockState
+	for _, m := range rearm {
+		if p.isWorker(m.Name) {
+			counted = append(counted, m)
+			continue
+		}
+		keep = append(keep, m)
+	}
+	return counted, keep
+}
+
+// unansweredWorker is, in recorded order, the worker-scope mocks the set's
+// end requires answered and consumed does not hold: those whose place the
+// run reached (a test case that has begun, or the set's start when keploy
+// started its application: bootSeen), but for the ones whose answer is idle
+// (D3, D4). One the recording made as keploy record stopped the application
+// (MockEntry.AtStop) is required only once keploy has stopped this set's
+// application and read what it consumed as it stopped (stopped).
+func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
+	if p == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range p.worker {
+		switch {
+		case p.idle[e.Name], e.AtStop && !stopped:
+			continue
+		case e.Place == "" && !p.bootSeen, e.Place != "" && !p.begun[e.Place]:
+			continue
+		}
+		if _, ok := consumed[e.Name]; !ok {
+			out = append(out, e.Name)
+		}
+	}
+	return out
 }
 
 // exactServing reports whether this replay serves each test case exactly
@@ -98,35 +223,37 @@ func (r *Replayer) exactServing() bool {
 // which lists what a replay consumed, not what each test recorded. A
 // mappings.yaml with no source is trusted as recorded: one keploy test wrote
 // before it said so cannot be told from keploy record's.
-func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, string, error) {
+func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, string, error) {
 	const absent = "the test set has no mappings.yaml"
 	if r.mappingDB == nil {
-		return map[string][]models.MockEntry{}, absent, nil
+		return map[string][]models.MockEntry{}, nil, absent, nil
 	}
 	if mr, ok := r.mappingDB.(mappingReader); ok {
 		m, err := mr.GetMapping(ctx, testSetID)
 		if err != nil {
-			return nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+			return nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 		}
 		if m != nil && m.Source == models.MappingSourceKeployTest {
-			return map[string][]models.MockEntry{}, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
+			return map[string][]models.MockEntry{}, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
 		}
 		mappings := map[string][]models.MockEntry{}
+		var worker []models.MockEntry
 		if m != nil {
 			for _, tc := range m.TestCases {
 				mappings[tc.ID] = tc.Mocks
 			}
+			worker = m.Worker
 		}
-		return mappings, absent, nil
+		return mappings, worker, absent, nil
 	}
 	mappings, _, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+		return nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 	}
 	if mappings == nil {
 		mappings = map[string][]models.MockEntry{}
 	}
-	return mappings, absent, nil
+	return mappings, nil, absent, nil
 }
 
 // mappingReader is the part of a mapping store that reads a set's whole
@@ -148,7 +275,7 @@ type mappingReader interface {
 // could not read (models.TestSetMocks.SkippedWindowed): a test case owns a
 // recorded call this keploy cannot serve, and is judged for it. The replay
 // never writes what it derives.
-func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, why string, skipped []models.WindowedMock, stored ...[]*models.Mock) map[string][]models.MockEntry {
+func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, why string, skipped []models.WindowedMock, stored ...[]*models.Mock) (map[string][]models.MockEntry, []models.MockEntry) {
 	windows := make([]models.TestWindow, 0, len(cases))
 	for _, tc := range cases {
 		windows = append(windows, models.RecordedWindow(tc))
@@ -183,6 +310,7 @@ func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, w
 		zap.String("reason", why),
 		zap.Int("numTests", len(out)),
 		zap.Int("ownedMocks", mapped),
+		zap.Int("workerMocks", len(derived.Worker)),
 		zap.String("next_step", "record the test set again under KEPLOY_PROVEN for a mappings.yaml keploy record writes"))
 	if n := len(derived.Concurrent); n > 0 {
 		r.logger.Warn("some tests of this test set were recorded while another test's request was still open: a call recorded while two tests were open is owned by the test whose request came first, which may not be the test that made it",
@@ -191,18 +319,20 @@ func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, w
 			zap.Strings("tests", derived.Concurrent[:min(n, 20)]),
 			zap.String("next_step", "if one of these tests fails with a call it did not make or a call no recorded mock answered, record the test set again under KEPLOY_PROVEN, one request at a time"))
 	}
-	return out
+	return out, derived.Worker
 }
 
-// newExactPlan is the plan for a set whose test cases own mappings and whose
-// stored mocks are stored (what the agent holds): every stored mock no
-// mapping lists is the pool's. A test case owns the stored mocks its mapping
-// lists. One it lists that the agent does not hold (a connection failure,
-// which keploy never hands it, or one the store pruned) answers nothing: the
-// agent is not asked for it, and the test case is judged for it all the
-// same, as a recorded call it did not make (unconsumedTestMocks reads the
-// whole mapping).
-func newExactPlan(mappings map[string][]models.MockEntry, stored ...[]*models.Mock) *exactPlan {
+// newExactPlan is the plan for a set whose test cases own mappings, whose
+// worker scope is worker, and whose stored mocks are stored (what the agent
+// holds): every stored mock no mapping lists is the pool's. A test case owns
+// the stored mocks its mapping lists. One it lists that the agent does not
+// hold (a connection failure, which keploy never hands it, or one the store
+// pruned) answers nothing: the agent is not asked for it, and the test case
+// is judged for it all the same, as a recorded call it did not make
+// (unconsumedTestMocks reads the whole mapping). The worker scope is the
+// stored data-plane mocks it lists that no test case's mapping lists, in its
+// order; it is not the pool's.
+func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEntry, stored ...[]*models.Mock) *exactPlan {
 	p := &exactPlan{owned: make(map[string][]string, len(mappings))}
 	// held: the stored mocks by name, true for a test mock (data-plane).
 	held := map[string]bool{}
@@ -210,6 +340,12 @@ func newExactPlan(mappings map[string][]models.MockEntry, stored ...[]*models.Mo
 		for _, mk := range list {
 			if mk != nil && mk.Name != "" {
 				held[mk.Name] = !mk.IsProtocolPhase()
+				if models.IsAnswerPlaced(mk) {
+					if p.answerPlaced == nil {
+						p.answerPlaced = map[string]bool{}
+					}
+					p.answerPlaced[mk.Name] = true
+				}
 			}
 		}
 	}
@@ -230,6 +366,42 @@ func newExactPlan(mappings map[string][]models.MockEntry, stored ...[]*models.Mo
 		}
 		p.owned[test] = names
 	}
+	idle := map[string]bool{}
+	for _, list := range stored {
+		for _, mk := range list {
+			if mk != nil && mk.Name != "" && models.IsIdleAnswer(mk) {
+				idle[mk.Name] = true
+			}
+		}
+	}
+	for _, e := range worker {
+		if e.Name == "" || mapped[e.Name] {
+			continue
+		}
+		// A protocol-phase mock is never required. One the agent does not
+		// hold is required all the same, as a test case's own is: a
+		// recorded call the application never makes fails the set, and one
+		// it makes misses. A kind no assertion covers (DNS, a connection
+		// failure) is not.
+		dataPlane, stored := held[e.Name]
+		if (stored && !dataPlane) || (!stored && isUnassertedMockEntry(e, nil)) {
+			continue
+		}
+		if !stored {
+			if p.unheld == nil {
+				p.unheld = map[string]bool{}
+			}
+			p.unheld[e.Name] = true
+		}
+		mapped[e.Name] = true
+		p.worker = append(p.worker, e)
+		if idle[e.Name] {
+			if p.idle == nil {
+				p.idle = map[string]bool{}
+			}
+			p.idle[e.Name] = true
+		}
+	}
 	seen := map[string]bool{}
 	for _, list := range stored {
 		for _, mk := range list {
@@ -246,6 +418,7 @@ func newExactPlan(mappings map[string][]models.MockEntry, stored ...[]*models.Mo
 // serveExactTest opens test case name on the agent, served exactly its own
 // mocks; vars are the test variables its request carries.
 func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, vars ...models.VariableBinding) error {
+	plan.begin(name)
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
 		Variables: vars,
 		Exact:     &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)},
@@ -384,4 +557,77 @@ func (r *Replayer) noteOwnsNothing(testSetID string) {
 	r.logger.Warn("under KEPLOY_PROVEN no test case of this test set owns a recorded call: its mappings.yaml, or with none its test windows, list no data-plane mock the agent holds, so every call a test case makes to a dependency misses",
 		zap.String("testSetID", testSetID),
 		zap.String("next_step", "record the test set again with this keploy (keploy record writes mappings.yaml)"))
+}
+
+// workerStallLimit is the count of wake-ups in a row, with none of the set's
+// worker-scope mocks answered, after which the set's end stops waiting for
+// them (awaitWorkerScope): the end count's watchdog's (design v14's lead
+// decision, 600). It counts wake-ups, not seconds: a starved replay starves
+// its watchdog equally, so load alone cannot trip it.
+var workerStallLimit = 600
+
+// workerWake is how the wait for the worker scope wakes: once a second. A
+// test replaces it.
+var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+	t := time.NewTicker(time.Second)
+	return t.C, t.Stop
+}
+
+// awaitWorkerScope waits, at the set's end and before its application is
+// stopped, until every worker-scope mock the set's end requires answered by
+// then has answered (exactPlan.unansweredWorker, those the recording made
+// before its stop; D3): a worker makes its calls in its own time, after the
+// last test as well. It reads what the agent consumed meanwhile into
+// consumed (through add), as the set's end reads it. It returns those still
+// unanswered when the run stops waiting: the set's own context ends (its
+// application exited, or the user stopped it), or none of them answers
+// across workerStallLimit wake-ups in a row. The wake-ups count the
+// application's progress on the calls, not keploy's: a call the application
+// no longer makes holds the set's end for that many. A read that fails ends
+// the wait with its error: what the worker scope answered is then not known,
+// and the set is not judged.
+func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consumed map[string]models.MockState, add func([]models.MockState)) ([]string, error) {
+	missing := plan.unansweredWorker(consumed, false)
+	if len(missing) == 0 {
+		return nil, nil
+	}
+	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end ("+provenswitch.Env+"=1)",
+		zap.Int("calls", len(missing)), zap.Strings("mocks", missing[:min(len(missing), 20)]))
+	wake, stop := workerWake(ctx)
+	defer stop()
+	stalls := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return missing, nil
+		case <-wake:
+		}
+		read, err := r.hookImpl.GetConsumedMocks(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return missing, nil
+			}
+			return missing, err
+		}
+		add(read)
+		now := plan.unansweredWorker(consumed, false)
+		if len(now) == 0 {
+			return nil, nil
+		}
+		if len(now) < len(missing) {
+			stalls = 0
+		} else {
+			stalls++
+		}
+		missing = now
+		if stalls >= workerStallLimit {
+			return missing, nil
+		}
+	}
+}
+
+// workerWhy says what a set's end found of its worker scope: the calls its
+// recording made that the application never did.
+func workerWhy(missing []string) string {
+	return fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(missing), strings.Join(missing[:min(len(missing), 20)], ", "))
 }

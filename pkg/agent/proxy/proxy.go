@@ -360,9 +360,25 @@ type Proxy struct {
 
 	Listener net.Listener
 
-	// inflight keeps, under the proven switch, every accepted connection, so
-	// a test's end can tell when none holds its calls (inflight.go).
+	// inflight keeps, under the proven switch or for an agent that settles
+	// its reads (settleReads), every accepted connection, so a test's end, or
+	// a read of its misses, can tell when none holds its calls (inflight.go).
 	inflight inflight
+	// settleReads is the agent's --settle-reads (models.SetupOptions.
+	// SettleReads), set at its start: a run that learns noise has its reads of
+	// a test's misses settle the test's calls first, with the switch off too.
+	settleReads bool
+	// countedFromStart: once the canary had run, before the proxy said it
+	// was ready, the kernel counted the connections to its listener and the
+	// bytes on its paired connections could be read (decideCounted). With
+	// the switch off it drops to false, for good, at the first connection
+	// the kernel tied to none of the application's (dropCounting).
+	countedFromStart atomic.Bool
+	// countingLost is why, with the switch off, the run's calls stopped
+	// being counted (dropCounting); nil while they are. countingLostCh is
+	// closed then.
+	countingLost   atomic.Pointer[error]
+	countingLostCh chan struct{}
 
 	// nodataRelayLogged dedupes the "relayed NODATA" Info log to once per
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
@@ -1117,6 +1133,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IncomingProxyPort:         opts.IncomingProxyPort,
 		DNSPort:                   opts.DNSPort, // default: 26789
 		synchronous:               opts.Agent.Synchronous,
+		settleReads:               opts.Agent.SettleReads,
+		countingLostCh:            make(chan struct{}),
 		IP4:                       "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
 		IP6:                       "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:                   &sync.Mutex{},
@@ -2035,7 +2053,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// falls back to the legacy PATH-keytool behaviour. See
 	// pkg/agent/proxy/tls/java_detect.go for the resolution order.
 	err = pTls.SetupCAForApp(ctx, p.logger, p.IsDocker, int(p.appPID), p.caJavaHome)
-	utils.BootStep() // the agent's start: the CA's install is over
+	utils.BootStep("the CA's install is over")
 	if err != nil {
 		// Terminal: the CA cannot be installed in this process and
 		// Keploy-proxied TLS will fail cert-verify for every workload
@@ -2156,13 +2174,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	if err := <-readyChan; err != nil {
 		return err
 	}
-	utils.BootStep() // the agent's start: the proxy listens
+	utils.BootStep("the proxy listens")
 
 	// Serve DNS over TCP and UDP, and wait for both to be bound.
 	if err := p.startDNSServers(ctx, g); err != nil {
 		return err
 	}
-	utils.BootStep() // the agent's start: its DNS servers listen
+	utils.BootStep("the DNS servers listen")
 
 	if p.auxiliaryHook != nil {
 		if err := p.runAuxStart(ctx); err != nil {
@@ -2238,6 +2256,11 @@ func (p *Proxy) runSkipListenerFlush(ctx context.Context, interval time.Duration
 	}
 }
 
+// beginBootWork is utils.BeginBootWork: the work of the agent's start that the
+// proxy does on goroutines of its own (the listener's start, the DNS servers'
+// binds) while StartProxy's stage waits for it. A variable for tests.
+var beginBootWork = utils.BeginBootWork
+
 // start function starts the proxy server on the idle local port.
 // When skipListener is true, no TCP listener is created.
 // The function blocks on ctx.Done and handles cleanup on shutdown.
@@ -2310,6 +2333,15 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		return nil
 	}
 
+	// The listener's start below -- its bind, the kernel count's proof, the
+	// handshake hold -- is the agent's start's own work, done here while
+	// StartProxy's stage waits for it on readyChan: a stage of the start of
+	// its own, on this goroutine, so the CLI that waits for the agent sees
+	// it make progress (utils.BeginBootWork). The wait alone shows none. It
+	// ends before readyChan says how the start went.
+	endListen := beginBootWork("the proxy listener's start")
+	defer endListen() // a panic's path: its thread let go, the stage over
+
 	// It will listen on all the interfaces
 	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
 	if err != nil {
@@ -2319,6 +2351,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// the shutdown below that removes it is never set up (a port in use,
 		// a previous agent still around, left the anchor trusted).
 		p.detachThenRemoveCA(ctx)
+		endListen()
 		// Notify failure
 		readyChan <- err
 		return err
@@ -2327,12 +2360,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// The kernel's count is proven before the proxy says it is ready
 	// (accepts.go); the stop ends the proof.
 	p.canary(ctx, listener)
+	p.decideCounted()
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Handshakes are held from the first session whose connections dial
 	// their destination (ensureHandshakeHold); one already set is honoured
 	// now, before the proxy is reported ready.
 	p.armHandshakeHold(ctx)
 	defer p.stopHandshakeHold()
+	endListen()
 	// Signal that the server is ready
 	readyChan <- nil
 	defer func(listener net.Listener) {
@@ -2492,14 +2527,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				_ = clientConn.Close()
 				return nil
 			}
-			// Under the proven switch the connection is kept from its
-			// accept on, so a test's end sees what it holds (inflight.go):
-			// kept before it is counted, or a wait that saw the count reach
-			// it could find it nowhere and call the test settled while its
-			// request sat unread.
+			// Under the proven switch, or for an agent that settles its
+			// reads, the connection is kept from its accept on, so a test's
+			// end sees what it holds (inflight.go): kept before it is
+			// counted, or a wait that saw the count reach it could find it
+			// nowhere and call the test settled while its request sat unread.
 			raw := clientConn
 			var tracked *trackedConn
-			if provenswitch.On() {
+			if p.keepsConnections() {
 				tracked = p.inflight.track(clientConn)
 				clientConn = tracked
 			}
@@ -2586,8 +2621,8 @@ func (p *Proxy) handleRecovered(ctx context.Context, conn net.Conn) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
-	// tracked is the connection as the accept kept it (inflight.go), under
-	// the proven switch: srcConn is wrapped again below (a peek's reader, a
+	// tracked is the connection as the accept kept it (inflight.go:
+	// keepsConnections): srcConn is wrapped again below (a peek's reader, a
 	// prefix, TLS), and what a test's end reads of it goes to this one.
 	tracked, _ := srcConn.(*trackedConn)
 	// activeConns.Add/Done are paired at the goroutine-spawn site
@@ -2655,12 +2690,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-	// Under the proven switch, a connection the kernel paired with the
-	// application's carries its own destination; one it paired with none
-	// is refused. Never a destination by source port, which another
-	// connection may share (accepts.go).
+	// When the proxy uses the kernel's pairing (the proven switch, or calls
+	// counted from its start: usesPairing), a connection the kernel paired
+	// with the application's carries its own destination; one it paired with
+	// none is refused under the switch, and with it off drops the count and
+	// is routed by its source port, as it always was. A paired one never
+	// takes a destination by source port, which another connection may share
+	// (accepts.go).
 	var err error
 	destInfo, counted := p.pairedDest(srcConn)
+	if counted && destInfo == nil && !provenswitch.On() && p.dropCounting(srcConn) {
+		// With the switch off a connection the kernel tied to none of the
+		// application's (a NAT between them) is routed by its source port,
+		// as it always was: the run is no longer counted, and every later
+		// read of its misses is unread (CountingLost).
+		counted = false
+	}
 	if counted {
 		if destInfo == nil {
 			p.refuseUnpaired(srcConn)
@@ -2780,9 +2825,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
-	// Under the proven switch the accept kept the connection (inflight.go):
-	// a parser that reads ahead says through it which requests it holds
-	// (integrations.HoldRequest).
+	// Under the proven switch, or settleReads, the accept kept the connection
+	// (inflight.go): a parser that reads ahead says through it which requests
+	// it holds (integrations.HoldRequest).
 	if tracked != nil {
 		parserCtx = integrations.WithRequestHolder(parserCtx, tracked)
 	}
@@ -3312,6 +3357,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// ports); same-port-different-host disambiguation only engages where
 		// sniHost is present.
 		hsCtx := ctx
+		// A client that dialled an IP literal sends no SNI; hand the MITM the
+		// destination IP so its leaf carries the IP SAN the client checks. A
+		// CONNECT target is a host name, which reaches the MITM through
+		// SrcPortToDstURL instead.
+		if host, _, splitErr := net.SplitHostPort(dstAddr); splitErr == nil {
+			hsCtx = pTls.WithDstIP(hsCtx, net.ParseIP(host))
+		}
 		if rule.Mode == models.MODE_TEST {
 			sniHost := ""
 			if v, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
@@ -3324,7 +3376,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
 			}
 			if preferH2 {
-				hsCtx = pTls.WithPreferH2(ctx)
+				// On hsCtx, not ctx: the destination IP set above must
+				// survive the hint.
+				hsCtx = pTls.WithPreferH2(hsCtx)
 				p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
 					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
 			}
@@ -4661,6 +4715,26 @@ func (p *Proxy) ServeExactPoolAhead(key string, names []string, ahead []*models.
 		return errNoMockManager
 	}
 	m.ServeExactPool(key, names, ahead...)
+	return nil
+}
+
+// ServeExactWorker implements agent.ExactWorkerServer (exact.go).
+func (p *Proxy) ServeExactWorker(names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactWorker(names)
+	return nil
+}
+
+// SetRecordingSource implements agent.RecordingSourceSetter (exact.go).
+func (p *Proxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordingSource(src)
 	return nil
 }
 

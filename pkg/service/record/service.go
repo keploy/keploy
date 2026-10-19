@@ -53,6 +53,9 @@ type MappingDb interface {
 	// with the file, and a slow consumer back-pressures the agent's mapping stream
 	// into dropping entries (its send is non-blocking so capture is never stalled).
 	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
+	// UpsertWorker writes the set's worker scope (models.Mapping.Worker)
+	// whole, keeping the file's other sections.
+	UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error
 }
 
 type TestSetConfig interface {

@@ -226,7 +226,14 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// staged mock is ever served outside it, and none still staged from
 		// the previous set answers under one of this set's pool names
 		// (names are unique only within a set). The set's pool is served
-		// once its mocks are in.
+		// once its mocks are in. The previous set's worker scope goes for
+		// the same reason, before that view is installed.
+		a.scopeMu.Lock()
+		a.testWorker, a.testBegun = nil, nil
+		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
 		if err := es.ServeExactPool(models.PoolKeyNone, nil); err != nil {
 			return err
 		}
@@ -241,12 +248,28 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// one, is the pool's, served by name from the staged mocks; were it
 		// not staged, its replay would find no mock. The pool is what no
 		// test owns, never the whole recording.
-		if err := a.stageMocks(ctx, staging, ex.Pool); err != nil {
+		//
+		// The set's worker scope (models.Mapping.Worker) is staged by name
+		// with the pool: its mocks answer from their places on.
+		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...)); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
+		}
+		// A miss on a call that is the recording of a test not begun yet
+		// (a worker's call made early) is told from the on-disk store: a
+		// test's own are staged only as it opens.
+		if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
+			if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
+				return fmt.Errorf("set the test set's recording source: %w", err)
+			}
 		}
 		a.scopeMu.Lock()
 		a.testPool = append([]string(nil), ex.Pool...)
+		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
+		a.testBegun = map[string]bool{}
 		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
 		return es.ServeExactPool(models.PoolKeyNone, append([]string(nil), ex.Pool...))
 	case ex.Test != "":
 		var owned []*models.Mock
@@ -257,11 +280,23 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			}
 			owned = testMocks(ex.Owned, mocks)
 		}
+		a.scopeMu.Lock()
+		if a.testBegun == nil {
+			a.testBegun = map[string]bool{}
+		}
+		a.testBegun[ex.Test] = true
+		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
 		return es.ServeExactTest(ex.Test, owned)
 	default:
 		a.scopeMu.Lock()
 		pool := append([]string(nil), a.testPool...)
 		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
 		if err := a.servePoolAhead(es, pool, ex.Ahead); err != nil {
 			return err
 		}
@@ -288,6 +323,61 @@ func (a *Agent) servePoolAhead(es coreAgent.ExactServer, pool, ahead []string) e
 		return es.ServeExactPool(models.PoolKeyNone, pool)
 	}
 	return as.ServeExactPoolAhead(models.PoolKeyNone, pool, testMocks(ahead, mocks))
+}
+
+// diskRecordingSource visits, of the set staged, the on-disk mocks of a kind
+// under request keys (DiskMocks.RangeKeys); nil when the set's mocks are all
+// resident, and so all staged in the proxy's trees.
+func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	disk := s.diskMocks
+	s.mu.RUnlock()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeKeys
+}
+
+// serveWorkerExactly tells the proxy which of the set's worker-scope mocks
+// (testWorker) the set's run has reached the place of: those placed at the
+// set's start, and those placed after a test case that has begun since the
+// staging (testBegun). It is said before each view is installed, so the view
+// shows them. A proxy that has no worker scope (coreAgent.ExactWorkerServer)
+// cannot serve a set that has one.
+func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
+	a.scopeMu.Lock()
+	var reachable []string
+	for _, e := range a.testWorker {
+		if e.Place == "" || a.testBegun[e.Place] {
+			reachable = append(reachable, e.Name)
+		}
+	}
+	has := len(a.testWorker) > 0
+	a.scopeMu.Unlock()
+	ws, ok := es.(coreAgent.ExactWorkerServer)
+	if !ok {
+		if has {
+			return errors.New("this keploy agent's proxy cannot serve a test set's worker scope, the calls no test case owns")
+		}
+		return nil
+	}
+	return ws.ServeExactWorker(reachable)
+}
+
+// entryNames is the names of entries, in order.
+func entryNames(entries []models.MockEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Name != "" {
+			out = append(out, e.Name)
+		}
+	}
+	return out
 }
 
 // realDestinations is implemented by a proxy that relays the run's mock.real

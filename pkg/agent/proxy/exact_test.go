@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -280,15 +281,21 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimeSession)
 	cfg := exactMock("cfg", time.Second, models.LifetimeSession)
 	cfg.Spec.Metadata = map[string]string{"type": "config"}
-	mm := stagedManager(t, nil, []*models.Mock{a, cfg})
+	w := exactMock("w", 2*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{a, cfg, w})
+	mm.ServeExactWorker([]string{"w"})
 	mm.ServeExactPool("-", []string{"a"})
 	mm.ServeExactTest("T", []*models.Mock{a})
 	mm.ResetForReplaySession()
 	if test, _, _, ok := mm.ExactTestOutcome(); !ok || test != "" {
 		t.Fatalf("the previous session's test is still read: %q %v", test, ok)
 	}
+	// Its worker scope goes too, from this view and every one after it.
 	sess, _ := mm.GetSessionMocks()
 	equalNames(t, "after the reset", sess, "cfg")
+	mm.ServeExactPool("-", nil)
+	sess, _ = mm.GetSessionMocks()
+	equalNames(t, "a view installed after the reset", sess, "cfg")
 	if mm.WindowSnapshot().FirstTestFired || mm.WindowSnapshot().Active {
 		t.Fatal("the next session starts with a test fired or open")
 	}
@@ -1291,5 +1298,246 @@ func TestTheNextTestsCallInFlightBindsInItsScopeInTheGap(t *testing.T) {
 				t.Fatalf("%s, in the gap %v: test-2's call that uses key was answered %s; want %s", c.name, inGap, got, want)
 			}
 		}
+	}
+}
+
+// The set's worker scope (ServeExactWorker): a worker-scope mock the run has
+// reached the place of answers whether a test is open or not, after the open
+// test's own, and at most one request in the staging, through whichever door
+// a parser consumes it: a consume in a test spends it for the gap after and
+// the next test too. One the run has not reached the place of answers
+// nothing, in a test or out of one, until a later ServeExactWorker names it.
+func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	boot := httpCall("w-boot", time.Second, "/receive")
+	later := httpCall("w-later", 2*time.Second, "/receive")
+	pool := httpCall("pool", 3*time.Second, "/pool")
+	mm := stagedManager(t, nil, []*models.Mock{own, boot, later, pool})
+
+	// The set's start: only the boot one is reached.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	sess, _ := mm.GetSessionScopedMocks()
+	equalNames(t, "before the first test", sess, "w-boot", "pool")
+
+	// A test opens: its own mock first, then the reached worker mock; the
+	// pool is not shown in a test, nor the worker mock not reached yet.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if pt, _ := mm.GetPerTestMocksInWindow(); len(pt) == 0 || pt[0].Name != "own" {
+		t.Fatalf("in a test the test's own mock is not read first: %v", exactNames(pt))
+	}
+	sess, _ = mm.GetSessionScopedMocks()
+	if names := strings.Join(exactNames(sess), ","); strings.Contains(names, "pool") || strings.Contains(names, "w-later") || !strings.Contains(names, "w-boot") {
+		t.Fatalf("in a test the reusable read shows %v; want w-boot, and neither the pool nor w-later", names)
+	}
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the reached worker mock did not answer in a test: %s", got)
+	}
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock answered twice in a test: %s", got)
+	}
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock whose place the run has not reached answered: %s", got)
+	}
+
+	// T1 ends: w-later's place (after T1) is reached. w-boot, spent in T1,
+	// stays spent in the gap and the next test.
+	mm.ServeExactWorker([]string{"w-boot", "w-later"})
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock spent in a test answered again in the gap after: %s", got)
+	}
+	mm.ServeExactWorker([]string{"w-boot", "w-later"})
+	mm.ServeExactTest("T2", nil)
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a worker mock placed after T1 did not answer in T2: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock answered again after its one request: %s", got)
+	}
+	// The next staging answers afresh.
+	mm.SetMocksWithWindow(nil, []*models.Mock{own, boot, later, pool}, models.BaseTime, time.Now())
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", nil)
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the next staging's worker mock did not answer: %s", got)
+	}
+}
+
+// A miss's diagnosis (FindStagedNotOwned) names a staged recording the open
+// view does not show and no call of the set consumed: another test's, in a
+// test or between tests, and a worker-scope one whose place the run has not
+// reached. It never names one the view shows (the pool between tests, a
+// reached worker mock), the open test's own, or one a call already consumed.
+// Each recording is named for one miss at most, as it answers one call at
+// most: two identical calls made elsewhere name its two recordings, in
+// recorded order, and a third names none. The next staging starts afresh.
+func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	other := httpCall("other", time.Second, "/delete")
+	inT1 := httpCall("other-in-t1", 1500*time.Millisecond, "/archive")
+	consumed := httpCall("consumed", 1700*time.Millisecond, "/notify")
+	boot := httpCall("w-boot", 2*time.Second, "/receive")
+	later := httpCall("w-later", 3*time.Second, "/receive")
+	pool := httpCall("pool", 4*time.Second, "/pool")
+	pollA := httpCall("poll-a", 5*time.Second, "/jobs")
+	pollB := httpCall("poll-b", 6*time.Second, "/jobs")
+	all := []*models.Mock{own, other, inT1, consumed, boot, later, pool, pollA, pollB}
+	mm := stagedManager(t, nil, all)
+	find := func(name string) string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+	}
+	jobs := func() string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
+	}
+
+	// The set's start, no test open: any test's recording is named, and the
+	// worker mock not reached; the pool and the reached worker mock are shown.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	for name, want := range map[string]string{"other": "other", "w-later": "w-later", "w-boot": "", "pool": ""} {
+		if got := find(name); got != want {
+			t.Errorf("before the first test, %s: found %q, want %q", name, got, want)
+		}
+	}
+	if got := find("other"); got != "" {
+		t.Errorf("a recording already named was named for a second miss: %q", got)
+	}
+	if a, b, none := jobs(), jobs(), jobs(); a != "poll-a" || b != "poll-b" || none != "" {
+		t.Errorf("three identical calls named %q, %q, %q; want poll-a, poll-b, then none", a, b, none)
+	}
+
+	// A test open: never its own, still another test's.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := find("own"); got != "" {
+		t.Errorf("in T1 its own recording was named: %q", got)
+	}
+	if got := find("other-in-t1"); got != "other-in-t1" {
+		t.Errorf("in T1 another test's recording was not named: %q", got)
+	}
+
+	// Its owner is not a test that has begun until it begins.
+	if mm.StagedOwnerBegun("consumed") || !mm.StagedOwnerBegun("own") {
+		t.Errorf("owners begun: consumed %v, own %v; want only own's test begun", mm.StagedOwnerBegun("consumed"), mm.StagedOwnerBegun("own"))
+	}
+
+	// Another test consumes its recording: no later miss names it.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T2", []*models.Mock{consumed})
+	if !mm.StagedOwnerBegun("consumed") {
+		t.Error("consumed's test began, and its owner is not read as begun")
+	}
+	if !mm.DeleteFilteredMock(*consumed) {
+		t.Fatal("T2 could not consume its own recording")
+	}
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := find("consumed"); got != "" {
+		t.Errorf("a recording its test consumed was named after: %q", got)
+	}
+	// Nor one the worker scope spent.
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the reached worker mock did not answer: %s", got)
+	}
+	if got := find("w-boot"); got != "" {
+		t.Errorf("a spent worker mock was named: %q", got)
+	}
+	// The next staging begins afresh: no test of it has begun, and a
+	// recording named in the previous one is named again.
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.ServeExactPool("k", nil)
+	if mm.StagedOwnerBegun("own") || mm.StagedOwnerBegun("consumed") {
+		t.Error("a test begun in the previous staging is read as begun in the next")
+	}
+	if got := find("other"); got != "other" {
+		t.Errorf("the next staging did not name a recording the previous one named: %q", got)
+	}
+}
+
+// A recording of a test not begun yet, which the agent keeps on disk and the
+// trees do not hold, is named from the recording source by its request key
+// (FindStagedNotOwnedByKeys), read on each such miss and kept by nobody. The
+// source's mocks take the same filters as the trees': never the open test's
+// own, each named once; and one passed over by name (named already, the open
+// test's) is never decoded. Without keys only the trees are looked in, and a
+// session reset drops the source.
+func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
+	pool := httpCall("pool", 0, "/pool")
+	onDisk := httpCall("t2-delete", time.Second, "/delete")
+	own := httpCall("t1-own", 2*time.Second, "/delete")
+	mm := stagedManager(t, nil, []*models.Mock{pool})
+	var asked, decoded []string
+	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		asked = append(asked, string(kind)+" "+strings.Join(keys, ","))
+		if kind != models.HTTP || len(keys) != 1 || keys[0] != "DELETE /delete" {
+			return nil
+		}
+		for _, m := range []*models.Mock{onDisk, own} {
+			m := m
+			if !visit(m.Name, func() (*models.Mock, error) { decoded = append(decoded, m.Name); return m, nil }) {
+				break
+			}
+		}
+		return nil
+	})
+	find := func(key, name string) string {
+		var keys []string
+		if key != "" {
+			keys = []string{key}
+		}
+		return mm.FindStagedNotOwnedByKeys(models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := find("", "t2-delete"); got != "" || len(asked) != 0 {
+		t.Fatalf("with no key the source was read (%v), naming %q", asked, got)
+	}
+	if got := find("DELETE /delete", "t2-delete"); got != "t2-delete" {
+		t.Fatalf("a recording kept on disk was not named before its test: %q", got)
+	}
+	if got := find("DELETE /delete", "t2-delete"); got != "" {
+		t.Fatalf("a recording kept on disk was named twice: %q", got)
+	}
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := find("DELETE /delete", "t1-own"); got != "" {
+		t.Fatalf("the open test's own recording was named from the source: %q", got)
+	}
+	if len(asked) != 3 {
+		t.Fatalf("the source was read %v; want once per keyed miss", asked)
+	}
+	// t2-delete was decoded once, as the first miss named it: the second
+	// miss passed it over by name (and decoded t1-own, which is not that
+	// call), and the third passed over both, named and the open test's own.
+	if want := []string{"t2-delete", "t1-own"}; !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded %v; want %v: a recording named already, or the open test's own, is passed over by name", decoded, want)
+	}
+	mm.ResetForReplaySession()
+	mm.ServeExactPool("k", nil)
+	if got := find("DELETE /delete", "t2-delete"); got != "" || len(asked) != 3 {
+		t.Fatalf("after a session reset the source was still read (%v), naming %q", asked, got)
+	}
+}
+
+// A pool view's ahead (the next test's call in flight, ServeExactPool) is the
+// view's own: answered in the gap as that test's, it is flagged consumed only
+// once that test opens. An identical second call in the gap is an extra call,
+// and never names it as a recording made elsewhere, answered or not.
+func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
+	ahead := httpCall("t2-fetch", time.Second, "/fetch")
+	mm := stagedManager(t, nil, []*models.Mock{ahead})
+	mm.ServeExactPool("k", nil, ahead)
+	named := func() string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
+	}
+	if got := named(); got != "" {
+		t.Fatalf("before it answered, the next test's call in flight was named as made elsewhere: %q", got)
+	}
+	if got := pollFirst(t, mm, "t2-fetch"); got != "t2-fetch" {
+		t.Fatalf("the call in flight did not answer in the gap: %s", got)
+	}
+	if got := named(); got != "" {
+		t.Fatalf("an identical second call in the gap named the next test's call in flight %q, which answered here already", got)
 	}
 }

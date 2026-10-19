@@ -3,11 +3,9 @@ package http
 import (
 	"context"
 	"errors"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -158,13 +156,6 @@ func countClientRequests(a *AgentClient) *clientRequests {
 	c := &clientRequests{base: base}
 	a.client.Transport = c
 	return c
-}
-
-// noComposeBudget gives MakeAgentReadyForDockerCompose a readiness budget that
-// never runs out (KEPLOY_AGENT_READY_TIMEOUT is whole seconds).
-func noComposeBudget(t *testing.T) {
-	t.Helper()
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", strconv.Itoa(math.MaxInt32))
 }
 
 // switchStates is the switch off and on, as KEPLOY_PROVEN values.
@@ -333,7 +324,6 @@ func TestWaitForAgentWhoseStartStopsIsNotReady(t *testing.T) {
 // a definite answer; a second read of /health gives up at once, on its count,
 // rather than leaving a regression to the readiness budget.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) {
-	noComposeBudget(t)
 	t.Setenv(provenswitch.Env, "")
 	for _, tc := range []struct {
 		name   string
@@ -371,7 +361,6 @@ func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) 
 // the count); one whose health check answers 503 once and then reports the
 // switch on is released after that read.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOnWaitsForAReadableSwitch(t *testing.T) {
-	noComposeBudget(t)
 	t.Setenv(provenswitch.Env, "1")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -406,7 +395,6 @@ func TestMakeAgentReadyForDockerComposeWithTheSwitchOnWaitsForAReadableSwitch(t 
 // told to release the app: a disagreeing agent is refused and never released;
 // an agreeing one is released as before.
 func TestMakeAgentReadyForDockerComposeChecksTheSwitchFirst(t *testing.T) {
-	noComposeBudget(t)
 	t.Setenv(provenswitch.Env, "1")
 	bad := newStandInAgent(t, "off", http.StatusOK)
 	err := clientFor(bad.url).MakeAgentReadyForDockerCompose(context.Background())
@@ -423,5 +411,21 @@ func TestMakeAgentReadyForDockerComposeChecksTheSwitchFirst(t *testing.T) {
 	}
 	if n := good.readies.Load(); n != 1 {
 		t.Fatalf("the agreeing agent was released %d times, want 1", n)
+	}
+}
+
+// A run that learns noise starts its native agent settling reads
+// (--settle-reads), which sudo would otherwise have no way to tell it; any
+// other run's argv does not change.
+func TestNativeAgentArgs_CarrySettleReads(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	a := New(zap.NewNop(), nil, &config.Config{})
+	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
+	if args := a.nativeAgentArgs(opts); slices.Contains(args, "--settle-reads") {
+		t.Fatalf("a run that learns no noise, yet the native agent argv carries --settle-reads: %v", args)
+	}
+	opts.SettleReads = true
+	if args := a.nativeAgentArgs(opts); !slices.Contains(args, "--settle-reads") {
+		t.Fatalf("a run that learns noise, yet the native agent argv lacks --settle-reads: %v", args)
 	}
 }

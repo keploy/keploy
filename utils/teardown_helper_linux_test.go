@@ -11,10 +11,11 @@ func helperProcAttr() *syscall.SysProcAttr {
 }
 
 // orphanHelpers is every helper TestHelperOrphanParent starts: the
-// escalation tests' agents, by the test that is each and the variable that
-// gives it its directory.
+// escalation tests' agents and the starved boot test's, by the test that is
+// each and the variable that gives it its directory.
 func orphanHelpers() []struct{ name, env string } {
 	return append(unixOrphanHelpers(),
 		struct{ name, env string }{"TestEscalationWhileWedgedHelper", "KEPLOY_TEST_ESCALATION_WEDGED"},
-		struct{ name, env string }{"TestEscalationWhilePausingHelper", "KEPLOY_TEST_ESCALATION_PAUSING"})
+		struct{ name, env string }{"TestEscalationWhilePausingHelper", "KEPLOY_TEST_ESCALATION_PAUSING"},
+		struct{ name, env string }{"TestBootStarvedHelper", "KEPLOY_TEST_BOOT_STARVED"})
 }

@@ -1260,6 +1260,24 @@ func splitURLOrigin(rawURL string) (scheme, rest string, ok bool) {
 // parameter, a trailing slash would go, and so would a {{template}} as
 // written.
 func ReplaceBaseURL(newURL, oldURL string) (string, error) {
+	return replaceBase(newURL, oldURL, true)
+}
+
+// requestAtBasePath is the URL a test's HTTP request goes to under basePath:
+// ReplaceBaseURL's, except for a CONNECT in authority form
+// (pkg.ConnectsToAuthority), which takes the base path's scheme and host only.
+// Its request target is the host and port it asks to reach, and has no path
+// for the base path's to go in front of: under it, it was another request
+// ("CONNECT /api/"), which a proxy refuses.
+func requestAtBasePath(basePath string, req models.HTTPReq) (string, error) {
+	recorded, err := url.Parse(req.URL)
+	authority := err == nil && pkg.ConnectsToAuthority(string(req.Method), recorded)
+	return replaceBase(basePath, req.URL, !authority)
+}
+
+// replaceBase is ReplaceBaseURL, which puts the base path's path in front of
+// the URL's only when withPath says to.
+func replaceBase(newURL, oldURL string, withPath bool) (string, error) {
 	scheme, rest, ok := splitURLOrigin(oldURL)
 	if !ok {
 		return "", fmt.Errorf("the test's URL %q does not start with a scheme and a host, so it has none to replace", oldURL)
@@ -1274,7 +1292,11 @@ func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	// The host as a URL writes it, escaped: an IPv6 zone's % is %25 there,
 	// and the URL has to parse again.
 	host := strings.TrimPrefix((&url.URL{Host: base.Host}).String(), "//")
-	return scheme + "://" + host + strings.TrimRight(base.EscapedPath(), "/") + rest, nil
+	path := ""
+	if withPath {
+		path = strings.TrimRight(base.EscapedPath(), "/")
+	}
+	return scheme + "://" + host + path + rest, nil
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {

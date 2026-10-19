@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -831,5 +832,60 @@ func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 	TeardownNativeCA(zap.NewNop())
 	if _, err := os.Stat(anchor); !os.IsNotExist(err) {
 		t.Fatalf("the teardown left this run's anchor %s in the trust store (stat: %v)", anchor, err)
+	}
+}
+
+// TestCertForClient_NoSNINamesDestinationIP: a client that dialled an IP literal
+// sends no SNI, so the leaf must carry the destination IP as an IP SAN (Go
+// checks it: "cannot validate certificate for 10.96.0.1 because it doesn't
+// contain any IP SANs"). An SNI still names the leaf, and SrcPortToDstURL keeps
+// holding only what the client asked for.
+func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
+	resetCertCacheForTest()
+	logger := zap.NewNop()
+	caKey, caCert := helperCA(t)
+
+	leafFor := func(sni string, dstIP net.IP) (*x509.Certificate, int) {
+		t.Helper()
+		hello, cleanup, err := helperClientHello(sni)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		cert, err := certForClient(logger, hello, caKey, caCert, time.Time{}, dstIP)
+		if err != nil {
+			t.Fatalf("certForClient(%q, %v): %v", sni, dstIP, err)
+		}
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return leaf, hello.Conn.RemoteAddr().(*net.TCPAddr).Port
+	}
+
+	for _, ip := range []string{"10.96.0.1", "fd00::1"} {
+		leaf, port := leafFor("", net.ParseIP(ip))
+		if err := leaf.VerifyHostname(ip); err != nil {
+			t.Errorf("no SNI, destination %s: leaf does not name it: %v (IP SANs %v)", ip, err, leaf.IPAddresses)
+		}
+		if v, _ := SrcPortToDstURL.Load(port); v != "" {
+			t.Errorf("no SNI: SrcPortToDstURL = %q, want empty (it carries the SNI only)", v)
+		}
+		SrcPortToDstURL.Delete(port)
+	}
+
+	leaf, port := leafFor("api.example.com", net.ParseIP("10.96.0.1"))
+	SrcPortToDstURL.Delete(port)
+	if err := leaf.VerifyHostname("api.example.com"); err != nil {
+		t.Errorf("SNI set: leaf does not name it: %v", err)
+	}
+	if len(leaf.IPAddresses) != 0 {
+		t.Errorf("SNI set: leaf has IP SANs %v, want the SNI alone", leaf.IPAddresses)
+	}
+
+	leaf, port = leafFor("", nil)
+	SrcPortToDstURL.Delete(port)
+	if len(leaf.IPAddresses) != 0 {
+		t.Errorf("no SNI, no destination: leaf has IP SANs %v, want none (as before)", leaf.IPAddresses)
 	}
 }

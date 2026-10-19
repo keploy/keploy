@@ -3,6 +3,8 @@ package pkg
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,4 +132,197 @@ func TestReadGRPCFrameRejectsOversizedLength(t *testing.T) {
 	got, err := ReadGRPCFrame(bytes.NewReader(raw))
 	require.NoError(t, err)
 	assert.Equal(t, raw, got)
+}
+
+// splitBlock is the frames of one header block on stream id, encoded with
+// enc (one encoder for every block of a direction, as a peer has), cut into
+// parts pieces of about one size: a HEADERS frame, then CONTINUATION frames.
+func splitBlock(t *testing.T, enc *hpack.Encoder, out *bytes.Buffer, id uint32, endStream bool, parts int, fields ...hpack.HeaderField) []byte {
+	t.Helper()
+	out.Reset()
+	for _, f := range fields {
+		require.NoError(t, enc.WriteField(f))
+	}
+	block := append([]byte(nil), out.Bytes()...)
+	var frames bytes.Buffer
+	fr := http2.NewFramer(&frames, nil)
+	for i := 0; i < parts; i++ {
+		piece := block[i*len(block)/parts : (i+1)*len(block)/parts]
+		last := i == parts-1
+		if i == 0 {
+			require.NoError(t, fr.WriteHeaders(http2.HeadersFrameParam{StreamID: id, BlockFragment: piece, EndStream: endStream, EndHeaders: last}))
+		} else {
+			require.NoError(t, fr.WriteContinuation(id, last, piece))
+		}
+	}
+	return frames.Bytes()
+}
+
+// frameList cuts b, whole frames, into its frames.
+func frameList(t *testing.T, b []byte) [][]byte {
+	t.Helper()
+	var out [][]byte
+	for len(b) > 0 {
+		require.GreaterOrEqual(t, len(b), 9)
+		size := 9 + (int(b[0])<<16 | int(b[1])<<8 | int(b[2]))
+		out = append(out, b[:size])
+		b = b[size:]
+	}
+	return out
+}
+
+// eachFrame reads the frames in b, in order, with r.
+func eachFrame(t *testing.T, r *FrameReader, b []byte, fn func(http2.Frame) error) error {
+	t.Helper()
+	for _, raw := range frameList(t, b) {
+		f, err := r.ReadFrame(raw)
+		if err != nil {
+			return err
+		}
+		if err := fn(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A FrameReader reads a header block a peer split across a HEADERS frame and
+// CONTINUATION frames, and refuses what RFC 9113 §6.10 forbids between them:
+// another frame, or a CONTINUATION of another stream. A CONTINUATION read by
+// a Framer that has not seen its HEADERS frame (each frame read alone, as the
+// ingress did) is refused.
+func TestFrameReaderReadsAHeaderBlockSplitAcrossFrames(t *testing.T) {
+	var out bytes.Buffer
+	enc := hpack.NewEncoder(&out)
+	block := splitBlock(t, enc, &out, 1, true, 3, hpack.HeaderField{Name: "grpc-status", Value: "0"}, hpack.HeaderField{Name: "x-detail", Value: strings.Repeat("d", 200)})
+	frames := frameList(t, block)
+	require.Len(t, frames, 3)
+
+	var types []http2.FrameType
+	require.NoError(t, eachFrame(t, NewFrameReader(), block, func(f http2.Frame) error {
+		types = append(types, f.Header().Type)
+		return nil
+	}))
+	assert.Equal(t, []http2.FrameType{http2.FrameHeaders, http2.FrameContinuation, http2.FrameContinuation}, types)
+
+	_, err := NewFrameReader().ReadFrame(frames[1])
+	assert.Error(t, err, "a CONTINUATION read without its HEADERS frame")
+
+	var data bytes.Buffer
+	require.NoError(t, http2.NewFramer(&data, nil).WriteData(1, false, []byte("x")))
+	interleaved := append(append([]byte{}, frames[0]...), data.Bytes()...)
+	assert.Error(t, eachFrame(t, NewFrameReader(), interleaved, func(http2.Frame) error { return nil }), "a DATA frame inside a header block")
+
+	other := append([]byte{}, block...)
+	other[len(frames[0])+8] = 3 // the first CONTINUATION, on stream 3
+	assert.Error(t, eachFrame(t, NewFrameReader(), other, func(http2.Frame) error { return nil }), "a CONTINUATION of another stream")
+
+	_, err = NewFrameReader().ReadFrame(append(append([]byte{}, data.Bytes()...), data.Bytes()...))
+	assert.Error(t, err, "two frames given as one")
+}
+
+// at is the n-th instant of a test's frames: distinct, in order.
+func at(n int) time.Time { return time.Unix(1000, 0).Add(time.Duration(n) * time.Millisecond) }
+
+// The stream manager decodes a split header block once, joined, with its
+// direction's HPACK decoder: a block cut inside a field decodes whole, and the
+// next block, which refers to that block's fields by their dynamic-table
+// index, decodes too. A HEADERS frame's END_STREAM ends its stream at its
+// block's end (RFC 9113 §8.1): nothing completes while the block is open, the
+// trailers are the call's own, not its headers copied, and the call's end is
+// the time of the frame that ends the block.
+func TestStreamManagerReadsAHeaderBlockSplitAcrossFramesWhole(t *testing.T) {
+	sm := NewStreamManager(zap.NewNop())
+	var reqOut, respOut bytes.Buffer
+	reqEnc, respEnc := hpack.NewEncoder(&reqOut), hpack.NewEncoder(&respOut)
+	in, out := NewFrameReader(), NewFrameReader()
+	big := strings.Repeat("b", 300)
+	n := 0
+	feed := func(r *FrameReader, raw []byte, outgoing bool) time.Time {
+		t.Helper()
+		f, err := r.ReadFrame(raw)
+		require.NoError(t, err)
+		n++
+		require.NoError(t, sm.HandleFrame(f, outgoing, at(n)))
+		return at(n)
+	}
+	feedAll := func(r *FrameReader, b []byte, outgoing bool) {
+		t.Helper()
+		for _, raw := range frameList(t, b) {
+			feed(r, raw, outgoing)
+		}
+	}
+	ends := map[uint32]time.Time{}
+	call := func(id uint32, parts int) {
+		t.Helper()
+		feedAll(in, splitBlock(t, reqEnc, &reqOut, id, false, parts,
+			hpack.HeaderField{Name: ":method", Value: "POST"},
+			hpack.HeaderField{Name: ":path", Value: fmt.Sprintf("/svc.Echo/Call%d", id)},
+			hpack.HeaderField{Name: "authorization", Value: "Bearer " + big}), false)
+		var data bytes.Buffer
+		require.NoError(t, http2.NewFramer(&data, nil).WriteData(id, true, []byte{0, 0, 0, 0, 1, 'q'}))
+		feedAll(in, data.Bytes(), false)
+		feedAll(out, splitBlock(t, respEnc, &respOut, id, false, 1,
+			hpack.HeaderField{Name: ":status", Value: "200"},
+			hpack.HeaderField{Name: "content-type", Value: "application/grpc"}), true)
+		data.Reset()
+		require.NoError(t, http2.NewFramer(&data, nil).WriteData(id, false, []byte{0, 0, 0, 0, 1, 'x'}))
+		feedAll(out, data.Bytes(), true)
+		trailers := frameList(t, splitBlock(t, respEnc, &respOut, id, true, parts,
+			hpack.HeaderField{Name: "grpc-status", Value: "13"},
+			hpack.HeaderField{Name: "grpc-message", Value: big}))
+		for i, raw := range trailers {
+			ends[id] = feed(out, raw, true)
+			if i < len(trailers)-1 {
+				for _, st := range sm.GetCompleteStreams() {
+					require.NotEqual(t, id, st.ID, "stream %d completed inside its trailers block, after frame %d of %d", id, i+1, len(trailers))
+				}
+			}
+		}
+	}
+	call(1, 3)
+	call(3, 1) // refers to call 1's fields by index
+
+	streams := sm.GetCompleteStreams()
+	require.Len(t, streams, 2, "a call whose blocks were split did not complete")
+	for _, st := range streams {
+		assert.Equal(t, "Bearer "+big, st.GRPCReq.Headers.OrdinaryHeaders["authorization"], "stream %d's request headers", st.ID)
+		assert.Equal(t, "200", st.GRPCResp.Headers.PseudoHeaders[":status"], "stream %d's headers", st.ID)
+		assert.Equal(t, "13", st.GRPCResp.Trailers.OrdinaryHeaders["grpc-status"], "stream %d's trailers: %+v", st.ID, st.GRPCResp.Trailers)
+		assert.Equal(t, big, st.GRPCResp.Trailers.OrdinaryHeaders["grpc-message"], "stream %d's trailers", st.ID)
+		assert.Empty(t, st.GRPCResp.Trailers.PseudoHeaders, "stream %d's headers were taken for its trailers", st.ID)
+		assert.Equal(t, ends[st.ID], st.GRPCResp.Timestamp, "stream %d ends at %v, not at the frame that ended its trailers block", st.ID, st.GRPCResp.Timestamp)
+	}
+}
+
+// A bodyless request (END_STREAM on its HEADERS frame) whose header block
+// continues in a CONTINUATION ends at that block's end, and completes its
+// call then, even when the call's response was read before it (the two
+// directions are parsed apart). Before, its END_STREAM took effect at the
+// HEADERS frame, before its headers were decoded, and nothing checked the call
+// again: it never completed.
+func TestStreamManagerCompletesASplitBodylessRequestWhoseResponseCameFirst(t *testing.T) {
+	sm := NewStreamManager(zap.NewNop())
+	var reqOut, respOut bytes.Buffer
+	reqEnc, respEnc := hpack.NewEncoder(&reqOut), hpack.NewEncoder(&respOut)
+	in, out := NewFrameReader(), NewFrameReader()
+	feedAll := func(r *FrameReader, b []byte, outgoing bool) {
+		t.Helper()
+		require.NoError(t, eachFrame(t, r, b, func(f http2.Frame) error { return sm.HandleFrame(f, outgoing, time.Now()) }))
+	}
+	feedAll(out, splitBlock(t, respEnc, &respOut, 1, true, 1,
+		hpack.HeaderField{Name: ":status", Value: "200"},
+		hpack.HeaderField{Name: "grpc-status", Value: "0"}), true)
+	request := frameList(t, splitBlock(t, reqEnc, &reqOut, 1, true, 2,
+		hpack.HeaderField{Name: ":method", Value: "POST"},
+		hpack.HeaderField{Name: ":path", Value: "/svc.Echo/Ping"},
+		hpack.HeaderField{Name: "x-meta", Value: strings.Repeat("m", 100)}))
+	require.Len(t, request, 2)
+	feedAll(in, request[0], false)
+	assert.Empty(t, sm.GetCompleteStreams(), "complete before its request's headers were read")
+	feedAll(in, request[1], false)
+	streams := sm.GetCompleteStreams()
+	require.Len(t, streams, 1, "the call did not complete at its request's end")
+	assert.Equal(t, "/svc.Echo/Ping", streams[0].GRPCReq.Headers.PseudoHeaders[":path"])
+	assert.Equal(t, "0", streams[0].GRPCResp.Trailers.OrdinaryHeaders["grpc-status"])
 }

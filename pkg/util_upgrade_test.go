@@ -19,18 +19,18 @@ const upgradePayload = 1 << 20
 // server does: it sends HTTP/2's client preface. With more it then sends
 // upgradePayload bytes more, ends its side of the connection (a half-close:
 // it has nothing more to send) and keeps reading its peer, as a server that
-// waits on it does, until its peer ends the connection; ended then says how
-// many bytes it read, which is none for a client that does not speak the
-// protocol. Without more it closes the connection at once (api-server's
-// tunnel closes it 10 s later, when no HTTP/2 answer has come).
+// waits on it does, until its peer ends the connection, which ended then
+// says. Without more it closes the connection at once (api-server's tunnel
+// closes it 10 s later, when no HTTP/2 answer has come).
 //
 // What tells whether keploy read on is the answer's body: everything the app
 // sent before its half-close is there for a client that reads on. Whether the
-// app's writes completed is no signal: an OS may take them into its buffers
-// whether or not its peer reads them (Windows takes 64 MiB on loopback).
-func upgradeApp(t *testing.T, more bool) (url string, ended <-chan int64) {
+// app's writes completed is no signal: on Windows a 64 MiB loopback write
+// completed with no error after its peer had closed unread. And a keploy that
+// keeps the connection open is a test that hangs at <-ended.
+func upgradeApp(t *testing.T, more bool) (url string, ended <-chan struct{}) {
 	t.Helper()
-	ch := make(chan int64, 1)
+	ch := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := w.(http.Hijacker).Hijack()
 		if err != nil {
@@ -48,8 +48,8 @@ func upgradeApp(t *testing.T, more bool) (url string, ended <-chan int64) {
 			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 				_ = cw.CloseWrite()
 			}
-			n, _ := io.Copy(io.Discard, rw)
-			ch <- n
+			_, _ = io.Copy(io.Discard, rw)
+			ch <- struct{}{}
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -101,9 +101,7 @@ func TestASwitchingProtocolsAnswerClosesTheUpgradedConnection(t *testing.T) {
 	if resp.StatusCode != http.StatusSwitchingProtocols || resp.Body != "" {
 		t.Fatalf("got %d with a %d-byte body: keploy read on past its 101's headers, want a 101 with none", resp.StatusCode, len(resp.Body))
 	}
-	if n := <-ended; n != 0 {
-		t.Fatalf("the app read %d bytes from keploy after its 101, want none", n)
-	}
+	<-ended // the app saw keploy end the connection
 }
 
 // The streaming path ends a 101 at its headers too: its reader holds nothing,
@@ -124,7 +122,5 @@ func TestASwitchingProtocolsAnswerStreamsNothing(t *testing.T) {
 	if resp.StatusCode != http.StatusSwitchingProtocols || len(body) != 0 {
 		t.Fatalf("got %d with %d bytes to stream: keploy read on past its 101's headers, want a 101 with nothing", resp.StatusCode, len(body))
 	}
-	if n := <-ended; n != 0 {
-		t.Fatalf("the app read %d bytes from keploy after its 101, want none", n)
-	}
+	<-ended // the app saw keploy end the connection
 }

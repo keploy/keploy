@@ -386,6 +386,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		_ = cmd.Flags().MarkHidden("mock-mode")
 		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("record-requests")
+		// Internal orchestrator→agent flag: a run that learns noise settles
+		// each test's calls before its misses are read (SetupOptions.SettleReads).
+		cmd.Flags().Bool("settle-reads", c.cfg.Agent.SettleReads, "Internal: settle a test's calls before a replay reads its misses. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("settle-reads")
 		// Internal orchestrator→agent flag: the proven model's staging switch.
 		// The CLI reads KEPLOY_PROVEN, but the agent does not inherit it (sudo
 		// drops the environment, the agent container is not given it), so the
@@ -1241,6 +1245,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	}
+	if cmd.Name() != "agent" {
+		warnRemovedAgentReadyTimeout(c.logger)
 	}
 
 	if c.cfg.Record.BasePath != "" {
@@ -2145,6 +2152,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.RecordRequests = recordRequests
+
+		settleReads, err := cmd.Flags().GetBool("settle-reads")
+		if err != nil {
+			errMsg := "failed to read the settle-reads flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.SettleReads = settleReads
 
 		proven, err := cmd.Flags().GetBool(provenswitch.AgentFlag)
 		if err != nil {

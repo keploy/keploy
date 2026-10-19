@@ -22,6 +22,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
@@ -30,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	agentsvc "go.keploy.io/server/v3/pkg/service/agent"
 )
 
@@ -387,6 +389,9 @@ type syscallConner interface {
 // unsettled while it lives, and is lost when it closes: never settled as if
 // the proxy had it, so the test that made it is not verified.
 func TestANATedConnectionIsNotVerified(t *testing.T) {
+	// Refusing it is the switch's: with the switch off see
+	// TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff.
+	t.Setenv(provenswitch.Env, "1")
 	iptables, err := exec.LookPath("iptables")
 	if err != nil {
 		t.Skipf("no iptables here: %v", err)
@@ -450,6 +455,80 @@ func TestANATedConnectionIsNotVerified(t *testing.T) {
 	}
 	if lost := h.CaptureLosses(); len(lost) != 1 || lost[0].Kind != models.CaptureLossAppConnLost {
 		t.Fatalf("the hooks' capture losses %+v: want the application connection lost", lost)
+	}
+}
+
+// With the switch off, a run that settles its reads (an agent started for a
+// run that learns noise) meets the same NAT'd connection: its proxy does not
+// refuse it (no capture loss) but routes it by its source port, as it always
+// did, so the application's calls work; the run drops to not counted, for
+// good, with one WARN, and every later read of a test's misses is unread
+// (the agent's side: pkg/service/agent's
+// TestAReadAfterTheRunDroppedToNotCountedIsUnreadWithTheSwitchOff), so
+// nothing learns noise from them.
+func TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	iptables, err := exec.LookPath("iptables")
+	if err != nil {
+		t.Skipf("no iptables here: %v", err)
+	}
+	h := NewHooks(zap.NewNop(), &config.Config{})
+	loadProxyConnObject(t, h)
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	cfg.Agent.SettleReads = true
+	core, logs := observer.New(zap.WarnLevel)
+	p := proxy.New(zap.New(core), h, cfg)
+	p.SetListenerCounter(h)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan error, 1), make(chan error, 1)
+	go func() { done <- p.Serve(ctx, ready) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	if !p.CountedFromStart() {
+		t.Fatal("the settling proxy was not counted from its start")
+	}
+	port := p.Listener.Addr().(*net.TCPAddr).Port
+	info := structs.AgentInfo{DNSPort: -1, IsDocker: 1}
+	info.Proxy = structs.ProxyInfo{IP4: 0x7f000001, IP6: [4]uint32{0, 0, 0, 1}, Port: uint32(port)}
+	if err := h.SendAgentInfo(info); err != nil {
+		t.Fatal(err)
+	}
+	rule := []string{"OUTPUT", "-p", "tcp", "-d", "127.0.0.1", "--dport", fmt.Sprint(port), "-j", "DNAT", "--to-destination", fmt.Sprintf("127.0.0.2:%d", port)}
+	if out, err := exec.Command(iptables, append([]string{"-t", "nat", "-A"}, rule...)...).CombinedOutput(); err != nil {
+		t.Skipf("cannot add a DNAT rule: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command(iptables, append([]string{"-t", "nat", "-D"}, rule...)...).Run() })
+
+	app := appSocket(t, h)
+	if err := unix.Connect(app, &unix.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(app) })
+	// The proxy takes it on: by its source port, which here names no
+	// destination (the application dialled the proxy itself), so it ends it
+	// as an untracked connection, as it always did; never as unpaired.
+	if n, err := unix.Read(app, make([]byte, 1)); n != 0 || err != nil {
+		t.Fatalf("the application's read on the NAT'd connection: %d, %v; want EOF", n, err)
+	}
+	for _, l := range p.CaptureLosses() {
+		if l.Kind == models.CaptureLossUnpairedConn {
+			t.Fatalf("the proxy's capture losses %+v: with the switch off the NAT'd connection is routed, not refused", p.CaptureLosses())
+		}
+	}
+	lostCh, lost := p.CountingLost()
+	if lost == nil {
+		t.Fatal("CountingLost is nil: the run is still counted after a NAT'd connection")
+	}
+	select {
+	case <-lostCh:
+	default:
+		t.Fatal("CountingLost's channel is not closed")
+	}
+	if n := logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len(); n != 1 {
+		t.Fatalf("%d WARNs of the NAT, want 1", n)
 	}
 }
 

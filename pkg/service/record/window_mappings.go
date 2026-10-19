@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -32,6 +33,47 @@ type windowMappings struct {
 	// mocks holds only the test mocks: a protocol-phase or async-lane mock
 	// is no test's, and a recording can make millions of them.
 	mocks []models.WindowedMock
+	// stopAt is when keploy record began stopping the application (a stop
+	// signal, the record timer), zero while it has not: a worker-scope mock
+	// recorded from then on is the application's shutdown's
+	// (MockEntry.AtStop).
+	stopAt time.Time
+}
+
+// noteStop records that keploy record began stopping the application at at;
+// the earliest such moment is kept.
+func (w *windowMappings) noteStop(at time.Time) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.stopAt.IsZero() || at.Before(w.stopAt) {
+		w.stopAt = at
+	}
+	w.mu.Unlock()
+}
+
+// markAtStop marks, of the worker scope, each mock placed once keploy record
+// had begun stopping the application (stopAt): its shutdown's calls, which a
+// replay requires only once it has stopped the application. A mock's place is
+// placed's (models.PlaceOf, as the window mappings read it: its answer's time
+// for a mock placed at its answer), else its request time.
+func markAtStop(worker []models.MockEntry, placed map[string]time.Time, stopAt time.Time) {
+	if stopAt.IsZero() {
+		return
+	}
+	for i := range worker {
+		at, ok := placed[worker[i].Name]
+		if !ok {
+			var err error
+			if at, err = models.ParseMockTimestamp(worker[i].ReqTimestampMock); err != nil {
+				continue
+			}
+		}
+		if !at.IsZero() && !at.Before(stopAt) {
+			worker[i].AtStop = true
+		}
+	}
 }
 
 // lostTestPrefix starts the window name of a test case the recording failed
@@ -143,6 +185,15 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// it as it is, without a copy.
 	w.mu.Lock()
 	derived := models.DeriveWindowMappings(w.tests, w.mocks)
+	stopAt := w.stopAt
+	placed := make(map[string]time.Time, len(w.mocks))
+	for _, m := range w.mocks {
+		if !m.Place.IsZero() {
+			placed[m.Name] = m.Place
+		} else {
+			placed[m.Name] = m.At
+		}
+	}
 	w.mu.Unlock()
 	kept := func(id string) bool {
 		_, gone := deleted[id]
@@ -177,10 +228,25 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return
 	}
+	// The set's worker scope (D2): what no test owns, each at its place. A
+	// place whose test case the recording did not keep moves back to the
+	// latest kept test case before it (the set's start before every one), so
+	// a replay of the kept test cases reaches it.
+	worker := keptPlaces(derived, kept)
+	markAtStop(worker, placed, stopAt)
+	if err := db.UpsertWorker(ctx, testSetID, worker); err != nil {
+		logger.Error("failed to save the test set's worker scope, the calls no test made, derived from the test windows",
+			zap.String("testSetID", testSetID),
+			zap.Error(err),
+			zap.String("next_step", "keploy test cannot tell which recorded calls are the set's own without mappings.yaml's worker scope; fix the error above and re-record this test set"))
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return
+	}
 	logger.Info("Saved the test-mock mappings derived from the test windows",
 		zap.String("testSetID", testSetID),
 		zap.Int("numTests", len(byTest)),
-		zap.Int("mappedMocks", mappedMocks))
+		zap.Int("mappedMocks", mappedMocks),
+		zap.Int("workerMocks", len(worker)))
 	if n := len(concurrent); n > 0 {
 		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while two tests were open is mapped to the test whose request came first, which may not be the test that made it",
 			zap.String("testSetID", testSetID),
@@ -188,4 +254,32 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 			zap.Strings("tests", concurrent[:min(n, 20)]),
 			zap.String("next_step", "if one of these tests fails in keploy test with a call it did not make or a call no recorded mock answered, record them one request at a time"))
 	}
+}
+
+// keptPlaces is derived's worker scope with each place a test case kept
+// (kept) holds: a place whose test case is not kept moves back to the latest
+// kept test case whose window began before it, in window order, or to the
+// set's start before every one.
+func keptPlaces(derived models.WindowMappings, kept func(id string) bool) []models.MockEntry {
+	if len(derived.Worker) == 0 {
+		return nil
+	}
+	// latestKept is, by test case ID, the latest kept test case at or before
+	// it in window order.
+	latestKept := make(map[string]string, len(derived.Tests))
+	last := ""
+	for _, tc := range derived.Tests {
+		if kept(tc.ID) {
+			last = tc.ID
+		}
+		latestKept[tc.ID] = last
+	}
+	out := make([]models.MockEntry, 0, len(derived.Worker))
+	for _, e := range derived.Worker {
+		if e.Place != "" {
+			e.Place = latestKept[e.Place]
+		}
+		out = append(out, e)
+	}
+	return out
 }

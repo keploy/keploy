@@ -210,6 +210,14 @@ func TestStart_ProvenRecordWithoutSyncMapsEachTestFromItsWindow(t *testing.T) {
 	if got := w.batches(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("mappings written: %v; want %v", got, want)
 	}
+	// What no test's window held is the set's worker scope (D2): the boot
+	// query, at the set's start.
+	w.mapping.mu.Lock()
+	worker, workers := w.mapping.worker, w.mapping.workers
+	w.mapping.mu.Unlock()
+	if workers != 1 || len(worker) != 1 || worker[0].Name != "boot-query" || worker[0].Place != "" {
+		t.Fatalf("worker scope written %d time(s): %+v; want boot-query at the set's start, once", workers, worker)
+	}
 	w.mapping.mu.Lock()
 	entry := w.mapping.batches[0]["test-2"][0]
 	w.mapping.mu.Unlock()
@@ -592,5 +600,140 @@ func TestStart_ProvenRecordChargesAnUnreadMockToItsTestCase(t *testing.T) {
 				t.Fatalf("%d WARNs for test cases, want one naming test-1, which holds the mock: %+v", len(charged), charged)
 			}
 		})
+	}
+}
+
+// The worker scope is written with its places on the test cases the recording
+// kept: a mock placed after a test case it did not keep is placed after the
+// latest kept one before it, or at the set's start when there is none, so a
+// replay of the kept test cases reaches it.
+func TestWindowMappingsPlaceTheWorkerScopeOnKeptTests(t *testing.T) {
+	db := &recMappingDB{}
+	w := &windowMappings{}
+	w.addTest(winTest("deleted-first", 1000, 1100))
+	w.addTest(winTest("kept", 2000, 2100))
+	w.addTest(winTest("deleted", 3000, 3100))
+	w.addMock(winMock("after-deleted-first", models.HTTP, "", 1500))
+	w.addMock(winMock("after-kept", models.HTTP, "", 2500))
+	w.addMock(winMock("after-deleted", models.HTTP, "", 3500))
+	w.addMock(winMock("in-kept", models.HTTP, "", 2050))
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", map[string]struct{}{"deleted-first": {}, "deleted": {}}, true, 0)
+
+	got := []string{}
+	for _, e := range db.worker {
+		got = append(got, e.Name+"@"+e.Place)
+	}
+	if want := []string{"after-deleted-first@", "after-kept@kept", "after-deleted@kept"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("worker scope %v; want %v", got, want)
+	}
+}
+
+// A recorded answer its parser declares idle (models.RegisterIdleAnswer) is
+// written in the worker scope, placed after the test it was recorded in, and
+// not in that test's mapping (D4).
+func TestWindowMappingsWriteAnIdleAnswerInTheWorkerScope(t *testing.T) {
+	unregister := models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "empty-poll" })
+	defer unregister()
+	db := &recMappingDB{}
+	w := &windowMappings{}
+	w.addTest(winTest("test-1", 1000, 1100))
+	w.addMock(winMock("own-call", models.HTTP, "", 1040))
+	w.addMock(winMock("empty-poll", models.HTTP, "", 1050))
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+
+	if len(db.batches) != 1 || len(db.batches[0]["test-1"]) != 1 || db.batches[0]["test-1"][0].Name != "own-call" {
+		t.Fatalf("test-1's mapping is %v; want only own-call", db.batches)
+	}
+	if len(db.worker) != 1 || db.worker[0].Name != "empty-poll" || db.worker[0].Place != "test-1" {
+		t.Fatalf("worker scope %+v; want empty-poll placed after test-1", db.worker)
+	}
+}
+
+// A worker-scope call recorded once keploy record began stopping the
+// application is its shutdown's (MockEntry.AtStop): a replay requires it only
+// once it has stopped the application. One recorded before the stop is not
+// marked, and a recording never stopped marks none. The earliest stop moment
+// is kept.
+func TestWindowMappingsMarkTheShutdownsCalls(t *testing.T) {
+	write := func(stops ...int) []models.MockEntry {
+		db := &recMappingDB{}
+		w := &windowMappings{}
+		w.addTest(winTest("test-1", 1000, 1100))
+		w.addMock(winMock("own", models.HTTP, "", 1050))
+		w.addMock(winMock("after-last", models.HTTP, "", 2000))
+		w.addMock(winMock("deregister", models.HTTP, "", 3000))
+		for _, at := range stops {
+			w.noteStop(winAt(at))
+		}
+		w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+		return db.worker
+	}
+	atStop := func(worker []models.MockEntry) []string {
+		var out []string
+		for _, e := range worker {
+			if e.AtStop {
+				out = append(out, e.Name)
+			}
+		}
+		return out
+	}
+	if got := atStop(write(3500, 2500)); !reflect.DeepEqual(got, []string{"deregister"}) {
+		t.Fatalf("marked %v at the stop; want [deregister], recorded after the earliest stop", got)
+	}
+	if got := atStop(write()); got != nil {
+		t.Fatalf("a recording never stopped marked %v", got)
+	}
+}
+
+// Through Start: a worker-scope call recorded once keploy record began
+// stopping the application (a Ctrl+C, the record timer) is its shutdown's
+// (MockEntry.AtStop), and one recorded before is not. A recording that did
+// not note its stop wrote no such mark, and its replay waited on the
+// shutdown's calls as on the application's own, until the stall limit.
+func TestStart_ProvenRecordMarksTheCallsItsStopMade(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	keepExitCode(t)
+	w := startWinRecording(t, &config.Config{}, nil, nil)
+	// The agent stamps a call as it records it: this one, after the stop
+	// the recording is about to get.
+	shutdown := winMock("deregister", models.HTTP, "", 0)
+	shutdown.Spec.ReqTimestampMock = time.Now().Add(time.Hour)
+	shutdown.Spec.ResTimestampMock = shutdown.Spec.ReqTimestampMock.Add(time.Millisecond)
+	w.mock(t, winMock("boot-query", models.Postgres, "mocks", 500))
+	w.mock(t, shutdown)
+	w.test(t, winTest("test-1", 1000, 1100))
+	w.stop(t, 1, 2)
+
+	w.mapping.mu.Lock()
+	worker := append([]models.MockEntry(nil), w.mapping.worker...)
+	w.mapping.mu.Unlock()
+	atStop := map[string]bool{}
+	for _, e := range worker {
+		atStop[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"boot-query": false, "deregister": true}; !reflect.DeepEqual(atStop, want) {
+		t.Fatalf("worker scope written with atStop %v; want %v: only the call recorded after the stop is the shutdown's", atStop, want)
+	}
+}
+
+// A worker-scope call is the shutdown's by its place (models.PlaceOf, as the
+// window mappings read it): one sent before the stop that a parser places at
+// its answer, answered after the stop began, is the shutdown's; one placed
+// before the stop is not, whenever it was answered; an entry with no place
+// known is read by its request time.
+func TestMarkAtStopReadsAMocksPlace(t *testing.T) {
+	stop := winAt(3000)
+	worker := []models.MockEntry{
+		{Name: "held-poll", ReqTimestampMock: models.FormatMockTimestamp(winAt(2900))},
+		{Name: "early", ReqTimestampMock: models.FormatMockTimestamp(winAt(2900)), ResTimestampMock: models.FormatMockTimestamp(winAt(3100))},
+		{Name: "unplaced", ReqTimestampMock: models.FormatMockTimestamp(winAt(3050))},
+	}
+	markAtStop(worker, map[string]time.Time{"held-poll": winAt(3100), "early": winAt(2900)}, stop)
+	got := map[string]bool{}
+	for _, e := range worker {
+		got[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"held-poll": true, "early": false, "unplaced": true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked %v; want %v", got, want)
 	}
 }

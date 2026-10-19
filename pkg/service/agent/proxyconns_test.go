@@ -26,6 +26,8 @@ type connHooks struct {
 	established uint64
 	err         error
 	marked      int
+	// markErr is MarkProxyListener's answer: a mark the kernel refused.
+	markErr error
 	// The application's side: its count, and the numbers resolved.
 	app        uint64
 	appSettled acceptcount.Counter
@@ -59,7 +61,7 @@ func (h *connHooks) MarkProxyListener(syscall.RawConn) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.marked++
-	return nil
+	return h.markErr
 }
 func (h *connHooks) ProxyConnPair(syscall.RawConn) (coreAgent.ProxyConnPairing, error) {
 	return coreAgent.ProxyConnPairing{}, errors.New("not used")
@@ -410,26 +412,32 @@ func (p *markingProxy) StartProxy(ctx context.Context, opts coreAgent.ProxyOptio
 	return p.startedProxy.StartProxy(ctx, opts)
 }
 
-// The agent has its proxy counted by the hooks, before it
-// starts the proxy, under the proven switch only, and only when the hooks can
-// count: with the switch off the proxy is started exactly as before, its
-// listener untouched.
-func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOnly(t *testing.T) {
+// The agent has its proxy counted by the hooks, before it starts the proxy,
+// under the proven switch or when it was started settling reads, and only
+// when the hooks can count: otherwise the proxy is started exactly as before,
+// its listener untouched.
+func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOrWhenSettlingReads(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		proven string
-		hooks  coreAgent.Hooks
-		want   string
+		name    string
+		proven  string
+		hooks   coreAgent.Hooks
+		want    string
+		settles bool
 	}{
-		{"switch off, counting hooks", "", &connHooks{}, "[start]"},
-		{"switch on, counting hooks", "1", &connHooks{}, "[mark start]"},
-		{"switch on, hooks that cannot count", "1", loadedHooks{}, "[start]"},
+		{"switch off, counting hooks", "", &connHooks{}, "[start]", false},
+		{"switch on, counting hooks", "1", &connHooks{}, "[mark start]", false},
+		{"switch on, hooks that cannot count", "1", loadedHooks{}, "[start]", false},
+		// An agent started for a run that learns noise (--settle-reads).
+		{"switch off, settling reads, counting hooks", "", &connHooks{}, "[mark start]", true},
+		{"switch off, settling reads, hooks that cannot count", "", loadedHooks{}, "[start]", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, tc.proven)
 			var calls []string
 			p := &markingProxy{calls: &calls}
-			a := &Agent{logger: zap.NewNop(), Hooks: tc.hooks, Proxy: p, config: &config.Config{}}
+			cfg := &config.Config{}
+			cfg.Agent.SettleReads = tc.settles
+			a := &Agent{logger: zap.NewNop(), Hooks: tc.hooks, Proxy: p, config: cfg}
 			grp, ctx := errgroup.WithContext(context.Background())
 			ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, grp))
 			defer func() {
@@ -474,5 +482,42 @@ func TestAnApplicationConnectionLostIsACaptureLoss(t *testing.T) {
 	got, err := a.CaptureLosses(context.Background())
 	if err != nil || len(got) != 1 || got[0] != lost {
 		t.Fatalf("CaptureLosses = %+v, %v; want the lost application connection", got, err)
+	}
+}
+
+// countedMarkingProxy is a markingProxy that says whether the kernel counted
+// its calls when it came up (agent.CountingReporter).
+type countedMarkingProxy struct {
+	markingProxy
+	counted bool
+}
+
+func (p *countedMarkingProxy) CountedFromStart() bool { return p.counted }
+func (p *countedMarkingProxy) CountingLost() (<-chan struct{}, error) {
+	return nil, nil
+}
+
+// Hook latches, once the proxy is up, whether the kernel counts its calls: an
+// agent started settling reads settles them only where its proxy was counted
+// from its start, whatever the count says later.
+func TestHookLatchesWhetherTheProxysCallsAreCounted(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	for _, counted := range []bool{true, false} {
+		var calls []string
+		p := &countedMarkingProxy{markingProxy: markingProxy{calls: &calls}, counted: counted}
+		cfg := &config.Config{}
+		cfg.Agent.SettleReads = true
+		a := &Agent{logger: zap.NewNop(), Hooks: &connHooks{}, Proxy: p, config: cfg}
+		grp, ctx := errgroup.WithContext(context.Background())
+		ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, grp))
+		if err := a.Hook(ctx, models.HookOptions{Mode: models.MODE_TEST}); err != nil {
+			t.Fatalf("the agent did not start: %v", err)
+		}
+		p.counted = !counted // what the count says after the start does not matter
+		if got := a.settlesReads(); got != counted {
+			t.Fatalf("proxy counted from its start %v: settlesReads %v", counted, got)
+		}
+		cancel()
+		_ = grp.Wait()
 	}
 }

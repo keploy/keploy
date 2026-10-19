@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -43,7 +44,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	finalMappings := make(map[string][]models.MockEntry)
-	var existingStartup []models.MockEntry
+	var existingStartup, existingWorker []models.MockEntry
 	var existingSource string
 
 	// Detect whether a mappings file already exists in either format,
@@ -73,6 +74,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 			finalMappings[t.ID] = t.Mocks
 		}
 		existingStartup = existingConfig.Startup
+		existingWorker = existingConfig.Worker
 		existingSource = existingConfig.Source
 	}
 
@@ -110,6 +112,14 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Startup = mapping.Startup
 	case len(existingStartup) > 0:
 		newMapping.Startup = existingStartup
+	}
+	// The worker scope too, replace-or-keep as the startup section: it is the
+	// set's, not a test's, and CreateMappingStructure cannot see it.
+	switch {
+	case len(mapping.Worker) > 0:
+		newMapping.Worker = mapping.Worker
+	case len(existingWorker) > 0:
+		newMapping.Worker = existingWorker
 	}
 	// Who wrote the test entries: a writer that names itself, else the
 	// file's (models.Mapping.Source).
@@ -282,6 +292,143 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		zap.Int("tests", len(byTest)))
 
 	return nil
+}
+
+// UpsertWorker writes the set's worker scope (models.Mapping.Worker), whole,
+// creating the file if absent and keeping every other section as it is: the
+// recording derives the scope whole from its test windows (D2), so what is
+// written replaces what was there. An empty scope clears it.
+func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		effFormat = db.Format
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	mapping.Worker = worker
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// MoveToWorker bakes recordings into the set's worker scope
+// (models.Mapping.Worker), as record's judging does with a call it saw made
+// outside the window that recorded it (design v14 S12, a2): each of moves
+// names a mock and the place it is to answer from (MockEntry.Place). A mock a
+// test case lists leaves that list and joins the scope at that place, with
+// its entry's kind and recorded times; one the scope lists already takes that
+// place. A mock neither lists is left alone. The scope stays in recorded
+// order, and every other section is kept as it is. It returns the names it
+// moved or placed, in moves' order; a set with no mapping file moves none.
+//
+// The caller decides each place: judging only ever moves a place earlier
+// than the one recorded, never later.
+func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
+	if len(moves) == 0 {
+		return nil, nil
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil || !exists {
+		return nil, err
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	mapping, err := DecodeMappingF(fileData, db.logger, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	var moved []string
+	for _, mv := range moves {
+		if placeWorker(mapping, mv) {
+			moved = append(moved, mv.Name)
+		}
+	}
+	if len(moved) == 0 {
+		return nil, nil
+	}
+	sort.SliceStable(mapping.Worker, func(i, j int) bool {
+		return workerAt(mapping.Worker[i]).Before(workerAt(mapping.Worker[j]))
+	})
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	if err := yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat); err != nil {
+		return nil, err
+	}
+	return moved, nil
+}
+
+// placeWorker applies one of MoveToWorker's moves to mapping, reporting
+// whether it found the mock. A mock several test cases list leaves every one
+// of their lists: listed by one, it would still be that test's at replay.
+func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
+	for i := range mapping.Worker {
+		if mapping.Worker[i].Name == mv.Name {
+			mapping.Worker[i].Place = mv.Place
+			return true
+		}
+	}
+	var entry *models.MockEntry
+	for i := range mapping.TestCases {
+		kept := mapping.TestCases[i].Mocks[:0:0]
+		for _, e := range mapping.TestCases[i].Mocks {
+			if e.Name != mv.Name {
+				kept = append(kept, e)
+				continue
+			}
+			if entry == nil {
+				e := e
+				entry = &e
+			}
+		}
+		if len(kept) != len(mapping.TestCases[i].Mocks) {
+			mapping.TestCases[i].Mocks = kept
+		}
+	}
+	if entry == nil {
+		return false
+	}
+	entry.Place = mv.Place
+	mapping.Worker = append(mapping.Worker, *entry)
+	return true
+}
+
+// workerAt is when a worker-scope entry's request was recorded, for its
+// order: its recorded time, else its timestamp in seconds.
+func workerAt(e models.MockEntry) time.Time {
+	if at, err := models.ParseMockTimestamp(e.ReqTimestampMock); err == nil && !at.IsZero() {
+		return at
+	}
+	return time.Unix(e.Timestamp, 0)
 }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {

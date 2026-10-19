@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
@@ -75,7 +78,6 @@ func TestARecordingKeployFailedIsNotAnInterrupt(t *testing.T) {
 		{"run", agentUpFromSetup, utils.Native},
 	} {
 		t.Run(tc.stage, func(t *testing.T) {
-			shortAgentBudget(t)
 			base := newInstr(t, tc.lifetime, tc.cmdType == utils.DockerCompose, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr := failsRecord{&failsGroup{composeInstr: base, stage: tc.stage}}
 			if err := recordWith(t, context.Background(), instr, base, tc.cmdType); err == nil {
@@ -373,5 +375,98 @@ func TestARecordUnderTheSwitchRefusesEveryDockerCommandBeforeAnythingStarts(t *t
 				t.Fatalf("judged %v: a %s record under the switch was not refused before it started: %v", judged, kind, err)
 			}
 		}
+	}
+}
+
+// keploy mock record lists a call a parser holds until its answer
+// (models.RegisterAnswerPlaced) under the test its answer is in
+// (models.PlaceOf): a consumer's poll sent inside TestA and answered in TestC
+// is TestC's, and one sent as the app boots and answered in TestA is TestA's,
+// not start-up traffic. keploy mock replay stages a test's mapping as its
+// whole recording (ExactMapping): listed by its request, the poll was served
+// a test early, or at boot.
+func TestRecordListsACallPlacedAtItsAnswerUnderTheTestItsAnswerIsIn(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	ms := time.Millisecond
+	poll := func(name string, req, res time.Duration) *models.Mock {
+		m := mockAt(name, runnerT0.Add(req))
+		m.Spec.ResTimestampMock = runnerT0.Add(res)
+		// Stated per-test, as the HTTP recorder states a data mock.
+		m.Spec.Metadata = map[string]string{"type": "mocks", "poll": "yes", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+		return m
+	}
+	instr := newRunnerInstr(t, sequentialMarks()...) // TestA [0, 10ms], TestC [10ms, 20ms]
+	instr.mocks = []*models.Mock{
+		poll("boot-poll", -5*ms, 5*ms),
+		mockAt("own-a", runnerT0.Add(3*ms)),
+		poll("poll-b", 8*ms, 15*ms),
+		mockAt("own-c", runnerT0.Add(12*ms)),
+	}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	if err := recordSet(t, instr, mapDB, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := mappedNames(t, mapDB)
+	for _, names := range got {
+		sort.Strings(names)
+	}
+	for test, want := range map[string][]string{"orders/e2e.TestA": {"boot-poll", "own-a"}, "orders/e2e.TestC": {"own-c", "poll-b"}} {
+		if fmt.Sprint(got[test]) != fmt.Sprint(want) {
+			t.Errorf("%s is mapped %v; want %v", test, got[test], want)
+		}
+	}
+	startup, err := mapDB.GetStartup(context.Background(), "set")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range startup {
+		if e.Name == "boot-poll" {
+			t.Errorf("the boot poll, answered in TestA, is listed as start-up traffic: %v", startup)
+		}
+	}
+}
+
+// setupFails is the fake agent whose first starts fail with errs, in order,
+// and whose next start comes up.
+type setupFails struct {
+	*composeInstr
+	errs   []error
+	setups atomic.Int32
+}
+
+func (s *setupFails) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
+	if n := int(s.setups.Add(1)) - 1; n < len(s.errs) {
+		return s.errs[n]
+	}
+	return s.composeInstr.Setup(ctx, cmd, opts)
+}
+
+// errStalledStart is a start the CLI gave up on for want of progress, as
+// waitForAgent says it.
+var errStalledStart = fmt.Errorf("%w: its start took no step across 30 of its beats, with no work in progress making progress", pkg.ErrAgentNotReady)
+
+// A start the CLI gave up on for want of progress (pkg.ErrAgentNotReady) is
+// tried again with a fresh agent, as keploy record and keploy test try it
+// (pkg.RetryAgentSetup), and the recording goes on with that one: the boot
+// judge's contract. It was not, so a start the judge gave up on once ended the
+// recording -- and the judging rounds of keploy mock record with it. Any other
+// failure of the start is not tried again: it would fail the same way.
+func TestARecordingTriesAStalledStartAgain(t *testing.T) {
+	base := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr := &setupFails{composeInstr: base, errs: []error{errStalledStart}}
+	err := recordWith(t, context.Background(), instr, base, utils.Native)
+	if n := instr.setups.Load(); n != 2 || errors.Is(err, pkg.ErrAgentNotReady) {
+		t.Fatalf("%d starts, error %v: want the stalled start tried again, once, and the recording to go on", n, err)
+	}
+	if runs, _ := base.counts(); runs == 0 {
+		t.Fatal("the test command never ran after the second start came up")
+	}
+
+	base = newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	denied := fmt.Errorf("%w: the keploy agent could not start (exit status 3)", utils.ErrPrivilegeRequired)
+	instr = &setupFails{composeInstr: base, errs: []error{denied}}
+	err = recordWith(t, context.Background(), instr, base, utils.Native)
+	if n := instr.setups.Load(); n != 1 || !errors.Is(err, utils.ErrPrivilegeRequired) {
+		t.Fatalf("%d starts, error %v: want a start that cannot work tried once, its reason kept", n, err)
 	}
 }

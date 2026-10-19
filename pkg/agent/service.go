@@ -258,6 +258,25 @@ type PairedBytesWaiter interface {
 	PairedBytesProgress() uint64
 }
 
+// PairedBytesChecker is the proxy's account of whether it can count the bytes
+// on its paired connections: nil while it can (PairedBytesWaiter's waits can
+// be answered).
+type PairedBytesChecker interface {
+	PairedBytesErr() error
+}
+
+// CountingReporter says whether the kernel counted the calls waiting for the
+// proxy when it came up (its listener marked, its own check of the count
+// passed, and the bytes on its paired connections readable), and why, with
+// the proven switch off, they stopped being counted since (a NAT'd
+// connection), nil while they are.
+type CountingReporter interface {
+	CountedFromStart() bool
+	// CountingLost is a channel closed once there is that reason, and the
+	// reason.
+	CountingLost() (<-chan struct{}, error)
+}
+
 type AuxiliaryProxyHook interface {
 	// AfterStart runs once the proxy has started, ordered against
 	// BeforeTeardown: a teardown that comes while it runs waits for it. Where
@@ -490,6 +509,28 @@ type InFlightPlanner interface {
 // the current key's pool slice answers. It is the one visibility path there:
 // the agent moves it at every begin and end, and nothing else narrows or
 // widens what a parser is served.
+// ExactWorkerServer is implemented by a proxy that serves a test set's worker
+// scope under exact serving (models.Mapping.Worker): ServeExactWorker names the
+// worker-scope mocks the set's run has reached the place of, cumulative. Each
+// view installed after it (ServeExactTest, ServeExactPool) shows them, whether
+// a test is open or not, after the open test's own; each answers at most one
+// request in the staging.
+type ExactWorkerServer interface {
+	ServeExactWorker(names []string) error
+}
+
+// RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
+// exact serving (a call that is a recording made elsewhere) can read, beside
+// what is staged, the set's recordings the agent keeps on disk: a test's own
+// are staged only as it opens, so a call made before its test would find
+// none. SetRecordingSource sets where (src visits the on-disk mocks of a kind
+// indexed under any of keys, models.RequestKeys, in recorded order, decoding
+// one only as visit loads it; nil for none). For diagnosis only: nothing it
+// reads is served.
+type RecordingSourceSetter interface {
+	SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error
+}
+
 type ExactServer interface {
 	// ServeExactTest opens test, served exactly owned: its test mocks, in
 	// recorded order. A test opened again starts with none answered.

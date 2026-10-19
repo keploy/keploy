@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
@@ -19,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -64,6 +66,15 @@ type Agent struct {
 	coreAgent.IncomingProxy
 	proxyStarted bool
 	config       *config.Config
+	// countsCalls: once its proxy was up, the kernel counted the calls
+	// waiting for it (the proxy's CountedFromStart: its canary counted, the
+	// bytes on its paired connections readable). Latched at the start
+	// (latchCounting): a count lost later is a read that cannot vouch for
+	// every miss, never a return to reads that do not settle.
+	countsCalls atomic.Bool
+	// readLosses is the agent's count of its capture losses at the last read
+	// of a test's misses settled with the switch off (lostSinceLastRead).
+	readLosses atomic.Uint64
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
@@ -178,6 +189,8 @@ type Agent struct {
 	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
 	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
+	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
+	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -320,7 +333,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 	// Hooked into the app, the proxy up. The memory guard's start reads the
 	// cgroup's files: a stage of the start (utils.BeginBootWork).
-	endGuard := utils.BeginBootWork()
+	endGuard := utils.BeginBootWork("the memory guard's start")
 	err = memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit)
 	endGuard()
 	if err != nil {
@@ -633,6 +646,7 @@ func (a *Agent) resetScopeState() {
 	a.testReal = nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
+	a.testWorker, a.testBegun = nil, nil
 	a.scopeMu.Unlock()
 }
 
@@ -801,7 +815,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// The load can take long without a step (the kernel's verifier, on a
 	// loaded host): a stage of the start, making progress while its thread
 	// runs (utils.BeginBootWork).
-	endLoad := utils.BeginBootWork()
+	endLoad := utils.BeginBootWork("the hooks' load")
 	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 	endLoad()
 
@@ -838,15 +852,16 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
 	}
-	// Under the proven switch, the proxy's listener is marked for the hooks'
-	// count of the connections waiting for it (proxyconns.go).
+	// Under the proven switch, or for an agent that settles its reads, the
+	// proxy's listener is marked for the hooks' count of the connections
+	// waiting for it (proxyconns.go).
 	a.markProxyListener()
 
 	// The proxy's start can take long without a step: its CA's install runs
 	// keytool, update-ca-certificates (whose Java hook starts a JVM) and
 	// certutil, and the auxiliary hook loads BPF. A stage of the start, on
 	// this goroutine (utils.BeginBootWork), with steps of its own inside.
-	endProxy := utils.BeginBootWork()
+	endProxy := utils.BeginBootWork("the proxy's start")
 	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""
@@ -873,6 +888,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 
 	a.proxyStarted = true
+	a.latchCounting()
 	return nil
 }
 
@@ -886,12 +902,34 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// proxy's hands and answered (settle_proven.go): the run's last read
 	// included, so a call made after the last test's end is read, never
 	// filed after it. One keploy cannot settle is a read that cannot vouch
-	// for every miss.
+	// for every miss. With the switch off an agent started for a run that
+	// learns noise waits the same way where it can count the calls
+	// (settlesReads): that noise is learned from these reads, and a miss
+	// decided after the app answered its test (its own client gave up first)
+	// would otherwise be read with the next test's.
 	var settleErr error
-	if provenswitch.On() && a.replaying() {
-		// keploy test reads a test case's misses after its end: what the
-		// listener dropped since is no test's, and is not compared here.
-		_, settleErr = a.settle(ctx, true)
+	if (provenswitch.On() || a.settlesReads()) && a.replaying() {
+		if lost := a.countingLost(); lost != nil {
+			// With the switch off a NAT'd connection has dropped the run to
+			// not counted: no read of it can vouch for every miss, and none
+			// waits for calls that can never settle.
+			settleErr = lost
+		} else {
+			// keploy test reads a test case's misses after its end: what the
+			// listener dropped since is no test's, and is not compared here.
+			_, settleErr = a.settle(ctx, true)
+			if lost := a.countingLost(); settleErr == nil && lost != nil {
+				// Dropped while it settled: a call accepted since is not
+				// kept, so the settle could not have seen it.
+				settleErr = lost
+			}
+		}
+		if !provenswitch.On() {
+			// Counted whatever the settle said, so a loss is one read's.
+			if err := a.lostSinceLastRead(ctx); settleErr == nil {
+				settleErr = err
+			}
+		}
 	}
 	errs, err := a.Proxy.GetMockErrors(ctx)
 	if settleErr != nil && err == nil {
@@ -1231,22 +1269,34 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 }
 
 // followable reports whether this keploy can follow the variables a mock
-// declares (models.MockVariables): those of a plain HTTP call. A mock whose
-// variables it cannot follow is never served, under the proven switch: served
-// as recorded, it would answer a call whose variable does not hold. It is
-// named in an error, and the call it was recorded for misses.
+// declares (models.MockVariables): those of a plain HTTP call, and those the
+// parser of the mock's kind says it follows (integrations.VariableFollower,
+// which a parser registers). A mock whose variables it cannot follow is never
+// served, under the proven switch: served as recorded, it would answer a call
+// whose variable does not hold. It is named in an error, and the call it was
+// recorded for misses.
 func (a *Agent) followable(m *models.Mock) bool {
 	if m == nil || len(m.Spec.Variables) == 0 {
 		return true
 	}
 	why := ""
+	follow, registered := integrations.VariableFollowerOf(m.Kind)
 	switch {
-	case m.Kind != models.HTTP:
-		why = "keploy follows variables on HTTP calls only"
-	case m.IsAsync():
+	case m.Kind == models.HTTP && m.IsAsync():
 		why = "keploy does not follow variables on an async HTTP call"
-	default:
+	case m.Kind == models.HTTP:
 		return true
+	case !registered:
+		why = "keploy follows variables on HTTP calls, and on the calls of a parser that says it does; the " + string(m.Kind) + " parser does not"
+	default:
+		ok, w := follow(m)
+		if ok {
+			return true
+		}
+		why = w
+		if why == "" {
+			why = "the " + string(m.Kind) + " parser does not follow this mock's variables"
+		}
 	}
 	a.logger.Error("keploy cannot follow the variables of a recorded call, so it will not answer that call",
 		zap.String("mock", m.Name), zap.String("kind", string(m.Kind)), zap.String("why", why),
@@ -1413,6 +1463,17 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	switch mode {
 	case loadModeMapping:
 		loaded, err = disk.LoadByNames(params.MockMapping)
+		// Beside the mocks the mapping names, those placed at their answer
+		// that this test's window holds (models.PlaceOf), whatever the
+		// mapping lists (pkg.FilterTcsMocksMappingInWindow). A staging
+		// call's BaseTime start is no test's window: a scope's staging
+		// (stageScope) names the test's whole recording.
+		if err == nil && models.AnswerPlacedRegistered() && pkg.IsTestWindow(params.AfterTime, params.BeforeTime) {
+			var placed []*models.Mock
+			if placed, err = disk.LoadAnswerPlaced(params.AfterTime, params.BeforeTime); err == nil {
+				loaded = append(loaded, placed...)
+			}
+		}
 	case loadModeStrictWindow:
 		if cutoff, ok := stagingStartupCutoff(params); ok {
 			loaded, err = disk.LoadBefore(cutoff)
@@ -1462,8 +1523,9 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		}
 		// Beside the window's own, the calls in flight when its test began:
 		// sent in the gap before it, answered at or after its start (a
-		// consumer's long poll). The window loads by request time, so
-		// they are in no window's load otherwise.
+		// consumer's long poll). The window loads by place, which is the
+		// request time for a call the in-flight rule applies to, so they
+		// are in no window's load otherwise.
 		if from, ok := a.inFlightFrom(params); err == nil && ok {
 			var inFlight []*models.Mock
 			inFlight, err = disk.LoadInFlight(from, params.AfterTime)
@@ -1923,7 +1985,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
 		// Lax-mode promotion restoration: filterByTimeStamp moves

@@ -412,11 +412,14 @@ func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCase
 		default:
 			continue
 		}
-		if strings.Contains(j.Name(), "mocks") {
-			continue
-		}
 
 		name := strings.TrimSuffix(j.Name(), fileExt)
+		// Skip a stray mocks.yaml / mocks.json by its exact name only. A
+		// substring match also dropped every test case whose name merely
+		// contains "mocks" (e.g. get-k8s-proxy-mocks-download-1).
+		if name == "mocks" {
+			continue
+		}
 		// First-wins: pre-sort guarantees the format-matching file is
 		// processed before its sibling, so any later occurrence of the
 		// same basename is by definition the non-preferred format.
@@ -1323,6 +1326,14 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					} else {
 						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
 					}
+				} else if j < len(form.FileContents) && form.FileContents[j] != nil {
+					// Case 1b: File content travelled with the test case (captured
+					// in another process, e.g. the DaemonSet agent)
+					if err := os.WriteFile(destPath, form.FileContents[j], 0o644); err != nil {
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						return err
+					}
+					wroteFile = true
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
@@ -1351,6 +1362,8 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 			}
 
 			tc.HTTPReq.Form[i].Paths = newPaths
+			// Written to the assets above; never stored in the test case.
+			tc.HTTPReq.Form[i].FileContents = nil
 			if allFilesPersisted {
 				tc.HTTPReq.Form[i].Values = nil
 			}

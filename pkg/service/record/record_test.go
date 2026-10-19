@@ -270,6 +270,7 @@ func (c *countingMapDb) Insert(context.Context, *models.Mapping) error { return 
 func (c *countingMapDb) Upsert(ctx context.Context, testSetID, testID string, e []models.MockEntry) error {
 	return c.UpsertBatch(ctx, testSetID, map[string][]models.MockEntry{testID: e})
 }
+func (c *countingMapDb) UpsertWorker(context.Context, string, []models.MockEntry) error { return nil }
 func (c *countingMapDb) UpsertBatch(_ context.Context, _ string, byTest map[string][]models.MockEntry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -536,6 +537,18 @@ func (d *recMockDB) ResetCounterID()                                 {}
 type recMappingDB struct {
 	mu      sync.Mutex
 	batches []map[string][]models.MockEntry
+	// worker is the worker scope written last (UpsertWorker), and workers
+	// how many times it was.
+	worker  []models.MockEntry
+	workers int
+}
+
+func (d *recMappingDB) UpsertWorker(_ context.Context, _ string, worker []models.MockEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.worker = append([]models.MockEntry(nil), worker...)
+	d.workers++
+	return nil
 }
 
 func (d *recMappingDB) Insert(context.Context, *models.Mapping) error                    { return nil }

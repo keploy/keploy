@@ -169,8 +169,11 @@ func SentInGapAnsweredBy(req, res, from, start time.Time) bool {
 //   - A window-bound mock (a connection failure) is served from its own window
 //     or the startup band only.
 //   - A session or connection mock is every test's already.
+//   - A mock placed at its answer (IsAnswerPlaced) is its answer's window's
+//     test's, wherever it was sent (PlaceOf): the in-flight rule would give
+//     one sent in a gap to the next test whenever its answer came.
 func InFlightEligible(m *Mock) bool {
-	return m != nil && !WindowBound(m.Kind) && lifetimeOf(m) == LifetimePerTest && !IsCarryOver(m)
+	return m != nil && !WindowBound(m.Kind) && lifetimeOf(m) == LifetimePerTest && !IsCarryOver(m) && !IsAnswerPlaced(m)
 }
 
 // Contains reports whether t is inside one of the windows, ends included.
