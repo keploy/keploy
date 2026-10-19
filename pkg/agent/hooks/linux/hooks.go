@@ -223,15 +223,20 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	return nil
 }
 
-// hookLoadOptions are the options load() loads hookSpec() with: a verifier
-// log of every instruction and branch, from a 1 MiB buffer.
+// hookLoadOptions are the options load() loads hookSpec() with: no verifier
+// log. The kernel formats the log while it verifies, and at the instruction
+// and branch level the agent asked for, that log (and verifying again each
+// program whose log outgrew its buffer: cilium/ebpf grows the buffer on
+// ENOSPC and loads the program again) was nearly all of the load:
+// keploy's hook object (bpf_x86_bpfel.o) loaded in 3.5-6.5 s with it and in
+// 0.09-0.24 s without on 5.10.240, and in 0.84-1.5 s against 0.09-0.11 s on
+// 6.12.40, on 4-vCPU KVM guests, every agent start, and for longer on a host
+// short of CPU. A program the verifier rejects is loaded again by
+// cilium/ebpf with a log (LogLevelBranch, in a buffer it grows until the log
+// fits), so a rejection's *ebpf.VerifierError still carries the verifier's
+// account of the failing path, which load() prints.
 func hookLoadOptions() *ebpf.CollectionOptions {
-	return &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{
-			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
-			LogSizeStart: 1 * 1024 * 1024,
-		},
-	}
+	return &ebpf.CollectionOptions{}
 }
 
 // hookSpec is the collection load() loads into the kernel: the compiled
@@ -295,7 +300,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
-	bpfopts := hookLoadOptions()
 
 	spec, err := hookSpec()
 	if err != nil {
@@ -305,19 +309,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Now load and assign into the kernel with the corrected spec.
 	//
-	// This is the one call in agent startup that can block forever without
-	// saying anything: BPF_PROG_LOAD is uninterruptible, so a wedged kernel
-	// leaves the agent with no log output at all and the container merely
-	// "not ready". watchStall makes that state describe itself.
-	// Scoped to this one call by a closure rather than a plain defer: the rest of
-	// load() attaches tracepoints and resolves cgroups, and a watchdog left
-	// running across that would blame BPF_PROG_LOAD for whatever else was slow.
-	// The defer inside the closure keeps it from leaking if LoadAndAssign panics.
-	err = func() error {
-		stopStallWatch := watchStall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", stallFirstReport, stallRepeatReport, stallErrorAfter)
-		defer stopStallWatch()
-		return spec.LoadAndAssign(&objs, bpfopts)
-	}()
+	// BPF_PROG_LOAD is uninterruptible while it waits in the kernel, so a load
+	// stuck there leaves the agent with no log output at all and the container
+	// merely "not ready". watchedCall makes that state describe itself, from
+	// the thread making the call. Scoped to this one call: the rest of load()
+	// attaches tracepoints and resolves cgroups, and a watchdog left running
+	// across that would blame BPF_PROG_LOAD for whatever else was slow.
+	err = watchedCall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", func() error {
+		return spec.LoadAndAssign(&objs, hookLoadOptions())
+	})
 	if err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
@@ -378,7 +378,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "" {
 		h.logger.Info("daemonset/targeting mode: skipping sys_enter_socket PID auto-registration (target_namespace_pids is owned/scoped externally)")
 	} else {
-		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+		// A perf-event attach locks the kernel's tracing event_mutex
+		// (perf_trace_init), which every other tracer's attach and detach on
+		// the host holds too: watched like the load.
+		var socket link.Link
+		err := watchedCall(h.logger, "perf_event_open (tracepoint syscalls/sys_enter_socket) via link.Tracepoint", func() error {
+			var err error
+			socket, err = link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+			return err
+		})
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 			return tracepointFailure(err, tracefsMounted())

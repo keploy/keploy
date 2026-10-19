@@ -170,19 +170,19 @@ var (
 // fexit programs; where those cannot load or attach (arm64 before 6.0 has no
 // BPF trampoline), it loads unixconn again without them and attaches its
 // syscall tracepoints instead, which every kernel has.
-func loadUnixConn(objs *bpfObjects) (*unixConn, error) {
+func loadUnixConn(logger *zap.Logger, objs *bpfObjects) (*unixConn, error) {
 	if unixFallbackOnly {
-		u, err := loadUnixConnWith(objs, true)
+		u, err := loadUnixConnWith(logger, objs, true)
 		if err == nil {
 			u.why = "the fallback was asked for"
 		}
 		return u, err
 	}
-	u, ferr := loadUnixConnWith(objs, false)
+	u, ferr := loadUnixConnWith(logger, objs, false)
 	if ferr == nil {
 		return u, nil
 	}
-	u, err := loadUnixConnWith(objs, true)
+	u, err := loadUnixConnWith(logger, objs, true)
 	if err != nil {
 		return nil, fmt.Errorf("%w (and the fallback to the syscall tracepoints: %v)", ferr, err)
 	}
@@ -190,7 +190,7 @@ func loadUnixConn(objs *bpfObjects) (*unixConn, error) {
 	return u, nil
 }
 
-func loadUnixConnWith(objs *bpfObjects, fallback bool) (*unixConn, error) {
+func loadUnixConnWith(logger *zap.Logger, objs *bpfObjects, fallback bool) (*unixConn, error) {
 	spec, err := loadUnixconn()
 	if err != nil {
 		return nil, fmt.Errorf("read the unixconn object: %w", err)
@@ -212,14 +212,27 @@ func loadUnixConnWith(objs *bpfObjects, fallback bool) (*unixConn, error) {
 			repl[name] = m
 		}
 	}
-	coll, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{MapReplacements: repl})
+	// The load, and each attach below, waits in the kernel as the hooks' do
+	// (watchedCall): a perf-event attach on the tracing event_mutex, a
+	// trampoline's on its own locks.
+	var coll *ebpf.Collection
+	err = watchedCall(logger, "bpf(BPF_PROG_LOAD) of unixconn via ebpf.NewCollectionWithOptions", func() error {
+		var err error
+		coll, err = ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{MapReplacements: repl})
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("load the unixconn object: %w", err)
 	}
 	u := &unixConn{coll: coll, lost: coll.Maps["unix_connect_events_lost"], known: map[uint64]bool{}, fallback: fallback, self: uint32(os.Getpid()), drain: newReportDrain()}
 	if fallback {
 		for name, tp := range unixFallbackPrograms {
-			l, err := link.Tracepoint("syscalls", tp, coll.Programs[name], nil)
+			var l link.Link
+			err := watchedCall(logger, "perf_event_open (tracepoint syscalls/"+tp+") via link.Tracepoint", func() error {
+				var err error
+				l, err = link.Tracepoint("syscalls", tp, coll.Programs[name], nil)
+				return err
+			})
 			if err != nil {
 				u.close()
 				return nil, fmt.Errorf("attach %s to syscalls:%s: %w", name, tp, err)
@@ -228,7 +241,12 @@ func loadUnixConnWith(objs *bpfObjects, fallback bool) (*unixConn, error) {
 		}
 	} else {
 		for _, name := range unixFexitPrograms {
-			l, err := link.AttachTracing(link.TracingOptions{Program: coll.Programs[name]})
+			var l link.Link
+			err := watchedCall(logger, "attach of fexit program "+name+" via link.AttachTracing", func() error {
+				var err error
+				l, err = link.AttachTracing(link.TracingOptions{Program: coll.Programs[name]})
+				return err
+			})
 			if err != nil {
 				u.close()
 				return nil, fmt.Errorf("attach %s (a kernel without BPF trampolines?): %w", name, err)
@@ -458,7 +476,7 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 		return
 	}
 	h.objectsMutex.RLock()
-	u, err := loadUnixConn(&h.objects)
+	u, err := loadUnixConn(h.logger, &h.objects)
 	h.objectsMutex.RUnlock()
 	if err != nil {
 		h.logger.Warn("keploy cannot see the application's calls over Unix sockets on this kernel: a call over one to a dependency is neither recorded nor mocked, so no test is judged from now on",
