@@ -29,7 +29,7 @@ func (m *mockService) requests() bool {
 	_, ok := m.instrumentation.(IncomingReader)
 	switch {
 	case !ok || m.testDB == nil:
-		m.logger.Warn("the app's incoming requests are not recorded: this build has no test-case store or incoming stream for them")
+		m.logger.Warn("the app's incoming requests are not recorded: this keploy build cannot store them")
 	default:
 		return true
 	}
@@ -56,7 +56,7 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
-				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
+				utils.LogError(m.logger, err, "could not save a recorded request", zap.String("request", tc.Name))
 				c.handled.Add(1)
 				continue
 			}

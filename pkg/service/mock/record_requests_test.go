@@ -123,7 +123,7 @@ func TestRecordRequestsTurnOffWhenTheyCannotBeRecorded(t *testing.T) {
 		tweak func(*config.Config)
 		warn  string
 	}{
-		{"no test-case store", nil, withRequests, "no test-case store"},
+		{"no test-case store", nil, withRequests, "this keploy build cannot store them"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)

@@ -466,7 +466,7 @@ func TestGateReport(t *testing.T) {
 
 	// A harness that scopes but sends no verdicts, and cannot skip.
 	note, ungated = gateReport(g, []models.ScopeWindow{w("TestA", ""), w("TestB", ""), w("TestC", ""), w("TestC", "")})
-	require.Contains(t, note, "2 test(s) outside the run list ran")
+	require.Contains(t, note, "2 tests outside the run list ran")
 	require.Equal(t, 2, ungated)
 }
 
@@ -492,7 +492,7 @@ func TestPushScopeGateToAnAgentThatCannot(t *testing.T) {
 	RegisterScopeGateSource(func(context.Context, ScopeGateRequest) ([]string, string) { return []string{"t"}, "r" })
 	t.Cleanup(func() { RegisterScopeGateSource(nil) })
 	m.pushScopeGate(context.Background(), "set", "")
-	require.Equal(t, 1, logs.FilterMessageSnippet("every test runs this replay").Len())
+	require.Equal(t, 1, logs.FilterMessageSnippet("--run-only was ignored, so all tests ran").Len())
 }
 
 // An --on-miss record run appends mocks to the set, naming each past the

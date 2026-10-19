@@ -206,7 +206,7 @@ grep -qx '    gateReason: not in --run-only' keploy/e2e/last-replay.yaml || { ec
 echo "== 2b''. a harness that cannot skip runs every test, and the replay says so =="
 sudo -E env PATH="$PATH" KEPLOY_E2E_NO_SKIP=1 "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --run-only test_users --disable-tele 2>&1 | tee ungated.log
 grep -q "3 passed" ungated.log || { echo "FAIL: a harness that cannot skip should have run all 3 tests"; FAIL=1; }
-grep -q "asked to run only some tests, and did not" ungated.log || { echo "FAIL: keploy did not say the run was not the subset asked for"; FAIL=1; }
+grep -q -- "--run-only was ignored, so all tests ran" ungated.log || { echo "FAIL: keploy did not say the run was not the subset asked for"; FAIL=1; }
 grep -qx '    ungated: 2' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not count the 2 tests that ran outside the run list"; FAIL=1; }
 grep -q '^    gateNote: ' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the gate did not hold"; FAIL=1; }
 
@@ -245,7 +245,7 @@ echo "== 2c. a replay that lets calls reach real services proves nothing =="
 # dependency, so whatever the tests say, the run did not prove isolation.
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss passthrough --disable-tele 2>&1 | tee passthrough.log
 grep -qx 'isolated: false' keploy/e2e/last-replay.yaml || { echo "FAIL: a passthrough replay claims isolation"; FAIL=1; }
-grep -q "did not prove the tests run with the dependencies off" passthrough.log || { echo "FAIL: the passthrough run did not say what it failed to prove"; FAIL=1; }
+grep -q -- "--on-miss passthrough lets a call the recording does not have reach the real dependency" passthrough.log || { echo "FAIL: the passthrough run did not say what it failed to prove"; FAIL=1; }
 # ...and the next proven replay puts the verdict back.
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
 grep -qx 'isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: a proven replay did not restore the verdict"; FAIL=1; }
@@ -264,7 +264,7 @@ echo "nothing-served replay exit=$RC"
 check_receipt_exit "$RC"
 grep -qx 'failedBy: nothing-verified' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the run verified nothing"; FAIL=1; }
 grep -qx 'consumed: 0' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not record zero consumed"; FAIL=1; }
-grep -q "verified nothing" nothing.log || { echo "FAIL: keploy did not say the run verified nothing"; FAIL=1; }
+grep -q "none of the 3 recorded calls was used by this run, so nothing was checked against the recording" nothing.log || { echo "FAIL: keploy did not say the run verified nothing"; FAIL=1; }
 # A genuine proof (passed, no miss) must still exit 0: 'nothing verified' must
 # not fire when a recorded call WAS served, or it would fail every real pass.
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
@@ -292,7 +292,7 @@ rm -f coverage.xml
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "$COV_CMD" --name e2e --min-coverage 50 --disable-tele 2>&1 | tee cov-pass.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] || { echo "FAIL: replay above the coverage floor should pass, got $RC"; FAIL=1; }
-grep -q "offline coverage" cov-pass.log || { echo "FAIL: keploy did not report offline coverage"; FAIL=1; }
+grep -q "coverage with every outgoing call answered from the recording: " cov-pass.log || { echo "FAIL: keploy did not report offline coverage"; FAIL=1; }
 # The receipt must carry the runner's own numbers, not keploy's guess.
 WANT_COV=$(python3 -c "import xml.etree.ElementTree as E; r=E.parse('coverage.xml').getroot(); print(r.get('lines-covered'), r.get('lines-valid'))")
 GOT_COV=$(python3 - <<'PY'
@@ -330,7 +330,7 @@ RC=${PIPESTATUS[0]}
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "$OUT_CMD" --name e2e --coverage-report reports/offline.xml --min-coverage 50 --disable-tele 2>&1 | tee cov-named.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] || { echo "FAIL: --coverage-report did not find the report it was given, got $RC"; FAIL=1; }
-grep -q "offline coverage" cov-named.log || { echo "FAIL: the named report was not reported as offline coverage"; FAIL=1; }
+grep -q "coverage with every outgoing call answered from the recording: .*report: reports/offline.xml" cov-named.log || { echo "FAIL: the named report was not reported as offline coverage"; FAIL=1; }
 rm -f .coveragerc
 
 # No report is not a pass: a floor that cannot measure must not let the run through.
@@ -371,9 +371,9 @@ PY
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_self.py" --name e2e --disable-tele 2>&1 | tee self.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] && grep -q "4 passed" self.log || { echo "FAIL: the suite with self-calls should pass (exit 0, 4 passed), got $RC"; FAIL=1; }
-SAID=$(grep -c "INFO.*self-call passed through to the run's own listener" self.log)
+SAID=$(grep -c "keploy: self-call passed through to the run's own listener" self.log)
 [ "$SAID" -eq 1 ] || { echo "FAIL: 5 self-calls were said at INFO $SAID times, want once"; FAIL=1; }
-grep -qE "self-calls passed through to the run's own listeners.*\"calls\": 5" self.log ||
+grep -q "keploy: 5 self-calls passed through to the run's own listeners" self.log ||
   { echo "FAIL: the run's 5 self-calls were not counted when it ended"; FAIL=1; }
 
 fi

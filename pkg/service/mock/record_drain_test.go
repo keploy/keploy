@@ -1075,7 +1075,7 @@ func TestDrainTrailingMocks_AComposeAgentsClosedStreamIsUnconfirmed(t *testing.T
 		if unconfirmed != !holds || (!holds && lost) {
 			t.Fatalf("agent holds %v, its stream closed: lost %v, unconfirmed %v", holds, lost, unconfirmed)
 		}
-		if n := logs.FilterMessage(composeTailUnconfirmed).Len(); n != 0 {
+		if n := logs.FilterMessageSnippet(composeTailUnconfirmed).Len(); n != 0 {
 			t.Fatalf("the drain said the tail is unconfirmed %d time(s) before its caller saved anything", n)
 		}
 	}
@@ -1126,7 +1126,7 @@ func TestAComposeRecordingSavedUnconfirmedIsSaid(t *testing.T) {
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = 0 })
 			_ = New(zap.New(core), inst, stubMockDB{}, nil, nil, nil, cfg).Record(context.Background())
-			warned := logs.FilterMessage(composeTailUnconfirmed).All()
+			warned := logs.FilterMessage(composeTailUnconfirmed + " (set e2e)").All()
 			if said := len(warned) == 1; said != tc.said {
 				t.Fatalf("said the saved recording cannot be confirmed whole: %v, want %v (%v)", said, tc.said, logs.All())
 			}

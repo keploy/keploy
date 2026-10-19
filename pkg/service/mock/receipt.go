@@ -520,7 +520,7 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 		if _, err := os.Lstat(path); err == nil {
 			logger.Warn("the last replay receipt on disk is older than this run and no longer describes it",
 				zap.String("path", path),
-				zap.String("next_step", "delete it, or make its directory writable so keploy can keep it current"))
+				zap.String("next_step", "delete it (rm "+utils.QuoteArgs([]string{path})+"), or make its directory writable so keploy can keep it current"))
 		}
 	}
 	if err := writeLocalFile(logger, dir, ReceiptFile, receiptTempPrefix, append(head, body...)); err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -396,5 +397,36 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 	got, err := getGitHubRelease(context.Background(), zap.NewNop(), srv.URL)
 	if err != nil || got.TagName != "v3.6.200" || len(got.Assets) != 1 || got.Assets[0].Digest != "sha256:ab" {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
+	}
+}
+
+func TestQuoteArgsKeepsACommandOnOneLine(t *testing.T) {
+	for in, want := range map[string]string{
+		"go test ./...":   "'go test ./...'",
+		"a^b":             "'a^b'",
+		"go test\n-run A": `$'go test\n-run A'`,
+		"it's\r\v":        `$'it\'s\r\013'`,
+		"x\u2028y":        `$'x\342\200\250y'`,
+		"=x":              "'=x'",
+		"a\xffb":          `$'a\377b'`,
+		"plain":           "plain",
+	} {
+		if got := QuoteArgs([]string{in}); got != want {
+			t.Errorf("QuoteArgs(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestQuoteArgsRoundTripsInTheShells(t *testing.T) {
+	for _, sh := range []string{"bash", "zsh"} {
+		if _, err := exec.LookPath(sh); err != nil {
+			continue
+		}
+		for _, in := range []string{"go test\n-run A", "it's\r\v", "x\u2028y", "a\xffb", "=x", "plain", "a'b\\c"} {
+			out, err := exec.Command(sh, "-c", "printf %s "+QuoteArgs([]string{in})).Output()
+			if err != nil || string(out) != in {
+				t.Errorf("%s: %q came back as %q (%v)", sh, in, out, err)
+			}
+		}
 	}
 }

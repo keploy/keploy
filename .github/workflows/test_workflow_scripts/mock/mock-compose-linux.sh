@@ -283,7 +283,7 @@ echo "recorded /price/ mocks: $MOCKS"
 # Compose stops the agent with the project, and it closes its mock stream
 # without a word that it handed over every mock: the recording is saved, and
 # keploy says it cannot confirm it whole, naming the set.
-grep "keploy cannot confirm this recording holds them all" rec.log | grep -q '"mock-set": "e2e"' ||
+grep -qF "keploy cannot confirm this recording holds them all (set e2e)" rec.log ||
   { echo "FAIL: a compose recording whose agent closed its stream unconfirmed was saved without saying so"; FAIL=1; }
 cleanup
 
@@ -312,9 +312,10 @@ assert_agent_guarded rep.log
 # before keploy can ask it what it served. It leaves that account as it is
 # stopped, and keploy reads it out of the stopped container: the outcome must be
 # known, and this run -- every answer from the recording -- must be PROVEN.
-grep -q 'mock replay summary.*"missed": 0' rep.log || { echo "FAIL: the replay's outcome was not read back from the stopped agent (consumed/missed unknown)"; FAIL=1; }
-grep -q 'mock replay summary.*"consumed": [1-9]' rep.log || { echo "FAIL: the replay served every answer from the recording, and its outcome says it served none"; FAIL=1; }
-grep -q "incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
+grep -q 'outgoing calls: [0-9]* recorded, [0-9]* answered from the recording, 0 not in the recording' rep.log || { echo "FAIL: the replay's outcome was not read back from the stopped agent (consumed/missed unknown)"; FAIL=1; }
+grep -q 'outgoing calls: [0-9]* recorded, [1-9][0-9]* answered from the recording' rep.log || { echo "FAIL: the replay served every answer from the recording, and its outcome says it served none"; FAIL=1; }
+# The summary's own word: an agent that exits early says "incomplete" too.
+grep -q "mock replay summary (incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
 sudo grep -q '^isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not prove the run isolated:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 # The test's verdict and window reached the CLI from the stopped agent.
 sudo grep -A1 -x '    - name: compose_test' keploy/e2e/last-replay-tests.yaml | grep -qx '      outcome: passed' || { echo "FAIL: the replay does not know the scoped test passed under compose:"; sudo cat keploy/e2e/last-replay-tests.yaml; FAIL=1; }
@@ -337,7 +338,7 @@ RC=${PIPESTATUS[0]}
 echo "strict replay with an unrecorded call exit=$RC"
 grep -q "RUNNER PASSED 3" miss.log || { echo "FAIL: the runner did not complete"; FAIL=1; }
 [ "$RC" -eq 1 ] || { echo "FAIL: --strict must fail a replay that missed a call (exit 1), got $RC"; FAIL=1; }
-grep -q 'mock replay summary.*"missed": 1' miss.log || { echo "FAIL: the missed call was not read back from the stopped agent"; FAIL=1; }
+grep -q 'outgoing calls: [0-9]* recorded, [0-9]* answered from the recording, 1 not in the recording' miss.log || { echo "FAIL: the missed call was not read back from the stopped agent"; FAIL=1; }
 sudo grep -q '^failedBy: strict' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not blame --strict:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 cleanup
 
@@ -385,7 +386,7 @@ sudo grep -q '^runnerExitCode: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: 
 # Killed, the agent left no account of what it served: what it served and
 # missed is unknown, and must read so. Read as 0 and 0, it proves a run nobody
 # saw -- --strict passes it, and it is metered as zero.
-grep -q 'mock replay summary.*"missed": "unknown"' agentdies.log || { echo "FAIL: the replay summary gives a killed agent's outcome as known"; FAIL=1; }
+grep -q 'mock replay summary (incomplete' agentdies.log && ! grep -q 'outgoing calls: ' agentdies.log || { echo "FAIL: the replay summary gives a killed agent's outcome as known"; FAIL=1; }
 sudo grep -q '^missed: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives a killed agent's misses as known:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 
 cleanup
