@@ -41,7 +41,7 @@ func (r *Replayer) noteQuarantined(testSetID, testCaseID, reason string) {
 		r.quarantined = make(map[[2]string]string)
 	}
 	r.quarantined[key] = reason
-	r.logger.Debug("skipping a quarantined test ("+provenswitch.Env+"=1)",
+	r.logger.Debug("skipping a quarantined test",
 		zap.String("testcase", testCaseID),
 		zap.String("testset", testSetID),
 		zap.String("reason", reason))
@@ -78,7 +78,7 @@ func (r *Replayer) quarantinedSummary() string {
 		return keys[i][1] < keys[j][1]
 	})
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n\n\tQuarantined tests, skipped by keploy (%s=1): %d\n", provenswitch.Env, len(keys))
+	fmt.Fprintf(&b, "\n\n\tQuarantined tests, skipped by keploy: %d\n", len(keys))
 	for _, k := range keys {
 		fmt.Fprintf(&b, "\t\t%s/%s: %s\n", k[0], k[1], models.SkipReasonOneLine(reasons[k]))
 	}

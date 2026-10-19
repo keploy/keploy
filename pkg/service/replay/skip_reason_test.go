@@ -164,6 +164,11 @@ func TestRunTestSet_AQuarantinedTestIsSaidAndSummarised(t *testing.T) {
 			if want := "test-set-0/test-2: flaky/replay_only: failed the replay after record with no keploy evidence\n"; !strings.Contains(summary, want) || !strings.Contains(summary, ": 1\n") {
 				t.Fatalf("summary %q; want it to list test-2 on one line", summary)
 			}
+			// The proven model is keploy's default on Linux: a user who set
+			// nothing must not be told the skip came from a variable (P012).
+			if strings.Contains(summary, provenswitch.Env) || strings.Contains(said[0].Message, provenswitch.Env) {
+				t.Fatalf("the skip names %s: summary %q, line %q", provenswitch.Env, summary, said[0].Message)
+			}
 		})
 	}
 }
