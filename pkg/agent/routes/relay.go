@@ -63,12 +63,18 @@ func (a *Agent) HandleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forwardPath := extractRelayForwardPath(r.URL.Path, portStr)
+	// Use RawPath when available to preserve URL-encoded characters.
+	sourcePath := r.URL.RawPath
+	if sourcePath == "" {
+		sourcePath = r.URL.Path
+	}
+	forwardPath := extractRelayForwardPath(sourcePath, portStr)
 
 	target := &url.URL{
 		Scheme:   "http",
 		Host:     net.JoinHostPort(podIP, portStr),
 		Path:     forwardPath,
+		RawPath:  forwardPath,
 		RawQuery: r.URL.RawQuery,
 	}
 

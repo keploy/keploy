@@ -4620,7 +4620,14 @@ func rewriteForRelay(testURL, relayBaseURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse relay base URL %q: %w", relayBaseURL, err)
 	}
-	relay.Path = strings.TrimRight(relay.Path, "/") + "/" + port + u.Path
+	// Use RawPath when available to preserve URL-encoded characters (e.g.
+	// %2F in path segments). Fall back to the decoded Path otherwise.
+	originalPath := u.RawPath
+	if originalPath == "" {
+		originalPath = u.Path
+	}
+	relay.Path = strings.TrimRight(relay.Path, "/") + "/" + port + originalPath
+	relay.RawPath = relay.Path // keep encoding intact
 	relay.RawQuery = u.RawQuery
 	return relay.String(), nil
 }
