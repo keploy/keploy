@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 // keploy's stop of a compose app whose processes it reads waits for the
@@ -36,10 +38,17 @@ func TestTheComposeAppsStopWaitsForTheContainersStopEvents(t *testing.T) {
 			d.stop()
 			d.mu.Unlock()
 		}()
-		killed, err := composeApp(d).StopComposeApp(context.Background())
+		a := composeApp(d)
+		// The run's teardown: the container's steps out move it.
+		scope := &utils.TeardownScope{}
+		a.teardown.Store(scope)
+		killed, err := a.StopComposeApp(context.Background())
 		_, signals, _ := d.state()
 		if err != nil || killed != "" || strings.Join(signals, ",") != "SIGINT" {
 			t.Fatalf("said %q (err %v) after %v; want a container making progress waited for", killed, err, signals)
+		}
+		if scope.Moves() == 0 {
+			t.Fatal("the container's steps out moved the run's teardown not once")
 		}
 	})
 	t.Run("no progress", func(t *testing.T) {

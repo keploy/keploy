@@ -5,6 +5,7 @@ package utils
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -57,9 +58,18 @@ trap 'for fd in 3 4 5 6 7 8; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' INT
 		t.Run(tc.name, func(t *testing.T) {
 			shortStall(t, tc.stall)
 			pid, reaped := readyLeader(t, t.TempDir(), tc.command)
-			killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT)
+			scope := &TeardownScope{}
+			killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, scope)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// Its steps out move the run's teardown, which the run's drains
+			// wait on; one that ignores the interrupt takes none.
+			if tc.name == "a shutdown that keeps making progress past the stall bound" && scope.Moves() == 0 {
+				t.Fatal("a shutdown that kept making progress moved the run's teardown not once")
+			}
+			if tc.killed && scope.Moves() != 0 {
+				t.Fatalf("an app that ignored the interrupt moved the run's teardown %d times", scope.Moves())
 			}
 			if (killed != "") != tc.killed {
 				t.Fatalf("the stop said %q; want a kill %v", killed, tc.killed)
@@ -162,7 +172,7 @@ func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
 		t.Fatal("cannot read the process")
 	}
 	never := make(chan struct{})
-	if end := WaitExitByEvents(zap.NewNop(), never, []Reached{p}); end != StopExited {
+	if end := WaitExitByEvents(zap.NewNop(), never, []Reached{p}, nil); end != StopExited {
 		t.Fatalf("its processes gone: the wait ended %v, want StopExited", end)
 	}
 	awaitReaped(t, "the process", reaped)
@@ -177,7 +187,7 @@ func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
 		}
 	}()
 	pid, reaped := readyLeader(t, t.TempDir(), `trap "" INT; touch ready; exec sleep 600`)
-	killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT)
+	killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,4 +214,58 @@ func TestAProcessIsNamedByItsStart(t *testing.T) {
 	if _, ok := ProcOf(0); ok {
 		t.Fatal("pid 0 read as a process")
 	}
+}
+
+// Each step an app's processes take on their way out (a file closed, a
+// thread or a process gone) moves the run's teardown scope, which the run's
+// drains wait on; a process that only stays is no movement.
+func TestAStopsStepsOutMoveTheRunsTeardown(t *testing.T) {
+	shortStall(t, time.Hour)
+	dir := t.TempDir()
+	// It closes one of its files at each step file the test makes, and
+	// exits at "go".
+	cmd, reaped := startGroupLeader(t, "sh", "-c", `cd `+dir+` && exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null
+: > ready
+for fd in 3 4 5 6 7; do while [ ! -e step$fd ]; do sleep 0.01; done; eval "exec $fd<&-"; done
+while [ ! -e go ]; do sleep 0.01; done`)
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the app did not start")
+		}
+	}
+	p, ok := ProcOf(cmd.Process.Pid)
+	if !ok {
+		t.Fatal("cannot read the process")
+	}
+	scope := &TeardownScope{}
+	ended := make(chan StopEnd, 1)
+	go func() { ended <- WaitExitByEvents(zap.NewNop(), make(chan struct{}), []Reached{p}, scope) }()
+	// The steps, until the stop has seen one: the first may come before it
+	// took its first look.
+	for fd, deadline := 3, time.Now().Add(time.Minute); scope.Moves() == 0; fd++ {
+		if fd <= 7 {
+			if err := os.WriteFile(filepath.Join(dir, "step"+strconv.Itoa(fd)), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if time.Now().After(deadline) { // only turns a hang into a failure
+			t.Fatal("the app's steps out did not move the run's teardown")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case end := <-ended:
+		if end != StopExited {
+			t.Fatalf("the wait ended %v, want StopExited", end)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("the wait did not end with the app's exit")
+	}
+	awaitReaped(t, "the app", reaped)
 }

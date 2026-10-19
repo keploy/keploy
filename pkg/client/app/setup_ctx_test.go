@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -104,5 +105,17 @@ func TestSetupHooksEndWhenTheRunIsCancelled(t *testing.T) {
 				t.Fatalf("setup returned %v, want the run's cancellation", err)
 			}
 		})
+	}
+}
+
+// An app keeps the teardown scope of the run that set it up, for its stops
+// to move (the compose down, the app's stop): Setup takes it from its
+// context first, before anything that may end the setup.
+func TestAnAppTakesTheTeardownScopeOfTheRunThatSetItUp(t *testing.T) {
+	a := NewApp(zap.NewNop(), "docker run -d nginx", nil, models.SetupOptions{CommandType: string(utils.DockerRun)})
+	ctx, scope := utils.NewTeardownScope(context.Background())
+	_ = a.Setup(ctx) // refused: a detached docker run
+	if a.teardown.Load() != scope {
+		t.Fatal("the app does not move the teardown of the run that set it up")
 	}
 }

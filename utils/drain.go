@@ -94,6 +94,13 @@ func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, b
 	return drainErrGroupProgress(nil, logger, name, g, bound, progress)
 }
 
+// DrainErrGroupProgressOn is DrainErrGroupProgress on clk (nil: the
+// process's own runnable clock), for a test that drives the time a drain's
+// stall is measured in.
+func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
+	return drainErrGroupProgress(clk, logger, name, g, bound, progress)
+}
+
 // drainErrGroupProgress is DrainErrGroupProgress on clk (nil: the process's
 // own runnable clock).
 func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {

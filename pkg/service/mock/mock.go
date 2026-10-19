@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	stallclock "go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -21,6 +22,10 @@ import (
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
 	ids *ids.Map
+	// drainClock is the clock the run's end measures its drain's stall on
+	// (teardownDrain): nil, keploy's own runnable time; a test drives its
+	// own.
+	drainClock stallclock.Clock
 	// servedAnnounced remembers which mocks have already been reported as
 	// served, so the poll loop and the end-of-run flush cannot announce the
 	// same mock twice. Guarded because the two run on different goroutines.

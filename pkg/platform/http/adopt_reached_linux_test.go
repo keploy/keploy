@@ -305,3 +305,55 @@ while :; do sleep 1; done
 		t.Fatalf("the run said %q; want the kill of a daemon that was on its way out said", appErr.StopKilled)
 	}
 }
+
+// The stop at a set's end of the daemons an application left moves the
+// teardown of the run that ran it (AgentClient.Run hands stopAdopted its
+// context's scope) at each step they take on their way out: that run's
+// drains wait on them. The app itself ends at its interrupt, at once.
+func TestTheDaemonsStepsOutMoveTheTeardownOfTheRunThatRanTheApp(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 100
+	dir := t.TempDir()
+	daemon := filepath.Join(dir, "daemon.sh")
+	if err := os.WriteFile(daemon, []byte(`exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null
+trap 'for fd in 3 4 5 6 7; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' TERM
+echo $$ > "$1"
+while :; do sleep 0.05; done
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(dir, "daemon.pid")
+	client := newRunClient(fmt.Sprintf("(setsid sh %s %s &); exec sleep 600", daemon, pidFile))
+	runCtx, scope := utils.NewTeardownScope(context.Background())
+	ctx, cancel := context.WithCancelCause(runCtx)
+	defer cancel(nil)
+	done := make(chan models.AppError, 1)
+	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
+	var pid int
+	await(t, "the daemon started", func() bool {
+		b, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+		return err == nil && pid > 0
+	})
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	await(t, "the daemon adopted", func() bool { return parentIs(pid, os.Getpid()) })
+	cancel(models.ErrAppStoppedForSetEnd)
+	if appErr := <-done; appErr.StopKilled != "" {
+		t.Fatalf("the stop killed: %q", appErr.StopKilled)
+	}
+	// Five files closed on its way out, each a step its stop looks at.
+	if n := scope.Moves(); n < 4 {
+		t.Fatalf("the daemon's steps out moved the teardown of the run that ran the app %d times, want 4 or more", n)
+	}
+}

@@ -136,7 +136,11 @@ type AgentClient struct {
 // (startAgent): the stop of an earlier start, which a setup retry waits for,
 // reads its own.
 type agentRun struct {
-	ready    atomic.Bool
+	ready atomic.Bool
+	// scope is the teardown scope of the run that started the agent
+	// (utils.TeardownScopeOf of the start's context): its stop's reports
+	// that move tick it (stopWatch.moved). Set before the run is shared.
+	scope    *utils.TeardownScope
 	gone     chan struct{} // closed once the agent process (or its container's client) has exited
 	goneOnce sync.Once
 	// letGo is closed once its stop killed it at once at the user's Ctrl+C,
@@ -1779,7 +1783,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		// stopping, and is not asked again when it acts on the interrupt.
 		// When the stop at a set's end had to kill one that made no
 		// progress on its way out, the run says so, as for the app.
-		if why := stopAdopted(a.logger, app.TakeStopReached()); why != "" && stopKilled == "" {
+		if why := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx)); why != "" && stopKilled == "" {
 			switch {
 			case errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd):
 				stopKilled = "keploy interrupted the application at the set's end, and " + why
@@ -2407,7 +2411,7 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	// one before may be a copy of the stop itself (stopWatch).
 	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
 		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach,
-		settled: sudoAgentSettled(pid)}
+		settled: sudoAgentSettled(pid), moved: run.scope}
 
 	err := ask()
 	switch {
@@ -2464,6 +2468,7 @@ func (a *AgentClient) beginRun(ctx context.Context) (context.Context, context.Ca
 	}
 	agentCtx, cancel := context.WithCancel(ctx)
 	run := newAgentRun()
+	run.scope = utils.TeardownScopeOf(ctx)
 	a.mu.Lock()
 	a.agentCancel = cancel
 	a.run = run
@@ -3410,7 +3415,7 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 // (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
 	logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
-	if stopAgentContainer(logger, name, !run.ready.Load()) {
+	if stopAgentContainer(logger, name, !run.ready.Load(), run.scope) {
 		run.stoppedAtOnce()
 	}
 }
@@ -3509,7 +3514,7 @@ var dockerStopPoll = time.Second
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent
 // reports its teardown (resendSIGTERM).
-func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (killedAtOnce bool) {
+func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
 	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
@@ -3517,7 +3522,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		return
 	}
-	return awaitAgentContainer(logger, cli, name, unanswered)
+	return awaitAgentContainer(logger, cli, name, unanswered, moved)
 }
 
 // awaitAgentContainer waits for an agent's container that has been told to
@@ -3526,7 +3531,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 // stopped making any, or has detached everything and not exited, or at the
 // user's Ctrl+C, as stopAgentContainer says. It returns once the container
 // has exited, or once it killed it at once (killedAtOnce).
-func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool) (killedAtOnce bool) {
+func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	// kill(false) sends the agent the escalation signal, on which it dies
 	// once no teardown work in progress is making progress
 	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
@@ -3569,7 +3574,7 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
 	// one before may be a copy of the stop itself (stopWatch).
 	killedAtOnce = stopWatch{logger: logger, gone: gone, read: readContainerProgress(cli, name),
-		kill: kill, poll: dockerStopPoll, reported: reported}.run()
+		kill: kill, poll: dockerStopPoll, reported: reported, moved: moved}.run()
 	stopWaiting()
 	<-gone
 	<-resent
@@ -3604,7 +3609,10 @@ func (a *AgentClient) EndComposeAgent(release bool) {
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
 	}
-	awaitAgentContainer(logger, cli, name, false)
+	// No teardown scope: a compose agent is compose's (this client began no
+	// run of it, beginRun), and this wait runs before the stop's drains begin
+	// (drainComposeAgent), so none of them could wait on its movements.
+	awaitAgentContainer(logger, cli, name, false, nil)
 }
 
 // sigtermResendFirst is how long stopAgentContainer's resendSIGTERM waits

@@ -35,6 +35,9 @@ import (
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
+	// The replay's own teardown scope: what keploy sees its stops do moves
+	// it, and the drain below waits while it moves (teardownDrain).
+	ctx, teardown := utils.NewTeardownScope(ctx)
 	m.ids = nil
 	name := m.setName()
 	requests := m.requests()
@@ -183,7 +186,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.notifyShutdown()
 		// Cancel so agent-monitor / app-runner goroutines unwind before drain.
 		cancel()
-		if err := utils.DrainErrGroup(m.logger, "mock-replay", errGrp, 30*time.Second); err != nil {
+		if err := m.teardownDrain("mock-replay", errGrp, teardown); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-replay goroutines")
 		}
 	}()
