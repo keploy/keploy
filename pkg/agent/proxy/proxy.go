@@ -3357,6 +3357,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// ports); same-port-different-host disambiguation only engages where
 		// sniHost is present.
 		hsCtx := ctx
+		// A client that dialled an IP literal sends no SNI; hand the MITM the
+		// destination IP so its leaf carries the IP SAN the client checks. A
+		// CONNECT target is a host name, which reaches the MITM through
+		// SrcPortToDstURL instead.
+		if host, _, splitErr := net.SplitHostPort(dstAddr); splitErr == nil {
+			hsCtx = pTls.WithDstIP(hsCtx, net.ParseIP(host))
+		}
 		if rule.Mode == models.MODE_TEST {
 			sniHost := ""
 			if v, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
@@ -3369,7 +3376,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
 			}
 			if preferH2 {
-				hsCtx = pTls.WithPreferH2(ctx)
+				// On hsCtx, not ctx: the destination IP set above must
+				// survive the hint.
+				hsCtx = pTls.WithPreferH2(hsCtx)
 				p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
 					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
 			}

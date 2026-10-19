@@ -3330,6 +3330,49 @@ func composeEndAfterReady(stopped app.StoppedAgent, appExit int) error {
 	return nil
 }
 
+// appContainerExit is the app's container no longer running, as docker
+// reports it.
+type appContainerExit struct {
+	container string
+	status    string
+	code      int
+	oomKilled bool
+	// restarting says its restart policy is starting it again.
+	restarting bool
+}
+
+func (e *appContainerExit) Error() string {
+	var msg string
+	switch {
+	case e.restarting:
+		msg = fmt.Sprintf("the application container %s exited with code %d and is restarting", e.container, e.code)
+	case e.status == "dead":
+		msg = fmt.Sprintf("the application container %s is dead (exit code %d)", e.container, e.code)
+	default:
+		msg = fmt.Sprintf("the application container %s exited with code %d", e.container, e.code)
+	}
+	if e.oomKilled {
+		msg += ", killed for running out of memory"
+	}
+	return msg
+}
+
+// AppContainerExit implements replay.AppContainerExitReader: the app's
+// container no longer running -- exited, dead, or restarting after an exit --
+// as an error naming it and how it ended, and nil while it runs or when keploy
+// cannot tell.
+func (a *AgentClient) AppContainerExit(ctx context.Context) error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	name, state, exited := ap.ExitedState(ctx)
+	if !exited {
+		return nil
+	}
+	return &appContainerExit{container: name, status: state.Status, code: state.ExitCode, oomKilled: state.OOMKilled, restarting: state.Restarting}
+}
+
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
 // retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
 // not hit a "container name already in use" conflict from the dependency

@@ -150,7 +150,7 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 
 		trimmedLine := strings.TrimSpace(line)
 
-		if trimmedLine == "---" {
+		if isDocumentMarker(line) {
 			if buffer.Len() == 0 {
 				continue
 			}
@@ -170,6 +170,15 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 			return nil, io.EOF
 		}
 	}
+}
+
+// isDocumentMarker reports whether line (with its line break, if it has one)
+// is a YAML document marker: "---" at column 0, followed only by spaces, tabs
+// or the line break, as the mock writers emit it. An indented "---" is part of
+// the document — a line of a block scalar, e.g. a response body that is itself
+// a multi-document YAML file — and must not end the mock.
+func isDocumentMarker(line string) bool {
+	return strings.TrimRight(line, " \t\r\n") == "---"
 }
 
 // Format returns the format the reader is decoding. Callers can use this to

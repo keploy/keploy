@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -72,6 +74,10 @@ type rearmInstr struct {
 	// onOutgoing runs inside MockOutgoing, so a test can observe state as it was
 	// at that moment rather than after the repair finished.
 	onOutgoing func()
+
+	// outgoingErr, when set, is what MockOutgoing answers: an agent that is
+	// gone refuses the repair's first call.
+	outgoingErr error
 
 	// outgoingOpts is what the last MockOutgoing was sent.
 	outgoingOpts models.OutgoingOptions
@@ -138,7 +144,7 @@ func (f *rearmInstr) mockOutgoing() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.mockOutgoingCalls++
-	return nil
+	return f.outgoingErr
 }
 
 func (f *rearmInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
@@ -640,6 +646,140 @@ func TestRepairLatchesBeforeItResetsTheAgentsMockManager(t *testing.T) {
 		t.Fatal("MockOutgoing ran before the latch was armed; that call resets the agent's mock manager " +
 			"and clears its consumption history, so on a false-positive repair a live agent would lose " +
 			"real history with nothing sending the CLI's map in its place")
+	}
+}
+
+// appExitInstr is rearmInstr behind an instrumentation that can tell whether
+// the application's container still runs (AppContainerExitReader), as the
+// docker compose agent client can.
+type appExitInstr struct {
+	*rearmInstr
+
+	// exit is what AppContainerExit reports: nil while the app runs.
+	exit error
+	// logs is what GetRecentAppLogs reports: the app's last lines.
+	logs string
+
+	exitCalls int
+}
+
+func (f *appExitInstr) AppContainerExit(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.exitCalls++
+	return f.exit
+}
+
+func (f *appExitInstr) GetRecentAppLogs(context.Context) string { return f.logs }
+
+func (f *appExitInstr) appExitCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.exitCalls
+}
+
+// newAppExitReplayer is newRearmReplayer over f, logging to an observer.
+func newAppExitReplayer(f *appExitInstr) (*Replayer, *observer.ObservedLogs) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	return &Replayer{logger: zap.New(core), config: &config.Config{}, instrument: true, instrumentation: f, hookImpl: &rearmHooks{}}, logs
+}
+
+// Under docker compose the agent is a service in the app's project, and
+// compose stops it the moment the app's container exits. An agent that went
+// with the app is not a replaced one: reporting "replaced" there sent the
+// reader after the agent, when the app had died at boot (dsmon F23). The
+// failure must name the app's exit and carry its last log lines -- and the
+// run must do exactly what it did before: the re-registration is still tried.
+func TestEnsureAgentHoldsStoredMocks_ReportsTheAppsExitWhenTheAgentWentWithIt(t *testing.T) {
+	exit := errors.New("the application container k8s-proxy exited with code 1")
+	f := &appExitInstr{
+		rearmInstr: &rearmInstr{statsErrCalls: 2, outgoingErr: errors.New("dial tcp [::1]:61885: connect: connection refused")},
+		exit:       exit,
+		logs:       "FATAL shared token: no Kubernetes client",
+	}
+	r, logs := newAppExitReplayer(f)
+	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+
+	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil)
+	if err == nil {
+		t.Fatal("an agent that went with the app must still fail the test set")
+	}
+	if !errors.Is(err, exit) || !strings.Contains(err.Error(), "exited with code 1") {
+		t.Fatalf("the failure must name the app's exit and its code, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("the app exited; the failure must not say the agent was replaced, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("the agent's own error must still be carried, got: %v", err)
+	}
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "replaced") {
+			t.Fatalf("logged %q although the app's container had exited", e.Message)
+		}
+	}
+	var sawLogs bool
+	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+		if e.ContextMap()["appLogs"] == f.logs {
+			sawLogs = true
+		}
+	}
+	if !sawLogs {
+		t.Fatal("the app's last log lines were not logged with its exit")
+	}
+
+	// Diagnosis only: the repair is still attempted, and armed, as before.
+	if _, outgoing, _, _, _ := f.counts(); outgoing != 1 {
+		t.Fatalf("the re-registration must still be attempted, got MockOutgoing=%d", outgoing)
+	}
+	if !r.agentHistoryIncompleteForRun.Load() {
+		t.Fatal("the consumption-history latch must still be armed, as before")
+	}
+}
+
+// The app still runs and the agent is gone: that is the replaced agent the
+// guard exists for, and its failure stays as it was.
+func TestEnsureAgentHoldsStoredMocks_KeepsReplacedWhenTheAppStillRuns(t *testing.T) {
+	f := &appExitInstr{
+		rearmInstr: &rearmInstr{statsErrCalls: 2, outgoingErr: errors.New("dial tcp [::1]:61885: connect: connection refused")},
+	}
+	r, _ := newAppExitReplayer(f)
+	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+
+	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil)
+	if err == nil {
+		t.Fatal("a gone agent must fail the test set")
+	}
+	if !strings.Contains(err.Error(), "keploy-agent was replaced during the docker compose bring-up") || !strings.Contains(err.Error(), "MockOutgoing") {
+		t.Fatalf("with the app running the failure must stay the replaced-agent one, got: %v", err)
+	}
+	if f.appExitCalls() == 0 {
+		t.Fatal("the app's container was never looked at before the agent was called replaced")
+	}
+}
+
+// An agent that holds the corpus, or one that answered and took the
+// re-registration, never needs the app's container looked at.
+func TestEnsureAgentHoldsStoredMocks_LooksAtTheAppOnlyWhenTheAgentFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    *rearmInstr
+	}{
+		{"healthy agent", &rearmInstr{loaded: 2, storeTakesEffect: true}},
+		{"replaced agent re-registered", &rearmInstr{storeTakesEffect: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &appExitInstr{rearmInstr: tc.f, exit: errors.New("the application container app exited with code 1")}
+			r, _ := newAppExitReplayer(f)
+			filtered, unfiltered, consumed, cases := rearmSessionArgs()
+
+			if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+				t.Fatalf("got: %v", err)
+			}
+			if n := f.appExitCalls(); n != 0 {
+				t.Fatalf("the app's container was inspected %d times with nothing failing", n)
+			}
+		})
 	}
 }
 

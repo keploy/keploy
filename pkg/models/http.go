@@ -79,6 +79,15 @@ type FormData struct {
 	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
 	Paths     []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
 	FileNames []string `json:"file_names,omitempty" bson:"file_names,omitempty" yaml:"-"`
+	// FileContents carries a file part's bytes, index-aligned with FileNames
+	// and Paths, for a test case persisted by another process than the one
+	// that captured it: the DaemonSet agent streams its test cases to
+	// k8s-proxy's control plane, where the capture's temp file in Paths does
+	// not exist (see conn.InlineFormFiles). []byte so JSON carries binary
+	// content intact, which a string in Values does not. It rides only that
+	// JSON upload: the persister writes it to the test case's assets and
+	// clears it, and yaml/bson "-" keep it out of stored test cases.
+	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
 }
 
 type HTTPResp struct {
