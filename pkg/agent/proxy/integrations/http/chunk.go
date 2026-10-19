@@ -67,7 +67,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get the content-length header")
+			utils.LogContentError(h.Logger, err, "failed to get the content-length header")
 			return fmt.Errorf("failed to handle chunked request")
 		}
 		//Get the length of the body in the request.
@@ -193,14 +193,14 @@ func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn,
 		done, framingErr := body.completeOrLegacy(*finalReq)
 		if framingErr != nil {
 			h.Logger.Warn("chunked request body is not framed per RFC 9112; relaying it and taking a trailing \"0\\r\\n\\r\\n\" as its end, as before",
-				zap.Error(framingErr))
+				logcontent.Error(framingErr))
 		}
 		return done, nil
 	}
 	for {
 		done, err := complete()
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to frame the chunked request body")
+			utils.LogContentError(h.Logger, err, "failed to frame the chunked request body")
 			return err
 		}
 		if done {
@@ -306,7 +306,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get the content-length header")
+			utils.LogContentError(h.Logger, err, "failed to get the content-length header")
 			return fmt.Errorf("failed to handle chunked response")
 		}
 		contentLength -= len(resp) - bodyStart
@@ -343,7 +343,7 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 		done, framingErr := body.completeOrLegacy(*finalResp)
 		if framingErr != nil {
 			h.Logger.Warn("chunked response body is not framed per RFC 9112; relaying it and taking a trailing \"0\\r\\n\\r\\n\" or the server closing as its end, as before",
-				zap.Error(framingErr))
+				logcontent.Error(framingErr))
 		}
 		if done {
 			return nil

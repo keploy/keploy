@@ -110,8 +110,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
-			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
+			sess.ReportStoppedOnError(models.HTTP, reqTs, "http decode error: request read failed", err)
+			utils.LogContentError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
 		}
 
@@ -187,8 +187,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
-				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
+				sess.ReportStoppedOnError(models.HTTP, reqTs, "http decode error: response read failed", err)
+				utils.LogContentError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
 			}
 		} else if !gotLastWritten.IsZero() {
@@ -204,8 +204,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
-			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
-			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
+			sess.ReportStoppedOnError(models.HTTP, reqTs, "http decode error: "+exchangeStep(err), err)
+			utils.LogContentError(logger, err, "V2 HTTP record: failed to build mock")
 			return err
 		}
 		if mock != nil {
@@ -561,10 +561,34 @@ func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, c
 		}
 	}
 	if interim != 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
-		return nil, false, fmt.Errorf("parse response: the final response after a %d never arrived whole: %w",
-			interim, io.ErrUnexpectedEOF)
+		return nil, false, &exchangeError{"parse response", fmt.Errorf("the final response after a %d never arrived whole: %w",
+			interim, io.ErrUnexpectedEOF)}
 	}
-	return nil, false, fmt.Errorf("parse response: %w", err)
+	return nil, false, &exchangeError{"parse response", err}
+}
+
+// exchangeError is what recording an exchange could not do, in keploy's words
+// (step: "parse request", "decompress response body"), and why (err). err can
+// quote the exchange, as net/http quotes a header line it cannot read whole,
+// so a line that may not carry it still says the step (exchangeStep).
+type exchangeError struct {
+	step string
+	err  error
+}
+
+func (e *exchangeError) Error() string { return e.step + ": " + e.err.Error() }
+
+func (e *exchangeError) Unwrap() error { return e.err }
+
+// exchangeStep is what buildHTTPMock could not do, for the left-out WARN's
+// reason, which is logged whatever the switch says: an exchangeError's step,
+// and nothing of an error's text otherwise.
+func exchangeStep(err error) string {
+	var e *exchangeError
+	if errors.As(err, &e) {
+		return e.step
+	}
+	return "the mock cannot be built"
 }
 
 // decompressReadInPart is pkg.Decompress for a body its client read only in
@@ -625,7 +649,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
-		return nil, fmt.Errorf("parse request: %w", err)
+		return nil, &exchangeError{"parse request", err}
 	}
 	req.Header.Set("Host", req.Host)
 
@@ -633,12 +657,12 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	if req.Body != nil {
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
-			return nil, fmt.Errorf("read request body: %w", err)
+			return nil, &exchangeError{"read request body", err}
 		}
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody, pkg.MaxDecompressedSize)
 			if err != nil {
-				return nil, fmt.Errorf("decompress request body: %w", err)
+				return nil, &exchangeError{"decompress request body", err}
 			}
 		}
 	}
@@ -659,7 +683,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		// its own length (the Content-Length set below).
 		if err != nil {
 			if !m.RespReadInPart || !errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil, fmt.Errorf("read response body: %w", err)
+				return nil, &exchangeError{"read response body", err}
 			}
 			cut = true
 		}
@@ -678,7 +702,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				respBody, err = pkg.Decompress(h.Logger, enc, respBody, pkg.MaxDecompressedSize)
 			}
 			if err != nil {
-				return nil, fmt.Errorf("decompress response body: %w", err)
+				return nil, &exchangeError{"decompress response body", err}
 			}
 		}
 		// A response with no body by rule (to a HEAD, a 1xx, 204 or 304)

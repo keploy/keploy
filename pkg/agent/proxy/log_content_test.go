@@ -1,19 +1,27 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // canary is a value of the application's, a literal in the statement it sent.
@@ -60,10 +68,10 @@ func TestCaptureWindow_TheDiscardedMissesAreNamedWithoutTheValuesTheySent(t *tes
 }
 
 // malformedHTTP sends a request whose header block net/http cannot read
-// through the HTTP integration in test mode, as the proxy hands it a
-// connection, and returns what the integration returned: net/http's error,
-// which quotes the line it could not read, the canary in it.
-func malformedHTTP(t *testing.T) error {
+// through the HTTP integration in test mode, logging to logger, as the proxy
+// hands it a connection, and returns what the integration returned: net/http's
+// error, which quotes the line it could not read, the canary in it.
+func malformedHTTP(t *testing.T, logger *zap.Logger) error {
 	t.Helper()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
@@ -71,7 +79,7 @@ func malformedHTTP(t *testing.T) error {
 	t.Cleanup(func() { _ = app.Close() })
 	returned := make(chan error, 1)
 	go func() {
-		returned <- httpint.New(zap.NewNop()).MockOutgoing(context.Background(), agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		returned <- httpint.New(logger).MockOutgoing(context.Background(), agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
 		_ = agentEnd.Close()
 	}()
 	if _, err := app.Write([]byte("GET /reset HTTP/1.1\r\nHost: deps.example\r\nX-Reset-Token " + canary + "\r\n\r\n")); err != nil {
@@ -85,17 +93,17 @@ func malformedHTTP(t *testing.T) error {
 }
 
 // A parser's error is whatever the parser said, which can quote the call it
-// could not read (net/http quotes a malformed header line whole). Every line
-// the proxy logs it on, as it fails the connection, queues the miss and the
-// connection's handler returns it, and the line that names the miss a test's
-// window never took, names it by its kind, and its text only as logcontent
-// allows.
+// could not read (net/http quotes a malformed header line whole). The
+// parser's own lines for it, every line the proxy logs it on, as it fails the
+// connection, queues the miss and the connection's handler returns it, and
+// the line that names the miss a test's window never took, name it by its
+// kind, and its text only as logcontent allows.
 func TestMockFailed_AParsersErrorIsLoggedWithoutTheCallItQuotes(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	logtest.Each(t, func(t *testing.T, on bool) {
 		logger, logs := logtest.Observe()
 		p := &Proxy{logger: logger, errChannel: make(chan error, 16)}
-		err := malformedHTTP(t)
+		err := malformedHTTP(t, logger)
 		// As handleConnection hands it on, and the accept loop logs what the
 		// handler returned.
 		p.logHandlerError(p.mockFailed(logger, err))
@@ -105,12 +113,14 @@ func TestMockFailed_AParsersErrorIsLoggedWithoutTheCallItQuotes(t *testing.T) {
 		p.BeginTestErrorCapture()
 		const discarded = "mock mismatches made while no test's capture window was open are not attributed to a test"
 		logtest.Check(t, logs, canary, on,
+			"failed to parse the http request message",
+			"failed to decode the http message from the yaml",
 			"failed to mock the outgoing message",
 			"mock mismatch: no matching mock for outgoing call (no structured report)",
 			"failed to handle the client connection",
 			discarded)
 		for _, msg := range []string{"failed to mock the outgoing message", "mock mismatch: no matching mock for outgoing call (no structured report)", "failed to handle the client connection"} {
-			if got, want := logs.FilterMessage(msg).All()[0].ContextMap()["error_kind"], fmt.Sprintf("%T", err); got != want {
+			if got, want := logs.FilterMessage(msg).All()[0].ContextMap()["error_kind"], "textproto.ProtocolError"; got != want {
 				t.Errorf("%q names the error %v, want its kind %q", msg, got, want)
 			}
 		}
@@ -211,5 +221,122 @@ func TestSendError_AMissThatCannotBeQueuedIsLoggedWithoutTheCallItQuotes(t *test
 			untilTrue(t, func() bool { return logs.FilterMessage(msg).Len() > 0 })
 			logtest.Check(t, logs, canary, on, msg)
 		})
+	})
+}
+
+// recordThroughTheHTTPParser records one exchange through recordViaSupervisor
+// and the HTTP parser, as a proxied connection is recorded: the app sends
+// request, and the upstream answers response once it has read the request's
+// header block, which net/http need not be able to read. The relay forwards
+// the exchange whatever the parser makes of it.
+func recordThroughTheHTTPParser(t *testing.T, logger *zap.Logger, request, response string) {
+	t.Helper()
+	supervisor.ResetLeftOutWarningsForTest()
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(nil)))
+	defer cancel()
+	app, rawSrc, cleanupSrc := tcpConnPair(t)
+	defer cleanupSrc()
+	dstConn, upstream, cleanupDst := tcpConnPair(t)
+	defer cleanupDst()
+	srcConn := &util.Conn{Conn: rawSrc, Reader: rawSrc, Logger: zap.NewNop()}
+	p := &Proxy{logger: logger, recordBufferCap: 1 << 20, recordBufferQueueSize: 64,
+		recordBufferStallGrace: 2 * time.Second, recordBufferHalfCloseGrace: 200 * time.Millisecond}
+	go func() {
+		head := bufio.NewReader(upstream)
+		for {
+			line, err := head.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		_, _ = upstream.Write([]byte(response))
+		_ = upstream.Close()
+	}()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), httpint.New(logger), integrations.HTTP,
+			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
+	}()
+	if _, err := app.Write([]byte(request)); err != nil {
+		t.Fatalf("write the request: %v", err)
+	}
+	if got, err := io.ReadAll(app); err != nil || !strings.HasPrefix(string(got), "HTTP/1.1 200") {
+		t.Fatalf("the app read %q, %v; want the upstream's answer, relayed, and its close", got, err)
+	}
+	_ = app.Close()
+	if err := awaitEvent(t, done, "recordViaSupervisor returning after the connection ended"); err != nil {
+		t.Fatalf("recordViaSupervisor returned %v", err)
+	}
+}
+
+// On the record path a parser's error can quote the call it could not read,
+// as on replay: net/http quotes a header line it cannot read whole, and
+// strconv a Content-Length that is not a number. The HTTP parser's line for
+// it, the WARN that says the exchange was not recorded, and the dispatcher's
+// line as it falls through to passthrough name it by its kind, and its text
+// only as logcontent allows. The WARN still says what the parser stopped on.
+func TestRecordViaSupervisor_AParsersErrorIsLoggedWithoutTheCallItQuotes(t *testing.T) {
+	const fallthroughMsg = "parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close"
+	for name, c := range map[string]struct {
+		request, response, parserLine, reason string
+	}{
+		"a header line net/http cannot read": {
+			"GET /reset HTTP/1.1\r\nHost: upstream\r\nX-Reset-Token " + canary + "\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+			"V2 HTTP record: failed to build mock", "http decode error: parse request"},
+		"a request's length that is not a number": {
+			"POST /reset HTTP/1.1\r\nHost: upstream\r\nContent-Length: " + canary + "\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+			"V2 HTTP record: failed to read full request", "http decode error: request read failed"},
+		"a response's length that is not a number": {
+			"GET /reset HTTP/1.1\r\nHost: upstream\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Length: " + canary + "\r\n\r\nok",
+			"V2 HTTP record: failed to read full response", "http decode error: response read failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				recordThroughTheHTTPParser(t, logger, c.request, c.response)
+				logtest.Check(t, logs, canary, on, c.parserLine, supervisor.LeftOutWarnMsg, fallthroughMsg)
+				if got := logs.FilterMessage(supervisor.LeftOutWarnMsg).All()[0].ContextMap()["reason"]; got != c.reason {
+					t.Fatalf("the WARN says the exchange was left out for %q, want %q", got, c.reason)
+				}
+			})
+		})
+	}
+}
+
+// closedUnderCancelParser is a V2 parser that, once the recording stops,
+// returns a read error that quotes what it was reading and reads as a closed
+// connection, as a parser that wraps its read's error does.
+type closedUnderCancelParser struct{ stubParser }
+
+func (closedUnderCancelParser) RecordOutgoing(ctx context.Context, _ *integrations.RecordSession) error {
+	<-ctx.Done()
+	return fmt.Errorf("read the request after %q: use of closed network connection: %w", "X-Reset-Token "+canary, ctx.Err())
+}
+
+// A parser that returns as the recording stops, with an error that reads as
+// a closed connection, is logged by its error's kind, and its text only as
+// logcontent allows.
+func TestRecordViaSupervisor_AClosedConnectionsErrorIsLoggedWithoutWhatItQuotes(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(nil)))
+		app, rawSrc, cleanupSrc := tcpConnPair(t)
+		defer cleanupSrc()
+		dstConn, _, cleanupDst := tcpConnPair(t)
+		defer cleanupDst()
+		p := &Proxy{logger: logger, recordBufferCap: 1 << 20, recordBufferQueueSize: 64,
+			recordBufferStallGrace: 2 * time.Second, recordBufferHalfCloseGrace: 200 * time.Millisecond}
+		done := make(chan error, 1)
+		go func() {
+			done <- p.recordViaSupervisor(ctx, rawSrc, connseq.NewUpstream(dstConn), closedUnderCancelParser{}, integrations.HTTP,
+				make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
+		}()
+		cancel()
+		_ = app.Close()
+		_ = awaitEvent(t, done, "recordViaSupervisor returning after the recording stopped")
+		logtest.Check(t, logs, canary, on, "V2 parser exited with network-closed error")
 	})
 }

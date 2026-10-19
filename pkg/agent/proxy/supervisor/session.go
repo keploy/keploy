@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -888,6 +889,12 @@ func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
 // ends before it. A nil m is reported as a mock with no times: the flag it was
 // left out for has been taken, so it must still be counted. Nil-safe.
 func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
+	s.reportLeftOut(m, reason, nil)
+}
+
+// reportLeftOut is ReportLeftOut, with the error the exchange was left out
+// for, if one is given, logged beside the reason as logcontent allows.
+func (s *Session) reportLeftOut(m *models.Mock, reason string, err error) {
 	if s == nil {
 		return
 	}
@@ -911,6 +918,9 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	}
 	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("mockName", m.Name),
 		zap.String("kind", string(m.Kind)), zap.String("reason", reason), zap.Bool("spanRecorded", spanned)}
+	if err != nil {
+		fields = append(fields, logcontent.Error(err))
+	}
 	cause := leftOutCause(reason)
 	class := leftOutClass(cause)
 	ok, held, _ := leftOutWarns.AllowOr(cause, class)
@@ -963,6 +973,18 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 // stop (ctx done) is an exchange stopped on: a parser that returns on either
 // reports nothing. Nil-safe.
 func (s *Session) ReportStoppedOn(kind models.Kind, reqTs time.Time, reason string) {
+	s.ReportStoppedOnError(kind, reqTs, reason, nil)
+}
+
+// ReportStoppedOnError is ReportStoppedOn for a parser that stops on err: reason
+// says what it stopped on, in keploy's words ("http decode error: request read
+// failed"), and err, logged beside it, why. A parser's error can quote what it
+// could not read (net/http quotes a header line it cannot read whole, strconv
+// the value it could not parse), and the reason is logged at WARN, so err is
+// logged as logcontent allows: by its kind, and its text only with the switch
+// on. The reason's text before its first colon keys the WARN's limit, as
+// ReportStoppedOn's does.
+func (s *Session) ReportStoppedOnError(kind models.Kind, reqTs time.Time, reason string, err error) {
 	if s == nil {
 		return
 	}
@@ -970,10 +992,10 @@ func (s *Session) ReportStoppedOn(kind models.Kind, reqTs time.Time, reason stri
 	if mark, ok := s.TakeMockIncomplete(); ok {
 		reason = mark + ": " + reason
 	}
-	s.ReportLeftOut(&models.Mock{
+	s.reportLeftOut(&models.Mock{
 		Kind: kind,
 		Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: stop},
-	}, reason)
+	}, reason, err)
 }
 
 // StoppedAt is the instant this connection stopped being recorded: the first of
@@ -1087,10 +1109,10 @@ const maxLeftOutCause = 64
 // names, which keys ReportLeftOut's WARN limit: the reason up to its first
 // colon, trimmed, and at most maxLeftOutCause bytes. The relay's reasons are
 // fixed tokens (memory_pressure, per_conn_cap, desynced, short_write,
-// client_hold_cap), so each is a cause of its own. A parser's reason can carry
-// an error's text after a colon ("http decode error: " + err.Error()), which
-// the cause leaves off: one error must not get a WARN per text it carries. An
-// empty reason is of class other.
+// client_hold_cap), so each is a cause of its own. A parser's reason can say
+// more after a colon ("mysql exchange not recorded: " and what it could not
+// frame), which the cause leaves off: one cause must not get a WARN per text
+// it carries. An empty reason is of class other.
 func leftOutCause(reason string) string {
 	if i := strings.IndexByte(reason, ':'); i >= 0 {
 		reason = reason[:i]

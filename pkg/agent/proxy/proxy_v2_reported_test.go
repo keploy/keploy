@@ -106,8 +106,10 @@ func TestRecordViaSupervisorDoesNotWarnAgainAboutAStopTheParserReported(t *testi
 			if got != c.warns {
 				t.Fatalf("%d WARN lines for the parser's retirement, want %d", got, c.warns)
 			}
-			// The Debug line says why, for this stop too.
-			if n := fallback().FilterLevelExact(zapcore.DebugLevel).FilterField(zap.Error(c.err)).Len(); n != 1 {
+			// The Debug line says why, for this stop too: by the error's
+			// kind, and its text as logcontent allows.
+			why := parserErrorFields(c.err)
+			if n := fallback().FilterLevelExact(zapcore.DebugLevel).FilterField(why[0]).FilterField(why[1]).Len(); n != 1 {
 				t.Fatalf("%d Debug passthrough-fallback lines carrying the parser's error %q, want 1", n, c.err)
 			}
 			// What the connection carries from the retirement on is left out:

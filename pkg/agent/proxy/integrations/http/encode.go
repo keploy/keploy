@@ -117,7 +117,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		for m := range mockDataCh {
 			err := h.parseFinalHTTP(recordCtx, m, destPort, mocks, opts, onMockRecorded)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to parse the final http request and response")
+				utils.LogContentError(h.Logger, err, "failed to parse the final http request and response")
 			}
 		}
 	}()

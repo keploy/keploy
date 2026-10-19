@@ -446,3 +446,116 @@ func TestMatchRequestShape_AnUnparseablePollIsLoggedByItsShape(t *testing.T) {
 		logtest.Check(t, logs, canary, on, drift)
 	})
 }
+
+// A call whose framing cannot be read fails with the reader's error, which
+// quotes what it could not read: strconv a Content-Length that is not a
+// number, the chunked reader a chunk-size line, which is the body's first
+// line when the body is not chunked. replay's lines for it carry that only as
+// logcontent allows.
+func TestDecodeHTTP_AFramingItCannotReadIsLoggedWithoutWhatItQuotes(t *testing.T) {
+	for name, c := range map[string]struct {
+		call  string
+		lines []string
+	}{
+		"a length that is not a number": {"POST /notes HTTP/1.1\r\nHost: api.test\r\nContent-Length: " + canary + "\r\n\r\n",
+			[]string{"failed to get the content-length header"}},
+		"a chunked body that is not chunked": {"POST /notes HTTP/1.1\r\nHost: api.test\r\nTransfer-Encoding: chunked\r\n\r\n{\"note\":\"" + canary + "\"}\r\n",
+			[]string{"failed to frame the chunked request body", "failed to handle chunked requests"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				_, done := decodeLogged(t, logger, c.call, &mockMemDb{})
+				if err := <-done; err == nil {
+					t.Fatal("decodeHTTP read the call whole")
+				}
+				logtest.Check(t, logs, canary, on, c.lines...)
+			})
+		})
+	}
+}
+
+// A call whose header block net/http cannot read fails with its error, which
+// quotes the header line whole: the parser's lines for it, as it parses the
+// call and as MockOutgoing returns, carry it only as logcontent allows.
+func TestMockOutgoing_AHeaderLineItCannotReadIsLoggedWithoutIt(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		app, proxy := tcpPair(t)
+		done := runDecode(t, proxy, func(ctx context.Context) error {
+			return New(logger).MockOutgoing(ctx, proxy, &models.ConditionalDstCfg{}, &mockMemDb{}, models.OutgoingOptions{})
+		})
+		if _, err := app.Write([]byte("GET /reset HTTP/1.1\r\nHost: api.test\r\nX-Reset-Token " + canary + "\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err == nil || !strings.Contains(err.Error(), canary) {
+			t.Fatalf("precondition: MockOutgoing returned %v, want net/http's error quoting the header line", err)
+		}
+		logtest.Check(t, logs, canary, on, "failed to parse the http request message", "failed to decode the http message from the yaml")
+	})
+}
+
+// The legacy record path relays what it cannot frame, and says so: a length
+// that is not a number, and a chunked body that is not chunked, whose first
+// line the chunked reader's error quotes. Its lines carry what they quote
+// only as logcontent allows.
+func TestEncodeHTTP_AFramingItCannotReadIsLoggedWithoutWhatItQuotes(t *testing.T) {
+	const ok = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	notChunked := "{\"note\":\"" + canary + "\"}\r\n0\r\n\r\n"
+	for name, c := range map[string]struct {
+		call, answer, line string
+	}{
+		"a request's chunked body that is not chunked": {"POST /notes HTTP/1.1\r\nHost: up\r\nTransfer-Encoding: chunked\r\n\r\n" + notChunked, ok,
+			"chunked request body is not framed per RFC 9112; relaying it and taking a trailing \"0\\r\\n\\r\\n\" as its end, as before"},
+		"a response's length that is not a number": {"GET /notes HTTP/1.1\r\nHost: up\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: " + canary + "\r\n\r\nok",
+			"failed to get the content-length header"},
+		"a response's chunked body that is not chunked": {"GET /notes HTTP/1.1\r\nHost: up\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + notChunked,
+			"chunked response body is not framed per RFC 9112; relaying it and taking a trailing \"0\\r\\n\\r\\n\" or the server closing as its end, as before"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				app, done := encodeLogged(t, logger, c.call, func(up net.Conn) {
+					_ = readUntil(up, "\r\n\r\n", 2*time.Second)
+					_, _ = up.Write([]byte(c.answer))
+				})
+				// The answer's end, as the app reads it relayed.
+				_ = readUntil(app, c.answer[len(c.answer)-2:], 2*time.Second)
+				_ = app.Close()
+				<-done
+				logtest.Check(t, logs, canary, on, c.line)
+			})
+		})
+	}
+}
+
+// An exchange the legacy record path relayed whole but net/http cannot parse
+// fails with its error, which quotes the header line it could not read: a
+// request's or a response's. The lines for it, as it parses the exchange and
+// as its recorder logs what the parse returned, carry it only as logcontent
+// allows.
+func TestEncodeHTTP_AnExchangeItCannotParseIsLoggedWithoutWhatItQuotes(t *testing.T) {
+	const parsed = "failed to parse the final http request and response"
+	for name, c := range map[string]struct {
+		call, answer, line string
+	}{
+		"its request": {"GET /reset HTTP/1.1\r\nHost: up\r\nX-Reset-Token " + canary + "\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+			"failed to parse the http request message"},
+		"its response": {"GET /reset HTTP/1.1\r\nHost: up\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie " + canary + "\r\n\r\nok",
+			"failed to parse the http response message"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				app, done := encodeLogged(t, logger, c.call, func(up net.Conn) {
+					_ = readUntil(up, "\r\n\r\n", 2*time.Second)
+					_, _ = up.Write([]byte(c.answer))
+				})
+				_ = readUntil(app, "ok", 2*time.Second)
+				_ = app.Close()
+				<-done
+				logtest.Check(t, logs, canary, on, c.line, parsed)
+			})
+		})
+	}
+}

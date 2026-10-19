@@ -1278,8 +1278,8 @@ func (p *Proxy) recordMySQLOutgoing(
 		if errors.Is(err, integrations.ErrParserDeclined) {
 			return p.relayDeclinedConn(parserCtx, err, mysqlLogger, integrations.MYSQL, mysqlSession)
 		}
-		utils.LogError(p.logger, err, "failed to record the outgoing message")
-		return err
+		utils.LogErrorWith(p.logger, err, "failed to record the outgoing message", parserErrorFields(err))
+		return parserFailed{err}
 	}
 	return nil
 }
@@ -3590,11 +3590,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			if err != nil {
 				if isNetworkClosedErr(err) {
-					logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
+					logger.Debug("failed to record the outgoing message (connection closed)", parserErrorFields(err)...)
 				} else {
-					utils.LogError(logger, err, "failed to record the outgoing message")
+					utils.LogErrorWith(logger, err, "failed to record the outgoing message", parserErrorFields(err))
 				}
-				return err
+				return parserFailed{err}
 			}
 			logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
@@ -3693,8 +3693,8 @@ func (p *Proxy) recordGenericOutgoing(
 		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
-		utils.LogError(logger, err, "failed to record the outgoing message")
-		return err
+		utils.LogErrorWith(logger, err, "failed to record the outgoing message", parserErrorFields(err))
+		return parserFailed{err}
 	}
 	return nil
 }
@@ -4976,7 +4976,8 @@ func missSummaries(errs []error) (shapes, calls []string) {
 
 // errorKind names a parser's error, or a miss the proxy made of one, for a
 // line that may not carry its text: a ParserError's type ("mock not found"),
-// a miss's, or the error's Go type.
+// a miss's, a panic's (util.ErrParserPanicked, which is text alone), or what
+// logcontent.ErrorKind names it by, its cause.
 func errorKind(err error) string {
 	var pe models.ParserError
 	if errors.As(err, &pe) {
@@ -4985,7 +4986,10 @@ func errorKind(err error) string {
 	if isMockMiss(err) {
 		return string(models.ErrMockNotFound)
 	}
-	return fmt.Sprintf("%T", err)
+	if errors.Is(err, util.ErrParserPanicked) {
+		return "parser panicked"
+	}
+	return logcontent.ErrorKind(err)
 }
 
 // parserErrorFields are how a line logs a parser's error, or a miss the proxy
@@ -4996,8 +5000,9 @@ func parserErrorFields(err error) []zap.Field {
 	return []zap.Field{zap.String("error_kind", errorKind(err)), logcontent.String("error", err.Error())}
 }
 
-// parserFailed is a parser's MockOutgoing error as the connection's handler
-// returns it, so that the accept loop logs it as parserErrorFields does.
+// parserFailed is a parser's error, from MockOutgoing or RecordOutgoing, as
+// the connection's handler returns it, so that the accept loop logs it as
+// parserErrorFields does.
 type parserFailed struct{ err error }
 
 func (f parserFailed) Error() string { return f.err.Error() }

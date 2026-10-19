@@ -55,6 +55,14 @@ func panicLoss(t *testing.T, p *Proxy, what string) {
 // upstream that accepts it.
 func throughHandler(t *testing.T, mode models.Mode, parser integrations.Integrations, logger *zap.Logger) (*Proxy, string) {
 	t.Helper()
+	p, upstream, _ := serveThroughHandler(t, mode, parser, logger)
+	return p, upstream
+}
+
+// serveThroughHandler is throughHandler, which also returns what the handler
+// returned: the error the accept loop logs (logHandlerError).
+func serveThroughHandler(t *testing.T, mode models.Mode, parser integrations.Integrations, logger *zap.Logger) (*Proxy, string, error) {
+	t.Helper()
 	saved := containerkey.Default
 	containerkey.Default = containerkey.NewKeyer(containerAt{addr: "none"})
 	t.Cleanup(func() { containerkey.Default = saved })
@@ -94,8 +102,8 @@ func throughHandler(t *testing.T, mode models.Mode, parser integrations.Integrat
 	if _, err := io.WriteString(app, "GET / HTTP/1.1\r\nHost: up\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	awaitEvent(t, done, "the handler returning")
-	return p, upstream
+	err = awaitEvent(t, done, "the handler returning")
+	return p, upstream, err
 }
 
 // Every place the proxy hands a connection to a parser, to mock it or to

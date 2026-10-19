@@ -460,12 +460,13 @@ func (p *Proxy) recordViaSupervisor(
 				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"),
 			)
 		}
-		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
-			zap.String("parser", string(parserType)),
+		fallback := []zap.Field{zap.String("parser", string(parserType)),
 			zap.String("status", result.Status.String()),
-			zap.Bool("shutting_down", shuttingDown),
-			zap.Error(result.Err),
-		)
+			zap.Bool("shutting_down", shuttingDown)}
+		if result.Err != nil {
+			fallback = append(fallback, parserErrorFields(result.Err)...)
+		}
+		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close", fallback...)
 		// Crucial invariant (I1): the relay keeps forwarding client↔dest
 		// bytes end-to-end during the fallback. We do NOT cancel it here
 		// — cancelling would introduce a gap between the relay stopping
@@ -506,7 +507,7 @@ func (p *Proxy) recordViaSupervisor(
 		// than only the happy path. A span that never closes would suppress
 		// every test case for the REST OF THE SESSION.
 	case result.Err != nil && isNetworkClosedErr(result.Err):
-		logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
+		logger.Debug("V2 parser exited with network-closed error", parserErrorFields(result.Err)...)
 	case result.Err != nil:
 		err = result.Err
 	default:

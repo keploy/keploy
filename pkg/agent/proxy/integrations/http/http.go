@@ -195,7 +195,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 			h.Logger.Debug("mock miss — 502 already sent to client", zap.Error(err))
 			return err
 		}
-		utils.LogError(h.Logger, err, "failed to decode the http message from the yaml")
+		utils.LogContentError(h.Logger, err, "failed to decode the http message from the yaml")
 		return err
 	}
 	return nil
@@ -207,7 +207,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to parse the http request message")
+		utils.LogContentError(h.Logger, err, "failed to parse the http request message")
 		return err
 	}
 
@@ -246,7 +246,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// never an interim 1xx (parseFinalResponse, as the V2 recorder parses it)
 	respParsed, _, err := parseFinalResponse(mock, req)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
+		utils.LogContentError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
 		return err
 	}
 

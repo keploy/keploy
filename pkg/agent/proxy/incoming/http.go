@@ -633,7 +633,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				logger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", zap.Error(err))
+				// net/http's error quotes the line it could not read whole.
+				logger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", logcontent.Error(err))
 			}
 			return
 		}
@@ -1351,7 +1352,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// reset and misattribute it to upstream. EOF is the
 				// normal end-of-keep-alive close path; no response
 				// needed there.
-				logger.Debug("Failed to parse downstream HTTP request", zap.Error(err))
+				logger.Debug("Failed to parse downstream HTTP request", logcontent.Error(err))
 				writeBadRequest(clientConn)
 			}
 			return

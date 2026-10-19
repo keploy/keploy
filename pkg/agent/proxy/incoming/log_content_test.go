@@ -38,6 +38,30 @@ func TestIngress_AnExchangeNotRecordedIsLoggedWithoutItsQuery(t *testing.T) {
 			})
 		}
 	})
+	// net/http's error for a header line it cannot read quotes the line
+	// whole: the synchronous loop's line and the request-framed loop's, which
+	// answer it with a 400, carry it only as logcontent allows.
+	t.Run("a header line it cannot read", func(t *testing.T) {
+		app, _ := interimApp(t)
+		for _, mode := range interimModes {
+			t.Run(mode, func(t *testing.T) {
+				line := "Failed to parse downstream HTTP request"
+				if mode == "sync" {
+					line = "Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists."
+				}
+				logtest.Each(t, func(t *testing.T, on bool) {
+					logger, logs := logtest.Observe()
+					client, done, _ := interimIngressLogged(t, mode, app, logger)
+					if _, err := io.WriteString(client, "GET /reset HTTP/1.1\r\nHost: app.local\r\nX-Reset-Token "+canary+"\r\n\r\n"); err != nil {
+						t.Fatal(err)
+					}
+					_, _ = io.Copy(io.Discard, client) // what the ingress answers, up to its close
+					<-done
+					logtest.Check(t, logs, canary, on, line)
+				})
+			})
+		}
+	})
 	// The sync loop, which takes one exchange at a time, is what checks a
 	// capture against its budget.
 	for name, tc := range map[string]struct {
