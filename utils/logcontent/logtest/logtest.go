@@ -89,9 +89,11 @@ func Disabled() *zap.Logger {
 // more with the switch off than with it on. A logcontent field that is built
 // before its line's level is checked costs a disabled line an allocation
 // that zap's own field does not, so a hot path's line must check the level
-// first. Each side is the least of a few measures, and a whole allocation
-// per run apart: another goroutine's allocations only add to a measure, and
-// a run whose own allocations vary does not move its average by one.
+// first. Each side is the least of a few measures, each the average of
+// costRuns runs, and they must be half an allocation per run apart: another
+// goroutine's allocations only add to a measure, and a run whose own
+// allocations vary with the scheduler, as one over a socket does by a few,
+// moves an average of that many runs by far less than half of one.
 //
 // It skips under -race, where sync.Pool drops what is put back at random, so
 // a run's allocations are not its code's.
@@ -104,7 +106,7 @@ func CheckDisabledCost(t testing.TB, run func()) {
 		defer logcontent.Set(on)()
 		least := math.Inf(1)
 		for range 5 {
-			least = min(least, allocsPerRun(50, run))
+			least = min(least, allocsPerRun(costRuns, run))
 		}
 		return least
 	}
@@ -112,6 +114,12 @@ func CheckDisabledCost(t testing.TB, run func()) {
 		t.Fatalf("with Debug off, a run allocates %.2f times with the switch off and %.2f with it on: a line builds a logcontent field before its level is checked", off, on)
 	}
 }
+
+// costRuns is how many runs a measure of CheckDisabledCost averages. A
+// decodeHTTP run over a socket allocates 298 to 304 times as its goroutines
+// are scheduled; over 50 runs that moved one side's least measure half an
+// allocation from the other's in 2 of 180 checks, and over 200 in none.
+const costRuns = 200
 
 // allocsPerRun is testing.AllocsPerRun's measure, not rounded down: two
 // averages a fraction apart may round to two counts.

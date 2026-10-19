@@ -283,22 +283,54 @@ func TestDecodeHTTP_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			// One listener for the thousands of runs, each of which closes
+			// its connection as it ends: a listener and a connection held per
+			// run until the test ends ran a loaded host out of ports.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
 			logtest.CheckDisabledCost(t, func() {
 				db := &mockMemDb{mocks: mocks(), updateUnFilteredReturn: true, deleteFilteredReturn: true}
-				app, proxy := tcpPair(t)
-				done := runDecode(t, proxy, func(ctx context.Context) error {
-					return h.decodeHTTP(ctx, []byte(canaryCall("GET")), proxy, nil, db, models.OutgoingOptions{})
-				})
+				app, proxy := tcpPairOn(t, ln)
+				defer app.Close()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- h.decodeHTTP(ctx, []byte(canaryCall("GET")), proxy, nil, db, models.OutgoingOptions{}) }()
 				if resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil); err != nil || resp.StatusCode != 200 {
 					t.Fatalf("the call was not served (%v)", err)
 				}
 				// Its own end, not the app's: an app's close is read as a short
-				// wait for more (proxy/util.ReadBuffConn), on every run.
+				// wait for more (proxy/util.ReadBuffConn), on every run. Closed
+				// with a reset, so no run leaves a socket in TIME_WAIT.
+				_ = proxy.(*net.TCPConn).SetLinger(0)
 				_ = proxy.Close()
 				<-done
 			})
 		})
 	}
+}
+
+// tcpPairOn is tcpPair on ln, which it leaves open: the two ends are the
+// caller's to close.
+func tcpPairOn(t *testing.T, ln net.Listener) (app, proxy net.Conn) {
+	t.Helper()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := ln.Accept()
+		accepted <- c
+	}()
+	app, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy = <-accepted; proxy == nil {
+		_ = app.Close()
+		t.Fatal("accept failed")
+	}
+	return app, proxy
 }
 
 // A variable a call binds costs a Debug level that is off nothing for the
