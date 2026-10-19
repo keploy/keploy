@@ -121,3 +121,61 @@ func TestMockBeginsTheSetsVariablesUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// keploy test under the switch, in the order it begins a test set and its
+// tests: Mock (the set's variables begin), the set's staging filter, the
+// application's start-up, then each test case's filter, its calls, and the
+// pool call after it. The agent's route begins a test's variables at a
+// filter only when MockFilterParams.BeginsTestVariables says so
+// (routes.UpdateMockParams), and filter applies that rule to each. The
+// staging begins no test: what the start-up binds after it is the run's,
+// every test's of the set, and the next set's Mock forgets it, its start-up
+// binding the run's anew.
+func TestKeployTestsStartUpBindsForEveryTestOfItsSet(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := New(zap.NewNop(), fakeDestInfo{}, config.New())
+	// Preseeded so Mock() leaves the host's /etc/nsswitch.conf alone (see
+	// testProxy).
+	p.nsswitchData = []byte("preseeded-by-test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	filter := func(params models.MockFilterParams) {
+		t.Helper()
+		if params.BeginsTestVariables() && !p.StartVariables(params.Variables) {
+			t.Fatal("the proxy keeps no mock manager")
+		}
+	}
+	for set, key := range []string{"x-1", "x-2"} {
+		if err := p.Mock(ctx, models.OutgoingOptions{Mocking: true, StartsTestSet: set > 0}); err != nil {
+			t.Fatal(err)
+		}
+		mm := p.getMockManager()
+		boot := varMock("boot", "/session", false, models.LifetimeSession)
+		uses := []*models.Mock{varMock("use-1", "/use-1", true, models.LifetimePerTest), varMock("use-2", "/use-2", true, models.LifetimePerTest)}
+		// The staging (the agent's serveKeployTestExactly): the set's mocks
+		// are in, and its pool is served.
+		mm.SetMocksWithWindow(uses, []*models.Mock{boot}, models.BaseTime, time.Now())
+		mm.ServeExactPool(models.PoolKeyNone, []string{"boot"})
+		filter(models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now(), Exact: &models.ExactServing{Stage: true, Pool: []string{"boot"}}})
+		want := `200 {"echo":"` + key + `"}`
+		if got := postKey(t, mm, "/session", key); got != want {
+			t.Fatalf("set %d: the start-up call was answered %s", set+1, got)
+		}
+		for i, use := range uses {
+			name := "test-" + string(rune('1'+i))
+			mm.ServeExactTest(name, []*models.Mock{use})
+			filter(models.MockFilterParams{Exact: &models.ExactServing{Test: name, Owned: []string{use.Name}}})
+			path := "/use-" + string(rune('1'+i))
+			if set > 0 {
+				if got := postKey(t, mm, path, "x-1"); strings.HasPrefix(got, "200 ") {
+					t.Fatalf("set %d: %s's call was answered %s with the previous set's run's value", set+1, name, got)
+				}
+			}
+			if got := postKey(t, mm, path, key); got != want {
+				t.Fatalf("set %d: %s's call that uses the start-up's value was answered %s; want %s", set+1, name, got, want)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, []string{"boot"})
+			filter(models.MockFilterParams{Exact: &models.ExactServing{}})
+		}
+	}
+}

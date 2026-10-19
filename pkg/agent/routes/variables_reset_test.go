@@ -176,11 +176,15 @@ func TestAnAgentThatCannotBindRefusesGivenValues(t *testing.T) {
 }
 
 // Under exact serving keploy test sends three filters: the set's staging, a
-// test case's open, and the pool call between test cases. The staging and
-// the open begin a test's variables; the pool call begins none, so what the
-// test case's dependency calls bound stays readable until the next open, and
-// keploy test reads it after the pool call. A pool call that gives values is
-// refused before it applies: they would be bound nowhere.
+// test case's open, and the pool call between test cases. Only the open
+// begins a test's variables. The staging begins none: the set's variables
+// began at its Mock, and what its start-up binds after the staging is the
+// run's, which the first test must not forget (MockManager.NewVariableSet).
+// The pool call begins none, so what the test case's dependency calls bound
+// stays readable until the next open, and keploy test reads it after the pool
+// call. A staging or a pool call that gives values is refused before it
+// applies: they would be bound nowhere. Without exact serving a set's staging
+// (from BaseTime, no test's mapping) begins none either.
 func TestExactServingsPoolCallKeepsTheTestCasesVariables(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
@@ -189,7 +193,9 @@ func TestExactServingsPoolCallKeepsTheTestCasesVariables(t *testing.T) {
 		code   int
 		events string
 	}{
-		{"staging", `{"filterParams":{"exact":{"stage":true,"pool":["mock-9"]}}}`, http.StatusOK, "filter reset"},
+		{"staging", `{"filterParams":{"afterTime":"2000-01-01T00:00:00Z","exact":{"stage":true,"pool":["mock-9"]}}}`, http.StatusOK, "filter"},
+		{"a staging that gives values", `{"filterParams":{"afterTime":"2000-01-01T00:00:00Z","exact":{"stage":true},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusUnprocessableEntity, ""},
+		{"a staging without exact serving", `{"filterParams":{"afterTime":"2000-01-01T00:00:00Z"}}`, http.StatusOK, "filter"},
 		{"a test case's open", `{"filterParams":{"exact":{"test":"test-1","owned":["mock-1"]},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusOK, "filter reset bind:id=u1"},
 		{"the pool call", `{"filterParams":{"exact":{}}}`, http.StatusOK, "filter"},
 		{"a pool call that gives values", `{"filterParams":{"exact":{},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusUnprocessableEntity, ""},

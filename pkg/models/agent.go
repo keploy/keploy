@@ -464,12 +464,34 @@ type ExactServing struct {
 }
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
-// begins a test's variables as it applies this filter: every filter but
-// exact serving's pool call. That call ends a test case's serving, and the
-// variables its dependency calls bound stay readable until the next test
-// case's filter begins the next scope: keploy test reads them after it.
+// begins a test's variables as it applies this filter: a filter that opens a
+// test case, with exact serving or without. Two filters begin none:
+//
+//   - A test set's staging (StagesSet). The set's variables began at its
+//     Mock (MockManager.NewVariableSet), as the learn step's set did
+//     (learn.Tracker.NewSet), and what the set's start-up binds before its
+//     first test begins is the run's, which every test of the set reads: a
+//     scope begun at the staging would take the start-up's bindings as its
+//     own, and the first test's would forget them.
+//   - Exact serving's pool call. It ends a test case's serving, and the
+//     variables its dependency calls bound stay readable until the next test
+//     case's filter begins the next scope: keploy test reads them after it.
 func (p MockFilterParams) BeginsTestVariables() bool {
-	return p.Exact == nil || p.Exact.Stage || p.Exact.Test != ""
+	if p.StagesSet() {
+		return false
+	}
+	return p.Exact == nil || p.Exact.Test != ""
+}
+
+// StagesSet reports whether the filter is a test set's staging: the set's
+// mocks staged before any of its tests runs, from BaseTime and naming no
+// test's mapping, as keploy test sends it once per set (exact serving's
+// Stage, which it sends on that same call).
+func (p MockFilterParams) StagesSet() bool {
+	if p.Exact != nil {
+		return p.Exact.Stage
+	}
+	return p.AfterTime.Equal(BaseTime) && len(p.MockMapping) == 0
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent
