@@ -1258,6 +1258,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	if cmd.Name() != "agent" {
 		warnRemovedAgentReadyTimeout(c.logger)
 	}
+	// Windows and macOS stay out of the proven model's flip (P221): a run
+	// that records or judges says so once there, unless KEPLOY_PROVEN sets
+	// the switch either way.
+	if recordsOrJudges(cmd) {
+		if notice := platformNotice(); notice != "" {
+			c.logger.Info(notice)
+		}
+	}
 
 	if c.cfg.Record.BasePath != "" {
 		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)

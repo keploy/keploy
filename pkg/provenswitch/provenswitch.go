@@ -1,13 +1,15 @@
-// Package provenswitch is the staging gate of the proven model: KEPLOY_PROVEN=1.
+// Package provenswitch is the proven model's switch: KEPLOY_PROVEN.
 //
 // Every row of the proven model (strict verdicts on misses and unconsumed test
 // mocks, unread misses as an incomplete round, skip reasons, strict response
-// comparison, and the rest of the design's build plan) lands behind this one
-// switch, so it can merge piece by piece while today's behaviour stays exactly
-// as it is for everyone who does not set it. The e2e lanes that exercise those
-// rows set it. It is a staging gate, not a setting: the flip deletes this
-// package together with every old path, and no user is meant to choose between
-// the two behaviours.
+// comparison, and the rest of the design's build plan) landed behind this one
+// switch, so it could merge piece by piece while the old behaviour stayed
+// exactly as it was. Release 1 turns it on by default on Linux, the platform
+// it was built and proven on: there KEPLOY_PROVEN unset or empty means on, and
+// KEPLOY_PROVEN=0 runs the old paths. Every other platform keeps the old
+// default, off, until it is ruled on (Windows and macOS, P221): there an unset
+// KEPLOY_PROVEN means off, and KEPLOY_PROVEN=1 turns it on, as before. The old
+// paths stay for as long as a platform runs them.
 //
 // On is the ONE place the switch is read. keploy, enterprise and the
 // integrations all call it, so a row cannot be on in one of them and off in
@@ -19,8 +21,10 @@
 // launcher appends AgentArgs to the agent's argv, and the agent pins its switch
 // from its --proven flag, on or off (Pin): an agent's own environment never
 // decides, so an agent cannot run the new paths while the CLI that started it
-// runs the old ones, or the reverse. Parsers run inside the agent, so they see
-// the pinned switch too.
+// runs the old ones, or the reverse, and an agent on Linux that a macOS or
+// Windows keploy started (in a container) runs that keploy's switch, not
+// Linux's default. Parsers run inside the agent, so they see the pinned switch
+// too.
 //
 // The agent reports what it pinned on its health check (HealthHeader, State),
 // and the CLI refuses an agent whose state is not its own (CheckAgent). A
@@ -36,14 +40,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
 )
 
 const (
-	// Env is the variable that turns the switch on for a keploy process:
-	// KEPLOY_PROVEN=1.
+	// Env is the variable that sets the switch for a keploy process:
+	// KEPLOY_PROVEN=0 turns it off, KEPLOY_PROVEN=1 on, and unset or empty
+	// leaves it at the platform's default (PlatformDefault).
 	Env = "KEPLOY_PROVEN"
 	// AgentFlag is the hidden `keploy agent` flag that carries the switch from
 	// the CLI to the agent it starts (see AgentArgs).
@@ -71,13 +77,28 @@ const (
 
 var pinned atomic.Int32
 
+// PlatformDefault is the switch on a platform (a runtime.GOOS value) when
+// KEPLOY_PROVEN does not set it: on on Linux, which release 1 flips, and off
+// everywhere else. Windows and macOS stay out of the flip (P221): their
+// keploy judges as it did before, so a platform turns the proven model on by
+// default only once it is ruled on. WSL is Linux here.
+func PlatformDefault(goos string) bool {
+	return goos == "linux"
+}
+
+// defaultOn is this process's PlatformDefault. A variable only so this
+// package's tests can check another platform's default on any machine.
+var defaultOn = PlatformDefault(runtime.GOOS)
+
 // On reports whether the proven model's rows are on in this process. A process
 // whose switch was pinned (an agent, from its --proven flag) answers with what
 // was pinned. Any other process reads KEPLOY_PROVEN, on every call, so the
 // answer is its environment as it is now (and a test can set the switch with
 // t.Setenv): on for a value strconv.ParseBool reads as true ("1", "true", …),
-// off otherwise. A value it does not read at all is off here; keploy's own
-// commands refuse it before they start (Validate).
+// off for one it reads as false ("0", "false", …), and the platform's default
+// (PlatformDefault: on on Linux) when it is unset or empty. A value it does not
+// read at all is the default here too; keploy's own commands refuse it before
+// they start (Validate).
 func On() bool {
 	switch pinned.Load() {
 	case pinnedOn:
@@ -85,8 +106,20 @@ func On() bool {
 	case pinnedOff:
 		return false
 	}
-	on, err := parse(os.Getenv(Env))
-	return err == nil && on
+	return OnFor(os.Getenv(Env))
+}
+
+// OnFor is the switch of an unpinned keploy process whose KEPLOY_PROVEN is v:
+// what On answers in it. It is for a keploy program that reads the switch
+// from an environment it is handed (keploy-go-exec's tests stand in for the
+// test command's), so it reads it as keploy does, the platform's default
+// included, and not by a rule of its own.
+func OnFor(v string) bool {
+	on, set, err := parse(v)
+	if err != nil || !set {
+		return defaultOn
+	}
+	return on
 }
 
 // Pin fixes this process's switch for the rest of its life, on or off, and
@@ -114,11 +147,11 @@ func Unpin() {
 func IgnoredEnv() (string, bool) {
 	p := pinned.Load()
 	v := os.Getenv(Env)
-	if p == unpinned || strings.TrimSpace(v) == "" {
+	if p == unpinned {
 		return "", false
 	}
-	on, err := parse(v)
-	if err == nil && on == (p == pinnedOn) {
+	on, set, err := parse(v)
+	if !set || err == nil && on == (p == pinnedOn) {
 		return "", false
 	}
 	return v, true
@@ -144,18 +177,54 @@ func AgentArgs() []string {
 }
 
 // Validate refuses a KEPLOY_PROVEN that is set to something strconv.ParseBool
-// does not read ("yes", "on", a typo): such a value would otherwise mean "off"
-// without a word, and run a staging lane on the old paths. Unset or empty is
-// fine. keploy's CmdConfigurator.ValidateFlags calls it, so every command
-// whose flags it validates (record, test, mock, report and the others whose
-// PreRunE runs it) refuses such a value before it runs; the agent does not,
-// because its switch comes from its --proven flag alone. Commands that do not
-// validate their flags there, and k8s-proxy, do not refuse it yet.
+// does not read ("yes", "on", a typo): such a value would otherwise mean the
+// platform's default without a word, whichever side the user meant. Unset or
+// empty is fine. keploy's CmdConfigurator.ValidateFlags calls it, so every
+// command whose flags it validates (record, test, mock, report and the others
+// whose PreRunE runs it) refuses such a value before it runs; the agent does
+// not, because its switch comes from its --proven flag alone. Commands that do
+// not validate their flags there, and k8s-proxy, do not refuse it yet.
 func Validate() error {
-	if _, err := parse(os.Getenv(Env)); err != nil {
-		return fmt.Errorf("%s=%q is not a value keploy reads: set it to 1 to turn the proven model on, or unset it", Env, os.Getenv(Env))
+	if _, _, err := parse(os.Getenv(Env)); err != nil {
+		return fmt.Errorf("%s=%q is not a value keploy reads: %s", Env, os.Getenv(Env), settingHint())
 	}
 	return nil
+}
+
+// settingHint says how to set the switch on this platform.
+func settingHint() string {
+	if defaultOn {
+		return "set it to 0 to run without the proven model, or unset it: the proven model is on by default on " + platformName(runtime.GOOS)
+	}
+	return "set it to 1 to run the proven model, or unset it: the proven model is off by default on " + platformName(runtime.GOOS)
+}
+
+// platformName is a runtime.GOOS value as a user names the platform.
+func platformName(goos string) string {
+	switch goos {
+	case "linux":
+		return "Linux"
+	case "darwin":
+		return "macOS"
+	case "windows":
+		return "Windows"
+	}
+	return goos
+}
+
+// PlatformNotice is what keploy says once, as a judged or recorded run starts,
+// on a platform whose default is off (P221) while KEPLOY_PROVEN leaves the
+// switch at that default: that this platform's keploy still judges as it did
+// before, while Linux runs the proven model. "" otherwise: on Linux, or when
+// the user set the switch either way.
+func PlatformNotice() string {
+	if defaultOn || pinned.Load() != unpinned {
+		return ""
+	}
+	if _, set, err := parse(os.Getenv(Env)); set || err != nil {
+		return ""
+	}
+	return fmt.Sprintf("the proven model, keploy's default on Linux, is not on by default on %s in this release: tests here are recorded and judged as in earlier releases", platformName(runtime.GOOS))
 }
 
 // CheckAgent compares an agent's health-check report of its switch (the
@@ -184,11 +253,14 @@ func CheckAgent(reported string) error {
 		ErrAgentSwitch, local, reported, AgentFlag, Env, match)
 }
 
-// parse reads a value of KEPLOY_PROVEN. The empty string is off and no error.
-func parse(v string) (bool, error) {
+// parse reads a value of KEPLOY_PROVEN: whether it says on, and whether it
+// says anything (set). The empty string, or blanks, says nothing, and is no
+// error.
+func parse(v string) (on, set bool, err error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
-		return false, nil
+		return false, false, nil
 	}
-	return strconv.ParseBool(v)
+	on, err = strconv.ParseBool(v)
+	return on, true, err
 }

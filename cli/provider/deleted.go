@@ -15,9 +15,10 @@ import (
 )
 
 // DeletedSetting is a setting the proven model deletes (design v14 U18). A
-// row is deleted by the change that lands what replaces it; until the flip,
-// under the switch, its flags are unknown flags, which the command refuses,
-// and its keploy.yml keys are ignored, with one notice for all of them.
+// row is deleted by the change that lands what replaces it: under the switch,
+// the default on Linux, its flags are unknown flags, which the command
+// refuses, and its keploy.yml keys are ignored, with one notice for all of
+// them.
 // Ignoring one never makes keploy looser: each deleted setting weakened
 // matching, skipped tests, or changed nothing keploy reads.
 type DeletedSetting struct {
@@ -100,7 +101,7 @@ func deletedSettings() []DeletedSetting {
 }
 
 // checkDeletedSettings refuses, under the proven switch, a deleted flag the
-// user gave, as the unknown flag it is at the flip, and ignores the deleted
+// user gave, as the unknown flag it is there, and ignores the deleted
 // keys keploy.yml or the environment (KEPLOY_<KEY>, viper's AutomaticEnv)
 // sets, saying once which and what each row is. A key at its zero value sets
 // nothing: an older keploy wrote its whole default config into keploy.yml,

@@ -15,7 +15,7 @@ import (
 // reaches for real, replaces every one, and a call to anything it does not
 // list is recorded and mocked. keploy mock, keploy record and keploy test
 // read mock.real, so under the switch their passthrough flags are refused,
-// as unknown flags will be at the flip, and their keploy.yml keys are
+// as unknown flags are, and their keploy.yml keys are
 // ignored, with one notice. keploy mock keeps its own --pass-through-ports
 // (the app's ingress port) until the ingress row (PR 4).
 

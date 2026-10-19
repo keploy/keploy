@@ -17,7 +17,7 @@ import (
 // makes no progress across the watchdog's count is not judged. A ceiling
 // after which replay fired its tests at an application that was not ready
 // has nothing left to bound. Under the switch the flag is refused, as an
-// unknown flag will be at the flip, and the keploy.yml key is ignored, with a
+// unknown flag is, and the keploy.yml key is ignored, with a
 // notice when it was set to anything but the default keploy writes.
 
 // readinessHint is what the refusal and the notice tell the user.
@@ -29,7 +29,7 @@ func refuseHealthPollTimeout(cmd *cobra.Command) error {
 		return nil
 	}
 	if f := cmd.Flags().Lookup("health-poll-timeout"); f != nil && f.Changed {
-		// A usage error (exit 8), as it will be an unknown flag at the flip.
+		// A usage error (exit 8), as an unknown flag is.
 		return utils.UsageError(fmt.Errorf("--health-poll-timeout is not used with the proven model (U18): %s", readinessHint))
 	}
 	return nil

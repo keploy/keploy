@@ -6875,8 +6875,8 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 
 // schemaMatch reports whether a response is compared by its body's schema
 // alone (test.schemaMatch, --schema-match). Never under the proven switch,
-// where every response body is compared (design v14 U18: the setting is
-// deleted at the flip): a schema match passes a value that changed, a field
+// where every response body is compared (design v14 U18 deletes the
+// setting): a schema match passes a value that changed, a field
 // that was added and a reorder of same-shaped elements, so a response that
 // differs would pass. The setting is then ignored, said once.
 func (r *Replayer) schemaMatch() bool {

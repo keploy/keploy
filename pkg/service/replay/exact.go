@@ -519,8 +519,12 @@ func (r *Replayer) noteMappingAlwaysUsed() {
 }
 
 // The settings exact serving deletes (design v14 §10, U18 rows of S12):
-// under the proven switch each is ignored, said once per run, and never
-// weakens a verdict. The flip deletes them.
+// under the proven switch keploy's flag handling refuses their flags and
+// clears their keys (cli/provider deleted.go, P220). These notes are for a
+// configuration that did not go through it (a program that builds keploy's
+// config itself): there each setting is ignored, said once per run, and never
+// weakens a verdict. With the switch off (Windows, macOS, KEPLOY_PROVEN=0)
+// each works as before.
 
 // statefulMocksDisabled is test.disableStatefulMocks, ignored under the
 // switch: a test's own mocks answer once each in recorded order, and the

@@ -3,6 +3,7 @@ package provenswitch
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -15,30 +16,134 @@ func unpin(t *testing.T) {
 	t.Cleanup(func() { pinned.Store(unpinned) })
 }
 
+// onPlatform runs the rest of the test as a process whose platform default
+// (PlatformDefault) is def: on, as on Linux, or off, as on Windows and macOS.
+func onPlatform(t *testing.T, def bool) {
+	t.Helper()
+	saved := defaultOn
+	defaultOn = def
+	t.Cleanup(func() { defaultOn = saved })
+}
+
+// Release 1 flips the proven model on by default on Linux only: Windows and
+// macOS keep today's default, off (P221), and WSL is Linux.
+func TestPlatformDefaultIsOnOnlyOnLinux(t *testing.T) {
+	for goos, want := range map[string]string{"linux": "Linux", "darwin": "macOS", "windows": "Windows", "freebsd": "freebsd"} {
+		if got := platformName(goos); got != want {
+			t.Fatalf("platformName(%q) = %q, want %q", goos, got, want)
+		}
+	}
+	for goos, want := range map[string]bool{"linux": true, "windows": false, "darwin": false, "freebsd": false} {
+		if got := PlatformDefault(goos); got != want {
+			t.Fatalf("PlatformDefault(%q) = %v, want %v", goos, got, want)
+		}
+	}
+	if defaultOn != PlatformDefault(runtime.GOOS) {
+		t.Fatalf("this process's default is %v; %s's is %v", defaultOn, runtime.GOOS, PlatformDefault(runtime.GOOS))
+	}
+}
+
+// An unset KEPLOY_PROVEN is the platform's default, here as in a keploy that
+// nothing configures; 0 and 1 decide on every platform, so a Linux user can
+// still run the old paths and a Windows or macOS user can still opt in, as
+// before.
 func TestOnReadsTheVariable(t *testing.T) {
 	unpin(t)
+	for _, linux := range []bool{true, false} {
+		onPlatform(t, linux)
+		for _, tc := range []struct {
+			value string
+			want  bool
+		}{
+			{"", linux},
+			{"  ", linux},
+			{"0", false},
+			{"false", false},
+			{"1", true},
+			{" 1 ", true},
+			{"true", true},
+			{"TRUE", true},
+			// Not read at all: the default here, and refused at startup by
+			// Validate.
+			{"yes", linux},
+			{"on", linux},
+			{"ture", linux},
+		} {
+			t.Run(tc.value, func(t *testing.T) {
+				t.Setenv(Env, tc.value)
+				if got := On(); got != tc.want {
+					t.Fatalf("platform default %v, %s=%q: On() = %v, want %v", linux, Env, tc.value, got, tc.want)
+				}
+				// OnFor reads a value it is handed by the same rule, whatever
+				// this process's own environment says.
+				t.Setenv(Env, "")
+				if got := OnFor(tc.value); got != tc.want {
+					t.Fatalf("platform default %v: OnFor(%q) = %v, want %v, as On reads it", linux, tc.value, got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// OnFor is an unpinned process's switch: a pin of this one does not decide it.
+func TestOnForIgnoresThisProcesssPin(t *testing.T) {
+	unpin(t)
+	onPlatform(t, true)
+	Pin(false)
+	if !OnFor("1") || !OnFor("") || OnFor("0") {
+		t.Fatalf("pinned off: OnFor(1), OnFor(\"\"), OnFor(0) = %v, %v, %v, want true, true (Linux's default), false", OnFor("1"), OnFor(""), OnFor("0"))
+	}
+}
+
+// With the switch at its default, the agent a Linux keploy starts is told to
+// run the proven paths, and the one a macOS or Windows keploy starts (in its
+// Linux container) is not: the agent's own platform never decides.
+func TestAgentArgsFollowTheCLIsPlatform(t *testing.T) {
+	unpin(t)
+	t.Setenv(Env, "")
+	onPlatform(t, true)
+	if got, want := AgentArgs(), []string{"--proven"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Linux, KEPLOY_PROVEN unset: AgentArgs() = %q, want %q", got, want)
+	}
+	onPlatform(t, false)
+	if got := AgentArgs(); got != nil {
+		t.Fatalf("macOS or Windows, KEPLOY_PROVEN unset: AgentArgs() = %q, want nil, the argv of before", got)
+	}
+}
+
+// Windows and macOS say once that they stay out of the flip, unless the user
+// set the switch either way; Linux says nothing.
+func TestPlatformNotice(t *testing.T) {
+	unpin(t)
 	for _, tc := range []struct {
-		value string
-		want  bool
+		linux  bool
+		value  string
+		notice bool
 	}{
-		{"", false},
-		{"0", false},
-		{"false", false},
-		{"1", true},
-		{" 1 ", true},
-		{"true", true},
-		{"TRUE", true},
-		// Not read at all: off here, and refused at startup by Validate.
-		{"yes", false},
-		{"on", false},
-		{"ture", false},
+		{true, "", false},
+		{true, "0", false},
+		{false, "", true},
+		{false, " ", true},
+		{false, "0", false},
+		{false, "1", false},
+		{false, "yes", false}, // refused by Validate, which says how to set it
 	} {
-		t.Run(tc.value, func(t *testing.T) {
-			t.Setenv(Env, tc.value)
-			if got := On(); got != tc.want {
-				t.Fatalf("%s=%q: On() = %v, want %v", Env, tc.value, got, tc.want)
-			}
-		})
+		onPlatform(t, tc.linux)
+		t.Setenv(Env, tc.value)
+		got := PlatformNotice()
+		if (got != "") != tc.notice {
+			t.Fatalf("platform default %v, %s=%q: PlatformNotice() = %q, want a notice: %v", tc.linux, Env, tc.value, got, tc.notice)
+		}
+		if got != "" && (!strings.Contains(got, "Linux") || !strings.Contains(got, platformName(runtime.GOOS))) {
+			t.Fatalf("the notice must name Linux, where the proven model is the default, and this platform (%s): %q", platformName(runtime.GOOS), got)
+		}
+	}
+	// An agent's switch is its flag's: it says nothing.
+	onPlatform(t, false)
+	t.Setenv(Env, "")
+	Pin(false)
+	if got := PlatformNotice(); got != "" {
+		t.Fatalf("a pinned agent: PlatformNotice() = %q, want none", got)
 	}
 }
 
@@ -47,10 +152,11 @@ func TestOnReadsTheVariable(t *testing.T) {
 // decides an agent's switch.
 func TestPinIgnoresTheVariable(t *testing.T) {
 	unpin(t)
+	onPlatform(t, false)
 	t.Setenv(Env, "")
 	Pin(true)
 	if !On() || State() != "on" {
-		t.Fatal("Pin(true) with KEPLOY_PROVEN unset: the agent must run the new paths the CLI asked for")
+		t.Fatal("Pin(true) with KEPLOY_PROVEN unset, off by default: the agent must run the new paths the CLI asked for")
 	}
 	unpin(t)
 	t.Setenv(Env, "1")
@@ -58,11 +164,21 @@ func TestPinIgnoresTheVariable(t *testing.T) {
 	if On() || State() != "off" {
 		t.Fatal("Pin(false) with KEPLOY_PROVEN=1 in the agent's environment: the agent must not run paths its CLI did not ask for")
 	}
+	// Nor with the variable unset on Linux, where unset is on: an agent a
+	// macOS or Windows keploy started in its Linux container runs that
+	// keploy's switch.
+	unpin(t)
+	onPlatform(t, true)
+	t.Setenv(Env, "")
+	Pin(false)
+	if On() || State() != "off" {
+		t.Fatal("Pin(false) on Linux with KEPLOY_PROVEN unset: the agent must not run paths its CLI did not ask for")
+	}
 }
 
 func TestAgentArgs(t *testing.T) {
 	unpin(t)
-	t.Setenv(Env, "")
+	t.Setenv(Env, "0")
 	if got := AgentArgs(); got != nil {
 		t.Fatalf("switch off: AgentArgs() = %q, want nil so the agent argv is byte-identical to before", got)
 	}
@@ -72,20 +188,25 @@ func TestAgentArgs(t *testing.T) {
 	}
 }
 
-// A mistyped value must not quietly mean "off".
+// A mistyped value must not quietly mean the default, on or off. The refusal
+// says how to leave the default on this platform.
 func TestValidateRefusesAValueItCannotRead(t *testing.T) {
 	unpin(t)
-	for _, ok := range []string{"", " ", "1", "0", "true", "false"} {
-		t.Setenv(Env, ok)
-		if err := Validate(); err != nil {
-			t.Fatalf("%s=%q refused: %v", Env, ok, err)
+	for _, linux := range []bool{true, false} {
+		onPlatform(t, linux)
+		for _, ok := range []string{"", " ", "1", "0", "true", "false"} {
+			t.Setenv(Env, ok)
+			if err := Validate(); err != nil {
+				t.Fatalf("%s=%q refused: %v", Env, ok, err)
+			}
 		}
-	}
-	for _, bad := range []string{"yes", "on", "ture", "2"} {
-		t.Setenv(Env, bad)
-		err := Validate()
-		if err == nil || !strings.Contains(err.Error(), Env) {
-			t.Fatalf("%s=%q: Validate() = %v, want a refusal naming the variable", Env, bad, err)
+		leave := map[bool]string{true: "set it to 0", false: "set it to 1"}[linux]
+		for _, bad := range []string{"yes", "on", "ture", "2"} {
+			t.Setenv(Env, bad)
+			err := Validate()
+			if err == nil || !strings.Contains(err.Error(), Env) || !strings.Contains(err.Error(), leave) {
+				t.Fatalf("platform default %v, %s=%q: Validate() = %v, want a refusal naming the variable that says to %s", linux, Env, bad, err, leave)
+			}
 		}
 	}
 }
@@ -96,12 +217,12 @@ func TestCheckAgent(t *testing.T) {
 		local, reported string
 		ok              bool
 	}{
-		{"", "off", true},
+		{"0", "off", true},
 		{"1", "on", true},
-		{"", "", true},      // switch off, an agent that predates the switch: today's pairing
+		{"0", "", true},     // switch off, an agent that predates the switch: today's pairing
 		{"1", "", false},    // switch on, an agent that cannot have it
 		{"1", "off", false}, // an agent started without --proven (k8s-proxy today)
-		{"", "on", false},   // an agent running paths this keploy does not
+		{"0", "on", false},  // an agent running paths this keploy does not
 	} {
 		t.Setenv(Env, tc.local)
 		err := CheckAgent(tc.reported)
@@ -160,6 +281,7 @@ func TestIgnoredEnv(t *testing.T) {
 	}{
 		{true, "1", false},  // the CLI ran as root and passed both: they agree
 		{true, "", false},   // nothing set
+		{false, "", false},  // nothing set, though unset is on on Linux
 		{false, "1", true},  // an agent started without --proven, the variable on
 		{true, "0", true},   // the reverse
 		{true, "yes", true}, // unreadable, and ignored
@@ -177,6 +299,7 @@ func TestIgnoredEnv(t *testing.T) {
 // Unpin hands the switch back to KEPLOY_PROVEN.
 func TestUnpin(t *testing.T) {
 	t.Cleanup(Unpin)
+	onPlatform(t, false)
 	t.Setenv(Env, "1")
 	Pin(false)
 	if On() {
