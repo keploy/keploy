@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // composeDocker is a docker daemon holding one app container: a kill with
@@ -411,5 +414,190 @@ func TestAComposeRecordingsStopSaysItsKill(t *testing.T) {
 		if got := a.takeSetEndKill(); (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
 			t.Fatalf("%s: the run says %q, want %q", tc.mode, got, tc.want)
 		}
+	}
+}
+
+// An up that returned because keploy stopped the app itself holds the run
+// until keploy's teardown ends it, or the app keploy started again since
+// halts: an up attached to the app alone returns as soon as the app has
+// stopped, and the run, so ended, took the project down, keploy's agent with
+// it, while the recording was draining it. An up that did not return on
+// keploy's stop does not wait.
+func TestComposeAwaitTeardownHoldsTheRunAfterKeploysStop(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	closed := make(chan struct{})
+	close(closed)
+	exited := func(status string, code int) map[string]container.InspectResponse {
+		return map[string]container.InspectResponse{"app": {ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: status, ExitCode: code}}}}
+	}
+	for _, tc := range []struct {
+		name     string
+		stopping bool
+		halted   bool
+		app      map[string]container.InspectResponse
+		ctx      context.Context
+		halt     <-chan struct{}
+		want     composeTeardownWait
+		ended    int
+	}{
+		{"keploy did not stop the app, which runs on", false, false, nil, cancelled, nil, composeNoWait, 0},
+		{"keploy did not stop the app, which compose only created", false, false, exited("created", 0), cancelled, nil, composeNoWait, 0},
+		{"the app exited on its own, before the watch took it", false, false, exited("exited", 3), context.Background(), nil, composeHaltCame, 1},
+		{"the app halted", true, true, nil, cancelled, nil, composeNoWait, 0},
+		{"keploy's teardown ends the run", true, false, nil, cancelled, nil, composeTeardownCame, 0},
+		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &App{logger: zap.NewNop(), container: "app", docker: &inspectRecorder{inspects: tc.app}}
+			a.composeApp.stopping.Store(tc.stopping)
+			if tc.halted {
+				a.composeApp.halted.Store(&composeHalt{exitCode: 1})
+			}
+			ended := 0
+			if got := a.composeAwaitTeardown(tc.ctx, tc.halt, func() { ended++ }); got != tc.want || ended != tc.ended {
+				t.Fatalf("composeAwaitTeardown = %d, ending the run %d times; want %d, %d", got, ended, tc.want, tc.ended)
+			}
+			if tc.ended > 0 {
+				if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+					t.Fatalf("the halt kept is %+v; want the app's exit, code 3", h)
+				}
+			}
+		})
+	}
+}
+
+// The run of `docker compose up app` (attached to the app alone) under the
+// switch: the up returns once keploy has stopped the app itself, and the run
+// holds the project up, keploy's agent in it, until keploy's teardown ends
+// the run (its context, which descends from keploy's own: a signal to keploy
+// ends it too), or until the app keploy started again since halts. Only then
+// is the project taken down. Before, the run ended with the up, and its
+// deferred down took the agent down mid-drain.
+func TestRunHoldsTheProjectAfterKeploysStopOfAnAppAttachedAlone(t *testing.T) {
+	for _, end := range []string{"keploy's teardown", "a halt of the app keploy started again", "the app's own exit, before the watch takes it"} {
+		t.Run(end, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			argvLog := stubDockerCLI(t, "", 0)
+			upEnds := filepath.Join(t.TempDir(), "app-stopped")
+			t.Setenv("KEPLOY_STUB_UP_WAIT_FILE", upEnds)
+			core, logs := observer.New(zap.DebugLevel)
+			rec := &inspectRecorder{events: make(chan events.Message, 1)}
+			a := &App{
+				logger:          zap.New(core),
+				docker:          rec,
+				kind:            utils.DockerCompose,
+				cmd:             "docker compose -f /tmp/keploy-compose.yaml up app",
+				composeFile:     "/tmp/keploy-compose.yaml",
+				keployContainer: "keploy-v3",
+				container:       "app",
+				composeServices: []string{"app", "keploy-agent"},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ran := make(chan models.AppError, 1)
+			go func() { ran <- a.run(ctx) }()
+
+			for !strings.Contains(recordedLog(t, argvLog), "ARG up") {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if end == "the app's own exit, before the watch takes it" {
+				// The app exits on its own (no die event reaches the
+				// watch), and the up attached to it returns: the container
+				// says it exited, with its code.
+				rec.mu.Lock()
+				rec.inspects = map[string]container.InspectResponse{"app": {
+					ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited", ExitCode: 3}},
+					Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": "p1"}},
+				}}
+				rec.mu.Unlock()
+				if err := os.WriteFile(upEnds, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				appErr := <-ran
+				if appErr.ExitCode != 3 {
+					t.Fatalf("the run ended %+v; want ended by the app's own exit, its exit code 3", appErr)
+				}
+				if !rec.listedProject("p1") {
+					t.Fatal("the run did not stop the app's project, as the watch would on the halt")
+				}
+				if !strings.Contains(recordedLog(t, argvLog), "ARG down") {
+					t.Fatalf("the project was not taken down once the run ended:\n%s", recordedLog(t, argvLog))
+				}
+				return
+			}
+			// keploy stops the app (StopComposeApp marks it stopping before
+			// its SIGINT), and the up attached to it returns.
+			a.composeApp.stopping.Store(true)
+			if err := os.WriteFile(upEnds, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for logs.FilterMessageSnippet("the project stays up for keploy's teardown").Len() == 0 {
+				select {
+				case appErr := <-ran:
+					t.Fatalf("the run ended with the up, before keploy's teardown (%+v):\n%s", appErr, recordedLog(t, argvLog))
+				default:
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if strings.Contains(recordedLog(t, argvLog), "ARG down") {
+				t.Fatalf("the project was taken down while the run held it for keploy's teardown:\n%s", recordedLog(t, argvLog))
+			}
+
+			var appErr models.AppError
+			if end == "keploy's teardown" {
+				cancel()
+				appErr = <-ran
+				if appErr.AppErrorType != models.ErrCtxCanceled {
+					t.Fatalf("the run ended %+v; want ended by keploy's teardown", appErr)
+				}
+			} else {
+				// keploy started the app again (StartComposeApp), and it
+				// exits on its own: the watch ends the run on the halt.
+				a.composeApp.stopping.Store(false)
+				rec.events <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie,
+					Actor: events.Actor{ID: "app", Attributes: map[string]string{"exitCode": "3"}}}
+				appErr = <-ran
+				if appErr.ExitCode != 3 {
+					t.Fatalf("the run ended %+v; want ended by the app's halt, its exit code 3", appErr)
+				}
+			}
+			if !strings.Contains(recordedLog(t, argvLog), "ARG down") {
+				t.Fatalf("the project was not taken down once the run ended:\n%s", recordedLog(t, argvLog))
+			}
+		})
+	}
+}
+
+// The run's end on a halt runs once, though the watch and the run, on an up
+// that returned on the app's own exit, both come to it.
+func TestComposeHaltEndRunsOnce(t *testing.T) {
+	rec := &inspectRecorder{inspects: map[string]container.InspectResponse{"app": {
+		ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited", ExitCode: 3}},
+		Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": "p1"}},
+	}}}
+	a := &App{logger: zap.NewNop(), container: "app", docker: rec}
+	halt := make(chan struct{})
+	downs := 0
+	end := a.composeHaltEnd(context.Background(), halt, func() { downs++ })
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); end() }()
+	}
+	wg.Wait()
+	select {
+	case <-halt:
+	default:
+		t.Fatal("the halt was not said")
+	}
+	if !a.composeApp.stopping.Load() {
+		t.Fatal("the app's exit is still taken for a halt after the run's end")
+	}
+	rec.mu.Lock()
+	lists := len(rec.listedLabels)
+	rec.mu.Unlock()
+	if lists != 1 || downs != 0 {
+		t.Fatalf("the project was stopped %d times (and taken down %d); want once, stopped", lists, downs)
 	}
 }

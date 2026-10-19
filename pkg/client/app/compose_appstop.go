@@ -160,6 +160,98 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	return true
 }
 
+// composeHaltEnd is the run's end on a halt of the app: halt is closed, the
+// app's exit is no longer taken for one (stopping), and the project is
+// stopped, as compose's abort stopped it, or taken down (composeDown) when
+// keploy cannot tell it. Both the watch and the run, on an up that returned on
+// the app's own exit, may come to it at once: it runs once.
+func (a *App) composeHaltEnd(ctx context.Context, halt chan struct{}, composeDown func()) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(halt)
+			a.composeApp.stopping.Store(true)
+			if !a.stopComposeProject(context.WithoutCancel(ctx)) {
+				composeDown()
+			}
+		})
+	}
+}
+
+// composeTeardownWait is how composeAwaitTeardown ended.
+type composeTeardownWait int
+
+const (
+	// composeNoWait: the up did not return on keploy's stop of the app.
+	composeNoWait composeTeardownWait = iota
+	// composeTeardownCame: keploy's teardown ended the run.
+	composeTeardownCame
+	// composeHaltCame: the app, started again by keploy since, exited on
+	// its own.
+	composeHaltCame
+)
+
+// composeAwaitTeardown holds the run when its `compose up` returned because
+// keploy stopped the app itself (stopping, with no halt): until keploy's
+// teardown ends the run (ctx), or the app keploy started again since halts
+// (halt, closed by end, the watch's end). An up attached to the app alone
+// (`docker compose up app`) returns as soon as the app has stopped, and the
+// run, so ended, took the project down (its deferred ComposeDown) with
+// keploy's agent in it, while the recording was still draining what the agent
+// had captured, or before the replay had read the set's end from it.
+// Compose's own up, its abort flags dropped, keeps the project up only while
+// something attached to it runs; under the switch the project's end is
+// keploy's: the watch's on a halt, the teardown's otherwise.
+//
+// Such an up also returns on the app's own exit, at once, which the watch may
+// not have taken yet (its event, its inspect): the container says, as the
+// watch would, and the run ends the project as the watch would (end, which
+// runs once). Left to the watch, the run ended as a clean stop, and its down
+// took keploy's agent down mid-drain, or the halt's exit code was lost.
+func (a *App) composeAwaitTeardown(ctx context.Context, halt <-chan struct{}, end func()) composeTeardownWait {
+	if a.composeApp.halted.Load() != nil {
+		return composeNoWait
+	}
+	if !a.composeApp.stopping.Load() {
+		h, exited := a.composeAppExited(ctx)
+		if !exited {
+			// Not an exit of the app (an up that failed leaves it only
+			// created, or the container cannot be read): the up's own end
+			// stands, as before.
+			return composeNoWait
+		}
+		a.composeApp.halted.CompareAndSwap(nil, &h)
+		a.logger.Info("the application's container exited, and keploy had not stopped it: ending the run",
+			zap.String("container", a.container), zap.Int("exitCode", h.exitCode))
+		end()
+		return composeHaltCame
+	}
+	a.logger.Debug("docker compose up returned on keploy's stop of the application; the project stays up for keploy's teardown",
+		zap.String("container", a.container))
+	select {
+	case <-ctx.Done():
+		return composeTeardownCame
+	case <-halt:
+		return composeHaltCame
+	}
+}
+
+// composeAppExited is the app's container's exit, when it has exited: not
+// one compose only created (an up that failed leaves it so), nor one that
+// runs, nor one that cannot be read.
+func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
+	ictx, cancel := context.WithTimeout(ctx, dockerInspectBudget)
+	defer cancel()
+	info, err := a.docker.ContainerInspect(ictx, a.container)
+	if err != nil || info.ContainerJSONBase == nil || info.State == nil || info.State.Running {
+		return composeHalt{}, false
+	}
+	if st := info.State.Status; st != "exited" && st != "dead" {
+		return composeHalt{}, false
+	}
+	return composeHalt{exitCode: info.State.ExitCode}, true
+}
+
 // stopComposeProject stops every container of the app's compose project that
 // still runs, keploy's agent among them, as compose's --abort-on-container-exit
 // stopped them when the app exited: each is asked to stop (SIGTERM), with its

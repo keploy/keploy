@@ -2015,6 +2015,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// unaffected by this run-local guard.
 	var downOnce sync.Once
 	composeDown := func() { downOnce.Do(a.ComposeDown) }
+	// composeHaltSeen is closed when the run is ended on a halt
+	// (composeStopsTheApp), by composeEnd, the watch's end, which the run
+	// itself takes too on an up that returned on the app's own exit; nil
+	// otherwise.
+	var composeHaltSeen <-chan struct{}
+	var composeEnd func()
 	if a.kind == utils.DockerCompose {
 		defer composeDown()
 		// Deferred after the teardown so that it runs BEFORE it: the agent's
@@ -2027,12 +2033,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if composeStopsTheApp() {
 			a.composeApp.halted.Store(nil)
 			a.composeApp.stopping.Store(false)
-			stopWatch := a.watchComposeApp(ctx, func() {
-				a.composeApp.stopping.Store(true)
-				if !a.stopComposeProject(context.WithoutCancel(ctx)) {
-					composeDown()
-				}
-			})
+			halt := make(chan struct{})
+			composeHaltSeen = halt
+			composeEnd = a.composeHaltEnd(ctx, halt, composeDown)
+			stopWatch := a.watchComposeApp(ctx, composeEnd)
 			defer stopWatch()
 		}
 	}
@@ -2322,6 +2326,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		cmdErr = a.retryComposeUp(ctx, func() utils.CmdError { return executeApp(runCmd, runEnv) })
+	}
+
+	// Under the switch the project is keploy's to take down: an up that
+	// returned because keploy stopped the app itself (a set's end, the
+	// recording's) has not ended the run (composeAwaitTeardown).
+	if a.kind == utils.DockerCompose && composeStopsTheApp() {
+		a.composeAwaitTeardown(ctx, composeHaltSeen, composeEnd)
 	}
 
 	if cmdErr.Err != nil {
