@@ -278,6 +278,8 @@ func TestReadBack(t *testing.T) {
 		wrote("mock-5", t0, order, "body.kind", String, "pending", "pending"),
 		wrote("mock-6", t0, order, "body.name", String, "日本", "韓国"),
 		wrote("mock-9", t0, "orders\x00o-live-2", "body.code2", String, "ZZZZ-1111", "YYYY-2222"),
+		// A write the adapter names no record of: no read is linked to it.
+		wrote("mock-10", t0, "", "body.ref", String, "REF-1", "REF-9"),
 		named, unknown,
 	}
 	for _, c := range []struct {
@@ -298,6 +300,8 @@ func TestReadBack(t *testing.T) {
 		{"ZZZZ-1111", String, order, "", ""},
 		{"BJBM-NZBS", String, "orders\x00o-live-2", "", ""},
 		{"BJBM-NZBS", String, "", "", ""},
+		{"REF-1", String, "", "", ""},
+		{"REF-1", String, order, "", ""},
 		{"", String, order, "", ""},
 	} {
 		p, ok := ReadBack(Leaf{Path: "body.value.x", Type: c.typ, Value: c.value}, c.record, earlier)
