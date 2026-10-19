@@ -220,7 +220,9 @@ func TestAValueComesFromTheTestsOwnCallBeforeTheRuns(t *testing.T) {
 }
 
 // A request place that holds no variable, or whose live value is unknown,
-// does not make a start-up exchange the run's.
+// does not make a start-up exchange the run's; nor does a drift in its
+// answer alone, at a place a variable can hold: only what the application
+// sent is a value it made. A request place that holds one and drifted does.
 func TestAStartUpExchangeDriftsOnlyAtAVariablePlace(t *testing.T) {
 	tr := NewTracker()
 	t0 := time.Unix(1_792_000_000, 0)
@@ -228,9 +230,16 @@ func TestAStartUpExchangeDriftsOnlyAtAVariablePlace(t *testing.T) {
 		{Side: Request, Leaf: Leaf{Path: "request{names}", Type: Keys, Value: "a,b"}, Live: "a,b,c"},
 		{Side: Request, Leaf: Leaf{Path: "body.x", Type: String, Value: "rec"}, Live: "", Place: "body.x"},
 	}})
+	tr.Served(0, Earlier{Mock: "mock-2", At: t0.Add(time.Second), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.session", Type: String, Value: "s-rec"}, Live: "s-live", Place: "body.session"},
+	}})
+	tr.Served(0, Earlier{Mock: "mock-3", At: t0.Add(2 * time.Second), Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.boot", Type: String, Value: "b-rec"}, Live: "b-live", Place: "body.boot"},
+	}})
 	tr.Begin()
-	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
-		t.Fatalf("an exchange that drifted at no variable place is the run's: %+v", earlier)
+	_, earlier, _, _ := tr.Test()
+	if len(earlier) != 1 || earlier[0].Mock != "mock-3" || !earlier[0].Run {
+		t.Fatalf("the run's exchanges are %+v; want only mock-3, which sent a drifted value at a variable place", earlier)
 	}
 }
 
@@ -280,6 +289,8 @@ func TestReadBack(t *testing.T) {
 		wrote("mock-9", t0, "orders\x00o-live-2", "body.code2", String, "ZZZZ-1111", "YYYY-2222"),
 		// A write the adapter names no record of: no read is linked to it.
 		wrote("mock-10", t0, "", "body.ref", String, "REF-1", "REF-9"),
+		// A write at no place a variable can hold: nothing to bind there.
+		{Mock: "mock-11", At: t0, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "NOPLACE-1"}, Live: "NOPLACE-9", Written: true, Record: order}}},
 		named, unknown,
 	}
 	for _, c := range []struct {
@@ -302,6 +313,7 @@ func TestReadBack(t *testing.T) {
 		{"BJBM-NZBS", String, "", "", ""},
 		{"REF-1", String, "", "", ""},
 		{"REF-1", String, order, "", ""},
+		{"NOPLACE-1", String, order, "", ""},
 		{"", String, order, "", ""},
 	} {
 		p, ok := ReadBack(Leaf{Path: "body.value.x", Type: c.typ, Value: c.value}, c.record, earlier)
