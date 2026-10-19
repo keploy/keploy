@@ -61,7 +61,7 @@ func TestCompareHTTPRespForReplay_ProvenSwitchFailsAnAdditiveChange(t *testing.T
 	if !qualifiesForHTTPResponseSchemaAdditionPass(result) {
 		t.Fatalf("fixture must be an additive Low-risk diff, else this proves nothing: %+v", result.FailureInfo)
 	}
-	const msg = "not auto-passing an additive response-schema change: every response field is asserted (KEPLOY_PROVEN=1)"
+	const msg = "not auto-passing an additive response-schema change: every response field is asserted"
 	if got := logs.FilterMessage(msg).Len(); got != 1 {
 		t.Fatalf("the refusal must be logged exactly once per test case, got %d", got)
 	}
@@ -114,13 +114,18 @@ func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 				if !on {
 					return
 				}
-				// What is said is the verdict, and the switch is named as
-				// what keeps the test FAILED, not a flag never passed. (The
+				// What is said is the verdict, and the proven model is named
+				// as what keeps the test FAILED, not a flag never passed. (The
 				// streamed test here also left its recorded call unconsumed,
-				// which O-2 names as the reason; either way it is the switch.)
+				// which O-2 names as the reason: a proven-model veto either
+				// way.)
 				said := logs.FilterMessageSnippet("mock mapping mismatch detected").All()
-				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || !strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), provenswitch.Env+"=1") || strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), "--strict-failure") {
-					t.Errorf("the mismatch was said %+v; want once, as FAILED, with %s=1 as the reason", said, provenswitch.Env)
+				reason := ""
+				if len(said) == 1 {
+					reason = fmt.Sprint(said[0].ContextMap()["reason"])
+				}
+				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || (reason != "the proven model" && reason != vetoUnconsumedTestMock) {
+					t.Errorf("the mismatch was said %+v; want once, as FAILED, with the proven model (or, streamed, its unconsumed-mock veto) as the reason", said)
 				}
 			})
 		}
@@ -229,7 +234,7 @@ func TestAMissVetoesTheObsoleteDemotionWithTheSwitchOff(t *testing.T) {
 					return
 				}
 				said := logs.FilterMessageSnippet("mock mapping mismatch detected").All()
-				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != vetoUnmatchedCallSwitchOff {
+				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != vetoUnmatchedCall {
 					t.Fatalf("the mismatch was said %+v; want once, as FAILED, for the miss", said)
 				}
 				if n := len(logs.FilterMessageSnippet("obsolete").All()) - len(logs.FilterMessageSnippet("not obsolete").All()); n != 0 {

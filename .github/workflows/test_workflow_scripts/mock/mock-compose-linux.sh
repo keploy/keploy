@@ -263,8 +263,8 @@ for verb in record replay; do
   RC=$?
   echo "$verb under the switch exit=$RC"
   [ "$RC" -eq 1 ] || { echo "FAIL: under the switch a compose $verb should be refused with exit 1, got $RC"; tail -20 "proven-$verb.log"; FAIL=1; }
-  WHY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
-  [ "$verb" = replay ] && WHY="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
+  WHY="keploy mock record under the proven model runs the test command natively in this release"
+  [ "$verb" = replay ] && WHY="keploy mock replay under the proven model needs a keploy build that judges each test (keploy enterprise)"
   grep -qF "$WHY" "proven-$verb.log" || { echo "FAIL: the refused compose $verb does not say: $WHY"; FAIL=1; }
   no_project_started "proven-$verb.log" "a compose $verb under the switch"
 done

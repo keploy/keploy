@@ -34,7 +34,7 @@ func refusePassthroughFlags(cmd *cobra.Command, names ...string) error {
 	}
 	for _, n := range names {
 		if f := cmd.Flags().Lookup(n); f != nil && f.Changed {
-			return utils.UsageError(fmt.Errorf("--%s is not used with %s (U18): %s", n, provenswitch.Env, passthroughHint))
+			return utils.UsageError(fmt.Errorf("--%s is not used with the proven model (U18): %s", n, passthroughHint))
 		}
 	}
 	return nil
@@ -76,5 +76,5 @@ func dropPassthroughKeys(logger *zap.Logger, cfg *config.Config, cmdName string)
 		return
 	}
 	fields = append(fields, zap.Strings("ignored", ignored))
-	logger.Warn(fmt.Sprintf("keploy.yml settings that made calls live are ignored under %s (U18): %s", provenswitch.Env, passthroughHint), fields...)
+	logger.Warn(fmt.Sprintf("keploy.yml settings that made calls live are ignored under the proven model (U18): %s", passthroughHint), fields...)
 }

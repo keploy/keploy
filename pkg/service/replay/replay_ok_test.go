@@ -55,7 +55,7 @@ func TestSchemaMatchIsIgnoredUnderTheProvenSwitch(t *testing.T) {
 					t.Fatal("KEPLOY_PROVEN=1: --schema-match passed a response that differs")
 				}
 			}
-			if n := logs.FilterMessage("schemaMatch (--schema-match) is ignored under KEPLOY_PROVEN: every response body is compared, value by value").Len(); n != 1 {
+			if n := logs.FilterMessage("schemaMatch (--schema-match) is ignored under the proven model: every response body is compared, value by value").Len(); n != 1 {
 				t.Fatalf("the ignored setting was said %d times, want once", n)
 			}
 		})

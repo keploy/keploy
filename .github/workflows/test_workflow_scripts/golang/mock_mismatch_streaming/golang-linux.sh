@@ -245,7 +245,7 @@ if grep "WARNING: DATA RACE" test_logs_proven.txt; then
     docker compose down 2>/dev/null || true
     exit 1
 fi
-if ! grep -q "staging switch is on in this agent" test_logs_proven.txt; then
+if ! grep -q "the proven model is on in this agent" test_logs_proven.txt; then
     echo "::error::the agent never said the proven switch is on: KEPLOY_PROVEN=1 did not reach it as --proven"
     grep -n "agent" test_logs_proven.txt | head -20
     docker compose down 2>/dev/null || true

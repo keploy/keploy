@@ -432,7 +432,7 @@ rm -f ran.txt
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "sh -c 'echo ran > ran.txt; python3 -m pytest -q -p no:cacheprovider test_api.py'" --name e2e-proven --disable-tele 2>&1 | tee rep-proven.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 1 ] || { echo "FAIL: under the switch this build should refuse the replay with exit 1, got $RC"; FAIL=1; }
-grep -q "keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)" rep-proven.log ||
+grep -q "keploy mock replay under the proven model needs a keploy build that judges each test (keploy enterprise)" rep-proven.log ||
   { echo "FAIL: the refused replay does not say it needs a build that judges each test"; FAIL=1; }
 [ -e ran.txt ] && { echo "FAIL: under the switch the refused replay ran the test command"; FAIL=1; }
 R=keploy/e2e-proven/last-replay.yaml

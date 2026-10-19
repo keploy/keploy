@@ -232,7 +232,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		// Under the switch each test is served exactly its own mocks, the one
 		// path that decides (design v14 §5.2): app starts are retired, and no
 		// per-start table may widen what a test is served.
-		http.Error(w, "under KEPLOY_PROVEN this keploy agent serves no per-start table: app starts are retired", http.StatusUnprocessableEntity)
+		http.Error(w, "under the proven model this keploy agent serves no per-start table: app starts are retired", http.StatusUnprocessableEntity)
 		return
 	}
 	if req.Sets != nil {
@@ -310,7 +310,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		writeScopeError(w, r, &models.ScopeError{
 			Status:  http.StatusUnprocessableEntity,
 			Code:    models.ScopeErrBadRequest,
-			Message: "a run list is not used with KEPLOY_PROVEN: keploy skips only the tests verdicts.yaml quarantines",
+			Message: "a run list is not used with the proven model: keploy skips only the tests verdicts.yaml quarantines",
 			Remedy:  "send the skip map, or nothing",
 		})
 		return
@@ -333,7 +333,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 			Status:  http.StatusUnprocessableEntity,
 			Code:    models.ScopeErrUpgradeIntegration,
 			Message: "this keploy agent does not run the proven model, so it cannot skip the tests verdicts.yaml lists",
-			Remedy:  "start keploy with KEPLOY_PROVEN=1",
+			Remedy:  "run keploy with the proven model on (its default on Linux, KEPLOY_PROVEN=1 elsewhere) and let it start its agent: an agent takes the switch only from the keploy that starts it",
 		})
 		return
 	}

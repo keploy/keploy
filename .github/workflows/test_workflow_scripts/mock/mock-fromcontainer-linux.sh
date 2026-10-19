@@ -162,7 +162,7 @@ BEFORE="$(identity)"
 KEPLOY_PROVEN=1 "$RECORD_BIN" mock record --from-container "$APP" --name fc-proven --path . --local --disable-ansi > record-proven.log 2>&1
 RC=$?
 [ "$RC" -eq 1 ] || fail "under the switch --from-container should be refused with exit 1, got $RC"
-sudo grep -aqF "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" record-proven.log ||
+sudo grep -aqF "keploy mock record under the proven model runs the test command natively in this release" record-proven.log ||
   fail "the refused --from-container record does not say this release runs the test command natively"
 AFTER="$(identity)"
 [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ] ||

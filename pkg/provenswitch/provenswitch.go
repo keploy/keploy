@@ -153,7 +153,7 @@ func AgentArgs() []string {
 // validate their flags there, and k8s-proxy, do not refuse it yet.
 func Validate() error {
 	if _, err := parse(os.Getenv(Env)); err != nil {
-		return fmt.Errorf("%s=%q is not a value keploy reads: set it to 1 to turn the proven model's staging switch on, or unset it", Env, os.Getenv(Env))
+		return fmt.Errorf("%s=%q is not a value keploy reads: set it to 1 to turn the proven model on, or unset it", Env, os.Getenv(Env))
 	}
 	return nil
 }
@@ -170,12 +170,18 @@ func CheckAgent(reported string) error {
 	case reported == "" && local == "off":
 		return nil
 	case reported == "":
-		return fmt.Errorf("%w: the switch is on in this keploy (%s) and its agent reports none, so the agent predates it; run the agent of this keploy version", ErrAgentSwitch, Env)
+		return fmt.Errorf("%w: the proven model is on in this keploy and its agent reports no switch, so the agent predates it: run the agent of this keploy version, or set %s=0 to run without the proven model", ErrAgentSwitch, Env)
 	case reported == local:
 		return nil
 	}
-	return fmt.Errorf("%w: the switch is %s in this keploy (%s) and %s in its agent. An agent takes it only from the --%s flag of the keploy that starts it; an agent started by anything else (k8s-proxy does not pass the flag yet) or by another keploy version has its own",
-		ErrAgentSwitch, local, Env, reported, AgentFlag)
+	// The way on: this keploy's own agent, or this keploy run with the
+	// switch its agent has.
+	match := "0"
+	if reported == "on" {
+		match = "1"
+	}
+	return fmt.Errorf("%w: the proven model is %s in this keploy and %s in its agent. An agent takes its switch only from the --%s flag of the keploy that starts it; an agent started by anything else (k8s-proxy does not pass the flag yet) or by another keploy version has its own. Let this keploy start its agent, or set %s=%s to run this keploy as its agent runs",
+		ErrAgentSwitch, local, reported, AgentFlag, Env, match)
 }
 
 // parse reads a value of KEPLOY_PROVEN. The empty string is off and no error.

@@ -29,7 +29,7 @@ func healthPollCmd(t *testing.T, args ...string) *cobra.Command {
 func TestUnderTheSwitchTheHealthPollTimeoutFlagIsRefused(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	err := refuseHealthPollTimeout(healthPollCmd(t, "--health-poll-timeout", "60s"))
-	if err == nil || !strings.Contains(err.Error(), "--health-poll-timeout is not used with "+provenswitch.Env+" (U18)") || !strings.Contains(err.Error(), "readiness event") {
+	if err == nil || !strings.Contains(err.Error(), "--health-poll-timeout is not used with the proven model (U18)") || !strings.Contains(err.Error(), "readiness event") {
 		t.Fatalf("refuseHealthPollTimeout = %v, want the U18 refusal", err)
 	}
 	if !errors.Is(err, utils.ErrUsage) {

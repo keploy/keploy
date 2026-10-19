@@ -198,7 +198,7 @@ func TestRunOnlyIsRefusedUnderTheSwitch(t *testing.T) {
 	cfg.Mock.OnMiss = "fail"
 	cfg.Mock.RunOnly = []string{"TestA"}
 	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
-	require.ErrorContains(t, err, "--run-only is not used with KEPLOY_PROVEN")
+	require.ErrorContains(t, err, "--run-only is not used with the proven model")
 }
 
 // A build that does not judge a replay refuses one under the switch: its
@@ -289,14 +289,14 @@ func TestComposeIsRefusedUnderTheSwitch(t *testing.T) {
 	provenOn(t)
 	instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	err := replayErr(t, instr, utils.DockerCompose)
-	require.ErrorContains(t, err, "keploy mock replay with KEPLOY_PROVEN runs the test command natively")
+	require.ErrorContains(t, err, "keploy mock replay under the proven model runs the test command natively")
 	runs, hits := instr.counts()
 	require.Zero(t, runs, "the compose project was started")
 	require.Zero(t, hits, "the agent was waited for")
 
 	rec := &runnerInstr{composeInstr: newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})}
 	err = recordSet(t, rec, nil, func(c *config.Config) { c.CommandType = string(utils.DockerCompose) })
-	require.ErrorContains(t, err, "keploy mock record with KEPLOY_PROVEN runs the test command natively")
+	require.ErrorContains(t, err, "keploy mock record under the proven model runs the test command natively")
 	opts, _ := rec.setup()
 	require.Zero(t, opts.Mode, "the agent was set up")
 }
@@ -321,7 +321,7 @@ func TestOnMissOtherThanFailIsRefusedUnderTheSwitch(t *testing.T) {
 	for _, policy := range []string{"passthrough", "record"} {
 		instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 		err := replayErrOnMiss(t, instr, utils.Native, policy)
-		require.ErrorContains(t, err, "--on-miss "+policy+" is not used with KEPLOY_PROVEN")
+		require.ErrorContains(t, err, "--on-miss "+policy+" is not used with the proven model")
 		runs, _ := instr.counts()
 		require.Zero(t, runs)
 	}
@@ -484,7 +484,7 @@ func TestStrictIsRefusedUnderTheSwitch(t *testing.T) {
 	cfg.Mock.OnMiss = "fail"
 	cfg.Mock.Strict = true
 	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
-	require.ErrorContains(t, err, "--strict is not used with KEPLOY_PROVEN")
+	require.ErrorContains(t, err, "--strict is not used with the proven model")
 }
 
 // A record that captured no call names keploy's Go integration under the

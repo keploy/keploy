@@ -30,7 +30,7 @@ func refuseHealthPollTimeout(cmd *cobra.Command) error {
 	}
 	if f := cmd.Flags().Lookup("health-poll-timeout"); f != nil && f.Changed {
 		// A usage error (exit 8), as it will be an unknown flag at the flip.
-		return utils.UsageError(fmt.Errorf("--health-poll-timeout is not used with %s (U18): %s", provenswitch.Env, readinessHint))
+		return utils.UsageError(fmt.Errorf("--health-poll-timeout is not used with the proven model (U18): %s", readinessHint))
 	}
 	return nil
 }
@@ -43,7 +43,7 @@ func dropHealthPollTimeout(logger *zap.Logger, cfg *config.Config) {
 		return
 	}
 	if t := cfg.Test.HealthPollTimeout; t > 0 && t != config.DefaultHealthPollTimeout {
-		logger.Warn(fmt.Sprintf("keploy.yml test.healthPollTimeout is ignored under %s (U18): %s", provenswitch.Env, readinessHint),
+		logger.Warn(fmt.Sprintf("keploy.yml test.healthPollTimeout is ignored under the proven model (U18): %s", readinessHint),
 			zap.Duration("healthPollTimeout", t))
 	}
 	cfg.Test.HealthPollTimeout = 0

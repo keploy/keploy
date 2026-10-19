@@ -121,6 +121,27 @@ func TestCheckAgent(t *testing.T) {
 		if tc.reported != "" && !strings.Contains(err.Error(), tc.reported+" in its agent") {
 			t.Fatalf("the refusal must name the agent's side (%s): %v", tc.reported, err)
 		}
+		// It names the proven model, not a variable the user may never
+		// have set (P222).
+		if strings.Contains(err.Error(), "("+Env+")") {
+			t.Fatalf("the refusal tags itself with %s: %v", Env, err)
+		}
+		// An agent that predates the switch is a version mismatch: the
+		// remedy is this version's agent, or the run without the model.
+		if tc.reported == "" && (!strings.Contains(err.Error(), "run the agent of this keploy version") || !strings.Contains(err.Error(), Env+"=0")) {
+			t.Fatalf("the refusal of an agent that predates the switch gives no way on: %v", err)
+		}
+		// An agent whose switch is the other one: this keploy starting its
+		// agent, or this keploy run with the agent's switch, goes on.
+		if tc.reported != "" {
+			match := Env + "=0"
+			if tc.reported == "on" {
+				match = Env + "=1"
+			}
+			if !strings.Contains(err.Error(), "Let this keploy start its agent") || !strings.Contains(err.Error(), match) {
+				t.Fatalf("the refusal of an agent with the other switch gives no way on (want %s): %v", match, err)
+			}
+		}
 	}
 }
 

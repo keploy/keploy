@@ -401,7 +401,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// cmd.Flags().GetBool only: viper's KEPLOY_ env mapping would make
 		// viper.GetBool("proven") answer from the agent's own KEPLOY_PROVEN,
 		// which must never decide an agent's switch.
-		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
+		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's switch, passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
 		// Internal orchestrator→agent flag: the Docker endpoint the client
 		// uses (its DOCKER_HOST), which sudo drops, for naming container
@@ -519,7 +519,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
-		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false: a non-JSON body is compared only when it differs in kind from the recorded one - JSON against non-JSON, or empty against non-empty - or under KEPLOY_PROVEN=1, which compares every body)")
+		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false: a non-JSON body is compared only when it differs in kind from the recorded one - JSON against non-JSON, or empty against non-empty - or under the proven model, which compares every body)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
@@ -2181,7 +2181,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// decides, so it cannot disagree with the CLI that started it.
 		pinProvenSwitch(proven)
 		if provenswitch.On() {
-			c.logger.Debug("the proven model's staging switch is on in this agent (KEPLOY_PROVEN=1, passed as --proven)")
+			c.logger.Debug("the proven model is on in this agent (passed as --proven)")
 		}
 		if v, ignored := provenswitch.IgnoredEnv(); ignored {
 			c.logger.Warn("KEPLOY_PROVEN in the agent's own environment is ignored: an agent takes the proven switch only from the --proven flag of the keploy that starts it",

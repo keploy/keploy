@@ -1769,7 +1769,7 @@ func TestUnderTheSwitchASetsRestartsBeginAtItsMark(t *testing.T) {
 	if res.ready || !strings.Contains(res.why, "it restarted 3 time(s) without listening (the last: /usr/bin/app)") {
 		t.Fatalf("wait = %+v, want not judged, its three restarts since the mark said", res)
 	}
-	lines := logs.FilterMessage("still waiting for the application before the set's first test (KEPLOY_PROVEN=1)").All()
+	lines := logs.FilterMessage("still waiting for the application before the set's first test").All()
 	if len(lines) == 0 {
 		t.Fatal("no status line")
 	}
@@ -1934,7 +1934,7 @@ func TestUnderTheSwitchTheStatusLineBeforeDockerAnswersNamesNoPort(t *testing.T)
 	up := models.AppReadiness{Listens: []models.AppListen{{Port: 3000, Addr: "0.0.0.0", Here: true, Live: true}}}
 	res := startWait(provenReadiness{logger: zap.New(core), cfg: testCfg(), agent: &fakeAgent{answers: []models.AppReadiness{up}}, host: "localhost", port: "8098", docker: true, resolve: never})
 	_ = wakeUntil(t, wake, res, 10)
-	lines := logs.FilterMessage("still waiting for the application before the set's first test (KEPLOY_PROVEN=1)").All()
+	lines := logs.FilterMessage("still waiting for the application before the set's first test").All()
 	if len(lines) == 0 {
 		t.Fatal("no status line")
 	}

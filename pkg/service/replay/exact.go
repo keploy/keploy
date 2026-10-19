@@ -305,19 +305,19 @@ func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, w
 		out[tc.ID] = tc.Mocks
 		mapped += len(tc.Mocks)
 	}
-	r.logger.Info("under KEPLOY_PROVEN each test case of this test set owns the calls recorded inside its own window, as keploy record maps a recording made under the switch",
+	r.logger.Info("under the proven model each test case of this test set owns the calls recorded inside its own window, as keploy record maps a recording made under it",
 		zap.String("testSetID", testSetID),
 		zap.String("reason", why),
 		zap.Int("numTests", len(out)),
 		zap.Int("ownedMocks", mapped),
 		zap.Int("workerMocks", len(derived.Worker)),
-		zap.String("next_step", "record the test set again under KEPLOY_PROVEN for a mappings.yaml keploy record writes"))
+		zap.String("next_step", "record the test set again under the proven model for a mappings.yaml keploy record writes"))
 	if n := len(derived.Concurrent); n > 0 {
 		r.logger.Warn("some tests of this test set were recorded while another test's request was still open: a call recorded while two tests were open is owned by the test whose request came first, which may not be the test that made it",
 			zap.String("testSetID", testSetID),
 			zap.Int("count", n),
 			zap.Strings("tests", derived.Concurrent[:min(n, 20)]),
-			zap.String("next_step", "if one of these tests fails with a call it did not make or a call no recorded mock answered, record the test set again under KEPLOY_PROVEN, one request at a time"))
+			zap.String("next_step", "if one of these tests fails with a call it did not make or a call no recorded mock answered, record the test set again under the proven model, one request at a time"))
 	}
 	return out, derived.Worker
 }
@@ -555,7 +555,7 @@ func (r *Replayer) noteIgnored(setting, why string) {
 	if _, said := r.ignoredSaid.LoadOrStore(setting, true); said {
 		return
 	}
-	r.logger.Warn(setting+" is ignored under KEPLOY_PROVEN: "+why,
+	r.logger.Warn(setting+" is ignored under the proven model: "+why,
 		zap.String("next_step", "remove it from the configuration or the command line"))
 }
 
@@ -566,7 +566,7 @@ func (r *Replayer) noteOwnsNothing(testSetID string) {
 	if r.exact == nil || r.exact.ownsTestMocks {
 		return
 	}
-	r.logger.Warn("under KEPLOY_PROVEN no test case of this test set owns a recorded call: its mappings.yaml, or with none its test windows, list no data-plane mock the agent holds, so every call a test case makes to a dependency misses",
+	r.logger.Warn("under the proven model no test case of this test set owns a recorded call: its mappings.yaml, or with none its test windows, list no data-plane mock the agent holds, so every call a test case makes to a dependency misses",
 		zap.String("testSetID", testSetID),
 		zap.String("next_step", "record the test set again with this keploy (keploy record writes mappings.yaml)"))
 }
@@ -603,7 +603,7 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 	if len(missing) == 0 {
 		return nil, nil
 	}
-	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end ("+provenswitch.Env+"=1)",
+	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end",
 		zap.Int("calls", len(missing)), zap.Strings("mocks", missing[:min(len(missing), 20)]))
 	wake, stop := workerWake(ctx)
 	defer stop()

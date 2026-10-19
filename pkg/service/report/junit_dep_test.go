@@ -395,7 +395,7 @@ func TestBuildFailureNamesACallByItsShape(t *testing.T) {
 // a protoscope reorder says so, with the proto-files way out for a map. With
 // the switch off the body is as before.
 func TestBuildFailureSaysWhyAGRPCBodyFailedUnderTheSwitch(t *testing.T) {
-	const reason = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"
+	const reason = "decoded data mismatch: a repeated field's elements came back in another order (the proven model compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"
 	res := models.TestResult{Kind: models.GRPC_EXPORT, Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{Assessment: &models.FailureAssessment{Reasons: []string{reason}}}}
 	for _, on := range []bool{false, true} {
 		if on {

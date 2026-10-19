@@ -171,8 +171,8 @@ func (m *mockService) refuseProvenDocker(verb string) error {
 	if !provenswitch.On() || !utils.IsDockerCmd(utils.CmdType(m.config.CommandType)) {
 		return nil
 	}
-	return fmt.Errorf("keploy mock %[1]s with %[2]s runs the test command natively in this release: inside a container keploy cannot tell which process runs the tests, or read what each of them did. "+
-		"Run the test command itself through keploy (keploy mock %[1]s -c \"go test -p 1 -json ./...\"), or unset %[2]s", verb, provenswitch.Env)
+	return fmt.Errorf("keploy mock %[1]s under the proven model runs the test command natively in this release: inside a container keploy cannot tell which process runs the tests, or read what each of them did. "+
+		"Run the test command itself through keploy (keploy mock %[1]s -c \"go test -p 1 -json ./...\"), or set %[2]s=0 to run without the proven model", verb, provenswitch.Env)
 }
 
 // isDockerCompose reports whether the wrapped command is a compose project.

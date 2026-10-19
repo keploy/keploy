@@ -168,7 +168,7 @@ func TestAgentSaysItsSwitchIsOnOnlyWhenPinnedOn(t *testing.T) {
 // that its switch is on exactly then. It pins this process's switch for good.
 func agentSaysItsSwitchIsOn(t *testing.T, args []string, want bool) {
 	t.Helper()
-	const line = "the proven model's staging switch is on in this agent"
+	const line = "the proven model is on in this agent"
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 	t.Cleanup(log.TestOnlyResetSink)

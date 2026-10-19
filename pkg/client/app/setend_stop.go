@@ -61,7 +61,7 @@ func stopsForSetEnd(ctx context.Context) bool {
 // noteSetEndKill records why the stop at a set's end killed the app.
 func (a *App) noteSetEndKill(why string) {
 	a.setEndKill.Store(&why)
-	a.logger.Warn(why+"; what it would have done as it stopped is not known, so its test set is not judged (KEPLOY_PROVEN=1)",
+	a.logger.Warn(why+"; what it would have done as it stopped is not known, so its test set is not judged",
 		zap.String("app", a.container))
 }
 
@@ -88,7 +88,7 @@ func (a *App) noteStopKill(setEnd, recordEnd bool, killed string) {
 // noteRecordKill records why keploy record's stop of the app had to kill it.
 func (a *App) noteRecordKill(why string) {
 	a.setEndKill.Store(&why)
-	a.logger.Warn(why+"; what it would have done as it stopped is not in the recording, so a replay of this test-set cannot judge a call its application makes after the set's last test ("+provenswitch.Env+"=1)",
+	a.logger.Warn(why+"; what it would have done as it stopped is not in the recording, so a replay of this test-set cannot judge a call its application makes after the set's last test",
 		zap.String("app", a.container),
 		zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
 }

@@ -1300,7 +1300,7 @@ func (s *Session) warnAnsweredBeforeAsked(m *models.Mock) {
 		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
 	}
 	s.Logger.Warn(AnsweredBeforeAskedMsg, append(fields, zap.String("next_step",
-		"this kind's recorder stamped the request after its answer, a keploy bug: report it with this line. A replay without KEPLOY_PROVEN leaves a per-test mock like this out, and answers the call it recorded with another mock or with none"))...)
+		"this kind's recorder stamped the request after its answer, a keploy bug: report it with this line. A replay without the proven model leaves a per-test mock like this out, and answers the call it recorded with another mock or with none"))...)
 }
 
 // debugMonotonic, when true, causes enforceReqMonotonic to panic on

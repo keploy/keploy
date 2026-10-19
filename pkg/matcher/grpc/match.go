@@ -742,4 +742,4 @@ func useIndexedKeys(expMsgs, actMsgs []models.GrpcLengthPrefixedMessage) bool {
 // in order. Protoscope text carries no schema, so a map field's entries are
 // compared in order too: with proto files configured the message is compared
 // as JSON, where a map is an object.
-const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"
+const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (the proven model compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"

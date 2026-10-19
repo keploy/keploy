@@ -543,7 +543,7 @@ func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st m
 	if lastErr != "" {
 		fields = append(fields, zap.String("lastReadError", lastErr))
 	}
-	p.logger.Info("still waiting for the application before the set's first test (KEPLOY_PROVEN=1)", fields...)
+	p.logger.Info("still waiting for the application before the set's first test", fields...)
 }
 
 // reachable says a listen of the application's is where keploy's requests

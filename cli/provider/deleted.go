@@ -113,7 +113,7 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 	for _, row := range rows {
 		for _, name := range row.Flags {
 			if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
-				return fmt.Errorf("unknown flag: --%s: it is deleted under %s (U18: %s); %s", name, provenswitch.Env, row.Row, row.Instead)
+				return fmt.Errorf("unknown flag: --%s: the proven model deletes it (U18: %s); %s", name, row.Row, row.Instead)
 			}
 		}
 	}
@@ -136,7 +136,7 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 		}
 	}
 	if len(ignored) > 0 {
-		c.logger.Warn(fmt.Sprintf("settings keploy deletes are ignored under %s (U18)", provenswitch.Env),
+		c.logger.Warn("settings the proven model deletes are ignored (U18)",
 			zap.Strings("ignored", ignored),
 			zap.String("next_step", "remove them from keploy.yml, or unset them in the environment"))
 	}

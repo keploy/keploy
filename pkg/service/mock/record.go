@@ -555,13 +555,13 @@ func (m *mockService) Record(ctx context.Context) error {
 	lostLosses, lostNotJudged := lostAll.Split()
 	recordNotJudged = lostNotJudged
 	if t := lostLosses.Text(); t != "" && judgedRecord {
-		m.logger.Error("keploy could not capture every call the test command made: the tests charged with it keep their previous recordings in judging ("+provenswitch.Env+"=1)",
+		m.logger.Error("keploy could not capture every call the test command made: the tests charged with it keep their previous recordings in judging",
 			zap.String("mock-set", name), zap.String("reason", t))
 	} else if t != "" {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
 		}
-		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
+		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged",
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", t))
 		if parent.Err() == nil {
 			m.propagateExit(appErr, "record")
@@ -596,7 +596,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//      recording lacks those calls, and a replay of it would make them
 	//      for real. Kept, not vouched for in silence.
 	if t := lostNotJudged.NotJudgedText(); t != "" {
-		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's ("+provenswitch.Env+"=1)",
+		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's",
 			zap.String("mock-set", name), zap.String("reason", t),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()+", then record again"))
 	}
@@ -690,12 +690,12 @@ func (m *mockService) Record(ctx context.Context) error {
 				recordLossesUnread = unread.Error()
 			}
 			if t := recordLosses.Text(); t != "" {
-				m.logger.Error("keploy could not capture every call the test command made after its last test: no recording holds what those calls carried, so judging fails the run ("+provenswitch.Env+"=1)",
+				m.logger.Error("keploy could not capture every call the test command made after its last test: no recording holds what those calls carried, so judging fails the run",
 					zap.String("mock-set", name), zap.String("reason", t),
 					zap.String("next_step", "fix what the reason names, then record again"))
 			}
 			if recordLossesUnread != "" {
-				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)",
+				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run",
 					zap.String("mock-set", name), zap.String("reason", recordLossesUnread),
 					zap.String("next_step", "check the agent's log for why its count could not be read, then record again"))
 			}

@@ -99,7 +99,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 		if cfg.InCi || cfg.Test.FallBackOnMiss {
 			t.Fatalf("a deleted key was kept: inCi %v, fallBackOnMiss %v", cfg.InCi, cfg.Test.FallBackOnMiss)
 		}
-		said := logs.FilterMessageSnippet("settings keploy deletes are ignored").All()
+		said := logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()
 		if len(said) != 1 {
 			t.Fatalf("said %d times, want once", len(said))
 		}
@@ -115,7 +115,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 		if err != nil || !cfg.InCi || !cfg.Test.FallBackOnMiss {
 			t.Fatalf("without the switch: %v, inCi %v, fallBackOnMiss %v", err, cfg.InCi, cfg.Test.FallBackOnMiss)
 		}
-		if n := len(logs.FilterMessageSnippet("settings keploy deletes are ignored").All()); n != 0 {
+		if n := len(logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()); n != 0 {
 			t.Fatalf("without the switch the notice was said %d times", n)
 		}
 	})
@@ -128,7 +128,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 		if err != nil {
 			t.Fatalf("ValidateFlags: %v", err)
 		}
-		if n := len(logs.FilterMessageSnippet("settings keploy deletes are ignored").All()); n != 0 {
+		if n := len(logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()); n != 0 {
 			t.Fatalf("keys at their zero values were said %d times", n)
 		}
 	})
@@ -151,7 +151,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 		if cfg.InCi {
 			t.Fatal("inCi from the environment was kept")
 		}
-		said := logs.FilterMessageSnippet("settings keploy deletes are ignored").All()
+		said := logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()
 		if len(said) != 1 || !strings.Contains(strings.Join(toStrings(said[0].ContextMap()["ignored"]), "\n"), "inCi, from the environment's KEPLOY_INCI") {
 			t.Fatalf("the notice %v does not name the environment's KEPLOY_INCI", said)
 		}
@@ -171,7 +171,7 @@ func TestUnderTheSwitchADeletedSettingsFlagIsUnknownAndItsKeyIgnored(t *testing.
 		if err != nil {
 			t.Fatalf("ValidateFlags: %v", err)
 		}
-		said := logs.FilterMessageSnippet("settings keploy deletes are ignored").All()
+		said := logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()
 		if len(said) != 1 || !strings.Contains(strings.Join(toStrings(said[0].ContextMap()["ignored"]), "\n"), "test.fuzzyMatch") {
 			t.Fatalf("the notice %v does not name test.fuzzyMatch", said)
 		}
@@ -225,7 +225,7 @@ func TestUnderTheSwitchTheSettingsExactServingReplacedAreDeleted(t *testing.T) {
 	if kept := set(cfg); len(kept) != 0 {
 		t.Fatalf("deleted keys were kept under the switch: %v", kept)
 	}
-	said := logs.FilterMessageSnippet("settings keploy deletes are ignored").All()
+	said := logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()
 	if len(said) != 1 {
 		t.Fatalf("said %d times, want once", len(said))
 	}
@@ -244,7 +244,7 @@ func TestUnderTheSwitchTheSettingsExactServingReplacedAreDeleted(t *testing.T) {
 	if kept := set(cfg); len(kept) != 5 {
 		t.Fatalf("without the switch only %v were kept, want all five", kept)
 	}
-	if n := len(logs.FilterMessageSnippet("settings keploy deletes are ignored").All()); n != 0 {
+	if n := len(logs.FilterMessageSnippet("settings the proven model deletes are ignored").All()); n != 0 {
 		t.Fatalf("without the switch the notice was said %d times", n)
 	}
 }

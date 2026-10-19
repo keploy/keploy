@@ -579,7 +579,7 @@ func TestVetoFlagNameNamesTheSwitch(t *testing.T) {
 			setSwitch(t, on)
 			want := "--assert-dependencies"
 			if on {
-				want = provenswitch.Env + "=1"
+				want = "the proven model"
 			}
 			if got := vetoFlagName(true, false); got != want {
 				t.Fatalf("vetoFlagName = %q, want %q", got, want)
@@ -640,7 +640,7 @@ func TestWarnDependencyAssertionInertUnderTheSwitch(t *testing.T) {
 		instrument, streaming bool
 		want                  string
 	}{
-		{"not instrument mode", false, false, provenswitch.Env + "=1 is inert for this test set"},
+		{"not instrument mode", false, false, "the proven model's dependency assertion is inert for this test set"},
 		{"streaming tests", true, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -920,8 +920,8 @@ func TestRunTestSet_AStreamedWrongAnswerIsNeverObsoleteUnderTheSwitch(t *testing
 				return
 			}
 			said := logs.FilterMessageSnippet("mock mapping mismatch detected for streaming testcase").All()
-			if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != provenswitch.Env+"=1" {
-				t.Fatalf("the mismatch was said %+v; want once, as FAILED, naming the switch", said)
+			if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != "the proven model" {
+				t.Fatalf("the mismatch was said %+v; want once, as FAILED, naming the proven model", said)
 			}
 		})
 	}

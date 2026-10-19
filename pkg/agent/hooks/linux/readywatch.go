@@ -716,7 +716,7 @@ func (h *Hooks) AppReadiness(since uint64) (models.AppReadiness, error) {
 	w := h.ready
 	h.readyMu.Unlock()
 	if w == nil {
-		return models.AppReadiness{}, fmt.Errorf("%w: this agent watches no application's readiness (%s is not set on it, or it does not run keploy test)", models.ErrReadinessUnsupported, provenswitch.Env)
+		return models.AppReadiness{}, fmt.Errorf("%w: this agent watches no application's readiness (the proven model is off in it, or it does not run keploy test)", models.ErrReadinessUnsupported)
 	}
 	if err := w.selfRegistered(); err != nil {
 		// Without the agent's container the kernel takes nothing for a

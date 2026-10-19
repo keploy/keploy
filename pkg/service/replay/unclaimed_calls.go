@@ -68,7 +68,7 @@ func describeUnclaimed(c models.UnmatchedCall) string {
 // logUnclaimed says, at ERROR, each call that fails the set.
 func (r *Replayer) logUnclaimed(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
-		r.logger.Error("test-set failed: the application made a call after its last test that no mock answered (KEPLOY_PROVEN=1)",
+		r.logger.Error("test-set failed: the application made a call after its last test that no mock answered",
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
 			zap.String("call", c.ActualSummary),

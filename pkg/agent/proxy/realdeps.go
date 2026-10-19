@@ -25,7 +25,7 @@ import (
 )
 
 // SetRealDepsErrNoSwitch refuses mock.real to an agent without the switch.
-var SetRealDepsErrNoSwitch = errors.New("mock.real is the proven model's, and this keploy agent runs without " + provenswitch.Env)
+var SetRealDepsErrNoSwitch = errors.New("mock.real is the proven model's, and the proven model is off in this keploy agent")
 
 // realState is a run's mock.real as the proxy decides connections by it: the
 // list, and the run's name book.

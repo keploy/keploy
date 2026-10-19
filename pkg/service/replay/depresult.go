@@ -799,7 +799,7 @@ func vetoFlagName(depAssertFail, strictFailure bool) string {
 	if (depAssertFail || strictFailure) && provenswitch.On() {
 		// Under the switch the veto holds whatever the flags say: it is the
 		// switch that keeps the test FAILED, so the switch is named, alone.
-		return provenswitch.Env + "=1"
+		return "the proven model"
 	}
 	switch {
 	case depAssertFail && strictFailure:
@@ -1012,7 +1012,7 @@ func (r *Replayer) warnDependencyAssertionInert(testSetID string, useMappingBase
 	msg := dependencyAssertionInertMessage(reason)
 	if provenswitch.On() {
 		// It is the switch that asks for the assertion, whatever the flags.
-		msg = provenswitch.Env + "=1" + strings.TrimPrefix(msg, "--assert-dependencies")
+		msg = "the proven model's dependency assertion" + strings.TrimPrefix(msg, "--assert-dependencies")
 	}
 	r.logger.Warn(msg,
 		zap.String("testset", testSetID),

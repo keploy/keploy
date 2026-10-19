@@ -45,7 +45,7 @@ func (r *Recorder) markStopKilled(ctx context.Context, testSetID, why string) {
 	if !provenswitch.On() {
 		return
 	}
-	r.logger.Warn("the recording's stop had to kill the application: what it would have done as it stopped is not in the recording, so a replay of this test-set does not judge a call the application makes after the set's last test ("+provenswitch.Env+"=1)",
+	r.logger.Warn("the recording's stop had to kill the application: what it would have done as it stopped is not in the recording, so a replay of this test-set does not judge a call the application makes after the set's last test",
 		zap.String("testSet", testSetID), zap.String("reason", why),
 		zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
 	if r.testSetConf == nil {

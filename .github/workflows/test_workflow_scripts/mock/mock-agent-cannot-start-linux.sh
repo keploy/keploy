@@ -286,10 +286,10 @@ check_proven() {
 }
 
 if half on; then
-JUDGES="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
+JUDGES="keploy mock replay under the proven model needs a keploy build that judges each test (keploy enterprise)"
 check_proven unprivileged 3 "keploy does not have the kernel privileges it needs" 1 "$JUDGES"
 check_proven no-tracefs 6 "neither debugfs nor tracefs are mounted" 1 "$JUDGES" --privileged
-NATIVELY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
+NATIVELY="keploy mock record under the proven model runs the test command natively in this release"
 check_proven docker-unprivileged 1 "$NATIVELY" 1 "$JUDGES" -e AGENT_EXIT=0
 check_proven docker-3 1 "$NATIVELY" 1 "$JUDGES" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
 fi

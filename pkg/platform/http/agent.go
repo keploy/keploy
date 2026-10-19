@@ -4554,7 +4554,7 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 	}
 	var ack models.ScopeGateResp
 	if err := json.Unmarshal(answer, &ack); err != nil || ack.V != models.ScopeProtocolVersion {
-		return fmt.Errorf("the agent did not acknowledge the tests to skip (answer %q): it predates keploy's scope protocol v1, or runs without KEPLOY_PROVEN=1", string(answer))
+		return fmt.Errorf("the agent did not acknowledge the tests to skip (answer %q): it predates keploy's scope protocol v1, or runs without the proven model", string(answer))
 	}
 	if ack.Skips != len(skip) {
 		return fmt.Errorf("the agent applies %d of the %d tests to skip", ack.Skips, len(skip))

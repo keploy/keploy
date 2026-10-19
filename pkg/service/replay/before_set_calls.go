@@ -85,7 +85,7 @@ func setCallsWhy(calls []models.UnmatchedCall) string {
 // logSetCalls says, at ERROR, each of the set's calls that fails it.
 func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
-		r.logger.Error("test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)",
+		r.logger.Error("test-set failed: the application made a call before its first test that no mock answered",
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
 			zap.String("call", c.ActualSummary),

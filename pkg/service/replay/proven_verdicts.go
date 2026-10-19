@@ -236,7 +236,7 @@ func alsoNotJudged(prev, reason string) string {
 // vetoUnconsumedTestMock is the reason a streaming test whose mock set
 // diverged is FAILED rather than demoted to OBSOLETE when one of its test
 // mocks was not consumed (KEPLOY_PROVEN=1).
-const vetoUnconsumedTestMock = "a recorded call of this test was not made during it (" + provenswitch.Env + "=1)"
+const vetoUnconsumedTestMock = "a recorded call of this test was not made during it"
 
 // failOnCaptureLoss is the verdict of a test keploy's agent lost a call of, or
 // of a test before it (testMisses.failsOnCaptureLoss), under the proven
@@ -328,22 +328,17 @@ func missCategory(r *models.TestResult) {
 	r.FailureInfo.Category = appendCategoryUnique(slices.Clone(r.FailureInfo.Category), models.CallUnmatched)
 }
 
-// vetoUnmatchedCall is the reason a streaming test whose mock set diverged is
-// FAILED rather than demoted to OBSOLETE when a call it made got no recorded
-// answer (KEPLOY_PROVEN=1).
-const vetoUnmatchedCall = "a call this test made got no recorded answer (" + provenswitch.Env + "=1)"
+// vetoUnmatchedCall is the reason a test whose mock set diverged is FAILED
+// rather than demoted to OBSOLETE when a call it made got no recorded answer,
+// with the proven switch on or off: a miss is no sign its recording is out of
+// date, and the demotion would turn its failure into a green run.
+const vetoUnmatchedCall = "a call this test made got no recorded answer"
 
 // vetoCaptureLoss is the reason a streaming test whose mock set diverged is
 // FAILED, whatever its answer, when keploy's agent lost a call while it or a
 // test before it ran (KEPLOY_PROVEN=1): not the mismatch, which does not fail
 // a streaming test whose answer matched.
-const vetoCaptureLoss = "keploy's agent could not capture every call while this test or a test before it ran (" + provenswitch.Env + "=1)"
-
-// vetoUnmatchedCallSwitchOff is the reason a test whose mock set diverged is
-// FAILED rather than demoted to OBSOLETE, with the proven switch off, when a
-// call it made got no recorded answer: a miss is no sign its recording is out
-// of date, and the demotion would turn its failure into a green run.
-const vetoUnmatchedCallSwitchOff = "a call this test made got no recorded answer"
+const vetoCaptureLoss = "keploy's agent could not capture every call while this test or a test before it ran"
 
 // testEvidence is the evidence against a test, as its results carried it
 // before the BeforeTestResult hook ran: the calls of it no mock answered
