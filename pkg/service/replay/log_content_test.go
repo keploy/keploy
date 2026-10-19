@@ -63,8 +63,8 @@ func TestSimulateRequest_ATestSentIsLoggedWithoutItsRequest(t *testing.T) {
 	}
 }
 
-// A test's URL rewritten to the base path, or to another host, is logged
-// without its query's values, unless KEPLOY_LOG_CONTENT is set.
+// A test's URL rewritten to the base path is logged without its query's
+// values, unless KEPLOY_LOG_CONTENT is set.
 func TestReplayer_ARewrittenURLIsLoggedWithoutItsQuery(t *testing.T) {
 	logtest.Each(t, func(t *testing.T, on bool) {
 		logger, logs := logtest.Observe()
@@ -75,10 +75,7 @@ func TestReplayer_ARewrittenURLIsLoggedWithoutItsQuery(t *testing.T) {
 		if err := r.applyBasePath(tc); err != nil {
 			t.Fatal(err)
 		}
-		if err := r.replaceHostInTestCase(tc, "127.0.0.1", "the app's container"); err != nil {
-			t.Fatal(err)
-		}
-		logtest.Check(t, logs, canary, on, "test case request origin", "")
+		logtest.Check(t, logs, canary, on, "test case request origin")
 	})
 }
 

@@ -7774,43 +7774,6 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 	return testCaseResult
 }
 
-func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, logContext string) error {
-	var err error
-	switch testCase.Kind {
-	case models.HTTP:
-		testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, newHost)
-		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
-			return err
-		}
-		r.logger.Debug("", logcontent.String(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
-
-	case models.GRPC_EXPORT:
-		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcHost(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newHost)
-		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
-			return err
-		}
-		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
-	}
-	return nil
-}
-
-func (r *Replayer) replacePortInTestCase(testCase *models.TestCase, newPort string) error {
-	var err error
-	switch testCase.Kind {
-	case models.HTTP:
-		testCase.HTTPReq.URL, err = utils.ReplacePort(testCase.HTTPReq.URL, newPort)
-	case models.GRPC_EXPORT:
-		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcPort(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newPort)
-	}
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to replace port")
-		return err
-	}
-	return nil
-}
-
 func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 	// get all the testset ids
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
