@@ -23,6 +23,15 @@ func (r *Replayer) learningPool() bool {
 	return r.learning() && r.config.Test.LearnPool
 }
 
+// judgedSet reports whether a test set's round gave it a verdict, which
+// judging reads: PASSED or FAILED (a set keploy marks not judged,
+// Replayer.markNotJudged, is INTERNAL_ERR), with a verdict for at least one
+// of its tests (everyIgnored: none got one, everyTestIgnored). Only then is
+// what its full round learned kept (persistLearned).
+func judgedSet(status models.TestSetStatus, everyIgnored bool) bool {
+	return !everyIgnored && (status == models.TestSetStatusPassed || status == models.TestSetStatusFailed)
+}
+
 // learnedPersister writes what the learn step learned onto a set's mocks and
 // says what it added, by mock (the yaml mock store, PersistLearned).
 type learnedPersister interface {

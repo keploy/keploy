@@ -177,10 +177,13 @@ func (c *consumingAtStop) consumed() []models.MockState {
 type learnedStore struct {
 	*prMockDB
 	persisted map[string]models.MockState
+	// writes counts the writes of what was learned.
+	writes int
 }
 
 func (l *learnedStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
 	l.persisted = states
+	l.writes++
 	return nil, nil
 }
 

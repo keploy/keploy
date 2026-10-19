@@ -5705,11 +5705,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// A round a hook says could not read all its tests read (UncheckedHook)
 	// learned on what it served unread: nothing of it is kept, and the
 	// recording stays as recorded for a round that can.
+	//
+	// Nor is anything kept of a set the round did not judge (P056-h), as
+	// the prune below is held for it: its verdict, which judging reads, is
+	// not there to stand for what it learned. An agent started again
+	// mid-set holds none of the earlier places the one before served, so a
+	// value that flowed from one is learned as noise; a run that stopped
+	// part-way learned on tests it never judged; a set whose every test is
+	// ignored (IGNORED, below) verified nothing.
 	if r.learning() && r.instrument {
 		if unchecked != "" {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
+		} else if !judgedSet(testSetStatus, everyTestIgnored(testSetStatus, success, failure, obsolete, ignored)) {
+			r.logger.Warn("keploy did not keep what this full round of the record learned: the test-set has no verdict, so nothing judged what it learned; its recording stays as recorded, for a round that judges it",
+				zap.String("testSetID", testSetID),
+				zap.String("status", string(testSetStatus)))
 		} else if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
