@@ -4098,7 +4098,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// off it writes no DepResult (see the NOTE further down), so
 		// --assert-dependencies cannot promote anything here. (Under the
 		// switch it judges its tests on their test mocks itself.) Without this call a CI run that points the flag at a
-		// set of SSE/chunked tests exits 0 for an assertion that never
+		// set of streaming tests exits 0 for an assertion that never
 		// executed — the flag would be silently inert, which is exactly the
 		// failure mode the flag exists to remove. deferredStreaming is true
 		// unconditionally: reaching this block means len(streamingTests) > 0.

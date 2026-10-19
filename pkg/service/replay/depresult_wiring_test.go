@@ -795,7 +795,7 @@ func TestMainLoopReportsEligibilityToTheWarner(t *testing.T) {
 
 // M-1: THE STREAMING HALF OF THE INERT-KNOB WARNING.
 //
-// RunTestSet splits SSE/chunked test cases out of the main replay loop and
+// RunTestSet splits streaming test cases out of the main replay loop and
 // replays them in a Phase-2 pass that deliberately writes no DepResult and
 // never calls resolveTestOutcome, so --assert-dependencies cannot promote
 // anything there. The warning that says so lives in that pass and nowhere
@@ -824,7 +824,7 @@ func TestStreamingPassWarnsTheAssertionDidNotRun(t *testing.T) {
 		t.Fatalf("RunTestSet calls %s %d time(s), want 2 (the main replay loop and the deferred streaming pass).\n\n"+
 			"WHY THIS MATTERS: the streaming pass runs no --assert-dependencies assertion (under "+
 			"KEPLOY_PROVEN=1 it judges only its test mocks, proven_verdicts.go). Without its own call, "+
-			"--assert-dependencies over a set of SSE/chunked tests is silently inert and exits 0.",
+			"--assert-dependencies over a set of streaming tests is silently inert and exits 0.",
 			warner, len(calls))
 	}
 
