@@ -18,18 +18,25 @@ func TestOnlyATestsFilterBeginsItsVariables(t *testing.T) {
 		name   string
 		params MockFilterParams
 		want   bool
+		stages bool
 	}{
-		{"exact serving's staging", MockFilterParams{AfterTime: BaseTime, BeforeTime: at, Exact: &ExactServing{Stage: true, Pool: []string{"mock-9"}}}, false},
-		{"a test set's staging without exact serving", MockFilterParams{AfterTime: BaseTime, BeforeTime: at}, false},
-		{"exact serving's open of a test case", MockFilterParams{Exact: &ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}, true},
-		{"exact serving's pool call", MockFilterParams{Exact: &ExactServing{}}, false},
-		{"a test case's filter without exact serving", MockFilterParams{AfterTime: at, BeforeTime: at.Add(time.Second), MockMapping: []string{"mock-1"}}, true},
-		{"a test case's filter by its window alone", MockFilterParams{AfterTime: at, BeforeTime: at.Add(time.Second)}, true},
-		{"a test case recorded without times", MockFilterParams{}, true},
-		{"a filter from BaseTime that names a test's mocks", MockFilterParams{AfterTime: BaseTime, BeforeTime: at, MockMapping: []string{"mock-1"}}, true},
+		{"exact serving's staging", MockFilterParams{AfterTime: BaseTime, BeforeTime: at, Exact: &ExactServing{Stage: true, Pool: []string{"mock-9"}}}, false, true},
+		{"a test set's staging without exact serving", MockFilterParams{AfterTime: BaseTime, BeforeTime: at}, false, true},
+		{"exact serving's open of a test case", MockFilterParams{Exact: &ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}, true, false},
+		{"exact serving's pool call", MockFilterParams{Exact: &ExactServing{}}, false, false},
+		{"exact serving's pool call from BaseTime", MockFilterParams{AfterTime: BaseTime, BeforeTime: at, Exact: &ExactServing{}}, false, false},
+		{"a test case's filter without exact serving", MockFilterParams{AfterTime: at, BeforeTime: at.Add(time.Second), MockMapping: []string{"mock-1"}}, true, false},
+		{"a test case's filter by its window alone", MockFilterParams{AfterTime: at, BeforeTime: at.Add(time.Second)}, true, false},
+		{"a test case recorded without times", MockFilterParams{}, true, false},
+		{"a filter from BaseTime that names a test's mocks", MockFilterParams{AfterTime: BaseTime, BeforeTime: at, MockMapping: []string{"mock-1"}}, true, false},
 	} {
 		if got := c.params.BeginsTestVariables(); got != c.want {
 			t.Errorf("%s: BeginsTestVariables %v, want %v", c.name, got, c.want)
+		}
+		// StagesSet says which filter is a set's staging: exact serving's
+		// says so itself (Stage), whatever its window.
+		if got := c.params.StagesSet(); got != c.stages {
+			t.Errorf("%s: StagesSet %v, want %v", c.name, got, c.stages)
 		}
 	}
 }
