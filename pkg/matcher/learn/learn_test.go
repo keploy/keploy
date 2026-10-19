@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -1443,5 +1444,44 @@ func TestGluedSpansAreLinear(t *testing.T) {
 		if total > 100*len(run) {
 			t.Fatalf("a %d-character run is cut into spans %d characters long in all", len(run), total)
 		}
+	}
+}
+
+// ReadRaw reads a mock whose answer the agent parked on disk with its answer
+// back, on a copy, once per drift cache; ok is false when it cannot be read
+// back. RawOf reads it without.
+func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
+	reads := 0
+	m := &models.Mock{Name: "mock-0", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "/a"}}}
+	m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		reads++
+		return &models.HTTPResp{StatusCode: 200, Body: `{"token":"tok-7f3a9c"}`}, nil, nil
+	})
+	if r := RawOf(m, true); strings.Contains(r.Text, "tok-7f3a9c") {
+		t.Fatal("RawOf read the parked answer: the test's premise moved")
+	}
+	dc := NewDriftCache()
+	for i := 0; i < 2; i++ {
+		r, err := dc.ReadRaw(m, true)
+		if err != nil || !strings.Contains(r.Text, "tok-7f3a9c") {
+			t.Fatalf("read %d: err %v, text %q", i, err, r.Text)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("read back %d times; want once for the cache", reads)
+	}
+	if m.Spec.HTTPResp != nil || !m.HasSpilledResponse() {
+		t.Fatal("the pooled mock was written")
+	}
+	var nilCache *DriftCache
+	if r, err := nilCache.ReadRaw(m, false); err != nil || !strings.Contains(r.Text, "tok-7f3a9c") {
+		t.Fatalf("a nil cache: err %v, text %q", err, r.Text)
+	}
+	broken := &models.Mock{Name: "mock-1", Kind: models.HTTP}
+	broken.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		return nil, nil, errors.New("disk mocks: store closed")
+	})
+	if _, err := dc.ReadRaw(broken, false); err == nil || !strings.Contains(err.Error(), "store closed") {
+		t.Fatalf("an answer that cannot be read back: err %v; want the store's", err)
 	}
 }
