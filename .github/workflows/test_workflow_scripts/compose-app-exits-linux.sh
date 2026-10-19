@@ -157,7 +157,10 @@ record() {
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
-    if [ -n "$flags" ] && [ -z "$(sudo docker ps -q --filter "name=^/?cae-app-$ID\$" --filter "label=com.docker.compose.project=$PROJECT")" ]; then
+    # Any state (-a): the app prints that it listens as its process starts,
+    # and a loaded daemon lists the container as running only once its
+    # start returns (compose's "Started"), which can come after.
+    if [ -n "$flags" ] && [ -z "$(sudo docker ps -aq --filter "name=^/?cae-app-$ID\$" --filter "label=com.docker.compose.project=$PROJECT")" ]; then
       echo "FAIL: $name: the app container is not in project $PROJECT, which the command names (-p)"
       sudo docker ps -a --format '{{.Names}} project={{.Label "com.docker.compose.project"}}'
       FAIL=1
