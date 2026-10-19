@@ -1246,6 +1246,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 	}
+	if cmd.Name() != "agent" {
+		warnRemovedAgentReadyTimeout(c.logger)
+	}
 
 	if c.cfg.Record.BasePath != "" {
 		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)

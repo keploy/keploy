@@ -377,7 +377,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
 		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
-		agentStart := keployPkg.WatchAgentStart(agentCtx, r.instrumentation)
+		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
 			cancel()

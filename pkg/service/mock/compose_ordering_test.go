@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -640,5 +641,37 @@ func TestComposePanicInRunStillDeliversAnExit(t *testing.T) {
 
 	if utils.ErrCode == 0 {
 		t.Error("a panicking app runner exited keploy cleanly; it must not report success")
+	}
+}
+
+// stalledStartInstr is a compose project whose agent never answers, and whose
+// start the watch gives up on (pkg.AgentStartWatcher).
+type stalledStartInstr struct {
+	*composeInstr
+}
+
+func (*stalledStartInstr) WatchAgentStart(context.Context) <-chan error {
+	out := make(chan error, 1)
+	out <- fmt.Errorf("%w: its start took no step across 30 of its beats", pkg.ErrAgentNotReady)
+	return out
+}
+
+// keploy mock's wait for the agent compose starts follows the agent's start:
+// a start that stopped ends it, with that, while the project still runs and
+// the agent never answers; no budget of wall time does.
+func TestComposeStartEndsOnTheAgentsStalledStart(t *testing.T) {
+	instr := &stalledStartInstr{newInstr(t, agentNeverUp, true, models.AppError{})}
+	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr.composeInstr, utils.DockerCompose, "docker compose up"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- svc.Record(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "did not come up") {
+			t.Fatalf("Record = %v; want the agent's stalled start", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Record waited on an agent whose start had stopped")
 	}
 }
