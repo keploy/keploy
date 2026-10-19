@@ -594,6 +594,50 @@ func TestVariables_TwoMarkedClockReadsMayShareALiveValue(t *testing.T) {
 	}
 }
 
+// A bind the table refuses because of a binding the call's check read is no
+// race: the check and the bind disagree, and checking the call again would
+// disagree again, forever. The call is a miss with the bind's evidence. A
+// bind refused because of a binding made after the check (another
+// connection's, meanwhile) is checked again, which sees it.
+func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := varMock("mock-2", "POST", "http://store/polls", `{"at":"r-2"}`, 200, `{}`, models.MockVariables{"polled": bindV("r-2", "body.at")})
+	for _, c := range []struct {
+		name  string
+		saw   map[string]string
+		retry bool
+	}{
+		{"a binding the check read", map[string]string{"created": "V"}, false},
+		{"a binding made after the check", nil, true},
+		{"a binding the check read with another value", map[string]string{"created": "W"}, true},
+	} {
+		var tb variables.Table
+		tb.Reset()
+		if _, _, _, ok := tb.BindAll(tb.Gen(), []variables.Binding{{Name: "created", Value: "V", Recorded: "r-1", Mock: "mock-1", Place: "body.at"}}); !ok {
+			t.Fatal("created could not bind")
+		}
+		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
+			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
+		consumed := false
+		served, problem, retry, err := newHTTP().serveVariablesBy(hit, func(*models.Mock) bool { consumed = true; return true })
+		if err != nil || served != nil || consumed {
+			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
+		}
+		if retry != c.retry {
+			t.Fatalf("%s: retry %v, want %v (problem %+v)", c.name, retry, c.retry, problem)
+		}
+		if c.retry {
+			if problem != nil {
+				t.Fatalf("%s: a retry with a problem %+v", c.name, problem)
+			}
+			continue
+		}
+		if problem == nil || problem.name != "polled" || problem.actual != "V" || !strings.Contains(problem.why, "variable created") {
+			t.Fatalf("%s: problem %+v, want polled's bind refused beside created", c.name, problem)
+		}
+	}
+}
+
 func TestVariables_AnEmptyValueBindsNothing(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, body := range []string{`{"id":null,"item":"pen"}`, `{"id":"","item":"pen"}`} {
