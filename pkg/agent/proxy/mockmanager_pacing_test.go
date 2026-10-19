@@ -5,7 +5,10 @@ package proxy
 // staging epoch (O2), and the carry-over tier (C1).
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -1050,5 +1053,446 @@ func TestConnectionFailuresNeverEnterTheCarryOverTier(t *testing.T) {
 		if r.consume(n) {
 			t.Fatalf("W3: %s was consumable outside its own window", n)
 		}
+	}
+}
+
+// A StagingRelease need marks a consume outside the current window CarryOver
+// only for the mocks its Match takes; its kind's other mocks are untouched,
+// unlike a RegisterCarryOver kind's.
+func TestAReleaseNeedMarksOnlyWhatItsMatchTakes(t *testing.T) {
+	t.Cleanup(models.RegisterStagingNeed(models.HTTP, models.StagingNeed{Use: models.StagingRelease, Match: func(m *models.Mock) bool {
+		return m.Spec.Metadata["poll"] == "1"
+	}}))
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	poll := brokerMockAt("poll", models.HTTP, "", 2050)
+	poll.Spec.Metadata["poll"] = "1"
+	poll.TestModeInfo.Lifetime = models.LifetimePerTest
+	plain := brokerMockAt("plain", models.HTTP, "", 2050)
+	plain.TestModeInfo.Lifetime = models.LifetimePerTest
+	mm.SetMocksWithWindow(nil, nil, winStart(4), winEnd(4))
+	for _, c := range []struct {
+		m    *models.Mock
+		want bool
+	}{{poll, true}, {plain, false}} {
+		mm.MarkMockAsUsed(*c.m)
+		sts := mm.GetConsumedMocks()
+		if len(sts) != 1 || sts[0].CarryOver != c.want {
+			t.Fatalf("%s consumed two windows late: %+v, want CarryOver=%v", c.m.Name, sts, c.want)
+		}
+	}
+}
+
+// As a set begins, before its app starts, the agent loads what the app's
+// startup reaches: the registered mocks the release rule makes reachable
+// before every window, those recorded up to CarryOverLookahead after the
+// set's first recorded window began (that end excluded), from the startup
+// cutoff on, by the set's own cutoff and windows. A cutoff earlier than the
+// first window (a recorded test that opens no window) moves the range's
+// start, not its end. With no windows or no cutoff, nothing.
+func TestStartupCarryOverRangeIsWhatTheStartupReaches(t *testing.T) {
+	registerSends(t)
+	end := winStart(1).Add(models.CarryOverLookahead - time.Nanosecond)
+	for _, cutoff := range []time.Time{winStart(1), winStart(1).Add(-500 * time.Millisecond)} {
+		gotFrom, gotTo, ok := StartupCarryOverRange(cutoff, carryWindows())
+		if !ok || !gotFrom.Equal(cutoff) || !gotTo.Equal(end) {
+			t.Fatalf("cutoff %v: range [%v, %v] ok=%v; want [%v, %v]", cutoff, gotFrom, gotTo, ok, cutoff, end)
+		}
+	}
+	if _, _, ok := StartupCarryOverRange(winStart(1), nil); ok {
+		t.Fatal("a set with no recorded windows planned a startup load")
+	}
+	if _, _, ok := StartupCarryOverRange(time.Time{}, carryWindows()); ok {
+		t.Fatal("a set with no first recorded test planned a startup load")
+	}
+}
+
+// A carry-over mock served from the startup tier is consumed once: Deleted,
+// so the next load filters it out, and CarryOver, so the replay attributes it
+// by its own window and does not re-arm it. Another startup mock of the kind
+// is consumed as before: Updated, and staged again.
+func TestACarryOverMockServedFromTheStartupTierIsConsumedOnce(t *testing.T) {
+	registerSends(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	send := brokerMockAt("boot-send", pulsarKind, "SEND", 500)
+	msg := brokerMockAt("boot-msg", pulsarKind, "MESSAGE", 600)
+	mm.BeginTestSet(winStart(1), carryWindows(), []*models.Mock{send.DeepCopy(), msg.DeepCopy()}, nil)
+	for _, c := range []struct {
+		m       *models.Mock
+		usage   models.MockUsage
+		carried bool
+	}{{send, models.Deleted, true}, {msg, models.Updated, false}} {
+		if !mm.DeleteFilteredMock(*c.m) {
+			t.Fatalf("%s was not consumed from the startup tier", c.m.Name)
+		}
+		st := mm.GetPersistentConsumed()[c.m.Name]
+		if st.Usage != c.usage || st.CarryOver != c.carried {
+			t.Fatalf("%s consumed as %+v; want usage %v, CarryOver %v", c.m.Name, st, c.usage, c.carried)
+		}
+	}
+}
+
+// A carry-over mock consumed before the set's first test is consumed once,
+// though the replay drains that consume only after the next staging: test-1's
+// staging reloads the startup band and the carry range from the cutoff,
+// handed it again, and leaves it out of every tier. One consumed after the
+// first test is the replay's to filter (and to re-arm for a retry cycle). A
+// set staged again keeps them out; the next set's fenced boundary forgets
+// them.
+func TestACarryOverMockConsumedAtStartupIsNotStagedAgain(t *testing.T) {
+	registerSends(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	boot, crossed := brokerMockAt("boot-send", pulsarKind, "SEND", 500), brokerMockAt("crossed-send", pulsarKind, "SEND", 1050)
+	stage := func() {
+		mm.ResetForReplaySession()
+		mm.BeginTestSet(winStart(1), carryWindows(), []*models.Mock{boot.DeepCopy(), crossed.DeepCopy()}, nil)
+	}
+	held := func(step string, want ...string) {
+		t.Helper()
+		var got []string
+		startup, _ := mm.GetStartupMocks()
+		perTest, _ := mm.GetFilteredMocks()
+		carry, _ := mm.GetCarryOverMocks()
+		for _, list := range [][]*models.Mock{startup, perTest, carry} {
+			for _, mk := range list {
+				got = append(got, mk.Name)
+			}
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if !reflect.DeepEqual(got, want) && !(len(got) == 0 && len(want) == 0) {
+			t.Fatalf("%s: the tiers hold %v; want %v", step, got, want)
+		}
+	}
+	stage()
+	for _, mk := range []*models.Mock{boot, crossed} {
+		if !mm.DeleteFilteredMock(*mk) {
+			t.Fatalf("%s was not served as the app started", mk.Name)
+		}
+	}
+	// Test-1, staged before the replay drained them: handed both again.
+	mm.SetMocksWithWindow([]*models.Mock{boot.DeepCopy(), crossed.DeepCopy()}, nil, winStart(1), winEnd(1))
+	held("test-1")
+	// A set staged again (a re-registration) keeps them out.
+	mm.ResetForReplaySession()
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{boot.DeepCopy(), crossed.DeepCopy()}, nil)
+	held("the set staged again")
+	// The next set's fenced boundary forgets them: its own recording is
+	// staged whole.
+	mm.ResetForReplaySession()
+	mm.ArmSetFence()
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{boot.DeepCopy(), crossed.DeepCopy()}, nil)
+	held("the next set", "boot-send", "crossed-send")
+}
+
+// A set boundary that starts another test set (ArmSetFence) drops what the
+// previous set's pool was consumed of and nobody drained: mock names are a
+// set's own, so a drain handing them to the next set marks its unrelated
+// same-named mocks consumed. A re-registration of the current set (no fence)
+// keeps them: what the app consumed as it started is the set's.
+func TestAFencedSetBoundaryDropsThePreviousSetsUndrainedConsumes(t *testing.T) {
+	registerSends(t)
+	for _, fenced := range []bool{true, false} {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		mm.ResetForReplaySession()
+		mm.BeginTestSet(winStart(1), carryWindows(), nil, nil)
+		mm.SetMocksWithWindow(nil, nil, winStart(5), winEnd(5))
+		// The set's app publishes once more after the replay's last drain.
+		late := brokerMockAt("mock-7", pulsarKind, "MESSAGE", 1500)
+		late.TestModeInfo.Lifetime = models.LifetimePerTest
+		mm.MarkMockAsUsed(*late)
+		mm.ResetForReplaySession()
+		if fenced {
+			mm.ArmSetFence()
+		}
+		mm.BeginTestSet(time.Time{}, nil, nil, nil)
+		got := mm.GetConsumedMocks()
+		if fenced && len(got) != 0 {
+			t.Fatalf("the next set's drain was handed the previous set's %+v", got)
+		}
+		if !fenced && (len(got) != 1 || got[0].Name != "mock-7") {
+			t.Fatalf("a re-registration's drain lost the set's own consume: %+v", got)
+		}
+		mm.Close()
+	}
+}
+
+// The replay says which session starts a test set (OutgoingOptions.StartsTestSet,
+// a set boundary) and which re-registers the current one; Proxy.Mock fences
+// only the first.
+func TestProxyMockFencesOnlyASessionThatStartsATestSet(t *testing.T) {
+	registerSends(t)
+	ctx := context.Background()
+	for _, starts := range []bool{true, false} {
+		p := testProxy(t)
+		if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: true}); err != nil {
+			t.Fatal(err)
+		}
+		mm := p.getMockManager()
+		mm.BeginTestSet(time.Time{}, nil, nil, nil)
+		late := brokerMockAt("mock-7", pulsarKind, "MESSAGE", 1500)
+		late.TestModeInfo.Lifetime = models.LifetimePerTest
+		mm.MarkMockAsUsed(*late)
+		if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: starts}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.BeginTestSet(ctx, time.Time{}, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := mm.GetConsumedMocks()
+		if starts && len(got) != 0 {
+			t.Fatalf("a session that starts a test set handed its drain the previous set's %+v", got)
+		}
+		if !starts && len(got) != 1 {
+			t.Fatalf("a re-registration's drain lost the set's own consume: %+v", got)
+		}
+	}
+}
+
+// With nothing registered, as in every OSS replay, the fence keeps a set's
+// leftovers out of the next set's drain all the same. Before it, a reusable
+// mock the app consumed after the set's last drain (a background job's query
+// against a mocked database, a scheduler's call) came back in the next set's
+// startup drain under the previous set's name. The replay folded it into that
+// set's consumed history and wrote it into that set's startup section, where it
+// names the next set's unrelated same-named mock: --remove-unused-mocks kept
+// that mock, every test's mock assertion left it out (dropStartupMockInfos),
+// and the agent's filter stamped the previous set's ordering on it.
+func TestWithNothingRegisteredANewSetsDrainHoldsNoneOfThePreviousSets(t *testing.T) {
+	if models.CarryOverRegistered() {
+		t.Fatal("a registration leaked into this test")
+	}
+	ctx := context.Background()
+	for _, starts := range []bool{true, false} {
+		p := testProxy(t)
+		if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: true}); err != nil {
+			t.Fatal(err)
+		}
+		mm := p.getMockManager()
+		cfg := &models.Mock{Name: "mock-3", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "config"}, ReqTimestampMock: pms(500)},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}}
+		mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{cfg})
+		mm.SetMocksWithWindow(nil, []*models.Mock{cfg}, winStart(1), winEnd(1))
+		_ = mm.GetConsumedMocks() // the set's last drain
+		mm.MarkMockAsUsed(*cfg)   // a background job's query after it
+		if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: starts}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.BeginTestSet(ctx, time.Time{}, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := mm.GetConsumedMocks()
+		if starts && len(got) != 0 {
+			t.Fatalf("the next set's drain was handed the previous set's %+v", got)
+		}
+		if !starts && (len(got) != 1 || got[0].Name != "mock-3") {
+			t.Fatalf("a re-registration's drain lost the set's own consume: %+v", got)
+		}
+	}
+}
+
+// pooledCopy is the copy a parser holds of the pooled mock named name in
+// mocks, as served.
+func pooledCopy(t *testing.T, mocks []*models.Mock, name string) models.Mock {
+	t.Helper()
+	for _, mk := range mocks {
+		if mk.Name == name {
+			return *mk.DeepCopy()
+		}
+	}
+	t.Fatalf("%s is not pooled", name)
+	return models.Mock{}
+}
+
+// A consume of a mock the previous set pooled, made once the next set's
+// fenced boundary staging moved the set generation (a consume racing it, or a
+// parser still holding the previous pool), is refused at every door: it is
+// not this set's, and a door that matches by name would take this set's
+// same-named mock for it. Nothing reaches this set's drain, and this set's
+// own mocks are consumed as before.
+func TestAConsumeOfAMockThePreviousSetPooledIsRefused(t *testing.T) {
+	registerSends(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	set := func(sendAt int) (send, cfg *models.Mock) {
+		send = brokerMockAt("mock-7", pulsarKind, "SEND", sendAt)
+		cfg = &models.Mock{Name: "mock-3", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "config"}, ReqTimestampMock: pms(sendAt + 1)},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}}
+		return send, cfg
+	}
+	sendN, cfgN := set(500)
+	mm.ResetForReplaySession()
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{sendN}, []*models.Mock{cfgN})
+	startup, _ := mm.GetStartupMocks()
+	session, _ := mm.GetUnFilteredMocks()
+	oldSend, oldCfg := pooledCopy(t, startup, "mock-7"), pooledCopy(t, session, "mock-3")
+
+	sendN1, cfgN1 := set(700)
+	mm.ResetForReplaySession()
+	mm.ArmSetFence()
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{sendN1}, []*models.Mock{cfgN1})
+	oldCfgCopy := oldCfg
+	if mm.DeleteFilteredMock(oldSend) || mm.MarkMockAsUsed(oldCfg) || mm.DeleteUnFilteredMock(oldCfg) ||
+		mm.UpdateUnFilteredMock(&oldCfgCopy, &oldCfg) {
+		t.Fatal("a consume of the previous set's pool was taken")
+	}
+	if got := mm.GetConsumedMocks(); len(got) != 0 {
+		t.Fatalf("the next set's drain holds the previous set's %+v", got)
+	}
+	startup, _ = mm.GetStartupMocks()
+	newSend := pooledCopy(t, startup, "mock-7")
+	if !newSend.Spec.ReqTimestampMock.Equal(pms(700)) {
+		t.Fatal("the previous set's consume took this set's same-named mock")
+	}
+	if !mm.DeleteFilteredMock(newSend) {
+		t.Fatal("this set's own mock was refused")
+	}
+}
+
+// The fence moves the set generation with its drop, under the consumed
+// list's lock: a flag of a mock pooled under the previous generation is
+// refused, never recorded; one of this set's, or of a mock no staging pooled,
+// is recorded.
+func TestAFlagOfAMockPooledForAnEarlierSetIsRefused(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	prev := mm.setGen.Load()
+	mm.ResetForReplaySession()
+	mm.ArmSetFence()
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
+	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Usage: models.Deleted}, prev); !errors.Is(err, errPreviousSet) {
+		t.Fatalf("a flag of the previous set's mock: %v, want errPreviousSet", err)
+	}
+	for _, g := range []uint64{mm.setGen.Load(), 0} {
+		if err := mm.flagMockAsUsed(models.MockState{Name: fmt.Sprint("mock-", g), Usage: models.Deleted}, g); err != nil {
+			t.Fatalf("a flag at generation %d: %v", g, err)
+		}
+	}
+	if got := mm.GetConsumedMocks(); len(got) != 2 {
+		t.Fatalf("consumed %+v; want this set's and the unpooled one", got)
+	}
+}
+
+// A carry-over mock the app consumed as it started is consumed once: one it
+// consumed from the startup tier it read before test-1's staging (which
+// filed a copy into test-1's window meanwhile) is refused when test-1 is
+// served it again, and a retry cycle does not stage it. A test's own
+// carry-over mock is the replay's to re-arm: a retry cycle consumes it again.
+func TestACarryOverMockIsConsumedOncePerPass(t *testing.T) {
+	registerSends(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	boot := brokerMockAt("boot-send", pulsarKind, "SEND", 1050) // in test-1's window
+	own := brokerMockAt("own-send", pulsarKind, "SEND", 1060)
+	mm.ResetForReplaySession()
+	mm.BeginTestSet(winStart(1), carryWindows(), []*models.Mock{boot.DeepCopy(), own.DeepCopy()}, nil)
+	mm.treesMu.RLock()
+	bootTier := mm.startup
+	mm.treesMu.RUnlock()
+	startup, _ := mm.GetStartupMocks()
+	served := pooledCopy(t, startup, "boot-send")
+
+	// Test-1 is staged with both before the app's consume lands.
+	test1 := func() {
+		mm.SetMocksWithWindow([]*models.Mock{boot.DeepCopy(), own.DeepCopy()}, nil, winStart(1), winEnd(1))
+	}
+	test1()
+	if !mm.deleteStartupMockFrom(bootTier, served) {
+		t.Fatal("the app's startup consume, of the tier it read, was refused")
+	}
+	perTest, _ := mm.GetFilteredMocks()
+	if mm.DeleteFilteredMock(pooledCopy(t, perTest, "boot-send")) {
+		t.Fatal("test-1 was served the boot SEND again")
+	}
+	if !mm.DeleteFilteredMock(pooledCopy(t, perTest, "own-send")) {
+		t.Fatal("test-1's own SEND was refused")
+	}
+	// Test-2, then test-1 again: a retry cycle.
+	mm.SetMocksWithWindow(nil, nil, winStart(2), winEnd(2))
+	test1()
+	perTest, _ = mm.GetFilteredMocks()
+	for _, mk := range perTest {
+		if mk.Name == "boot-send" {
+			t.Fatal("the retry cycle staged the boot SEND, consumed as the app started")
+		}
+	}
+	if !mm.DeleteFilteredMock(pooledCopy(t, perTest, "own-send")) {
+		t.Fatal("the retry cycle refused test-1's own SEND, which its replay re-armed")
+	}
+	if got := mm.GetConsumedMocks(); len(got) != 2 {
+		t.Fatalf("consumed %+v; want boot-send once and own-send", got)
+	}
+}
+
+// The replay re-arms what a test consumed, and the agent serves it again: a
+// retry cycle that starts with the window the last cycle ended on (a one-test
+// set, or only the last test passed), and keploy mock replay's test run twice
+// in a session (a scope opened again), each consume a test's carry-over mock
+// again. A startup tier staged between scope tests is not the app's startup:
+// what it serves is not kept from later tests.
+func TestARearmedCarryOverMockIsServedAgain(t *testing.T) {
+	registerSends(t)
+	t.Run("a retry cycle starting where the last ended", func(t *testing.T) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		own := brokerMockAt("own-send", pulsarKind, "SEND", 1060)
+		mm.ResetForReplaySession()
+		mm.BeginTestSet(winStart(1), carryWindows(), nil, nil)
+		for cycle := 1; cycle <= 2; cycle++ {
+			mm.SetMocksWithWindow([]*models.Mock{own.DeepCopy()}, nil, winStart(1), winEnd(1))
+			perTest, _ := mm.GetFilteredMocks()
+			if !mm.DeleteFilteredMock(pooledCopy(t, perTest, "own-send")) {
+				t.Fatalf("cycle %d refused the test's own SEND", cycle)
+			}
+		}
+	})
+	t.Run("a scope test run twice", func(t *testing.T) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		send := brokerMockAt("own-send", pulsarKind, "SEND", 1060)
+		pool := brokerMockAt("pool-send", pulsarKind, "SEND", 900)
+		mm.ResetForReplaySession()
+		mm.BeginTestSet(time.Time{}, nil, nil, nil)
+		for run := 1; run <= 2; run++ {
+			mm.SetScopeMocks([]*models.Mock{send.DeepCopy()}, nil, true)
+			perTest, _ := mm.GetFilteredMocks()
+			if !mm.DeleteFilteredMock(pooledCopy(t, perTest, "own-send")) {
+				t.Fatalf("run %d refused the test's own SEND", run)
+			}
+			// Between tests: the pool, from the startup tier.
+			mm.SetScopeMocks([]*models.Mock{pool.DeepCopy()}, nil, false)
+			startup, _ := mm.GetStartupMocks()
+			if !mm.DeleteFilteredMock(pooledCopy(t, startup, "pool-send")) {
+				t.Fatalf("run %d: between tests the pool's SEND was refused", run)
+			}
+		}
+	})
+}
+
+// RestartExactKey serves a retried package's pool afresh: a carry-over mock of
+// it the app consumed as it started is the package's to consume again.
+func TestRestartExactKeyForgetsTheStartupConsumesOfItsPool(t *testing.T) {
+	registerSends(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	boot := brokerMockAt("boot-send", pulsarKind, "SEND", 500)
+	mm.ResetForReplaySession()
+	mm.BeginTestSet(winStart(1), nil, []*models.Mock{boot.DeepCopy()}, nil)
+	startup, _ := mm.GetStartupMocks()
+	served := pooledCopy(t, startup, "boot-send")
+	if !mm.DeleteFilteredMock(served) {
+		t.Fatal("the app's startup consume was refused")
+	}
+	if !mm.bootConsumed(&served) {
+		t.Fatal("the startup consume was not recorded")
+	}
+	mm.RestartExactKey("pkg-a", []string{"boot-send"})
+	if mm.bootConsumed(&served) {
+		t.Fatal("the retried package's pool kept its startup consume")
 	}
 }

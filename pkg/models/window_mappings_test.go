@@ -190,3 +190,174 @@ func TestRecordedWindow(t *testing.T) {
 		t.Fatalf("nil test case: %+v", w)
 	}
 }
+
+// A call sent in the gap before a test and answered at or after its start (a
+// consumer's long poll) was in flight when that test began, and is its own,
+// first in its list; one sent and answered in the gap, one sent before the
+// first test, and one the in-flight rule does not apply to (a carry-over or
+// window-bound mock, a session mock: WindowedMock.InFlight) belong to no test.
+func TestDeriveWindowMappingsGivesAnInFlightGapCallToItsTest(t *testing.T) {
+	windows := []TestWindow{wmWindow("test-1", 1000, 1100), wmWindow("test-2", 2000, 2100)}
+	inFlight := WindowedMock{Name: "fetch-o2", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true}
+	lateAnswer := WindowedMock{Name: "fetch-late", Kind: HTTP, At: wmAt(1600), Res: wmAt(2500), TestMock: true, InFlight: true}
+	atStart := WindowedMock{Name: "answered-at-start", Kind: HTTP, At: wmAt(1650), Res: wmAt(2000), TestMock: true, InFlight: true}
+	atGapStart := WindowedMock{Name: "sent-at-gap-start", Kind: HTTP, At: wmAt(1100), Res: wmAt(2050), TestMock: true, InFlight: true}
+	beforeStart := WindowedMock{Name: "answered-before-start", Kind: HTTP, At: wmAt(1660), Res: wmAt(1999), TestMock: true, InFlight: true}
+	bootInFlight := WindowedMock{Name: "boot-fetch", Kind: HTTP, At: wmAt(500), Res: wmAt(1050), TestMock: true, InFlight: true}
+	notEligible := WindowedMock{Name: "carry-or-failure", Kind: ConnectionFailure, At: wmAt(1550), Res: wmAt(2050), TestMock: true}
+	got := DeriveWindowMappings(windows, []WindowedMock{
+		wmMock("own-1", 1050), atGapStart, inFlight, notEligible, lateAnswer, atStart, beforeStart,
+		wmMock("gap", 1700), bootInFlight, wmMock("own-2", 2010),
+	})
+	want := map[string][]string{
+		"test-1": {"own-1", "sent-at-gap-start"},
+		"test-2": {"fetch-o2", "fetch-late", "answered-at-start", "own-2"},
+	}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+}
+
+// Two tests that start at the same instant: which of them a call in flight
+// then belongs to cannot be told by the start the agent knows a window by, so
+// neither gets it (WindowSchedule.GapBefore), as the mock manager serves it to
+// neither.
+func TestDeriveWindowMappingsGivesAnInFlightCallToNeitherOfTwoTestsThatStartTogether(t *testing.T) {
+	windows := []TestWindow{wmWindow("a", 1000, 1100), wmWindow("b", 2000, 2100), wmWindow("c", 2000, 2200)}
+	inFlight := WindowedMock{Name: "fetch", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true}
+	got := DeriveWindowMappings(windows, []WindowedMock{inFlight, wmMock("own-b", 2010)})
+	want := map[string][]string{"a": {}, "b": {"own-b"}, "c": {}}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	if from, ok := NewWindowSchedule(windows).GapBefore(wmAt(2000)); ok {
+		t.Fatalf("GapBefore(the shared start) = %v, true; want no gap", from)
+	}
+}
+
+// NewWindowedMock applies the in-flight rule to a per-test data mock only: not
+// to a connection failure, nor to a session mock, whether its lifetime was
+// derived already or is read from its recording.
+func TestNewWindowedMockSaysWhetherTheInFlightRuleApplies(t *testing.T) {
+	stated := func(kind Kind, lifetime string, derived bool) *Mock {
+		m := &Mock{Name: "m", Kind: kind, Spec: MockSpec{Metadata: map[string]string{MetadataLifetimeKey: lifetime, "type": "mocks"},
+			ReqTimestampMock: wmAt(1), ResTimestampMock: wmAt(2)}}
+		if derived {
+			m.DeriveLifetime()
+		}
+		return m
+	}
+	for _, c := range []struct {
+		m    *Mock
+		want bool
+	}{
+		{stated(HTTP, MetadataLifetimePerTest, false), true},
+		{stated(HTTP, MetadataLifetimePerTest, true), true},
+		{stated(HTTP, MetadataLifetimeSession, false), false},
+		{stated(HTTP, MetadataLifetimeSession, true), false},
+		{stated(ConnectionFailure, MetadataLifetimePerTest, false), false},
+	} {
+		derivedBefore := c.m.TestModeInfo.LifetimeDerived
+		if got := NewWindowedMock(c.m).InFlight; got != c.want {
+			t.Errorf("%s %v (derived %v): InFlight %v, want %v", c.m.Kind, c.m.Spec.Metadata, derivedBefore, got, c.want)
+		}
+		if c.m.TestModeInfo.LifetimeDerived != derivedBefore {
+			t.Errorf("NewWindowedMock derived the mock's own lifetime")
+		}
+	}
+}
+
+// workerPlaces is the worker scope's mocks, each "name@place", in order.
+func workerPlaces(m WindowMappings) []string {
+	out := []string{}
+	for _, e := range m.Worker {
+		out = append(out, e.Name+"@"+e.Place)
+	}
+	return out
+}
+
+// A test mock recorded while no window was open, which the in-flight rule
+// gives to no test, is the set's worker scope (D2), in recorded order, each
+// placed after the window that began last before it, or at the set's start
+// before every window: the app's start, the gap between two tests, and what
+// came after the last test. A mock no test may own (a handshake) and one with
+// no recorded time are not in it, and a gap call the in-flight rule gives to
+// a test is that test's alone.
+// An idle answer (D4) is the worker scope's wherever it was recorded: inside
+// a window, in flight into one, or in a gap. Each is placed after the window
+// that began last before it, its own when it was recorded inside one; a
+// meaningful answer beside it stays where the windows put it.
+func TestDeriveWindowMappingsPutsEveryIdleAnswerInTheWorkerScope(t *testing.T) {
+	windows := []TestWindow{wmWindow("test-1", 1000, 1100), wmWindow("test-2", 2000, 2100)}
+	idle := func(name string, at int) WindowedMock {
+		m := wmMock(name, at)
+		m.Idle = true
+		return m
+	}
+	longPoll := WindowedMock{Name: "empty-long-poll", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true, Idle: true}
+	got := DeriveWindowMappings(windows, []WindowedMock{
+		idle("empty-at-boot", 500),
+		wmMock("m-1", 1040),
+		idle("empty-in-test-1", 1050),
+		longPoll,
+		idle("empty-in-gap", 1600),
+		wmMock("m-2", 2050),
+	})
+	want := map[string][]string{"test-1": {"m-1"}, "test-2": {"m-2"}}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	wantWorker := []string{"empty-at-boot@", "empty-in-test-1@test-1", "empty-long-poll@test-1", "empty-in-gap@test-1"}
+	if w := workerPlaces(got); !reflect.DeepEqual(w, wantWorker) {
+		t.Fatalf("worker scope %v; want %v", w, wantWorker)
+	}
+}
+
+// NewWindowedMock reads a mock's answer as idle only as its parser declares
+// it (IsIdleAnswer).
+func TestNewWindowedMockReadsTheParsersIdleAnswers(t *testing.T) {
+	poll := &Mock{Name: "empty-poll", Kind: HTTP}
+	if NewWindowedMock(poll).Idle {
+		t.Fatal("a mock no parser declared idle was read as idle")
+	}
+	unregister := RegisterIdleAnswer(HTTP, func(m *Mock) bool { return m.Name == "empty-poll" })
+	defer unregister()
+	if !NewWindowedMock(poll).Idle || NewWindowedMock(&Mock{Name: "full-poll", Kind: HTTP}).Idle {
+		t.Fatal("NewWindowedMock did not read the declared idle answer as idle, or read another as idle")
+	}
+}
+
+func TestDeriveWindowMappingsPlacesWhatNoTestOwnsInTheWorkerScope(t *testing.T) {
+	windows := []TestWindow{wmWindow("test-2", 2000, 2100), wmWindow("test-1", 1000, 1100), wmWindow("test-3", 3000, 3100)}
+	inFlight := WindowedMock{Name: "fetch-in-flight", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true}
+	answeredInGap := WindowedMock{Name: "poll-in-gap", Kind: HTTP, At: wmAt(1600), Res: wmAt(1900), TestMock: true, InFlight: true}
+	untimed := wmMock("untimed", 0)
+	untimed.At = time.Time{}
+	got := DeriveWindowMappings(windows, []WindowedMock{
+		wmMock("boot", 500),
+		wmMock("m-1", 1050),
+		wmMock("gap-1", 1400),
+		inFlight,
+		answeredInGap,
+		{Name: "handshake", At: wmAt(1700), TestMock: false},
+		wmMock("m-2", 2050),
+		wmMock("gap-2", 2500),
+		untimed,
+		wmMock("after", 3200),
+	})
+	want := map[string][]string{"test-1": {"m-1"}, "test-2": {"fetch-in-flight", "m-2"}, "test-3": {}}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	wantWorker := []string{"boot@", "gap-1@test-1", "poll-in-gap@test-1", "gap-2@test-2", "after@test-3"}
+	if w := workerPlaces(got); !reflect.DeepEqual(w, wantWorker) {
+		t.Fatalf("worker scope %v; want %v", w, wantWorker)
+	}
+	if e := got.Worker[1]; e.Kind != string(HTTP) || e.ReqTimestampMock != FormatMockTimestamp(wmAt(1400)) {
+		t.Fatalf("a worker entry does not carry the mock's kind and recorded time: %+v", e)
+	}
+	// No window at all: everything is the scope's, at the set's start.
+	if w := workerPlaces(DeriveWindowMappings(nil, []WindowedMock{wmMock("a", 10), wmMock("b", 20)})); !reflect.DeepEqual(w, []string{"a@", "b@"}) {
+		t.Fatalf("with no window the worker scope is %v; want [a@ b@]", w)
+	}
+}

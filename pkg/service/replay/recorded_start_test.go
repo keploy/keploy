@@ -93,3 +93,31 @@ func TestASetsFirstRecordedTestIsItsEarliestWindowOfAnyKind(t *testing.T) {
 		})
 	}
 }
+
+// The cutoff is the earliest recorded test of any kind that opens a window,
+// whatever order the cases come in: a set of gRPC tests has one (its staging
+// read the whole recording when only an HTTP case's request time was read),
+// and a set whose first test is a gRPC one cuts there, not at its first HTTP
+// test.
+func TestTheStagingCutoffIsTheEarliestTestOfAnyKind(t *testing.T) {
+	grpcAt := func(at time.Time) *models.TestCase {
+		return &models.TestCase{Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: at}}
+	}
+	httpAt := func(at time.Time) *models.TestCase {
+		return &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at}}
+	}
+	for name, c := range map[string]struct {
+		cases []*models.TestCase
+		want  time.Time
+	}{
+		"gRPC only":              {[]*models.TestCase{grpcAt(recordedT0.Add(time.Minute)), grpcAt(recordedT0)}, recordedT0},
+		"gRPC first, then HTTP":  {[]*models.TestCase{httpAt(recordedT0.Add(time.Minute)), grpcAt(recordedT0)}, recordedT0},
+		"HTTP out of order":      {[]*models.TestCase{httpAt(recordedT0.Add(time.Minute)), httpAt(recordedT0)}, recordedT0},
+		"a case of neither kind": {[]*models.TestCase{testCaseAt(recordedT0)}, recordedT0},
+		"no request time":        {[]*models.TestCase{httpAt(time.Time{}), nil}, time.Time{}},
+	} {
+		if got := firstRecordedTestStart(c.cases); !got.Equal(c.want) {
+			t.Errorf("%s: cutoff %v, want %v", name, got, c.want)
+		}
+	}
+}

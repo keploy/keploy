@@ -693,6 +693,10 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		m.ConnectionID = s.ClientConnID
 	}
 
+	// A mock its parser stamped answered before it was asked is left out of
+	// the replay: said here, as it is recorded (warnAnsweredBeforeAsked).
+	s.warnAnsweredBeforeAsked(m)
+
 	// Enforce per-session ReqTimestampMock monotonicity (I5). In
 	// debug builds, a regression panics the test so parser bugs
 	// surface immediately; in prod the timestamp is clamped up to
@@ -1255,6 +1259,48 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 		req = clamped
 	}
 	s.lastReqTimestamp = req
+}
+
+// AnsweredBeforeAskedMsg is the warning EmitMock logs for a mock its parser
+// stamped answered before it was asked (warnAnsweredBeforeAsked).
+const AnsweredBeforeAskedMsg = "a parser recorded a mock answered before it was asked: it stamped the mock's response before its request"
+
+// answeredBeforeAskedWarnEvery is how often warnAnsweredBeforeAsked's WARN
+// may be logged for each kind.
+const answeredBeforeAskedWarnEvery = 10 * time.Second
+
+// answeredBeforeAskedWarns limits warnAnsweredBeforeAsked's WARN,
+// process-wide, keyed by the mock's kind: a parser that stamps its requests
+// from the wrong clock does it on every connection.
+var answeredBeforeAskedWarns = NewWarnLimiters(answeredBeforeAskedWarnEvery)
+
+// warnAnsweredBeforeAsked says, as m is recorded, that its parser stamped it
+// answered before it was asked: its response time before its request time. A
+// correct parser never does: its request is read before its answer is
+// written. The stamps are the parser's (enforceReqMonotonic, which runs after,
+// says of an inversion it makes itself). What it costs depends on the replay:
+// one without the proven switch leaves a per-test mock like this out
+// (pkg.LeaveOutAnsweredBeforeAsked), so a call it recorded is answered by
+// another mock or by none, and said only there it is found as a miss, a
+// recording later, far from the parser that stamped it.
+func (s *Session) warnAnsweredBeforeAsked(m *models.Mock) {
+	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	if s.Logger == nil || req.IsZero() || res.IsZero() || !res.Before(req) {
+		return
+	}
+	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("mockName", m.Name),
+		zap.String("kind", string(m.Kind)), zap.Time("reqTimestampMock", req), zap.Time("resTimestampMock", res),
+		zap.Duration("answeredBeforeAskedBy", req.Sub(res))}
+	ok, held := answeredBeforeAskedWarns.Allow(string(m.Kind))
+	if !ok {
+		s.Logger.Debug(AnsweredBeforeAskedMsg, fields...)
+		return
+	}
+	if held > 0 {
+		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
+	}
+	s.Logger.Warn(AnsweredBeforeAskedMsg, append(fields, zap.String("next_step",
+		"this kind's recorder stamped the request after its answer, a keploy bug: report it with this line. A replay without KEPLOY_PROVEN leaves a per-test mock like this out, and answers the call it recorded with another mock or with none"))...)
 }
 
 // debugMonotonic, when true, causes enforceReqMonotonic to panic on

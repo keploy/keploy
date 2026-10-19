@@ -28,7 +28,7 @@ func TestStoringASetsMocksTellsTheKeyerItsAmbiguousKeys(t *testing.T) {
 	set := func() ([]*models.Mock, []*models.Mock, *models.Mock) {
 		a := recordedFromContainer("a", models.HTTP, key, "inst-a", "s2")
 		// b, the other container of the scope, is refused for its variables
-		// (keploy follows variables on HTTP calls only).
+		// (no follower is registered for Mongo mocks).
 		b := recordedFromContainer("b", models.Mongo, key, "inst-b", "s2")
 		b.Spec.Variables = models.MockVariables{"id": {Recorded: "x", Use: []string{"body.id"}}}
 		alone := recordedFromContainer("alone", models.HTTP, key, "inst-a", "s3")

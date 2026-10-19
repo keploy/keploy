@@ -15,7 +15,7 @@ import (
 
 // Default knobs. Callers can override via Config.
 const (
-	defaultHangBudget = 60 * time.Second
+	defaultHangBudget = stall.HangBudget
 	defaultMemCap     = 8 * 1024 * 1024 // 8 MiB
 	// minHangTick bounds how often the watchdog checks its budget so
 	// very short HangBudgets (used in tests) do not cause a ridiculous

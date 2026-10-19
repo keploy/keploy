@@ -38,6 +38,10 @@ type dnsServer struct {
 
 	stopOnce sync.Once
 	stopErr  error
+
+	// endBind ends the stage of the agent's start that is the bind (serve),
+	// on the goroutine that serves: nil until serve begins it.
+	endBind func()
 }
 
 // newDNSServer builds the DNS server for network ("tcp" or "udp") on
@@ -52,7 +56,10 @@ func (p *Proxy) newDNSServer(network string) *dnsServer {
 		// miekg/dns calls it once the socket is bound, just before it serves,
 		// on the goroutine that called ListenAndServe. A failed bind never
 		// calls it.
-		NotifyStartedFunc: func() { s.settleAs(true, nil) },
+		NotifyStartedFunc: func() {
+			s.bindOver()
+			s.settleAs(true, nil)
+		},
 	}
 	return s
 }
@@ -69,14 +76,32 @@ func (s *dnsServer) settleAs(bound bool, err error) {
 	})
 }
 
+// bindOver ends the bind's stage of the agent's start, once (endBind).
+func (s *dnsServer) bindOver() {
+	if s.endBind != nil {
+		s.endBind()
+	}
+}
+
 // serve binds s's socket and serves on it until s is stopped, and returns: nil
 // once stopped, else the error, a failed bind's included, which it also logs,
 // in one line that is true of both (the error says which). Return it, never
 // swallow it: a DNS listener that died silently looks healthy.
+//
+// The bind is the agent's start's own work, done here while startDNSServers
+// waits for it (settled): a stage of the start of its own, on this goroutine,
+// so the CLI that waits for the agent sees it make progress
+// (utils.BeginBootWork); the wait alone shows none. It ends as s settles, on
+// this goroutine either way: once bound, just before it serves
+// (NotifyStartedFunc), or as serve returns without binding.
 func (s *dnsServer) serve() (err error) {
+	s.endBind = beginBootWork(fmt.Sprintf("the %s DNS server's bind", s.name()))
 	// A serve call that bound has settled s already. This settles one that
 	// returned, or panicked, before it bound, so stop never waits on it.
-	defer func() { s.settleAs(false, err) }()
+	defer func() {
+		s.bindOver()
+		s.settleAs(false, err)
+	}()
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
 	err = s.srv.ListenAndServe()
 	if err != nil {

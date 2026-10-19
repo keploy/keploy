@@ -417,6 +417,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
 		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift
+		outOpts.DisablePgTimeSliceCohort = r.config.DisablePgTimeSliceCohort
 		outOpts.PassThroughPorts = r.config.Record.PassThroughPorts
 		outOpts.PassThroughHosts = r.config.Record.PassThroughHosts
 		// Validate modes at load: NormalizeMode fails an unknown/typo'd mode CLOSED
@@ -451,6 +452,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
+	// A set's session: what the agent recorded consumed of the previous
+	// set's pool is not this set's (models.OutgoingOptions.StartsTestSet).
+	outOpts.StartsTestSet = true
 	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}

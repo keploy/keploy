@@ -189,7 +189,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}()
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
-	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
+	//    A start the agent stops making progress in is given up on
+	//    (pkg.ErrAgentNotReady) and retried with a fresh agent, as record and
+	//    test retry it (pkg.RetryAgentSetup). Any other failure is not
+	//    retried.
+	opts := models.SetupOptions{
 		Container:        m.config.ContainerName,
 		FromContainer:    m.config.FromContainer,
 		CommandType:      m.config.CommandType,
@@ -202,6 +206,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughPorts: config.GetByPassPorts(m.config),
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
+	}
+	if err := pkg.RetryAgentSetup(ctx, m.logger, func(c context.Context, _ int) error {
+		return m.instrumentation.Setup(c, m.config.Command, opts)
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -253,6 +260,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 3. Put the proxy in mock-serving mode with the miss policy.
 	if err := m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
+		// A session of its own: what an agent kept from an earlier one
+		// recorded consumed is that session's.
+		StartsTestSet:             true,
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
 		SQLDelay:                  time.Duration(m.config.Test.Delay) * time.Second,
@@ -262,6 +272,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MysqlPorts:                m.config.MysqlPorts,
 		DisableMysqlAutoDetect:    m.config.DisableMysqlAutoDetect,
 		DisableMysqlEndpointDrift: m.config.DisableMysqlEndpointDrift,
+		DisablePgTimeSliceCohort:  m.config.DisablePgTimeSliceCohort,
 		PassThroughPorts:          m.config.Record.PassThroughPorts,
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.statefulMocksDisabled(),
@@ -446,7 +457,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, said at ERROR where it was found, and the run's (below).
 	requestsShort := ""
 	if actual != nil {
-		lost := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+		// Unconfirmed (the stream closed on its own) is not said: under
+		// compose this stream closes so on every run, and what it carries
+		// feeds the run's report, not a recording.
+		lost, _ := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
 			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords, watchRound)
 		if !lost && watchRound.endsByMarkers() {
 			// The agent said it holds nothing more from before the run
@@ -642,9 +656,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if m.config.Mock.Strict && !missesKnown && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
-		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
-		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
+		keployFailure = errors.New("--strict could not verify this replay: the agent could not report every call no recorded mock answered")
+		m.logger.Error("replay failed under --strict: the agent could not report every call no recorded mock answered, so a clean run could not be proven",
+			zap.String("why", counts.missesUnread),
+			zap.String("next_step", "drop --strict to accept an unverified run, or remove the cause named in why and replay again"))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
 	// Only a miss that counts against a test (models.UnmatchedCall.
@@ -729,7 +744,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, but nothing proves the run isolated either.
 	if t := lostNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified = t
-		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, or a TLS client abandoned its handshake ("+provenswitch.Env+"=1)",
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 	}
@@ -1689,7 +1704,10 @@ type replayCounts struct {
 	consumed   int
 	missed     int
 	missedData int
-	tests      []TestReceipt
+	// missesUnread is why the read of the calls no mock answered was
+	// incomplete (models.UnreadCause), when missed is -1.
+	missesUnread string
+	tests        []TestReceipt
 	// learnedPool is what the learn step wrote onto mocks no test consumed.
 	learnedPool []string
 	// learnErr is why what the learn step learned could not be written: the
@@ -1794,8 +1812,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		next := "check the agent logs for why it stopped before the run ended"
 		if fromCompose && consumedErr == nil {
 			// The agent left its account, but its read of the calls no mock
-			// answered was incomplete (the proven switch): that is what to
-			// look into.
+			// answered was incomplete: that is what to look into.
 			summary = append(summary, zap.NamedError("reason", missesErr))
 			next = "the keploy-agent container could not read every call no mock answered as compose stopped it; check its logs above for why"
 		} else if fromCompose {
@@ -1868,6 +1885,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	if missesErr != nil {
 		counts.missed, counts.missedData = -1, -1
+		counts.missesUnread = models.UnreadCause(missesErr)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
 	for i := range counts.tests {

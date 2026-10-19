@@ -388,6 +388,13 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 	}
 	for _, step := range append(steps, ready...) {
 		if err := step.apply(ctx); err != nil {
+			if step.kind == stepTestSetHook {
+				// As on the agent before it: a set hook that fails is
+				// logged and the run goes on (the replay's hooks), and
+				// the mocks and readiness after it still matter.
+				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
+				continue
+			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)
 		}
 	}
@@ -410,7 +417,17 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	}
 	// A docker-mode agent that restarted holds no container list.
 	a.pushContainers(ctx)
-	return a.session().reapply(ctx, a.logger)
+	if err := a.session().reapply(ctx, a.logger); err != nil {
+		return err
+	}
+	// The agent compose started again holds the whole setup again, and the
+	// app has not run against the one it replaced: compose's retry runs only
+	// while the app's container was never started (shouldRetryComposeUp),
+	// and the app starts behind this agent's readiness, put back last. So
+	// what a watch of the agent's process keeps to (a test set's evidence)
+	// is all on this one.
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).accept()
+	return nil
 }
 
 // awaitAgentAnswers waits, up to the agent's readiness budget, for its health
@@ -451,6 +468,7 @@ func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 	if params.Exact != nil {
 		ex := *params.Exact
 		ex.Owned = slices.Clone(ex.Owned)
+		ex.Ahead = slices.Clone(ex.Ahead)
 		params.Exact = &ex
 	}
 	return params

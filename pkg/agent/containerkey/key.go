@@ -65,6 +65,13 @@ const (
 	ScopeKey    = "containerScope"
 )
 
+// UnreadKey is the mock metadata field that says the mock's container could
+// not be named because the Docker daemon did not answer keploy's read of its
+// configuration (the container, named for a message): the mock's own test
+// is not judged, whenever the read stalled (a record charges it by the mock,
+// not by when the stall came).
+const UnreadKey = models.ContainerUnreadMetadata
+
 // prefix starts every key, and every `container:` entry of mock.real.
 const prefix = "container:"
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -68,6 +69,29 @@ type captureWatch struct {
 	// first on already).
 	chargedNotJudged models.CaptureLosses
 	finalNotJudged   models.CaptureLosses
+	// unreadMocks is each saved mock, by name, whose stamp says the Docker
+	// daemon did not answer keploy's read of its container's configuration
+	// (models.ContainerUnreadMetadata), with the container named;
+	// unreadMapped, those a test case's mapping held. A record charges such
+	// a mock's own test case, by its mapping, whenever the read stalled: the
+	// count of the kind (models.CaptureLossContainerUnread), which may come
+	// after the test case was checked, is left out of every check.
+	unreadMocks  map[string]string
+	unreadMapped map[string]bool
+	unreadLost   models.CaptureLosses
+	// agent watches which agent process answers (models.AgentInstanceWatch):
+	// the counts are the process's, from when it started, and the test cases
+	// and mocks it captured are in its memory until it hands them over. An
+	// agent started again in its place mid-recording (kubelet restarting a
+	// crashed sidecar) counts from nothing, and what the one before held went
+	// with it. nil when the instrumentation cannot tell.
+	agent models.AgentInstanceWatch
+}
+
+// agentInstanceWatcher is an Instrumentation that can tell which agent
+// process answers it (models.AgentInstanceWatch): the keploy agent client.
+type agentInstanceWatcher interface {
+	WatchAgentInstance() models.AgentInstanceWatch
 }
 
 // watchCaptureLosses marks the count the recording's test cases are checked
@@ -80,6 +104,11 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 		return w
 	}
 	w.reader = reader
+	// Begun before the count is read, so the agent that answers it is the
+	// one the recording's checks keep to.
+	if a, ok := instr.(agentInstanceWatcher); ok {
+		w.agent = a.WatchAgentInstance()
+	}
 	// No deadline of its own (rule 15): the agent's answer, or the
 	// connection's close, ends it. Not the stop: from here a stop drains what
 	// the agent captured (Start), and each test case it saves is checked
@@ -100,10 +129,14 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	case errors.Is(err, models.ErrCaptureLossesUnsupported):
 		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", zap.Error(err))
 		w.off = true
+		if w.agent != nil {
+			w.agent.Stop()
+			w.agent = nil
+		}
 	case err != nil:
 		w.baseErr = err
 	default:
-		w.base = base
+		w.base = base.Without(models.CaptureLossContainerUnread)
 	}
 	return w
 }
@@ -123,6 +156,7 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		return
 	}
 	now, err := w.reader.GetCaptureLosses(context.WithoutCancel(ctx))
+	now = now.Without(models.CaptureLossContainerUnread) // charged by its mock (mapped)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err != nil {
@@ -154,6 +188,53 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 	}
 }
 
+// saved notes a mock as it is saved: one whose stamp says the Docker daemon
+// did not answer keploy's read of its container's configuration is its own
+// test case's to charge, once a mapping names it (mapped). Called before the
+// mock is published to the mappings.
+func (w *captureWatch) saved(m *models.Mock) {
+	if w == nil || w.off || m == nil || m.Name == "" {
+		return
+	}
+	what := m.Spec.Metadata[models.ContainerUnreadMetadata]
+	if what == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.unreadMocks == nil {
+		w.unreadMocks = map[string]string{}
+	}
+	w.unreadMocks[m.Name] = what
+}
+
+// mapped charges test case test with each of its mocks (entries, as its
+// mapping resolved them) whose container the Docker daemon did not answer
+// the read of (saved): the test case is not judged, the container named,
+// whenever the mapping came, before or after the test case was checked, and
+// no other test case is charged with it.
+func (w *captureWatch) mapped(test string, entries []models.MockEntry) {
+	if w == nil || w.off {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, e := range entries {
+		what, ok := w.unreadMocks[e.Name]
+		if !ok || w.unreadMapped[e.Name] {
+			continue
+		}
+		if w.unreadMapped == nil {
+			w.unreadMapped = map[string]bool{}
+		}
+		w.unreadMapped[e.Name] = true
+		if !slices.Contains(w.uncapturable, test) {
+			w.uncapturable = append(w.uncapturable, test)
+		}
+		w.unreadLost = w.unreadLost.Plus(models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: what}})
+	}
+}
+
 // afterTestCases is the final read, once the app is stopped and before the
 // agent may stop: what was lost after the last test case was checked is
 // charged to no test case, so no test case's mocks miss it, and the
@@ -176,6 +257,7 @@ func (w *captureWatch) afterTestCases(ctx context.Context) {
 		}
 	}()
 	now, err := w.reader.GetCaptureLosses(readCtx)
+	now = now.Without(models.CaptureLossContainerUnread) // charged by its mock (mapped)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err != nil {
@@ -204,28 +286,58 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
 	}
 	if len(w.uncapturable) > 0 {
+		notJudged := w.notJudged.Plus(w.unreadLost)
 		// Not a failure: keploy never had these calls to lose, or cannot
-		// tell it lost one (an abandoned TLS handshake). The test cases are
-		// kept; a replay of them makes those calls for real.
-		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture, or while a TLS client abandoned its handshake: such calls are not in the mocks ("+provenswitch.Env+"=1)",
+		// tell it lost one (an abandoned TLS handshake), or which container
+		// one reached (a container read the Docker daemon did not answer).
+		// The test cases are kept; the reason says which.
+		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture, while a TLS client abandoned its handshake, or while the Docker daemon did not answer keploy's read of a container they called: such calls are not in the mocks, or not as that container's ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.uncapturable),
-			zap.String("reason", w.notJudged.NotJudgedText()),
-			zap.String("next_step", w.notJudged.NotJudgedRemedy()+", then re-record these test cases"))
+			zap.String("reason", notJudged.NotJudgedText()),
+			zap.String("next_step", notJudged.NotJudgedRemedy()+", then re-record these test cases"))
 	}
-	// A handshake abandoned after the last test case was checked: charged to
-	// no test case, and said, never a failure.
-	var abandonedLate models.CaptureLosses
+	var unmapped models.CaptureLosses
+	for name, what := range w.unreadMocks {
+		if !w.unreadMapped[name] {
+			unmapped = unmapped.Plus(models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: what}})
+		}
+	}
+	if len(unmapped) > 0 {
+		// Mocks no test case's mapping holds (the application's start, or
+		// background calls): no test case is charged, and nothing fails.
+		w.logger.Warn("keploy could not name the container of mocks no test case holds, because the Docker daemon did not answer keploy's read of it: they are kept without its key ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", unmapped.NotJudgedText()),
+			zap.String("next_step", unmapped.NotJudgedRemedy()+", then re-record"))
+	}
+	// A handshake abandoned after the last test case was checked, or data
+	// sent over a server-first protocol keploy relays: charged to no test
+	// case, and said, never a failure.
+	var abandonedLate, relayedLate models.CaptureLosses
 	for _, c := range w.finalNotJudged.Since(w.chargedNotJudged) {
-		if c.Kind.PerTest() {
+		switch {
+		case c.Kind == models.CaptureLossServerFirst || c.Kind == models.CaptureLossRefusedAtAccept:
+			relayedLate = append(relayedLate, c)
+		case c.Kind.PerTest():
 			abandonedLate = append(abandonedLate, c)
 		}
 	}
+	if len(relayedLate) > 0 {
+		w.logger.Warn("the application sent data on connections keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", relayedLate.NotJudgedText()),
+			zap.String("next_step", relayedLate.NotJudgedRemedy()+", then re-record"))
+	}
 	if len(abandonedLate) > 0 {
-		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: whether a call was lost cannot be told, and no test case holds it ("+provenswitch.Env+"=1)",
+		// Most often a connection the application dialled, never used and
+		// closed at its stop (Go's http.Transport keeps such a spare): a
+		// rejection is made as its call is, during a test case, and named
+		// against it.
+		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: a client that does not trust keploy's CA rejects its certificate so, and so does a connection the application dialled, never used and closed at its stop (Go's http.Transport keeps such a spare), which lost nothing; no test case holds it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.String("reason", abandonedLate.NotJudgedText()),
-			zap.String("next_step", abandonedLate.NotJudgedRemedy()+", then re-record"))
+			zap.String("next_step", "if the client does not trust keploy's CA: "+abandonedLate.NotJudgedRemedy()+", then re-record"))
 	}
 	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 {
 		failed = true
@@ -240,6 +352,20 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.String("testSetID", testSetID),
 			zap.Error(w.finalErr),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
+	}
+	// Read last, after the final read: an agent started again before it
+	// answered that read holding none of what the one before counted.
+	if w.agent != nil {
+		if rep, replaced := w.agent.Replacement(); replaced {
+			failed = true
+			w.logger.Error("the recording is not verified: keploy's agent was started again while it recorded, and what the agent before counted it could not capture, and what it captured but had not handed over, went with it ("+provenswitch.Env+"=1)",
+				zap.String("testSetID", testSetID),
+				zap.String("agentProcess", rep.First),
+				zap.String("startedAgainAs", rep.Next),
+				zap.String("next_step", "find why the agent restarted (its container's restart count, an OOM kill, its log), then re-record"))
+		}
+		w.agent.Stop()
+		w.agent = nil
 	}
 	if len(w.unverified) > 0 {
 		failed = true

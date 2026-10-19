@@ -280,7 +280,7 @@ URL_FILE="$WORK/payments-url"
 rm -f "$URL_FILE"
 before="$(newest_run)"
 sudo -E env -u KEPLOY_PROVEN PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env AMOUNT=100 PAYMENTS_URL_FILE=$URL_FILE ./order-app" \
-    --delay 1 --health-url "http://127.0.0.1:$APP/healthz" --health-poll-timeout 600s --generateGithubActions=false --disable-tele >midsession.log 2>&1 </dev/null &
+    --delay 1 --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele >midsession.log 2>&1 </dev/null &
 MID_PID=$!
 # keploy started the app, so its session (and its watch of Docker) is up: the
 # container starts now, and the app learns where it is.
@@ -295,7 +295,10 @@ if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
     fail "step 7b: keploy test wrote no report (exit $RC)"
     tail -30 midsession.log
 fi
-grep -q "falling back to fixed delay" midsession.log && fail "step 7b: the tests started before the container did"
+# Under the switch the first test goes on the readiness event: /healthz's 2xx,
+# which the app gives only once it knows the container's URL (U18).
+grep "the application is ready; firing the first test" midsession.log | grep -q "healthz answered 200" ||
+    fail "step 7b: the first test did not wait for /healthz's 2xx (the container's start)"
 expect_pass "step 7b"
 stop_containers
 

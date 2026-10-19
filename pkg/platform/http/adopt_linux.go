@@ -78,9 +78,9 @@ var (
 func adoptDaemons(logger *zap.Logger) {
 	adoptOnce.Do(func() {
 		if _, err := startAdopting(logger); err != nil {
-			logger.Warn("keploy cannot keep a daemon the application starts in this run: a process the application starts and leaves behind (pg_ctl start, redis-server --daemonize) is reparented away from keploy, and its calls are neither intercepted nor judged",
+			logger.Warn("keploy cannot keep a daemon the application starts in this run: a process the application starts and leaves behind (pg_ctl start, redis-server --daemonize) is reparented away from keploy, and its calls are neither intercepted nor judged; nor does keploy's stop of the application wait for a process of it that outlives the shell that started it (`app & wait`), so what that process does as it stops can come after its test set's end is read",
 				zap.Error(err),
-				zap.String("next_step", "start such a dependency before keploy, where it is an outside dependency, recorded and mocked; or run it in the foreground of the command keploy runs (postgres -D <dir> &, redis-server --daemonize no &), where it stays the command's child"))
+				zap.String("next_step", "start such a dependency before keploy, where it is an outside dependency, recorded and mocked; or run it in the foreground of the command keploy runs (postgres -D <dir> &, redis-server --daemonize no &), where it stays the command's child; and start the application itself in the foreground of its shell (exec app)"))
 		}
 	})
 }
@@ -366,7 +366,12 @@ type member struct {
 // stopAdopted ends what this process adopted from the application's tree,
 // once the application has ended or keploy has stopped it for its test set.
 // The daemons and what they run, as they are now, are asked to stop
-// (SIGTERM, each daemon's group with it), killed only once they make no
+// (SIGTERM, each daemon's group with it), but for those keploy's stop of the
+// application asked already: a process its interrupt reached (reached, from
+// utils.InterruptProcessTreeReached) that does not ignore SIGINT is acting
+// on it, and is not asked again, as a second signal ends many an application
+// mid-shutdown (Go's signal.NotifyContext once its stop is called). They are
+// killed only once they make no
 // progress on their way out across stopStallChecks reads -- a process or
 // thread of theirs ending, a file or socket closed, storage read or written;
 // being scheduled is not, a daemon that ignores the request runs on -- and
@@ -379,13 +384,17 @@ type member struct {
 // member starts after the stop began is not the stop's: orphaned, it is
 // adopted, a member of the next run, and ended with it. A no-op unless
 // adoptDaemons made this process a subreaper.
-func stopAdopted(logger *zap.Logger) {
+//
+// It returns why it had to kill a daemon that made no progress on its way
+// out, "" when it did not, or when the kill was the user's (Ctrl+C): a
+// shutdown that kill cut is not known.
+func stopAdopted(logger *zap.Logger, reached []utils.Reached) string {
 	if !adopting.Load() {
-		return
+		return ""
 	}
 	daemons := adoptedRunning(logger)
 	if len(daemons) == 0 {
-		return
+		return ""
 	}
 	end := utils.BeginDaemonStop()
 	defer end()
@@ -395,7 +404,19 @@ func stopAdopted(logger *zap.Logger) {
 			closePidfd(m.fd)
 		}
 	}()
-	stopMembers(logger, ms)
+	return stopMembers(logger, ms, actingOn(reached))
+}
+
+// actingOn is whether a member is acting on keploy's interrupt: reached by
+// it, the same process (its start time) as when it was, and not ignoring it.
+func actingOn(reached []utils.Reached) func(member) bool {
+	acting := make(map[[2]uint64]bool, len(reached))
+	for _, r := range reached {
+		if !r.Ignores {
+			acting[[2]uint64{uint64(r.PID), r.Start}] = true
+		}
+	}
+	return func(m member) bool { return acting[[2]uint64{uint64(m.pid), m.start}] }
 }
 
 // adoptedRunning is this process's children that it adopted (no pidfd of its
@@ -470,28 +491,39 @@ func members(pids []int) []member {
 	return ms
 }
 
-// stopMembers asks ms to stop, kills them once they make no progress on
-// their way out (or at once, at the press of Ctrl+C the stop offers), and
-// waits until each has exited, or is held by the kernel without progress.
-func stopMembers(logger *zap.Logger, ms []member) {
+// stopMembers asks ms to stop, but those acting on keploy's interrupt
+// already, kills them once they make no progress on their way out (or at
+// once, at the press of Ctrl+C the stop offers), and waits until each has
+// exited, or is held by the kernel without progress. stallKill says why it
+// killed for want of progress; "" when it did not.
+func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (stallKill string) {
 	pids := make([]int, 0, len(ms))
+	var stopping []int
 	for _, m := range ms {
 		pids = append(pids, m.pid)
+		if acting(m) {
+			stopping = append(stopping, m.pid)
+		}
 	}
-	logger.Info("stopping the daemons the application left running: they are part of its run, and end with it", zap.Ints("pids", pids))
-	signalAll(ms, syscall.SIGTERM, false)
-	signalAll(ms, syscall.SIGCONT, false) // a stopped one handles it now
+	logger.Info("stopping the daemons the application left running: they are part of its run, and end with it",
+		zap.Ints("pids", pids), zap.Ints("acting_on_the_interrupt", stopping))
+	// Whether each ignores SIGTERM as it is asked to stop with it: one that
+	// does has no way out of its own for a kill to cut. Read now, not at the
+	// kill: a handler may ignore further TERMs while it shuts down.
+	ignored := ignoresSigtermNow(ms)
+	signalAll(ms, syscall.SIGTERM, false, acting)
+	signalAll(ms, syscall.SIGCONT, false, nil) // a stopped one handles it now
 	notice := utils.NewStopNowNotice(stopOffer)
 	defer notice.Withdraw()
 	t := time.NewTicker(stopCheck)
 	defer t.Stop()
-	var mark exitRatchet
-	mark.advance(markExit(ms))
+	var mark utils.ExitRatchet
+	mark.Advance(markExit(ms))
 	var quiet uint64
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
-		signalAll(ms, syscall.SIGKILL, true)
+		signalAll(ms, syscall.SIGKILL, true, nil)
 		killed, quiet = true, 0
 		// What is left the kill ends, or the kernel holds: no press
 		// does more, and a closed channel read again would spin.
@@ -515,7 +547,7 @@ func stopMembers(logger *zap.Logger, ms []member) {
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
-		if mark.advance(markExit(ms)) {
+		if mark.Advance(markExit(ms)) {
 			quiet = 0
 			continue
 		}
@@ -532,7 +564,21 @@ func stopMembers(logger *zap.Logger, ms []member) {
 			}
 			return
 		}
+		// A kill cuts the way out of a process that was on one: one acting
+		// on keploy's interrupt, or one that does not ignore the SIGTERM it
+		// was asked to stop with. One that ignores it has no way out to
+		// cut (a server daemon with no stop of its own): its kill is said,
+		// and leaves the set judged.
+		cut, uncut := cutBy(ms, acting, ignored)
+		stalled := describe(cut)
 		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
+		if len(cut) > 0 {
+			stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, stopStallChecks)
+		} else {
+			logger.Info("the daemons keploy killed ignored SIGTERM when it asked them to stop with it: they had no way out of their own to cut, so the set's end is judged",
+				zap.String("killed", describe(uncut)),
+				zap.String("next_step", "give such a daemon a stop of its own (a SIGTERM handler), or end it in the application's own shutdown"))
+		}
 	}
 }
 
@@ -544,19 +590,97 @@ func stopMembers(logger *zap.Logger, ms []member) {
 // to each member outside those groups; with every, to each member as well.
 // The daemon is the process its pidfd names while that pidfd shows it alive:
 // its pid, and so its group's id, cannot have been given to another.
-func signalAll(ms []member, sig syscall.Signal, every bool) {
+//
+// A member skip holds for is not sent sig, nor is its group as a whole: a
+// daemon's group is then signalled member by member.
+func signalAll(ms []member, sig syscall.Signal, every bool, skip func(member) bool) {
+	if skip == nil {
+		skip = func(member) bool { return false }
+	}
 	groups := map[int]bool{}
 	for _, m := range ms {
-		if m.leads && unix.PidfdSendSignal(m.fd, 0, nil, 0) == nil {
+		if m.leads && !skip(m) && unix.PidfdSendSignal(m.fd, 0, nil, 0) == nil {
 			groups[m.pgrp] = true
 			_ = syscall.Kill(-m.pid, sig)
 		}
 	}
 	for _, m := range ms {
-		if every || !groups[m.pgrp] {
+		if (every || !groups[m.pgrp]) && !skip(m) {
 			_ = unix.PidfdSendSignal(m.fd, sig, nil, 0)
 		}
 	}
+}
+
+// cutBy splits the members of ms still running by whether a kill now cuts
+// their way out: cut, those acting on keploy's interrupt and those that did
+// not ignore SIGTERM when the stop asked them to stop with it (ignored);
+// uncut, the rest.
+func cutBy(ms []member, acting func(member) bool, ignored map[[2]uint64]bool) (cut, uncut []member) {
+	for _, m := range ms {
+		if m.exited() {
+			continue
+		}
+		if acting(m) || !ignored[[2]uint64{uint64(m.pid), m.start}] {
+			cut = append(cut, m)
+		} else {
+			uncut = append(uncut, m)
+		}
+	}
+	return cut, uncut
+}
+
+// ignoresSigtermNow is which members of ms ignore SIGTERM now, by pid and
+// start time; one whose status cannot be read is taken for one that does not.
+func ignoresSigtermNow(ms []member) map[[2]uint64]bool {
+	ignored := make(map[[2]uint64]bool, len(ms))
+	for _, m := range ms {
+		if ignoresSigterm(m.pid) {
+			ignored[[2]uint64{uint64(m.pid), m.start}] = true
+		}
+	}
+	return ignored
+}
+
+// ignoresSigterm reports whether process pid ignores SIGTERM: the SIGTERM bit
+// (15, bit 14) of its status's SigIgn mask. A process whose status cannot be
+// read is taken for one that does not.
+func ignoresSigterm(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "SigIgn:"); ok {
+			mask, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+			return err == nil && mask&(1<<(uint(syscall.SIGTERM)-1)) != 0
+		}
+	}
+	return false
+}
+
+// describe names each member of ms still running: its pid, command and
+// state ("process 4242 (sleep, state S)").
+func describe(ms []member) string {
+	var names []string
+	for _, m := range ms {
+		if m.exited() {
+			continue
+		}
+		name := "process " + strconv.Itoa(m.pid)
+		comm, err := os.ReadFile("/proc/" + strconv.Itoa(m.pid) + "/comm")
+		st, ok := utils.ReadProcStat(m.pid)
+		switch {
+		case err == nil && ok:
+			name += fmt.Sprintf(" (%s, state %c)", strings.TrimSpace(string(comm)), st.State)
+		case err == nil:
+			name += " (" + strings.TrimSpace(string(comm)) + ")"
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "a process"
+	}
+	return strings.Join(names, ", ")
 }
 
 // exited reports whether m has exited: its pidfd is readable then.
@@ -577,93 +701,16 @@ func running(ms []member) []int {
 	return pids
 }
 
-// exitMark is how far a stop's members are on their way out: how many still
-// run, with how many threads and open files, how much storage they have read
-// and written, and whether one waits on storage (an uninterruptible sleep,
-// D) as it is read.
-type exitMark struct {
-	running, threads, fds int
-	io                    uint64
-	onStorage             bool
-}
-
-func markExit(ms []member) exitMark {
-	var m exitMark
+// markExit reads how far a stop's members are on their way out
+// (utils.ExitMark): those whose pidfd shows them exited are not read.
+func markExit(ms []member) utils.ExitMark {
+	procs := make([]utils.Reached, 0, len(ms))
 	for _, mb := range ms {
-		if mb.exited() {
-			continue
-		}
-		m.running++
-		dir := "/proc/" + strconv.Itoa(mb.pid)
-		if st, ok := utils.ReadProcStat(mb.pid); ok && st.State == 'D' {
-			m.onStorage = true
-		}
-		if tasks, err := os.ReadDir(dir + "/task"); err == nil {
-			m.threads += len(tasks)
-		}
-		if fds, err := os.ReadDir(dir + "/fd"); err == nil {
-			m.fds += len(fds)
-		}
-		m.io += storageIO(dir + "/io")
-	}
-	return m
-}
-
-// exitRatchet is the furthest a stop's members have come on their way out:
-// the fewest of them running, threads and open files seen, and the most
-// storage I/O. A reading is progress only where it passes that mark, so a
-// count that rises and falls back (a socket opened and closed, a thread
-// started and ended: a retry loop, a DNS lookup, a pool) is none; and
-// storage I/O counts only while a member waits on it: a daemon that logs as
-// it waits on its own makes none.
-type exitRatchet struct {
-	best exitMark
-	set  bool
-}
-
-// advance takes reading m and reports whether it passed the mark.
-func (r *exitRatchet) advance(m exitMark) bool {
-	if !r.set {
-		r.best, r.set = m, true
-		return false
-	}
-	moved := false
-	if m.running < r.best.running {
-		r.best.running, moved = m.running, true
-	}
-	if m.threads < r.best.threads {
-		r.best.threads, moved = m.threads, true
-	}
-	if m.fds < r.best.fds {
-		r.best.fds, moved = m.fds, true
-	}
-	if m.io > r.best.io {
-		if m.onStorage {
-			moved = true
-		}
-		r.best.io = m.io
-	}
-	return moved
-}
-
-// storageIO is the bytes a process has read from and written to storage
-// (read_bytes and write_bytes of /proc/<pid>/io), 0 where it cannot be read.
-func storageIO(path string) uint64 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	var n uint64
-	for _, line := range strings.Split(string(b), "\n") {
-		for _, key := range []string{"read_bytes:", "write_bytes:"} {
-			if v, ok := strings.CutPrefix(line, key); ok {
-				if x, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64); err == nil {
-					n += x
-				}
-			}
+		if !mb.exited() {
+			procs = append(procs, utils.Reached{PID: mb.pid, Start: mb.start})
 		}
 	}
-	return n
+	return utils.MarkExit(procs)
 }
 
 // processChildren is the processes pid runs: its threads' children lists, or,

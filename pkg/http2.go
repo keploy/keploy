@@ -661,10 +661,20 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Create gRPC client connection using the TCP connection. Under the
 	// proven switch the app's frames are watched (pingWatch): a stream it
 	// keeps open past its recording ends on its keepalives (row W1).
+	//
+	// With no clock on the app's answer, the stall rule (answerWatch) ends an
+	// exchange the app makes no progress on: the whole call waits on the
+	// app, and AnswerStallGrace of keploy's runnable time with no frame of
+	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
 	var dialed net.Conn = conn
 	var pings *pingWatch
+	answer := newAnswerWatch(cfg)
+	defer answer.stop()
+	defer answer.waiting()()
+	answer.closeOnCut(conn)
 	if provenswitch.On() {
 		pings = newPingWatch(conn)
+		pings.answer = answer
 		dialed = pings
 	}
 	dialer := func(context.Context, string) (net.Conn, error) { return dialed, nil }
@@ -729,6 +739,12 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		defer cancelStream()
 		callCtx = metadata.NewOutgoingContext(streamCtx, md)
 		pings.arm(recordedMessagesComplete(tc.GrpcResp), cancelStream)
+		answer.onCut(cancelStream)
+	}
+
+	reqMsgs := grpcReq.AllMessages()
+	if answer != nil {
+		answer.describe(path, grpcRequestSize(reqMsgs))
 	}
 
 	// Create a new stream
@@ -738,6 +754,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		ClientStreams: true,
 	}, path)
 	if err != nil {
+		if answer.didStall() {
+			return nil, answer.err()
+		}
 		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, tc.AppPort, err))
 	}
 
@@ -751,7 +770,6 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// zero-value body — the health check records message_length 0 with empty
 	// decoded_data and expects exactly one empty message. An empty payload
 	// here is a real message, not the absence of one.
-	reqMsgs := grpcReq.AllMessages()
 	for i, m := range reqMsgs {
 		var requestPayload []byte
 		if m.DecodedData != "" {
@@ -764,12 +782,18 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			}
 		}
 		if err := stream.SendMsg(&rawMessage{data: requestPayload}); err != nil {
+			if answer.didStall() {
+				return stalledStart(stream, answer), answer.err()
+			}
 			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
 		}
 	}
 
 	// Close the send side of the stream
 	if err := stream.CloseSend(); err != nil {
+		if answer.didStall() {
+			return stalledStart(stream, answer), answer.err()
+		}
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
 
@@ -778,6 +802,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// answers nil; the error check stays for a client that does not.
 	respHeaders, err := stream.Header()
 	if err != nil {
+		if answer.didStall() {
+			return stalledStart(stream, answer), answer.err()
+		}
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
 
@@ -828,11 +855,43 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// sent, so that only what came is compared.
 	heldOpen, heldAt, stalled := pings.heldOpen()
 	heldOpen = heldOpen && len(respMsgs) >= heldAt
+	if heldOpen && stalled && heldAt == 0 {
+		// Keepalives, and no message: nothing of the answer to compare.
+		// It fails closed, not judged (ErrAnswerStalled), never a pass on
+		// the recording's fill.
+		headers, data := pings.heldAnswer()
+		if headers {
+			return headersOnly(respHeaders), keptOpenWithNothing(path, headers, data)
+		}
+		return nil, keptOpenWithNothing(path, headers, data)
+	}
 	if heldOpen {
 		respMsgs, drainErr = respMsgs[:heldAt], nil
 		if recorded := tc.GrpcResp.AllMessages(); stalled && heldAt < len(recorded) {
 			respMsgs = append(respMsgs, recorded[heldAt:]...)
 		}
+	}
+	// The stall rule cut the exchange, and no keepalive held it open: an
+	// answer that never began, or none of whose messages came, is nothing to
+	// compare (ErrAnswerStalled), and a stream the app went silent on is
+	// judged on what came, the recording's rest in place of what did not
+	// (the stall's own fill), not judged as a whole.
+	var silent error
+	if !heldOpen && drainErr != nil && answer.didStall() {
+		if !answer.answered.Load() {
+			return nil, answer.err()
+		}
+		if len(respMsgs) == 0 {
+			return headersOnly(respHeaders), answer.err()
+		}
+		recorded := tc.GrpcResp.AllMessages()
+		came := len(respMsgs)
+		silent = streamCut(answer.err(), came, len(recorded), "message")
+		if came < len(recorded) {
+			respMsgs = append(respMsgs, recorded[came:]...)
+		}
+		drainErr = nil
+		heldOpen = true
 	}
 	if len(respMsgs) == 0 {
 		// A response carrying only trailers is legitimate (an error status, or
@@ -860,35 +919,11 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Construct the response
 	grpcResp := &models.GrpcResp{
-		Headers: models.GrpcHeaders{
-			PseudoHeaders:   make(map[string]string),
-			OrdinaryHeaders: make(map[string]string),
-		},
+		Headers: grpcHeadersOf(respHeaders),
 		Trailers: models.GrpcHeaders{
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
 		},
-	}
-
-	// Convert response headers
-	for k, v := range respHeaders {
-		val := strings.Join(v, ", ")
-		if strings.HasPrefix(k, ":") {
-			grpcResp.Headers.PseudoHeaders[k] = val
-		} else {
-			grpcResp.Headers.OrdinaryHeaders[k] = val
-		}
-	}
-
-	// Add the :status pseudo-header since gRPC client abstracts it away
-	// For successful gRPC calls, HTTP status is always 200
-	if _, ok := grpcResp.Headers.PseudoHeaders[":status"]; !ok {
-		grpcResp.Headers.PseudoHeaders[":status"] = "200"
-	}
-
-	// Add standard gRPC headers if not present
-	if _, ok := grpcResp.Headers.OrdinaryHeaders["content-type"]; !ok {
-		grpcResp.Headers.OrdinaryHeaders["content-type"] = "application/grpc"
 	}
 
 	// Convert trailers
@@ -931,6 +966,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	logger.Info("successfully completed gRPC simulation",
 		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
+	if silent != nil {
+		return grpcResp, silent
+	}
 	if heldOpen && stalled {
 		return grpcResp, ErrStreamStalled
 	}
@@ -938,6 +976,66 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return grpcResp, ErrStreamHeldOpen
 	}
 	return grpcResp, nil
+}
+
+// grpcHeadersOf is the response headers respHeaders as a GrpcResp holds them:
+// with :status 200 and content-type application/grpc when the app sent none
+// (the gRPC client hides :status; a successful call's is always 200).
+func grpcHeadersOf(respHeaders metadata.MD) models.GrpcHeaders {
+	h := models.GrpcHeaders{PseudoHeaders: make(map[string]string), OrdinaryHeaders: make(map[string]string)}
+	for k, v := range respHeaders {
+		val := strings.Join(v, ", ")
+		if strings.HasPrefix(k, ":") {
+			h.PseudoHeaders[k] = val
+		} else {
+			h.OrdinaryHeaders[k] = val
+		}
+	}
+	if _, ok := h.PseudoHeaders[":status"]; !ok {
+		h.PseudoHeaders[":status"] = "200"
+	}
+	if _, ok := h.OrdinaryHeaders["content-type"]; !ok {
+		h.OrdinaryHeaders["content-type"] = "application/grpc"
+	}
+	return h
+}
+
+// headersOnly is the answer of a stream whose headers came and nothing more
+// (an ErrAnswerStalled after its answer began): its headers, for the replay
+// to judge them against the recording before it calls the stream not judged.
+// nil with no metadata in hand: a start is never made up.
+func headersOnly(respHeaders metadata.MD) *models.GrpcResp {
+	if respHeaders == nil {
+		return nil
+	}
+	return &models.GrpcResp{Headers: grpcHeadersOf(respHeaders)}
+}
+
+// stalledStart is what of the answer a call the stall rule cut while keploy
+// still sent its request had: the app's headers, when they came before the
+// cut (the cut call's Header returns at once), else nothing.
+func stalledStart(stream grpc.ClientStream, answer *answerWatch) *models.GrpcResp {
+	if !answer.answered.Load() {
+		return nil
+	}
+	md, _ := stream.Header()
+	return headersOnly(md)
+}
+
+// grpcRequestSize is the size of reqMsgs on the wire, their 5-byte prefixes
+// with them: what the stall rule says of a request the app did not take
+// whole. A payload that does not parse counts as empty.
+func grpcRequestSize(reqMsgs []models.GrpcLengthPrefixedMessage) int64 {
+	var n int64
+	for _, m := range reqMsgs {
+		n += 5
+		if m.DecodedData != "" {
+			if b, err := protoscope.NewScanner(m.DecodedData).Exec(); err == nil {
+				n += int64(len(b))
+			}
+		}
+	}
+	return n
 }
 
 // recordedMessagesComplete is how many response messages complete resp, the

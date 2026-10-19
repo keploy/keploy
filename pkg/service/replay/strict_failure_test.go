@@ -68,9 +68,10 @@ func TestCompareHTTPRespForReplay_ProvenSwitchFailsAnAdditiveChange(t *testing.T
 }
 
 // A test whose response failed while its mock set diverged from the recording
-// is demoted to OBSOLETE today, and its test set stays PASSED. Under the switch
-// strict failure is on: the test is FAILED and so is its set. Both replay
-// phases make that decision, so both are driven.
+// is demoted to OBSOLETE with the switch off, and its test set is not judged
+// (INTERNAL_ERR): a wrong answer is never a pass. Under the switch strict
+// failure is on: the test is FAILED and so is its set. Both replay phases make
+// that decision, so both are driven.
 func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 	for _, phase := range []string{"main loop", "streaming pass"} {
 		for _, on := range []bool{false, true} {
@@ -103,7 +104,7 @@ func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 					t.Fatalf("report has %d results, want 1", len(h.report.report.Tests))
 				}
 				got := h.report.report.Tests[0].Status
-				wantTest, wantSet := models.TestStatusObsolete, models.TestSetStatusPassed
+				wantTest, wantSet := models.TestStatusObsolete, models.TestSetStatusInternalErr
 				if on {
 					wantTest, wantSet = models.TestStatusFailed, models.TestSetStatusFailed
 				}
@@ -177,11 +178,11 @@ func TestRunTestSet_ProvenSwitchCapturesInAnArrayAtItsIndex(t *testing.T) {
 }
 
 // With the switch off a test whose answer failed and whose mock set diverged
-// is demoted to OBSOLETE, which leaves its set green, unless a call it made
-// got no recorded answer: the miss explains the failure, not an out-of-date
-// recording, so the test stays FAILED and its set fails, in the main loop and
-// the streaming pass. A DNS miss is not a data-plane call and keeps the
-// demotion; so does a test with no miss.
+// is demoted to OBSOLETE, which leaves its set not judged (INTERNAL_ERR),
+// unless a call it made got no recorded answer: the miss explains the failure,
+// not an out-of-date recording, so the test stays FAILED and its set fails, in
+// the main loop and the streaming pass. A DNS miss is not a data-plane call and
+// keeps the demotion; so does a test with no miss.
 func TestAMissVetoesTheObsoleteDemotionWithTheSwitchOff(t *testing.T) {
 	miss := func(protocol, summary string) func() ([]models.UnmatchedCall, error) {
 		return func() ([]models.UnmatchedCall, error) {
@@ -195,8 +196,8 @@ func TestAMissVetoesTheObsoleteDemotionWithTheSwitchOff(t *testing.T) {
 			want    models.TestStatus
 			wantSet models.TestSetStatus
 		}{
-			{"no miss", nil, models.TestStatusObsolete, models.TestSetStatusPassed},
-			{"a DNS miss", miss("DNS", "A auth.internal"), models.TestStatusObsolete, models.TestSetStatusPassed},
+			{"no miss", nil, models.TestStatusObsolete, models.TestSetStatusInternalErr},
+			{"a DNS miss", miss("DNS", "A auth.internal"), models.TestStatusObsolete, models.TestSetStatusInternalErr},
 			{"an HTTP miss", miss("HTTP", "POST /oauth/token"), models.TestStatusFailed, models.TestSetStatusFailed},
 		} {
 			t.Run(phase+"/"+c.name, func(t *testing.T) {

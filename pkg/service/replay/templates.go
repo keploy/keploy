@@ -146,9 +146,9 @@ const vetoTemplateFailure = "the test case failed on a template variable's place
 // variable's place (failed): FAILED, and its set fails, whatever its mock set
 // did. A diverged mock set demotes any other failure to OBSOLETE unless
 // --strict-failure is set or --assert-dependencies finds a dependency of the
-// test case missing (resolveTestOutcome), and an OBSOLETE test case leaves
-// its set passing;
-// a template failure is never hidden that way. The log line then names why
+// test case missing (resolveTestOutcome), and an OBSOLETE test case is not
+// judged (FailureInfo.MappingStale); a template failure is never hidden that
+// way. The log line then names why
 // it stays FAILED, as it names a veto flag.
 func keepTemplateFailure(o testOutcome, failed bool) testOutcome {
 	if !failed || o.Status != models.TestStatusObsolete {

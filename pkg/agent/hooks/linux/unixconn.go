@@ -462,7 +462,7 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	h.objectsMutex.RUnlock()
 	if err != nil {
 		h.logger.Warn("keploy cannot see the application's calls over Unix sockets on this kernel: a call over one to a dependency is neither recorded nor mocked, so no test is judged from now on",
-			zap.Error(err), zap.String("next_step", "reach dependencies over TCP addresses"))
+			zap.Error(err), zap.String("next_step", "report this error to keploy: nothing done to the application or its dependencies (reaching them over TCP included) changes it"))
 		h.unixMu.Lock()
 		h.unix = &unixConn{off: err.Error()}
 		h.unixMu.Unlock()

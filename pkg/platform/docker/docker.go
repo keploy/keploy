@@ -54,6 +54,13 @@ const (
 	// from one that has stopped making progress, which alone it kills.
 	AgentTeardownProgressFile = "/tmp/keploy-agent-teardown.json"
 
+	// AgentBootProgressFile is where a containerised agent reports its
+	// start's progress until its control-plane server listens
+	// (utils.ReportBootProgress): keploy reads it out of the container to
+	// tell an agent still starting from one that has stopped making
+	// progress, which alone it gives up on.
+	AgentBootProgressFile = "/tmp/keploy-agent-boot.json"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
@@ -772,6 +779,13 @@ func (idc *Impl) generateKeployVolumes() []string {
 	return volumes
 }
 
+// composeLiteral is s written so that compose reads it back as s. A command
+// list is read by no shell, but compose interpolates every string of a file
+// it loads ($VAR, ${VAR}, from the operator's environment), and reads $$ as
+// one $: the agent's arguments (a caller's ExtraArgs, its config path) reach
+// it as they were given.
+func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
+
 // GenerateKeployAgentService creates a Docker Compose service configuration for keploy-agent
 // based on the SetupOptions and returns it as a yaml.Node that can be appended to a compose file
 func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error) {
@@ -893,6 +907,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	if opts.RecordRequests {
 		command = append(command, "--record-requests")
+	}
+	if opts.SettleReads {
+		command = append(command, "--settle-reads")
 	}
 	// The proven model's staging switch: the agent container is not given
 	// KEPLOY_PROVEN, so it travels as a flag.
@@ -1123,7 +1140,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		for _, cmd := range command {
 			commandNode.Content = append(commandNode.Content, &yaml.Node{
 				Kind:  yaml.ScalarNode,
-				Value: cmd,
+				Value: composeLiteral(cmd),
 				Tag:   "!!str", // Explicitly mark as string
 			})
 		}

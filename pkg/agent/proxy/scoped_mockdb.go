@@ -301,6 +301,29 @@ func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.M
 
 var _ integrations.StagedFinder = (*scopedMockDb)(nil)
 
+// FindStagedNotOwnedByKeys forwards the store's
+// (integrations.StagedKeyFinder), or, from one that has none, its
+// FindStagedNotOwned.
+func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	if f, ok := s.MockMemDb.(integrations.StagedKeyFinder); ok {
+		return f.FindStagedNotOwnedByKeys(kind, keys, match)
+	}
+	return s.FindStagedNotOwned(kind, match)
+}
+
+var _ integrations.StagedKeyFinder = (*scopedMockDb)(nil)
+
+// StagedOwnerBegun forwards the store's (integrations.BegunOwnerReader);
+// false from a store that cannot tell.
+func (s *scopedMockDb) StagedOwnerBegun(name string) bool {
+	if b, ok := s.MockMemDb.(integrations.BegunOwnerReader); ok {
+		return b.StagedOwnerBegun(name)
+	}
+	return false
+}
+
+var _ integrations.BegunOwnerReader = (*scopedMockDb)(nil)
+
 // passThrough reports whether this view passes every read and consume
 // straight to the store it wraps: while the store serves each test exactly
 // its own mocks (exact serving, the proven switch), it alone decides what
@@ -536,6 +559,15 @@ func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
 		return w.SameRecordedTestWindow(a, b)
 	}
 	return false, false
+}
+
+// StatementCatalog forwards the staged set's statement catalog: describe-only,
+// the same for every view (it serves no test's answer).
+func (s *scopedMockDb) StatementCatalog(kind models.Kind) []*models.Mock {
+	if c, ok := s.MockMemDb.(integrations.StatementCatalog); ok {
+		return c.StatementCatalog(kind)
+	}
+	return nil
 }
 
 // Variables forwards the replay's variable table. Under the proven switch one

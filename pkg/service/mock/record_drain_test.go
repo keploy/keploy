@@ -695,7 +695,8 @@ func gatedDrain(t *testing.T, lookErr error, frames *atomic.Uint64, whileLooking
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		lost.Store(m.drainTrailingMocks(consumerDone, time.Now(), true, func() (uint64, bool) { return frames.Load(), false }, frames.Load, recordDrainWords, nil))
+		l, _ := m.drainTrailingMocks(consumerDone, time.Now(), true, func() (uint64, bool) { return frames.Load(), false }, frames.Load, recordDrainWords, nil)
+		lost.Store(l)
 	}()
 	wait := func(c <-chan struct{}, what string) {
 		t.Helper()
@@ -1029,8 +1030,9 @@ func TestDrainTrailingMocks_SaysWhatStoppingNowCostsItsCaller(t *testing.T) {
 			m := &mockService{logger: zap.New(core), instrumentation: alwaysPending{}}
 			lost := make(chan bool, 1)
 			go func() {
-				lost <- m.drainTrailingMocks(make(chan struct{}), time.Now(), false,
+				l, _ := m.drainTrailingMocks(make(chan struct{}), time.Now(), false,
 					func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, words, nil)
+				lost <- l
 			}()
 			offered := words.saving + "; " + words.stopNow
 			deadline := time.Now().Add(30 * time.Second) // bounds only a drain that never offers
@@ -1052,6 +1054,85 @@ func TestDrainTrailingMocks_SaysWhatStoppingNowCostsItsCaller(t *testing.T) {
 			warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(words.gaveUp).All()
 			if len(warned) != 1 || warned[0].ContextMap()["next_step"] != words.nextStep {
 				t.Fatalf("the user's stop was not said in the caller's terms: %v", logs.All())
+			}
+		})
+	}
+}
+
+// Under docker compose the agent goes with the project and closes its mock
+// stream without a word that it handed over every mock: the drain is not
+// lost, nothing says a mock is missing, but it is unconfirmed. The drain says
+// nothing of it itself: only its caller knows whether it then saves anything.
+// An agent that holds its stream for the drain is never unconfirmed: its
+// close is judged by agentEndedDrain.
+func TestDrainTrailingMocks_AComposeAgentsClosedStreamIsUnconfirmed(t *testing.T) {
+	for _, holds := range []bool{false, true} {
+		core, logs := observer.New(zapcore.WarnLevel)
+		m := &mockService{logger: zap.New(core), instrumentation: alwaysPending{}}
+		closed := make(chan struct{})
+		close(closed)
+		lost, unconfirmed := m.drainTrailingMocks(closed, time.Now(), holds, func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, recordDrainWords, nil)
+		if unconfirmed != !holds || (!holds && lost) {
+			t.Fatalf("agent holds %v, its stream closed: lost %v, unconfirmed %v", holds, lost, unconfirmed)
+		}
+		if n := logs.FilterMessage(composeTailUnconfirmed).Len(); n != 0 {
+			t.Fatalf("the drain said the tail is unconfirmed %d time(s) before its caller saved anything", n)
+		}
+	}
+}
+
+// composeOneMock is a compose project whose agent hands over one mock, then
+// closes its stream as compose stops it with the project.
+type composeOneMock struct{ *composeInstr }
+
+func (c composeOneMock) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
+	if _, err := c.composeInstr.GetOutgoing(ctx, o); err != nil {
+		return nil, err
+	}
+	out := make(chan *models.Mock, 1)
+	out <- &models.Mock{Name: "mock-0", Kind: models.HTTP}
+	close(out)
+	return out, nil
+}
+
+// keploy mock record says at WARN, naming the set, that it cannot confirm a
+// compose recording holds every mock, once it has saved it, and only then: a
+// recording it does not keep is not said to be saved.
+func TestAComposeRecordingSavedUnconfirmedIsSaid(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mocks  bool
+		res    models.AppError
+		failed func() error
+		said   bool
+	}{
+		{name: "saved", mocks: true, res: models.AppError{AppErrorType: models.ErrAppStopped}, said: true},
+		{name: "tests failed: not kept", mocks: true, res: models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 2}},
+		{name: "nothing captured: not kept", res: models.AppError{AppErrorType: models.ErrAppStopped}},
+		{name: "the agent died: not kept", mocks: true, res: models.AppError{AppErrorType: models.ErrAppStopped}, failed: func() error { return errors.New("keploy-agent exited (137)") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortAgentBudget(t)
+			core, logs := observer.New(zapcore.WarnLevel)
+			instr := newInstr(t, agentUpAfterRun, false, tc.res)
+			instr.runUntilReady = true
+			instr.agentFailure = tc.failed
+			var inst Instrumentation = instr
+			if tc.mocks {
+				inst = composeOneMock{instr}
+			}
+			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+			cfg.Mock.Name = "e2e"
+			cfg.Path = t.TempDir()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			_ = New(zap.New(core), inst, stubMockDB{}, nil, nil, nil, cfg).Record(context.Background())
+			warned := logs.FilterMessage(composeTailUnconfirmed).All()
+			if said := len(warned) == 1; said != tc.said {
+				t.Fatalf("said the saved recording cannot be confirmed whole: %v, want %v (%v)", said, tc.said, logs.All())
+			}
+			if tc.said && (warned[0].ContextMap()["mock-set"] != "e2e" || warned[0].ContextMap()["mocks"] != int64(1)) {
+				t.Fatalf("the warning does not name the set and its mocks: %v", warned[0].ContextMap())
 			}
 		})
 	}

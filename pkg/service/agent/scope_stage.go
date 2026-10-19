@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
@@ -59,7 +58,7 @@ func (a *Agent) stageScope(ctx context.Context, names []string, open bool) error
 	if !ok {
 		return a.stagePool(ctx, params)
 	}
-	filtered, unfiltered, err := a.poolMocks(ctx, params, time.Time{}, nil)
+	filtered, unfiltered, err := a.poolMocks(ctx, params, poolRead{})
 	if err != nil {
 		return err
 	}

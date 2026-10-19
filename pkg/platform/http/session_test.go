@@ -323,6 +323,9 @@ type restartingAgent struct {
 	slowBy             time.Duration
 	// order is every call that met the agent up, as "METHOD path".
 	order []string
+	// instance, when set, names the agent process in every answer, as an
+	// agent with the proven switch on does (models.AgentInstanceHeader).
+	instance string
 }
 
 func (r *restartingAgent) handler(t *testing.T) http.Handler {
@@ -344,6 +347,9 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		r.order = append(r.order, req.Method+" "+req.URL.Path)
 		if req.URL.Path == "/agent/agent/ready" { // the agent's /agent/ready, under its /agent prefix
 			r.ready++
+		}
+		if r.instance != "" {
+			w.Header().Set(models.AgentInstanceHeader, r.instance)
 		}
 		r.mu.Unlock()
 		switch req.URL.Path {
@@ -375,6 +381,10 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		case "/agent/containers": // a docker-mode agent: it takes container lists
 			_, _ = io.Copy(io.Discard, req.Body)
 			w.WriteHeader(http.StatusNoContent)
+		case "/agent/containers/settle":
+			// The CLI's ask for settles, held open: this agent's first uses
+			// ask none, so it ends when the CLI's session does.
+			<-req.Context().Done()
 		case "/agent/mock":
 			_ = json.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 		default:
@@ -728,5 +738,12 @@ func TestSessionKeepsTheSetsBeginBeforeItsLatestTest(t *testing.T) {
 	}
 	if want := "store begin set-2"; strings.Join(got, " ") != want {
 		t.Fatalf("set up again with %v, want %s: the previous set's last test is no test of this one", got, want)
+	}
+	// Nor with a pool call's calls in flight (models.ExactServing.Ahead).
+	poolCall := models.MockFilterParams{Exact: &models.ExactServing{Ahead: []string{"mock-3"}}}
+	pc := copyMockParams(poolCall)
+	poolCall.Exact.Ahead[0] = "changed"
+	if pc.Exact.Ahead[0] != "mock-3" {
+		t.Fatalf("the copy's calls in flight changed with the original: %+v", pc.Exact)
 	}
 }

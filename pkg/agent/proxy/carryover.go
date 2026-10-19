@@ -27,8 +27,9 @@ func carryKeyOf(m *models.Mock) carryKey {
 	return carryKey{name: m.Name, req: m.Spec.ReqTimestampMock.UnixNano()}
 }
 
-// carryOverPool is the carry-over tier: per-test mocks of RegisterCarryOver
-// kinds that are reachable outside their own window — ahead of it by up to
+// carryOverPool is the carry-over tier: carry-over mocks (models.IsCarryOver:
+// RegisterCarryOver, a StagingRelease need) that are reachable outside their
+// own window — ahead of it by up to
 // models.CarryOverLookahead, and after it until consumed. Held in recorded
 // order. Disjoint from the per-test tree: a mock the current window holds is
 // served from there, not from here.

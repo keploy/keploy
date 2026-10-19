@@ -41,10 +41,9 @@ func guardedAgent(t *testing.T, token string) (*AgentClient, *[]string) {
 	t.Cleanup(srv.Close)
 
 	return &AgentClient{
-		logger:     zap.NewNop(),
-		client:     agentHTTPClient(token),
-		hookClient: agentHTTPClientWithTimeout(token, agentHookTimeout),
-		conf:       &config.Config{Agent: config.Agent{AgentURI: srv.URL}},
+		logger: zap.NewNop(),
+		client: agentHTTPClient(token),
+		conf:   &config.Config{Agent: config.Agent{AgentURI: srv.URL}},
 	}, &seen
 }
 
@@ -82,9 +81,8 @@ func TestAgentHooks_AuthenticateAgainstAGuardedAgent(t *testing.T) {
 	for _, h := range hooks {
 		t.Run(h.name, func(t *testing.T) {
 			client, seen := guardedAgent(t, token)
-			// The hook methods swallow transport errors and return nil, so a
-			// nil error alone proves nothing. What proves it is that the
-			// request reached the handler behind the middleware.
+			// The request reached the handler behind the middleware: the
+			// agent's auth let it through.
 			require.NoError(t, client.call(h.call))
 			require.Equal(t, []string{h.path}, *seen,
 				"the request never got past the agent's auth middleware")
@@ -100,7 +98,7 @@ func (a *AgentClient) call(f func(*AgentClient) error) error { return f(a) }
 func TestAgentHooks_SurfaceARejectionRatherThanPassingSilently(t *testing.T) {
 	client, seen := guardedAgent(t, "the-agents-token")
 	// A client holding the wrong token is what a botched handoff looks like.
-	client.hookClient = agentHTTPClientWithTimeout("a-different-token", agentHookTimeout)
+	client.client = agentHTTPClient("a-different-token")
 
 	now := time.Now()
 	err := client.BeforeSimulate(context.Background(), &now, "test-set-0", "test-1")
@@ -159,13 +157,6 @@ func TestBearerTransport_DoesNotMutateTheCallersRequest(t *testing.T) {
 
 	require.Empty(t, req.Header.Get("Authorization"),
 		"RoundTrip mutated the request it was given")
-}
-
-func TestAgentHookTimeout_IsPreservedByTheAuthenticatedClient(t *testing.T) {
-	// The bare clients this replaced carried a 50s deadline. Dropping it while
-	// adding the token would turn a hung agent into a hung test run.
-	require.Equal(t, agentHookTimeout, agentHTTPClientWithTimeout("tok", agentHookTimeout).Timeout)
-	require.Equal(t, 50*time.Second, agentHookTimeout)
 }
 
 func TestAppendTokenFileArg_PassesThePathAndNeverTheToken(t *testing.T) {
@@ -253,13 +244,13 @@ func TestNew_BuildsClientsThatCarryTheSessionToken(t *testing.T) {
 	a := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
 	_, err := a.GetMockErrors(context.Background()) // a.client
 	require.NoError(t, err)
-	require.NoError(t, a.BeforeTestRun(context.Background(), "test-run-0")) // a.hookClient
+	require.NoError(t, a.BeforeTestRun(context.Background(), "test-run-0"))
 
 	mu.Lock()
 	defer mu.Unlock()
 	want := "Bearer " + token.Session()
 	require.Equal(t, want, seen["/mockerrors"], "the client's requests do not carry the session token")
-	require.Equal(t, want, seen["/hooks/before-test-run"], "the hook client's requests do not carry the session token")
+	require.Equal(t, want, seen["/hooks/before-test-run"], "the hook requests do not carry the session token")
 }
 
 // TestExportMockScopeEnv_HandsTheTokenOnlyToAMockRunner pins the guard around

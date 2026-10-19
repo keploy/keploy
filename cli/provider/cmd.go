@@ -386,6 +386,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		_ = cmd.Flags().MarkHidden("mock-mode")
 		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("record-requests")
+		// Internal orchestrator→agent flag: a run that learns noise settles
+		// each test's calls before its misses are read (SetupOptions.SettleReads).
+		cmd.Flags().Bool("settle-reads", c.cfg.Agent.SettleReads, "Internal: settle a test's calls before a replay reads its misses. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("settle-reads")
 		// Internal orchestrator→agent flag: the proven model's staging switch.
 		// The CLI reads KEPLOY_PROVEN, but the agent does not inherit it (sudo
 		// drops the environment, the agent container is not given it), so the
@@ -518,12 +522,14 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
-		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
-		// Default false is deliberate: today an expected-but-unconsumed mock
-		// demotes the test to OBSOLETE without failing the test set, so
-		// defaulting this true would flip existing suites red on upgrade.
-		// See keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
-		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test is demoted to OBSOLETE today and the run still exits 0. Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
+		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping. By default such a test is demoted to OBSOLETE and reported not judged: keploy cannot tell a regression from a stale mapping, so the test set is not judged and keploy exits non-zero; re-record, or run with --disable-mapping --update-test-mapping. The per-test mappingDiff block is still written for diagnostics.")
+		// Default false is deliberate: a response-matched test whose
+		// expected mock went unconsumed passes today, so defaulting this true
+		// would flip existing suites red on upgrade. With it off, a
+		// response-failing one is demoted to OBSOLETE and reported not judged;
+		// with it on, that test is FAILED instead. See
+		// keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
+		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test still passes when its response matched (a response-failing one is demoted to OBSOLETE and reported not judged). Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of the test cases that pass from what they consumed (a test case that does not pass keeps its recorded mapping)")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
@@ -1588,6 +1594,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "refusing a deleted passthrough flag")
 			return err
 		}
+		if cmd.Name() == "test" {
+			if err := refuseHealthPollTimeout(cmd); err != nil {
+				utils.LogError(c.logger, err, "refusing a deleted readiness flag")
+				return err
+			}
+		}
 
 		// Before the command type: refusing an engine does not depend on it,
 		// and the --cmd-type checks would otherwise answer a podman command
@@ -2043,6 +2055,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		dropPassthroughKeys(c.logger, c.cfg, cmd.Name())
+		if cmd.Name() == "test" {
+			dropHealthPollTimeout(c.logger, c.cfg)
+		}
 
 	case "normalize":
 		var err error
@@ -2134,6 +2149,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.RecordRequests = recordRequests
+
+		settleReads, err := cmd.Flags().GetBool("settle-reads")
+		if err != nil {
+			errMsg := "failed to read the settle-reads flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.SettleReads = settleReads
 
 		proven, err := cmd.Flags().GetBool(provenswitch.AgentFlag)
 		if err != nil {

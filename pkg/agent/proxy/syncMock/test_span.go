@@ -34,6 +34,9 @@ func (s TestSpan) Changed() <-chan struct{} { return s.changed }
 // a mock requested at t, by recorded times alone, as keploy record maps a
 // recording made without --sync (models.DeriveWindowMappings): of the test
 // cases whose span [request, answer] holds t, the one whose request came first.
+// It goes by the request time only, so a call sent in the gap before a test
+// and answered once that test began, which DeriveWindowMappings gives that
+// test (models.WindowSchedule.InFlightInto), is no test's here.
 // A window still open that started at or before t may yet be that test, and
 // its answer is not known until it ends: when the earliest-started candidate
 // is such a window, the span is not final, and Changed fires when it leaves

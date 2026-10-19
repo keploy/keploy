@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -251,6 +252,45 @@ func TestScopeBeginOpensTheTestsWindow(t *testing.T) {
 	scopeEnd(t, a, "TestB")
 	if snap := p.mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
 		t.Fatalf("TestB's end left the window %+v; want it closed, with calls between tests routed as before the first test", snap)
+	}
+}
+
+// A scope's begin stages the test's own recording, which its mapping names
+// (ExactMapping), with no window. A poll placed at its answer (models.PlaceOf) is staged for the test
+// whose mapping names it alone: before, every one of the recording was
+// staged as each test's own, the later tests' among them.
+func TestScopeBeginStagesAPollPlacedAtItsAnswerOnlyForTheTestItsMappingNames(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	poll := func(name string, req, res time.Duration) *models.Mock {
+		m := stageMock(name, "/poll", stageT0.Add(req))
+		m.Spec.Metadata["poll"] = "yes"
+		m.Spec.ResTimestampMock = stageT0.Add(res)
+		return m
+	}
+	a, p := newStageReplay(t,
+		[]*models.Mock{
+			stageMock("mock-a", "/q", stageT0),
+			poll("poll-a", 10*time.Millisecond, 2*time.Second),
+			stageMock("mock-b", "/q", stageT0.Add(3*time.Second)),
+			poll("poll-b", 3010*time.Millisecond, 4*time.Second),
+		},
+		[]*models.Mock{stageSessionMock("cfg", "/cfg")},
+		map[string][]string{"TestA": {"mock-a", "poll-a"}, "TestB": {"mock-b", "poll-b"}})
+	for _, tc := range []struct {
+		test string
+		want []string
+	}{{"TestA", []string{"mock-a", "poll-a"}}, {"TestB", []string{"mock-b", "poll-b"}}} {
+		scopeBegin(t, a, tc.test)
+		per, err := p.mm.GetPerTestMocksInWindow()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := namesOf(per)
+		sort.Strings(got)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s's tier holds %v; want its own recording, %v", tc.test, got, tc.want)
+		}
+		scopeEnd(t, a, tc.test)
 	}
 }
 

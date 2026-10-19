@@ -34,9 +34,10 @@ func statedLifetime(mockType, requestOperation string, requests []mysql.Request)
 	case "connection":
 		return models.MetadataLifetimeConnection
 	}
-	switch requestOperation {
-	case "COM_STMT_PREPARE", "COM_STMT_CLOSE", "COM_STMT_RESET":
+	if models.IsMySQLStatementLifecycleCommandType(requestOperation) {
 		return models.MetadataLifetimeConnection
+	}
+	switch requestOperation {
 	case "COM_INIT_DB", "COM_CHANGE_USER", "COM_QUIT", comSetOption:
 		return models.MetadataLifetimeSession
 	case "COM_QUERY":

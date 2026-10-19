@@ -7,8 +7,10 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -18,6 +20,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -67,6 +70,7 @@ type fakeDocker struct {
 	imageGate    chan struct{}
 	imageEntered chan string
 	calls        int
+	lists        int // lists of every container: the watch's, and Settle's
 	placeLists   int
 	inspects     int
 	closes       int
@@ -127,6 +131,7 @@ func (f *fakeDocker) ContainerList(ctx context.Context, opts container.ListOptio
 	}
 	f.mu.Lock()
 	f.calls++
+	f.lists++
 	hang := f.hang
 	out := f.listedLocked(nil)
 	err := f.listErr
@@ -154,11 +159,17 @@ func (f *fakeDocker) listedLocked(ids []string) []container.Summary {
 	return out
 }
 
+// ContainerInspect answers as of when it was asked, as the list does: block
+// holds only its delivery, an answer in flight across what the test changes
+// meanwhile. (Docker's own inspect of a container another operation holds
+// waits for that operation, and answers as of its end.)
 func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container.InspectResponse, error) {
 	f.mu.Lock()
 	f.calls++
 	f.inspects++
 	block := f.block[id]
+	err := f.inspectErr[id]
+	got, ok := f.containers[id]
 	f.mu.Unlock()
 	if block != nil {
 		f.entered <- id
@@ -168,13 +179,10 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container
 			return container.InspectResponse{}, ctx.Err()
 		}
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.inspectErr[id]; err != nil {
+	switch {
+	case err != nil:
 		return container.InspectResponse{}, err
-	}
-	got, ok := f.containers[id]
-	if !ok {
+	case !ok:
 		return container.InspectResponse{}, notFound{}
 	}
 	return got, nil
@@ -622,8 +630,12 @@ func TestIndexReadsContainersSideBySide(t *testing.T) {
 	if _, ok := lookup(t, r, "127.0.0.1:49002"); !ok {
 		t.Fatal("the fast container is not indexed while another read is stuck")
 	}
-	// slow dies while its read is stuck. The read still answers it running
-	// (it began before the die): only its count tells it lost.
+	// slow dies while its read is stuck: Docker records the stop before it
+	// sends the die, and lists it no more. The read still answers it running
+	// (it was asked before the die): only its count tells it lost.
+	stopped := running("postgres:16", "sha256:s", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49001")})
+	stopped.State.Running = false
+	f.set("slow", stopped)
 	f.msgs <- die("slow")
 	f.msgs <- start("fence") // applied after the die, so the die is in
 	<-applied
@@ -1613,7 +1625,7 @@ func TestAContainerListedByImageIDIsNotPlacedFromTheList(t *testing.T) {
 // read put in: the list carries no configuration.
 func TestAListAfterTheReadKeepsTheFingerprint(t *testing.T) {
 	f := newFakeDocker()
-	r, applied := watching(t, f)
+	r, applied, placed := watchingPlaced(t, f)
 	g := make(chan struct{})
 	defer close(g)
 	f.mu.Lock()
@@ -1632,10 +1644,18 @@ func TestAListAfterTheReadKeepsTheFingerprint(t *testing.T) {
 		t.Fatalf("the read did not index it with a fingerprint: %+v %v", c, ok)
 	}
 	fp := c.Fingerprint
-	changed := make(chan struct{}, 1)
-	r.setChanged(changed)
+	r.mu.Lock()
+	gen := r.changeGen
+	r.mu.Unlock()
 	g <- struct{}{} // the list answers after the read, at the same event
-	<-changed
+	for id := <-placed; id != "svc"; id = <-placed {
+	}
+	r.mu.Lock()
+	again := r.changeGen - gen
+	r.mu.Unlock()
+	if again != 0 {
+		t.Fatalf("the list, the same as the read's entry, counted %d change(s): a docker-mode agent is given the same list again", again)
+	}
 	if c, ok := lookup(t, r, "172.17.0.90:6379"); !ok || c.Fingerprint != fp {
 		t.Fatalf("the list dropped the read's fingerprint: %+v %v (want %s)", c, ok, fp)
 	}
@@ -1715,5 +1735,735 @@ func TestADieDuringAListStopsTheRerun(t *testing.T) {
 	}
 	if got, ok := lookup(t, r, "172.17.0.92:6379"); ok {
 		t.Fatalf("a dead container is indexed: %+v", got)
+	}
+}
+
+// listsOf is how many lists of every container f answered or holds.
+func listsOf(f *fakeDocker) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lists
+}
+
+// Settle places a container Docker runs whose start event has not reached
+// the index, from a list asked after it was called, never waiting for the
+// container's configuration (its inspect is held throughout); the index
+// reads that configuration beside, as it reads the first list's.
+func TestSettlePlacesAContainerWhoseStartHasNotCome(t *testing.T) {
+	f := newFakeDocker()
+	r, applied := watching(t, f)
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{"5432/tcp": published("0.0.0.0", "49400")}))
+	if _, ok := lookup(t, r, "127.0.0.1:49400"); ok {
+		t.Fatal("placed before the index listed the daemon")
+	}
+	r.Settle(t.Context())
+	<-f.entered // its configuration's read began, and is held
+	for _, dst := range []string{"127.0.0.1:49400", "172.17.0.7:5432"} {
+		if c, ok := lookup(t, r, dst); !ok || c.ID != "tc" || c.Image != "postgres:16" || c.Fingerprint != "" {
+			t.Fatalf("after Settle %s = %+v, %v; want tc placed, its configuration unread", dst, c, ok)
+		}
+	}
+	close(held)
+	if id := <-applied; id != "tc" {
+		t.Fatalf("read %s", id)
+	}
+	if fp, ok := r.Fingerprint(t.Context(), "tc"); !ok || fp != fpEmpty {
+		t.Fatalf("Fingerprint = %q, %v", fp, ok)
+	}
+}
+
+// Settle marks a container it places as being read before the container's
+// entry is in, as the first list does (add): a key taken between the two
+// waits for the read, and never takes the missing fingerprint for one that
+// could not be read (Withheld). The index's word that it indexed the
+// container comes with the entry in, and is where the mark is looked at.
+func TestSettleMarksItsReadBeforeItsEntryIsIn(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	marked := make(chan bool, 1)
+	core, _ := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if e.Message == "indexed a container" {
+			r.mu.Lock()
+			reading := r.cur.reading["tc"]
+			r.mu.Unlock()
+			select {
+			case marked <- reading:
+			default:
+			}
+		}
+		return nil
+	}))
+	r.mu.Lock()
+	r.logger = logger
+	r.mu.Unlock()
+	r.Settle(t.Context())
+	if !<-marked {
+		t.Fatal("Settle put a container in before marking its read: a key taken then is withheld as unreadable")
+	}
+}
+
+// The uses that come while Settle's list is out wait for one asked after
+// them, which they share: a list each time one is out, never one per use.
+func TestSettleSharesTheNextListAmongTheUsesWhileOneIsOut(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	asked, gate, waits := make(chan struct{}, 8), make(chan struct{}), make(chan struct{}, 16)
+	f.mu.Lock()
+	f.beforeList, f.listGate = func() { asked <- struct{}{} }, gate
+	f.mu.Unlock()
+	r.mu.Lock()
+	r.settleWaits = func() { waits <- struct{}{} }
+	r.mu.Unlock()
+	before := listsOf(f)
+	done := make(chan struct{}, 3)
+	settle := func() {
+		go func() {
+			r.Settle(t.Context())
+			done <- struct{}{}
+		}()
+	}
+	settle()
+	<-asked
+	<-waits // the first use waits for its list, held
+	settle()
+	settle()
+	<-waits
+	<-waits // two more uses, after that list was asked
+	gate <- struct{}{}
+	<-done // the first use's list is in
+	<-asked
+	<-waits
+	<-waits // the two wait for one list asked after them
+	select {
+	case <-done:
+		t.Fatal("a use took a list asked before it")
+	default:
+	}
+	gate <- struct{}{}
+	<-done
+	<-done
+	if n := listsOf(f) - before; n != 2 {
+		t.Fatalf("%d lists for three uses, want 2", n)
+	}
+}
+
+// A die that reaches the index while Settle's list is out wins over the
+// list, which showed the container running: a dead container is never
+// placed.
+func TestADieThatOvertakesSettlesListWins(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	f.set("gone", running("redis", "sha256:r", []string{"172.17.0.93"}, nat.PortMap{}))
+	f.mu.Lock()
+	f.beforeList = func() {
+		f.msgs <- die("gone")
+		fence(f)
+	}
+	f.mu.Unlock()
+	r.Settle(t.Context())
+	if c, ok := lookup(t, r, "172.17.0.93:6379"); ok {
+		t.Fatalf("a container that died is placed: %+v", c)
+	}
+}
+
+// Settle leaves a container listed by image ID to its read, as the first
+// list does (its repository is in its configuration only), and returns when
+// its caller's context ends, or the watch does, while its list is out.
+func TestSettlePlacesNoImageIDAndEndsWithItsCaller(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	f.set("moved", running("sha256:abcdef0123456789", "sha256:abcdef0123456789aa", []string{"172.17.0.94"}, nat.PortMap{}))
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["moved"] = held
+	f.mu.Unlock()
+	defer close(held)
+	r.Settle(t.Context())
+	if c, ok := lookup(t, r, "172.17.0.94:80"); ok {
+		t.Fatalf("a container listed by image ID is placed by its list: %+v", c)
+	}
+	gate := make(chan struct{})
+	defer close(gate)
+	f.mu.Lock()
+	f.listGate = gate
+	f.mu.Unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	r.Settle(ctx) // returns though its list is held
+	stopIndex(r)
+	r.Settle(t.Context()) // an index whose watch ended lists nothing
+}
+
+// A container whose start reaches the index while Settle's list is out is
+// left to that event, and Settle waits for the event's placing: a use that
+// lists the daemon never misses a container placed a moment after.
+func TestSettleWaitsForThePlacingOfAStartWhileItsListIsOut(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	g := make(chan struct{})
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.placeGate["tc"] = g
+	f.block["tc"] = held // only the placing places it
+	f.beforeList = func() {
+		f.msgs <- start("tc")
+		<-f.placeEntered // its own placing is out, and held
+	}
+	f.mu.Unlock()
+	f.set("tc", running("redis", "sha256:r", []string{"172.17.0.95"}, nat.PortMap{}))
+	waits := make(chan struct{}, 4)
+	r.mu.Lock()
+	r.settleWaits = func() { waits <- struct{}{} }
+	r.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		r.Settle(t.Context())
+		close(done)
+	}()
+	<-waits // the use waits for its list
+	<-waits // the list waits for the start's placing
+	select {
+	case <-done:
+		t.Fatal("Settle returned while a start that came during its list was still being placed")
+	default:
+	}
+	close(g)
+	<-done
+	if c, ok := lookup(t, r, "172.17.0.95:6379"); !ok || c.ID != "tc" {
+		t.Fatalf("after Settle = %+v, %v; want the started container placed", c, ok)
+	}
+}
+
+// A container Docker restarted, whose die the index took and whose new start
+// it has not, is placed by Settle as one never seen: the list is applied as
+// of the event counts when it was asked, not as of none.
+func TestSettlePlacesARestartedContainerWhoseStartHasNotCome(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	f.set("again", running("redis", "sha256:r", []string{"172.17.0.96"}, nat.PortMap{}))
+	f.msgs <- die("again") // its first run's die
+	fence(f)
+	r.Settle(t.Context())
+	if c, ok := lookup(t, r, "172.17.0.96:6379"); !ok || c.ID != "again" {
+		t.Fatalf("after Settle = %+v, %v; want the restarted container placed", c, ok)
+	}
+}
+
+// A die and then a destroy that reach the index while Settle's list is out
+// win over the list, which showed the container running, as a die alone does
+// (TestADieThatOvertakesSettlesListWins): the destroy drops the container's
+// event count, and the list must not take it for a container no event ever
+// spoke for. Its inspect is held, as a gone container's answer would come
+// only later: what drops it must be the events, not its read.
+func TestADestroyThatOvertakesSettlesListWins(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	f.set("gone", running("redis", "sha256:r", []string{"172.17.0.97"}, nat.PortMap{"6379/tcp": published("0.0.0.0", "49497")}))
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["gone"] = held
+	f.beforeList = func() {
+		f.msgs <- die("gone")
+		f.msgs <- events.Message{Type: events.ContainerEventType, Action: events.ActionDestroy, Actor: events.Actor{ID: "gone"}}
+		fence(f)
+	}
+	f.mu.Unlock()
+	r.Settle(t.Context())
+	for _, dst := range []string{"172.17.0.97:6379", "127.0.0.1:49497"} {
+		if c, ok := lookup(t, r, dst); ok {
+			t.Fatalf("a destroyed container is placed at %s: %+v", dst, c)
+		}
+	}
+}
+
+// A container destroyed while Settle's list is out, whose IP a container
+// started since took (Docker hands a freed IP on at once), never takes it
+// back from the live one: the live container stays at its address. (The fake
+// lists the live one too; it is held, so the list passes over it, as a list
+// asked before it started would not show it.)
+func TestSettleNeverGivesADestroyedContainerALiveOnesAddress(t *testing.T) {
+	f := newFakeDocker()
+	r, _, placed := watchingPlaced(t, f)
+	f.set("gone", running("redis", "sha256:r", []string{"172.17.0.98"}, nat.PortMap{}))
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["gone"] = held
+	f.beforeList = func() {
+		f.msgs <- die("gone")
+		f.msgs <- events.Message{Type: events.ContainerEventType, Action: events.ActionDestroy, Actor: events.Actor{ID: "gone"}}
+		f.set("next", running("postgres:16", "sha256:p", []string{"172.17.0.98"}, nat.PortMap{}))
+		f.msgs <- start("next")
+		for id := <-placed; id != "next"; id = <-placed {
+		}
+	}
+	f.mu.Unlock()
+	r.Settle(t.Context())
+	if c, ok := lookup(t, r, "172.17.0.98:5432"); !ok || c.ID != "next" {
+		t.Fatalf("the live container's address after Settle = %+v, %v; want next", c, ok)
+	}
+}
+
+// waitStallLook waits for a read's stall watch to arm its next look on clk.
+func waitStallLook(t *testing.T, clk *stall.ManualClock) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the read's stall watch never armed its next look")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A read of a container's configuration the daemon holds stalls once keploy
+// could run for the stall window with no answer, never in wall time alone (a
+// starved agent's read is not stalled): what waits for the container's
+// fingerprint stops waiting then, told the container, and a later wait does
+// not wait at all. The read's end, when it comes, clears the stall.
+func TestAReadTheDaemonHoldsStallsInTimeKeployCouldRun(t *testing.T) {
+	f := newFakeDocker()
+	r, applied := watching(t, f)
+	clk := &stall.ManualClock{}
+	r.mu.Lock()
+	r.stallClock = clk
+	r.mu.Unlock()
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered // its inspect is held
+	got := make(chan string, 1)
+	go func() {
+		_, _, ok, stalled := r.FingerprintsOrStall(t.Context(), "tc")
+		if ok {
+			stalled = "a fingerprint"
+		}
+		got <- stalled
+	}()
+	for range 5 { // wall time passes, keploy given no CPU
+		waitStallLook(t, clk)
+		clk.Pass()
+	}
+	waitStallLook(t, clk)
+	select {
+	case s := <-got:
+		t.Fatalf("a read keploy had no CPU to wait on stalled: %q", s)
+	default:
+	}
+	clk.Advance(readStallGrace)
+	if s := <-got; !strings.Contains(s, "postgres:16") {
+		t.Fatalf("the wait ended with %q, want the stalled container named", s)
+	}
+	if _, _, ok, s := r.FingerprintsOrStall(t.Context(), "tc"); ok || s == "" {
+		t.Fatalf("a wait after the stall = %v, %q; want none, at once", ok, s)
+	}
+	close(held)
+	if id := <-applied; id != "tc" {
+		t.Fatalf("read %s", id)
+	}
+	if fp, legacy, ok, s := r.FingerprintsOrStall(t.Context(), "tc"); !ok || fp != fpEmpty || legacy != lfpEmpty || s != "" {
+		t.Fatalf("after the read = %q, %q, %v, %q", fp, legacy, ok, s)
+	}
+}
+
+// waitStallLooks waits until n of the reads' stall watches on clk have armed
+// their next look.
+func waitStallLooks(t *testing.T, clk *stall.ManualClock, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of the reads' stall watches never armed their next look (%d did)", n, clk.Pending())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// stalledNow says whether the current watch marks container id's read stalled.
+func stalledNow(r *dockerIndex, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cur != nil && r.cur.stalled[id]
+}
+
+// A read that waits for a read slot while the reads in the slots end is not
+// stalled: the daemon answers, and the queue moves. Its stall counts from the
+// queue's last move (a read giving its slot back, or its taking one), as a
+// parser's hang counts from its last progress: a read stalls once its own
+// inspect, or every read in front of it, has been held for the window, never
+// for the length of a queue that moves.
+func TestAReadWaitingForASlotIsNotStalledWhileTheQueueMoves(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	clk := &stall.ManualClock{}
+	r.mu.Lock()
+	r.stallClock = clk
+	r.mu.Unlock()
+	r.readSlots = make(chan struct{}, 1) // one slot: b and c wait for a's
+	heldA, heldB, heldC := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer close(heldB)
+	defer close(heldC)
+	f.mu.Lock()
+	f.block["a"], f.block["b"], f.block["c"] = heldA, heldB, heldC
+	f.mu.Unlock()
+	f.set("a", running("nginx", "sha256:n", []string{"172.17.0.8"}, nat.PortMap{}))
+	f.set("b", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.set("c", running("redis", "sha256:r", []string{"172.17.0.9"}, nat.PortMap{}))
+	f.msgs <- start("a")
+	if id := <-f.entered; id != "a" {
+		t.Fatalf("read %s first", id)
+	}
+	f.msgs <- start("b")
+	f.msgs <- start("c")
+	waitStallLooks(t, clk, 3) // b's and c's watches run while they wait for a's slot
+	clk.Advance(readStallGrace - time.Second)
+	waitStallLooks(t, clk, 3)
+	close(heldA) // the daemon answers a: one of b and c takes the slot, and its inspect is held
+	x := <-f.entered
+	y := map[string]string{"b": "c", "c": "b"}[x]
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() != 2 {                // a's watch ended with its read
+		if time.Now().After(deadline) {
+			t.Fatalf("a's stall watch did not end with its read (%d looks pending)", clk.Pending())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Each has waited past the window in all: x's own inspect 2 s of it, and
+	// y in a queue that moved 2 s ago.
+	clk.Advance(2 * time.Second)
+	for clk.Pending() < 2 && !stalledNow(r, x) && !stalledNow(r, y) {
+		if time.Now().After(deadline) {
+			t.Fatal("the stall watches neither looked again nor marked a read")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if stalledNow(r, x) || stalledNow(r, y) {
+		t.Fatalf("stalled: %s %v, %s %v; the queue they waited in moved: the daemon answered a", x, stalledNow(r, x), y, stalledNow(r, y))
+	}
+	clk.Advance(readStallGrace) // x's inspect held for the window, and y behind it
+	for !stalledNow(r, x) || !stalledNow(r, y) {
+		if time.Now().After(deadline) {
+			t.Fatalf("held for the window: %s stalled %v, %s, behind it, stalled %v", x, stalledNow(r, x), y, stalledNow(r, y))
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A stall watch whose look expired as its read ended marks nothing, though a
+// read of the container is in flight again: that read is another, not
+// stalled until its own watch says so.
+func TestALookThatExpiredAsItsReadEndedMarksNoOtherRead(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered // a read of tc in flight, its own watch on the process's clock
+	ended := make(chan struct{})
+	close(ended) // the watch of a read before it, which ended
+	r.markStalled(current(r), "tc", ended)
+	if stalledNow(r, "tc") {
+		t.Fatal("a look of a read that ended marked the read in flight now stalled")
+	}
+	r.markStalled(current(r), "tc", make(chan struct{})) // this read's own watch
+	if !stalledNow(r, "tc") {
+		t.Fatal("the read's own watch did not mark it stalled")
+	}
+}
+
+// A read that stalled and then ends, with its container to be read once more
+// (an event came meanwhile), clears its stall: the next read is waited for
+// until its own watch says it stalled.
+func TestAStalledReadReadOnceMoreIsWaitedForAgain(t *testing.T) {
+	f := newFakeDocker()
+	r, applied := watching(t, f)
+	clk := &stall.ManualClock{}
+	r.mu.Lock()
+	r.stallClock = clk
+	r.mu.Unlock()
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	waitStallLook(t, clk)
+	clk.Advance(readStallGrace)
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for !stalledNow(r, "tc") {
+		if time.Now().After(deadline) {
+			t.Fatal("never stalled")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	connect(f, "tc") // tc is to be read once more when this read ends
+	fence(f)
+	second := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = second // the next read is held too
+	f.mu.Unlock()
+	close(held)
+	if id := <-applied; id != "tc" {
+		t.Fatalf("read %s", id)
+	}
+	<-f.entered // the next read of tc is in flight
+	defer close(second)
+	if stalledNow(r, "tc") {
+		t.Fatal("the next read of tc is stalled before its own watch said so")
+	}
+	got := make(chan bool, 1)
+	go func() {
+		_, _, ok, s := r.FingerprintsOrStall(t.Context(), "tc")
+		got <- ok || s != ""
+	}()
+	waitStallLook(t, clk)
+	select {
+	case <-got:
+		t.Fatal("a wait for the next read did not wait")
+	default:
+	}
+	clk.Advance(readStallGrace)
+	if !<-got {
+		t.Fatal("the next read's stall did not end the wait")
+	}
+}
+
+// A fingerprint that is in wins over a stall still marked: the read put it
+// in, and its end, which clears the mark, comes a moment after.
+func TestAFingerprintInWinsOverAStallStillMarked(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	r.markStalled(current(r), "tc", make(chan struct{}))
+	r.mu.Lock()
+	// the read's put, before its end
+	r.cur.images["tc"], r.cur.fingerprints["tc"], r.cur.legacy["tc"] = "postgres:16", fpEmpty, lfpEmpty
+	r.mu.Unlock()
+	if fp, legacy, ok, s := r.FingerprintsOrStall(t.Context(), "tc"); !ok || fp != fpEmpty || legacy != lfpEmpty || s != "" {
+		t.Fatalf("= %q, %q, %v, %q; want the fingerprint, not the stall", fp, legacy, ok, s)
+	}
+}
+
+// A placing loop of a started container that runs only after the
+// container's die (a loaded host schedules it late) places nothing, and the
+// read that ran across the die brings nothing back: whether the daemon's
+// list no longer shows the container by then (Docker 23.0 and later record
+// the stop before they send the die; Podman's list waits for the container
+// lock its die is written under), or still shows it running, with its ports
+// (Docker before 23.0 sends the die before it records the stop).
+func TestALatePlacingOfAContainerThatDiedPlacesNothing(t *testing.T) {
+	for _, listedAfterDie := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listedAfterDie=%v", listedAfterDie), func(t *testing.T) {
+			f := newFakeDocker()
+			r, applied, placed := watchingPlaced(t, f)
+			hold := make(chan struct{})
+			r.mu.Lock()
+			r.placeStart = func(id string) {
+				if id == "slow" {
+					<-hold
+				}
+			}
+			r.mu.Unlock()
+			stuck := make(chan struct{})
+			f.mu.Lock()
+			f.block["slow"] = stuck
+			f.mu.Unlock()
+			f.set("slow", running("postgres:16", "sha256:s", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49001")}))
+			f.msgs <- start("slow")
+			<-f.entered // slow's read is in flight, as of its start
+			if !listedAfterDie {
+				stopped := running("postgres:16", "sha256:s", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49001")})
+				stopped.State.Running = false
+				f.set("slow", stopped)
+			}
+			f.msgs <- die("slow")
+			fence(f)    // the die is in
+			close(hold) // slow's placing loop starts only now, after the die
+			for id := <-placed; id != "slow"; id = <-placed {
+			}
+			close(stuck)
+			if id := <-applied; id != "slow" {
+				t.Fatalf("applied %q, want the stuck read", id)
+			}
+			if c, ok := lookup(t, r, "127.0.0.1:49001"); ok {
+				t.Fatalf("a container that died is placed: %+v", c)
+			}
+		})
+	}
+}
+
+// A put the index already holds byte for byte (a placing's list landing
+// after the read that placed its container) counts no change; one that
+// changes what a list shows does: the container's own addresses, or a host
+// port another container held, which the put takes from it.
+func TestAnIdenticalPutCountsNoChange(t *testing.T) {
+	f := testcontainers()
+	r, _ := watching(t, f, "10.0.0.5")
+	st := current(r)
+	gen := func() uint64 {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.changeGen
+	}
+	listed := func(id string) entry {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		e := summaryEntry(summaryOf(id, f.containers[id]))
+		e.placed, e.fromList = true, true
+		return e
+	}
+	seqOf := func(id string) int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return st.seq[id]
+	}
+	g0 := gen()
+	if !r.put(st, listed("pg"), seqOf("pg")) {
+		t.Fatal("the put was refused")
+	}
+	if g := gen(); g != g0 {
+		t.Fatalf("an identical put counted %d change(s)", g-g0)
+	}
+	renamed := listed("pg")
+	renamed.name = "/pg-renamed" // docker rename: a list names it anew
+	r.put(st, renamed, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that renamed the container counted no change")
+	}
+	g0 = gen()
+	moved := renamed // its name as it is now: only its address changes
+	moved.ips = []netip.Addr{netip.MustParseAddr("172.17.0.99")}
+	r.put(st, moved, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that moved the container counted no change")
+	}
+	if c, ok := lookup(t, r, "172.17.0.99:5432"); !ok || c.ID != "pg" {
+		t.Fatalf("after the move = %+v, %v", c, ok)
+	}
+	// docker network connect, then disconnect: an address given, or one
+	// taken away, and nothing else.
+	g0 = gen()
+	connected := moved
+	connected.ips = []netip.Addr{netip.MustParseAddr("172.17.0.99"), netip.MustParseAddr("172.18.0.7")}
+	r.put(st, connected, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that gave the container another address counted no change")
+	}
+	g0 = gen()
+	r.put(st, moved, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that took an address from the container counted no change")
+	}
+	if c, ok := lookup(t, r, "172.18.0.7:5432"); ok {
+		t.Fatalf("the address it lost = %+v", c)
+	}
+	// A host port published, then no longer: a port given, or one taken
+	// away, and nothing else.
+	g0 = gen()
+	more := listed("ls")
+	more.publish("127.0.0.1", 49201, 4567)
+	r.put(st, more, seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that published another host port counted no change")
+	}
+	if c, ok := lookup(t, r, "127.0.0.1:49201"); !ok || c.ID != "ls" || c.Port != 4567 {
+		t.Fatalf("the host port published = %+v, %v", c, ok)
+	}
+	g0 = gen()
+	r.put(st, listed("ls"), seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that unpublished a host port counted no change")
+	}
+	if c, ok := lookup(t, r, "127.0.0.1:49201"); ok {
+		t.Fatalf("the host port unpublished = %+v", c)
+	}
+	// A binding's address alone, then its container's port alone.
+	g0 = gen()
+	rebound := listed("ls")
+	rebound.bindings, rebound.hostPort = nil, nil
+	rebound.publish("10.0.0.5", 49200, 4566)
+	r.put(st, rebound, seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that bound a host port at another address counted no change")
+	}
+	g0 = gen()
+	repointed := listed("ls")
+	repointed.bindings, repointed.hostPort = nil, nil
+	repointed.publish("10.0.0.5", 49200, 4567)
+	r.put(st, repointed, seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that gave a host port to another of the container's ports counted no change")
+	}
+	if c, ok := lookup(t, r, "10.0.0.5:49200"); !ok || c.ID != "ls" || c.Port != 4567 {
+		t.Fatalf("the host port repointed = %+v, %v", c, ok)
+	}
+	r.put(st, listed("ls"), seqOf("ls"))
+	// A read that could not read its image leaves it no fingerprint, and
+	// the next read gives it one again.
+	g0 = gen()
+	unread := moved
+	unread.fromList = false
+	r.put(st, unread, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that took the container's fingerprint away counted no change")
+	}
+	g0 = gen()
+	reread := unread
+	reread.fingerprint, reread.legacy = fpEmpty, lfpEmpty
+	r.put(st, reread, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that gave the container its fingerprint counted no change")
+	}
+	if c, ok := lookup(t, r, "172.17.0.99:5432"); !ok || c.Fingerprint != fpEmpty {
+		t.Fatalf("after the read = %+v, %v", c, ok)
+	}
+	g1 := gen()
+	took := listed("ls")
+	took.publish("0.0.0.0", 49153, 5432) // pg's host port, which ls now holds: only its holder changes
+	r.put(st, took, seqOf("ls"))
+	if g := gen(); g == g1 {
+		t.Fatal("a put that took another container's host port counted no change")
+	}
+	if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "ls" {
+		t.Fatalf("pg's old host port = %+v, %v; want ls", c, ok)
+	}
+	// Two containers that publish one host port at two addresses: putting
+	// the first again as it is changes nothing, wherever it lands among
+	// the port's bindings.
+	shared := took
+	shared.publish("127.0.0.1", 49300, 4566) // beside redis's 10.0.0.5:49300
+	r.put(st, shared, seqOf("ls"))
+	g0 = gen()
+	r.put(st, listed("redis"), seqOf("redis"))
+	if g := gen(); g != g0 {
+		t.Fatalf("an identical put of a container that shares its host port counted %d change(s)", g-g0)
 	}
 }

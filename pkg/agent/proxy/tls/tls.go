@@ -172,23 +172,37 @@ func HandshakeCause(err error) error {
 	return err
 }
 
-// clientHandshakeReportKey carries WithClientHandshakeReport's report.
-type clientHandshakeReportKey struct{}
-
-// WithClientHandshakeReport is ctx carrying report, which HandleTLSConnection
-// calls with its error when a client-side handshake made under ctx fails: an
-// integration that makes its own client handshake (MySQL's, on its client's
-// SSLRequest) is charged so as the proxy charges its own handshakes, without
-// the error having to come back up through the integration.
-func WithClientHandshakeReport(ctx context.Context, report func(error)) context.Context {
-	return context.WithValue(ctx, clientHandshakeReportKey{}, report)
+// ClientEvents is told what a client-side TLS handshake keploy's TLS server
+// (HandleTLSConnection) makes under a context carrying it (WithClientEvents)
+// comes to: its beginning (HandshakeBegin); its failure (HandshakeFailed,
+// with HandleTLSConnection's error); and, the handshake done, the client's
+// hang-up having sent nothing since (SilentHangUp, with the read's error:
+// under the proven switch, which reads the client a record at a time until
+// then). Every path that makes such a
+// handshake -- handleConnection, the opportunistic upgrade, the relay's, the
+// MySQL replayer's, a record upgrader's -- hands its context one, so what a
+// handshake loses is charged one way.
+type ClientEvents interface {
+	HandshakeBegin()
+	HandshakeFailed(err error)
+	SilentHangUp(err error)
 }
 
-// reportClientHandshake hands err to ctx's report, if it carries one.
-func reportClientHandshake(ctx context.Context, err error) {
-	if report, ok := ctx.Value(clientHandshakeReportKey{}).(func(error)); ok && report != nil {
-		report(err)
-	}
+// clientEventsKey carries WithClientEvents's events.
+type clientEventsKey struct{}
+
+// WithClientEvents is ctx carrying ev, which HandleTLSConnection tells of each
+// client-side handshake made under ctx: a path makes the handshake, or has an
+// integration make it, without the error or the hang-up coming back up
+// through it.
+func WithClientEvents(ctx context.Context, ev ClientEvents) context.Context {
+	return context.WithValue(ctx, clientEventsKey{}, ev)
+}
+
+// clientEventsFrom is ctx's ClientEvents, or nil.
+func clientEventsFrom(ctx context.Context) ClientEvents {
+	ev, _ := ctx.Value(clientEventsKey{}).(ClientEvents)
+	return ev
 }
 
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
@@ -196,11 +210,17 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
 	// by SetupCAForApp before the proxy serves; getActiveCA lazily mints an
 	// ephemeral one for callers that reach here without SetupCAForApp.
+	ev := clientEventsFrom(ctx)
+	if ev != nil {
+		ev.HandshakeBegin()
+	}
 	ca := getActiveCA(logger)
 	if ca == nil {
 		err := fmt.Errorf("no MITM CA available for this run")
 		utils.LogError(logger, err, "Failed to obtain the signing CA")
-		reportClientHandshake(ctx, err)
+		if ev != nil {
+			ev.HandshakeFailed(err)
+		}
 		return nil, false, err
 	}
 	caPrivKey := ca.signer
@@ -248,14 +268,19 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 
 	// Perform the handshake
 	err := tlsConn.Handshake()
-	if err == nil && records != nil {
-		records.handshakeDone()
-	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
 		herr := &HandshakeError{Err: err, CertificateSent: certSent.Load()}
-		reportClientHandshake(ctx, herr)
+		if ev != nil {
+			ev.HandshakeFailed(herr)
+		}
 		return nil, false, herr
+	}
+	if records != nil {
+		if ev != nil {
+			records.silent = ev.SilentHangUp
+		}
+		records.handshakeDone()
 	}
 
 	// The connection the proxy closes with care is handed the layer: its

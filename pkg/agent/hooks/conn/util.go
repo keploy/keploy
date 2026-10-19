@@ -287,6 +287,15 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// takes what was held for the request and ends its window before
 		// handing the mocks on.
 		mgr.ResolveKept(win, reqTimeTest, resTimeTest, testName, mapping)
+	} else if syncMock.WindowFromContext(ctx).LeftAtStop() {
+		// Without --sync nothing is resolved here, but a request that was in
+		// flight across its recording's stop is left out as Keep leaves it
+		// out with --sync: the recording it began in has ended without it,
+		// and it is no request of the next one.
+		logger.Debug("Test case left out: its request was in flight across its recording's stop",
+			zap.String("method", req.Method),
+			zap.Time("in_flight_since", reqTimeTest))
+		return
 	}
 	select {
 	case <-ctx.Done():

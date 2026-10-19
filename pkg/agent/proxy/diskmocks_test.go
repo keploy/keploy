@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -410,5 +411,144 @@ func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
 		if want := m.Name == "big" || m.Name == "mongo"; elided != want {
 			t.Fatalf("mock %s: response kept apart = %v, want %v", m.Name, elided, want)
 		}
+	}
+}
+
+// pgStatementMock is a per-test PostgreSQL query mock of the statement
+// sqlHash, recorded at second sec.
+func pgStatementMock(name, sqlHash string, sec int64) *models.Mock {
+	at := time.Unix(sec, 0).UTC()
+	return &models.Mock{
+		Name: name,
+		Kind: models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type:  models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{SQLAstHash: sqlHash},
+			},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true},
+	}
+}
+
+// The store keeps, for each statement its mocks record, the first one
+// recorded, whatever order they were added in; a mock of no statement, or one
+// the server answered with an error (no shape to describe the statement by),
+// is in no catalog.
+func TestLoadStatements_KeepsTheFirstRecordingOfEachStatement(t *testing.T) {
+	s, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	refused := pgStatementMock("b-refused", "sha256:b", 5)
+	refused.Spec.PostgresV3.Query.Response = &models.PostgresV3Response{Error: &models.PostgresV3Error{Severity: "ERROR", Code: "42P01"}}
+	for _, m := range []*models.Mock{
+		pgStatementMock("a-late", "sha256:a", 30),
+		pgStatementMock("a-first", "sha256:a", 10),
+		pgStatementMock("b", "sha256:b", 20),
+		refused,
+		perTestMockAt("http", 15),
+	} {
+		if err := s.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.LoadStatements()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, m := range got {
+		names = append(names, m.Name)
+	}
+	if want := []string{"a-first", "b"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("catalog %v; want the first recording of each statement, in recorded order: %v", names, want)
+	}
+}
+
+// LoadStaged returns, in recorded order, the stored mocks a
+// models.StagingWithStartup need declares with request time in [from, to],
+// both ends included, and none other. Mocks stored before the need was
+// declared are not indexed: the store indexes a mock as it is added.
+func TestLoadStaged_ReadsOnlyTheDeclaredMocksOfItsRangeInRecordedOrder(t *testing.T) {
+	s, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	declared := func(name string, at int64) *models.Mock {
+		m := perTestMockAt(name, at)
+		m.Spec.Metadata = map[string]string{"push": "true"}
+		return m
+	}
+	if err := s.Add(declared("before-need", 15)); err != nil {
+		t.Fatal(err)
+	}
+	defer models.RegisterStagingNeed(models.HTTP, models.StagingNeed{
+		Use:   models.StagingWithStartup,
+		Match: func(m *models.Mock) bool { return m.Spec.Metadata["push"] == "true" },
+	})()
+	for _, m := range []*models.Mock{
+		declared("late", 300), perTestMockAt("plain", 20), declared("at-from", 10),
+		declared("before-from", 9), declared("at-to", 400), declared("after-to", 401),
+	} {
+		if err := s.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.LoadStaged(time.Unix(10, 0), time.Unix(400, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range got {
+		out = append(out, m.Name)
+	}
+	if want := []string{"at-from", "late", "at-to"}; !reflect.DeepEqual(out, want) {
+		t.Fatalf("LoadStaged read %v; want the declared mocks of [10s, 400s] in recorded order: %v", out, want)
+	}
+}
+
+// RangeKeys visits the on-disk mocks of a kind indexed under any key asked
+// (models.RequestKeys), once each, in recorded order, until the visit says
+// stop: none of another key, another kind, or a mock whose parser declares
+// none. It decodes only what the visit loads.
+func TestRangeKeysVisitsTheKeysAskedInRecordedOrder(t *testing.T) {
+	defer models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string { return []string{m.Name[:4], "any"} })()
+	mongo := perTestMockAt("dele-mongo", 15)
+	mongo.Kind = models.Mongo
+	s := newDiskWith(t, perTestMockAt("dele-30", 30), mongo, perTestMockAt("poll-20", 20), perTestMockAt("dele-10", 10), perTestMockAt("send-40", 40))
+	defer s.Close()
+	visit := func(kind models.Kind, keys []string, loadName string, stopAt string) (visited, loaded []string) {
+		t.Helper()
+		if err := s.RangeKeys(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+			visited = append(visited, name)
+			if name == loadName {
+				m, err := load()
+				if err != nil || m.Name != name {
+					t.Fatalf("load of %s = %v, %v", name, m, err)
+				}
+				loaded = append(loaded, m.Name)
+			}
+			return name != stopAt
+		}); err != nil {
+			t.Fatalf("RangeKeys: %v", err)
+		}
+		return visited, loaded
+	}
+	if got, loaded := visit(models.HTTP, []string{"dele"}, "dele-30", ""); !reflect.DeepEqual(got, []string{"dele-10", "dele-30"}) || !reflect.DeepEqual(loaded, []string{"dele-30"}) {
+		t.Fatalf("RangeKeys(HTTP, dele) visited %v and loaded %v; want dele-10, dele-30, and only dele-30 decoded", got, loaded)
+	}
+	if got, _ := visit(models.HTTP, []string{"send", "dele", "any"}, "", ""); !reflect.DeepEqual(got, []string{"dele-10", "poll-20", "dele-30", "send-40"}) {
+		t.Fatalf("RangeKeys(HTTP, send, dele, any) visited %v; want each HTTP mock once, in recorded order", got)
+	}
+	if got, _ := visit(models.HTTP, []string{"any"}, "", "poll-20"); !reflect.DeepEqual(got, []string{"dele-10", "poll-20"}) {
+		t.Fatalf("a visit that stopped at poll-20 went on: %v", got)
+	}
+	if got, _ := visit(models.Mongo, []string{"dele"}, "", ""); len(got) != 0 {
+		t.Fatalf("a kind with no declared keys visited %v", got)
 	}
 }

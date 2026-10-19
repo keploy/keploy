@@ -2,13 +2,17 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle reproduces
@@ -558,5 +562,45 @@ func TestWaitForOther_DrainsResultPublishedBeforeGoroutineExit(t *testing.T) {
 		t.Errorf("%d of %d already-published verdicts were discarded — waitForOther took its "+
 			"doneCh case without draining the buffer, losing a ClientHello that exists "+
 			"nowhere else", dropped, iterations)
+	}
+}
+
+// The opportunistic upgrade's client-side handshake is charged as every
+// client-side handshake is: a client that hangs up as soon as it is done,
+// having sent nothing -- no call, no close_notify -- abandoned it, as curl,
+// libcurl and Node.js under TLS 1.2 do when they reject keploy's
+// certificate (tls_handshake_abandoned).
+func TestAnOpportunisticClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	// The dependency ends its side once keploy passes the client's end on,
+	// as a server does: the upgrade's relay then ends at once.
+	upstream, _ := newTLSTestServer(t, 0, nil, func(c *tls.Conn) {
+		go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
+	})
+	defer upstream.Close()
+	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientLn.Close()
+	go func() {
+		c, err := tls.Dial("tcp", clientLn.Addr().String(), &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example", MaxVersion: tls.VersionTLS12})
+		if err == nil {
+			_ = c.NetConn().Close() // no close_notify of its own
+		}
+	}()
+	srcConn, err := clientLn.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstConn, err := net.Dial("tcp", upstream.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxy{logger: zap.NewNop()}
+	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
+	_ = p.hijackAndMITM(context.Background(), srcConn, dstConn, nil, upstream.Addr().String(), time.Time{}, models.OutgoingOptions{})
+	if got := p.losses.Snapshot(); len(got) != 1 || got[0].Kind != models.CaptureLossTLSAbandoned || got[0].What != "to "+upstream.Addr().String() {
+		t.Fatalf("charged %+v, want one tls_handshake_abandoned to the destination", got)
 	}
 }

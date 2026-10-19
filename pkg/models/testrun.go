@@ -44,10 +44,18 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
-	// UnclaimedCalls are the calls the set's application made after its last
-	// test that no mock answered (proven switch): a pool miss no later test
-	// takes. They fail the set; JUnit fails a case of its own with them.
+	// UnclaimedCalls are the calls the set's application made outside every
+	// test that no mock answered (proven switch): after its last test, a pool
+	// miss no later test takes, and before its first, as it started
+	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
+	// own with them.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// AppNotStopped, under the proven switch, says why keploy read the set's
+	// end with its application still running (a stack kept across test-sets,
+	// --keep-app-alive, an application keploy did not start): a call the
+	// application made after that read is not judged (P101-c). The set's
+	// verdict is what the read found.
+	AppNotStopped string `json:"appNotStopped,omitempty" yaml:"app_not_stopped,omitempty"`
 	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
 	// so its results carry the proven model's evidence: a report renders it
 	// from this, not from the switch of the process rendering it. Set on
@@ -208,6 +216,15 @@ type FailureInfo struct {
 	// test's evidence is unknown, so its test set is not judged. Set only under
 	// the proven switch.
 	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// MissesUnattributed says, with the proven switch off, what
+	// UnmatchedCallsUnread says under it: the calls no mock answered during
+	// this test could not all be read, so a miss of this test may be missing
+	// from it, or have been read with another test's. With the switch off a
+	// miss fails no test, so the test's verdict stands, and nothing reads this
+	// as no verdict; but nothing may take a failed difference of its test set
+	// for noise, which may be that miss's (enterprise's auto-noise learns none
+	// for the set). Set only with the switch off.
+	MissesUnattributed bool `json:"misses_unattributed,omitempty" yaml:"misses_unattributed,omitempty"`
 	// TestMocksUnread says the mocks this test consumed could not be read
 	// from keploy's agent, so whether it made every call it recorded is
 	// unknown: it has no verdict, and its test set is not judged. Set only
@@ -259,14 +276,37 @@ type FailureInfo struct {
 	// verdict, and its set is not judged. Never a pass, and a failure only
 	// on what came.
 	StreamHeldOpen string `json:"stream_held_open,omitempty" yaml:"stream_held_open,omitempty"`
+	// AnswerStalled says, under KEPLOY_PROVEN=1 with no apiTimeout of the
+	// user's, what the stall rule waited for when it ended the test's
+	// exchange before the app's answer began, or part-way through an answer
+	// that is not streamed: the app took none of the request, or not all of
+	// it, or sent nothing back for the rule's grace of keploy's runnable time
+	// (pkg.AnswerStallGrace, rule 15). Nothing was compared: the row is
+	// built as a test with no answer is (FAILED), and the test has no
+	// verdict all the same (VerdictUnknown), nor has its set.
+	AnswerStalled string `json:"answer_stalled,omitempty" yaml:"answer_stalled,omitempty"`
+	// MappingStale says why an OBSOLETE test has no verdict: it answered
+	// differently from its recording while the dependency calls it made
+	// diverged from what its recorded mapping lists (a recorded mock of its
+	// mapping left unconsumed, or a mock outside it consumed). keploy cannot
+	// tell a regression from a stale mapping then, so the test is not
+	// judged, and neither is its set: never the silent pass an OBSOLETE once
+	// was (false-pass row 0). Set with the proven switch off, the only place
+	// a wrong answer is demoted.
+	MappingStale string `json:"mapping_stale,omitempty" yaml:"mapping_stale,omitempty"`
 }
+
+// MappingStaleRemedy is what to do about a test whose recorded mapping
+// diverged from what it consumed (FailureInfo.MappingStale).
+const MappingStaleRemedy = "re-record the test-set, or run keploy test with --disable-mapping --update-test-mapping to replay it by recorded time and write its mapping afresh"
 
 // NotJudged is why the test has no verdict, whatever its status says: what
 // keploy could not read or check of it (UnmatchedCallsUnread,
 // TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
 // capture at all (CannotCapture, decision 20), one reason each.
 // Empty for a judged test. Each is set only under the proven switch, so a
-// result written without it is never unjudged.
+// result written without it is never unjudged, but for MappingStale, which is
+// set with it off, the only place a wrong answer is demoted to OBSOLETE.
 func (fi FailureInfo) NotJudged() []string {
 	var why []string
 	if fi.UnmatchedCallsUnread {
@@ -287,19 +327,39 @@ func (fi FailureInfo) NotJudged() []string {
 	if fi.StreamHeldOpen != "" {
 		why = append(why, fi.StreamHeldOpen)
 	}
+	if fi.AnswerStalled != "" {
+		why = append(why, fi.AnswerStalled)
+	}
+	if fi.MappingStale != "" {
+		why = append(why, fi.MappingStale)
+	}
 	return why
 }
 
 // VerdictUnknown is why the test has no verdict although its row reads as
 // one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
-// (what could not be read can only add to why it failed) and for one keploy
-// skipped (IGNORED, which says it has no verdict). JUnit and the NDJSON mark
-// a test by this one predicate.
+// (what could not be read can only add to why it failed) unless nothing was
+// compared because the stall rule ended its answer (AnswerStalled), and for
+// one keploy skipped (IGNORED, which says it has no verdict). MappingStale
+// counts on an OBSOLETE row only. JUnit and the NDJSON mark a test by this one
+// predicate.
 func (r TestResult) VerdictUnknown() []string {
-	if r.Status == TestStatusFailed || r.Status == TestStatusIgnored {
+	if r.Status == TestStatusIgnored {
 		return nil
 	}
-	return r.FailureInfo.NotJudged()
+	if r.Status == TestStatusFailed && r.FailureInfo.AnswerStalled == "" {
+		return nil
+	}
+	// A FAILED row whose answer the stall rule ended (AnswerStalled) was
+	// compared with nothing: its FAILED says no answer came, not that one
+	// differed.
+	fi := r.FailureInfo
+	if r.Status != TestStatusObsolete {
+		// MappingStale is a demoted wrong answer's: a row a hook relabelled
+		// since says its own verdict.
+		fi.MappingStale = ""
+	}
+	return fi.NotJudged()
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -383,6 +443,12 @@ type UnmatchedCall struct {
 	// extra call, how many times the test recorded that call.
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// BeforeSet says, under the proven switch, that the call was made before
+	// its test set's first test began, with no test's window open: the
+	// application's startup. Its Kind is MissOutsideTest. It is the set's,
+	// no test's: the replay fails the set with it, naming the call, and
+	// charges no test (the read of the set's first test carries it).
+	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

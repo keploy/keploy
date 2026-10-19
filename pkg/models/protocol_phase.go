@@ -15,8 +15,10 @@ package models
 //     (SET, SHOW VARIABLES, USE), transaction control (BEGIN, COMMIT) and a
 //     prepared statement's lifecycle so, and they belong to the connection,
 //     not to the test whose window they were captured in. A mock stated
-//     per-test is data-plane, whatever its type tag: a Generic exchange
-//     after its connection's first included.
+//     per-test is data-plane, whatever its type tag (a Generic exchange
+//     after its connection's first included), but an HTTP, HTTP/2 or MySQL
+//     mock tagged "config", which statedLifetime reads as session: a
+//     post-record hook's config call, as enterprise's SQS hook tags them.
 //
 // Every other mock is data-plane, whatever tier DeriveLifetime gives it: its
 // kind fallback makes an untagged HTTP, SQL or Generic mock session-tier, and
@@ -55,6 +57,11 @@ func (m *Mock) IsProtocolPhase() bool {
 		return true
 	}
 	if m.Kind == MySQL && mysqlIsSessionReusableCommand(m) {
+		return true
+	}
+	// A prepared statement's lifecycle recorded before its lifetime was
+	// stated is its connection's (DeriveLifetime), as a stated one is.
+	if m.IsMySQLStatementLifecycle() {
 		return true
 	}
 	return sessionReusableHooks.match(m)

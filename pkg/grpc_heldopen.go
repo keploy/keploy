@@ -67,9 +67,22 @@ type pingWatch struct {
 	complete int
 	cut      func()
 	held     atomic.Bool
-	heldAt   int
-	stalled  bool // held short of the recording (written before held)
-	received atomic.Int64
+	// answer is the stall rule's watch on the exchange (answerWatch), told
+	// of each frame that is progress on it, never a keepalive: the app's
+	// HEADERS (its answer begins), CONTINUATION, DATA and WINDOW_UPDATE
+	// (it took request bytes), and the request's DATA written.
+	answer *answerWatch
+	// headers: the app's answer began (its HEADERS came); dataBytes is how
+	// many bytes of its DATA came. heldHeaders and heldData are the two at
+	// the keepalive that held the stream (written before held), so what
+	// the app sends after it does not change what is said of it.
+	headers     atomic.Bool
+	dataBytes   atomic.Int64
+	heldHeaders bool
+	heldData    int64
+	heldAt      int
+	stalled     bool // held short of the recording (written before held)
+	received    atomic.Int64
 }
 
 // frameWalk follows HTTP/2 frames across reads or writes: a 9-byte header,
@@ -123,6 +136,15 @@ func (w *pingWatch) heldOpen() (held bool, at int, stalled bool) {
 	return true, w.heldAt, w.stalled
 }
 
+// heldAnswer is what of the app's answer had come at the keepalive that held
+// the stream open (heldOpen): its headers, and how many bytes of its DATA.
+func (w *pingWatch) heldAnswer() (headers bool, data int64) {
+	if w == nil || !w.held.Load() {
+		return false, 0
+	}
+	return w.heldHeaders, w.heldData
+}
+
 // gotMessage tells the watch the drain has had n messages, and reports
 // whether the drain is done: the app held the stream open after n.
 //
@@ -147,15 +169,21 @@ func (w *pingWatch) Read(p []byte) (int, error) {
 func (w *pingWatch) Write(p []byte) (int, error) {
 	// What the request ends with is marked before it goes out, so a PING
 	// the app sends on it is read after the mark.
-	w.scanWrite(p)
-	return w.Conn.Write(p)
+	data := w.scanWrite(p)
+	n, err := w.Conn.Write(p)
+	if n > 0 && data {
+		// The request's messages went: progress (the app's flow-control
+		// window let them), unlike a PING's ACK or a SETTINGS frame.
+		w.answer.progress()
+	}
+	return n, err
 }
 
 // scanWrite follows the client's frames and marks the one that ends the
-// request: DATA or HEADERS with END_STREAM. The client writes from one
-// goroutine at a time (grpc-go's writer); the lock keeps the walk whole if
-// not.
-func (w *pingWatch) scanWrite(b []byte) {
+// request: DATA or HEADERS with END_STREAM. It reports whether b carries
+// request DATA. The client writes from one goroutine at a time (grpc-go's
+// writer); the lock keeps the walk whole if not.
+func (w *pingWatch) scanWrite(b []byte) (data bool) {
 	w.wmu.Lock()
 	defer w.wmu.Unlock()
 	if w.wpreface < len(http2.ClientPreface) {
@@ -165,11 +193,19 @@ func (w *pingWatch) scanWrite(b []byte) {
 	}
 	for len(b) > 0 {
 		var header bool
-		header, _, b = w.w.next(b)
+		var payload []byte
+		header, payload, b = w.w.next(b)
 		if header && endsStream(w.w.typ, w.w.flags) {
 			w.ended.Store(true)
+			w.answer.requestDone()
+		}
+		if !header && w.w.typ == http2.FrameData && len(payload) > 0 {
+			// The request's messages, as the stall rule counts them.
+			w.answer.sentBody(len(payload))
+			data = true
 		}
 	}
+	return data
 }
 
 // scanRead follows the app's frames (a server sends no preface string: its
@@ -180,7 +216,9 @@ func (w *pingWatch) scanRead(b []byte) {
 		var payload []byte
 		header, payload, b = w.r.next(b)
 		if !header {
-			if w.r.typ == http2.FrameData {
+			if w.r.typ == http2.FrameData && len(payload) > 0 {
+				w.dataBytes.Add(int64(len(payload)))
+				w.answer.gotAnswer(len(payload))
 				w.data(payload)
 			}
 			continue
@@ -189,10 +227,19 @@ func (w *pingWatch) scanRead(b []byte) {
 		case w.r.typ == http2.FrameData:
 			w.padPending = w.r.flags.Has(http2.FlagDataPadded)
 			w.dataLeft = w.r.left
+			w.answer.progress()
 		case w.r.typ == http2.FramePing && !w.r.flags.Has(http2.FlagPingAck):
 			w.ping()
 		case w.r.typ == http2.FrameRSTStream:
 			w.appEnded = true
+			w.answer.progress()
+		case w.r.typ == http2.FrameHeaders:
+			w.headers.Store(true)
+			w.answer.answering()
+		case w.r.typ == http2.FrameContinuation, w.r.typ == http2.FrameWindowUpdate, w.r.typ == http2.FrameGoAway:
+			// More of the answer's headers; the app took request bytes
+			// (it opened its window); the app ends the connection.
+			w.answer.progress()
 		}
 		if endsStream(w.r.typ, w.r.flags) {
 			// Its payload, the stream's last messages, still counts.
@@ -267,6 +314,7 @@ func (w *pingWatch) ping() {
 		return
 	}
 	w.heldAt = w.came
+	w.heldHeaders, w.heldData = w.headers.Load(), w.dataBytes.Load()
 	w.held.Store(true)
 	if w.received.Load() >= int64(w.heldAt) {
 		// Not on the transport's read: the cut cancels the stream, and

@@ -33,3 +33,23 @@ func TestBuildJUnitSuites_UnclaimedCalls(t *testing.T) {
 		t.Fatalf("a set with no unclaimed call has %d cases, %d failed", s.Tests, s.Failures)
 	}
 }
+
+// F2: a call the application made as it started, before the set's first test,
+// is named as such in the same failed case.
+func TestBuildJUnitSuites_ACallBeforeTheFirstTestIsNamedAsSuch(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	calls := []models.UnmatchedCall{
+		{Protocol: "Mongo", ActualSummary: "insert on events", BeforeSet: true, Kind: models.MissOutsideTest},
+		{Protocol: "HTTP", ActualSummary: "POST /publish"},
+	}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: calls}}).Suites[0]
+	last := s.Cases[len(s.Cases)-1]
+	if last.Failure == nil || strings.Contains(last.Failure.Message, "after the last test") {
+		t.Fatalf("failure %+v; want a message for calls outside every test", last.Failure)
+	}
+	for _, want := range []string{"before the first test: Mongo insert on events", "after the last test: HTTP POST /publish"} {
+		if !strings.Contains(last.Failure.Text, want) {
+			t.Fatalf("failure text %q does not say %q", last.Failure.Text, want)
+		}
+	}
+}

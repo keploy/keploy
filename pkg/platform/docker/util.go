@@ -74,6 +74,33 @@ func buildUpstreamTLSFlags(opts models.SetupOptions) (string, error) {
 	return flags + " --upstream-tls-ca-cert=" + shellQuote(opts.UpstreamTLSCACert), nil
 }
 
+// windowsCmdOperators are the characters cmd.exe acts on in the windows
+// docker alias, which the windows runner (util_windows.go) splits on spaces
+// and runs through cmd.exe with no quoting layer any escaping would survive:
+// & and | end the docker command and start another, < and > redirect it, ^
+// escapes the next character, % expands a variable, and a line break ends the
+// command. A value holding one would run as cmd.exe syntax.
+const windowsCmdOperators = "&|<>^%\r\n"
+
+// aliasWord renders s, a value the agent is handed as one argument (what
+// names it in an error), as one word of the docker alias, so it reaches the
+// agent as it was given whatever it holds: a space, a quote, JSON, a $ or a
+// backtick. Elsewhere than windows it is quoted for the shell the alias runs
+// through (shellQuote), so none of it runs as shell code. On windows it goes
+// in as it is, and a value holding one of windowsCmdOperators is refused: it
+// would run as cmd.exe syntax. (The runner's split on spaces still splits a
+// value with a space there, as it always has: only a runner that hands docker
+// its arguments as a list, with no cmd.exe, ends that.)
+func aliasWord(what, s string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return shellQuote(s), nil
+	}
+	if strings.ContainsAny(s, windowsCmdOperators) {
+		return "", fmt.Errorf("%s %q cannot be forwarded to the keploy agent container on windows: the docker alias is run by cmd.exe, which would act on its %q", what, s, windowsCmdOperators)
+	}
+	return s, nil
+}
+
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
@@ -317,7 +344,30 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 	Volumes = Volumes + tlsVolumeMount
 
-	extraArgs := opts.ExtraArgs
+	// The agent's config path and its own arguments a caller hands it
+	// (ExtraArgs: the enterprise startup hook's, JSON among them), each one
+	// word of the alias as it was given (aliasWord). Every arm appends both
+	// (TestGetAlias_EveryPlatformBranchHandsTheAgentItsArgumentsAsWords).
+	configPathFlag := ""
+	if opts.ConfigPath != "" && opts.ConfigPath != "." {
+		if w, err := aliasWord("the config path", opts.ConfigPath); err == nil {
+			configPathFlag = " --config-path " + w
+		} else {
+			// The agent container reads no file at a host path (no arm
+			// mounts the project), so leaving it out changes nothing the
+			// agent does, where refusing would stop the run.
+			logger.Debug("not handing the keploy agent container the config path, which cmd.exe would act on", zap.String("configPath", opts.ConfigPath), zap.Error(err))
+		}
+	}
+	extraArgWords := ""
+	for _, a := range opts.ExtraArgs {
+		w, err := aliasWord("the keploy agent argument", a)
+		if err != nil {
+			utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+			return "", err
+		}
+		extraArgWords += " " + w
+	}
 	// Skip publishing the proxy port when it's zero. Docker rejects
 	// `-p 0:0` outright, so a caller that intentionally sets
 	// ProxyPort=0 (e.g. to run the agent without a listening proxy
@@ -340,7 +390,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -382,18 +432,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if debug {
 			alias += " --debug"
 		}
-		if opts.ConfigPath != "" && opts.ConfigPath != "." {
-			alias += " --config-path " + opts.ConfigPath
-		}
+		alias += configPathFlag
 		if opts.Synchronous {
 			alias += " --sync"
 		}
 		if opts.EnableSampling > 0 {
 			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
-		if len(extraArgs) > 0 {
-			alias += " " + strings.Join(extraArgs, " ")
-		}
+		alias += extraArgWords
 		return alias, nil
 	case "windows":
 
@@ -420,7 +466,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -463,18 +509,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if debug {
 				alias += " --debug"
 			}
-			if opts.ConfigPath != "" && opts.ConfigPath != "." {
-				alias += " --config-path " + opts.ConfigPath
-			}
+			alias += configPathFlag
 			if opts.Synchronous {
 				alias += " --sync"
 			}
 			if opts.EnableSampling > 0 {
 				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 			}
-			if len(extraArgs) > 0 {
-				alias += " " + strings.Join(extraArgs, " ")
-			}
+			alias += extraArgWords
 			return alias, nil
 		}
 		// if default docker context is used
@@ -486,7 +528,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -529,18 +571,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if debug {
 			alias += " --debug"
 		}
-		if opts.ConfigPath != "" && opts.ConfigPath != "." {
-			alias += " --config-path " + opts.ConfigPath
-		}
+		alias += configPathFlag
 		if opts.Synchronous {
 			alias += " --sync"
 		}
 		if opts.EnableSampling > 0 {
 			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
-		if len(extraArgs) > 0 {
-			alias += " " + strings.Join(extraArgs, " ")
-		}
+		alias += extraArgWords
 		return alias, nil
 
 	case "darwin":
@@ -567,7 +605,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -610,18 +648,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if debug {
 				alias += " --debug"
 			}
-			if opts.ConfigPath != "" && opts.ConfigPath != "." {
-				alias += " --config-path " + opts.ConfigPath
-			}
+			alias += configPathFlag
 			if opts.Synchronous {
 				alias += " --sync"
 			}
 			if opts.EnableSampling > 0 {
 				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 			}
-			if len(extraArgs) > 0 {
-				alias += " " + strings.Join(extraArgs, " ")
-			}
+			alias += extraArgWords
 			return alias, nil
 		}
 		// if default docker context is used
@@ -632,7 +666,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -675,18 +709,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if debug {
 			alias += " --debug"
 		}
-		if opts.ConfigPath != "" && opts.ConfigPath != "." {
-			alias += " --config-path " + opts.ConfigPath
-		}
+		alias += configPathFlag
 		if opts.Synchronous {
 			alias += " --sync"
 		}
 		if opts.EnableSampling > 0 {
 			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
-		if len(extraArgs) > 0 {
-			alias += " " + strings.Join(extraArgs, " ")
-		}
+		alias += extraArgWords
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
@@ -738,6 +768,16 @@ func provenSuffix() string {
 		return ""
 	}
 	return " " + strings.Join(args, " ")
+}
+
+// settleReadsSuffix returns " --settle-reads" for a run that learns noise
+// (models.SetupOptions.SettleReads), "" otherwise, so the alias is
+// byte-identical to before for every other run.
+func settleReadsSuffix(opts models.SetupOptions) string {
+	if !opts.SettleReads {
+		return ""
+	}
+	return " --settle-reads"
 }
 
 // mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`

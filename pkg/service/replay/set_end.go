@@ -1,6 +1,10 @@
 package replay
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"strings"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // SetEndHook is an optional TestHooks extension: it is told how keploy test
 // ended each run of each test set (models.SetEnd), as soon as RunTestSet
@@ -13,12 +17,26 @@ type SetEndHook interface {
 	SetEnd(testSetID string, end models.SetEnd)
 }
 
+// SetCallsHook is an optional TestHooks extension, under the proven switch:
+// it is told, with each run of each test set's end (SetEndHook's moment), the
+// calls no mock answered that the set's end charged to the set, no test: made
+// before its first test, or after its last (the final report's
+// UnclaimedCalls); none when there were none. Each carries what its parser
+// found of it, as a test's own misses do in its result
+// (UnmatchedCall.NotOwned, ClosestMock): what record's judging reads to bake a
+// recording made elsewhere into the worker scope (design v14 S12, a2). It is
+// a notification: it changes nothing the replayer does.
+type SetCallsHook interface {
+	SetCalls(testSetID string, calls []models.UnmatchedCall)
+}
+
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends
 // it, for tellSetEnd: each place RunTestSet writes one (the end of the set,
 // a set with no test case to run, a set ignored whole, a set refused when it
 // loaded) notes it before writing it.
 func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
+	r.setEndCalls = rep.UnclaimedCalls
 }
 
 // tellSetEnd tells the hooks, when they take it (SetEndHook), how a run of
@@ -27,6 +45,13 @@ func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 // ended it first: one before any final report, or the failure to write the
 // one at the set's end, which ends the set INTERNAL_ERR whatever it said.
 func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err error) {
+	if h, ok := r.hookImpl.(SetCallsHook); ok {
+		var calls []models.UnmatchedCall
+		if noted := r.setEnd; noted != nil && noted.Status == status {
+			calls = append(calls, r.setEndCalls...)
+		}
+		h.SetCalls(testSetID, calls)
+	}
 	h, ok := r.hookImpl.(SetEndHook)
 	if !ok {
 		return
@@ -39,4 +64,47 @@ func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err
 		end.Why = err.Error()
 	}
 	h.SetEnd(testSetID, end)
+}
+
+// UncheckedHook is an optional TestHooks extension: a hook that changes what
+// a test set's run reads (decrypts its recordings, say) tells keploy when it
+// could not, so that some of the set's tests could not be checked, and why.
+// Under the proven switch a set that would be PASSED or FAILED, or is not
+// judged already, is not judged with that reason; any other (the switch
+// off, or a set that halted, was stopped or faulted) keeps its status, and
+// its report gives the reason first. Either way keploy writes nothing of
+// that run back to the recording: no mock prune, no mappings.yaml, nothing
+// its learn step learned.
+type UncheckedHook interface {
+	// Unchecked is why this run of testSetID could not check every test it
+	// ran, "" when it could. It is asked once per run of the set, as that
+	// run's report is written: a set run again (--max-flaky-checks,
+	// --must-pass) is asked again, after its next run, so the answer is
+	// that run's alone, never an earlier run's. A run that ends before its
+	// report (an error that stops keploy test) is not asked. It must not
+	// block: it is asked on the set's end, with no deadline.
+	Unchecked(testSetID string) string
+}
+
+// hookUnchecked is what the hooks say keeps testSetID's run from checking
+// its tests (UncheckedHook), "" when they take no such hook or say nothing.
+func (r *Replayer) hookUnchecked(testSetID string) string {
+	h, ok := r.hookImpl.(UncheckedHook)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(h.Unchecked(testSetID))
+}
+
+// withUnchecked puts why first in a report's failure reason (a set that
+// keeps its status, UncheckedHook): the reason the run could not check its
+// tests explains the rest.
+func withUnchecked(why, reason string) string {
+	switch {
+	case why == "":
+		return reason
+	case reason == "":
+		return "keploy could not check every test: " + why
+	}
+	return "keploy could not check every test: " + why + "; " + reason
 }

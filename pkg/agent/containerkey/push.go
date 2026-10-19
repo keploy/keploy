@@ -20,9 +20,11 @@ import (
 // Docker for the run, keeps the index instead (Pusher) and gives it to the
 // agent whole (Snapshot): before each session starts, when the agent
 // restarts, and on every change. The agent names connections from the last
-// list it was given (pushedIndex) and never waits for one: a list that has
-// not come yet names nothing, which only costs keys. Nothing is refreshed on
-// a timer.
+// list it was given (pushedIndex): a list that has not come yet names
+// nothing, which only costs keys. It waits for a list only at a connection's
+// first use that finds nothing placed, when it asks its CLI to list the
+// daemon (pushedIndex.Settle) and waits for the list that answers. Nothing is
+// refreshed on a timer.
 
 // Snapshot is the index as the keploy CLI gives it to its docker-mode agent.
 type Snapshot struct {
@@ -48,7 +50,32 @@ type Snapshot struct {
 	// or moved, not yet in Containers where they now are. A connection the
 	// agent accepts meanwhile waits for them, as the CLI's index would.
 	Placing []string `json:"placing,omitempty"`
+	// Settled is the last of the agent's settle asks (SettleAsk.Asked) the
+	// CLI answered, of the agent run SettledBoot names: it listed the
+	// daemon after the agent asked, and this list holds what that list
+	// placed. The agent's settles up to it wait no longer.
+	Settled     uint64 `json:"settled,omitempty"`
+	SettledBoot string `json:"settledBoot,omitempty"`
+	// Settles says the CLI answers the agent's settles: a CLI that predates
+	// them gives lists without it, and the agent's settles then wait for
+	// nothing.
+	Settles bool `json:"settles,omitempty"`
 }
+
+// SettleAsk is a docker-mode agent's asks of its CLI for a list of the
+// daemon (pushedIndex.Settle), as the CLI's ask for them is answered
+// (AwaitSettleAsk): Asked counts the agent's settles, Boot names the agent's
+// run, whose count starts again from none when it restarts.
+type SettleAsk struct {
+	Asked uint64 `json:"asked"`
+	Boot  string `json:"boot"`
+}
+
+// ErrNoSettles is the error of a CLI's ask for settles of an agent that
+// takes none: one that predates them (it has no such route), whose first
+// uses place what the lists say, as before, or one that reads Docker itself.
+// Its CLI stops asking for the session.
+var ErrNoSettles = errors.New("keploy's agent takes no settle asks")
 
 // SnapshotContainer is one running container of a Snapshot.
 type SnapshotContainer struct {
@@ -63,6 +90,10 @@ type SnapshotContainer struct {
 	// made before secrets were left out of it.
 	LegacyFingerprint string `json:"legacyFingerprint,omitempty"`
 	Reading           bool   `json:"reading,omitempty"`
+	// Stalled says that read has made no progress for the stall window, in
+	// time the CLI could run: the agent stops waiting for it, the
+	// container's identity unknown, until a list says the read ended.
+	Stalled bool `json:"stalled,omitempty"`
 	// Name is the container's name, for messages.
 	Name  string         `json:"name,omitempty"`
 	IPs   []string       `json:"ips,omitempty"`
@@ -115,7 +146,8 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 		}
 		at[id] = len(s.Containers)
 		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/"),
-			Fingerprint: st.fingerprints[id], LegacyFingerprint: st.legacy[id], Reading: st.fingerprints[id] == "" && st.reading[id]})
+			Fingerprint: st.fingerprints[id], LegacyFingerprint: st.legacy[id], Reading: st.fingerprints[id] == "" && st.reading[id],
+			Stalled: st.fingerprints[id] == "" && st.reading[id] && st.stalled[id]})
 	}
 	// Each IP goes to the container the index names at it (byIP): a
 	// container that took an IP whose old holder's die never arrived holds
@@ -148,9 +180,24 @@ type pushedIndex struct {
 	seq    uint64
 	// endpoint is the daemon the CLI reads, for messages.
 	endpoint string
+	// asked counts the agent's settles (Settle), each an ask of its CLI for
+	// a list of the daemon; answered is the last the CLI's lists say it
+	// answered (Snapshot.Settled, of this run, boot). asking closes, and is
+	// replaced, when asked grows: the CLI's ask waiting for one
+	// (AwaitSettleAsk) looks again. answers: the list held says its CLI
+	// answers settles (Snapshot.Settles); one that predates them does not,
+	// and a settle then waits for nothing. boot names this agent's run.
+	asked, answered uint64
+	asking          chan struct{}
+	answers         bool
+	boot            string
 }
 
-func newPushedIndex() *pushedIndex { return &pushedIndex{applied: make(chan struct{})} }
+func newPushedIndex() *pushedIndex {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return &pushedIndex{applied: make(chan struct{}), asking: make(chan struct{}), boot: hex.EncodeToString(b)}
+}
 
 // apply takes a snapshot in place of the one held, unless it is an older
 // list of the same source.
@@ -182,11 +229,15 @@ func (p *pushedIndex) apply(s Snapshot) {
 			e.publish(port.HostIP, port.HostPort, port.Port)
 		}
 		st.images[e.id] = e.image
+		if c.Name != "" {
+			st.names[e.id] = "/" + c.Name
+		}
 		if c.Fingerprint != "" {
 			st.fingerprints[e.id] = c.Fingerprint
 			st.legacy[e.id] = c.LegacyFingerprint
 		} else if c.Reading {
 			st.reading[e.id] = true
+			st.stalled[e.id] = c.Stalled
 		}
 		for _, a := range e.ips {
 			st.byIP[a] = e.id
@@ -197,12 +248,90 @@ func (p *pushedIndex) apply(s Snapshot) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	answered := s.SettledBoot == p.boot && s.Settled > p.answered
+	if answered {
+		// Taken from an older list too: the newer one held was made after
+		// it, and holds what its daemon's list placed.
+		p.answered = s.Settled
+	}
 	if p.st != nil && s.Source == p.source && s.Seq <= p.seq {
+		if answered {
+			close(p.applied)
+			p.applied = make(chan struct{})
+		}
 		return // an older list that arrived late
 	}
-	p.st, p.source, p.seq, p.endpoint = st, s.Source, s.Seq, s.Endpoint
+	p.st, p.source, p.seq, p.endpoint, p.answers = st, s.Source, s.Seq, s.Endpoint, s.Settles
 	close(p.applied)
 	p.applied = make(chan struct{})
+}
+
+// Settle asks the CLI for a list of the daemon and waits for the list that
+// says it answered (Snapshot.Settled), or ctx ends: a container Docker
+// started before a connection's first use is then in the list held, though
+// its start event had not reached the CLI's index (settler). The settles
+// asked while the CLI answers one share its next answer. An agent whose list
+// does not say its CLI answers settles (a CLI that predates them), or says
+// its CLI cannot read the daemon, waits for nothing.
+func (p *pushedIndex) Settle(ctx context.Context) {
+	p.mu.Lock()
+	if !p.answers || p.st == nil || p.st.err != nil {
+		p.mu.Unlock()
+		return
+	}
+	p.asked++
+	want := p.asked
+	close(p.asking)
+	p.asking = make(chan struct{})
+	for p.answered < want {
+		applied := p.applied
+		p.mu.Unlock()
+		select {
+		case <-applied:
+		case <-ctx.Done():
+			return
+		}
+		p.mu.Lock()
+	}
+	p.mu.Unlock()
+}
+
+// awaitAsk is AwaitSettleAsk on p.
+func (p *pushedIndex) awaitAsk(ctx context.Context, boot string, after uint64) SettleAsk {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if boot != p.boot {
+		after = 0 // the CLI's count is of the agent's last run
+	}
+	for p.asked <= after {
+		asking := p.asking
+		p.mu.Unlock()
+		select {
+		case <-asking:
+		case <-ctx.Done():
+		}
+		p.mu.Lock()
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return SettleAsk{Asked: p.asked, Boot: p.boot}
+}
+
+// AwaitSettleAsk is a docker-mode agent's answer to its CLI's ask for
+// settles, held open: once the agent has asked for a settle the CLI was not
+// told of (more than after, of the agent run boot names; all of them, of
+// another run), it gives how many the agent asked, and which run it is; ctx
+// ending first gives the count as it is. An agent that reads Docker itself
+// refuses (ErrNotPushed).
+func AwaitSettleAsk(ctx context.Context, boot string, after uint64) (SettleAsk, error) {
+	Default.mu.Lock()
+	p, ok := Default.res.(*pushedIndex)
+	Default.mu.Unlock()
+	if !ok {
+		return SettleAsk{}, ErrNotPushed
+	}
+	return p.awaitAsk(ctx, boot, after), nil
 }
 
 // errNoList is a docker-mode agent's lookup before its CLI gave it a list:
@@ -234,25 +363,38 @@ func (p *pushedIndex) Fingerprint(ctx context.Context, id string) (string, bool)
 // Fingerprints is Fingerprint with the container's legacy fingerprint in the
 // list held (fingerprintsResolver).
 func (p *pushedIndex) Fingerprints(ctx context.Context, id string) (string, string, bool) {
+	fp, legacy, ok, _ := p.FingerprintsOrStall(ctx, id)
+	return fp, legacy, ok
+}
+
+// FingerprintsOrStall is Fingerprints, and, when the list held says the
+// CLI's read of the container's configuration stalled (Stalled), the
+// container named for a message (stallResolver).
+func (p *pushedIndex) FingerprintsOrStall(ctx context.Context, id string) (string, string, bool, string) {
 	for {
 		p.mu.Lock()
 		st, applied := p.st, p.applied
-		var fp, legacy string
+		var fp, legacy, stalled string
 		held, reading := false, false
 		if st != nil && st.err == nil {
 			fp, legacy, held, reading = st.fingerprints[id], st.legacy[id], st.images[id] != "", st.reading[id]
+			if st.stalled[id] {
+				stalled = st.describeLocked(id)
+			}
 		}
 		p.mu.Unlock()
 		switch {
 		case fp != "" && held:
-			return fp, legacy, true
+			return fp, legacy, true, ""
 		case !reading:
-			return "", "", false
+			return "", "", false, ""
+		case stalled != "":
+			return "", "", false, stalled
 		}
 		select {
 		case <-applied:
 		case <-ctx.Done():
-			return "", "", false
+			return "", "", false, ""
 		}
 	}
 }
@@ -381,6 +523,27 @@ type Pusher struct {
 	sentGen  uint64
 	owed     bool
 	logger   *zap.Logger
+	// ask, when set (AnswerSettles), waits for the agent's next settle ask;
+	// answer is the last ask the CLI answered, which every list it gives
+	// carries (Snapshot.Settled). settlesDone closes when the session's
+	// answering of settles has ended (its session ended, or its agent takes
+	// no settle asks).
+	ask         func(ctx context.Context, boot string, after uint64) (SettleAsk, error)
+	answer      SettleAsk
+	settlesDone chan struct{}
+}
+
+// AnswerSettles makes p answer its agent's settles (pushedIndex.Settle):
+// every list it gives says so (Snapshot.Settles), and while a session lasts
+// it asks the agent, with ask, for the next one, and answers each by listing
+// the daemon (dockerIndex.Settle) and giving the agent the list, which says
+// which it answers. ask gives ErrNoSettles for an agent that predates
+// settles (which ignores Settles): p then stops asking. Called before the
+// first Push.
+func (p *Pusher) AnswerSettles(ask func(ctx context.Context, boot string, after uint64) (SettleAsk, error)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ask = ask
 }
 
 // NewPusher is a pusher that gives each list with post, leaving out the
@@ -426,8 +589,61 @@ func (p *Pusher) Push(ctx context.Context, logger *zap.Logger) error {
 	if fresh {
 		p.loopDone = make(chan struct{})
 		go p.loop(ctx, p.changed, logger, p.loopDone)
+		if p.ask != nil {
+			p.settlesDone = make(chan struct{})
+			go p.answerSettles(ctx, p.ask, p.changed, p.settlesDone)
+		}
 	}
 	return err
+}
+
+// answerSettles answers the agent's settles while its session (ctx) lasts:
+// it asks the agent for the next one, lists the daemon once the agent asks
+// (dockerIndex.Settle), and gives the agent the list then, which says which
+// ask it answers. A list the agent did not take is given again by the change
+// loop (owed), carrying the answer. An ask that fails is made again, paced;
+// an agent that predates settles is not asked again.
+func (p *Pusher) answerSettles(ctx context.Context, ask func(context.Context, string, uint64) (SettleAsk, error), changed chan struct{}, done chan struct{}) {
+	defer close(done)
+	// The agent was told the answers of the sessions before (every list
+	// carries the last): this one asks for the settles since, and lists the
+	// daemon for none it answered already.
+	p.mu.Lock()
+	last := p.answer
+	p.mu.Unlock()
+	backoff := pushRetryFirst
+	for {
+		got, err := ask(ctx, last.Boot, last.Asked)
+		switch {
+		case ctx.Err() != nil, errors.Is(err, ErrNoSettles):
+			return
+		case err != nil:
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			if backoff < pushRetryMax {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = pushRetryFirst
+		if got == last {
+			continue // the agent's own ask ended with nothing new
+		}
+		p.idx.Settle(ctx)
+		p.mu.Lock()
+		p.answer = got
+		if err := p.send(ctx, true); err != nil {
+			select {
+			case changed <- struct{}{}: // the change loop gives it again
+			default:
+			}
+		}
+		p.mu.Unlock()
+		last = got
+	}
 }
 
 // send gives the agent the list as it is now: always when forced or owed
@@ -442,6 +658,7 @@ func (p *Pusher) send(ctx context.Context, force bool) error {
 		return nil
 	}
 	s.Source = p.source
+	s.Settled, s.SettledBoot, s.Settles = p.answer.Asked, p.answer.Boot, p.ask != nil
 	if err := p.post(ctx, s); err != nil {
 		p.owed = true
 		return err

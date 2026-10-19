@@ -347,9 +347,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	winStart, winEnd := mockDb.CurrentTestWindow()
 	windowActive := !winStart.IsZero() && !winEnd.IsZero()
 	// mockInCurrentWindow reports whether a mock's recorded request timestamp
-	// lies within the active outer-test window. When no window is active
-	// (initial staging / between tests) every mock is treated as in-window
-	// so behaviour matches the pre-fix path.
+	// lies within the active outer-test window, or the mock was in flight
+	// when the window's test began (sent in the gap before it and answered
+	// inside it: integrations.InFlightOwner), which the windowed read serves
+	// as the test's own. When no window is active (initial staging / between
+	// tests) every mock is treated as in-window so behaviour matches the
+	// pre-fix path.
 	mockInCurrentWindow := func(mk *models.Mock) bool {
 		if !windowActive {
 			return true
@@ -358,7 +361,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if req.IsZero() {
 			return true
 		}
-		return !req.Before(winStart) && !req.After(winEnd)
+		if !req.Before(winStart) && !req.After(winEnd) {
+			return true
+		}
+		return integrations.InFlightIntoOpenTest(mockDb, mk)
 	}
 
 	// pool is the full merged pool, filled on first need. When the in-window

@@ -422,6 +422,13 @@ type ExactServing struct {
 	// (its mapping). An empty Test serves the set's pool again.
 	Test  string   `json:"test,omitempty"`
 	Owned []string `json:"owned,omitempty"`
+	// Ahead is, on a call that serves the pool (no Test), the mocks of the
+	// next test case's mapping that were in flight when it began: recorded
+	// in the gap before its window, answered once it had begun
+	// (models.WindowSchedule.InFlightInto). They answer between test cases,
+	// each at most once, as that test case's own: one answered then counts
+	// as answered when it opens. An agent that predates it ignores it.
+	Ahead []string `json:"ahead,omitempty"`
 }
 
 // ExactPool is a test set's exact serving, under the proven switch: the agent
@@ -430,6 +437,13 @@ type ExactPool struct {
 	// Pool is every mock no test case's mapping lists. It answers between
 	// test cases, beside the protocol-phase mocks.
 	Pool []string `json:"pool,omitempty"`
+	// Worker is the set's worker scope (Mapping.Worker): the mocks no test
+	// case owns, each with its place (MockEntry.Place). The agent stages them
+	// with the pool, and each answers from its place in the set's run on
+	// (once the test case it is placed after has begun; from the start for an
+	// empty place), whether a test case is open or not, after the open test
+	// case's own, at most one request in the staging.
+	Worker []MockEntry `json:"worker,omitempty"`
 }
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
@@ -520,6 +534,41 @@ const (
 // the header reads it as before. Only an agent with the proven switch on sends
 // it.
 const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
+
+// AgentInstanceHeader is the response header in which an agent names the
+// process that answers: an id the agent draws once, as its process starts.
+// What a test set is judged on (the calls no mock answered, what its tests
+// consumed, what keploy could not capture) is held in that process's memory,
+// and an agent started again in its place (kubelet restarting a crashed
+// sidecar, docker restarting a container) answers at the same address with
+// none of it. Two answers that name different processes say that happened
+// between them. Only an agent with the proven switch on sends it.
+const AgentInstanceHeader = "X-Keploy-Agent-Instance"
+
+// AgentReplacement is an agent process answering where another answered
+// before it: First, the process that answered first since a watch began
+// (AgentInstanceWatch), and Next, the first other one that answered after it.
+type AgentReplacement struct {
+	First string
+	Next  string
+}
+
+// AgentInstanceWatch watches which agent process answers a client's agent
+// address (AgentInstanceHeader): from when it begins, the first process to
+// answer is the one the watch keeps to, and any other that answers after it
+// replaced it.
+type AgentInstanceWatch interface {
+	// Replacement reports the first process that answered after the one the
+	// watch keeps to, and whether one did.
+	Replacement() (AgentReplacement, bool)
+	// Accept says the process that answers now was set up again in full
+	// before the application ran against it (the docker compose bring-up's
+	// retry): nothing the watch keeps to was on the process it replaced, and
+	// the watch keeps to this one from now on.
+	Accept()
+	// Stop ends the watch.
+	Stop()
+}
 
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`

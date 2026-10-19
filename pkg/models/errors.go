@@ -18,7 +18,26 @@ type AppError struct {
 	// The mock record/replay flows propagate this as keploy's own exit code
 	// so a wrapped `pytest`/`go test` failure fails the keploy process too.
 	ExitCode int
+	// StopKilled, under the proven switch, says why keploy had to kill the
+	// application it stopped at its test set's end (ErrAppStoppedForSetEnd),
+	// or at a recording's end (P101-b-k): it had not exited when the stop's
+	// grace ran out. "" when it exited within it, or when the stop was
+	// another's.
+	StopKilled string
 }
+
+// ErrAppStoppedForSetEnd is the cause keploy cancels an application's run
+// with when, under the proven switch, it stops the app at its test set's end
+// to read what the app did after the set's last test once it has exited
+// (P101-b). The app's runner stops it as its teardown does, and says in
+// AppError.StopKilled whether that had to kill it.
+var ErrAppStoppedForSetEnd = errors.New("keploy stopped the application at its test set's end")
+
+// ErrAppExitedOnItsOwn is what keploy's stop of an application it watches
+// (a docker compose app, under the proven switch: P101-c) answers when the
+// app had exited on its own before keploy asked it to stop: a halt, not a
+// stop. Its set is APP_HALTED, as compose's abort on the app's exit made it.
+var ErrAppExitedOnItsOwn = errors.New("the application exited on its own before keploy stopped it")
 
 type AppErrorType string
 
@@ -277,8 +296,8 @@ var ErrNoMockMatched = errors.New("no matching mock found")
 // comes back WITH whatever was read, so a caller that only reports misses keeps
 // them, while one that judges must treat the test's evidence as unknown: under
 // the proven switch the replayer marks the test FailureInfo.UnmatchedCallsUnread
-// and its test set is not judged. Only an agent with the proven switch on
-// reports it.
+// and its test set is not judged; with it off, FailureInfo.MissesUnattributed.
+// An agent reports it with the switch on or off.
 var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
 
 // UnreadCause is why a read of the unmatched calls was incomplete: the text

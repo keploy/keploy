@@ -108,6 +108,74 @@ func (s *WindowSchedule) ReleaseIndex(t time.Time) int {
 	return p - 1
 }
 
+// GapBefore is the gap before the window that starts at start: the recorded
+// time after every window that starts earlier has ended and before start.
+// from is its exclusive lower bound, the latest end of those windows. ok is
+// false when no window starts at start, for the first window (what precedes
+// it is the app's startup), when an earlier window reaches start (no gap), and
+// when two windows start at start: a window is known by its start alone (the
+// agent's current window, MockFilterParams.AfterTime), so which of their two
+// tests a call in flight then belongs to cannot be told, and neither gets it.
+//
+// A request recorded in it and answered at or after start was in flight when
+// that window's test began, and is that test's (InFlightInto).
+func (s *WindowSchedule) GapBefore(start time.Time) (from time.Time, ok bool) {
+	n := s.Len()
+	if n == 0 || start.IsZero() {
+		return time.Time{}, false
+	}
+	i := sort.Search(n, func(i int) bool { return !s.windows[i].Start.Before(start) })
+	if i == n || !s.windows[i].Start.Equal(start) || i == 0 {
+		return time.Time{}, false
+	}
+	if i+1 < n && s.windows[i+1].Start.Equal(start) {
+		return time.Time{}, false
+	}
+	from = s.maxEnd[i-1]
+	if !from.Before(start) {
+		return time.Time{}, false
+	}
+	return from, true
+}
+
+// InFlightInto reports whether a request recorded at req and answered at res
+// was in flight when the window that starts at start began: sent in the gap
+// before it (GapBefore), answered at or after its start (SentInGapAnsweredBy).
+// Such a call is that window's test's, whenever its answer landed; one sent and
+// answered within the gap is no test's.
+func (s *WindowSchedule) InFlightInto(req, res, start time.Time) bool {
+	from, ok := s.GapBefore(start)
+	return ok && SentInGapAnsweredBy(req, res, from, start)
+}
+
+// SentInGapAnsweredBy is the in-flight rule for a gap that runs from from
+// (exclusive, GapBefore) to start: a call sent inside it and answered at or
+// after start. Every site that applies the rule calls this one predicate,
+// directly or through InFlightInto: the agent's on-disk load and its filter,
+// the mock manager's staging and its windowed read, the mapping write and the
+// window ownership (DeriveWindowMappings).
+func SentInGapAnsweredBy(req, res, from, start time.Time) bool {
+	return req.After(from) && req.Before(start) && !res.IsZero() && !res.Before(start)
+}
+
+// InFlightEligible reports whether m may be attributed by the in-flight rule:
+// a per-test mock (DeriveLifetime; a mock not derived yet is looked at through
+// a copy) that is neither carry-over nor window-bound.
+//   - A carry-over mock (IsCarryOver, a Pulsar SEND's receipt) is released at
+//     the window its recorded time belongs to, and a moment in the gap after a
+//     test belongs to that test (WindowSchedule); the carry-over tier keeps it
+//     reachable while the next test runs. Its receipt time says nothing about
+//     which test made the publish.
+//   - A window-bound mock (a connection failure) is served from its own window
+//     or the startup band only.
+//   - A session or connection mock is every test's already.
+//   - A mock placed at its answer (IsAnswerPlaced) is its answer's window's
+//     test's, wherever it was sent (PlaceOf): the in-flight rule would give
+//     one sent in a gap to the next test whenever its answer came.
+func InFlightEligible(m *Mock) bool {
+	return m != nil && !WindowBound(m.Kind) && lifetimeOf(m) == LifetimePerTest && !IsCarryOver(m) && !IsAnswerPlaced(m)
+}
+
 // Contains reports whether t is inside one of the windows, ends included.
 func (s *WindowSchedule) Contains(t time.Time) bool {
 	return s.IndexOf(t) >= 0

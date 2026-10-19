@@ -37,6 +37,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No lane pulls from ECR Public, whose anonymous quota is per source IP
+      # and GitHub's runners share theirs (the script says how). First, so a
+      # lint failure does not hide it; it needs no Go.
+      - name: Check image registries
+        run: bash ./.github/workflows/test_workflow_scripts/check-image-registries.sh
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

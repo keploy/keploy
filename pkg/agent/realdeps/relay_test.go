@@ -46,8 +46,13 @@ type relayRig struct {
 	h2Sends      atomic.Int64
 	mu           sync.Mutex
 	refused      []string
-	done         chan error
-	cancel       context.CancelFunc
+	// awaiting is how many AwaitsAnswer marks stand; awaited how many were
+	// made, the first of them closing marked.
+	awaiting, awaited atomic.Int32
+	marked            chan struct{}
+	markOnce          sync.Once
+	done              chan error
+	cancel            context.CancelFunc
 }
 
 func newRig(t *testing.T, check *Check) *relayRig {
@@ -56,7 +61,7 @@ func newRig(t *testing.T, check *Check) *relayRig {
 	dest, server := tcpPair(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	r := &relayRig{app: app, server: server, client: client, dest: dest, done: make(chan error, 1), cancel: cancel}
+	r := &relayRig{app: app, server: server, client: client, dest: dest, marked: make(chan struct{}), done: make(chan error, 1), cancel: cancel}
 	relay := &Relay{
 		Client: client, In: bufio.NewReaderSize(client, ReaderSize), Dest: dest, Check: check,
 		Sent: func(n int) { r.sent.Add(int64(n)) },
@@ -65,6 +70,13 @@ func newRig(t *testing.T, check *Check) *relayRig {
 			r.mu.Lock()
 			r.refused = append(r.refused, why)
 			r.mu.Unlock()
+		},
+		AwaitsAnswer: func() func() {
+			r.awaited.Add(1)
+			r.awaiting.Add(1)
+			r.markOnce.Do(func() { close(r.marked) })
+			var once sync.Once
+			return func() { once.Do(func() { r.awaiting.Add(-1) }) }
 		},
 	}
 	go func() { r.done <- relay.Run(ctx) }()
@@ -123,6 +135,56 @@ func TestRelayLetsAServerSpeakFirst(t *testing.T) {
 	require.NoError(t, r.server.Close())
 	<-r.done
 	require.Empty(t, r.refusals())
+}
+
+// Once the client has ended its side cleanly, and all of it has gone to the
+// destination, the relay says that what is left is the destination's answer
+// (AwaitsAnswer), the real server's to give, until the destination's
+// direction ends: a server that never answers holds no work of keploy's. A
+// connection a name check ended awaits no answer.
+func TestRelaySaysWhenOnlyTheDestinationsAnswerIsLeft(t *testing.T) {
+	r := newRig(t, nil)
+	_, err := r.app.Write([]byte("request"))
+	require.NoError(t, err)
+	got := make([]byte, len("request"))
+	_, err = io.ReadFull(r.server, got)
+	require.NoError(t, err)
+	require.Zero(t, r.awaited.Load(), "the client's side still open: the relay reads it")
+
+	require.NoError(t, r.app.CloseWrite())
+	rest, err := io.ReadAll(r.server) // the half-close, passed on
+	require.NoError(t, err)
+	require.Empty(t, rest)
+	// The mark's own event, with no budget: a relay that never says so
+	// hangs the test to go test's -timeout.
+	<-r.marked
+	require.Equal(t, int32(1), r.awaiting.Load(), "the client's side over and relayed, the server silent: only its answer is left")
+
+	_, err = r.server.Write([]byte("response"))
+	require.NoError(t, err)
+	require.NoError(t, r.server.CloseWrite())
+	answer, err := io.ReadAll(r.app)
+	require.NoError(t, err)
+	require.Equal(t, "response", string(answer))
+	require.NoError(t, <-r.done)
+	require.Zero(t, r.awaiting.Load(), "the destination's direction over: the mark is released")
+	require.Equal(t, int32(1), r.awaited.Load())
+
+	refused := newRig(t, checkFor(t, 8443, "auth.example.com:8443"))
+	_, err = refused.app.Write([]byte("GET /c HTTP/1.1\r\nHost: pay.example.com\r\n\r\n"))
+	require.NoError(t, err)
+	require.NoError(t, <-refused.done)
+	require.Zero(t, refused.awaited.Load(), "a connection a name check ended awaits no answer")
+
+	reset := newRig(t, nil)
+	_, err = reset.app.Write([]byte("request"))
+	require.NoError(t, err)
+	_, err = io.ReadFull(reset.server, make([]byte, len("request")))
+	require.NoError(t, err)
+	require.NoError(t, reset.app.SetLinger(0)) // the client resets: no clean end
+	require.NoError(t, reset.app.Close())
+	<-reset.done
+	require.Zero(t, reset.awaited.Load(), "a connection its client reset awaits no answer")
 }
 
 func TestRelayChecksTheHostOfEveryRequest(t *testing.T) {

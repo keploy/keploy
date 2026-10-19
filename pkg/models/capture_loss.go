@@ -104,14 +104,52 @@ const (
 	// answered live, neither recorded nor mocked. Only under the proven
 	// switch.
 	CaptureLossUDPReply CaptureLossKind = "udp_reply"
+	// CaptureLossServerFirst (P250): a connection in record whose
+	// destination spoke first with a greeting keploy has no parser for (a
+	// server-first protocol: SMTP, FTP, POP3, IMAP, NATS) was relayed both
+	// ways, every byte, neither recorded nor mocked: each test the
+	// application sent data on it in made a call keploy cannot capture, and
+	// is NOT JUDGED (NotJudged), never failed. Counted once for each piece
+	// of the application's data sent on it, the test's it was sent in
+	// (PerTest); what the destination sends on its own charges nothing.
+	// Only under the proven switch.
+	CaptureLossServerFirst CaptureLossKind = "server_first"
+	// CaptureLossRefusedAtAccept (P250): a connection in record whose
+	// destination refused it at accept (a RESP error, a MySQL ERR packet in
+	// place of its handshake) was relayed, so the application got the
+	// refusal, and nothing of it recorded. Counted as CaptureLossServerFirst
+	// is (NotJudged, PerTest), with its own text. Only under the proven
+	// switch.
+	CaptureLossRefusedAtAccept CaptureLossKind = "refused_at_accept"
+	// CaptureLossContainerUnread (P116-a): the Docker daemon did not answer
+	// keploy's read of the configuration of a container a call reached, for
+	// keploy's stall window in time keploy could run (Docker holds an
+	// inspect while another operation holds the container, and may hold it
+	// for good). The container's identity, its key, is unknown to the call,
+	// so whether it was matched, or recorded, under the right one cannot be
+	// told: the test it is charged to is NOT JUDGED (NotJudged). A test's own
+	// kind (PerTest), counted when the use gives up waiting: in a replay the
+	// count charges a call matched to its own test (a replayed test's end
+	// settles its calls first). A record charges by the mock instead
+	// (ContainerUnreadMetadata), whenever its stamp came, and leaves the
+	// count out (Without). Only under the proven switch.
+	CaptureLossContainerUnread CaptureLossKind = "container_unread"
 )
+
+// ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
+// with when the Docker daemon did not answer keploy's read of its
+// container's configuration (CaptureLossContainerUnread), naming the
+// container: a record charges the mock's own test with it, whenever the
+// read stalled, rather than by the count (Without).
+const ContainerUnreadMetadata = "containerUnread"
 
 // NotJudged reports whether a loss of kind k leaves the tests it taints
 // without a verdict (decision 20), rather than failing them: a call keploy
-// cannot capture at all, or a TLS handshake abandoned without a word, which
-// keploy cannot tell lost a call, as opposed to one it saw and lost.
+// cannot capture at all (a Unix socket, a server-first protocol it relays),
+// or a TLS handshake abandoned without a word, which keploy cannot tell lost
+// a call, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
@@ -176,26 +214,64 @@ func (l CaptureLosses) NotJudgedText() string {
 	return "not judged: " + strings.Join(parts, "; ") + ", so keploy cannot prove this test's calls were all captured"
 }
 
+// trustKeployCA is how each kind of TLS client that rejects keploy's
+// certificate without a word is made to trust keploy's CA: Node.js reads
+// NODE_EXTRA_CA_CERTS; the curl command line takes --cacert, or the
+// CURL_CA_BUNDLE or SSL_CERT_FILE environment variable, which only the command
+// line reads; an application on libcurl (PHP's Guzzle and curl extension,
+// pycurl) sets CURLOPT_CAINFO itself, or its library's own option for it.
+const trustKeployCA = "Node.js: set NODE_EXTRA_CA_CERTS to keploy's CA certificate; the curl command line: --cacert, CURL_CA_BUNDLE or SSL_CERT_FILE; libcurl clients such as PHP's Guzzle and pycurl: CURLOPT_CAINFO (Guzzle's verify, pycurl's CAINFO), which libcurl does not take from those variables"
+
+// UnixUnseenRemedy is what to do when keploy cannot see the application's
+// calls over Unix sockets at all (CaptureLossUnixUnseen): its report of them
+// failed to load on this host (both ways: BPF trampolines, then the syscall
+// tracepoints, which keploy's other hooks already use outside DaemonSet and
+// target-container mode), or stopped while running. A state of keploy's, not
+// of the application's dependencies, so nothing done to them (reaching them
+// over TCP included) ends it. What says what failed.
+const UnixUnseenRemedy = "report the reason to keploy (its report of the application's Unix-socket calls failed to load here, or stopped; nothing done to the application or its dependencies changes that)"
+
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
-// dependency over TCP; make a TLS client that abandoned its handshake trust
-// keploy's CA. Empty for none.
+// dependency over TCP; report to keploy why it cannot see those calls at
+// all; make a TLS client that abandoned its handshake trust keploy's CA; list
+// a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, tls bool
+	var unix, unseen, tls, serverFirst, refused, docker bool
 	for _, c := range l {
 		switch c.Kind {
-		case CaptureLossUnixSocket, CaptureLossUnixUnseen:
+		case CaptureLossUnixSocket:
 			unix = true
+		case CaptureLossUnixUnseen:
+			unseen = true
 		case CaptureLossTLSAbandoned:
 			tls = true
+		case CaptureLossServerFirst:
+			serverFirst = true
+		case CaptureLossRefusedAtAccept:
+			refused = true
+		case CaptureLossContainerUnread:
+			docker = true
 		}
 	}
 	var do []string
 	if unix {
 		do = append(do, "reach that dependency over a TCP address (mocked, or listed in mock.real)")
 	}
+	if unseen {
+		do = append(do, UnixUnseenRemedy)
+	}
 	if tls {
-		do = append(do, "make the TLS client trust keploy's CA (for Node.js, NODE_EXTRA_CA_CERTS)")
+		do = append(do, "make the TLS client trust keploy's CA ("+trustKeployCA+")")
+	}
+	if serverFirst {
+		do = append(do, "list the server-first destination in keploy.yml mock.real, to reach it for real by design")
+	}
+	if refused {
+		do = append(do, "find why the destination refused the application's connections (its connection limit, or its protected mode)")
+	}
+	if docker {
+		do = append(do, "make `docker inspect` of the container named answer (another operation on it, such as a stop's grace period or a hung exec, holds it)")
 	}
 	return strings.Join(do, ", and ")
 }
@@ -227,12 +303,13 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // happened in, not a taint of every later test (design v14 §3.2's taint,
 // which the agent-life kinds carry): a client whose TLS handshake failed, or
 // was abandoned, lost that one call or may have, and its later calls are
-// captured, or lost, on their own. One between two tests is the next test's,
-// as a miss between tests is.
+// captured, or lost, on their own; data the application sent over a
+// server-first protocol keploy relays is that test's call. One between two
+// tests is the next test's, as a miss between tests is.
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -253,6 +330,19 @@ func (l CaptureLosses) Charged(base, runBase, test CaptureLosses) CaptureLosses 
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
+// Without is l without kind k's count: a record charges a container read
+// the daemon did not answer by the mock it marked
+// (ContainerUnreadMetadata), not by when it was counted.
+func (l CaptureLosses) Without(k CaptureLossKind) CaptureLosses {
+	var out CaptureLosses
+	for _, c := range l {
+		if c.Kind != k {
+			out = append(out, c)
+		}
+	}
 	return out
 }
 
@@ -384,13 +474,19 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossRealUncaptured:
 		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
 	case CaptureLossTLSAbandoned:
-		return fmt.Sprintf("a client hung up on %d TLS handshake(s) with keploy's proxy once keploy had sent its certificate, without a word, during the handshake or as soon as it was done: a client that does not trust keploy's CA rejects it so (Node.js, curl and libcurl do) and one that gave up (a cancel, a timeout) looks the same, so whether a call was lost cannot be told; if the client does not trust keploy's CA, make it trust it (for Node.js, set NODE_EXTRA_CA_CERTS to keploy's CA certificate; for curl, --cacert)", c.Count)
+		return fmt.Sprintf("a client hung up on %d TLS handshake(s) with keploy's proxy once keploy had sent its certificate, without a word, during the handshake or as soon as it was done: a client that does not trust keploy's CA rejects it so (Node.js, curl and libcurl do) and one that gave up (a cancel, a timeout) looks the same, so whether a call was lost cannot be told; if the client does not trust keploy's CA, make it trust it ("+trustKeployCA+")", c.Count)
 	case CaptureLossUDPReply:
 		return fmt.Sprintf("the application's UDP was answered live %d time(s) (a socket counted once per read it was answered before), which keploy neither records nor mocks (UDP other than DNS); add a port-only bypassRules entry for it if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:
 		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
 	case CaptureLossUnixUnseen:
 		return "keploy cannot see the application's calls over Unix sockets here, so whether this test or one before it made one cannot be told"
+	case CaptureLossServerFirst:
+		return fmt.Sprintf("the application's calls over a server-first protocol keploy has no parser for (its server greets first: SMTP, FTP, POP3) were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
+	case CaptureLossRefusedAtAccept:
+		return fmt.Sprintf("a destination refused the application's connections at accept, and its calls on them were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
+	case CaptureLossContainerUnread:
+		return fmt.Sprintf("the Docker daemon did not answer keploy's read of a container's configuration (%d time(s) a call to it was matched or recorded), so keploy cannot tell which container those calls reached, nor whether they were matched or recorded as that container's", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

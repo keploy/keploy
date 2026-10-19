@@ -247,13 +247,15 @@ func grpcStatusOf(resp *models.GrpcResp) string {
 // is returned with them, so the comparison fails on it, as before. A
 // recording of none (trailers alone) is held past only by a message beyond
 // it: the app's headers and then keepalives alone are a stall, two
-// keepalives on (ErrStreamStalled).
+// keepalives on, with nothing of the answer to compare: it fails closed
+// (ErrAnswerStalled, the coordinator's ruling (a)), never a pass on the
+// recording.
 func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		sent     [][]byte
 		recorded [][]byte
-		stalled  bool
+		nothing  bool
 	}{
 		{"every recorded message, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one"), pbMsg("two")}, false},
 		{"a message beyond the recording, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one")}, false},
@@ -276,11 +278,16 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 				s.holdOpen(200)
 			})
 			resp, err := heldOpenCall(t, withStatus(recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), tc.recorded...), recordedCode), app.exhausted)
-			if !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled) != tc.stalled {
-				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen, stalled %v", err, tc.stalled)
-			}
-			if got := len(resp.AllMessages()); got != max(len(tc.sent), 1) {
-				t.Fatalf("returned %d messages, want what came (%d)", got, len(tc.sent))
+			switch {
+			case tc.nothing:
+				if want := "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method"; !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != want || !AnswerBegan(err) {
+					t.Fatalf("SimulateGRPC: %v, %v; want it failing closed: %q", resp, err, want)
+				}
+				requireHeadersOnly(t, resp, true)
+			case !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled):
+				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen, not stalled", err)
+			case len(resp.AllMessages()) != len(tc.sent):
+				t.Fatalf("returned %d messages, want what came (%d)", len(resp.AllMessages()), len(tc.sent))
 			}
 			if n := app.keepalives.Load(); n < 2 {
 				t.Fatalf("the call ended after the app's keepalive %d; the first after the request may be a flow-control ping, so not before the second", n)
@@ -318,8 +325,9 @@ func TestAGRPCStreamThatStallsShortOfItsRecordingEndsOnItsKeepalives(t *testing.
 // fewer than two keepalives after the first: an answer of trailers alone,
 // recorded with its error status, and an empty message (google.protobuf.Empty),
 // recorded as one empty message with status 0, which a recording of trailers
-// alone is not. A third keepalive with nothing is a stall: not judged, the
-// count keploy waits by.
+// alone is not. A third keepalive with nothing is a stall, the count keploy
+// waits by, with nothing of the answer to compare: it fails closed, not
+// judged (ErrAnswerStalled).
 func TestASlowAnswerIsJudgedUntilTheAppStallsOnItsKeepalives(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -371,8 +379,10 @@ func TestASlowAnswerIsJudgedUntilTheAppStallsOnItsKeepalives(t *testing.T) {
 			call.GrpcResp = tc.recorded.GrpcResp
 			resp, err := heldOpenCall(t, call, app.exhausted)
 			if tc.stalled {
-				if !errors.Is(err, ErrStreamStalled) {
-					t.Fatalf("SimulateGRPC: %v; want ErrStreamStalled", err)
+				// Keepalives alone, no answer: nothing to compare, so
+				// it fails closed (ErrAnswerStalled).
+				if want := "the app never answered, and sent only keepalives, for /pkg.Svc/Method"; resp != nil || !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want {
+					t.Fatalf("SimulateGRPC: %v, %v; want it failing closed: %q", resp, err, want)
 				}
 				return
 			}

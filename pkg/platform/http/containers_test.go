@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -256,5 +257,50 @@ func TestAnAgentOlderThanContainerKeysIsSaidOnce(t *testing.T) {
 	a.pushContainers(t.Context())
 	if n := logs.FilterMessageSnippet("predates container keys").Len(); n != 1 {
 		t.Fatalf("an older agent was said %d times, want once: %v", n, logs.All())
+	}
+}
+
+// The CLI's ask for its agent's next settle reads the agent's answer; an
+// agent with no such route (one that predates settles) or that reads Docker
+// itself gives ErrNoSettles, so the pusher stops asking; anything else is
+// an error, asked again.
+func TestAskSettleReadsTheAgentsAnswer(t *testing.T) {
+	var status atomic.Int32
+	var query atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/containers/settle" {
+			http.NotFound(w, r)
+			return
+		}
+		query.Store(r.URL.RawQuery)
+		if code := int(status.Load()); code != http.StatusOK {
+			http.Error(w, "no", code)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(containerkey.SettleAsk{Asked: 3, Boot: "b1"})
+	}))
+	t.Cleanup(srv.Close)
+	a := New(zap.NewNop(), nil, &config.Config{})
+	uri := srv.URL + "/agent"
+	status.Store(http.StatusOK)
+	got, err := a.askSettle(t.Context(), uri, "b0", 2)
+	if err != nil || got != (containerkey.SettleAsk{Asked: 3, Boot: "b1"}) {
+		t.Fatalf("askSettle = %+v, %v", got, err)
+	}
+	if q := query.Load().(string); q != "after=2&boot=b0" {
+		t.Fatalf("asked with %q", q)
+	}
+	for _, code := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusConflict} {
+		status.Store(int32(code))
+		if _, err := a.askSettle(t.Context(), uri, "", 0); !errors.Is(err, containerkey.ErrNoSettles) {
+			t.Fatalf("an agent answering %d gave %v, want ErrNoSettles", code, err)
+		}
+	}
+	status.Store(http.StatusInternalServerError)
+	if _, err := a.askSettle(t.Context(), uri, "", 0); err == nil || errors.Is(err, containerkey.ErrNoSettles) {
+		t.Fatalf("an agent answering 500 gave %v, want an error to ask again on", err)
+	}
+	if _, err := a.askSettle(t.Context(), srv.URL+"/old", "", 0); !errors.Is(err, containerkey.ErrNoSettles) {
+		t.Fatalf("an agent with no settle route gave %v", err)
 	}
 }

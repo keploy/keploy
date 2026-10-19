@@ -38,35 +38,30 @@ func exchangeLifetime(n int) string {
 }
 
 // notOwnedExchange is, under exact serving (the proven switch), the name of
-// the recorded exchange this request is (byte for byte, else at the per-test
-// similarity), when the open test does not own it and its recorder stated it
-// per-test: a later exchange of a connection recorded in another test's
-// window, or between tests, or the first exchange of a connection that lay
-// wholly inside another test. The likely cause of the miss is that at replay
-// the call was made on another connection, or in another test, than when
-// recording. "" when it is none, or exact serving is off.
+// the recorded exchange this request is, byte for byte, when the open view
+// does not show it and its recorder stated it per-test: a later exchange of a
+// connection recorded in another test's window, or between tests, or the
+// first exchange of a connection that lay wholly inside another test. The
+// likely cause of the miss is that at replay the call was made on another
+// connection, or in another test, than when recording. Only an exchange that
+// is this request is named: keploy record's judging bakes what a miss names
+// into the set's worker scope, and an exchange merely like it (the per-test
+// similarity) is another call. "" when it is none, or exact serving is off.
 func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb) string {
 	sf, ok := mockDb.(integrations.StagedFinder)
 	if !ok {
 		return ""
 	}
-	perTest := func(mk *models.Mock) bool {
-		return mk.Spec.Metadata[models.MetadataLifetimeKey] == models.MetadataLifetimePerTest
-	}
-	if name := sf.FindStagedNotOwned(models.GENERIC, func(mk *models.Mock) bool {
-		return perTest(mk) && findExactMatch([]*models.Mock{mk}, reqBuffs) == 0
-	}); name != "" {
-		return name
-	}
 	return sf.FindStagedNotOwned(models.GENERIC, func(mk *models.Mock) bool {
-		return perTest(mk) && findBinaryMatch([]*models.Mock{mk}, reqBuffs, 0.9) == 0
+		return mk.Spec.Metadata[models.MetadataLifetimeKey] == models.MetadataLifetimePerTest &&
+			findExactMatch([]*models.Mock{mk}, reqBuffs) == 0
 	})
 }
 
 // notOwnedExchangeNextSteps says what a miss on an exchange the test does not
 // own (notOwnedExchange) likely means, and what to do.
 func notOwnedExchangeNextSteps(name string) string {
-	return fmt.Sprintf("This request matches %s, which keploy recorded for another test: an exchange of a connection outside this test (keploy serves a connection's first exchange, its handshake, to every test, unless the whole connection lay inside one test, which then owns it all; every other exchange goes to the test that recorded it). Likely, at replay this test made the call on a connection it opened itself, which it did not do when recording, or the call was made in this test where it was made in another when recording: record again so each test opens the connections it uses, or keep the application's connection reuse and timing as they were when recording. If this is a heartbeat or keepalive on a long-lived connection, it is to be declared session in keploy.yaml, by destination and request prefix: that rule for Generic connections is not available yet, so until it is, a test that sends one where it was not recorded fails.", name)
+	return fmt.Sprintf("This request is %s, which keploy recorded where this replay did not make it (in another test's window, or after a test this replay had not reached): an exchange of a connection outside this test (keploy serves a connection's first exchange, its handshake, to every test, unless the whole connection lay inside one test, which then owns it all; every other exchange goes to the test that recorded it). Likely, at replay this test made the call on a connection it opened itself, which it did not do when recording, or the call was made in this test where it was made in another when recording: record again so each test opens the connections it uses, or keep the application's connection reuse and timing as they were when recording. If this is a heartbeat or keepalive on a long-lived connection, it is to be declared session in keploy.yaml, by destination and request prefix: that rule for Generic connections is not available yet, so until it is, a test that sends one where it was not recorded fails.", name)
 }
 
 // maxHeldExchanges is how many exchanges a connection may have and still be

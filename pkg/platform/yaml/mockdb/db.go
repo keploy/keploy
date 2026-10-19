@@ -1673,10 +1673,12 @@ func (r *mockRouter) pruned(mock *models.Mock) bool {
 // shared (sessionCalls). A replay's mapping names it under the test that
 // consumed it, but it is not that test's alone: a run of other tests needs it
 // too (a connection's setup, a token another test fetched). A mock recorded
-// before lifetimes were stated is pruned by the mapping as it always was.
+// before lifetimes were stated is pruned by the mapping as it always was, but
+// for a MySQL prepared statement's lifecycle (PREPARE, CLOSE, RESET), which
+// is its connection's whenever it was recorded (models.DeriveLifetime).
 func sharedByStatement(mock *models.Mock) bool {
 	if !mock.StatesLifetime() {
-		return false
+		return mock.IsMySQLStatementLifecycle()
 	}
 	mock.DeriveLifetime()
 	lt := mock.TestModeInfo.Lifetime
@@ -1798,7 +1800,8 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 // wanted pools from it:
 //
 //   - Filtered (poolPerTest): the per-test mocks, in file order. From a gob
-//     file, PostgresV2 mocks too, through the lax window filter.
+//     file, PostgresV2 mocks too, through the lax window filter, which the
+//     proven switch skips (a test owns what its mapping lists).
 //   - Unfiltered (poolSession): the session and connection mocks, through the
 //     lax FilterConfigMocks.
 //   - AllSession (poolAllSession): Unfiltered without the mapping prune.
@@ -1863,7 +1866,19 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 		warnUnmetRequirements(logger, testSetID, gobPath, deps.Unmet())
 		if want&poolPerTest != 0 {
-			out.Filtered = pkg.FilterTcsMocks(ctx, ys.Logger, r.perTest, afterTime, beforeTime, false)
+			if provenswitch.On() {
+				// Under the proven switch a test owns the mocks its mapping
+				// lists, whatever their recorded times say, so the per-test
+				// pool is read whole, as a yaml or json file's is, for the
+				// agent to serve by mapping. The window filter left out a mock
+				// whose response is stamped before its request (a recorder's
+				// bad stamp, not a bad answer) before the agent saw it: the
+				// test that owns it was judged for a recorded call it did not
+				// make, and its call to that dependency missed.
+				out.Filtered = r.perTest
+			} else {
+				out.Filtered = pkg.FilterTcsMocks(ctx, logger, r.perTest, afterTime, beforeTime, false)
+			}
 		}
 		if err := r.separateSharedMocks(out.Filtered); err != nil {
 			return models.TestSetMocks{}, err

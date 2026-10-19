@@ -34,7 +34,7 @@ var notJudgedCases = []struct {
 	{"variables unchecked", models.FailureInfo{VariablesUnchecked: "the learn step's table could not be read"}, "the learn step's table could not be read"},
 	{"capture unread", models.FailureInfo{CaptureUnread: true}, "captured every call"},
 	{"cannot capture (decision 20)", models.FailureInfo{CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/run/app/db.sock"}}}, "a Unix socket keploy cannot capture (1 time(s)) while this test or one before it ran (/run/app/db.sock)"},
-	{"an abandoned TLS handshake", models.FailureInfo{CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.1:443"}}}, "set NODE_EXTRA_CA_CERTS to keploy's CA certificate; for curl, --cacert) (to 10.0.0.1:443)"},
+	{"an abandoned TLS handshake", models.FailureInfo{CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.1:443"}}}, "libcurl clients such as PHP's Guzzle and pycurl: CURLOPT_CAINFO (Guzzle's verify, pycurl's CAINFO), which libcurl does not take from those variables) (to 10.0.0.1:443)"},
 }
 
 // A test keploy could not judge is not green in JUnit, whatever its row's
@@ -234,5 +234,40 @@ func TestNDJSONASetKeployCouldNotJudgeHasNoVerdicts(t *testing.T) {
 		if v.VerdictUnknown {
 			t.Fatalf("a set run without the switch: %+v; want it as before", v)
 		}
+	}
+}
+
+// A test whose exchange ended with nothing of its answer to compare (the
+// stall rule, or the app's keepalives) is FAILED, so a reader of the status
+// alone sees no pass, and marked not judged (FailureInfo.AnswerStalled): JUnit
+// shows it as a NotJudged <error> saying what was waited for, not a
+// <failure>, and the NDJSON marks its verdict unknown, with the same. A
+// FAILED row without the mark stays a failure in both.
+func TestAFailedRowWithNothingOfItsAnswerToCompareIsNotJudged(t *testing.T) {
+	const why = "the app never answered; waited 1m0s of keploy's runnable time for GET /orders"
+	reports := map[string]*models.TestReport{"test-set-0": {
+		Total: 3, Success: 1, Failure: 2, TimeTaken: "1s", Proven: true,
+		Tests: []models.TestResult{
+			{TestCaseID: "test-1", Status: models.TestStatusPassed},
+			{TestCaseID: "test-2", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{AnswerStalled: why}},
+			{TestCaseID: "test-3", Status: models.TestStatusFailed},
+		},
+	}}
+	s := buildJUnitSuites(reports).Suites[0]
+	if c := s.Cases[1]; c.Error == nil || c.Error.Type != "NotJudged" || !strings.Contains(c.Error.Text, why) || c.Failure != nil {
+		t.Fatalf("test-2 = %+v; want a NotJudged <error> saying %q, not a <failure>", c, why)
+	}
+	if c := s.Cases[2]; c.Failure == nil || c.Error != nil {
+		t.Fatalf("test-3 = %+v; want its <failure>", c)
+	}
+	if s.Errors != 1 || s.Failures != 1 {
+		t.Fatalf("suite errors %d, failures %d; want 1 and 1", s.Errors, s.Failures)
+	}
+	v := buildTestVerdicts("test-run-0", reports)
+	if !v[1].VerdictUnknown || v[1].VerdictUnknownReason != why || v[1].Status != string(models.TestStatusFailed) {
+		t.Fatalf("test-2 %+v; want FAILED with its verdict unknown, saying %q", v[1], why)
+	}
+	if v[2].VerdictUnknown {
+		t.Fatalf("test-3 %+v; a failure on what was compared is a verdict", v[2])
 	}
 }

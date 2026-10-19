@@ -172,6 +172,13 @@ disableMysqlAutoDetect: false
 # dependency on that host is being misread as MySQL; unlike
 # disableMysqlAutoDetect this keeps record-time detection on.
 disableMysqlEndpointDrift: false
+# During replay, a PostgreSQL query that matches no recording on its
+# parameter types and values is served its recordings in record order (the
+# time-slice fallback, which checks only how many parameters it has and
+# their formats). Set to true to make such a query a miss instead, when a
+# query recorded with other values could get another call's rows.
+# KEPLOY_PG_V3_TIMESLICE_COHORT=0 turns it off too; either one does.
+disablePgTimeSliceCohort: false
 disableMapping: false
 mock:
   name: "default"
