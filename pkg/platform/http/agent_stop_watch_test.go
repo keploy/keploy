@@ -8,10 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/teardowntest"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sync/errgroup"
 )
 
 // p is a teardown progress report from an agent that records its steps.
@@ -1085,5 +1088,220 @@ func TestARootAgentThatReportsNothingIsSeenToHalt(t *testing.T) {
 	w.halted.Store("it is stopped")
 	if !awaitWatch(t, w.watching) {
 		t.Fatal("the watch did not end on a root agent that has halted")
+	}
+}
+
+// A report moves the run's teardown when it shows the agent's teardown going
+// on since the report before it: a step taken, or a new beat busy in a stage
+// that takes no steps. A report read again, or a beat with nothing done, is
+// no movement: a drain bounded by them would never give a wedged stop up.
+func TestAReportMovesTheTeardownOnlyWhenTheAgentsTeardownWentOn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		prev utils.TeardownProgress
+		had  bool
+		p    utils.TeardownProgress
+		want bool
+	}{
+		{"the first report, with steps taken", utils.TeardownProgress{}, false, unstepped(3, 0), true},
+		{"the first report, busy", utils.TeardownProgress{}, false, busy(0, 0), true},
+		{"the first report, nothing done yet", utils.TeardownProgress{}, false, unstepped(0, 0), false},
+		{"a step since", unstepped(3, 4), true, unstepped(4, 5), true},
+		{"the same report read again", unstepped(3, 4), true, unstepped(3, 4), false},
+		{"a beat with nothing done", unstepped(3, 4), true, unstepped(3, 5), false},
+		{"a new beat busy", busy(3, 4), true, busy(3, 5), true},
+		{"the same busy report read again", busy(3, 4), true, busy(3, 4), false},
+	} {
+		if got := movedSince(tc.prev, tc.had, tc.p); got != tc.want {
+			t.Errorf("%s: moved=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// awaitArmed waits for a drain to arm its next look on clk.
+func awaitArmed(t *testing.T, clk *stall.ManualClock) {
+	t.Helper()
+	teardowntest.AwaitArmed(t, clk, nil)
+}
+
+// awaitMoves waits for scope to have seen n movements.
+func awaitMoves(t *testing.T, scope *utils.TeardownScope, n uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for scope.Moves() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop's reports moved the teardown %d times, want %d", scope.Moves(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The shape of E-C5 12051's grpc-linux: at the end of a replay, its drain of
+// the run's goroutines waits on a keploy agent that is still stopping, and
+// keeps reporting its teardown, while holding no drain (it does not record
+// its steps, or its hold went stale). The drain gave up at a fixed 30 s of
+// wall time ("teardown drain timed out after cancellation; forcing
+// shutdown"), with the stop still going. Bounded by the run's teardown
+// moving, a stop that keeps reporting progress past 30 s of keploy's
+// runnable time is never cut; one that stops reporting is cut on the bound.
+func TestATeardownDrainWaitsForAnAgentStopThatReportsProgress(t *testing.T) {
+	const bound = 30 * time.Second
+	for _, tc := range []struct {
+		name   string
+		report func(i uint64) utils.TeardownProgress
+	}{
+		{"taking steps", func(i uint64) utils.TeardownProgress { return unstepped(i, i) }},
+		{"busy in a stage", func(i uint64) utils.TeardownProgress {
+			r := busy(0, i)
+			r.Steps = false
+			return r
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			f := newFakeAgent()
+			t.Cleanup(f.exited)
+			scope := &utils.TeardownScope{}
+			var g errgroup.Group
+			g.Go(func() error {
+				stopWatch{logger: zap.NewNop(), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, moved: scope}.run()
+				return nil
+			})
+			clk := &stall.ManualClock{}
+			res := make(chan bool, 1)
+			go func() {
+				_, timedOut := utils.DrainErrGroupProgressOn(clk, zap.NewNop(), "replay", &g, bound, scope.Moves)
+				res <- timedOut
+			}()
+			// Two minutes of runnable time, four bounds, the teardown going
+			// on every 10 s of it.
+			for i := uint64(1); i <= 12; i++ {
+				awaitArmed(t, clk)
+				f.set(tc.report(i))
+				awaitMoves(t, scope, i)
+				clk.Advance(10 * time.Second)
+			}
+			awaitArmed(t, clk)
+			select {
+			case timedOut := <-res:
+				t.Fatalf("the drain gave the agent's stop up (timedOut=%v) while it reported progress", timedOut)
+			default:
+			}
+			f.exited()
+			select {
+			case timedOut := <-res:
+				if timedOut {
+					t.Fatal("a drain whose stop ended was said to time out")
+				}
+			case <-time.After(time.Minute): // only turns a hang into a failure
+				t.Fatal("the drain did not end with the agent's exit")
+			}
+		})
+	}
+	t.Run("stopped reporting progress", func(t *testing.T) {
+		utils.ResetInterruptedAgain()
+		t.Cleanup(utils.ResetInterruptedAgain)
+		f := newFakeAgent()
+		t.Cleanup(f.exited)
+		scope := &utils.TeardownScope{}
+		var g errgroup.Group
+		g.Go(func() error {
+			stopWatch{logger: zap.NewNop(), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, moved: scope}.run()
+			return nil
+		})
+		clk := &stall.ManualClock{}
+		res := make(chan bool, 1)
+		go func() {
+			_, timedOut := utils.DrainErrGroupProgressOn(clk, zap.NewNop(), "replay", &g, bound, scope.Moves)
+			res <- timedOut
+		}()
+		f.set(unstepped(5, 1))
+		awaitMoves(t, scope, 1)
+		// It beats on, and takes no step: no movement. The drain gives it up
+		// once 30 s of runnable time pass after its last step, and not
+		// before: not within the first 20 s, at the third or fourth 10 s
+		// (by whether the drain looked before or after that step).
+		var timedOut, ended bool
+		for beat := uint64(2); beat <= 5 && !ended; beat++ {
+			awaitArmed(t, clk)
+			f.set(unstepped(5, beat))
+			clk.Advance(10 * time.Second)
+			if beat <= 3 {
+				awaitArmed(t, clk) // the drain looked, and waits on
+				continue
+			}
+			// It has given the stop up, or looked and waits on.
+			for deadline := time.Now().Add(time.Minute); !ended; time.Sleep(time.Millisecond) {
+				select {
+				case timedOut = <-res:
+					ended = true
+				default:
+				}
+				if !ended && clk.Pending() > 0 {
+					break
+				}
+				if time.Now().After(deadline) { // only turns a hang into a failure
+					t.Fatal("the drain neither gave the stop up nor looked again")
+				}
+			}
+		}
+		if !ended || !timedOut {
+			t.Fatalf("the drain of a stop that stopped making progress: ended=%v timedOut=%v; want it given up", ended, timedOut)
+		}
+		if got := scope.Moves(); got != 1 {
+			t.Fatalf("beats with nothing done moved the teardown: %d movements, want 1", got)
+		}
+	})
+}
+
+// An agent's run takes the teardown scope of the run that started it: its
+// stop's reports move that run's teardown, which that run's drains wait on,
+// and not another's.
+func TestAnAgentsRunTakesTheTeardownScopeOfTheRunThatStartedIt(t *testing.T) {
+	a := &AgentClient{logger: zap.NewNop()}
+	ctx, scope := utils.NewTeardownScope(context.Background())
+	_, stop, run, err := a.beginRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if run.scope != scope {
+		t.Fatal("the agent's run does not move the teardown of the run that started it")
+	}
+}
+
+// The stop of a natively started agent moves the teardown of the run that
+// started it at each report that shows its teardown going on (endAgent's
+// watch takes the agent's run's scope): that run's drains wait on it, as in
+// E-C5 12051's grpc-linux, whose replay drain was cut with the agent's stop
+// still reporting.
+func TestANativeAgentsStopMovesTheTeardownOfTheRunThatStartedIt(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	a := &AgentClient{logger: zap.NewNop()}
+	ctx, scope := utils.NewTeardownScope(context.Background())
+	_, stop, run, err := a.beginRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	run.ready.Store(true)
+	var seq atomic.Uint64
+	seq.Store(1)
+	read := func(context.Context) (utils.TeardownProgress, bool) {
+		n := seq.Load()
+		return utils.TeardownProgress{Seq: n, Beat: n}, true
+	}
+	returned := make(chan struct{})
+	go func() {
+		a.endAgent(run, 1, func() error { return nil }, func() error { return nil },
+			func(bool) error { run.exited(); return nil }, killReach{}, read)
+		close(returned)
+	}()
+	defer func() { run.exited(); <-returned }()
+	for n := uint64(1); n <= 3; n++ {
+		seq.Store(n)
+		awaitMoves(t, scope, n)
 	}
 }

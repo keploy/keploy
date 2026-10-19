@@ -35,7 +35,7 @@ func ExitOf(Reached) (<-chan struct{}, func()) {
 
 // WaitExitByEvents waits for exited for StopStallBudget here, where no
 // progress can be read, and then says a kill is due.
-func WaitExitByEvents(_ *zap.Logger, exited <-chan struct{}, _ []Reached) StopEnd {
+func WaitExitByEvents(_ *zap.Logger, exited <-chan struct{}, _ []Reached, _ *TeardownScope) StopEnd {
 	grace := time.NewTimer(StopStallBudget)
 	defer grace.Stop()
 	select {

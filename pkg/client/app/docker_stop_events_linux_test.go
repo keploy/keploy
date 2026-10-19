@@ -198,10 +198,16 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 		d := &eventDocker{seen: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
 		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		// The run's teardown: the container's steps out move it.
+		scope := &utils.TeardownScope{}
+		a.teardown.Store(scope)
 		go func() { time.Sleep(5 * time.Second); d.halt() }()
 		killed, _ := a.stopDockerRunByEvents(client)
 		if killed != "" || len(d.kills) != 0 {
 			t.Fatalf("said %q after kills %v; want a container making progress waited for", killed, d.kills)
+		}
+		if scope.Moves() == 0 {
+			t.Fatal("the container's steps out moved the run's teardown not once")
 		}
 	})
 	t.Run("a pid the daemon names from another namespace", func(t *testing.T) {
@@ -210,9 +216,15 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 		d := &eventDocker{seen: true, id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", pid: other.Process.Pid, stop: make(chan struct{})}
 		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		scope := &utils.TeardownScope{}
+		a.teardown.Store(scope)
 		killed, _ := a.stopDockerRunByEvents(client)
 		if killed == "" || strings.Join(d.kills, ",") != "SIGKILL" {
 			t.Fatalf("said %q after kills %v; want the stall kill", killed, d.kills)
+		}
+		// Nor are its steps the container's teardown.
+		if n := scope.Moves(); n != 0 {
+			t.Fatalf("another process's progress moved the run's teardown %d times", n)
 		}
 		if n := held(other.Process.Pid); n <= 3 {
 			t.Fatalf("the kill came once the other process had closed its files (%d left): its progress was read for the container's", n)

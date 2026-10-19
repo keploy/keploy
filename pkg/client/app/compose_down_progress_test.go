@@ -125,6 +125,10 @@ func TestComposeDownRunsPastEightSecondsWhileTheProjectMoves(t *testing.T) {
 func TestComposeDownIsKeptGoingByTheProjectsEvents(t *testing.T) {
 	shortDownStall(t, time.Second)
 	a, rec, argvLog := keployStack(t, "", 0)
+	// The run's teardown scope: each step of the project's down moves it,
+	// which the run's drains wait on.
+	scope := &utils.TeardownScope{}
+	a.teardown.Store(scope)
 	projectMoves(t, rec)
 	downTakes(t, 3*time.Second)
 
@@ -132,6 +136,9 @@ func TestComposeDownIsKeptGoingByTheProjectsEvents(t *testing.T) {
 
 	if log := recordedLog(t, argvLog); !strings.Contains(log, "DOWN-DONE") {
 		t.Fatalf("keploy cut a down whose project was moving, at the stall bound of %s:\n%s", composeDownStall, log)
+	}
+	if scope.Moves() == 0 {
+		t.Fatal("the project's down moved, and moved the run's teardown not once")
 	}
 	if strings.Join(rec.eventLabels, ",") != "com.docker.compose.project=orderflow" {
 		t.Fatalf("the down's progress was watched by labels %v; want the project's own, com.docker.compose.project=orderflow", rec.eventLabels)
@@ -159,11 +166,15 @@ func TestComposeDownIsCutWhileOnlyHealthchecksAndRestartsGoOn(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		noise func(i int) events.Message
+		// moves is how often it moves the run's teardown: the looping
+		// container's first death is a step out (each container's counts
+		// once), its later ones and the rest none.
+		moves uint64
 	}{
-		{"a healthcheck and a restart loop", func(i int) events.Message { return loop[i%len(loop)] }},
+		{"a healthcheck and a restart loop", func(i int) events.Message { return loop[i%len(loop)] }, 1},
 		{"health from ever more containers", func(i int) events.Message {
 			return events.Message{Type: events.ContainerEventType, Action: events.ActionHealthStatus + ": healthy", Actor: events.Actor{ID: "dep-" + itoa10(i)}}
-		}},
+		}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shortDownStall(t, 500*time.Millisecond)
@@ -182,10 +193,15 @@ func TestComposeDownIsCutWhileOnlyHealthchecksAndRestartsGoOn(t *testing.T) {
 				}
 			}()
 			downTakes(t, 30*time.Second)
+			scope := &utils.TeardownScope{}
+			a.teardown.Store(scope)
 
 			a.ComposeDown()
 			if log := recordedLog(t, argvLog); strings.Contains(log, "DOWN-DONE") {
 				t.Fatalf("a wedged down was kept going by %s, past its stall bound of %s, to its end:\n%s", tc.name, composeDownStall, log)
+			}
+			if n := scope.Moves(); n != tc.moves {
+				t.Fatalf("%s moved the run's teardown %d times, want %d: only a container's first step out is one", tc.name, n, tc.moves)
 			}
 		})
 	}

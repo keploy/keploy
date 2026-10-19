@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -436,6 +437,10 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// drainClock is the clock the teardown's drains measure a stall on
+	// (teardownDrain): nil, keploy's own runnable time; a test drives its
+	// own.
+	drainClock stall.Clock
 	// unattributedSets are, with the proven switch off, the test sets of this
 	// run with a test whose misses keploy could not all read
 	// (MissesUnattributed): nothing may learn noise from them, which the
@@ -644,6 +649,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
 
+	// The run's own teardown scope: what keploy sees its stops do (the
+	// agent's, the app's, the daemons', a compose project's down) moves it,
+	// and the run's drains below wait while it moves.
+	ctx, teardown := utils.NewTeardownScope(ctx)
+
 	// The exit code, recorded on EVERY way out of this function.
 	//
 	// There are nine returns and exactly one of them used to record the run:
@@ -757,13 +767,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// Bounded drain: a setup/run goroutine that wedges under contention and does
 		// not observe cancel() must not be able to block this teardown forever, or
 		// SIGINT (which runs through this same defer) is swallowed and the process
-		// hangs until an external SIGKILL. See utils.DrainErrGroup.
-		if err := utils.DrainErrGroup(r.logger, "replay", g, 30*time.Second); err != nil {
+		// hangs until an external SIGKILL. Bounded by the run's teardown making
+		// no progress, not by a time: a stop of the agent that keeps reporting
+		// its steps, past any number of seconds, is never cut (teardownDrain).
+		if err := r.teardownDrain("replay", g, teardownDrainStall, teardown); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 
 		setupCtxCancel()
-		if err := utils.DrainErrGroup(r.logger, "replay-setup", setupErrGrp, 30*time.Second); err != nil {
+		if err := r.teardownDrain("replay-setup", setupErrGrp, teardownDrainStall, teardown); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 	}()
@@ -1647,10 +1659,27 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 	r.firstRun = false
 }
 
-// testSetDrainTimeout bounds the drain of a test set's goroutines (the
-// application and its watcher) once the set is over. A var, not a const, so a
-// test can shrink it rather than wait it out.
-var testSetDrainTimeout = 30 * time.Second
+// testSetDrainStall bounds the drain of a test set's goroutines (the
+// application and its watcher) once the set is over: how long, in time keploy
+// could run, the set's teardown may make no progress (teardownDrain). A var,
+// not a const, so a test can shrink it rather than wait it out.
+var testSetDrainStall = 30 * time.Second
+
+// teardownDrainStall is the same bound for the drains of a run's teardown.
+const teardownDrainStall = 30 * time.Second
+
+// teardownDrain waits for g, a group of the teardown of scope's run (or test
+// set), for as long as that teardown moves (utils.TeardownScope: the agent's
+// stop reporting its steps, the app or the daemons it left taking theirs on
+// their way out, a compose project's down), and gives it up only once the
+// teardown has made no progress for bound of keploy's runnable time. A fixed
+// 30 s of wall time forced the shutdown of a stop still under way on a loaded
+// host. A group that gives up still returns nil: a timeout never fails the
+// teardown (utils.DrainErrGroup).
+func (r *Replayer) teardownDrain(name string, g *errgroup.Group, bound time.Duration, scope *utils.TeardownScope) error {
+	err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, name, g, bound, scope.Moves)
+	return err
+}
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
 	// Whether this run of the set is judged is this run's to say: a mark left
@@ -1665,6 +1694,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if agentWatch != nil {
 		defer agentWatch.Stop()
 	}
+
+	// The set's own teardown scope, part of its run's: what keploy sees the
+	// stop of the set's app (and the daemons it left) do moves it, and the
+	// set's drain waits while it moves.
+	ctx, setTeardown := utils.NewTeardownScope(ctx)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -1696,8 +1730,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			notifyCancel()
 		}
 		runTestSetCtxCancel()
-		// Bounded drain so a wedged per-test-set goroutine can't hang teardown/SIGINT.
-		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, testSetDrainTimeout); err != nil {
+		// Bounded drain so a wedged per-test-set goroutine can't hang
+		// teardown/SIGINT; by the set's teardown making no progress, not
+		// by a time (teardownDrain).
+		if err := r.teardownDrain("replay-testset", runTestSetErrGrp, testSetDrainStall, setTeardown); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
 	}()
