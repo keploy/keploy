@@ -919,7 +919,7 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
-	_, _, err := interruptProcessTree(logger, ppid, sig, nil, false)
+	_, _, err := interruptProcessTree(logger, ppid, sig, nil, false, nil)
 	return err
 }
 
@@ -933,7 +933,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 // InterruptProcessTree, it waits for each group's leader, not for the rest of
 // the group.
 func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
-	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false)
+	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false, nil)
 	return killed, err
 }
 
@@ -953,7 +953,7 @@ type Reached struct {
 // ignored the signal then. A process the group gained as /proc was read is
 // not among them. Off Linux it says none.
 func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
-	return interruptProcessTree(logger, ppid, sig, groupReached, false)
+	return interruptProcessTree(logger, ppid, sig, groupReached, false, nil)
 }
 
 // InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
@@ -963,15 +963,19 @@ func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signa
 // a group only when it made no progress on its way out for StopStallBudget
 // of keploy's runnable time. A starved group takes as long as it takes.
 // Elsewhere it is InterruptProcessTreeReached, with its grace.
-func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
-	return interruptProcessTree(logger, ppid, sig, groupReached, true)
+//
+// Each step a group takes on its way out is a movement of moved, the
+// teardown scope of the run whose app it stops (nil: none).
+func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal, moved *TeardownScope) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached, true, moved)
 }
 
 // groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
 // waits for a group it signalled: until its leader exits, while its members
 // (as the signal reached them) make progress. It kills the group on a stall,
 // or at the user's Ctrl+C, and says why ("" when it did not kill).
-var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached) (killed string)
+// Each step the group takes on its way out is a movement of moved.
+var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string)
 
 // TreeInterruptGrace is how long InterruptProcessTree waits for each process
 // group of the tree to exit after its signal before it sends SIGKILL.
@@ -985,7 +989,7 @@ const windowsInterruptGrace = 10 * time.Second
 // reads which processes a group's signal is about to reach; byEvents (with
 // snapshot) has it wait for each group on its exit event, under the stall
 // rule, rather than for TreeInterruptGrace.
-func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached, byEvents bool) (killed string, reached []Reached, err error) {
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached, byEvents bool, moved *TeardownScope) (killed string, reached []Reached, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -1127,7 +1131,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		// A stop that waits on the app's exit kills only a group that
 		// stopped making progress on its way out.
 		if byEvents && snapshot != nil && groupStopByEvents != nil {
-			if why := groupStopByEvents(logger, pid, members); why != "" && killed == "" {
+			if why := groupStopByEvents(logger, pid, members, moved); why != "" && killed == "" {
 				killed = why
 			}
 			continue

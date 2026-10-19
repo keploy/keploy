@@ -714,7 +714,7 @@ func engineCalls(t *testing.T, log string) []string {
 func TestStopAgentContainerSignalsAndWaitsWithoutStop(t *testing.T) {
 	log, release := fakeEngine(t)
 	returned := make(chan struct{})
-	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false, nil); close(returned) }()
 
 	awaitEngineWait(t, log, returned)
 	if returnsWithin(returned, 200*time.Millisecond) {
@@ -741,7 +741,7 @@ func TestAnUnansweredAgentContainerIsSignalledAgainWhileWaited(t *testing.T) {
 
 	log, release := fakeEngine(t)
 	returned := make(chan struct{})
-	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, true); close(returned) }()
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, true, nil); close(returned) }()
 	hung := time.After(hangBound)
 	for count(engineLines(t, log), kill) < 3 {
 		if returnsWithin(returned, 5*time.Millisecond) {
@@ -761,7 +761,7 @@ func TestAnUnansweredAgentContainerIsSignalledAgainWhileWaited(t *testing.T) {
 
 	log, release = fakeEngine(t)
 	returned = make(chan struct{})
-	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false, nil); close(returned) }()
 	awaitEngineWait(t, log, returned)
 	// Only that it has NOT been signalled again: under load, too short a
 	// look can only miss a wrong resend, never fail a right stop.
@@ -799,7 +799,7 @@ func TestTheAgentContainerIsKilledOnlyWhenItStopsProgressing(t *testing.T) {
 			t.Cleanup(utils.ResetInterruptedAgain)
 			log, release := fakeEngine(t)
 			returned := make(chan struct{})
-			go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
+			go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false, nil); close(returned) }()
 			awaitEngineWait(t, log, returned)
 			for beat := uint64(0); ; beat++ {
 				if !returnsWithin(returned, 0) && !tc.wantKill && beat == 4*stallChecks {
@@ -844,7 +844,7 @@ func TestResendsStopOnceTheAgentReportsItsTeardown(t *testing.T) {
 	log, release := fakeEngine(t)
 	core, logs := observer.New(zap.DebugLevel)
 	returned := make(chan struct{})
-	go func() { stopAgentContainer(zap.New(core), stopTestContainer, true); close(returned) }()
+	go func() { stopAgentContainer(zap.New(core), stopTestContainer, true, nil); close(returned) }()
 	hung := time.After(hangBound)
 	for count(engineLines(t, log), sigterm) < 2 {
 		select {
@@ -894,7 +894,7 @@ func TestAHangingCpDoesNotHoldUpTheDockerStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	returned := make(chan struct{})
-	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false, nil); close(returned) }()
 	awaitEngineWait(t, log, returned)
 	_ = returnsWithin(returned, 50*time.Millisecond) // a `cp` is under way by now, as a rule
 	if err := os.WriteFile(release, nil, 0o644); err != nil {
@@ -1295,4 +1295,39 @@ func TestEndComposeAgentKillsOnlyAWedgedAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The stop of an agent's container moves the teardown of the run that
+// started the agent (stopAgentContainerFor gives its watch the agent's run's
+// scope) at each report the container holds that shows its teardown going
+// on: that run's drains wait on it.
+func TestAContainerisedAgentsStopMovesTheTeardownOfTheRunThatStartedIt(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 5 * time.Millisecond
+	log, release := fakeEngine(t)
+	a := &AgentClient{logger: zap.NewNop()}
+	ctx, scope := utils.NewTeardownScope(context.Background())
+	_, stop, run, err := a.beginRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	run.ready.Store(true)
+	returned := make(chan struct{})
+	go func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer); close(returned) }()
+	awaitEngineWait(t, log, returned)
+	for n := uint64(1); n <= 3; n++ {
+		awaitEngineRead(t, log, reportInContainer(t, log, utils.TeardownProgress{Seq: n, Beat: n}), returned)
+		for deadline := time.Now().Add(hangBound); scope.Moves() < n; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) { // only turns a hang into a failure
+				t.Fatalf("the container's report %d did not move the teardown of the run that started the agent (%d movements)", n, scope.Moves())
+			}
+		}
+	}
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "stopAgentContainerFor", func() { <-returned })
 }

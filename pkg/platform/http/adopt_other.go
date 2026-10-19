@@ -13,4 +13,4 @@ import (
 func adoptDaemons(*zap.Logger) {}
 
 // stopAdopted ends what adoptDaemons adopted: nothing here.
-func stopAdopted(*zap.Logger, []utils.Reached) string { return "" }
+func stopAdopted(*zap.Logger, []utils.Reached, *utils.TeardownScope) string { return "" }

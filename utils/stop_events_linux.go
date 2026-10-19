@@ -158,8 +158,10 @@ func TreeOf(pid int) []Reached {
 // with no procs to read, that is the bound on no news at all. It ends
 // StopPressed at the user's Ctrl+C, which it offers StopOffer after the run's
 // interrupt (StopNowNotice), so a stop that waits as long as the app makes
-// progress can always be ended. A kill is due on either.
-func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached) StopEnd {
+// progress can always be ended. A kill is due on either. Each step they take
+// on their way out is a movement of moved, the teardown scope of the run
+// whose app it stops (nil: none).
+func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope) StopEnd {
 	meter := stall.NewMeter(nil, StopStallBudget)
 	defer meter.Stop()
 	notice := NewStopNowNotice(StopOffer)
@@ -185,6 +187,7 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 		}
 		if mark.Advance(m) {
 			meter.Reset()
+			moved.Note()
 			continue
 		}
 		if meter.Expired() {
@@ -254,11 +257,11 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 // it, members), while the group makes progress. It kills the group on a stall,
 // or at the user's press, and says why; "" when the group exited, or was gone
 // by the kill.
-func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached) (killed string) {
+func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string) {
 	exited, release := leaderExited(leader, members)
 	defer release()
 	var why string
-	switch WaitExitByEvents(logger, exited, members) {
+	switch WaitExitByEvents(logger, exited, members, moved) {
 	case StopExited:
 		return ""
 	case StopPressed:
@@ -278,7 +281,7 @@ func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached) (kille
 	}
 	// A kill ends it but in the kernel: wait for that, at the same stall
 	// rule, and go on without it after.
-	WaitExitByEvents(logger, exited, members)
+	WaitExitByEvents(logger, exited, members, moved)
 	return why
 }
 

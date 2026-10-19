@@ -98,7 +98,7 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	}()
 
 	var why string
-	switch utils.WaitExitByEvents(a.logger, stopped, procs) {
+	switch utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load()) {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:

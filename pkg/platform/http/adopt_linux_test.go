@@ -266,7 +266,10 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	}
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	why := stopAdopted(zap.New(core), nil)
+	// The run's teardown scope: the slow daemon's steps on its way out move
+	// it, which the run's drains wait on.
+	scope := &utils.TeardownScope{}
+	why := stopAdopted(zap.New(core), nil, scope)
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("polite %d, deaf %d, busy %d, churn %d, slow %d", polite, deaf, busy, churn, slow)
@@ -286,6 +289,9 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	}
 	if _, err := os.Stat(done); err != nil {
 		t.Fatalf("the daemon whose way out made progress was killed before it was done: %v", err)
+	}
+	if scope.Moves() == 0 {
+		t.Fatal("the daemons' way out made progress, and moved the run's teardown not once")
 	}
 	killed := logs.FilterMessageSnippet("killing it").All()
 	if len(killed) != 1 {
@@ -335,7 +341,7 @@ func TestAPressKillsTheDaemonsAStopWaitsFor(t *testing.T) {
 		late, lateErr = startDaemon("exec sleep 120")
 		utils.MarkInterruptedAgain()
 	}()
-	why := stopAdopted(zap.New(core), nil)
+	why := stopAdopted(zap.New(core), nil, nil)
 	if lateErr != nil {
 		t.Fatal(lateErr)
 	}
@@ -402,5 +408,48 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 		if tc.killed && (!strings.Contains(appErr.StopKilled, "(sh, state ") || !strings.Contains(appErr.StopKilled, "make it exit once it is asked to stop")) {
 			t.Fatalf("%s: the kill is said as %q; want the process named, with its state, and the next step", tc.name, appErr.StopKilled)
 		}
+	}
+}
+
+// Only a step on a daemon's way out moves the run's teardown: one that opens
+// and closes a file over and over, ignoring the request to stop, moves it at
+// most once (its first look below where the stop found it is a file fewer,
+// utils.ExitRatchet), not at each of the dozens of closes it makes, and is
+// killed on the stall bound.
+func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 25
+	ready := filepath.Join(t.TempDir(), "ready")
+	// No child of its own: one that ended would be a step (a process of it
+	// gone).
+	churn := daemonize(t, `trap '' TERM; : > "$1"; while :; do exec 3</dev/null; exec 3<&-; done`, ready)
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	scope := &utils.TeardownScope{}
+	core, logs := observer.New(zapcore.InfoLevel)
+	done := make(chan struct{})
+	go func() { stopAdopted(zap.New(core), nil, scope); close(done) }()
+	// Read as the stop decides to kill it: what the kill does after (the
+	// kernel freeing what it held) is not the daemon's way out.
+	var before uint64
+	await(t, "the stall kill", func() bool {
+		if logs.FilterMessageSnippet("made no progress on its way out after it was asked to stop; killing it").Len() == 0 {
+			return false
+		}
+		before = scope.Moves()
+		return true
+	})
+	<-done
+	if parentIs(churn, os.Getpid()) {
+		t.Fatal("the churning daemon outlived its stop")
+	}
+	if before > 1 {
+		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", before)
 	}
 }

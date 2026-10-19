@@ -185,3 +185,73 @@ func TestTheDockerRunStopSaysWhenItKilled(t *testing.T) {
 		t.Fatalf("a docker client that had exited: killed %v after %d kills", killed, kills)
 	}
 }
+
+// Under the switch an app's steps on its way out at a set's end move the
+// teardown scope of the run that ran it (Run's context), which that run's
+// drains wait on. The app closes one of its files at each step file the test
+// makes, and exits only at the last, which the test makes once the stop has
+// seen a step: a step made before the stop's first look (its baseline) is
+// none it can see, so steps are made, once the interrupt reached the app,
+// until one is seen.
+func TestAnAppsStepsOutMoveTheTeardownOfTheRunThatRanIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	budget := utils.StopStallBudget
+	utils.StopStallBudget = time.Minute
+	t.Cleanup(func() { utils.StopStallBudget = budget })
+	dir := t.TempDir()
+	script := `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null
+trap ': > trapped; for fd in 3 4 5 6; do while [ ! -e step$fd ]; do sleep 0.01; done; eval "exec $fd<&-"; done; exit 0' INT
+touch started; while :; do sleep 0.1; done`
+	a := NewApp(zap.NewNop(), "cd "+dir+" && "+script, nil, models.SetupOptions{CommandType: string(utils.Native)})
+	runCtx, scope := utils.NewTeardownScope(context.Background())
+	ctx, cancel := context.WithCancelCause(runCtx)
+	defer cancel(nil)
+	done := make(chan models.AppError, 1)
+	go func() { done <- a.Run(ctx) }()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "started")); err == nil {
+			break
+		}
+		select {
+		case appErr := <-done:
+			t.Fatalf("the app ended before it started: %+v", appErr)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel(models.ErrAppStoppedForSetEnd)
+	step := func(fd int) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("step%d", fd)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for _, err := os.Stat(filepath.Join(dir, "trapped")); err != nil; _, err = os.Stat(filepath.Join(dir, "trapped")) {
+		if time.Now().After(deadline) {
+			t.Fatal("the stop's interrupt never reached the app")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The steps but its exit, spread out, until the stop has seen one.
+	for fd := 3; scope.Moves() == 0; time.Sleep(200 * time.Millisecond) {
+		if fd <= 5 {
+			step(fd)
+			fd++
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the app's steps out did not move the teardown of the run that ran it")
+		}
+	}
+	step(3)
+	step(4)
+	step(5)
+	step(6) // its exit
+	select {
+	case appErr := <-done:
+		if appErr.StopKilled != "" {
+			t.Fatalf("an app that made progress on its way out was killed: %q", appErr.StopKilled)
+		}
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the stop did not end")
+	}
+}
