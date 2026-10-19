@@ -46,6 +46,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -4938,24 +4939,29 @@ func (p *Proxy) logDroppedMisses(msg string, errs []error) {
 			break
 		}
 	}
-	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", missSummaries(errs)))
+	shapes, calls := missSummaries(errs)
+	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("call_shapes", shapes), logcontent.Any("calls", calls))
 }
 
-// missSummaries names, for a log line, the calls of up to the first 10 misses.
-func missSummaries(errs []error) []string {
-	out := make([]string, 0, min(len(errs), 10))
+// missSummaries names, for a log line, the calls of up to the first 10
+// misses: each in its shape (models.CallShape), and as it was made, which
+// holds the values the call sent and is logged only as logcontent allows.
+func missSummaries(errs []error) (shapes, calls []string) {
 	for _, err := range errs {
-		if len(out) == 10 {
+		if len(calls) == 10 {
 			break
 		}
 		var pe models.ParserError
 		if errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.ActualSummary != "" {
-			out = append(out, pe.MismatchReport.ActualSummary)
+			r := pe.MismatchReport
+			shapes = append(shapes, models.CallShape(r.Protocol, r.ActualSummary))
+			calls = append(calls, r.ActualSummary)
 			continue
 		}
-		out = append(out, err.Error())
+		shapes = append(shapes, err.Error())
+		calls = append(calls, err.Error())
 	}
-	return out
+	return shapes, calls
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
@@ -5332,7 +5338,8 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
 			zap.String("destination", r.Destination),
-			zap.String("actual", r.ActualSummary),
+			zap.String("actual_shape", models.CallShape(r.Protocol, r.ActualSummary)),
+			logcontent.String("actual", r.ActualSummary),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),

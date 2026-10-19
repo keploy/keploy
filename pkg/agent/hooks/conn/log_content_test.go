@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/logcontent/logtest"
 )
 
@@ -34,15 +36,17 @@ func (failingBody) Close() error { return nil }
 func TestCapture_ADroppedOrTrimmedTestCaseIsLoggedWithoutItsContent(t *testing.T) {
 	const overLimit = "HTTP test case data exceeds 5MB limit, skipping capture"
 	bytesOf := func(b []byte) func() io.Reader { return func() io.Reader { return bytes.NewReader(b) } }
+	unread := []byte(`{"note":"` + canary + `"}`)
 	for name, tc := range map[string]struct {
 		reqBody      func() io.Reader
 		reqEncoding  string
 		respBody     []byte
 		respEncoding string
 		want         string
+		body         []byte // the bytes the line names as "body"
 	}{
-		"a request body that fails to read": {reqBody: func() io.Reader { return failingBody{bytes.NewReader([]byte(`{"note":"` + canary + `"}`))} },
-			respBody: []byte("ok"), want: "failed to read the http request body"},
+		"a request body that fails to read": {reqBody: func() io.Reader { return failingBody{bytes.NewReader(unread)} },
+			respBody: []byte("ok"), want: "failed to read the http request body", body: unread},
 		"a request body over the limit decompressed": {reqBody: bytesOf(gzipBomb(t)), reqEncoding: "gzip",
 			respBody: []byte("ok"), want: overLimit},
 		"a response body over the limit decompressed": {reqBody: bytesOf([]byte("hi")),
@@ -68,6 +72,14 @@ func TestCapture_ADroppedOrTrimmedTestCaseIsLoggedWithoutItsContent(t *testing.T
 				logger, logs := logtest.Observe()
 				Capture(context.Background(), logger, make(chan *models.TestCase, 1), req, resp, time.Now(), time.Now(), models.IncomingOptions{}, true, false, 8080)
 				logtest.Check(t, logs, canary, on, tc.want)
+				// Named as a logcontent.Bytes line names the same bytes, not
+				// by the fingerprint of their base64.
+				if tc.body != nil && !on {
+					got := logs.FilterMessage(tc.want).All()[0].ContextMap()["body"]
+					if want := map[string]interface{}{"len": len(tc.body), "fp": logcontent.Fingerprint(tc.body)}; !reflect.DeepEqual(got, want) {
+						t.Fatalf("the body is named %v, want %v", got, want)
+					}
+				}
 			})
 		})
 	}

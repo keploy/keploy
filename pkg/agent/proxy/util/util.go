@@ -17,7 +17,6 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
@@ -372,7 +371,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
 					if logger.Core().Enabled(zap.DebugLevel) {
-						logger.Debug("Failed to read buffer", zap.Int("size", len(buffer)), logcontent.String("base64_encoded", util.EncodeBase64(buffer)))
+						logger.Debug("Failed to read buffer", zap.Int("size", len(buffer)), logcontent.Binary("base64_encoded", buffer))
 					}
 				}
 				errChannel <- err

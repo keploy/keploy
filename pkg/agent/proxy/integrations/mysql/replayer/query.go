@@ -224,7 +224,8 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// that merely drifted from its recording, and reporting that as
 					// a lost mock sends the reader hunting for the wrong bug.
 					logger.Error("REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time",
-						zap.String("sql_query", truncate(actualQuery, 300)),
+						zap.String("sql_shape", models.SQLShape(actualQuery)),
+						logcontent.String("sql_query", truncate(actualQuery, 300)),
 						zap.String("request_type", req.Header.Type),
 						zap.Int("commands_processed", commandCount),
 						zap.String("hint", "check mappings.yaml: this test set has no MySQL data mock for the command phase — either the query was never recorded, or its mock was dropped at record time (teardown lag or memory pressure)"),

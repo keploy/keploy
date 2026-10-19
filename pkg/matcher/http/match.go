@@ -816,8 +816,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_equal assertion failed",
 						zap.String("header", header),
-						zap.String("expected", exp),
-						zap.String("actual", act),
+						logcontent.String("expected", exp),
+						logcontent.String("actual", act),
 					)
 				}
 			}
@@ -835,8 +835,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_contains assertion failed",
 						zap.String("header", header),
-						zap.String("expected_substr", exp),
-						zap.String("actual", act),
+						logcontent.String("expected_substr", exp),
+						logcontent.String("actual", act),
 					)
 				}
 			}
@@ -896,8 +896,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_matches assertion failed",
 						zap.String("header", header),
-						zap.String("pattern", pattern),
-						zap.String("actual", act),
+						logcontent.String("pattern", pattern),
+						logcontent.String("actual", act),
 						zap.Error(err),
 					)
 				}
@@ -916,7 +916,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			actJSON := actualResponse.Body
 			if expJSON != actJSON {
 				pass = false
-				logger.Error("json_equal assertion failed", zap.String("expected", expJSON), zap.String("actual", actJSON))
+				logger.Error("json_equal assertion failed", logcontent.String("expected", expJSON), logcontent.String("actual", actJSON))
 			}
 
 		case models.JsonContains:
@@ -928,7 +928,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
 				pass = false
-				logger.Error("json_contains assertion failed", zap.Any("expected", expectedMap))
+				logger.Error("json_contains assertion failed", logcontent.Any("expected", expectedMap))
 			}
 
 		case models.NoiseAssertion:

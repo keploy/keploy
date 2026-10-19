@@ -129,10 +129,12 @@ func upstreamErrorClass(err error) string {
 }
 
 // upstreamRequestURL extracts a best-effort URL string from a raw HTTP
-// request buffer. Falls back to the dest-socket address if the request
-// cannot be parsed (e.g. truncated / non-HTTP bytes). The returned string
-// is log-only; callers must not depend on its format.
-func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
+// request buffer: the whole of it, and the same without its query, whose
+// values are the application's and which a line carries only as logcontent
+// allows. Falls back to the dest-socket address if the request cannot be
+// parsed (e.g. truncated / non-HTTP bytes). The returned strings are
+// log-only; callers must not depend on their format.
+func upstreamRequestURL(rawReq []byte, destAddr net.Addr) (full, withoutQuery string) {
 	if len(rawReq) > 0 {
 		req, err := nhttp.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
 		if err == nil && req != nil {
@@ -140,18 +142,21 @@ func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
 			if host == "" && destAddr != nil {
 				host = destAddr.String()
 			}
-			path := "/"
+			path, target := "/", "/"
 			if req.URL != nil && req.URL.RequestURI() != "" {
-				path = req.URL.RequestURI()
+				target = req.URL.RequestURI()
+				if p := req.URL.EscapedPath(); p != "" {
+					path = p
+				}
 			}
 			scheme := "http"
-			return fmt.Sprintf("%s://%s%s", scheme, host, path)
+			return fmt.Sprintf("%s://%s%s", scheme, host, target), fmt.Sprintf("%s://%s%s", scheme, host, path)
 		}
 	}
 	if destAddr != nil {
-		return destAddr.String()
+		return destAddr.String(), destAddr.String()
 	}
-	return "unknown"
+	return "unknown", "unknown"
 }
 
 // parseRequestMethodAndURL extracts (method, request-uri) from a raw HTTP/1.x

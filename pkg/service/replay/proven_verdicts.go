@@ -8,6 +8,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
+	"go.uber.org/zap"
 )
 
 // The per-test verdict of the proven model for `keploy test`, under the proven
@@ -614,10 +616,9 @@ func noteConsumers(consumers map[string][]string, test string, consumed []models
 // call is likely one that test recorded, such as a later exchange of a
 // connection it opened at record time and this test opened at replay. A
 // recording its own test owns too, or none owns (one recorded between tests),
-// is named with none. It returns "test: call (closest mock, recorded in test)"
-// for each it named.
-func markRecordedIn(results []models.TestResult, owners map[string][]string) []string {
-	var named []string
+// is named with none. It returns each call it named.
+func markRecordedIn(results []models.TestResult, owners map[string][]string) []recordedIn {
+	var named []recordedIn
 	for i := range results {
 		r := &results[i]
 		for j := range r.FailureInfo.UnmatchedCalls {
@@ -627,10 +628,45 @@ func markRecordedIn(results []models.TestResult, owners map[string][]string) []s
 				continue
 			}
 			c.RecordedIn = by[0]
-			named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, by[0]))
+			named = append(named, recordedIn{test: r.TestCaseID, by: by[0], call: *c})
 		}
 	}
 	return named
+}
+
+// recordedIn is a call markRecordedIn named: the test that made it, and the
+// test that recorded it.
+type recordedIn struct {
+	test, by string
+	call     models.UnmatchedCall
+}
+
+// named is "test: call (closest mock, recorded in test)", with the call
+// named as summary says.
+func (c recordedIn) named(summary string) string {
+	return fmt.Sprintf("%s: %s (%s, recorded in %s)", c.test, summary, c.call.ClosestMock, c.by)
+}
+
+// logRecordedIn names each call of the set's results that another test
+// recorded with that test (markRecordedIn), and warns of the first 20: each
+// by its shape, and as it was made only as logcontent allows, since a call's
+// summary holds what it sent (a statement's literals).
+func (r *Replayer) logRecordedIn(testSetID string, results []models.TestResult, owners map[string][]string) {
+	named := markRecordedIn(results, owners)
+	if len(named) == 0 {
+		return
+	}
+	named = named[:min(len(named), 20)]
+	shapes, calls := make([]string, 0, len(named)), make([]string, 0, len(named))
+	for _, c := range named {
+		shapes = append(shapes, c.named(models.MissShape(c.call)))
+		calls = append(calls, c.named(c.call.ActualSummary))
+	}
+	r.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under unmatched_calls.recorded_in",
+		zap.String("test-set", testSetID),
+		zap.Strings("call_shapes", shapes),
+		logcontent.Any("calls", calls),
+		zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
 }
 
 // ownersOf is the tests that own each mock of the plan, by name, sorted.

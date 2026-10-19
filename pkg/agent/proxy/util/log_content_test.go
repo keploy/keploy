@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/logcontent/logtest"
 )
 
@@ -21,7 +23,7 @@ func TestReadHTTPHeadersUntilEnd_TheHeadersAreLoggedWithoutTheirValues(t *testin
 		parts []string
 		want  string
 	}{
-		"in one read": {[]string{head}, "received complete HTTP headers in initial buffer"},
+		"in one read":  {[]string{head}, "received complete HTTP headers in initial buffer"},
 		"in two reads": {[]string{head[:40], head[40:]}, "received complete HTTP headers"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -70,12 +72,19 @@ func TestReadBuffConn_AFailedReadsBytesAreLoggedWithoutThem(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		errs := make(chan error, 1)
-		go ReadBuffConn(ctx, logger, &failingConn{Conn: server, data: []byte("GET /?ref=" + canary)}, make(chan []byte, 1), errs, false)
+		data := []byte("GET /?ref=" + canary)
+		go ReadBuffConn(ctx, logger, &failingConn{Conn: server, data: data}, make(chan []byte, 1), errs, false)
 		select {
 		case <-errs:
 		case <-time.After(5 * time.Second):
 			t.Fatal("ReadBuffConn did not fail the read")
 		}
 		logtest.Check(t, logs, canary, on, "Failed to read buffer")
+		// The bytes are named as a logcontent.Bytes line names them, not by
+		// the fingerprint of their base64.
+		got := logs.FilterMessage("Failed to read buffer").All()[0].ContextMap()["base64_encoded"]
+		if want := map[string]interface{}{"len": len(data), "fp": logcontent.Fingerprint(data)}; !on && !reflect.DeepEqual(got, want) {
+			t.Fatalf("the bytes are named %v, want %v", got, want)
+		}
 	})
 }

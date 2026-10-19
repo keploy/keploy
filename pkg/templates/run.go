@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -175,9 +176,12 @@ func (r *Run) set(key, value string) {
 	r.values[key] = value
 }
 
-// warnOnce logs a warning once per run for each distinct message.
-func (r *Run) warnOnce(msg string, fields ...zap.Field) {
-	key := msg
+// warnOnce logs a warning once per run for each distinct message, fields and
+// value. The value is a placeholder's, the application's or a secret's, so
+// the line carries it only as logcontent allows; the warning is said once per
+// value either way.
+func (r *Run) warnOnce(msg, value string, fields ...zap.Field) {
+	key := msg + "\x00value=" + value
 	for _, f := range fields {
 		key += "\x00" + f.Key + "=" + f.String
 	}
@@ -186,7 +190,7 @@ func (r *Run) warnOnce(msg string, fields ...zap.Field) {
 	r.warned[key] = true
 	r.mu.Unlock()
 	if !seen {
-		r.logger.Warn(msg, fields...)
+		r.logger.Warn(msg, append(fields, logcontent.String("value", value))...)
 	}
 }
 

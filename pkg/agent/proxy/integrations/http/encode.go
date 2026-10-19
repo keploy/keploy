@@ -280,10 +280,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				var resTimestampMock time.Time
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
+				full, upstream := upstreamRequestURL(finalReq, destConn.RemoteAddr())
 				if len(resp) == 0 {
 					resTimestampMock = reqTimestampMock
 					h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
-						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.String("upstream", upstream),
+						logcontent.String("upstream_url", full),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err))
 					// Write the synthesized response back to the client so
@@ -312,7 +314,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					// the synthesized error mock instead.
 					h.Logger.Error("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
 						zap.Int("partial_resp_len", len(resp)),
-						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.String("upstream", upstream),
+						logcontent.String("upstream_url", full),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err),
 						zap.String("next_step", "investigate upstream stability (check connection resets, timeouts, keep-alive settings); recorded synthesized 5xx mock in place of the truncated response"))

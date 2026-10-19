@@ -85,3 +85,71 @@ func TestMatch_TheAnswersBodyIsNotLogged(t *testing.T) {
 		})
 	})
 }
+
+// A test case compared with no other is logged by which side is missing, not
+// the test case that is there, unless KEPLOY_LOG_CONTENT is set.
+func TestAbsMatch_AMissingTestCaseIsLoggedWithoutTheOther(t *testing.T) {
+	for name, firstMissing := range map[string]bool{"the second missing": false, "the first missing": true} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				tcs1, tcs2 := canaryCase("a", canary), (*models.TestCase)(nil)
+				if firstMissing {
+					tcs1, tcs2 = tcs2, tcs1
+				}
+				if pass, _, _, _ := AbsMatch(tcs1, tcs2, nil, false, logger); pass {
+					t.Fatal("a test case matched no test case")
+				}
+				logtest.Check(t, logs, canary, on, "test case is nil")
+			})
+		})
+	}
+}
+
+// A response body compared by size, because the other side's was recorded by
+// its size alone, is logged by its size, unless KEPLOY_LOG_CONTENT is set.
+func TestAbsMatch_TheBodyComparedBySizeIsNotLogged(t *testing.T) {
+	for kept, tcs1Skipped := range map[string]bool{
+		"tcs2 response body (other side was skipped)": true,
+		"tcs1 response body (other side was skipped)": false,
+	} {
+		t.Run(kept, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				skipped, other := canaryCase("a", canary), canaryCase("b", canary)
+				skipped.HTTPResp.Body, skipped.HTTPResp.BodySkipped, skipped.HTTPResp.BodySize = "", true, 2
+				tcs1, tcs2 := skipped, other
+				if !tcs1Skipped {
+					tcs1, tcs2 = other, skipped
+				}
+				_, _, _, _ = AbsMatch(tcs1, tcs2, nil, false, logger)
+				logtest.Check(t, logs, canary, on, kept)
+			})
+		})
+	}
+}
+
+// An assertion that fails is logged by its name and the header it judged,
+// not the values it compared, unless KEPLOY_LOG_CONTENT is set.
+func TestAssertionMatch_AFailedAssertionIsLoggedWithoutTheValuesItCompared(t *testing.T) {
+	for want, assertion := range map[string]map[models.AssertionType]interface{}{
+		"json_equal assertion failed":      {models.JsonEqual: true},
+		"json_contains assertion failed":   {models.JsonContains: map[string]interface{}{"note": canary + "-expected"}},
+		"header_equal assertion failed":    {models.HeaderEqual: map[string]interface{}{"X-Note": canary + "-expected"}},
+		"header_contains assertion failed": {models.HeaderContains: map[string]interface{}{"X-Note": canary + "-expected"}},
+		"header_matches assertion failed":  {models.HeaderMatches: map[string]interface{}{"X-Note": "^" + canary + "-expected$"}},
+	} {
+		t.Run(want, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				tc := canaryCase("a", canary+"-recorded")
+				tc.Assertions = assertion
+				actual := canaryCase("a", canary+"-live").HTTPResp
+				if pass, _ := AssertionMatch(tc, &actual, logger); pass {
+					t.Fatal("an answer that differs passed the assertion")
+				}
+				logtest.Check(t, logs, canary, on, want)
+			})
+		})
+	}
+}

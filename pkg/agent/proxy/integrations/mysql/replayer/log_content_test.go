@@ -3,6 +3,7 @@ package replayer
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -204,5 +205,44 @@ func TestReplay_TheCommandPhasesLinesCarryNoRowOrCommand(t *testing.T) {
 			"Encoded Packet",
 			"No response for the command",
 			"failed to encode the response")
+	})
+}
+
+// A query no recording answers, in a recording that holds no data mock, is
+// named by its statement's shape, not its literals: in the line that says so
+// and in the call the miss reports, unless KEPLOY_LOG_CONTENT is set.
+func TestReplay_AnOrphanQuerysLinesCarryNoLiteral(t *testing.T) {
+	const query = "SELECT body FROM notes WHERE tag = '" + canary + "'"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		db := &fakeMockDb{session: []*models.Mock{nativeHandshake()}}
+		logger, logs := logtest.Observe()
+		client, agentEnd := net.Pipe()
+		t.Cleanup(func() { _ = client.Close(); _ = agentEnd.Close() })
+		done := make(chan error, 1)
+		go func() {
+			done <- Replay(context.Background(), logger, agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, db, models.OutgoingOptions{})
+			_ = agentEnd.Close()
+		}()
+		c := mysqlClient{t: t, c: client}
+		c.greetAndAnswer("app", mysql.Native)
+		if ok := c.read(); len(ok) == 0 || ok[0] != mysql.OK {
+			t.Fatalf("the client read %x after its handshake; want the recorded OK", ok)
+		}
+		c.send(0, append([]byte{mysql.COM_QUERY}, query...))
+		err := <-done
+		var reporter interface {
+			MismatchReport() *models.MockMismatchReport
+		}
+		if !errors.As(err, &reporter) || reporter.MismatchReport() == nil {
+			t.Fatalf("the orphan query was not reported as a miss: %v", err)
+		}
+		const orphan = "REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time"
+		logtest.Check(t, logs, canary, on, orphan)
+		if got, want := logs.FilterMessage(orphan).All()[0].ContextMap()["sql_shape"], "SELECT body FROM notes WHERE tag = ?"; got != want {
+			t.Fatalf("the line names the query %v, want its shape %q", got, want)
+		}
+		if got, want := reporter.MismatchReport().ActualSummary, "COM_QUERY "+query; got != want {
+			t.Fatalf("the miss reports %q, want the call as it was made, %q, for the report", got, want)
+		}
 	})
 }

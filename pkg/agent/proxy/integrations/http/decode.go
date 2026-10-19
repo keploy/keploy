@@ -78,7 +78,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			h.Logger.Debug("Decoded HTTP request headers", zap.Strings("header_names", utils.HeaderNames(request.Header)), logcontent.Any("headers", request.Header))
+			// Checked first, as the line below is: each runs for every
+			// request replayed, and a logcontent field costs a line whose
+			// level is off an allocation that zap.Any's does not.
+			if ce := h.Logger.Check(zap.DebugLevel, "Decoded HTTP request headers"); ce != nil {
+				ce.Write(zap.Array("header_names", utils.SortedKeys(request.Header)), logcontent.Any("headers", request.Header))
+			}
 			// Set the host header explicitly because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -125,14 +130,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			h.Logger.Debug("decodeHTTP debug logs for input",
-				zap.Any("method", input.method),
-				zap.String("path", input.url.Path),
-				logcontent.Any("url", input.url),
-				zap.Strings("header_names", utils.HeaderNames(input.header)),
-				logcontent.Any("header", input.header),
-				logcontent.Bytes("body", input.body),
-				logcontent.Bytes("raw", input.raw))
+			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
+				ce.Write(zap.Any("method", input.method),
+					zap.String("path", input.url.Path),
+					logcontent.Any("url", input.url),
+					zap.Array("header_names", utils.SortedKeys(input.header)),
+					logcontent.Any("header", input.header),
+					logcontent.Bytes("body", input.body),
+					logcontent.Bytes("raw", input.raw))
+			}
 
 			noise := NewRequestNoise(h.Logger, opts)
 			headerNoise, bodyNoise, urlNoise := noise.Header, noise.Body, noise.URL

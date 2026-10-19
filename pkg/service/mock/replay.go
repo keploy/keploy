@@ -1910,7 +1910,8 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	}
 	logger.Warn(msg,
 		zap.String("protocol", miss.Protocol),
-		zap.String("call", miss.ActualSummary),
+		zap.String("call_shape", models.MissShape(miss)),
+		logcontent.String("call", miss.ActualSummary),
 		zap.String("destination", miss.Destination),
 		zap.String("next_step", next))
 }

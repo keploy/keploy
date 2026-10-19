@@ -295,3 +295,44 @@ func TestServeOnMiss_TheServedLineCarriesNoQuery(t *testing.T) {
 		logtest.Check(t, logs, canary, on, "on-miss: served an unrecorded call from the real dependency")
 	})
 }
+
+// A dependency that fails a recorded call, before it answers or partway
+// through its answer's first read, is logged with the call's URL without its
+// query's values, unless KEPLOY_LOG_CONTENT is set.
+func TestEncodeHTTP_AFailedUpstreamIsLoggedWithoutTheQuery(t *testing.T) {
+	// A first read's worth of an answer (pUtil.ReadBytes reads on while each
+	// read fills its 1 KiB), so the reset fails the read that holds it.
+	head := "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n"
+	partial := head + strings.Repeat("x", 1024-len(head))
+	for want, partial := range map[string]string{
+		"upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic":                     "",
+		"upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock": partial,
+	} {
+		t.Run(want, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				app, done := encodeLogged(t, logger, canaryCall("GET"), func(up net.Conn) {
+					_ = readUntil(up, canary+`-body"}`, 2*time.Second)
+					if partial == "" {
+						// A reset: the dependency fails the call before it
+						// answers any of it.
+						_ = up.(*net.TCPConn).SetLinger(0)
+						_ = up.Close()
+						return
+					}
+					_, _ = up.Write([]byte(partial))
+					time.Sleep(100 * time.Millisecond)
+					_ = up.(*net.TCPConn).SetLinger(0)
+					_ = up.Close()
+				})
+				<-done
+				_ = app.Close()
+				logtest.Check(t, logs, canary, on, want)
+				e := logs.FilterMessage(want).All()
+				if got := e[0].ContextMap()["upstream"]; got != "http://api.test/profile" {
+					t.Fatalf("the line names the call %v, want its URL without the query", got)
+				}
+			})
+		})
+	}
+}

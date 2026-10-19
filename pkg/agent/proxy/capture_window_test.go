@@ -158,7 +158,7 @@ func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
 		t.Fatalf("want one Warn naming the discarded miss, got %+v", logs.All())
 	}
-	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "GET /background" {
+	if calls, _ := e[0].ContextMap()["call_shapes"].([]interface{}); len(calls) != 1 || calls[0] != "GET /background" {
 		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
 	}
 
@@ -335,7 +335,7 @@ func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) 
 	if len(e) != 1 {
 		t.Fatalf("the cut was said %d times; want once: %+v", len(e), logs.All())
 	}
-	calls, _ := e[0].ContextMap()["calls"].([]interface{})
+	calls, _ := e[0].ContextMap()["call_shapes"].([]interface{})
 	if len(calls) != 2 || calls[0] != "POST /stopped" || calls[1] != "GET /health" {
 		t.Fatalf("the warning names %v; want the call after the last read and the one before the staging", calls)
 	}

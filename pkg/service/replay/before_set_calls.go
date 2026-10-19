@@ -89,7 +89,8 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 		r.logger.Error("test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)",
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
-			zap.String("call", c.ActualSummary),
+			zap.String("call_shape", models.MissShape(c)),
+			logcontent.String("call", c.ActualSummary),
 			zap.String("destination", c.Destination),
 			logcontent.String("diff", c.Diff),
 			zap.String("next_step", "a call the application makes before the set's first test (as it starts, or while it waits for the set) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"))

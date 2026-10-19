@@ -1062,11 +1062,15 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 			// differently and false-reject (~1/900, negligible for longer ids) —
 			// the loud, safe direction versus the silent wrong-mock this replaces.
 			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
-				h.Logger.Debug("http query: value treated as auto-detected dynamic",
-					zap.String("param", key),
-					logcontent.String("mock value", rv[i]),
-					logcontent.String("request value", av[i]),
-					zap.String("type class", c))
+				// Checked first: it runs for every candidate mock, and a
+				// logcontent field costs a line whose level is off an
+				// allocation that zap.String's does not.
+				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
+					ce.Write(zap.String("param", key),
+						logcontent.String("mock value", rv[i]),
+						logcontent.String("request value", av[i]),
+						zap.String("type class", c))
+				}
 				continue
 			}
 			return false
@@ -1124,7 +1128,12 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
-			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), logcontent.String("mock url", mock.Spec.HTTPReq.URL))
+			// Checked first, as the header line below is: each runs for every
+			// candidate mock of every request, and a logcontent field costs a
+			// line whose level is off an allocation that zap's does not.
+			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), logcontent.String("mock url", mock.Spec.HTTPReq.URL))
+			}
 			continue
 		}
 
@@ -1141,12 +1150,13 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// Header key match (presence-only; extra request headers allowed)
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
-			h.Logger.Debug("headers missing required keys for mock name",
-				zap.String("mock name", mock.Name),
-				zap.Strings("expected header names", utils.HeaderNames(mock.Spec.HTTPReq.Header)),
-				zap.Strings("input header names", utils.HeaderNames(input.header)),
-				logcontent.Any("expected header keys", mock.Spec.HTTPReq.Header),
-				logcontent.Any("input header", input.header))
+			if ce := h.Logger.Check(zap.DebugLevel, "headers missing required keys for mock name"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name),
+					zap.Array("expected header names", utils.SortedKeys(mock.Spec.HTTPReq.Header)),
+					zap.Array("input header names", utils.SortedKeys(input.header)),
+					logcontent.Any("expected header keys", mock.Spec.HTTPReq.Header),
+					logcontent.Any("input header", input.header))
+			}
 			continue
 		}
 

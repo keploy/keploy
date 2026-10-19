@@ -167,8 +167,8 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
-			zap.Strings("request_header_names", utils.HeaderNames(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
-			zap.Strings("response_header_names", utils.HeaderNames(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
+			zap.Array("request_header_names", utils.SortedKeys(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
+			zap.Array("response_header_names", utils.SortedKeys(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
 			logcontent.Any("request_headers", grpcSpec.GrpcReq.Headers),
 			logcontent.Any("response_headers", grpcSpec.GrpcResp.Headers),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),

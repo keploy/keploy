@@ -169,34 +169,54 @@ func ReplacePort(currentURL string, port string) (string, error) {
 
 // ReqMeta is what a log line says of an HTTP request: its method, host and
 // path, which name the call, and its URL, whose query values are the
-// application's and so logged only as logcontent allows.
-type ReqMeta struct{ req *http.Request }
+// application's and so logged only as logcontent allows. It holds only what
+// it logs, not the request, whose headers are the application's too.
+type ReqMeta struct {
+	ok           bool
+	method, host string
+	url          *url.URL
+}
 
 // GetReqMeta returns the metadata of the request, for a log field.
-func GetReqMeta(req *http.Request) ReqMeta { return ReqMeta{req: req} }
+func GetReqMeta(req *http.Request) ReqMeta {
+	if req == nil {
+		return ReqMeta{}
+	}
+	return ReqMeta{ok: true, method: req.Method, host: req.Host, url: req.URL}
+}
 
 func (m ReqMeta) MarshalLogObject(enc zapcore.ObjectEncoder) error {
-	if m.req == nil {
+	if !m.ok {
 		return nil
 	}
-	enc.AddString("method", m.req.Method)
-	enc.AddString("host", m.req.Host)
-	if m.req.URL != nil {
-		enc.AddString("path", m.req.URL.Path)
-		logcontent.String("url", m.req.URL.String()).AddTo(enc)
+	enc.AddString("method", m.method)
+	enc.AddString("host", m.host)
+	if m.url != nil {
+		enc.AddString("path", m.url.Path)
+		logcontent.String("url", m.url.String()).AddTo(enc)
 	}
 	return nil
 }
 
-// HeaderNames is the names of h, sorted: what a log line says of headers
-// whose values it may not carry (logcontent).
-func HeaderNames[V any](h map[string]V) []string {
-	names := make([]string, 0, len(h))
-	for k := range h {
-		names = append(names, k)
+// SortedKeys is m's keys, sorted, as a log field (zap.Array): what a line
+// says of headers or query params whose values it may not carry
+// (logcontent). The keys are read and sorted when a core encodes the line,
+// so a Debug line on a hot path whose level is off pays nothing for them: a
+// map is one pointer, which the field holds without an allocation.
+func SortedKeys[V any](m map[string]V) zapcore.ArrayMarshaler { return sortedKeys[V](m) }
+
+type sortedKeys[V any] map[string]V
+
+func (m sortedKeys[V]) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	sort.Strings(names)
-	return names
+	sort.Strings(keys)
+	for _, k := range keys {
+		enc.AppendString(k)
+	}
+	return nil
 }
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {

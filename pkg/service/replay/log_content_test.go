@@ -97,19 +97,53 @@ func TestResolveExpected_ACapturedValueIsLoggedWithoutIt(t *testing.T) {
 	})
 }
 
-// A call that fails a set is logged by its protocol, its summary and its
-// destination, not how it differs from its closest recording, unless
-// KEPLOY_LOG_CONTENT is set.
-func TestReplayer_ACallThatFailsASetIsLoggedWithoutItsDiff(t *testing.T) {
-	calls := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /notes", Destination: "api.test",
-		Diff: `body.note: recorded "` + canary + `-rec", live "` + canary + `-live"`}}
+// A call that fails a set is logged by its protocol, its shape and its
+// destination, not the values it sent or how it differs from its closest
+// recording, unless KEPLOY_LOG_CONTENT is set.
+func TestReplayer_ACallThatFailsASetIsLoggedWithoutItsContent(t *testing.T) {
+	for name, call := range map[string]models.UnmatchedCall{
+		"its diff": {Protocol: "HTTP", ActualSummary: "POST /notes", Destination: "api.test",
+			Diff: `body.note: recorded "` + canary + `-rec", live "` + canary + `-live"`},
+		"its statement's literals": {Protocol: "MySQL", Destination: "db:3306",
+			ActualSummary: "COM_QUERY SELECT body FROM notes WHERE tag = '" + canary + "'"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				r := &Replayer{logger: logger, config: &config.Config{}}
+				r.logSetCalls("test-set-0", []models.UnmatchedCall{call})
+				r.logUnclaimed("test-set-0", []models.UnmatchedCall{call})
+				logtest.Check(t, logs, canary, on,
+					"test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)",
+					"test-set failed: the application made a call after its last test that no mock answered (KEPLOY_PROVEN=1)")
+				for _, e := range logs.All() {
+					if got, want := e.ContextMap()["call_shape"], models.MissShape(call); got != want || want == "" {
+						t.Fatalf("%q names the call %v, want its shape %q", e.Message, got, want)
+					}
+				}
+			})
+		})
+	}
+}
+
+// A call another test recorded is named by its shape, not the values it
+// sent, unless KEPLOY_LOG_CONTENT is set.
+func TestReplayer_ACallAnotherTestRecordedIsNamedWithoutItsContent(t *testing.T) {
 	logtest.Each(t, func(t *testing.T, on bool) {
 		logger, logs := logtest.Observe()
 		r := &Replayer{logger: logger, config: &config.Config{}}
-		r.logSetCalls("test-set-0", calls)
-		r.logUnclaimed("test-set-0", calls)
-		logtest.Check(t, logs, canary, on,
-			"test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)",
-			"test-set failed: the application made a call after its last test that no mock answered (KEPLOY_PROVEN=1)")
+		results := []models.TestResult{{TestCaseID: "test-2", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
+			Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT body FROM notes WHERE tag = '" + canary + "'",
+			ClosestMock: "mock-auth", NotOwned: true}}}}}
+		r.logRecordedIn("test-set-0", results, map[string][]string{"mock-auth": {"test-1"}})
+		const msg = "tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under unmatched_calls.recorded_in"
+		logtest.Check(t, logs, canary, on, msg)
+		shapes, _ := logs.FilterMessage(msg).All()[0].ContextMap()["call_shapes"].([]interface{})
+		if want := "test-2: COM_QUERY SELECT body FROM notes WHERE tag = ? (mock-auth, recorded in test-1)"; len(shapes) != 1 || shapes[0] != want {
+			t.Fatalf("the line names the calls %v, want [%q]", shapes, want)
+		}
+		if got := results[0].FailureInfo.UnmatchedCalls[0].RecordedIn; got != "test-1" {
+			t.Fatalf("the call is said to be recorded in %q, want test-1", got)
+		}
 	})
 }

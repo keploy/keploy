@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -1074,7 +1075,7 @@ func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, lo
 		if producer.inArray && ignoreOrdering {
 			plan.left++
 			logger.Info(fmt.Sprintf("%s gives a value a later request sends, inside an array: test.ignoreOrdering is on, so which element gives it cannot be decided, and templatize captures nothing there", at(producer)),
-				zap.String("value", value))
+				logcontent.String("value", value))
 			continue
 		}
 		if isLocation(producer) && !urlAllowed[producer] {
@@ -1085,7 +1086,7 @@ func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, lo
 		if producer.unholdable {
 			plan.left++
 			logger.Info(fmt.Sprintf("%s gives a value a later request sends, holding a delimiter of its URL part, where it reads as two parts: the replay could not tell it from them, and templatize captures nothing there", at(producer)),
-				zap.String("value", value))
+				logcontent.String("value", value))
 			continue
 		}
 
@@ -1122,7 +1123,7 @@ func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, lo
 				continue // equal by value only: what this test case was not asked for
 			} else if why := untiedWhy(untied, l); l.inResponse() && why != "" {
 				logger.Info(fmt.Sprintf("%s holds a read-back's value inside an array, and it stays as recorded: test.ignoreOrdering is on and %s, so nothing would tie a use there to its element and keploy test would refuse it", at(l), why),
-					zap.String("value", value))
+					logcontent.String("value", value))
 				continue
 			}
 			write(l, placeholderFor(l, false, key))
