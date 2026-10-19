@@ -2,17 +2,16 @@ package http
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 )
 
 // compile-time assertions.
@@ -90,8 +89,9 @@ func queryOf(r *models.HTTPReq) url.Values {
 // spuriously fail the shape match — stripping both sides keeps the comparison
 // honest while still ignoring the volatile key's value.
 //
-// The detail is logged at Info (async.Engine.LogReport), so it names each
-// request as pkg.LoggedURL does: a URL's query holds the application's values.
+// The detail is logged at Info (async.Engine.LogReport), and only logged, so
+// it names each request as logurl.URL does, by its shape: a URL's query and
+// its path's segments hold the application's values.
 func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"
@@ -100,11 +100,7 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	liveReq, err := mockToReq(stripVolatile(live, vol))
 	if err != nil {
 		// url.Parse's error quotes the URL it was given whole.
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
-			err = &url.Error{Op: uerr.Op, URL: pkg.LoggedURL(uerr.URL), Err: uerr.Err}
-		}
-		return false, "unparseable live request: " + err.Error()
+		return false, "unparseable live request: " + logurl.Error(err).Error()
 	}
 	rec := stripVolatile(recorded, vol)
 	// SchemaMatch does field-by-field request-shape comparison; a non-empty
@@ -121,8 +117,8 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 		return false, "schema match error: " + err.Error()
 	}
 	if len(matched) == 0 {
-		return false, fmt.Sprintf("request shape drift: %s %s vs %s",
-			liveReq.method, liveReq.url.Path, pkg.LoggedURL(recorded.Spec.HTTPReq.URL))
+		return false, fmt.Sprintf("request shape drift: %s vs %s",
+			logurl.URL(liveReq.method+" "+liveReq.url.Path), logurl.URL(recorded.Spec.HTTPReq.URL))
 	}
 	return true, ""
 }

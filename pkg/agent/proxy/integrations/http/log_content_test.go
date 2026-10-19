@@ -392,10 +392,10 @@ func TestEncodeHTTP_AFailedUpstreamIsLoggedWithoutTheQuery(t *testing.T) {
 }
 
 // A poll of an async lane that drifts from its recording is still served it,
-// and the engine's verdict names the drift by both requests' method and path:
-// not the recorded URL's query, whose values are the application's, unless
+// and the engine's verdict names the drift by both requests' shapes: not the
+// recorded URL's query values, which are the application's, unless
 // KEPLOY_LOG_CONTENT is set.
-func TestDecodeHTTP_AnAsyncDriftIsLoggedWithoutTheRecordedQuery(t *testing.T) {
+func TestDecodeHTTP_AnAsyncDriftIsLoggedByItsShape(t *testing.T) {
 	logtest.Each(t, func(t *testing.T, on bool) {
 		logger, logs := logtest.Observe()
 		h := &HTTP{Logger: logger}
@@ -418,16 +418,16 @@ func TestDecodeHTTP_AnAsyncDriftIsLoggedWithoutTheRecordedQuery(t *testing.T) {
 		engine.LogReport(logger)
 		const drift = "async egress shape drift (served recorded response anyway); re-record if the request legitimately changed, or widen the lane's volatileParams / match to treat the varying part as noise"
 		logtest.Check(t, logs, canary, on, drift)
-		if got, want := logs.FilterMessage(drift).All()[0].ContextMap()["detail"], "notifications: request shape drift: GET /v1/poll vs http://notify.internal.svc/v1/poll"; !on && got != want {
+		if got, want := logs.FilterMessage(drift).All()[0].ContextMap()["detail"], "notifications: request shape drift: GET /v1/poll vs http://notify.internal.svc/v1/poll?cursor={}&ref={}"; !on && got != want {
 			t.Fatalf("the drift is named %q, want %q", got, want)
 		}
 	})
 }
 
 // A live poll whose URL does not parse is named in the engine's verdict by
-// url.Parse's error, which quotes the URL: without its query, unless
+// url.Parse's error, which quotes the URL: by its shape, unless
 // KEPLOY_LOG_CONTENT is set.
-func TestMatchRequestShape_AnUnparseablePollIsLoggedWithoutItsQuery(t *testing.T) {
+func TestMatchRequestShape_AnUnparseablePollIsLoggedByItsShape(t *testing.T) {
 	logtest.Each(t, func(t *testing.T, on bool) {
 		logger, logs := logtest.Observe()
 		h := &HTTP{Logger: logger}

@@ -392,7 +392,9 @@ func TestUnderTheSwitchATestTheAppNeverAnswersIsNotJudged(t *testing.T) {
 	if utils.ErrCode == 0 {
 		t.Fatal("a FAILED row read without its mark left the exit code 0")
 	}
-	if said := run.said(zapcore.ErrorLevel, "not judged: "+want); len(said) != 1 {
+	// The console names the request by its shape (models.URLShape), test-2
+	// as {}, unless KEPLOY_LOG_CONTENT is set; the row keeps it whole.
+	if said := run.said(zapcore.ErrorLevel, "not judged: the app never answered; waited 300ms of keploy's runnable time for GET /{}"); len(said) != 1 {
 		t.Fatalf("the console said %d times that test-2 is not judged and what was waited for, want once", len(said))
 	}
 	if said := run.said(zapcore.ErrorLevel, "failed to simulate request"); len(said) != 0 {
@@ -449,7 +451,7 @@ func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
 			if c.judged && r.Result.StatusCode.Normal {
 				t.Fatalf("test-2's status compared normal: %+v; want the 500 judged against the recorded 200", r.Result.StatusCode)
 			}
-			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /test-2"); (len(said) == 1) != c.judged {
+			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /{}"); (len(said) == 1) != c.judged {
 				t.Fatalf("the console said %d time(s) that test-2 failed on its start", len(said))
 			}
 			if rep := run.report.report; rep == nil || rep.Status != string(c.set) {

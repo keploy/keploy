@@ -1717,9 +1717,10 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 }
 
 // failUnsentTest reports a test that was not sent to the app as failed, with
-// why, and returns the error of writing that down.
+// why, and returns the error of writing that down. why names the test's URL,
+// which its report keeps whole and its line names as pkg.LoggedError does.
 func (r *Replayer) failUnsentTest(ctx context.Context, testRunID, testSetID string, testCase *models.TestCase, why error) error {
-	utils.LogError(r.logger, why, "failed the test without sending it",
+	utils.LogError(r.logger, pkg.LoggedError(why, testCase.HTTPReq.URL), "failed the test without sending it",
 		zap.String("testcase", testCase.Name),
 		zap.String("next_step", "write the test case's request URL with its scheme and host, as in http://localhost:8080/orders: they are what the base path replaces"))
 	result := r.CreateFailedTestResult(testCase, testSetID, time.Now().UTC(), why)
@@ -8063,7 +8064,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 			zap.Int("maxRetries", maxResetResends),
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCase.Name),
-			zap.Error(origErr))
+			zap.Error(pkg.LoggedError(origErr)))
 
 		// The test's capture window stays open across the re-send: what it
 		// holds is this test's — the misses carried in from before it

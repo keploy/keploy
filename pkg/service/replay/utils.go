@@ -1282,12 +1282,11 @@ func requestAtBasePath(basePath string, req models.HTTPReq) (string, error) {
 }
 
 // replaceBase is ReplaceBaseURL, which puts the base path's path in front of
-// the URL's only when withPath says to. Its error names the URL as
-// pkg.LoggedURL does: the replay logs it as it fails the test.
+// the URL's only when withPath says to.
 func replaceBase(newURL, oldURL string, withPath bool) (string, error) {
 	scheme, rest, ok := splitURLOrigin(oldURL)
 	if !ok {
-		return "", fmt.Errorf("the test's URL %q does not start with a scheme and a host, so it has none to replace", pkg.LoggedURL(oldURL))
+		return "", fmt.Errorf("the test's URL %q does not start with a scheme and a host, so it has none to replace", oldURL)
 	}
 	base, err := parseBasePath(newURL)
 	if err != nil {

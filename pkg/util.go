@@ -39,6 +39,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -795,8 +796,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
-		err = requestError(err)
-		utils.LogError(logger, err, "failed to create a http request from the yaml document")
+		utils.LogError(logger, LoggedError(err), "failed to create a http request from the yaml document")
 		return nil, err
 	}
 	req.Header = ToWireHTTPHeader(tc.HTTPReq.Header, tc.HTTPReq.HeaderLineLengths)
@@ -1148,7 +1148,6 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if err == nil {
 			return resp, nil
 		}
-		err = requestError(err)
 		refused := isPreResponseConnRefused(err)
 		// A reset or drop is asked about too: at a published port where the
 		// app listens only on 127.0.0.1 in its container, docker accepts the
@@ -1179,7 +1178,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 			req.Body = body
 		}
 		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
-			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(LoggedError(err)))
 		select {
 		case <-ctx.Done():
 			return nil, err
@@ -1200,35 +1199,18 @@ func sentRequestFields(req *http.Request) []zap.Field {
 	return fields
 }
 
-// requestError is the error about a test's request URL, client.Do's or
-// url.Parse's, as keploy logs and returns it. Their *url.Error names the whole
-// URL, and the error is logged where the request fails and again by the
-// replay that sent it, so it names the URL as LoggedURL does. Its Op and
-// cause are kept, so what reads it (isPreResponseConnRefused,
-// IsTransportConnReset, errors.Is) reads it as before.
-func requestError(err error) error {
-	uerr, ok := err.(*url.Error) // client.Do's and url.Parse's errors always are
-	if !ok {
-		return err
+// LoggedError is err, a test request's error, as a log line may carry it
+// (logurl.Error): the URLs it names, client.Do's and url.Parse's
+// (*url.Error, whose cause is named by its kind), a stalled answer's request
+// (AnswerStallError.Target) and each of urls, by their shape unless
+// logcontent is on. err itself, which the test's report keeps, is left
+// whole.
+func LoggedError(err error, urls ...string) error {
+	var st *AnswerStallError
+	if errors.As(err, &st) && st.Target != "" {
+		urls = append(urls, st.Target)
 	}
-	if u := LoggedURL(uerr.URL); u != uerr.URL {
-		return &url.Error{Op: uerr.Op, URL: u, Err: uerr.Err}
-	}
-	return err
-}
-
-// LoggedURL is a request's URL, or its request URI, as keploy's lines and
-// the errors they print name it: whole with logcontent on, and otherwise
-// without its query and fragment, whose values are the application's. The
-// path is kept, as the lines that name a call by its method and path keep it.
-func LoggedURL(u string) string {
-	if logcontent.On() {
-		return u
-	}
-	if i := strings.IndexAny(u, "?#"); i >= 0 {
-		return u[:i]
-	}
-	return u
+	return logurl.Error(err, urls...)
 }
 
 // answerDoesNotDecode is the error of a test request whose answer came back,
@@ -1293,7 +1275,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+LoggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
 	if ce := logger.Check(zap.DebugLevel, "Sending request to user app"); ce != nil {
@@ -1307,7 +1289,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		utils.LogError(logger, LoggedError(errHTTPReq), "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
 	endAtHeaders(httpResp)
@@ -1406,7 +1388,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+LoggedURL(prepared.Request.URL.RequestURI()), prepared.Request.ContentLength)
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
 	if ce := logger.Check(zap.DebugLevel, "Sending streaming request to user app"); ce != nil {
@@ -1420,7 +1402,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		utils.LogError(logger, LoggedError(errHTTPReq), "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
 	endAtHeaders(httpResp)
@@ -1433,7 +1415,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
 	if provenswitch.On() {
-		streamCfg.Target = prepared.Request.Method + " " + LoggedURL(prepared.Request.URL.RequestURI())
+		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
 	}
 
 	logger.Debug("detected HTTP streaming response",
@@ -4809,8 +4791,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
 		}
 		if err != nil {
-			err = requestError(err)
-			utils.LogError(logger, err, "failed to replace host with config host")
+			utils.LogError(logger, LoggedError(err), "failed to replace host with config host")
 			return "", err
 		}
 		logger.Debug("Replaced host with config host", zap.String("host", configHost), logcontent.String("target", finalTarget))
@@ -4824,8 +4805,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	if isHTTP {
 		parsedURL, parseErr := url.Parse(finalTarget)
 		if parseErr != nil {
-			parseErr = requestError(parseErr)
-			utils.LogError(logger, parseErr, "failed to parse test case URL")
+			utils.LogError(logger, LoggedError(parseErr), "failed to parse test case URL")
 			return "", parseErr
 		}
 		host = parsedURL.Hostname()

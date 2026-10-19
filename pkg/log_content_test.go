@@ -107,10 +107,11 @@ func TestResolveTestTarget_TheTargetIsLoggedWithoutItsQuery(t *testing.T) {
 }
 
 // A test request the app refuses fails with net/http's error, which names the
-// request's URL: the lines that say so, and the error returned for the replay
-// to log, name it without its query, unless KEPLOY_LOG_CONTENT is set. The
-// error still reads as a refusal. The line that says the request is sent
-// names its headers, not their values.
+// request's URL: the lines that say so name it without its query, unless
+// KEPLOY_LOG_CONTENT is set. The error returned, which the test's report
+// keeps, names it whole, whatever the switch says, and reads as a refusal.
+// The line that says the request is sent names its headers, not their
+// values.
 func TestSimulateHTTP_ARefusedRequestIsLoggedWithoutItsQuery(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -144,11 +145,8 @@ func TestSimulateHTTP_ARefusedRequestIsLoggedWithoutItsQuery(t *testing.T) {
 				logtest.Check(t, logs, canary, on, send.sent,
 					"test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
 					"failed to send testcase request to app")
-				if got := strings.Contains(err.Error(), canary); got != on {
-					t.Fatalf("the error the replay logs carries the query: %v, want %v: %v", got, on, err)
-				}
-				if !strings.Contains(err.Error(), addr+"/reset") {
-					t.Fatalf("the error does not name the request: %v", err)
+				if !strings.Contains(err.Error(), addr+"/reset?token="+canary) {
+					t.Fatalf("the error, which the test's report keeps, is %v; want it to name the request's URL whole", err)
 				}
 				sent := logs.FilterMessage(send.sent).All()[0].ContextMap()
 				if names := sent["header_names"]; !slices.Contains(names.([]interface{}), "Authorization") {
@@ -176,11 +174,12 @@ func TestResolveTestTarget_TheSwitchCostsADisabledLevelNothing(t *testing.T) {
 }
 
 // Under the stall rule, a test the app stops answering fails with an error
-// that names its request, which the replay logs: by its path, without the
-// query, unless KEPLOY_LOG_CONTENT is set. A plain answer that never comes, a
-// stream that sends nothing past its headers, and one that sends keepalives
-// alone, which the stream's comparison names.
-func TestSimulateHTTP_AStalledAnswerNamesItsRequestWithoutItsQuery(t *testing.T) {
+// that names its request whole, which the test's report keeps, whatever the
+// switch says; the replay's line for it names it as LoggedError does,
+// without its query unless KEPLOY_LOG_CONTENT is set. A plain answer that
+// never comes, a stream that sends nothing past its headers, and one that
+// sends keepalives alone, which the stream's comparison names.
+func TestSimulateHTTP_AStalledAnswerNamesItsRequest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	hold := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -230,11 +229,15 @@ func TestSimulateHTTP_AStalledAnswerNamesItsRequestWithoutItsQuery(t *testing.T)
 					HTTPResp: models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/event-stream"},
 						StreamBody: tc.frames}}
 				err := tc.send(c)
-				if !errors.Is(err, ErrAnswerStalled) || !strings.Contains(err.Error(), "for GET "+tc.path) {
-					t.Fatalf("%v; want a stalled answer that names GET %s", err, tc.path)
+				if !errors.Is(err, ErrAnswerStalled) || !strings.Contains(err.Error(), "for GET "+tc.path+"?token="+canary) {
+					t.Fatalf("%v; want a stalled answer that names GET %s whole", err, tc.path)
 				}
-				if got := strings.Contains(err.Error(), canary); got != on {
-					t.Fatalf("the error the replay logs carries the query: %v, want %v: %v", got, on, err)
+				logged := LoggedError(err)
+				if !errors.Is(logged, ErrAnswerStalled) || !strings.Contains(logged.Error(), "for GET "+tc.path) {
+					t.Fatalf("logged as %v; want a stalled answer that names GET %s", logged, tc.path)
+				}
+				if got := strings.Contains(logged.Error(), canary); got != on {
+					t.Fatalf("the error as the replay logs it carries the query: %v, want %v: %v", got, on, logged)
 				}
 			})
 		})
@@ -242,11 +245,11 @@ func TestSimulateHTTP_AStalledAnswerNamesItsRequestWithoutItsQuery(t *testing.T)
 }
 
 // A test's URL that does not parse fails with url.Parse's error, which quotes
-// the URL whole: the line that says so, and the error returned for the replay
-// to log, name it without its query, unless KEPLOY_LOG_CONTENT is set. It
-// fails where the target is resolved, where its host is replaced, or, when a
-// replacement names a port and so ends the resolving early, where the request
-// is built.
+// the URL whole: the line that says so names it without its query, unless
+// KEPLOY_LOG_CONTENT is set, and the error returned, which the test's report
+// keeps, names it whole. It fails where the target is resolved, where its
+// host is replaced, or, when a replacement names a port and so ends the
+// resolving early, where the request is built.
 func TestSimulateHTTP_AURLThatDoesNotParseIsLoggedWithoutItsQuery(t *testing.T) {
 	url := "http://127.0.0.1:8080/notes?ref=" + canary + "\x7f"
 	for name, tc := range map[string]struct {
@@ -267,8 +270,8 @@ func TestSimulateHTTP_AURLThatDoesNotParseIsLoggedWithoutItsQuery(t *testing.T) 
 					t.Fatalf("SimulateHTTP = %v; want url.Parse's error, naming the URL", err)
 				}
 				logtest.Check(t, logs, canary, on, tc.line)
-				if got := strings.Contains(err.Error(), canary); got != on {
-					t.Fatalf("the error the replay logs carries the query: %v, want %v: %v", got, on, err)
+				if !strings.Contains(err.Error(), canary) {
+					t.Fatalf("the error, which the test's report keeps, is %v; want it to name the URL whole", err)
 				}
 			})
 		})

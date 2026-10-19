@@ -467,6 +467,14 @@ func (c bpTestSetConf) Read(context.Context, string) (*models.TestSet, error) {
 // with the given template values.
 func newBasePathRunOf(t *testing.T, basePath string, template map[string]interface{}, cases ...*models.TestCase) *bpRun {
 	t.Helper()
+	core, logs := observer.New(zap.InfoLevel)
+	return newBasePathRunLogging(t, zap.New(core), logs, basePath, template, cases...)
+}
+
+// newBasePathRunLogging is newBasePathRunOf with every line of the run, the
+// sending of its tests included, logged to logger, whose lines logs keeps.
+func newBasePathRunLogging(t *testing.T, logger *zap.Logger, logs *observer.ObservedLogs, basePath string, template map[string]interface{}, cases ...*models.TestCase) *bpRun {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Path = t.TempDir()
 	cfg.Test.BasePath = basePath
@@ -475,7 +483,6 @@ func newBasePathRunOf(t *testing.T, basePath string, template map[string]interfa
 	cfg.Test.APITimeout = 5
 	cfg.Test.MaxFlakyChecks = 1
 
-	core, logs := observer.New(zap.InfoLevel)
 	run := &bpRun{
 		tests:    &bpTestDB{prTestDB: &prTestDB{cases: cases}},
 		agent:    &bpNoAgent{},
@@ -484,7 +491,7 @@ func newBasePathRunOf(t *testing.T, basePath string, template map[string]interfa
 		report:   &bpReportDB{prReportDB: &prReportDB{}},
 		logs:     logs,
 	}
-	svc := NewReplayer(zap.New(core), run.tests, run.mocks, run.report, run.mappings,
+	svc := NewReplayer(logger, run.tests, run.mocks, run.report, run.mappings,
 		bpTestSetConf{template: template}, prTelemetry{}, run.agent, nil, cfg)
 	run.replayer = svc.(*Replayer)
 	return run
