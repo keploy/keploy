@@ -499,8 +499,8 @@ type Test struct {
 	// such a caller still sets Test.Host (it rewrites recorded request
 	// URLs), and the resolved-test-target fallback will reach for that
 	// address and probe it. Intent has to be stated, not inferred.
-	DisableAppReadyProbe   bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
-	Host                   string              `json:"host" yaml:"host" mapstructure:"host"`
+	DisableAppReadyProbe bool   `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
+	Host                 string `json:"host" yaml:"host" mapstructure:"host"`
 	// RelayBaseURL, when non-empty, rewrites every resolved test URL so the
 	// request goes through the agent's reverse-proxy relay endpoint instead of
 	// directly to the app port. Set by k8s-proxy cross-cluster replay so
