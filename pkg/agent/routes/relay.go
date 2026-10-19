@@ -63,19 +63,18 @@ func (a *Agent) HandleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use RawPath when available to preserve URL-encoded characters.
-	sourcePath := r.URL.RawPath
-	if sourcePath == "" {
-		sourcePath = r.URL.Path
-	}
-	forwardPath := extractRelayForwardPath(sourcePath, portStr)
+	// Path is the decoded form; RawPath preserves encoding (e.g. %2F).
+	// Set both correctly so the reverse proxy sends the right path.
+	forwardPath := extractRelayForwardPath(r.URL.Path, portStr)
 
 	target := &url.URL{
 		Scheme:   "http",
 		Host:     net.JoinHostPort(podIP, portStr),
 		Path:     forwardPath,
-		RawPath:  forwardPath,
 		RawQuery: r.URL.RawQuery,
+	}
+	if r.URL.RawPath != "" {
+		target.RawPath = extractRelayForwardPath(r.URL.RawPath, portStr)
 	}
 
 	// Preserve the original Host header from the incoming request.

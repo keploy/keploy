@@ -2279,6 +2279,12 @@ func TestRewriteForRelay(t *testing.T) {
 			relayURL: "http://localhost:34567/agent/relay/",
 			want:     "http://localhost:34567/agent/relay/8080/api",
 		},
+		{
+			name:     "URL-encoded path preserved through relay",
+			testURL:  "http://localhost:8080/api%2Fv1/data",
+			relayURL: "http://localhost:34567/agent/relay",
+			want:     "http://localhost:34567/agent/relay/8080/api%2Fv1/data",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

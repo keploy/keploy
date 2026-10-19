@@ -4617,14 +4617,13 @@ func rewriteForRelay(testURL, relayBaseURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse relay base URL %q: %w", relayBaseURL, err)
 	}
-	// Use RawPath when available to preserve URL-encoded characters (e.g.
-	// %2F in path segments). Fall back to the decoded Path otherwise.
-	originalPath := u.RawPath
-	if originalPath == "" {
-		originalPath = u.Path
+	// Path is the decoded form (Go convention); RawPath preserves encoding.
+	// Set both correctly so url.URL.String() produces the right output.
+	prefix := strings.TrimRight(relay.Path, "/") + "/" + port
+	relay.Path = prefix + u.Path
+	if u.RawPath != "" {
+		relay.RawPath = prefix + u.RawPath
 	}
-	relay.Path = strings.TrimRight(relay.Path, "/") + "/" + port + originalPath
-	relay.RawPath = relay.Path // keep encoding intact
 	relay.RawQuery = u.RawQuery
 	return relay.String(), nil
 }
