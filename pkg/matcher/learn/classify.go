@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -37,6 +36,12 @@ type Seen struct {
 	// updates a record with), rather than only naming or comparing with it
 	// (ReadBack).
 	Written bool
+	// Record names the record a Written place stores its value in, as the
+	// adapter names it (its collection, and the identity the record has in
+	// this run); "" when the adapter names none. A read of that record links
+	// its answer to this write (ReadBack): the adapter states the link, keploy
+	// never guesses it from the value.
+	Record string
 	// Name is the variable the learn step put at Place (bound or used
 	// there), "" for none (Named).
 	Name string
@@ -1256,31 +1261,35 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 	return containsWholeClock(d.encodedRec, o.rec) || o.decoded && containsWholeClock(d.encodedRec, o.decRec)
 }
 
-// minReadBack is the length, in characters, below which a value is not read
-// back: a short value equal by chance to one the run made is not that value.
-const minReadBack = 6
-
-// ReadBack is where a value of a recorded answer was written earlier with
-// another value in this run: the request place, held whole, of the earliest
-// exchange served before whose recorded value is r's and whose live value
-// differs from it. That is where the value was first stored, so every read of
-// it, and every later write that carries it on, follows one variable. A call
-// that answers with what an earlier call wrote (a time, a code the
-// application made and stored) is then answered with what this run wrote
-// there: r's place is an answer place of the variable bound at that earlier
-// place. Only a place the adapter marked Written is read (it knows which of a
-// request's places store a value, and which only compare with one). The
-// request place's type is not compared with r's: an id stored as a number is
-// read back as text.
-func ReadBack(r Leaf, earlier []Earlier) (Place, bool) {
-	if r.Unnamed || r.Type != String || utf8.RuneCountInString(r.Value) < minReadBack {
+// ReadBack is where a value of a recorded answer was written earlier in this
+// run, by a write the read is linked to, with another value than its
+// recording's: the request place, held whole, of the earliest exchange served
+// before that marked it Written into record (Seen.Record), whose recorded
+// value is r's and whose live value differs from it. record is the record
+// the read names, as the adapter names it (the record its filter or its
+// identity names); "" for a read the adapter links to no record, which reads
+// nothing back.
+//
+// That is where the value was first stored, so every read of it, and every
+// later write that carries it on, follows one variable. A call that answers
+// with what an earlier call wrote (a time, a code the application made and
+// stored) is then answered with what this run wrote there: r's place is an
+// answer place of the variable bound at that earlier place.
+//
+// What decides is the evidence alone: the write drifted, the adapter marked
+// the place Written, and the read names the record it wrote. A value is read
+// back whatever its length, script or type (the request place's type is not
+// compared with r's: an id stored as a number is read back as text), and a
+// value no linked write stored is never read back, however it looks.
+func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
+	if r.Unnamed || r.Value == "" || record == "" {
 		return Place{}, false
 	}
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if s.Side != Request || !s.Written || s.Place == "" || s.Leaf.Value != r.Value || s.Live == s.Leaf.Value || s.Live == "" {
+			if s.Side != Request || !s.Written || s.Record != record || s.Place == "" || s.Leaf.Value != r.Value || s.Live == s.Leaf.Value || s.Live == "" {
 				continue
 			}
 			return Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
