@@ -22,6 +22,11 @@
 #
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 export GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -330,7 +335,7 @@ start dep; DEP_PORT=$PORT
 export REAL_PORT DEP_PORT
 printf 'mock:\n  real:\n    - localhost:%s\n' "$REAL_PORT" > keploy.yml
 sudo rm -rf keploy
-record rec-off.log ""
+record rec-off.log 0
 mock_paths > mocks-off.txt; cat mocks-off.txt
 expect mocks-off.txt "without the switch a call was not recorded" "/d" "/d" "/r"
 

@@ -177,7 +177,7 @@ CASE=$1 MODE=$2 GAP=$3 AS=$4 EXTRA=$5
 D="$WORK/$CASE"
 # <case>-proven is the case under the proven switch.
 BASE=${CASE%-proven}
-PROVEN=""
+PROVEN=0
 [ "$BASE" != "$CASE" ] && PROVEN=1
 mkdir -p "$D/home" "$D/app"
 export HOME="$D/home"

@@ -210,7 +210,7 @@ check() {
   shift 3
   [ "$name" = agent-no-ipv4 ] && expect="agent-record agent-test"
   echo "--- $name: expecting exit $want from each of its runs ---"
-  docker run --rm --network none "$@" -e HOSTUID="$(id -u):$(id -g)" \
+  docker run --rm --network none "$@" -e KEPLOY_PROVEN=0 -e HOSTUID="$(id -u):$(id -g)" \
     -v "$WORK:/work" "$IMAGE" /work/inside.sh "$name" || fail "$name: the container itself failed"
   runs="$(tr '\n' ' ' < "$WORK/$name/runs" 2>/dev/null)"
   [ "${runs% }" = "$expect" ] || fail "$name: ran \"${runs% }\", want \"$expect\""

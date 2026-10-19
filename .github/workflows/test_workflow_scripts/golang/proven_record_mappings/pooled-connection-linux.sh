@@ -34,6 +34,11 @@
 # Needs RECORD_BIN and REPLAY_BIN (this build: the step is only reached when
 # both are), go, curl, yq and jq. Stops keploy by its own pid only.
 set -euo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../../go-retry.sh"

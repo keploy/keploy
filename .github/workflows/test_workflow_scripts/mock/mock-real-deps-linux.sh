@@ -25,6 +25,11 @@
 #
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
@@ -252,7 +257,7 @@ done
 
 echo "== 2. without the switch the list is not read =="
 rm -f hits.*
-record rd-off rec-off.log ""
+record rd-off rec-off.log 0
 grep -q "4 passed" rec-off.log || { echo "FAIL: pytest did not pass every test recording without the switch"; FAIL=1; }
 paths_of rd-off > paths-off.txt
 cat paths-off.txt

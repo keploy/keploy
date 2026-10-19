@@ -3,6 +3,12 @@
 # Standard Keploy test script pattern
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
+# This lane guards --schema-match, which the proven switch ignores (every
+# response body is compared) (design v14 U18). So it runs keploy with the
+# switch off (KEPLOY_PROVEN=0), where that still works: the default on Windows
+# and macOS. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
+
 # Function to cleanup any remaining keploy processes
 cleanup_keploy() {
     echo "Cleaning up any remaining keploy processes..."

@@ -124,7 +124,7 @@ cat > "$WORK/inside.sh" <<'SH'
 PHASE=$1
 # <phase>-proven: the phase under the proven switch, into a set of its own.
 BASE=${PHASE%-proven}
-PROVEN=""
+PROVEN=0
 [ "$BASE" != "$PHASE" ] && PROVEN=1
 PIDS=""
 trap '[ -z "$PIDS" ] || kill $PIDS 2>/dev/null' EXIT
@@ -160,7 +160,7 @@ case "$BASE" in
   hosts-*) SET=hosts ;;
   loopback-*) SET=loopback ;;
 esac
-[ -n "$PROVEN" ] && SET="$SET-proven"
+[ "$PROVEN" = 1 ] && SET="$SET-proven"
 case "$BASE" in
   online|hosts-record|loopback-record) SUB=record ;;
   *) SUB=replay ;;

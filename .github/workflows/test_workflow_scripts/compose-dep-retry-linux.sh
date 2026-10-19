@@ -34,6 +34,11 @@
 # image must be loaded as ghcr.io/keploy/keploy:v3-dev
 # (.github/actions/download-image).
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 RECORD_BIN="$(command -v "${RECORD_BIN:-keploy}" || echo "${RECORD_BIN:-keploy}")"
 REPLAY_BIN="$(command -v "${REPLAY_BIN:-$RECORD_BIN}" || echo "${REPLAY_BIN:-$RECORD_BIN}")"
@@ -128,7 +133,7 @@ record() {
   cleanup
   sudo rm -rf keploy
   # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN="${KEPLOY_PROVEN:-0}" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
     --record-timer 60s --disable-tele > "$name.log" 2>&1 &
   local pid=$!
   requests "$pid"

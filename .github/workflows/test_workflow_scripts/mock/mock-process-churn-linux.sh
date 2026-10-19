@@ -126,7 +126,7 @@ fi
 
 if half off; then
 echo "== record without the switch: the same =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "bash churn.sh" --name churn --disable-tele > rec.log 2>&1
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$RECORD_BIN" mock record -c "bash churn.sh" --name churn --disable-tele > rec.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "record: keploy exited $rc, want 0"
 answered rec.log record
@@ -137,7 +137,7 @@ done
 
 : > dep.log
 echo "== replay without the switch: the same command, the dependency up and logging =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn --disable-tele > rep.log 2>&1
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn --disable-tele > rep.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "replay: keploy exited $rc, want 0"
 answered rep.log replay

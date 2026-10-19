@@ -326,6 +326,16 @@ export ECHO_URL="https://${ECHO_HOST}:${UPSTREAM_PORT}/anything"
 
 go_retry build -o sample-tls-app .
 
+# --opportunistic-tls-intercept relays a connection verbatim instead of
+# recording it. The proven model deletes it (design v14 U18) and refuses it,
+# and a Linux keploy runs the proven model unless told otherwise, so the
+# opportunistic modes run with the switch off (KEPLOY_PROVEN=0, where the flag
+# still works: the default on Windows and macOS). The other modes run keploy's
+# default.
+case " $KEPLOY_FLAGS " in
+  *" --opportunistic-tls-intercept "*) export KEPLOY_PROVEN=0 ;;
+esac
+
 # shellcheck disable=SC2086
 sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
   QUOTE_URL="$QUOTE_URL" ECHO_URL="$ECHO_URL" \

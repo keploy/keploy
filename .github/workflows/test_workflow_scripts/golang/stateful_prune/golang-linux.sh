@@ -26,6 +26,11 @@
 # one made before lifetimes were stated); WORK (default: a new temporary
 # directory).
 set -uo pipefail
+# This lane guards the switch-off prune (--remove-unused-mocks), which the
+# proven switch ignores (design v14 U18). So it runs keploy with the switch
+# off (KEPLOY_PROVEN=0), where that still works: the default on Windows and
+# macOS. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"

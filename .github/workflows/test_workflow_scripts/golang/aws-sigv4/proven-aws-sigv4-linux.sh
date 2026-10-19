@@ -32,6 +32,11 @@
 # stops only the processes and containers it started. Ports: 8091 (app),
 # 4566 (LocalStack). Env: RECORD_BIN, REPLAY_BIN; LOCALSTACK_IMAGE.
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 
@@ -107,7 +112,7 @@ curl -sf -X PUT "http://127.0.0.1:$LS/$BUCKET" >/dev/null || { echo "::error::ca
 # Record two GET /run, with LocalStack up.
 rm -rf keploy
 # shellcheck disable=SC2086
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "env $ENVS ./aws-app" \
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$RECORD_BIN" record -c "env $ENVS ./aws-app" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -131,7 +136,7 @@ replay() {
     shift
     before="$(newest_run)"
     # shellcheck disable=SC2086
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${PROVEN:+KEPLOY_PROVEN=1} "$REPLAY_BIN" test -c "env $ENVS $* ./aws-app" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN="${PROVEN:-0}" "$REPLAY_BIN" test -c "env $ENVS $* ./aws-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -166,7 +171,7 @@ PROVEN=1 replay proven-keyid AWS_ACCESS_KEY_ID=other
 expect_pass "3 (KEPLOY_PROVEN=1, another access key id)"
 PROVEN=1 replay proven-session AWS_ACCESS_KEY_ID=ASIATEMPORARY AWS_SESSION_TOKEN=session-token-1
 expect_pass "4 (KEPLOY_PROVEN=1, temporary credentials)"
-PROVEN="" replay off-same
+PROVEN=0 replay off-same
 expect_pass "5 (switch off)"
 
 if [ "$FAIL" -eq 0 ]; then

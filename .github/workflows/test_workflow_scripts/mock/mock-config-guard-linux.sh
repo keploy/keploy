@@ -214,7 +214,7 @@ cases() {
   succeeds "${P}control"
 }
 
-half off && cases "" ""
+half off && cases "" 0
 half on && cases proven- 1
 
 if [ "$FAIL" -ne 0 ]; then

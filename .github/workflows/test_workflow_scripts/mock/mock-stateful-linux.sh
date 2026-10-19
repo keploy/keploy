@@ -318,18 +318,18 @@ fi
 if half off; then
 echo "== 1'. without the switch: record the same, each call with the worker's pid =="
 start_dep
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name s --disable-tele 2>&1 | tee rec.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name s --disable-tele 2>&1 | tee rec.log
 grep -qx "CLAIM=legacy" rec.log || { echo "FAIL: without the switch the record driver did not fall back to the scope API as it was"; FAIL=1; }
 grep -q "RECORD_OK" rec.log || { echo "FAIL: record driver did not complete"; FAIL=1; }
 [ "$(mocks_of rec.log)" = "5" ] || { echo "FAIL: expected 5 recorded mocks, got $(mocks_of rec.log)"; FAIL=1; }
 stop_dep
 
 echo "== 2. without the switch: replay unscoped, dependency DOWN: record order, then saturate =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 unscoped.py $PORT" --name s --disable-tele 2>&1 | tee rep-unscoped.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$REPLAY_BIN" mock replay -c "python3 unscoped.py $PORT" --name s --disable-tele 2>&1 | tee rep-unscoped.log
 has "UNSCOPED=1,2,3,4,5,5" rep-unscoped.log || { echo "FAIL: unscoped replay did not serve 1,2,3,4,5,5 (got: $(grep -o 'UNSCOPED=[^ ]*' rep-unscoped.log))"; FAIL=1; }
 
 echo "== 3. without the switch: replay two concurrent pid-scoped workers, then a re-run, dependency DOWN =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name s --disable-tele 2>&1 | tee rep-workers.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name s --disable-tele 2>&1 | tee rep-workers.log
 has "t1=1,2,3"      rep-workers.log || { echo "FAIL: worker t1 was not served its own 1,2,3 (got: $(grep -o 't1=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
 has "t2=4,5"        rep-workers.log || { echo "FAIL: worker t2 was not served its own 4,5 (got: $(grep -o 't2=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
 has "t1first=1,2,3" rep-workers.log || { echo "FAIL: t1 in a new worker process was not served 1,2,3 (got: $(grep -o 't1first=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
@@ -339,7 +339,7 @@ has "t1again=1,2,3" rep-workers.log || { echo "FAIL: a re-run of t1 in the same 
 # the two tests must be served each test's own recordings.
 for how in pid nopid; do
   echo "== 4($how). without the switch: one keep-alive connection across two tests, dependency DOWN =="
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 keepalive.py $PORT $how" --name s --disable-tele 2>&1 | tee "rep-keepalive-$how.log"
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$REPLAY_BIN" mock replay -c "python3 keepalive.py $PORT $how" --name s --disable-tele 2>&1 | tee "rep-keepalive-$how.log"
   has "KA_${how}_t1=1,2,3" "rep-keepalive-$how.log" || { echo "FAIL: ($how) t1 on the keep-alive connection was not served its own 1,2,3 (got: $(grep -o "KA_${how}_t1=[0-9,A-Z:a-z]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
   has "KA_${how}_t2=4,5" "rep-keepalive-$how.log" || { echo "FAIL: ($how) t2 on the connection t1 opened was not served its own 4,5 (got: $(grep -o "KA_${how}_t2=[0-9,A-Z:a-z]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
   has "KA_${how}_sockets=1" "rep-keepalive-$how.log" || { echo "FAIL: ($how) the client reconnected, so step 4 did not test one connection across two tests ($(grep -o "KA_${how}_sockets=[0-9]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
@@ -350,7 +350,7 @@ echo "== 5. without the switch: a mock t1 consumed is not served again after t1'
 # scope. (A pid-less end stages the whole pool again, t1's consumed mock with
 # it, and the call between tests is served it: reported, not guarded here.)
 start_dep
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 once.py $PORT record" --name once --disable-tele 2>&1 | tee rec-once.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$RECORD_BIN" mock record -c "python3 once.py $PORT record" --name once --disable-tele 2>&1 | tee rec-once.log
 RC=${PIPESTATUS[0]}
 stop_dep
 [ "$RC" -eq 0 ] && grep -q "ONCE_RECORD_OK" rec-once.log || { echo "FAIL: the once record should pass (exit 0), got $RC"; FAIL=1; }
@@ -361,10 +361,10 @@ GOT=$(mapped_counts keploy/once/mappings.yaml)
 # The control first: with t1 making no call, a call between tests is answered
 # by t1's unconsumed recording, so a miss below is t1's consumption, not a
 # call between tests that nothing could ever answer.
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 once.py $PORT control" --name once --disable-tele 2>&1 | tee rep-once-control.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 once.py $PORT control" --name once --disable-tele 2>&1 | tee rep-once-control.log
 has "ONCE_control_between=1" rep-once-control.log ||
   { echo "FAIL: control: with t1 making no call, the call between tests got '$(grep -o 'ONCE_control_between=[^ ]*' rep-once-control.log | head -1)', want t1's recording (1)"; FAIL=1; }
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 once.py $PORT replay" --name once --disable-tele 2>&1 | tee rep-once.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 once.py $PORT replay" --name once --disable-tele 2>&1 | tee rep-once.log
 RC=${PIPESTATUS[0]}
 echo "the once replay exited $RC (without --strict, the test command's code)"
 has "ONCE_t1=1" rep-once.log || { echo "FAIL: t1 was not served its own recording (got: $(grep -o 'ONCE_t1=[^ ]*' rep-once.log | head -1))"; FAIL=1; }

@@ -71,6 +71,11 @@
 # service), 3306 (MySQL). Env: RECORD_BIN, REPLAY_BIN; MYSQL_IMAGE (default
 # mysql:8.0).
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 # docker_pull_retry: a registry hiccup is retried and named, not taken for a
 # failed lane.
@@ -182,12 +187,12 @@ TESTS=4
 # the proven switch with --sync (KEPLOY_PROVEN=1), which maps each test to the
 # mocks it made as it records.
 record() {
-    local proven="${1:-}" flags=()
-    [ -n "$proven" ] && flags=(--sync)
+    local proven="${1:-}" flags=() switch=0
+    [ -n "$proven" ] && flags=(--sync) && switch=1
     rm -rf keploy keploy.yml
     start_mysql
     start_upstream
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN="$switch" "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -216,7 +221,7 @@ record() {
 # keploy.yaml. RC is its exit code.
 replay() {
     local name="$1" mapping="$2" only="${3:-}" declare="${4:-}" before
-    local switch=()
+    local switch=(KEPLOY_PROVEN=0)
     [ -n "${PROVEN_REPLAY:-}" ] && switch=(KEPLOY_PROVEN=1)
     [ "$mapping" = fresh ] && rm -f keploy/test-set-0/mappings.yaml
     rm -f keploy.yml
@@ -229,7 +234,7 @@ replay() {
         fi
     } >keploy.yml
     before="$(newest_run)"
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
+    sudo -E env PATH="$PATH" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
         --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own

@@ -9,6 +9,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 # --- Helper Functions for Logging and Error Handling ---
 

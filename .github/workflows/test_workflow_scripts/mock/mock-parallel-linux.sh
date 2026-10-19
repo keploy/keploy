@@ -287,7 +287,7 @@ fi
 
 if half off; then
 echo "== 3. without the switch: record two endpoints under two pid scopes =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p --disable-tele 2>&1 | tee rec.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p --disable-tele 2>&1 | tee rec.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] || fail "without the switch the record should pass (exit 0), got $RC"
 case "$(line_of rec.log CLAIM)" in
@@ -301,7 +301,7 @@ kill "$DP" 2>/dev/null
 wait "$DP" 2>/dev/null
 
 echo "== 4. without the switch: two concurrent workers, both hitting /b, dependency DOWN =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name p --disable-tele 2>&1 | tee rep.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name p --disable-tele 2>&1 | tee rep.log
 grep -q "t2=SERVED:BBB" rep.log || fail "the worker scoped to t2 was NOT served /b"
 grep -q "t1=MISS"       rep.log || fail "the worker scoped to t1 was NOT isolated (it saw another test's mock)"
 fi

@@ -43,6 +43,12 @@
 # nobody, deterministically, and only the capture-incomplete guard keeps it.
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
+# This lane guards the switch-off prune (--remove-unused-mocks) and its
+# --health-poll-timeout gate, which the proven switch ignores and refuses
+# (design v14 U18). So it runs keploy with the switch off (KEPLOY_PROVEN=0),
+# where that still works: the default on Windows and macOS. Unset, a Linux
+# keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true

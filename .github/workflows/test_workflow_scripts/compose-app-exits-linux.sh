@@ -16,6 +16,11 @@
 # Env: RECORD_BIN (the keploy binary under test). The agent image the binary
 # names must be loaded (.github/actions/download-image).
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
@@ -225,7 +230,7 @@ ended_at_markers() {
 }
 
 echo "== 1. a compose app that exits on its own, the switch off =="
-record exits-off ""
+record exits-off 0
 saved_all exits-off
 ended_at_markers exits-off
 cleanup
@@ -237,7 +242,7 @@ ended_at_markers exits-on
 cleanup
 
 echo "== 3. a compose command naming its project (-p), the switch off =="
-record exits-project "" "-p $PROJECT"
+record exits-project 0 "-p $PROJECT"
 saved_all exits-project
 ended_at_markers exits-project
 cleanup

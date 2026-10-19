@@ -305,7 +305,7 @@ expect keys-two.txt "test_two alone did not name its containers as the full run 
 
 echo "== 4. the switch's recording replays without the switch =="
 start_suite
-sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele --debug > rep-off.log 2>&1
+sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN=0 "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele --debug > rep-off.log 2>&1
 RC=$?
 grep -E "[0-9]+ (passed|failed|error)" rep-off.log | tail -3
 [ "$RC" -eq 0 ] || { echo "FAIL: the replay without the switch exited $RC"; tail -40 rep-off.log; FAIL=1; }
@@ -323,7 +323,7 @@ fi
 
 if half off; then
 echo "== 5. without the switch nothing is keyed =="
-record ck-off rec-off.log ""
+record ck-off rec-off.log 0
 grep -q "2 passed" rec-off.log || { echo "FAIL: pytest did not pass both tests recording without the switch"; FAIL=1; }
 untouched rec-off.log "an agent without the switch read Docker for container keys in record"
 keys_of ck-off | sort > keys-off.txt

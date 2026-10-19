@@ -39,6 +39,11 @@
 # replaying. The script stops only the processes it started. Ports: 8092
 # (app), 9097 (dependency). Env: RECORD_BIN, REPLAY_BIN.
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 
@@ -114,7 +119,7 @@ read -r line <&"${DEPPROC[0]}"
 [ "$line" = ready ] || { echo "::error::the dependency did not start"; exit 1; }
 
 # Record two GET /n and one GET /t, with the dependency up.
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$RECORD_BIN" record -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -163,7 +168,7 @@ replay() {
     local name="$1" before
     before="$(newest_run)"
     # shellcheck disable=SC2086
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${PROVEN:+KEPLOY_PROVEN=1} "$REPLAY_BIN" test -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN="${PROVEN:-0}" "$REPLAY_BIN" test -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -207,14 +212,14 @@ expect_body_fail() {
         fail "$1: the report does not show keploy's no-mock answer as the actual body"
 }
 
-PROVEN="" replay off-recorded
+PROVEN=0 replay off-recorded
 expect_pass "1 (switch off, the recording as it is)"
 expect_upgrade_pass "1"
 expect_connect_pass "1"
 
 cp keploy/test-set-0/mocks.yaml mocks.yaml.saved
 : >keploy/test-set-0/mocks.yaml
-PROVEN="" replay off-no-mocks
+PROVEN=0 replay off-no-mocks
 expect_body_fail "2 (switch off, no mocks: keploy's plain-text answer in place of the JSON)"
 [ "$(text_test .status)" = PASSED ] ||
     fail "2: GET /t's text body of the recorded kind must stay uncompared with the switch off, as documented (status $(text_test .status))"

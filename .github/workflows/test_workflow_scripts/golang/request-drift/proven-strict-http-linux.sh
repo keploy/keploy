@@ -48,6 +48,11 @@
 # containers it started. Ports: 8090 (app), 9099 (payments), as the app has
 # them. Env: RECORD_BIN, REPLAY_BIN; DEP_IMAGE (default python:3.11-slim).
 set -uo pipefail
+# The proven switch, stated for every keploy this lane runs: the steps that
+# say KEPLOY_PROVEN=1 run under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
+# them. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 
@@ -146,14 +151,14 @@ stop_containers() {
     CONTAINERS=()
 }
 
-# record <proven: 1 or ""> <payments url>: records two GET /order.
+# record <proven: 1 or 0> <payments url>: records two GET /order.
 record() {
     local proven="$1" url="$2"
     rm -rf keploy
     sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "env AMOUNT=100 PAYMENTS_URL=$url ./order-app" \
-        --generateGithubActions=false --disable-tele >"record-${proven:-off}.log" 2>&1 </dev/null &
+        --generateGithubActions=false --disable-tele >"record-$proven.log" 2>&1 </dev/null &
     REC_PID=$!
-    wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 "record-${proven:-off}.log"; exit 1; }
+    wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 "record-$proven.log"; exit 1; }
     for _ in 1 2; do
         out="$(curl -s "http://127.0.0.1:$APP/order")"
         [ "$out" = '{"order":"ok"}' ] || fail "GET /order answered '$out' while recording"
@@ -171,9 +176,9 @@ replay() {
     local name="$1" amount="$2" url="$3" before
     shift 3
     before="$(newest_run)"
-    # The switch is on only where a step asks for it, whatever the job's
-    # environment holds.
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$@" "$REPLAY_BIN" test -c "env AMOUNT=$amount PAYMENTS_URL=$url ./order-app" \
+    # The switch is off unless a step asks for it (KEPLOY_PROVEN=1 in env,
+    # which comes after the 0 and wins), whatever the job's environment holds.
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=0 "$@" "$REPLAY_BIN" test -c "env AMOUNT=$amount PAYMENTS_URL=$url ./order-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -227,7 +232,7 @@ echo "== record by host (no switch) =="
 ./payments-svc >payments.log 2>&1 &
 DEP_PID=$!
 wait_listen "$DEP" "$DEP_PID" || { echo "::error::the payments service did not start"; exit 1; }
-record "" "http://127.0.0.1:$DEP"
+record 0 "http://127.0.0.1:$DEP"
 kill "$DEP_PID" 2>/dev/null
 wait "$DEP_PID" 2>/dev/null
 DEP_PID=""
@@ -279,7 +284,7 @@ echo "== 7b. KEPLOY_PROVEN=1, the container started while the replay runs: passe
 URL_FILE="$WORK/payments-url"
 rm -f "$URL_FILE"
 before="$(newest_run)"
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env AMOUNT=100 PAYMENTS_URL_FILE=$URL_FILE ./order-app" \
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env AMOUNT=100 PAYMENTS_URL_FILE=$URL_FILE ./order-app" \
     --delay 1 --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele >midsession.log 2>&1 </dev/null &
 MID_PID=$!
 # keploy started the app, so its session (and its watch of Docker) is up: the
@@ -322,7 +327,7 @@ expect_pass "step 10"
 stop_containers
 
 echo "== 11. no data race =="
-for f in record-off.log record-1.log unchanged.log host.log hostoff.log drift.log driftoff.log newcontainer.log midsession.log otherconfig.log othercontainer.log othercontaineroff.log; do
+for f in record-0.log record-1.log unchanged.log host.log hostoff.log drift.log driftoff.log newcontainer.log midsession.log otherconfig.log othercontainer.log othercontaineroff.log; do
     grep -q 'WARNING: DATA RACE' "$f" 2>/dev/null && fail "data race in $f"
 done
 

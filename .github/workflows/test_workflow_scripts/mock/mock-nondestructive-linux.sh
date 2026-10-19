@@ -159,7 +159,7 @@ if grep -q '/users' "$MFILE"; then echo "FAIL: $LABEL: the baseline's calls surv
 no_staging_left "a successful re-record"
 }
 
-half off && run_all switch-off ""
+half off && run_all switch-off 0
 half on && run_all switch-on 1
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK NON-DESTRUCTIVE E2E: PASSED"; else echo "MOCK NON-DESTRUCTIVE E2E: FAILED"; fi

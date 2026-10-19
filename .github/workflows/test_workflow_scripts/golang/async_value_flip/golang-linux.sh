@@ -26,6 +26,11 @@
 # answered. Ports: 8098 (app), 9098 (config service). Env: RECORD_BIN,
 # REPLAY_BIN.
 set -uo pipefail
+# This lane guards the switch-off prune (--remove-unused-mocks) of async
+# epochs, which the proven switch ignores (design v14 U18). So it runs keploy
+# with the switch off (KEPLOY_PROVEN=0), where that still works: the default
+# on Windows and macOS. Unset, a Linux keploy runs the proven model.
+export KEPLOY_PROVEN=0
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"

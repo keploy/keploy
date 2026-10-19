@@ -34,6 +34,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 # match, grep with no match, startup curl retries), so disable errexit here.
 set +e
 set -o pipefail
+# This lane guards --schema-noise-detection and --mock-noise-strict, which the
+# proven switch replaces (record's learn step learns drifting fields) (design
+# v14 U18). So it runs keploy with the switch off (KEPLOY_PROVEN=0), where
+# that still works: the default on Windows and macOS. Unset, a Linux keploy
+# runs the proven model.
+export KEPLOY_PROVEN=0
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
