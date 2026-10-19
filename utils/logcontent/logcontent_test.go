@@ -45,20 +45,22 @@ type rawBody []byte
 // constructors are the field constructors a call site uses: the helpers, or
 // the zap ones they stand in for.
 type constructors struct {
-	bytes func(string, []byte) zap.Field
-	str   func(string, string) zap.Field
-	any   func(string, any) zap.Field
+	bytes  func(string, []byte) zap.Field
+	binary func(string, []byte) zap.Field
+	str    func(string, string) zap.Field
+	any    func(string, any) zap.Field
 }
 
 var (
-	helpers = constructors{Bytes, String, Any}
-	zaps    = constructors{zap.ByteString, zap.String, zap.Any}
+	helpers = constructors{Bytes, Binary, String, Any}
+	zaps    = constructors{zap.ByteString, zap.Binary, zap.String, zap.Any}
 )
 
 // logEach logs one Debug line per constructor, and per kind of value Any
 // treats apart, through logger, the way call sites build them.
 func logEach(logger *zap.Logger, c constructors) {
 	logger.Debug("frame", c.bytes("payload", []byte(canary)))
+	logger.Debug("buffer", c.binary("buffer", []byte(canary)))
 	logger.Debug("header", c.str("value", canary))
 	logger.Debug("mock", c.any("mock", mock))
 	logger.Debug("raw", c.any("raw", []byte(canary)))
@@ -154,11 +156,28 @@ func TestSetRestores(t *testing.T) {
 	}
 }
 
+// A launcher passes the opt-in to the native agent it starts as AgentFlag,
+// and nothing with the switch off, so the agent's argv is what it was; the
+// agent that reads the flag opts in.
+func TestAgentArgsCarryTheOptIn(t *testing.T) {
+	t.Cleanup(Set(false))
+	if got := AgentArgs(); got != nil {
+		t.Fatalf("with the switch off, AgentArgs() = %q, want nothing", got)
+	}
+	OptIn()
+	if !On() {
+		t.Fatal("OptIn left the switch off")
+	}
+	if got := AgentArgs(); len(got) != 1 || got[0] != "--"+AgentFlag {
+		t.Fatalf("with the switch on, AgentArgs() = %q, want [--%s]", got, AgentFlag)
+	}
+}
+
 func TestNoHelperLogsContentWithTheSwitchOff(t *testing.T) {
 	t.Cleanup(Set(false))
 	lines := observed(t, func(l *zap.Logger) { logEach(l, helpers) })
-	if len(lines) != 6 {
-		t.Fatalf("logged %d lines, want 6", len(lines))
+	if len(lines) != 7 {
+		t.Fatalf("logged %d lines, want 7", len(lines))
 	}
 	for _, line := range lines {
 		if carries(line) {
@@ -170,6 +189,7 @@ func TestNoHelperLogsContentWithTheSwitchOff(t *testing.T) {
 	digest := fmt.Sprintf(`"len": %d, "fp": "%s"`, len(canary), Fingerprint([]byte(canary)))
 	for i, want := range []string{
 		`"payload": {` + digest + `}`,
+		`"buffer": {` + digest + `}`,
 		`"value": {` + digest + `}`,
 		`"mock": {"type": "*logcontent.row"}`,
 		`"raw": {"type": "[]uint8", ` + digest + `}`,
@@ -188,8 +208,8 @@ func TestEveryHelperLogsContentWithTheSwitchOn(t *testing.T) {
 	t.Cleanup(Set(true))
 	lines := observed(t, func(l *zap.Logger) { logEach(l, helpers) })
 	want := observed(t, func(l *zap.Logger) { logEach(l, zaps) })
-	if len(lines) != 6 || len(want) != 6 {
-		t.Fatalf("logged %d and %d lines, want 6", len(lines), len(want))
+	if len(lines) != 7 || len(want) != 7 {
+		t.Fatalf("logged %d and %d lines, want 7", len(lines), len(want))
 	}
 	for i, line := range lines {
 		if !carries(line) {
