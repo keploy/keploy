@@ -465,3 +465,19 @@ func TestTable_TwoVariablesNeverShareALiveValue(t *testing.T) {
 		t.Fatalf("a call bound the run's live value as another variable: ok %v, evidence %+v %+v", ok, bad, with)
 	}
 }
+
+// A call checked before the next set began binds nothing in it: a set's
+// boundary ends the scope, as the next scope's start does.
+func TestTable_NewSetMakesAnEarlierCallStale(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	tb.Start(nil)
+	gen := tb.Gen()
+	tb.NewSet()
+	if _, _, stale, ok := tb.BindAll(gen, []Binding{{Name: "late", Value: "l-1", Recorded: "l-r"}}); ok || !stale {
+		t.Fatalf("a call of the previous set bound in the next: ok %v stale %v", ok, stale)
+	}
+	if _, bound := tb.Lookup("late"); bound {
+		t.Fatal("a stale call of the previous set left late bound")
+	}
+}
