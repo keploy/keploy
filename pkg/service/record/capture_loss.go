@@ -79,6 +79,9 @@ type captureWatch struct {
 	unreadMocks  map[string]string
 	unreadMapped map[string]bool
 	unreadLost   models.CaptureLosses
+	// ca is, with the proven switch off, the WARN of the TLS handshakes a
+	// client failed with keploy's certificate (caRejectWatch); nil with it on.
+	ca *caRejectWatch
 	// agent watches which agent process answers (models.AgentInstanceWatch):
 	// the counts are the process's, from when it started, and the test cases
 	// and mocks it captured are in its memory until it hands them over. An
@@ -101,6 +104,11 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	reader, ok := instr.(CaptureLossReader)
 	if !provenswitch.On() || !ok {
 		w.off = true
+		if ok {
+			// With the switch off a failed TLS handshake is only said, at
+			// WARN, never a failure.
+			w.ca = newCARejectWatch(ctx, logger, reader)
+		}
 		return w
 	}
 	w.reader = reader
@@ -146,7 +154,11 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 // the previous check (models.PerTest) is its own. A check that failed leaves
 // the next one to count from the check before.
 func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
-	if w == nil || w.off {
+	if w == nil {
+		return
+	}
+	if w.off {
+		w.ca.afterTestCase(ctx, name)
 		return
 	}
 	if w.baseErr != nil {
@@ -241,7 +253,14 @@ func (w *captureWatch) mapped(test string, entries []models.MockEntry) {
 // recording fails on it (design v14 §7.5: evidence charged to no test).
 // Without it a loss after the last test case went unsaid.
 func (w *captureWatch) afterTestCases(ctx context.Context) {
-	if w == nil || w.off || w.baseErr != nil {
+	if w == nil {
+		return
+	}
+	if w.off {
+		w.ca.afterTestCases(ctx)
+		return
+	}
+	if w.baseErr != nil {
 		return
 	}
 	// No deadline of its own (rule 15), as the base read: the agent's
@@ -267,11 +286,25 @@ func (w *captureWatch) afterTestCases(ctx context.Context) {
 	w.final, w.finalNotJudged = now.Since(w.base).Split()
 }
 
+// waitForReads waits, with the switch off, for the CA watch's reads still out
+// (caRejectWatch.waitForReads): once the frame drains are over, while the
+// agent is up. With the switch on, the final read is waited for as it is made.
+func (w *captureWatch) waitForReads() {
+	if w == nil || !w.off {
+		return
+	}
+	w.ca.waitForReads()
+}
+
 // finish says, at ERROR, which test cases were recorded while the agent could
 // not capture every call, or could not be checked, and reports whether the
 // recording is to fail for it.
 func (w *captureWatch) finish(testSetID string) bool {
-	if w == nil || w.off {
+	if w == nil {
+		return false
+	}
+	if w.off {
+		w.ca.finish(testSetID) // said, never a failure
 		return false
 	}
 	w.mu.Lock()
