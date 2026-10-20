@@ -4152,6 +4152,15 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// with none bound, the previous set's run's neither (its mocks
 		// reuse the names), and what its start-up binds before its first
 		// test is the run's, which each of its tests reads.
+		//
+		// The replay's re-registration of a set's mocks with an agent it
+		// took for replaced mid bring-up (ensureAgentHoldsStoredMocks)
+		// reaches Mock too, without StartsTestSet. Where the agent was not
+		// in fact replaced, what the start-up bound so far is forgotten
+		// here, as the learn step's tracker forgets what it served (above),
+		// so the two stay one set: a start-up call made again binds anew,
+		// and a test's use of a value bound before the repair is a miss,
+		// never an answer from a binding the learn step no longer knows.
 		p.getMockManager().NewVariableSet()
 	}
 
