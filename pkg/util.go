@@ -590,6 +590,9 @@ type preparedHTTPRequest struct {
 	// host port. 0 when not known, or when the URL names where the app is
 	// (SimulationConfig.TargetFromURL).
 	AppPort uint16
+	// ended is how the app ended the request's connection, which client.Do
+	// may report as net/http's own close of it (peerEnd).
+	ended *peerEnd
 }
 
 // HostHeaderOf is the Host header a client sends for u: its host, and its port
@@ -846,6 +849,12 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	_, hasAcceptEncoding := req.Header["Accept-Encoding"]
 	disableCompression := !hasAcceptEncoding
 
+	// Each connection is dialled as net/http dials it, and notes how the app
+	// ended it (peerEnd). A Transport with its own DialContext tries HTTP/2
+	// only when told to, so it is told to exactly when a Transport without
+	// one would: with no TLS configuration of keploy's.
+	ended := &peerEnd{}
+	autoHTTP2 := cfg.TLSConfig == nil
 	var client *http.Client
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
@@ -858,6 +867,8 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
+				DialContext:        ended.dial,
+				ForceAttemptHTTP2:  autoHTTP2,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -871,6 +882,8 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
+				DialContext:        ended.dial,
+				ForceAttemptHTTP2:  autoHTTP2,
 			},
 		}
 	} else {
@@ -885,6 +898,8 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
+				DialContext:        ended.dial,
+				ForceAttemptHTTP2:  autoHTTP2,
 			},
 		}
 	}
@@ -893,6 +908,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		Request: req,
 		Client:  client,
 		AppPort: appPort,
+		ended:   ended,
 	}, nil
 }
 
@@ -1138,14 +1154,17 @@ func IsTransportConnReset(err error) bool {
 // the bounded retries, and a mid-response reset is never retried. A refusal,
 // reset or drop at an address reach says the app's server on appPort (the port
 // the test was recorded on, 0 when not known) can never be reached at fails at
-// once, saying why, as an *UnreachableAppPortError.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
+// once, saying why, as an *UnreachableAppPortError. ended is how the app ended
+// the request's connection (nil when not known): a drop net/http reports as
+// its own close of the connection is the drop it is (peerEnd.explain).
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16, ended *peerEnd) (*http.Response, error) {
 	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
 			return resp, nil
 		}
+		err = ended.explain(err)
 		refused := isPreResponseConnRefused(err)
 		// A reset or drop is asked about too: at a published port where the
 		// app listens only on 127.0.0.1 in its container, docker accepts the
@@ -1253,7 +1272,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort, prepared.ended)
 	if errHTTPReq != nil {
 		prepared.Client.CloseIdleConnections()
 		if cfg.answer.didStall() {
@@ -1364,7 +1383,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort, prepared.ended)
 	if errHTTPReq != nil {
 		prepared.Client.CloseIdleConnections()
 		if cfg.answer.didStall() {

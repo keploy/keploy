@@ -57,7 +57,7 @@ func TestDoRequestWithConnRefusedRetry_RecoversTransientRefusal(t *testing.T) {
 	rt := &scriptedRT{errs: []error{connRefusedErr("http://x/a"), connRefusedErr("http://x/a")}}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://x/a", nil)
-	resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0)
+	resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0, nil)
 	if err != nil {
 		t.Fatalf("expected recovery after 2 refusals, got error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestDoRequestWithConnRefusedRetry_StopsAfterMaxWithoutFabricating(t *testin
 	rt := &scriptedRT{errs: errs}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://x/a", nil)
-	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0)
+	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0, nil)
 	if err == nil {
 		t.Fatal("expected an error after exhausting retries — must not fabricate a result")
 	}
@@ -124,7 +124,7 @@ func TestDoRequestWithConnRefusedRetry_DoesNotRetryReset(t *testing.T) {
 	rt := &scriptedRT{errs: []error{connResetErr("http://x/a")}}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://x/a", nil)
-	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0)
+	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0, nil)
 	if err == nil {
 		t.Fatal("expected the reset error to propagate without retry")
 	}
@@ -140,7 +140,7 @@ func TestDoRequestWithConnRefusedRetry_RewindsBody(t *testing.T) {
 	rt := &scriptedRT{errs: []error{connRefusedErr("http://x/a")}}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", "http://x/a", strings.NewReader(body))
-	if _, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0); err != nil {
+	if _, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil, 0, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rt.lastBody != body {
@@ -175,7 +175,7 @@ func TestDoRequestWithConnRefusedRetry_ReachablePortStillRetries(t *testing.T) {
 		rt := &scriptedRT{errs: []error{connRefusedErr(u.url), connRefusedErr(u.url)}}
 		reach := &answerReach{}
 		req, _ := http.NewRequestWithContext(context.Background(), "GET", u.url, nil)
-		resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), &http.Client{Transport: rt}, req, reach, 0)
+		resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), &http.Client{Transport: rt}, req, reach, 0, nil)
 		if err != nil || resp.StatusCode != 200 {
 			t.Fatalf("%s: expected recovery after 2 refusals, got (%v, %v)", u.url, resp, err)
 		}
@@ -205,7 +205,7 @@ func TestDoRequestWithConnRefusedRetry_UnreachablePortFailsAtOnce(t *testing.T) 
 		rt := &scriptedRT{errs: []error{connRefusedErr("http://localhost:8096/a"), connRefusedErr("http://localhost:8096/a")}}
 		reach := &answerReach{reason: "it is not published on the host"}
 		req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://localhost:8096/a", nil)
-		_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), &http.Client{Transport: rt}, req, reach, tc.appPort)
+		_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), &http.Client{Transport: rt}, req, reach, tc.appPort, nil)
 		var unreachable *UnreachableAppPortError
 		if !errors.As(err, &unreachable) || unreachable.Port != 8096 || unreachable.AppPort != tc.appPort {
 			t.Fatalf("app port %d: want an UnreachableAppPortError for 8096, got %v", tc.appPort, err)
