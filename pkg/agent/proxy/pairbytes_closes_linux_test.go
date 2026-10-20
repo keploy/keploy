@@ -382,7 +382,7 @@ func TestAProxysCloseIsJudgedByWhatCameAfter(t *testing.T) {
 			{"a byte it had sent missing: a loss", ps.received + 1, ps.received + 1, false, true, true},
 			{"a byte it had not sent missing: unknown", ps.received + 1, ps.received, false, false, false},
 		} {
-			pc.lost.Store(false)
+			pc.lost.Store(false) // each case on its own: no loss charged yet
 			was := lossesOf(p, models.CaptureLossAppBytesLost)
 			ok, err := p.pairReached(&pairTarget{pc: pc, want: c.want, sent: c.sent, finCounted: c.finCounted})
 			lost := lossesOf(p, models.CaptureLossAppBytesLost) > was
@@ -648,51 +648,12 @@ func TestAByteLostBeforeTheApplicationsResetIsALoss(t *testing.T) {
 	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
 		t.Fatal(err)
 	}
-	rc, err := proxySide.SyscallConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Accept a segment only when its length is its TCP header's: no payload.
-	noPayload := []unix.SockFilter{
-		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 12},    // the data offset byte
-		{Code: unix.BPF_ALU | unix.BPF_RSH | unix.BPF_K, K: 2},    // >> 2
-		{Code: unix.BPF_ALU | unix.BPF_AND | unix.BPF_K, K: 0x3c}, // & 0x3c: the header's length
-		{Code: unix.BPF_MISC | unix.BPF_TAX},                      // X = it
-		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_LEN},           // A = the segment's length
-		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_X, Jt: 0, Jf: 1},
-		{Code: unix.BPF_RET | unix.BPF_K, K: 0xffffffff},
-		{Code: unix.BPF_RET | unix.BPF_K, K: 0},
-	}
-	var serr error
-	if err := rc.Control(func(fd uintptr) {
-		serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: uint16(len(noPayload)), Filter: &noPayload[0]})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if errors.Is(serr, unix.EPERM) {
-		t.Skipf("this kernel refuses an unprivileged socket filter on a TCP socket: %v", serr)
-	}
-	if serr != nil {
-		t.Fatalf("attach the filter to the proxy's socket: %v", serr)
-	}
+	dropPayloads(t, proxySide)
 	_ = reader.Close() // kept; its FIN reaches the application
 	if _, err := app.Read(make([]byte, 1)); err != io.EOF {
 		t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
 	}
-	if _, err := app.Write([]byte("p")); err != nil {
-		t.Fatal(err)
-	}
-	local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
-	for { // the byte sent, and not acknowledged: dropped at the proxy
-		d, err := lookupTCP(local, remote)
-		if err != nil {
-			t.Fatalf("the application's socket: %v", err)
-		}
-		if d.info != nil && d.wqueue == 1 && d.info.Notsent_bytes == 0 {
-			break
-		}
-		runtime.Gosched()
-	}
+	sendDropped(t, app)
 	targets, err := p.pairTargets(1)
 	if err != nil || len(targets) != 1 || targets[0].want != 11 || targets[0].sent != 11 {
 		t.Fatalf("pairTargets = %+v, %v; want one connection, 11 bytes written and sent", targets, err)
@@ -736,6 +697,103 @@ func TestATCPInfoTooShortForNotsentIsNone(t *testing.T) {
 			t.Errorf("a tcp_info of %d bytes: info %v, %v; want info %v", c.n, d.info != nil, err, c.info)
 		}
 	}
+}
+
+// The same lost byte and abort while the proxy's handler still holds the
+// connection (no close): the reset reaches its live socket, and what the
+// application had sent decides as for any reset. A root test.
+func TestAByteLostBeforeTheApplicationsResetOnAHeldConnectionIsALoss(t *testing.T) {
+	p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	dropPayloads(t, proxySide)
+	sendDropped(t, app)
+	targets, err := p.pairTargets(1)
+	if err != nil || len(targets) != 1 || targets[0].want != 11 || targets[0].sent != 11 {
+		t.Fatalf("pairTargets = %+v, %v; want one connection, 11 bytes written and sent", targets, err)
+	}
+	if err := app.SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close() // the abort
+	for proxyState(t, proxySide) != tcpClose {
+		runtime.Gosched()
+	}
+	ok, err := p.pairReached(targets[0])
+	if !ok || err != nil {
+		t.Fatalf("a byte sent and lost before the reset = %v, %v; want resolved as a loss", ok, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+		t.Fatalf("%d app_bytes_lost charged, want 1: the byte the application sent never reached the proxy", l)
+	}
+}
+
+// dropPayloads attaches a filter to c's socket that drops every segment with
+// a payload, as a loaded host's backlog drops one; it skips the test where
+// the kernel refuses an unprivileged filter on a TCP socket (Linux 7).
+func dropPayloads(t *testing.T, c *net.TCPConn) {
+	t.Helper()
+	rc, err := c.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Accept a segment only when its length is its TCP header's: no payload.
+	noPayload := []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 12},    // the data offset byte
+		{Code: unix.BPF_ALU | unix.BPF_RSH | unix.BPF_K, K: 2},    // >> 2
+		{Code: unix.BPF_ALU | unix.BPF_AND | unix.BPF_K, K: 0x3c}, // & 0x3c: the header's length
+		{Code: unix.BPF_MISC | unix.BPF_TAX},                      // X = it
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_LEN},           // A = the segment's length
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_X, Jt: 0, Jf: 1},
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0xffffffff},
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+	}
+	var serr error
+	if err := rc.Control(func(fd uintptr) {
+		serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: uint16(len(noPayload)), Filter: &noPayload[0]})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if errors.Is(serr, unix.EPERM) {
+		t.Skipf("this kernel refuses an unprivileged socket filter on a TCP socket: %v", serr)
+	}
+	if serr != nil {
+		t.Fatalf("attach the filter to the proxy's socket: %v", serr)
+	}
+}
+
+// sendDropped has the application write one byte, and returns once its socket
+// has sent it and not had it acknowledged: dropped at the proxy (dropPayloads).
+func sendDropped(t *testing.T, app *net.TCPConn) {
+	t.Helper()
+	if _, err := app.Write([]byte("p")); err != nil {
+		t.Fatal(err)
+	}
+	local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
+	for {
+		d, err := lookupTCP(local, remote)
+		if err != nil {
+			t.Fatalf("the application's socket: %v", err)
+		}
+		if d.info != nil && d.wqueue == 1 && d.info.Notsent_bytes == 0 {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+// proxyState is the TCP state of c's socket (tcpi_state).
+func proxyState(t *testing.T, c *net.TCPConn) uint8 {
+	t.Helper()
+	ps := readProxySide(c)
+	if ps.err != nil {
+		t.Fatal(ps.err)
+	}
+	return ps.state
 }
 
 // appSent is what the application's socket had written less what it had not
