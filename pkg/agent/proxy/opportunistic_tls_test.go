@@ -574,7 +574,7 @@ func TestAnOpportunisticClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	// The dependency ends its side once keploy passes the client's end on,
 	// as a server does: the upgrade's relay then ends at once.
-	upstream, _ := newTLSTestServer(t, 0, nil, func(c *tls.Conn) {
+	upstream, _ := newTLSTestServer(t, nil, func(c *tls.Conn) {
 		go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
 	})
 	defer upstream.Close()

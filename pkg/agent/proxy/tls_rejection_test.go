@@ -262,7 +262,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			// it for ever. MySQL, the only sender of this directive in
 			// production, writes its ClientHello at once and is protected
 			// by the client-write hold instead.
-			upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil)
+			upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil)
 			upgrading := make(chan struct{})
 			r := relay.New(relay.Config{
 				Logger:                  zap.NewNop(),

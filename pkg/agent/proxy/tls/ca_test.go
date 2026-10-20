@@ -838,44 +838,45 @@ func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 // TestCertForClient_NoSNINamesDestinationIP: a client that dialled an IP literal
 // sends no SNI, so the leaf must carry the destination IP as an IP SAN (Go
 // checks it: "cannot validate certificate for 10.96.0.1 because it doesn't
-// contain any IP SANs"). An SNI still names the leaf, and SrcPortToDstURL keeps
-// holding only what the client asked for.
+// contain any IP SANs"). An SNI still names the leaf, and so does a CONNECT
+// target when there is no SNI. SrcPortToDstURL, still filed for readers
+// outside this module, holds what this handshake was asked for, "" included.
+//
+// Every leaf here is minted for one client end, in an order where an earlier
+// one's name could stand in for a later one's: the name comes from what each
+// handshake is handed, never from what an earlier one on the same end asked
+// for. It used to: the SNI was filed under the client's source port and a
+// ClientHello without one took it, so after "api.example.com" the IP literal
+// got a leaf for "api.example.com" (the CI red of
+// TestHandleConnectionNamesTheLeafForAnIPLiteralDestinationOnReplay).
 func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 	resetCertCacheForTest()
 	logger := zap.NewNop()
 	caKey, caCert := helperCA(t)
+	hello, cleanup, err := helperClientHello("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	port := hello.Conn.RemoteAddr().(*net.TCPAddr).Port
+	defer SrcPortToDstURL.Delete(port)
+	filed := func() any { v, _ := SrcPortToDstURL.Load(port); return v }
 
-	leafFor := func(sni string, dstIP net.IP) (*x509.Certificate, int) {
+	leafFor := func(sni, connectTarget string, dstIP net.IP) *x509.Certificate {
 		t.Helper()
-		hello, cleanup, err := helperClientHello(sni)
+		hello.ServerName = sni
+		cert, err := certForClient(logger, hello, caKey, caCert, time.Time{}, connectTarget, dstIP)
 		if err != nil {
-			t.Fatal(err)
-		}
-		defer cleanup()
-		cert, err := certForClient(logger, hello, caKey, caCert, time.Time{}, dstIP)
-		if err != nil {
-			t.Fatalf("certForClient(%q, %v): %v", sni, dstIP, err)
+			t.Fatalf("certForClient(%q, %q, %v): %v", sni, connectTarget, dstIP, err)
 		}
 		leaf, err := x509.ParseCertificate(cert.Certificate[0])
 		if err != nil {
 			t.Fatal(err)
 		}
-		return leaf, hello.Conn.RemoteAddr().(*net.TCPAddr).Port
+		return leaf
 	}
 
-	for _, ip := range []string{"10.96.0.1", "fd00::1"} {
-		leaf, port := leafFor("", net.ParseIP(ip))
-		if err := leaf.VerifyHostname(ip); err != nil {
-			t.Errorf("no SNI, destination %s: leaf does not name it: %v (IP SANs %v)", ip, err, leaf.IPAddresses)
-		}
-		if v, _ := SrcPortToDstURL.Load(port); v != "" {
-			t.Errorf("no SNI: SrcPortToDstURL = %q, want empty (it carries the SNI only)", v)
-		}
-		SrcPortToDstURL.Delete(port)
-	}
-
-	leaf, port := leafFor("api.example.com", net.ParseIP("10.96.0.1"))
-	SrcPortToDstURL.Delete(port)
+	leaf := leafFor("api.example.com", "", net.ParseIP("10.96.0.1"))
 	if err := leaf.VerifyHostname("api.example.com"); err != nil {
 		t.Errorf("SNI set: leaf does not name it: %v", err)
 	}
@@ -883,9 +884,33 @@ func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 		t.Errorf("SNI set: leaf has IP SANs %v, want the SNI alone", leaf.IPAddresses)
 	}
 
-	leaf, port = leafFor("", nil)
-	SrcPortToDstURL.Delete(port)
-	if len(leaf.IPAddresses) != 0 {
-		t.Errorf("no SNI, no destination: leaf has IP SANs %v, want none (as before)", leaf.IPAddresses)
+	for _, ip := range []string{"10.96.0.1", "fd00::1"} {
+		leaf := leafFor("", "", net.ParseIP(ip))
+		if err := leaf.VerifyHostname(ip); err != nil {
+			t.Errorf("no SNI, destination %s, after a leaf for an SNI on the same client end: leaf CN %q does not name it: %v (IP SANs %v)", ip, leaf.Subject.CommonName, err, leaf.IPAddresses)
+		}
+		if v := filed(); v != "" {
+			t.Errorf("no SNI, destination %s: SrcPortToDstURL = %q, want \"\": the client asked for no name, and the IP is none", ip, v)
+		}
+	}
+
+	leaf = leafFor("", "proxied.example.com", net.ParseIP("10.96.0.1"))
+	if err := leaf.VerifyHostname("proxied.example.com"); err != nil {
+		t.Errorf("no SNI, CONNECT target set: leaf does not name it: %v", err)
+	}
+	if v := filed(); v != "proxied.example.com" {
+		t.Errorf("no SNI, CONNECT target set: SrcPortToDstURL = %q, want the target", v)
+	}
+	leaf = leafFor("api.example.com", "proxied.example.com", nil)
+	if err := leaf.VerifyHostname("api.example.com"); err != nil {
+		t.Errorf("SNI and CONNECT target set: leaf does not name the SNI: %v", err)
+	}
+	if v := filed(); v != "api.example.com" {
+		t.Errorf("SNI and CONNECT target set: SrcPortToDstURL = %q, want the SNI", v)
+	}
+
+	leaf = leafFor("", "", nil)
+	if leaf.Subject.CommonName != "" || len(leaf.IPAddresses) != 0 {
+		t.Errorf("no SNI, no CONNECT target, no destination: leaf CN %q, IP SANs %v, want neither (as before)", leaf.Subject.CommonName, leaf.IPAddresses)
 	}
 }
