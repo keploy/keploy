@@ -10,8 +10,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -245,6 +247,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				diag  *matchDiag
 				lmiss *learnMiss
 			)
+			// DIAG (local build only): how long the match took, for KPSLOW.
+			diagStart := time.Now()
 			switch {
 			case provenswitch.On() && opts.Learn:
 				// Record's full round: the learn step decides every request
@@ -277,6 +281,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
+			}
+			if d := time.Since(diagStart); d > time.Second {
+				served := ""
+				if stub != nil {
+					served = stub.Name
+				}
+				h.Logger.Info("KPSLOW a call took over 1s to match", zap.Duration("took", d), zap.Bool("matched", ok), zap.String("served", served), zap.String("call", diagCall(input)))
 			}
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
@@ -318,6 +329,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report)
+				}
+				// DIAG (local build only): the reason keploy's own WARN hides (nextStepOf).
+				if report != nil {
+					why := ""
+					if lmiss != nil {
+						why = lmiss.res.Why
+					}
+					h.Logger.Info("KPWHY no answer for a call", zap.String("call", diagCall(input)), zap.String("closest", report.ClosestMock),
+						zap.String("phase", report.MatchPhase), zap.Int("extra_of_recorded", n), zap.String("learn_why", why),
+						zap.String("diff", report.Diff), zap.String("next_step", report.NextSteps))
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
@@ -642,4 +663,21 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 		}
 	}
 	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}
+}
+
+// diagCall names a call for the DIAG lines: method, path and, for GraphQL, its operation (local build only).
+var diagOp = regexp.MustCompile(`"operationName"\s*:\s*"([^"]+)"`)
+
+func diagCall(in *req) string {
+	out := in.method + " " + in.url.Path
+	if m := diagOp.FindSubmatch(in.body); m != nil {
+		out += " " + string(m[1])
+	} else if len(in.body) > 0 && in.url.Path == "/query" {
+		b := in.body
+		if len(b) > 60 {
+			b = b[:60]
+		}
+		out += " " + string(b)
+	}
+	return out
 }
