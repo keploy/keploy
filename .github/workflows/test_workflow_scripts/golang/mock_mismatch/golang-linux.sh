@@ -257,12 +257,20 @@ echo "✓ the default replay failed every test and exited $default_rc"
 # the values it was found in, unless KEPLOY_LOG_CONTENT opts in (it does not
 # here). The mutated recorded path (/api/v0-mismatch/) reaches a miss's report
 # only as content: the closest mock's rendered request (closest_mock_req) and
-# the recorded value of its "path" field diff. Only the misses are read: the
-# test's dependency rows name the recorded call by its path by design.
+# the recorded value of its "path" field diff. The live path's segment there
+# (/api/v2/) is the diff's live value, which the summary writes {}, and so
+# does every other part of the report that names the path: the advice to
+# declare the call shared (next_steps, on a recording that states lifetimes)
+# names it as the summary does. Only the misses are read: the test's
+# dependency rows name the recorded call by its path by design.
 for rf in "${reports[@]}"; do
     calls=$(yq -o=json '[.tests[].failure_info.unmatched_calls[]?]' "$rf")
     if grep -nE 'v0-mismatch|closest_mock_req|received_req' <<<"$calls"; then
         echo "::error::$(basename "$rf")'s unmatched calls carry the recorded request's content with KEPLOY_LOG_CONTENT unset"
+        exit 1
+    fi
+    if grep -n '/api/v2/' <<<"$calls"; then
+        echo "::error::$(basename "$rf")'s unmatched calls name the live path's segment that differs (/api/v2/), whose values the path's field diff withholds"
         exit 1
     fi
     if [ "$(yq '[.tests[].failure_info.unmatched_calls[]? | select(.content_withheld != true)] | length' "$rf")" != 0 ]; then
@@ -282,6 +290,19 @@ done
 table=$(sed -n '/=== MOCK MISMATCH ===/,$p' test_logs.txt | grep -v 'Keploy')
 if grep -n 'v0-mismatch' <<<"$table"; then
     echo "::error::the MOCK MISMATCH table printed the recorded request's content with KEPLOY_LOG_CONTENT unset"
+    exit 1
+fi
+# The table itself, from its banner to its note, names the live path only as
+# the summary does: not in a heading, a row or a Hint. (What follows the
+# note is the run's, not the table's.)
+table_only=$(sed -n '/=== MOCK MISMATCH ===/,/values are withheld; set KEPLOY_LOG_CONTENT=1/p' test_logs.txt | grep -v 'Keploy')
+if grep -n '/api/v2/' <<<"$table_only"; then
+    echo "::error::the MOCK MISMATCH table names the live path's segment that differs (/api/v2/) with KEPLOY_LOG_CONTENT unset"
+    exit 1
+fi
+if grep -q 'lifetime: perTest' ./keploy/test-set-*/mocks.yaml && ! grep -qF 'pathPrefix: "/api/{}/' <<<"$table_only"; then
+    echo "::error::the MOCK MISMATCH table's Hint does not name the call's path as its summary does (pathPrefix: \"/api/{}/...\")"
+    echo "$table_only" | head -60
     exit 1
 fi
 if ! grep -qE '^[^a-zA-Z]*path[^a-zA-Z(]*\(withheld\)[^a-zA-Z(]*\(withheld\)' <<<"$table" || ! grep -q 'values are withheld; set KEPLOY_LOG_CONTENT=1 to include them' <<<"$table"; then
