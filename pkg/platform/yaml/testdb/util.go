@@ -21,25 +21,14 @@ import (
 )
 
 // buildHTTPSchema assembles the HTTPSchema that will live in a doc's Spec,
-// plus performs the noisy-field detection that mutates tc.Noise. This is the
+// plus, with the proven switch off, performs the time-shaped noisy-field
+// detection that mutates tc.Noise (addTimeShapedNoise). This is the
 // "meaningful work" shared between the YAML and JSON encode paths; it does
 // not touch any yaml.Node or produce any serialized bytes.
 func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
-	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-	if err != nil {
-		utils.LogError(logger, err, "error in flattening http response")
-	}
 	noise := tc.Noise
-	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-		for _, v := range vals {
-			if pkg.IsTime(v) {
-				return true
-			}
-		}
-		return pkg.IsTime(strings.Join(vals, ", "))
-	})
-	for _, v := range noiseFieldsFound {
-		noise[v] = []string{}
+	if !provenswitch.On() {
+		addTimeShapedNoise(tc, noise, logger)
 	}
 
 	httpSchema := models.HTTPSchema{
@@ -60,6 +49,40 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 	}
 	httpSchema.Metadata = specMetadata(tc.Description)
 	return httpSchema
+}
+
+// addTimeShapedNoise adds to noise every response header and body field whose
+// value reads as a time (pkg.IsTime), as match-anything noise. It goes by the
+// value's shape alone: a date-formatted string, or any number within a day of
+// now read as epoch nanoseconds.
+//
+// With the proven switch off, every test case keploy writes (at record, and
+// each time a test case is written again) gets this noise, as it always has.
+// Under the switch it gets none: a field is noise only when it is declared, or
+// when the learn step of record's full round F saw it drift (F replays every
+// test 61.5 s past its recording, so a value the app reads from its clock
+// drifts there and is learned from the drift). A date-shaped value that stays
+// the same from record to replay (a created_at read back from a mocked
+// database) is then asserted. Noised by its shape, a change to it would pass.
+// The Date header a server mints on every answer is not asserted either way:
+// the replay forgives it by its name (models.IsVolatileResponseHeader, unless
+// --disableAutoHeaderNoise), never by its value.
+func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) {
+	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+	if err != nil {
+		utils.LogError(logger, err, "error in flattening http response")
+	}
+	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})
+	for _, v := range noiseFieldsFound {
+		noise[v] = []string{}
+	}
 }
 
 // specMetadata builds the spec-level Metadata map carrying the fields that
