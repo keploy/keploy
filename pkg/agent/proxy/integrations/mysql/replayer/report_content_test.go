@@ -11,10 +11,11 @@ import (
 	"go.keploy.io/server/v3/utils/logcontent"
 )
 
-// queryMiss is the report of a COM_QUERY no recorded mock answers.
-func queryMiss(t *testing.T, query string) *models.MockMismatchReport {
+// queryMiss is the report of a COM_QUERY no recorded mock answers, replayed
+// with the handshake and data, the data mocks the session records.
+func queryMiss(t *testing.T, query string, data ...*models.Mock) *models.MockMismatchReport {
 	t.Helper()
-	client, done := replay(t, &fakeMockDb{session: []*models.Mock{nativeHandshake()}})
+	client, done := replay(t, &fakeMockDb{session: append([]*models.Mock{nativeHandshake()}, data...)})
 	client.t = t
 	client.greetAndAnswer("app", mysql.Native)
 	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
@@ -53,6 +54,33 @@ func TestAQueryMissNamesItsStatementWithoutLiteralsByDefault(t *testing.T) {
 	rep = queryMiss(t, query)
 	if rep.ActualSummary != "COM_QUERY "+query || !strings.Contains(rep.Diff, "actual: "+query) || rep.ContentWithheld {
 		t.Errorf("with the switch on: summary %q, diff %q", rep.ActualSummary, rep.Diff)
+	}
+}
+
+// A query's miss names the closest recorded statement as it names the live
+// one: with its literals written "?" by default, as a recorded literal is a
+// value the application sent when it was recorded.
+func TestAQueryMissNamesItsClosestStatementWithoutLiteralsByDefault(t *testing.T) {
+	const recorded = "SELECT token FROM sessions WHERE owner = 'kp-recorded-secret' AND tries = 77"
+	const query = "SELECT * FROM users WHERE email = 'kp-mysql-secret' AND id = 4242"
+	closest := readbackMock("q-sessions", recorded, "row-1", zeroTime())
+	rep := queryMiss(t, query, closest)
+	if rep.ClosestMock != "q-sessions" {
+		t.Fatalf("the miss names closest mock %q, want q-sessions: %+v", rep.ClosestMock, *rep)
+	}
+	for _, f := range []string{rep.ActualSummary, rep.Diff, rep.NextSteps} {
+		if strings.Contains(f, "kp-recorded-secret") || strings.Contains(f, "77") {
+			t.Errorf("the default report carries a recorded literal: summary %q, diff %q, next steps %q", rep.ActualSummary, rep.Diff, rep.NextSteps)
+		}
+	}
+	if !strings.Contains(rep.Diff, "closest: SELECT token FROM sessions WHERE owner = ? AND tries = ?") || !rep.ContentWithheld {
+		t.Errorf("diff = %q, withheld %v; want the closest statement named without its literals", rep.Diff, rep.ContentWithheld)
+	}
+
+	t.Cleanup(logcontent.Set(true))
+	rep = queryMiss(t, query, readbackMock("q-sessions", recorded, "row-1", zeroTime()))
+	if !strings.Contains(rep.Diff, "closest: "+recorded) || rep.ContentWithheld {
+		t.Errorf("with the switch on: diff %q, withheld %v", rep.Diff, rep.ContentWithheld)
 	}
 }
 
