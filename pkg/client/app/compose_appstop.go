@@ -31,14 +31,16 @@ import (
 // Under the switch compose runs without the abort flags (composeAbortFlags),
 // and keploy watches the app's container itself (watchComposeApp): an exit
 // keploy did not ask for ends the run, as the abort did, with the app's exit
-// code (APP_HALTED). keploy stops the app (StopComposeApp: SIGINT, then a wait
-// for its exit on events, a kill only when it made no progress on its way
+// code (APP_HALTED). keploy stops the app (StopComposeApp: an interrupt, then a
+// wait for its exit on events, a kill only when it made no progress on its way
 // out, and the kill is said) and starts it again (StartComposeApp), while the
 // agent and the app's dependencies run on.
 //
 // The app's container is the one compose made for the app's service in the
 // project of keploy's agent (composeAppContainer), not the one a name reaches
-// (P101-b-n).
+// (P101-b-n), and keploy's interrupt is one the docker daemon takes for a
+// stop (composeInterrupt), so its restart policy does not start it again
+// (P101-c-A2 SF-3(b)).
 
 // The labels compose puts on each container it makes for a service.
 const (
@@ -51,7 +53,7 @@ const (
 type composeAppState struct {
 	// stopMu makes keploy's stops of the container one at a time: the stop
 	// at a set's end and the teardown's can come at once (an interrupt as a
-	// set ends), and a second SIGINT would cut the app's shutdown short. The
+	// set ends), and a second interrupt would cut the app's shutdown short. The
 	// second finds the container stopped by the first.
 	stopMu sync.Mutex
 	// stopping: keploy has asked the app to stop, so its exit is no halt.
@@ -485,9 +487,11 @@ func (a *App) composeAppHalt() *composeHalt {
 }
 
 // StopComposeApp stops the app's container of a compose stack, under the
-// proven switch, its stack running on (keploy's agent among it): SIGINT to the
-// container compose made for the app's service (composeAppContainer), then a
-// wait for it to stop on the stop's events, as a docker run
+// proven switch, its stack running on (keploy's agent among it): an interrupt
+// the daemon takes for a stop (composeInterrupt: the container's own stop
+// signal, SIGINT when it declares none) to the container compose made for
+// the app's service (composeAppContainer), then a wait for it to stop on the
+// stop's events, as a docker run
 // app's stop waits (stopDockerRunByEvents): the daemon's word, or its main
 // process exiting (its pidfd), which a starved daemon is slow to report. It
 // kills only when the container's processes made no progress on its way out
@@ -509,7 +513,11 @@ func (a *App) StopComposeApp(ctx context.Context) (killed string, err error) {
 // stopComposeApp is StopComposeApp's stop. An app that had exited on its own
 // (halted) before keploy asked it to stop is no stop: it answers the halt
 // (models.ErrAppExitedOnItsOwn), which its watch may not have seen yet (the
-// die event comes after the inspect), and keeps it.
+// die event comes after the inspect), and keeps it. So is one the daemon is
+// starting again (restarting: it exited on its own, and its restart policy
+// starts it), which the daemon calls running, and which keploy's interrupt
+// would only have stopped from starting: its own exit, after the set's last
+// answer, was taken for keploy's clean stop.
 func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	defer utils.BeginAppStop()()
 	a.composeApp.stopMu.Lock()
@@ -529,6 +537,11 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	}
 	w := a.watchContainer(wctx, id)
 	defer w.release()
+	if w.restarting && !wasStopping {
+		h := composeHalt{exitCode: w.exitCode}
+		a.composeApp.halted.CompareAndSwap(nil, &h)
+		return "", *a.composeAppHalt()
+	}
 	if !w.running {
 		if w.seen && !wasStopping {
 			h := composeHalt{exitCode: w.exitCode}
@@ -541,7 +554,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	a.composeApp.stopping.Store(true)
 	// Asked for before the interrupt: an exit before it is still seen.
 	daemonSaid, waitErr := a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)
-	if err := a.signalComposeApp(wctx, id, "SIGINT"); err != nil {
+	if err := a.signalComposeApp(wctx, id, composeInterrupt(w.stopSignal)); err != nil {
 		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
 			return "", nil
 		}
@@ -595,6 +608,28 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
 	return killed, nil
+}
+
+// composeInterrupt is the signal keploy interrupts the app's container
+// with: the stop signal it declares (its compose stop_signal, or its image's
+// STOPSIGNAL), SIGINT when it declares none (P101-c-A2 SF-3(b)). The docker
+// daemon cancels a container's restart policy only for a kill it takes for a
+// stop: one with the container's own stop signal, any kill of a container
+// that declares none, or SIGKILL (moby's killWithSignal, ExitOnNext); a
+// ContainerStop with another signal is the same kill. keploy's SIGINT to an
+// app that declares stop_signal: SIGTERM stopped it, its restart policy
+// (always, or on-failure on a non-zero exit) started it again, and the set's
+// end was read with it running, with nothing said; the next set's start was a
+// no-op on a container the daemon had started before that set was staged, so
+// that start's calls were no set's. The signal is the container's own word
+// for it, as the daemon reads it ("SIGTERM", "TERM", "15"), sent as it is.
+// keploy's start (StartComposeApp), a start through the API, arms the policy
+// again.
+func composeInterrupt(stopSignal string) string {
+	if stopSignal == "" {
+		return "SIGINT"
+	}
+	return stopSignal
 }
 
 // signalComposeApp sends signal to the app's container, id. The call is
