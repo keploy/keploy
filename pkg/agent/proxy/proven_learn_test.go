@@ -918,3 +918,38 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 		t.Fatalf("the test's own call was refused (%d %s): another test's row on disk read as its earlier place", code, got)
 	}
 }
+
+// Through the HTTP integration, the call's window ends when decodeHTTP had
+// the request whole: a start-up pool call's clock read in it is learned as
+// noise, where the lead alone (its minute and second words of the
+// receive's Date header) refuses it.
+func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+	rec := time.Now().Add(-time.Hour).Truncate(time.Second)
+	receive := r3Mock("mock-0", rec, "POST", "/queue/receive", `{"n":10}`, `{"Messages":[{"Body":"m-1"}]}`)
+	receive.Spec.HTTPResp.Header["Date"] = rec.Format(http.TimeFormat)
+	event := r3Mock("mock-1", rec.Add(4*time.Millisecond), "POST", "/v1/events", `{"processed_at":"`+iso(rec.Add(3*time.Millisecond))+`"}`, `{"ok":true}`)
+	event.DeriveLifetime()
+	receive.DeriveLifetime()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: rec.Add(time.Minute), End: rec.Add(2 * time.Minute)}})
+	mm.SetMocksWithWindow(nil, []*models.Mock{receive, event}, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-1"})
+	served := time.Now()
+	offset := rec.Add(learn.FullRoundLead + 2*time.Second).Sub(served)
+	p.learnTracker.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+	p.learnTracker.ServedMockAt(receive, served)
+	body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code != http.StatusOK || got != `{"ok":true}` {
+		t.Fatalf("answered %d %s; want the pool recording, its clock read learned", code, got)
+	}
+	if noise := r3States(mm)["mock-1"].ReqBodyNoise; noise["body.processed_at"] == nil {
+		t.Fatalf("learned %v; want body.processed_at", noise)
+	}
+}

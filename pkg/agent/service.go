@@ -570,6 +570,15 @@ type ExactTestOpener interface {
 	OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error
 }
 
+// AppClockSetter is an optional proxy capability: SetAppClock hands the
+// proxy how to read the app's clock at a real instant, as the agent's hooks
+// move it (a time-freeze; false where they cannot tell), so that the
+// parsers' learn steps read a call's clock reads in its own window
+// (learn.Tracker.CallWindow).
+type AppClockSetter interface {
+	SetAppClock(f func(real time.Time) (time.Time, bool))
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

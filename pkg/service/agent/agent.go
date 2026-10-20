@@ -1145,6 +1145,19 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 				zap.Error(err), zap.Time("anchor", anchor))
 		}
 	}
+	a.wireAppClock()
+}
+
+// wireAppClock hands the proxy the hooks' reading of the app's clock, when
+// both have one (AppClockReader, coreAgent.AppClockSetter).
+func (a *Agent) wireAppClock() {
+	r, ok := ActiveHooks.(AppClockReader)
+	if !ok {
+		return
+	}
+	if s, ok := a.Proxy.(coreAgent.AppClockSetter); ok {
+		s.SetAppClock(r.AppClock)
+	}
 }
 
 // StoreMocksStream decodes the mock corpus one frame at a time from dec (header

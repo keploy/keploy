@@ -2,8 +2,10 @@ package learn
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -69,6 +71,13 @@ type Tracker struct {
 	runNames map[string]string
 	runTaken map[string]bool
 	setTaken map[string]bool
+	// appClock reads the app's clock at a real instant (SetAppClock), nil
+	// while none is set.
+	appClock func(time.Time) (time.Time, bool)
+	// servedAt are the real instants the store served the running set's
+	// data-plane mocks at, in order (ServedMockAt): when the app's calls the
+	// replay answered reached keploy. NewSet forgets them.
+	servedAt []time.Time
 }
 
 // NewTracker makes a tracker with no test open.
@@ -97,6 +106,7 @@ func (t *Tracker) NewSet() {
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
 	t.answered, t.drifts = nil, NewDriftCache()
+	t.servedAt = nil
 	t.open, t.began = false, false
 	t.mu.Unlock()
 }
@@ -184,12 +194,23 @@ func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
-// place of the test's recording, whatever its kind, for Classify (Raw).
-func (t *Tracker) ServedMock(m *models.Mock) {
+// place of the test's recording, whatever its kind, for Classify (Raw); and,
+// a data-plane one, a call of the app's that reached keploy now
+// (CallWindow).
+func (t *Tracker) ServedMock(m *models.Mock) { t.ServedMockAt(m, time.Now()) }
+
+// ServedMockAt is ServedMock of a mock served at the real instant at.
+func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 	if t == nil || m == nil {
 		return
 	}
 	t.mu.Lock()
+	if !m.IsProtocolPhase() {
+		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].After(at) })
+		t.servedAt = append(t.servedAt, time.Time{})
+		copy(t.servedAt[i+1:], t.servedAt[i:])
+		t.servedAt[i] = at
+	}
 	id := mockID(m)
 	// Kept between tests too: the next Begin moves it to before.
 	if !t.kept[id] {
@@ -412,6 +433,106 @@ func (t *Tracker) free(base string, reserved, taken map[string]bool) string {
 		name = base + "-" + strconv.Itoa(i)
 	}
 	return name
+}
+
+// SetAppClock makes the tracker read the app's clock through f: the instant
+// the app's clock showed at a real one, false where f cannot tell (the
+// agent's time-freeze hooks, which move the app's clock; nil: none, and no
+// call's window is read).
+func (t *Tracker) SetAppClock(f func(real time.Time) (time.Time, bool)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.appClock = f
+	t.mu.Unlock()
+}
+
+// PreviousCall finds, of the recordings it sees (See), the recording's
+// previous data-plane call before paired: the latest by request time, not
+// paired itself. A protocol-phase call (a handshake, a driver's heartbeat)
+// is no previous call: a driver makes one whenever it opens a connection,
+// after the app read its clock for the call it opens it for. It keeps only
+// that instant, so a caller can feed it every recording of the set as a
+// store streams them, holding none.
+type PreviousCall struct {
+	id     string
+	to, at time.Time
+}
+
+// NewPreviousCall starts the search for paired's previous call.
+func NewPreviousCall(paired *models.Mock) *PreviousCall {
+	if paired == nil {
+		return &PreviousCall{}
+	}
+	return &PreviousCall{id: mockID(paired), to: paired.Spec.ReqTimestampMock}
+}
+
+// See considers m as paired's previous call.
+func (p *PreviousCall) See(m *models.Mock) {
+	if p == nil || m == nil || p.to.IsZero() || m.IsProtocolPhase() || mockID(m) == p.id {
+		return
+	}
+	if at := m.Spec.ReqTimestampMock; !at.IsZero() && at.Before(p.to) && at.After(p.at) {
+		p.at = at
+	}
+}
+
+// At is the previous call's request time, zero when it saw none.
+func (p *PreviousCall) At() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.at
+}
+
+// CallWindow is CallWindowFrom with the previous call found among recorded,
+// the set's recordings.
+func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arrival time.Time) *Window {
+	prev := NewPreviousCall(paired)
+	for _, m := range recorded {
+		prev.See(m)
+	}
+	return t.CallWindowFrom(prev.At(), paired, arrival)
+}
+
+// CallWindowFrom is the window (Window) in which the call that reached
+// keploy at the real instant arrival, paired with the recording paired, made
+// its clock reads: in the recording, after the recording's previous
+// data-plane call (recorded at prevRec, PreviousCall: every recording of the
+// set seen, the ones the agent keeps on disk too) and no later than paired;
+// in this run, on the app's clock, after the previous data-plane call the
+// store served (ServedMockAt) and no later than arrival. nil when either run
+// has no previous call (the app's start is not recorded), paired has no
+// recorded time, no app clock reads arrival and the previous call, or the
+// app's clock did not run as one between them (a test's begin moved it):
+// the span F's clock read from the previous serve to the arrival must be
+// the real time between them, exactly, or what the window bounds is no run
+// of one clock.
+func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival time.Time) *Window {
+	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() || prevRec.IsZero() || !prevRec.Before(paired.Spec.ReqTimestampMock) {
+		return nil
+	}
+	t.mu.Lock()
+	clock := t.appClock
+	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
+	var prev time.Time
+	if i > 0 {
+		prev = t.servedAt[i-1]
+	}
+	t.mu.Unlock()
+	if clock == nil || prev.IsZero() {
+		return nil
+	}
+	fFrom, ok := clock(prev)
+	if !ok {
+		return nil
+	}
+	fTo, ok := clock(arrival)
+	if !ok || fTo.Sub(fFrom) != arrival.Sub(prev) {
+		return nil
+	}
+	return &Window{Rec: Span{From: prevRec, To: paired.Spec.ReqTimestampMock}, F: Span{From: fFrom, To: fTo}}
 }
 
 type trackerKey struct{}

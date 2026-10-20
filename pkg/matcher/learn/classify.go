@@ -152,6 +152,13 @@ type Learned struct {
 // An empty recorded value is never followed: it carries nothing to follow.
 // dc keeps what each value drifted for the test (nil: for this call).
 func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf) []Learned {
+	return ClassifyIn(dc, drift, live, rec, at, earlier, raw, resp, nil)
+}
+
+// ClassifyIn is Classify of a call whose clock reads were made in w
+// (Tracker.CallWindow; nil: none): a drifted instant that is a read of each
+// run's clock within it is a clock read, as one the lead moved is.
+func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -162,7 +169,7 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		if r.Value != "" {
-			if from, ok := appeared(dc, r.Value, l.Value, at, served, raw); ok {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -171,7 +178,7 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 		// Noise, or an echo, only where its readings account for all it
 		// changed: an echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
-			if why := unaccounted(dc, dc.of(r.Value, l.Value), at, served, raw); why != "" {
+			if why := unaccounted(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
@@ -180,7 +187,7 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 		// argument, an OData filter) that the answer holds is an echo keploy
 		// cannot answer with this run's value.
 		if ln.Kind == KindNoise {
-			if why := echoedPart(dc, dc.of(r.Value, l.Value), resp); why != "" {
+			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w), resp); why != "" {
 				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
@@ -550,7 +557,7 @@ type valueDrift struct {
 // earlier places of a test are read once, not once per request.
 type DriftCache struct {
 	mu     sync.Mutex
-	m      map[run]*valueDrift
+	m      map[driftKey]*valueDrift
 	raw    map[string]string
 	rawTok map[string][]map[string]bool
 	// mockText is each mock's text as Classify reads it (RawOf), by mock:
@@ -564,7 +571,7 @@ type DriftCache struct {
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[run]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
+	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -674,15 +681,27 @@ func (dc *DriftCache) rawExtra(text string) string {
 	return t
 }
 
-func (dc *DriftCache) of(rec, live string) *valueDrift {
-	k := run{rec, live}
+// driftKey is a drifted value, with the window of the call it is read in
+// (Window.key).
+type driftKey struct {
+	run
+	w [4]int64
+}
+
+func (dc *DriftCache) of(rec, live string) *valueDrift { return dc.ofIn(rec, live, nil) }
+
+// ofIn is what the drifted value (rec, live) changed, its clock reads read
+// by the lead and in w, the window of the call that carries it (nil: by the
+// lead alone).
+func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
+	k := driftKey{run{rec, live}, w.key()}
 	dc.mu.Lock()
 	d, ok := dc.m[k]
 	dc.mu.Unlock()
 	if ok {
 		return d
 	}
-	d = &valueDrift{rec: rec, live: live, clock: clockOf(rec, live)}
+	d = &valueDrift{rec: rec, live: live, clock: clockIn(rec, live, w)}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -698,7 +717,7 @@ func (dc *DriftCache) of(rec, live string) *valueDrift {
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockOf(d.decRec, d.decLive)
+		dclock = clockIn(d.decRec, d.decLive, w)
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
@@ -706,7 +725,7 @@ func (dc *DriftCache) of(rec, live string) *valueDrift {
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
-		merge(clockOf(f[0], f[1]))
+		merge(clockIn(f[0], f[1], w))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -958,7 +977,12 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // raw mock served before or recorded before at (of which F saw no live
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	v := dc.of(recorded, now)
+	return appearedIn(dc, dc.of(recorded, now), at, served, raw)
+}
+
+// appearedIn is appeared of the drifted value v, read in its call's window.
+func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
+	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
 	// application sent it, whole): the test's own call that sent it first,

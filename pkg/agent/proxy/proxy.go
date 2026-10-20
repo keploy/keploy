@@ -4487,6 +4487,14 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 	return nil
 }
 
+// SetAppClock makes the learn step read the app's clock through f
+// (agent.AppClockSetter).
+func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
+	p.learnTracker.SetAppClock(f)
+}
+
+var _ agent.AppClockSetter = (*Proxy)(nil)
+
 // ServeExactPool implements agent.ExactServer (exact.go).
 func (p *Proxy) ServeExactPool(key string, names []string) error {
 	m := p.getMockManager()

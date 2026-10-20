@@ -685,7 +685,7 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
 // disk and that cannot be read back, and why; no mock is then returned, since
 // what it held cannot be told.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier) (out []learn.Raw, err error) {
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -709,6 +709,7 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 		return nil
 	}
 	for _, m := range served {
+		prev.See(m)
 		if m != nil && !leafed[m.Name] && once(m) {
 			if err := add(m, true); err != nil {
 				return nil, err
@@ -729,6 +730,7 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 	// the mock and would keep every one): only its text stays.
 	var readErr error
 	if err := recorded(func(m *models.Mock) bool {
+		prev.See(m)
 		if m == nil || leafed[m.Name] || !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
 			return true
 		}
@@ -857,7 +859,12 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of "+m.Name+", so it cannot tell whether the answer echoes what changed"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(stagedOf(mockDb), m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier)
+			staged := stagedOf(mockDb)
+			prev := learn.NewPreviousCall(m)
+			for _, s := range staged {
+				prev.See(s)
+			}
+			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(staged, m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
 			var unread recordedUnread
 			if errors.As(err, &unread) {
 				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
@@ -871,7 +878,18 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			learned := learn.Classify(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp))
+			// A pool mock's call need not run on the clock F set for a
+			// test (at the start-up and between tests none is set, and a
+			// call made in a test was recorded in none): its clock reads
+			// are read in its own window (learn.Tracker.CallWindowFrom),
+			// as well as by the lead. Its previous recorded call is found
+			// among every recording of the set, those on disk too, as the
+			// earlier places streamed them.
+			var w *learn.Window
+			if !own {
+				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
+			}
+			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why

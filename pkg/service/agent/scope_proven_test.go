@@ -53,6 +53,15 @@ type wireProxy struct {
 	failPools int
 	// staged counts the stagings (SetMocks).
 	staged int
+	// appClock is the app clock the agent last handed the proxy
+	// (SetAppClock), nil until it did.
+	appClock func(time.Time) (time.Time, bool)
+}
+
+func (p *wireProxy) SetAppClock(f func(time.Time) (time.Time, bool)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.appClock = f
 }
 
 func (p *wireProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
@@ -1385,4 +1394,33 @@ func TestAConnectionThatSentNothingFailsNoTest(t *testing.T) {
 	all, err := a.GetMockErrors(ctx)
 	require.NoError(t, err)
 	require.Len(t, all, 1, "the run still reads it, for its next step")
+}
+
+// clockHook is the no-op hooks with an app clock that runs offset past the
+// real one (AppClockReader).
+type clockHook struct {
+	AgentHook
+	offset time.Duration
+}
+
+func (h *clockHook) AppClock(real time.Time) (time.Time, bool) { return real.Add(h.offset), true }
+
+// Once the mocks are stored, the proxy reads the app's clock as the hooks
+// move it; hooks that move none hand it nothing.
+func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	at := time.Date(2026, 10, 20, 15, 50, 35, 0, time.UTC)
+
+	ActiveHooks = &AgentHook{}
+	a, p := wireAgent(t, models.MODE_TEST)
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.appClock, "hooks with no app clock")
+
+	ActiveHooks = &clockHook{offset: 21 * time.Second}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.appClock)
+	got, ok := p.appClock(at)
+	require.True(t, ok)
+	require.Equal(t, at.Add(21*time.Second), got)
 }
