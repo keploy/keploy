@@ -1,0 +1,36 @@
+# BINARY TEST: what every floor VM runs (boot.sh), and the --- PASS line each
+# must print (check); a test or subtest that skips, fails or is not there fails
+# the floor. The binaries are the ones the root hooks jobs build:
+#   hooks       go test -c ./pkg/agent/hooks/linux/ (go-test.yaml)
+#   pidmap      the same, -tags 'viper_bind_struct pidmap_integration'
+#   proxyconns  the same, -tags 'viper_bind_struct proxyconns_integration'
+#               (mock_linux.yml's pid_map_overflow)
+# check also requires every test of the two integration tags' files to be
+# listed here, so a new one is run at the floors too, not left out unnoticed.
+hooks TestTheHooksLoadOnThisKernel
+hooks TestTracefsMountedAgreesWithCiliumInEveryLayout
+hooks TestTracefsMountedAgreesWithCiliumInEveryLayout/none
+hooks TestTracefsMountedAgreesWithCiliumInEveryLayout/canonical
+hooks TestTracefsMountedAgreesWithCiliumInEveryLayout/elsewhere
+hooks TestTracefsMountedAgreesWithCiliumInEveryLayout/subdir
+hooks TestTracefsMountedAgreesWithCiliumInEveryLayout/debugfs
+pidmap TestAProcessThePIDMapRefusesIsReported
+pidmap TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss
+pidmap TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt
+pidmap TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer
+pidmap TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss
+pidmap TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest
+pidmap TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive
+pidmap TestUnderTheSwitchABoundClientsAnswerIsCounted
+pidmap TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff
+pidmap TestUnderTheSwitchTheAgentSeesTheApplicationListen
+pidmap TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime
+pidmap TestUnderTheSwitchTheAgentCountsARestartAndNamesIt
+proxyconns TestProxyConnsMatchWhatTheProxyAccepts
+proxyconns TestTheProxysRealLoopSettlesOnTheKernelsCount
+proxyconns TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt
+proxyconns TestANATedConnectionIsNotVerified
+proxyconns TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff
+proxyconns TestTCPDNSNeverStopsTheProxyRouting
+proxyconns TestTwoConnectionsOnOnePortReachTheirOwnDependencies
+proxyconns TestADroppedAppConnEventEndsAParkedWait

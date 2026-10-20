@@ -1,0 +1,99 @@
+name: Kernel Floors
+# keploy's agent hooks have to work the same from amd64 5.10 and arm64 6.6 on,
+# the kernel floors: amd64 5.10 is what keploy's users run in production, low
+# latency included, and arm64 6.6 is the first arm64 kernel line that attaches
+# fentry and fexit (6.4 on), so it runs the hooks amd64 5.10 runs. No
+# GitHub-hosted runner has either kernel (they run Azure's 6.x and 7.x), so
+# each job boots its floor in a QEMU VM on the runner
+# (.github/scripts/kernel-floors/boot.sh) and runs the hooks' root tests there:
+# the binaries go-test.yaml's "Hooks tests as root" and mock_linux.yml's
+# pid_map_overflow run on the runner's own kernel. Every test's --- PASS line is
+# required, so a test that skips, fails or is not there fails the job, and so
+# does an AF_UNIX report that attached any other way than fexit, and a kernel
+# fault.
+#
+# The VM runs under KVM where the runner has /dev/kvm, else emulated (TCG); the
+# job says which, and runs every test either way. The kernels are Debian's,
+# pinned by sha256 in kernels.txt and cached by it. GitHub-hosted runners only,
+# no secrets: it runs for pull requests from forks too.
+on:
+  workflow_call:
+
+jobs:
+  floor:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The VM ends by itself when its tests have (init powers it off), so only
+    # a hung test or kernel meets this.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - floor: floor-amd64-5.10
+            arch: amd64
+            runner: ubuntu-latest
+            qemu: qemu-system-x86
+          - floor: floor-arm64-6.6
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            qemu: qemu-system-arm
+    name: ${{ matrix.floor }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Runner kernel
+        run: |
+          uname -srm
+          echo "runner: kernel $(uname -r) on $(uname -m); the tests run in a VM on the floor kernel"
+          ls -l /dev/kvm 2>/dev/null || echo "/dev/kvm: does not exist on this runner"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry mod download
+
+      - name: Install QEMU
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" --no-install-recommends ${{ matrix.qemu }} cpio
+          # KVM, where the runner has it, for the runner user (GitHub's
+          # images leave /dev/kvm to root and the kvm group).
+          if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; ls -l /dev/kvm; fi
+
+      - name: Cache the floor kernel
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/kernel-floors
+          key: kernel-floors-${{ matrix.arch }}-${{ hashFiles('.github/scripts/kernel-floors/kernels.txt') }}
+
+      - name: Build the VM's init and the hooks' test binaries
+        run: bash .github/scripts/kernel-floors/boot.sh build ${{ matrix.arch }} "$RUNNER_TEMP/kernel-floors"
+
+      - name: Copy this runner's sh, iptables and kmod into the VM
+        run: bash .github/scripts/kernel-floors/boot.sh userland ${{ matrix.arch }} "$RUNNER_TEMP/kernel-floors"
+
+      - name: Boot the floor kernel and run the tests in it
+        run: KF_CACHE="$HOME/.cache/kernel-floors" bash .github/scripts/kernel-floors/boot.sh boot ${{ matrix.arch }} "$RUNNER_TEMP/kernel-floors"
+
+      - name: Every test passed on the floor kernel
+        run: bash .github/scripts/kernel-floors/boot.sh check ${{ matrix.arch }} "$RUNNER_TEMP/kernel-floors"
+
+      # The verdict itself, on this run's console: each thing check requires,
+      # taken out of a copy (a test's PASS line, the kernel line, the AF_UNIX
+      # report's way, a binary's exit), or a skip, failure or kernel fault put
+      # in, must fail it.
+      - name: The verdict fails what it must
+        run: bash .github/scripts/kernel-floors/boot.sh selftest ${{ matrix.arch }} "$RUNNER_TEMP/kernel-floors"
+
+      - name: Upload the VM's console
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.floor }}-console
+          path: ${{ runner.temp }}/kernel-floors/console-${{ matrix.arch }}.log
+          if-no-files-found: warn
+          retention-days: 7
