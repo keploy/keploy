@@ -301,8 +301,10 @@ func TestARecordedStreamBodyThatCannotBeReadFails(t *testing.T) {
 }
 
 // A stream test whose recording keeps no frame and no body to read frames
-// from has nothing to compare the app's stream with: it is refused, with the
-// reason, under either switch, and never passes.
+// from, and is no recording of an empty stream, has nothing to compare the
+// app's stream with: a body over 1 MB the recording did not save, keepalives
+// alone. It is refused, with the reason, under either switch, and never
+// passes.
 func TestAStreamTestWithNothingRecordedIsRefused(t *testing.T) {
 	modes := []struct {
 		name        string
@@ -321,9 +323,6 @@ func TestAStreamTestWithNothingRecordedIsRefused(t *testing.T) {
 		resp func(contentType string) models.HTTPResp
 		why  string
 	}{
-		{"empty body", func(ct string) models.HTTPResp {
-			return models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": ct}}
-		}, "its recorded body is empty"},
 		{"body not saved", func(ct string) models.HTTPResp {
 			return models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": ct}, BodySkipped: true, BodySize: 2 << 20}
 		}, "its body, 2097152 bytes, was over 1 MB"},
@@ -365,6 +364,112 @@ func TestAStreamTestWithNothingRecordedIsRefused(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A stream recorded empty (its body saved, and empty: the app ended the
+// stream with nothing in it) is compared with that, as any recording is, under
+// either switch, YAML or carried as JSON: the app's stream is read to its end,
+// and an answer that ends with nothing passes, one that streams a frame fails,
+// judged different, and one of a keepalive has nothing of it to compare, not
+// judged. It is not refused: re-recording gives the same empty stream. With
+// the switch off a stream that came passed, compared with no recorded frame.
+func TestAStreamRecordedEmptyIsComparedWithItsEmptyStream(t *testing.T) {
+	modes := []struct {
+		name        string
+		contentType string
+		cfg         HTTPStreamConfig
+		frame       string // an answer of a frame
+		keepalive   string // an answer of a keepalive, where the format has one
+		differs     string // the mismatch's reason
+	}{
+		{"sse", "text/event-stream", HTTPStreamConfig{Mode: HTTPStreamModeSSE}, "data: {\"a\":1}\n\n", ": ping\n\n", "the stream went on after its 0 recorded frames"},
+		{"ndjson", "application/x-ndjson", HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}, "{\"a\":1}\n", "\n", "the stream went on after its 0 recorded frames"},
+		{"plain-text", "text/plain", HTTPStreamConfig{Mode: HTTPStreamModePlainText}, "\n", "", "the stream went on after its 0 recorded frames"},
+		{"multipart", "multipart/x-mixed-replace; boundary=frame", HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: "frame"}, "--frame\r\nContent-Type: text/plain\r\n\r\npart one\r\n--frame--\r\n", "", "the stream went on after its 0 recorded frames"},
+		{"binary", "application/octet-stream", HTTPStreamConfig{Mode: HTTPStreamModeBinary}, "\x00", "", "size mismatch: expected 0 bytes, got 1 bytes"},
+	}
+	for _, m := range modes {
+		for _, carried := range []string{"yaml", "json"} {
+			t.Run(m.name+"/"+carried, func(t *testing.T) {
+				switchStates(t, func(t *testing.T) {
+					resp := recordedThroughYAML(t, models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": m.contentType}})
+					if carried == "json" {
+						resp = throughJSON(t, &models.TestCase{Kind: models.HTTP, HTTPResp: resp}).HTTPResp
+					}
+					compare := func(answer string) (bool, *StreamMismatchInfo, error) {
+						ok, _, info, err := CompareHTTPStream(resp, strings.NewReader(answer), m.cfg, map[string]struct{}{}, zap.NewNop())
+						return ok, info, err
+					}
+
+					ok, info, err := compare("")
+					require.NoError(t, err)
+					require.True(t, ok, "an empty stream, as recorded, passes: %+v", info)
+
+					ok, info, err = compare(m.frame)
+					require.NoError(t, err, "judged, not refused")
+					require.False(t, ok, "a stream that came where none was recorded must not pass")
+					require.NotNil(t, info)
+					require.Equal(t, m.differs, info.Reason)
+
+					if m.keepalive != "" {
+						ok, info, err = compare(m.keepalive)
+						require.False(t, ok, "a keepalive is nothing of the answer to compare")
+						require.Nil(t, info)
+						require.True(t, errors.Is(err, ErrAnswerStalled), "not judged: %v", err)
+						require.False(t, errors.Is(err, ErrStreamNotRecorded), "compared, not refused: %v", err)
+					}
+				})
+			})
+		}
+	}
+}
+
+// A response HTTP says has no body (the answer to a HEAD, a 1xx, 204 or 304)
+// is no stream, whatever its Content-Type says: its recording's body is
+// empty, and always will be, so read as a stream it had nothing to compare.
+// It is compared as any response is, by its status and headers, YAML or
+// carried as JSON. An answer of one to a recorded stream is not read as a
+// stream either: it differs from the recording by its status.
+func TestAResponseWithNoBodyIsNoStream(t *testing.T) {
+	contentTypes := []string{"text/event-stream", "application/x-ndjson", "multipart/x-mixed-replace; boundary=frame"}
+	answers := []struct {
+		name   string
+		method string
+		status int
+	}{
+		{"HEAD", http.MethodHead, http.StatusOK},
+		{"204", http.MethodGet, http.StatusNoContent},
+		{"304", http.MethodGet, http.StatusNotModified},
+		{"103", http.MethodGet, http.StatusEarlyHints},
+	}
+	for _, ct := range contentTypes {
+		for _, a := range answers {
+			for _, carried := range []string{"yaml", "json"} {
+				t.Run(ct+"/"+a.name+"/"+carried, func(t *testing.T) {
+					tc := streamTestCase(ct, "")
+					tc.HTTPReq.Method = models.Method(a.method)
+					tc.HTTPResp.StatusCode = a.status
+					tc.HTTPResp = recordedThroughYAML(t, tc.HTTPResp)
+					if carried == "json" {
+						tc = throughJSON(t, tc)
+					}
+					require.False(t, IsHTTPStreamingTestCase(tc), "a response with no body is no stream test")
+					answer := &http.Response{StatusCode: a.status, Header: http.Header{"Content-Type": {ct}}, Request: &http.Request{Method: a.method}}
+					require.Equal(t, HTTPStreamModeNone, DetectHTTPStreamConfig(tc, answer).Mode)
+				})
+			}
+		}
+	}
+	t.Run("a recorded stream answered with no body", func(t *testing.T) {
+		recorded := streamTestCase("text/event-stream", "data: a\n\n")
+		require.True(t, IsHTTPStreamingTestCase(recorded))
+		for _, status := range []int{http.StatusNoContent, http.StatusNotModified} {
+			answer := &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"text/event-stream"}}, Request: &http.Request{Method: http.MethodGet}}
+			require.Equal(t, HTTPStreamModeNone, DetectHTTPStreamConfig(recorded, answer).Mode, "a %d is compared as a response, by its status", status)
+		}
+		ok := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Request: &http.Request{Method: http.MethodGet}}
+		require.Equal(t, HTTPStreamModeSSE, DetectHTTPStreamConfig(recorded, ok).Mode, "a 200 of the stream is read as one")
+	})
 }
 
 // countingReader counts the bytes read from r.

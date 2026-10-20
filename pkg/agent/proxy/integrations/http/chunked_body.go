@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // errMalformedChunkedBody is returned when a chunked message body does not
@@ -274,12 +275,10 @@ func responseStatus(head []byte) int {
 }
 
 // responseHasNoBody reports whether a response carries no body whatever its
-// headers say (RFC 9112 §6.3): the answer to a HEAD, an interim 1xx, 204 or
-// 304. Not a 101, nor a 2xx to a CONNECT: their message has no body either,
-// but the connection then carries another protocol, which is no next HTTP
-// message.
+// headers say (models.HTTPResponseHasNoBody): the answer to a HEAD, an
+// interim 1xx, 204 or 304.
 func responseHasNoBody(reqMethod string, status int) bool {
-	return reqMethod == "HEAD" || pUtil.IsInterimStatus(status) || status == 204 || status == 304
+	return models.HTTPResponseHasNoBody(reqMethod, status)
 }
 
 // startsWithInterimResponse reports whether resp begins with an interim 1xx

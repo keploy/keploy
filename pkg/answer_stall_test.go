@@ -417,6 +417,7 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 			says        string
 		}{
 			{"/sse-none", "text/event-stream", frames("data", "a"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /sse-none"},
+			{"/sse-keepalive-none", "text/event-stream", nil, "the app sent its answer's headers and nothing of its body but keepalives, for GET /sse-keepalive-none"},
 			{"/ndjson-keepalive-none", "application/x-ndjson", frames("raw", `{"id":1}`), "the app sent its answer's headers and nothing of its body but keepalives, for GET /ndjson-keepalive-none"},
 			{"/binary-none", "application/octet-stream", frames("raw", "abcdef"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /binary-none"},
 		} {
@@ -424,13 +425,6 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 			if ok || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
 				t.Fatalf("%s: %v, %v; want it failing closed, an ErrAnswerStalled saying %q", c.path, ok, err, c.says)
 			}
-		}
-		// A recording of no frame has nothing to compare either: it is
-		// refused before its stream is read (ErrStreamNotRecorded), the
-		// app's keepalives unread.
-		ok, err := readStream(t, stream("/sse-keepalive-none", "text/event-stream", nil))
-		if ok || !errors.Is(err, ErrStreamNotRecorded) || errors.Is(err, ErrStreamHeldOpen) {
-			t.Fatalf("/sse-keepalive-none: %v, %v; want it refused, an ErrStreamNotRecorded", ok, err)
 		}
 	})
 	t.Run("plain text and multipart short of their recordings", func(t *testing.T) {
