@@ -248,6 +248,40 @@ func TestANewSetsNamesAreItsOwn(t *testing.T) {
 	}
 }
 
+// A new set's start-up has none of the previous set's exchanges as earlier
+// places, its last test's neither: an app kept alive across sets sends there
+// a value of its run, which the new set's start-up may send again. Mock names
+// restart in every set, so the previous set's mock-3 would stand for the new
+// set's mock-3: a value the start-up sends would be explained by it, and a
+// read of the record it wrote read back from it. What the start-up serves is
+// all it sees.
+func TestANewSetHasNoneOfThePreviousSetsExchanges(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	const order = "orders\x00o-live-1"
+	tr.Begin()
+	last, _, _, _ := tr.Test()
+	own := wrote("mock-3", t0, order, "body.code", String, "SAME-1", "LIVE-1")
+	own.Own = true
+	tr.Served(last, own)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Mock != "mock-3" {
+		t.Fatalf("the set's last test does not keep its own exchange: %+v", earlier)
+	}
+	tr.End()
+	tr.NewSet()
+	boot, earlier, _, _ := tr.Test()
+	if len(earlier) != 0 {
+		t.Fatalf("the new set's start-up has the previous set's last test's exchanges: %+v", earlier)
+	}
+	if p, ok := ReadBack(Leaf{Path: "body.value.code", Type: String, Value: "SAME-1"}, order, earlier); ok {
+		t.Fatalf("the new set's start-up reads back what the previous set wrote, from %+v", p)
+	}
+	tr.Served(boot, sent("mock-1", t0.Add(time.Minute), "body.status", "body.status", "ok", "ok"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Mock != "mock-1" || earlier[0].Run {
+		t.Fatalf("the new set's start-up sees %+v, want only its own exchange", earlier)
+	}
+}
+
 // A value the test's own earlier call sent, which a start-up call sent too,
 // comes from the test's own call: only a test's own calls carry its
 // variables.
