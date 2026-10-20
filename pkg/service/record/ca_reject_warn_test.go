@@ -31,7 +31,7 @@ func tlsFailed(n uint64, to string) models.CaptureLosses {
 // case is saved, the final read, the end), with every log line from WARN up.
 func recordOff(t *testing.T, instr Instrumentation, names ...string) (bool, *observer.ObservedLogs) {
 	t.Helper()
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range names {
@@ -150,7 +150,7 @@ func (h *httpLossReader) GetCaptureLosses(ctx context.Context) (models.CaptureLo
 // same, so a handshake that failed in a test case saved by the drain, or
 // after the last, is said.
 func TestAFailedHandshakeAroundTheStopIsStillSaid(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	var count atomic.Uint64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(tlsFailed(count.Load(), "to up:8443"))
@@ -205,7 +205,7 @@ func (o *orderedReader) GetCaptureLosses(context.Context) (models.CaptureLosses,
 // counted, so an earlier, lower answer is never taken for an agent started
 // again. Neither ask waits for its read.
 func TestReadsAtOnceAreCountedInOrder(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	o := &orderedReader{perTest: make(chan struct{}), release: make(chan struct{})}
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), o)
@@ -280,7 +280,7 @@ func TestTheWarnsFieldsAreWhatItSaw(t *testing.T) {
 // its last test cases (record.go): a handshake that failed in a test case the
 // drain saves is that test case's, and named, not one after the last.
 func TestATestCaseTheDrainSavesAfterTheFinalReadIsNamed(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	instr := &countingInstr{answers: []models.CaptureLosses{
 		nil,                      // capture begins
 		nil,                      // test-1
@@ -309,7 +309,7 @@ func TestATestCaseTheDrainSavesAfterTheFinalReadIsNamed(t *testing.T) {
 // A stop before capture began ends the base read: nothing is watched, and
 // nothing said.
 func TestAStopBeforeCaptureBeganIsNoWatch(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(tlsFailed(1, "to a:443"))
 	}))
@@ -416,7 +416,7 @@ func finishing(w *captureWatch) <-chan struct{} {
 // no answer to an offer of the watch's, and the drain saves all the agent
 // held. Nor does finish stand one while it waits for the read.
 func TestTheCAWatchStandsNoOfferWhileADrainSaves(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	stoppedRun(t)
 	const held = 50
 	f, frames, stopDrain := newHeldAgentRecorder(t, held, zap.NewNop())
@@ -482,7 +482,7 @@ func saidWaiting(t *testing.T, logs *observer.ObservedLogs) {
 // finish comes after every drain: there, once it has said it waits for a read
 // the agent does not answer, one more Ctrl+C stops it now, and ends the read.
 func TestFinishOffersOneMoreCtrlC(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	stoppedRun(t)
 	r := newWedgedReader(2, nil)
 	core, logs := observer.New(zapcore.InfoLevel)
@@ -517,7 +517,7 @@ func TestATestCaseWhoseReadNeverCameIsNamedNotChecked(t *testing.T) {
 		answers: []models.CaptureLosses{nil, nil, tlsFailed(1, "to a:443")},
 		errAt:   map[int]error{4: errors.New("the agent went")},
 	}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	w.afterTestCase(context.Background(), "test-1")
@@ -562,7 +562,7 @@ func TestATestCaseWhoseReadNeverCameIsNamedNotChecked(t *testing.T) {
 // The base read is bounded as the others are: one the agent never answers is
 // given up once keploy had stall.HangBudget to run, and nothing is watched.
 func TestTheBaseReadIsGivenUpOnItsStall(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	clk := &stall.ManualClock{}
 	caReadClock = clk
 	t.Cleanup(func() { caReadClock = nil })
@@ -585,7 +585,7 @@ func TestTheBaseReadIsGivenUpOnItsStall(t *testing.T) {
 // drain that gave up) reads nothing.
 func TestAnAskAfterFinishReadsNothing(t *testing.T) {
 	instr := &countingInstr{answers: []models.CaptureLosses{nil}}
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
 	w.finish("test-set-0", false)
 	w.afterTestCase(context.Background(), "test-1")
@@ -601,7 +601,7 @@ func TestAnAskAfterFinishReadsNothing(t *testing.T) {
 // (CI's pkill -INT) still ends. Wall time that passed while keploy could not
 // run is no part of it: a starved keploy waits for a slow agent.
 func TestAReadTheAgentNeverAnswersIsGivenUpOnItsStall(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	r := newWedgedReader(2, nil, tlsFailed(1, "to a:443"))
 	core, logs := observer.New(zapcore.InfoLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), r)
@@ -636,7 +636,7 @@ func TestAReadTheAgentNeverAnswersIsGivenUpOnItsStall(t *testing.T) {
 // The interrupt that gave the stop's waits up (utils.StopNow: a drain's offer
 // answered) ends a read the agent never answers at once.
 func TestAReadEndsWhenTheUserGaveTheStopsWaitsUp(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	stoppedRun(t)
 	r := newWedgedReader(2, nil)
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), r)
@@ -655,7 +655,7 @@ func TestAReadEndsWhenTheUserGaveTheStopsWaitsUp(t *testing.T) {
 // Test cases saved while a read is out are counted by the next read, together:
 // a read that lags names every test case saved since the last.
 func TestAReadThatLagsNamesEveryTestCaseItCounts(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	o := &orderedReader{perTest: make(chan struct{}), release: make(chan struct{})}
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), o)
@@ -722,7 +722,7 @@ func (d *deafReader) GetCaptureLosses(context.Context) (models.CaptureLosses, er
 // A read that does not end with its context is given up on its stall all the
 // same, and its answer, coming after, is not counted.
 func TestAnAnswerAfterTheReadWasGivenUpIsNotCounted(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	r := &deafReader{asked: make(chan struct{}), release: make(chan struct{})}
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), r)
@@ -742,7 +742,7 @@ func TestAnAnswerAfterTheReadWasGivenUpIsNotCounted(t *testing.T) {
 // A press at finish's offer while a test case's read is out names that test
 // case as not checked: it is neither dropped nor taken for after the last.
 func TestAPressAtFinishNamesTheTestCaseItsReadWasFor(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	stoppedRun(t)
 	r := newWedgedReader(4, nil, nil, tlsFailed(1, "to a:443")) // base, test-1, the final read, then test-2's: never answered
 	core, logs := observer.New(zapcore.InfoLevel)
@@ -781,7 +781,7 @@ func TestAPressAtFinishNamesTheTestCaseItsReadWasFor(t *testing.T) {
 // on, which keploy cannot tell apart, cuts it short. The read's own bound
 // ends it.
 func TestNoInterruptCutsTheStopsWaitForTheReadsShort(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	stoppedRun(t)
 	r := newWedgedReader(2, nil)
 	core, logs := observer.New(zapcore.DebugLevel)
@@ -824,7 +824,7 @@ func TestNoInterruptCutsTheStopsWaitForTheReadsShort(t *testing.T) {
 // not checked beside those counted; and when nothing was counted at all, they
 // are named all the same: unknown is not none.
 func TestUnreadTestCasesWithoutAFinalRead(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	instr := &countingInstr{
 		answers: []models.CaptureLosses{nil, tlsFailed(1, "to a:443")},
 		errAt:   map[int]error{3: errors.New("the agent went"), 4: errors.New("the agent went")},
@@ -861,7 +861,7 @@ func TestUnreadTestCasesWithoutAFinalRead(t *testing.T) {
 // out (a copy of the stop's signal taken for a press does the same), says
 // that test case was not checked: the WARN is never dropped unsaid.
 func TestAPressAtFinishWithNothingCountedNamesWhatWasNotChecked(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	stoppedRun(t)
 	r := newWedgedReader(2, nil) // base, then test-1's read: never answered
 	core, logs := observer.New(zapcore.InfoLevel)
@@ -891,7 +891,7 @@ func TestAPressAtFinishWithNothingCountedNamesWhatWasNotChecked(t *testing.T) {
 // last counted, covers a test case whose own read never came (its calls came
 // before the stop): it is not said to be unchecked.
 func TestAReadAfterTheFinalOneCoversAnUnreadTestCase(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	instr := &countingInstr{
 		answers: []models.CaptureLosses{nil, nil, nil},
 		errAt:   map[int]error{4: errors.New("the agent went")},
@@ -938,7 +938,7 @@ func (r *takenBeforeFinalReader) GetCaptureLosses(context.Context) (models.Captu
 // final read itself failed, so test-2, whose read never came, is said to be
 // unchecked.
 func TestAReadTakenBeforeTheFinalOneCoversNothing(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	r := &takenBeforeFinalReader{asked: make(chan struct{}), release: make(chan struct{})}
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), r)
