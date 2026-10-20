@@ -25,10 +25,25 @@
 # the app starts that program only once its own socket exists, keploy sends
 # the first test once the app's /healthz says the map is full, and the
 # recording is stopped with Ctrl+C once every request has had its answer.
-#   1. no overflow: PASSED, every recorded mock still there, the dependency
-#      not called;
-#   2. overflow: FAILED as capture incomplete, exit non-zero, the prune
-#      skipped for that reason, no mock deleted, no mappings.yaml written.
+# Each half records and replays on its own (MOCK_LANE_SWITCH,
+# mock/lane_switch.sh; CI runs each in a job of its own):
+#   - with the proven model off (KEPLOY_PROVEN=0, the default on Windows and
+#     macOS), keploy test --remove-unused-mocks:
+#     1. no overflow: PASSED, every recorded mock still there, the dependency
+#        not called;
+#     2. overflow: FAILED as capture incomplete, exit non-zero, the prune
+#        skipped for that reason, no mock deleted, no mappings.yaml written.
+#   - under the proven model (KEPLOY_PROVEN=1, the default on Linux), keploy
+#     test with no prune flag and no readiness ceiling, both of which it
+#     refuses (exit 8): it prunes nothing and only keploy record writes
+#     mappings.yaml (design v14 U18), so:
+#     1. no overflow: PASSED, the dependency not called, and the recording
+#        (mocks.yaml, the mappings.yaml the record wrote) byte for byte as it
+#        was;
+#     2. overflow: FAILED as capture incomplete, exit non-zero, and the
+#        recording byte for byte as it was. This is the false green the lane
+#        guards on Linux's default: a full PID map must fail keploy test, not
+#        pass it with calls that reached the real dependency.
 #
 # Nothing in 2 depends on WHICH process the full map refused. The holder's own
 # 10500 processes are more than the map's 10240 places, so the kernel refuses
@@ -43,12 +58,12 @@
 # nobody, deterministically, and only the capture-incomplete guard keeps it.
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
-# This lane guards the switch-off prune (--remove-unused-mocks) and its
-# --health-poll-timeout gate, which the proven switch ignores and refuses
-# (design v14 U18). So it runs keploy with the switch off (KEPLOY_PROVEN=0),
-# where that still works: the default on Windows and macOS. Unset, a Linux
-# keploy runs the proven model.
-export KEPLOY_PROVEN=0
+# Which half this run runs (MOCK_LANE_SWITCH: off, on, or both when unset), as
+# the mock lanes do. Every keploy below states its switch (KEPLOY_PROVEN=0 or
+# 1); lane_switch.sh also exports KEPLOY_PROVEN=0, so nothing here runs a
+# Linux keploy's default unstated.
+# shellcheck source=mock/lane_switch.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/lane_switch.sh" || exit 1
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
@@ -120,9 +135,10 @@ def wait_held(p):
         held.set()
         return
     # The holder died without holding (a task-limit EAGAIN, say). /healthz would
-    # never go green, so keploy would wait out its whole --health-poll window on
-    # an app that will never be ready. Exit now so keploy sees the app go and
-    # fails the run at once, with the holder's output in hold.out to say why.
+    # never go green, so keploy would wait on an app that will never be ready
+    # (its whole --health-poll window with the proven model off, its watchdog
+    # count under it). Exit now so keploy sees the app go and fails the run at
+    # once, with the holder's output in hold.out to say why.
     os._exit(1)
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -251,119 +267,188 @@ if command -v systemd-run >/dev/null 2>&1 && sudo systemd-run --scope --quiet -p
   SCOPE=(systemd-run --scope --quiet -p TasksMax=infinity)
 fi
 
-echo "== record $N tests, one dependency call each =="
-# No --record-timer: the recording is stopped as a user stops one, with
-# Ctrl+C, once every request has had its answer. timeout only ends a keploy
-# that hangs.
-sudo -E "${SCOPE[@]}" env PATH="$PATH" timeout -k 10 600 "$RECORD_BIN" record -c "bash app.sh" \
-  --generateGithubActions=false --disable-tele > record.log 2>&1 &
-KP=$!
-# Until the app listens (a connect, which records no test): keploy starts it
-# once its agent is up. The bound is only for an agent that never comes up.
-UP=0
-for _ in $(seq 3600); do
-  (exec 3<>"/dev/tcp/127.0.0.1/$APP") 2>/dev/null && { UP=1; break; }
-  [ -d "/proc/$KP" ] || break
-  sleep 0.1
-done
-[ "$UP" = 1 ] || fail "record: the app never listened on :$APP"
-for i in $(seq $N); do
-  curl -fsS -o /dev/null "http://127.0.0.1:$APP/order/item$i" || fail "record: GET /order/item$i failed"
-done
-# Ctrl+C to keploy itself, timeout's child, whose command line starts with
-# the binary (the agent it starts says "agent", not "record").
-sudo pkill -INT -f "^$RECORD_BIN record -c bash app\.sh" || fail "record: found no keploy record to stop"
-wait "$KP"
-echo "record: keploy exited $?"
-
 # mocks <file>: how many mocks it holds; 0 for a file that is not there.
 mocks() {
   local n
   n=$(sudo grep -c '^name: mock-' "$1" 2>/dev/null)
   echo "${n:-0}"
 }
-REC=$(mocks keploy/test-set-0/mocks.yaml)
-TESTS=$(sudo sh -c 'ls keploy/test-set-0/tests 2>/dev/null | wc -l')
-echo "recorded $TESTS tests and $REC mocks"
-if [ "$TESTS" != "$N" ] || [ "$REC" -lt "$N" ]; then
-  echo "FAIL: recorded $TESTS tests and $REC mocks, want $N tests and at least $N mocks (one dependency call a test)"
-  tail -n 40 record.log
-  exit 1
-fi
-: > dep.log
-sudo cp -a keploy keploy.rec
+# recording_digest: test-set-0's mocks.yaml and mappings.yaml, each that
+# exists with its sha256: what a replay that writes no recording leaves as it
+# found it.
+recording_digest() {
+  local f
+  for f in keploy/test-set-0/mocks.yaml keploy/test-set-0/mappings.yaml; do
+    if sudo test -e "$f"; then sudo sha256sum "$f"; fi
+  done | awk '{print $2 "=" $1}' | tr '\n' ' '
+}
+latest_report() { sudo sh -c 'ls -1dt keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | head -n1'; }
 
-# ktest <log> [VAR=value...]: one replay, with the prune on, of the recording
-# as it was recorded; prints keploy's exit code. The dependency stays UP: a
-# call that is not intercepted is answered, and its test passes.
+# record <switch>: records $N tests with KEPLOY_PROVEN=<switch>, one dependency
+# call each, into keploy.rec; returns non-zero when the recording is not that.
+record() {
+  local sw=$1 log="record-$1.log"
+  sudo rm -rf keploy keploy.rec
+  # No --record-timer: the recording is stopped as a user stops one, with
+  # Ctrl+C, once every request has had its answer. timeout only ends a
+  # keploy that hangs.
+  sudo -E "${SCOPE[@]}" env PATH="$PATH" KEPLOY_PROVEN="$sw" timeout -k 10 600 "$RECORD_BIN" record -c "bash app.sh" \
+    --generateGithubActions=false --disable-tele > "$log" 2>&1 &
+  local kp=$!
+  # Until the app listens (a connect, which records no test): keploy starts
+  # it once its agent is up. The bound is only for an agent that never comes
+  # up.
+  local up=0
+  for _ in $(seq 3600); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$APP") 2>/dev/null && { up=1; break; }
+    [ -d "/proc/$kp" ] || break
+    sleep 0.1
+  done
+  [ "$up" = 1 ] || fail "record ($sw): the app never listened on :$APP"
+  local i
+  for i in $(seq $N); do
+    curl -fsS -o /dev/null "http://127.0.0.1:$APP/order/item$i" || fail "record ($sw): GET /order/item$i failed"
+  done
+  # Ctrl+C to keploy itself, timeout's child, whose command line starts with
+  # the binary (the agent it starts says "agent", not "record").
+  sudo pkill -INT -f "^$RECORD_BIN record -c bash app\.sh" || fail "record ($sw): found no keploy record to stop"
+  wait "$kp"
+  echo "record ($sw): keploy exited $?"
+  REC=$(mocks keploy/test-set-0/mocks.yaml)
+  local tests
+  tests=$(sudo sh -c 'ls keploy/test-set-0/tests 2>/dev/null | wc -l')
+  echo "record ($sw): recorded $tests tests and $REC mocks"
+  if [ "$tests" != "$N" ] || [ "$REC" -lt "$N" ]; then
+    echo "FAIL: record ($sw): recorded $tests tests and $REC mocks, want $N tests and at least $N mocks (one dependency call a test)"
+    tail -n 40 "$log"
+    return 1
+  fi
+  : > dep.log
+  sudo cp -a keploy keploy.rec
+}
+
+# ktest <switch> <log> [VAR=value...]: one replay with KEPLOY_PROVEN=<switch>
+# of the recording as it was recorded; prints keploy's exit code. The
+# dependency stays UP: a call that is not intercepted is answered, and its
+# test passes.
 ktest() {
-  local log=$1
-  shift
+  local sw=$1 log=$2
+  shift 2
   sudo rm -rf keploy hold.out && sudo cp -a keploy.rec keploy
   : > dep.log
   # --health-url, not --delay: the first test goes once the app says the map
   # is full (app.py), not after a time that a loaded runner may not keep to.
-  # --health-poll-timeout and the outer `timeout` are both 600s on purpose: on
-  # the poll ceiling the gate would warn and fire anyway (before the map is
-  # full), so that fallback must stay unreachable -- the outer timeout, the
-  # same 600s, is the real hang guard, and app.py exits the app if the holder
-  # dies, so a stuck /healthz never burns the window on a dead app.
-  sudo -E "${SCOPE[@]}" env PATH="$PATH" "$@" timeout -k 30 600 "$REPLAY_BIN" test -c "bash app.sh" \
-    --health-url "http://127.0.0.1:$APP/healthz" --health-poll-timeout 600s \
-    --remove-unused-mocks --generateGithubActions=false --disable-tele > "$log" 2>&1
+  local flags=(--health-url "http://127.0.0.1:$APP/healthz") guard=900
+  if [ "$sw" = 0 ]; then
+    # With the proven model off, keploy test prunes with --remove-unused-mocks.
+    # --health-poll-timeout and the outer `timeout` are both 600s on purpose:
+    # on the poll ceiling the gate would warn and fire anyway (before the map
+    # is full), so that fallback must stay unreachable -- the outer timeout,
+    # the same 600s, is the real hang guard, and app.py exits the app if the
+    # holder dies, so a stuck /healthz never burns the window on a dead app.
+    flags+=(--health-poll-timeout 600s --remove-unused-mocks)
+    guard=600
+  fi
+  # Under the proven model both are refused (exit 8): keploy test prunes
+  # nothing, writes no mappings.yaml, and waits for --health-url with no
+  # ceiling (design v14 U18); an app that makes no progress is reported not
+  # judged after keploy's watchdog count (about ten minutes idle). The outer
+  # `timeout` is only a hang guard, past that count.
+  sudo -E "${SCOPE[@]}" env PATH="$PATH" KEPLOY_PROVEN="$sw" "$@" timeout -k 30 "$guard" "$REPLAY_BIN" test -c "bash app.sh" \
+    "${flags[@]}" --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
 }
-latest_report() { sudo sh -c 'ls -1dt keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | head -n1'; }
 
-echo "== keploy test --remove-unused-mocks, no overflow: must pass and keep every mock =="
-rc=$(ktest test.log)
-rep=$(latest_report)
-echo "test: keploy exited $rc; $(sudo grep -m1 '^status:' "$rep" 2>/dev/null); mocks $(mocks keploy/test-set-0/mocks.yaml) of $REC; the dependency saw $(wc -l < dep.log) call(s)"
-[ "$rc" = 0 ] || fail "test: keploy exited $rc, want 0"
-sudo grep -q '^status: PASSED' "$rep" 2>/dev/null || fail "test: the test set's report is not PASSED"
-[ "$(mocks keploy/test-set-0/mocks.yaml)" = "$REC" ] ||
-  fail "test: mocks.yaml holds $(mocks keploy/test-set-0/mocks.yaml) mocks after a run that used them all, want the $REC recorded"
-[ ! -s dep.log ] || fail "test: these calls went to the real dependency instead of a mock: $(tr '\n' ' ' < dep.log)"
-if grep -q "PID map\|capture incomplete" test.log; then
-  fail "test: keploy reported a PID map refusal on a run that held no extra processes: $(grep -m1 'PID map\|capture incomplete' test.log | cut -c1-300)"
-fi
+# replay_clean <switch>: no overflow: must pass and keep every mock.
+replay_clean() {
+  local sw=$1 log="test-$1.log" rc rep recorded after
+  recorded=$(recording_digest)
+  rc=$(ktest "$sw" "$log")
+  rep=$(latest_report)
+  after=$(recording_digest)
+  echo "test ($sw): keploy exited $rc; $(sudo grep -m1 '^status:' "$rep" 2>/dev/null); mocks $(mocks keploy/test-set-0/mocks.yaml) of $REC; the dependency saw $(wc -l < dep.log) call(s)"
+  [ "$rc" = 0 ] || fail "test ($sw): keploy exited $rc, want 0"
+  sudo grep -q '^status: PASSED' "$rep" 2>/dev/null || fail "test ($sw): the test set's report is not PASSED"
+  [ "$(mocks keploy/test-set-0/mocks.yaml)" = "$REC" ] ||
+    fail "test ($sw): mocks.yaml holds $(mocks keploy/test-set-0/mocks.yaml) mocks after a run that used them all, want the $REC recorded"
+  [ ! -s dep.log ] || fail "test ($sw): these calls went to the real dependency instead of a mock: $(tr '\n' ' ' < dep.log)"
+  if grep -q "PID map\|capture incomplete" "$log"; then
+    fail "test ($sw): keploy reported a PID map refusal on a run that held no extra processes: $(grep -m1 'PID map\|capture incomplete' "$log" | cut -c1-300)"
+  fi
+  if [ "$sw" = 1 ]; then
+    [ "$after" = "$recorded" ] ||
+      fail "test ($sw): the replay changed the recording (was: $recorded; now: $after): under the proven model keploy test deletes no mock and writes no mappings.yaml"
+  fi
+}
 
-echo "== keploy test --remove-unused-mocks, the PID map overflowing: must fail and leave the recording as it was =="
-rc=$(ktest test-overflow.log OVERFLOW=1)
-rep=$(latest_report)
-AFTER=$(mocks keploy/test-set-0/mocks.yaml)
-echo "test (overflow): keploy exited $rc; $(sudo grep -m1 '^status:' "$rep" 2>/dev/null); $(sudo grep -E '^(success|failure):' "$rep" 2>/dev/null | tr '\n' ' '); mocks $AFTER of $REC; the dependency saw $(wc -l < dep.log) call(s)"
-grep -qx "held $HOLD" hold.out 2>/dev/null ||
-  fail "test (overflow): the app command did not hold $HOLD live processes: $(head -n 2 hold.out 2>/dev/null)"
-# Which of the new processes the map refused is the machine's to decide (see
-# the top): printed, not asserted. The app's own call is mocked either way,
-# its place having been taken before the map filled, and kept while it lives.
-echo "test (overflow): the calls the full map let reach the real dependency: $(tr '\n' ' ' < dep.log)"
-if grep -qx "/price/item1" dep.log; then
-  fail "test (overflow): the app's own call, /price/item1, went to the real dependency although the app had its place in the map"
-fi
-[ "$rc" != 0 ] || fail "test (overflow): keploy exited 0 although the agent could not track $HOLD live processes"
-sudo grep -q '^status: FAILED' "$rep" 2>/dev/null || fail "test (overflow): the test set's report is not FAILED"
-sudo grep -q '^failure_reason: .*capture incomplete' "$rep" 2>/dev/null ||
-  fail "test (overflow): the report's failure_reason does not say capture incomplete: $(sudo grep -m1 '^failure_reason' "$rep" 2>/dev/null | cut -c1-200)"
-grep -q "refused a process a place in the agent's PID map target_namespace_pids" test-overflow.log ||
-  fail "test (overflow): the agent did not warn that target_namespace_pids refused a process"
-# item$N's mock went unused in this run (app.py): unguarded, the prune deletes
-# it, and the mock of every call that reached the dependency.
-[ "$AFTER" = "$REC" ] ||
-  fail "test (overflow): mocks.yaml holds $AFTER mocks, the recording had $REC: the prune deleted mocks after a run that did not see every call"
-grep -E 'skipping mock pruning.*"reason": ?"capture_incomplete"' test-overflow.log >/dev/null ||
-  fail "test (overflow): keploy did not say it skipped the prune because the capture was incomplete: $(grep -m1 'skipping mock pruning' test-overflow.log | cut -c1-300)"
-if sudo test -e keploy/test-set-0/mappings.yaml; then
-  fail "test (overflow): a mappings.yaml was written from a run that did not see every call"
-fi
-echo "--- test (overflow): what keploy said"
-grep -E "PID map|could not track|skipping mock pruning|not writing mappings" test-overflow.log | cut -c1-400
+# replay_overflow <switch>: the PID map overflowing: must fail and leave the
+# recording as it was.
+replay_overflow() {
+  local sw=$1 log="test-overflow-$1.log" rc rep recorded after
+  recorded=$(recording_digest)
+  rc=$(ktest "$sw" "$log" OVERFLOW=1)
+  rep=$(latest_report)
+  after=$(recording_digest)
+  AFTER=$(mocks keploy/test-set-0/mocks.yaml)
+  echo "test (overflow, $sw): keploy exited $rc; $(sudo grep -m1 '^status:' "$rep" 2>/dev/null); $(sudo grep -E '^(success|failure):' "$rep" 2>/dev/null | tr '\n' ' '); mocks $AFTER of $REC; the dependency saw $(wc -l < dep.log) call(s)"
+  grep -qx "held $HOLD" hold.out 2>/dev/null ||
+    fail "test (overflow, $sw): the app command did not hold $HOLD live processes: $(head -n 2 hold.out 2>/dev/null)"
+  # Which of the new processes the map refused is the machine's to decide
+  # (see the top): printed, not asserted. The app's own call is mocked
+  # either way, its place having been taken before the map filled, and kept
+  # while it lives.
+  echo "test (overflow, $sw): the calls the full map let reach the real dependency: $(tr '\n' ' ' < dep.log)"
+  if grep -qx "/price/item1" dep.log; then
+    fail "test (overflow, $sw): the app's own call, /price/item1, went to the real dependency although the app had its place in the map"
+  fi
+  [ "$rc" != 0 ] || fail "test (overflow, $sw): keploy exited 0 although the agent could not track $HOLD live processes"
+  sudo grep -q '^status: FAILED' "$rep" 2>/dev/null || fail "test (overflow, $sw): the test set's report is not FAILED"
+  sudo grep -q '^failure_reason: .*capture incomplete' "$rep" 2>/dev/null ||
+    fail "test (overflow, $sw): the report's failure_reason does not say capture incomplete: $(sudo grep -m1 '^failure_reason' "$rep" 2>/dev/null | cut -c1-200)"
+  grep -q "refused a process a place in the agent's PID map target_namespace_pids" "$log" ||
+    fail "test (overflow, $sw): the agent did not warn that target_namespace_pids refused a process"
+  # item$N's mock went unused in this run (app.py): unguarded, the prune
+  # deletes it, and the mock of every call that reached the dependency.
+  [ "$AFTER" = "$REC" ] ||
+    fail "test (overflow, $sw): mocks.yaml holds $AFTER mocks, the recording had $REC: mocks were deleted after a run that did not see every call"
+  if [ "$sw" = 0 ]; then
+    grep -E 'skipping mock pruning.*"reason": ?"capture_incomplete"' "$log" >/dev/null ||
+      fail "test (overflow, $sw): keploy did not say it skipped the prune because the capture was incomplete: $(grep -m1 'skipping mock pruning' "$log" | cut -c1-300)"
+    if sudo test -e keploy/test-set-0/mappings.yaml; then
+      fail "test (overflow, $sw): a mappings.yaml was written from a run that did not see every call"
+    fi
+  else
+    # Under the proven model keploy test writes no mappings.yaml and prunes
+    # nothing whatever it saw: the recording, the mappings.yaml keploy record
+    # wrote included, is byte for byte as it was.
+    [ "$after" = "$recorded" ] ||
+      fail "test (overflow, $sw): the replay changed the recording (was: $recorded; now: $after): under the proven model keploy test deletes no mock and writes no mappings.yaml"
+  fi
+  echo "--- test (overflow, $sw): what keploy said"
+  grep -E "PID map|could not track|skipping mock pruning|not writing mappings" "$log" | cut -c1-400
+}
+
+for sw in "${SWITCH_VALUES[@]}"; do
+  if [ "$sw" = 0 ]; then
+    echo "== the proven model off (KEPLOY_PROVEN=0): keploy test --remove-unused-mocks =="
+  else
+    echo "== under the proven model (KEPLOY_PROVEN=1): keploy test, no prune, no readiness ceiling =="
+  fi
+  echo "== record $N tests, one dependency call each ($sw) =="
+  record "$sw" || exit 1
+  echo "== no overflow ($sw): must pass and keep every mock =="
+  replay_clean "$sw"
+  echo "== the PID map overflowing ($sw): must fail and leave the recording as it was =="
+  replay_overflow "$sw"
+done
 
 if [ "$FAIL" -ne 0 ]; then
-  for l in record test test-overflow; do
-    echo "--- the last 40 lines of $l.log ---"
-    tail -n 40 "$l.log"
+  for sw in "${SWITCH_VALUES[@]}"; do
+    for l in record test test-overflow; do
+      [ -e "$l-$sw.log" ] || continue
+      echo "--- the last 40 lines of $l-$sw.log ---"
+      tail -n 40 "$l-$sw.log"
+    done
   done
   echo "TEST-MODE PID-MAP OVERFLOW E2E: FAILED; logs and the recording are kept in $WORK"
   exit 1

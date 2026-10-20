@@ -33,7 +33,10 @@ name: Mock Mode Regression (Linux)
 # the agent could not track a process (and the pid_map_overflow job runs the
 # hooks' side of that against keploy's BPF object, as root). Another does the
 # same to `keploy test --remove-unused-mocks`, and asserts the test set fails
-# and the recording loses no mock for the calls the agent did not see.
+# and the recording loses no mock for the calls the agent did not see; its
+# half under the proven switch does it to `keploy test` without the flags the
+# switch refuses, and asserts the set fails and the recording, mappings.yaml
+# included, is left byte for byte as keploy record wrote it.
 # Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
@@ -200,7 +203,8 @@ jobs:
       # reach the real dependency and their tests pass. The test set must fail
       # as capture incomplete, and the mocks recorded for those calls, which
       # nobody consumed, must not be pruned from the recording (they were, and
-      # the run exited 0).
+      # the run exited 0). (Its half under the switch runs in
+      # mock_linux_proven.)
       - name: Run test-mode PID map overflow e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -461,6 +465,20 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
+
+      # The test-mode PID map overflow under the proven switch, Linux's
+      # default: keploy test without --remove-unused-mocks and
+      # --health-poll-timeout, which the switch refuses (exit 8), waiting on
+      # --health-url alone. A full map must fail the test set as capture
+      # incomplete and exit non-zero, never pass it with calls that reached
+      # the real dependency, and leave the recording, the mappings.yaml
+      # keploy record wrote included, byte for byte as it was.
+      - name: Run test-mode PID map overflow e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-pid-map-overflow-linux.sh"
 
   # Strict HTTP matching under the proven switch (row S1), on keploy #4686's
   # request-drift app: its response never shows where or what its dependency
