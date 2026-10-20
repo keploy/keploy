@@ -98,12 +98,12 @@ func handleConnectTunnel(
 	}
 	// Reject an empty host (e.g. ":443"). net.SplitHostPort accepts it and
 	// http.ReadRequest accepts `CONNECT :443 HTTP/1.1`, so without this check
-	// an authority with no host at all flows on as a real target: it is stored
-	// as the SNI for this source port (so CertForClient mints a cert with an
-	// empty CN), it overwrites dstAddr with ":443", and with upstream
-	// verification on it leaves keploy with no name to verify against. There
-	// is no destination in a host-less CONNECT — reject it the same way the
-	// empty port below is rejected.
+	// an authority with no host at all flows on as a real target: it names
+	// the connection's MITM leaf (a cert with an empty CN), it overwrites
+	// dstAddr with ":443", and with upstream verification on it leaves
+	// keploy with no name to verify against. There is no destination in a
+	// host-less CONNECT — reject it the same way the empty port below is
+	// rejected.
 	if host == "" {
 		return nil, fmt.Errorf("empty host in CONNECT target %q", targetAddr)
 	}
@@ -185,7 +185,11 @@ func handleConnectTunnel(
 		}
 	}
 
-	// Store the target hostname so TLS MITM can forge the right certificate.
+	// TargetHost is what the TLS MITM names its leaf for when the client's
+	// ClientHello carries no SNI: handleConnection hands it to the handshake
+	// (pTls.WithConnectTarget), on this connection alone. It is filed under
+	// the client's source port too, as it always was, only for the readers
+	// of SrcPortToDstURL outside this module (see its doc).
 	if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok {
 		proxytls.SrcPortToDstURL.Store(tcpAddr.Port, host)
 		logger.Debug("Stored CONNECT target in SrcPortToDstURL",

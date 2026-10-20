@@ -152,10 +152,10 @@ func TestRelayConfig_TLSUpgradeFnVerifiesOnTheSameFlag(t *testing.T) {
 	if !ok {
 		t.Fatal("relay.Config in recordViaSupervisor no longer sets TLSUpgradeFn; every KindUpgradeTLS directive would be acked with ErrNoTLSUpgrader and TLS traffic would go unrecorded")
 	}
-	// Positional: newProxyTLSUpgradeFn(logger, verify, rootCAs, srcConn).
-	want := "newProxyTLSUpgradeFn(logger, " + opts + ".UpstreamTLSVerify, " + opts + ".UpstreamTLSRootCAs, srcConn)"
+	// Positional: newProxyTLSUpgradeFn(logger, verify, rootCAs).
+	want := "newProxyTLSUpgradeFn(logger, " + opts + ".UpstreamTLSVerify, " + opts + ".UpstreamTLSRootCAs)"
 	if got != want {
-		t.Fatalf("TLSUpgradeFn is built as %q, want %q — the dest-side dial must take its verify decision and its trust anchors from the same session options that drive ClientTLSFirst, and its srcConn is the only way it can recover the SNI the application sent", got, want)
+		t.Fatalf("TLSUpgradeFn is built as %q, want %q — the dest-side dial must take its verify decision and its trust anchors from the same session options that drive ClientTLSFirst", got, want)
 	}
 }
 

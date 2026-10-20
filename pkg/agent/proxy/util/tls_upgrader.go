@@ -132,3 +132,33 @@ func unwrapSafe(conn net.Conn) net.Conn {
 	}
 	return conn
 }
+
+// ClientServerName is the SNI a client sent in the TLS handshake keploy
+// served it on conn: "" when it sent none (as for an IP-literal destination:
+// RFC 6066 forbids IP literals in SNI), or when conn is no TLS connection
+// keploy serves. It looks through the proxy's own wrappers (SafeConn, Conn) to
+// the *tls.Conn, so a connection's destination name is read off that
+// connection and nothing another one left can stand in for it.
+func ClientServerName(conn net.Conn) string {
+	for {
+		switch c := conn.(type) {
+		case *tls.Conn:
+			if c == nil {
+				return ""
+			}
+			return c.ConnectionState().ServerName
+		case *SafeConn:
+			if c == nil {
+				return ""
+			}
+			conn = c.Unwrap()
+		case *Conn:
+			if c == nil {
+				return ""
+			}
+			conn = c.Conn
+		default:
+			return ""
+		}
+	}
+}
