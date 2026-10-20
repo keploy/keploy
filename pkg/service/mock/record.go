@@ -610,8 +610,10 @@ func (m *mockService) Record(ctx context.Context) error {
 		if lossesUnread {
 			unread, reason = "captured every call the test command made", models.CaptureLossesUnverified(pidCheck.unreadable)
 		}
+		// The reason holds the read's error, whose text the agent's answer
+		// can fill: the line says it as logcontent lets it.
 		m.logger.Warn("the recording is kept, but keploy could not verify it is complete: it could not read whether the agent "+unread,
-			zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable), zap.String("reason", reason),
+			zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable), logcontent.String("reason", reason),
 			zap.String("next_step", "record again once the agent answers, or replay the set: under --on-miss fail (the default) a call it is missing fails the replay"))
 	}
 
@@ -697,7 +699,9 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if recordLossesUnread != "" {
 				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)",
-					zap.String("mock-set", name), zap.String("reason", recordLossesUnread),
+					// The per-test file keeps the read's error whole, for
+					// judging; the line names it as logcontent lets it.
+					zap.String("mock-set", name), logcontent.NamedError("reason", unread),
 					zap.String("next_step", "check the agent's log for why its count could not be read, then record again"))
 			}
 		}

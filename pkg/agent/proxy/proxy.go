@@ -3227,15 +3227,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
+	// err is what the steps above left in it (nil once each has passed),
+	// which a handshake's or a CONNECT's read can have filled: these lines
+	// name it as logcontent lets them.
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
 	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the client connection id")
+		utils.LogContentError(p.logger, err, "failed to fetch the client connection id")
 		return err
 	}
 
 	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
 	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
+		utils.LogContentError(p.logger, err, "failed to fetch the destination connection id")
 		return err
 	}
 
@@ -3497,7 +3500,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// get the mock manager for the current app
 	m := p.getMockManager()
 	if m == nil {
-		utils.LogError(logger, err, "failed to fetch the mock manager")
+		utils.LogContentError(logger, err, "failed to fetch the mock manager")
 		return err
 	}
 

@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 )
 
 // lossRunner is a record's runner whose agent counts capture losses (the
@@ -46,6 +47,12 @@ func stall(n uint64) models.CaptureLosses {
 // answers); pid, when set, is the agent's PID-map count.
 func recordWithLosses(t *testing.T, evA, evB *models.ScopeEvidence, after models.CaptureLosses, afterErr error, uncharged models.CaptureLosses, unchargedErr error, pid *pidMapCounter) (error, *TestsReceipt, string) {
 	t.Helper()
+	return recordWithLossesLogged(t, zap.NewNop(), evA, evB, after, afterErr, uncharged, unchargedErr, pid)
+}
+
+// recordWithLossesLogged is recordWithLosses whose record logs to logger.
+func recordWithLossesLogged(t *testing.T, logger *zap.Logger, evA, evB *models.ScopeEvidence, after models.CaptureLosses, afterErr error, uncharged models.CaptureLosses, unchargedErr error, pid *pidMapCounter) (error, *TestsReceipt, string) {
+	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
 	judgedBuild(t)
 	dir := t.TempDir()
@@ -73,7 +80,7 @@ func recordWithLosses(t *testing.T, evA, evB *models.ScopeEvidence, after models
 	require.NoError(t, os.WriteFile(filepath.Join(dir, set, RecordTestsReceiptFile), []byte("set: "+set+"\nat: 2020-01-01T00:00:00Z\nmocksDigest: \"\"\ntests:\n  - name: orders::TestStale\n    outcome: passed\n"), 0o644))
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	svc := New(zap.NewNop(), in, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	svc := New(logger, in, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
 	err := svc.Record(context.Background())
 	got, rerr := ReadRecordTestsReceipt(dir, set)
 	require.NoError(t, rerr)
@@ -140,6 +147,23 @@ func TestAJudgedRecordSaysALossChargedToNoTest(t *testing.T) {
 	require.NotNil(t, got)
 	require.Empty(t, got.CaptureLosses)
 	require.Contains(t, got.CaptureLossesUnread, "bad file descriptor")
+}
+
+// Why the agent's counts could not be read is its client's error, whose text
+// the agent's answer can fill: the per-test file keeps it whole, for judging,
+// and the line that says judging fails the run names it by its kind, unless
+// KEPLOY_LOG_CONTENT is set.
+func TestAJudgedRecordLogsAnUnreadLossByItsKind(t *testing.T) {
+	const canary = "kp-canary-loss-unread-5c1d"
+	ev := &models.ScopeEvidence{CaptureIncomplete: stall(1)}
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		err, got, _ := recordWithLossesLogged(t, logger, ev, ev, nil, errors.New("the agent answered "+canary), nil, errors.New("the agent went away"), nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Contains(t, got.CaptureLossesUnread, canary, "the per-test file keeps why the losses could not be read")
+		logtest.Check(t, logs, canary, on, "keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)")
+	})
 }
 
 // pidLossRunner is lossRunner whose agent also counts PID-map refusals.

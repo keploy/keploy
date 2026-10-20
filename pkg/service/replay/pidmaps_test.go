@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -412,6 +413,30 @@ func TestALostPIDMapCountLeavesOneTestSetUnverified(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Why the agent's count could not be read is its client's error, whose text
+// the agent's answer can fill: the test set's verdict keeps it whole, and the
+// WARN line that says the test set is not verified names it by its kind,
+// unless KEPLOY_LOG_CONTENT is set.
+func TestALostPIDMapCountIsLoggedByItsKind(t *testing.T) {
+	const canary = "kp-canary-pidmap-unread-71e0"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		h := newPartialRunHarness(t, 1, 0)
+		h.replayer.config.Test.Mocking = true
+		r := h.replayer
+		r.logger = logger
+		r.instrumentation = &prPIDMapInstr{prInstr: h.instr, answers: []models.PIDMapRefusals{{}, {}, {}},
+			errAt: map[int]error{2: errors.New("agent returned 500: " + canary)}}
+		ctx := context.Background()
+		r.markPIDMaps(ctx)
+		got := r.pidMapCaptureIncomplete(ctx, "test-set-0")
+		if !strings.Contains(got.unverified, canary) {
+			t.Fatalf("the verdict %q does not keep why the count could not be read", got.unverified)
+		}
+		logtest.Check(t, logs, canary, on, "this test set is not verified: keploy could not read whether the agent tracked every process the application ran, so a call may have reached the real dependency unmocked; its mocks are not pruned and mappings.yaml is not written from it")
+	})
 }
 
 // A test set whose count was lost is not failed for it -- keploy test has no

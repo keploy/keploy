@@ -71,7 +71,11 @@ func (r *Recorder) markStopKilled(ctx context.Context, testSetID, why string) {
 		err = r.testSetConf.Write(ctx, testSetID, conf)
 	}
 	if err != nil {
-		utils.LogError(r.logger, err, "keploy could not mark the test-set's recording as cut by its stop's kill; a replay may fail it for a call the recording lacks",
+		// A config.yaml the store cannot parse is quoted in its error
+		// (yaml.v3 writes the scalar it could not read), and the config
+		// holds the test-set's template values: the line names the error
+		// as logcontent lets it.
+		utils.LogContentError(r.logger, err, "keploy could not mark the test-set's recording as cut by its stop's kill; a replay may fail it for a call the recording lacks",
 			zap.String("testSet", testSetID))
 	}
 }

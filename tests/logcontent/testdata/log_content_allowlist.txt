@@ -455,8 +455,8 @@ pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- (pkg/agent/proxy.Proxy
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- (pkg/agent/proxy.Proxy).opportunisticTLSIntercept | 1 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- (pkg/agent/proxy.Proxy).runAuxStart | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- (pkg/agent/proxy.Proxy).start | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
-pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/tls.HandshakeCause | 3 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
-pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/util.DialDestination | 5 | a dial's error: net's OpError (the addresses and an errno), a timeout, or keploy's own text about the dial
+pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/tls.HandshakeCause | 1 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
+pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/util.DialDestination | 4 | a dial's error: net's OpError (the addresses and an errno), a timeout, or keploy's own text about the dial
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/util.DialDestinationTLS | 1 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- unassigned | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/proxy/proxy.go | error | zap.Error(err) <- (pkg/agent/proxy/cbshim.CBShim).AttachToProcessTree | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
@@ -1191,8 +1191,7 @@ pkg/service/mock/record.go | field | zap.String(mk.GetKind()) | 1 | a protocol's
 pkg/service/mock/record.go | field | zap.String(mk.Name) | 3 | mocks' names, which keploy gives them (mock-N)
 pkg/service/mock/record.go | field | zap.String(name) | 37 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/mock/record.go | field | zap.String(nothingCapturedNext()) | 2 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/service/mock/record.go | field | zap.String(reason) | 2 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/service/mock/record.go | field | zap.String(recordLossesUnread) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/mock/record.go | field | zap.String(reason) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/mock/record.go | field | zap.String(refused.CaptureIncomplete()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/mock/record.go | field | zap.String(staging) | 6 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/mock/record.go | field | zap.String(t) | 4 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
@@ -1212,7 +1211,6 @@ pkg/service/mock/replay.go | error | utils.LogError(err) <- (pkg/service/mock.mo
 pkg/service/mock/replay.go | error | utils.LogError(err) <- (pkg/service/mock.mockService).releaseComposeApp | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/service/mock/replay.go | error | utils.LogError(err) <- (pkg/service/mock.mockService).startComposeApp | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/service/mock/replay.go | error | utils.LogError(err) <- pkg.RetryAgentSetup | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
-pkg/service/mock/replay.go | error | zap.Error(consumedErr) <- (pkg/service/mock.ComposeOutcomeReader).ComposeAgentOutcome | 1 | the text of keploy's own state file, which keploy wrote
 pkg/service/mock/replay.go | error | zap.Error(err) <- (pkg/service/mock.ComposeOutcomeReader).ComposeAgentOutcome | 1 | the text of keploy's own state file, which keploy wrote
 pkg/service/mock/replay.go | error | zap.NamedError(consumedErr) <- (pkg/service/mock.ComposeOutcomeReader).ComposeAgentOutcome | 1 | the text of keploy's own state file, which keploy wrote
 pkg/service/mock/replay.go | errorf | fmt.Errorf(m.config.Mock.OnMiss) | 1 | a value the user gave keploy (a flag, a config key, a path, the app's command), echoed back to them
@@ -1324,7 +1322,6 @@ pkg/service/record/record.go | field | zap.Strings(names) | 1 | a test case's na
 pkg/service/record/record.go | message | fmt.Sprintf( "Test set name '%s' already exists, using '%s' instead. You can change this name if you want.", requestedName, assignedName, ) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/record.go | message | msg | 3 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/record.go | message | stopReason | 11 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/service/record/stop_killed.go | error | utils.LogError(err) <- (pkg/service/record.TestSetConfig).Write | 1 | the test or mock store's own error reading or writing its files (os's: a path and an errno, or keploy's own text)
 pkg/service/record/stop_killed.go | field | zap.String(testSetID) | 4 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/stop_killed.go | field | zap.String(why) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/uijoin_record.go | error | zap.Error(err) <- (pkg/service/record.Recorder).persistUIJoinAnnotation | 1 | the test or mock store's own error reading or writing its files (os's: a path and an errno, or keploy's own text)
@@ -1368,7 +1365,7 @@ pkg/service/replay/hooks.go | field | zap.String(testSetID) | 2 | a test set's o
 pkg/service/replay/learn.go | field | zap.String(line.test) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/replay/learn.go | field | zap.String(testSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/replay/learn.go | field | zap.Strings(line.fields) | 1 | a body field's path (body.user.id): where a value sits, not the value
-pkg/service/replay/pidmaps.go | field | zap.String(reason) | 2 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/replay/pidmaps.go | field | zap.String(reason) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/replay/pidmaps.go | field | zap.String(testSetID) | 3 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/replay/pidmaps.go | message | msg | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/replay/proven_verdicts.go | field | zap.String(testSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)

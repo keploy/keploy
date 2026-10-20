@@ -1775,11 +1775,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		}
 		m.announceServed(tail)
 	}
+	// Either read's error can be the agent's reply, which can quote what
+	// the application sent: a line names it as logcontent lets it.
 	if consumedErr != nil {
-		m.logger.Debug("failed to read consumed mocks", zap.Error(consumedErr))
+		m.logger.Debug("failed to read consumed mocks", logcontent.Error(consumedErr))
 	}
 	if missesErr != nil {
-		m.logger.Debug("failed to read mock misses", zap.Error(missesErr))
+		m.logger.Debug("failed to read mock misses", logcontent.Error(missesErr))
 	}
 
 	// The outcome is read after the runner exits, from an agent that may have

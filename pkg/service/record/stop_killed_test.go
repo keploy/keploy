@@ -2,11 +2,13 @@ package record
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
 )
 
@@ -113,4 +115,34 @@ func TestARecordingKeepsWhyItsEndIsCut(t *testing.T) {
 	if why := off.endCut.Load(); why != nil {
 		t.Fatalf("switch off: kept %q", *why)
 	}
+}
+
+// unparsedConf is a store that reads a config for update and cannot parse
+// it: its error quotes the value it could not read, as yaml.v3's does.
+type unparsedConf struct {
+	confStore
+	err error
+}
+
+func (u *unparsedConf) ReadForUpdate(context.Context, string) (*models.TestSet, error) {
+	return nil, u.err
+}
+
+// A config the store cannot read for update is not written, and the line that
+// says so names the store's error by its kind, unless KEPLOY_LOG_CONTENT is
+// set: config.yaml holds the test-set's template values, which the error can
+// quote.
+func TestAStopKillsUnreadConfigIsLoggedByItsKind(t *testing.T) {
+	const canary = "kp-canary-stopkill-conf-4d2c"
+	t.Setenv(provenswitch.Env, "1")
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		store := &unparsedConf{confStore: confStore{conf: &models.TestSet{}},
+			err: errors.New("yaml: unmarshal errors: cannot unmarshal !!str `" + canary + "` into int")}
+		(&Recorder{logger: logger, testSetConf: store}).markStopKilled(context.Background(), "test-set-0", "killed")
+		if store.written != nil {
+			t.Fatalf("a config the store could not read was written: %+v", store.written)
+		}
+		logtest.Check(t, logs, canary, on, "keploy could not mark the test-set's recording as cut by its stop's kill; a replay may fail it for a call the recording lacks")
+	})
 }

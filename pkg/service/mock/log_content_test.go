@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
@@ -57,5 +58,34 @@ func TestReportOutcome_AMissIsLoggedWithoutTheValuesItSent(t *testing.T) {
 		if got, want := e[0].ContextMap()["call_shape"], "COM_QUERY SELECT body FROM notes WHERE tag = ?"; got != want {
 			t.Fatalf("the line names the call %v, want its shape %q", got, want)
 		}
+	})
+}
+
+// unreadOutcomeInstr is an agent whose reads of what it served and missed
+// fail with its reply's text.
+type unreadOutcomeInstr struct {
+	deadlineInstr
+	err error
+}
+
+func (i *unreadOutcomeInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	return nil, i.err
+}
+
+func (i *unreadOutcomeInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return nil, i.err
+}
+
+// Why the agent's account of a replay could not be read is its client's
+// error, whose text the agent's reply fills: the lines that say the reads
+// failed name it by its kind, unless KEPLOY_LOG_CONTENT is set.
+func TestReportOutcome_AnUnreadAccountIsLoggedByItsKind(t *testing.T) {
+	const canary = "kp-canary-mock-unread-3b9d"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		inst := &unreadOutcomeInstr{err: errors.New("agent returned 500: " + canary)}
+		m := &mockService{logger: logger, instrumentation: inst, config: &config.Config{}}
+		m.reportOutcome(context.Background(), 0, replayDetail{}, func() bool { return false })
+		logtest.Check(t, logs, canary, on, "failed to read consumed mocks", "failed to read mock misses")
 	})
 }

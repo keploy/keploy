@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -782,6 +783,7 @@ func TestAPressAtFinishNamesTheTestCaseItsReadWasFor(t *testing.T) {
 // ends it.
 func TestNoInterruptCutsTheStopsWaitForTheReadsShort(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
+	t.Cleanup(logcontent.Set(true)) // the read's error, whole: see below
 	stoppedRun(t)
 	r := newWedgedReader(2, nil)
 	core, logs := observer.New(zapcore.DebugLevel)
@@ -809,6 +811,9 @@ func TestNoInterruptCutsTheStopsWaitForTheReadsShort(t *testing.T) {
 	if !all.Load() {
 		t.Fatal("an interrupt cut the stop's wait for the reads short")
 	}
+	// The line names the read's error by its kind unless KEPLOY_LOG_CONTENT
+	// is on (the agent's reply can quote what it was sent); on, as here, it
+	// is the error itself, which is what this asks of it.
 	gaveUpOnItsBound := false
 	for _, e := range logs.FilterMessageSnippet("could not read its agent's count").All() {
 		if err, _ := e.ContextMap()["error"].(string); err == errCountSilent.Error() {
