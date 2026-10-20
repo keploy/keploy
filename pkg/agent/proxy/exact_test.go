@@ -1736,6 +1736,93 @@ func TestFindStagedElsewhereFindsTheCallsRecordingAgainOnceItIsSpent(t *testing.
 	}
 }
 
+// A lookup of a recording made elsewhere digests no recording the view
+// shows (it answers in scope: no digest of it is ever read), and digests and
+// compares the others with no tree's lock held: the lookup that first
+// digests a staging's recordings (all of them, hundreds of milliseconds at
+// tens of thousands) holds back no call that reads or consumes the trees
+// meanwhile, nor, behind a consume waiting for one, every other reader.
+func TestFindStagedElsewhereDigestsNoShownRecordingAndHoldsNoTreeLockMeanwhile(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	worker := httpCall("worker", time.Second, "/config")
+	a := httpCall("a", 2*time.Second, "/orders")
+	b := httpCall("b", 3*time.Second, "/orders")
+	pt := httpCall("per-test", 4*time.Second, "/orders")
+	mm := stagedManager(t, []*models.Mock{pt}, []*models.Mock{own, worker, a, b})
+	mm.ServeExactWorker([]string{"worker"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	var digested, compared, locked []string
+	// held names the trees whose lock is held now, read or write.
+	held := func(at string) {
+		for i, tr := range []*TreeDb{mm.filtered, mm.unfiltered, mm.startup} {
+			if tr == nil {
+				continue
+			}
+			if !tr.mu.TryLock() {
+				locked = append(locked, fmt.Sprintf("%s: tree %d", at, i))
+				continue
+			}
+			tr.mu.Unlock()
+		}
+	}
+	q := integrations.ElsewhereQuery{
+		DigestOf: "test",
+		Digest: func(m *models.Mock) any {
+			held("digest of " + m.Name)
+			digested = append(digested, m.Name)
+			return m.Name
+		},
+		RulesOut: func(d any) bool { return d != "b" },
+		Match: func(m *models.Mock) bool {
+			held("compare with " + m.Name)
+			compared = append(compared, m.Name)
+			return m.Name == "b"
+		},
+	}
+	for i := 0; i < 2; i++ {
+		if name, notOwned := mm.FindStagedElsewhere(models.HTTP, q); name != "b" || notOwned != (i == 0) {
+			t.Fatalf("lookup %d found %q (not owned %v), want b", i, name, notOwned)
+		}
+	}
+	sort.Strings(digested)
+	if want := []string{"a", "b", "per-test"}; !reflect.DeepEqual(digested, want) {
+		t.Fatalf("digested %v, want %v once each: none the view shows (worker), nor the view's own", digested, want)
+	}
+	if !reflect.DeepEqual(compared, []string{"b", "b"}) {
+		t.Fatalf("compared %v, want b alone in each lookup", compared)
+	}
+	if len(locked) != 0 {
+		t.Fatalf("a tree's lock was held while the lookup %v", locked)
+	}
+
+	// A name one tree holds twice is compared once (Match is asked at most
+	// once per recording).
+	own2 := httpCall("own", 0, "/orders")
+	mm2 := stagedManager(t, nil, []*models.Mock{own2, httpCall("dup", time.Second, "/orders"), httpCall("dup", 2*time.Second, "/orders")})
+	mm2.ServeExactTest("T1", []*models.Mock{own2})
+	if _, held := treeMock(mm2, "dup"); held == nil {
+		t.Fatal("fixture: no tree holds dup")
+	}
+	dups := 0
+	mm2.unfiltered.rangeValues(func(v interface{}) bool {
+		if mk, _ := v.(*models.Mock); mk != nil && mk.Name == "dup" {
+			dups++
+		}
+		return true
+	})
+	if dups != 2 {
+		t.Fatalf("fixture: the session tree holds dup %d times, want twice", dups)
+	}
+	compared = nil
+	q.RulesOut = func(any) bool { return false }
+	if name, _ := mm2.FindStagedElsewhere(models.HTTP, q); name != "" {
+		t.Fatalf("found %q for a call no recording is", name)
+	}
+	if !reflect.DeepEqual(compared, []string{"dup"}) {
+		t.Fatalf("compared %v, want dup once", compared)
+	}
+}
+
 // A lookup compares a call only with the recordings whose digest is the
 // call's (or that have none), computes each recording's digest once for the
 // staging (again for a recording the trees swap for another, and afresh in

@@ -501,7 +501,11 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 // staging) rules it out (q.RulesOut) is not compared, nor read back from
 // disk once its digest is kept: a lookup compares the call only with the
 // recordings that may be it, and reads, of each other recording, its name
-// and its kept digest.
+// and its kept digest. One the view shows answers in scope and is never
+// digested. A tree is read under its lock by the digests kept alone: the
+// recordings that may be the call are digested, when none is kept yet, and
+// compared once its lock is released, so the lookup that first digests a
+// staging's recordings keeps no call from its trees meanwhile.
 func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (name string, notOwned bool) {
 	v := m.exactView()
 	if v == nil || q.Match == nil {
@@ -525,14 +529,11 @@ func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 	if len(q.Keys) > 0 && m.hasRecordingSource() {
 		inTrees = map[string]bool{}
 	}
-	// try reports whether mk, which the view does not own and whose digest
-	// may be the call's, is the call and named for it: the lookup is then
-	// over. What the view shows answers in scope.
-	try := func(mk *models.Mock) bool {
+	// tryUnshown reports whether mk, which the view neither owns nor shows
+	// and whose digest may be the call's, is the call and named for it: the
+	// lookup is then over.
+	tryUnshown := func(mk *models.Mock) bool {
 		seen[mk.Name] = true
-		if v.shows(mk) {
-			return false
-		}
 		spent := m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name)
 		if spent && again != "" {
 			// One recording the call is again is all a miss names.
@@ -552,10 +553,19 @@ func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 		}
 		return false
 	}
+	// try is tryUnshown of mk, when the view does not show it: what the
+	// view shows answers in scope.
+	try := func(mk *models.Mock) bool {
+		seen[mk.Name] = true
+		return !v.shows(mk) && tryUnshown(mk)
+	}
 	for _, t := range trees {
 		if t == nil || fresh != "" {
 			continue
 		}
+		// The tree's recordings that may be the call, by the digests kept
+		// (none kept yet: may be), read under its lock.
+		var maybe []*models.Mock
 		t.rangeValues(func(val interface{}) bool {
 			mk, _ := val.(*models.Mock)
 			if mk == nil || mk.Kind != kind || seen[mk.Name] {
@@ -569,11 +579,30 @@ func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 			if inTrees != nil {
 				inTrees[mk.Name] = true
 			}
-			if digests != nil && rulesOut(&digests.byMock, mk, mk, q) {
-				return true
+			if digests != nil {
+				if d, kept := digests.byMock.Load(mk); kept && q.RulesOut(d) {
+					return true
+				}
 			}
-			return !try(mk)
+			maybe = append(maybe, mk)
+			return true
 		})
+		// Digested and compared with the lock released.
+		for _, mk := range maybe {
+			if seen[mk.Name] {
+				continue
+			}
+			if v.shows(mk) {
+				seen[mk.Name] = true
+				continue
+			}
+			if digests != nil && rulesOut(&digests.byMock, mk, mk, q) {
+				continue
+			}
+			if tryUnshown(mk) {
+				break
+			}
+		}
 	}
 	if fresh == "" && inTrees != nil {
 		// The recordings kept on disk, each read back only while its digest
