@@ -1,11 +1,15 @@
 package utils
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
 	"testing"
 
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -36,4 +40,23 @@ func TestSortedKeys_CostsADisabledLineNothing(t *testing.T) {
 	if ours > viaAny {
 		t.Fatalf("a disabled line with SortedKeys allocates %v times, with zap.Any of the map %v", ours, viaAny)
 	}
+}
+
+// LogContentError logs what LogError does, with the error as logcontent.Error
+// logs it, and like LogError nothing for a cancellation.
+func TestLogContentError_LogsTheErrorAsLogcontentAllows(t *testing.T) {
+	const canary = "kp-canary-utils-3f9a"
+	parseErr := fmt.Errorf("parse request: %w", errors.New("malformed MIME header line: "+canary))
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		LogContentError(logger, parseErr, "failed to parse the request", zap.String("conn", "1"))
+		LogContentError(logger, fmt.Errorf("read: %w", context.Canceled), "canceled")
+		logtest.Check(t, logs, canary, on, "failed to parse the request")
+		if logs.FilterMessage("canceled").Len() != 0 {
+			t.Fatal("a cancellation was logged")
+		}
+		if got := logs.All()[0].ContextMap()["conn"]; got != "1" {
+			t.Fatalf("the line's own fields were dropped: conn = %v", got)
+		}
+	})
 }

@@ -2,9 +2,14 @@ package logurl
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -147,5 +152,65 @@ func TestADisabledLineShapesNothing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), urls[0].shape) {
 		t.Fatalf("the written line does not name the URL by its shape: %s", out.String())
+	}
+}
+
+// An error that names a URL, client.Do's and url.Parse's however wrapped and
+// one that names it in its own words, is logged naming it by its shape and a
+// *url.Error's cause by its kind, and still reads as the error it stands
+// for; with the switch on, or naming no URL, it is the error itself.
+func TestErrorNamesTheURLByItsShape(t *testing.T) {
+	const token = "kq7Zt0x9resettoken"
+	refused := &url.Error{Op: "Get", URL: "http://app:8080/reset/" + token + "?code=123456",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}}
+	// net/http quotes what the server answered in a transport's error.
+	answered := &url.Error{Op: "Get", URL: "http://app:8080/orders",
+		Err: fmt.Errorf("net/http: HTTP/1.x transport connection broken: %w", fmt.Errorf("malformed HTTP response %q", token))}
+	_, unparsed := url.Parse("http://app:8080/reset/" + token + "\x7f")
+	_, escaped := url.Parse("http://app:8080/reset/%z" + token)
+	own := "/reset/" + token + "?next=/x"
+	refusedKind := "syscall.Errno(" + syscall.ECONNREFUSED.Error() + ")"
+	for name, c := range map[string]struct {
+		err  error
+		urls []string
+		want string
+	}{
+		"client.Do's":                 {refused, nil, `Get "http://app:8080/reset/{}?code={}": ` + refusedKind},
+		"client.Do's, wrapped":        {fmt.Errorf("the app's port cannot be reached: %w", refused), nil, `the app's port cannot be reached: Get "http://app:8080/reset/{}?code={}": ` + refusedKind},
+		"client.Do's, with an answer": {answered, nil, `Get "http://app:8080/orders": *fmt.wrapError`},
+		"url.Parse's, which escapes":  {unparsed, nil, `parse "http://app:8080/reset/{}": *errors.errorString`},
+		"url.Parse's, which quotes":   {escaped, nil, `parse "http://app:8080/reset/{}": url.EscapeError`},
+		"one in its own words":        {fmt.Errorf("the test's URL %q has no host", own), []string{own}, `the test's URL "/reset/{}?next={}" has no host`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			func() {
+				defer logcontent.Set(false)()
+				got := Error(c.err, c.urls...)
+				if got.Error() != c.want {
+					t.Fatalf("Error = %q, want %q", got, c.want)
+				}
+				if strings.Contains(got.Error(), token) {
+					t.Fatalf("Error carries the token: %q", got)
+				}
+				if !errors.Is(got, c.err) {
+					t.Fatalf("Error(%v) does not unwrap to it", c.err)
+				}
+				var uerr *url.Error
+				if errors.As(c.err, &uerr) && (!errors.As(got, &uerr) || !strings.Contains(uerr.URL+fmt.Sprint(uerr.Err), token)) {
+					t.Fatalf("Error(%v) hides the *url.Error it holds, or changed it", c.err)
+				}
+			}()
+			defer logcontent.Set(true)()
+			if got := Error(c.err, c.urls...); got != c.err {
+				t.Fatalf("with the switch on, Error = %v, want the error itself", got)
+			}
+		})
+	}
+	defer logcontent.Set(false)()
+	if plain := errors.New("connection refused"); Error(plain) != plain {
+		t.Fatal("an error that names no URL is not logged as itself")
+	}
+	if got := Error(nil); got != nil {
+		t.Fatalf("Error(nil) = %v", got)
 	}
 }

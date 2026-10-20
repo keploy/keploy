@@ -4,11 +4,18 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/textproto"
+	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"go.uber.org/zap"
@@ -490,6 +497,110 @@ func TestAnyOfNilNamesNoType(t *testing.T) {
 	lines := observed(t, func(l *zap.Logger) { l.Debug("nil", Any("v", nil)) })
 	if len(lines) != 1 || !strings.Contains(lines[0], `"v": {"type": "<nil>"}`) {
 		t.Fatalf("Any(nil) logged %q", lines)
+	}
+}
+
+// parseErr is a parser's error that quotes what it could not read, as
+// net/http's does a header line, wrapped as a parser wraps it.
+var parseErr = fmt.Errorf("parse request: %w", textproto.ProtocolError("malformed MIME header: missing colon: "+strconv.Quote("X-Token "+canary)))
+
+// An error is logged by its kind and its text's length with the switch off,
+// with no fingerprint: the text quotes the value among words anyone can read,
+// so a short value is found by hashing the texts it would make. With the
+// switch on, Error and NamedError are zap's, and a nil error logs nothing
+// either way.
+func TestErrorIsLoggedByItsKindAndLength(t *testing.T) {
+	logBoth := func(l *zap.Logger, e func(error) zap.Field, ne func(string, error) zap.Field) {
+		l.Debug("parse", e(parseErr))
+		l.Debug("named", ne("cause", parseErr))
+		l.Debug("nil", e(nil))
+	}
+	t.Run("off", func(t *testing.T) {
+		t.Cleanup(Set(false))
+		fp := Fingerprint([]byte(parseErr.Error()))
+		hashes := countHashes(t)
+		lines := observed(t, func(l *zap.Logger) { logBoth(l, Error, NamedError) })
+		for _, line := range lines {
+			if carries(line) || strings.Contains(line, fp) {
+				t.Errorf("a line carries the error's text or its fingerprint: %s", line)
+			}
+		}
+		for i, want := range []string{
+			fmt.Sprintf(`"error": {"kind": "textproto.ProtocolError", "len": %d}`, len(parseErr.Error())),
+			fmt.Sprintf(`"cause": {"kind": "textproto.ProtocolError", "len": %d}`, len(parseErr.Error())),
+		} {
+			if !strings.Contains(lines[i], want) {
+				t.Errorf("line %d does not carry %s: %s", i, want, lines[i])
+			}
+		}
+		if strings.Contains(lines[2], "error") {
+			t.Errorf("a nil error was logged: %s", lines[2])
+		}
+		if n := hashes.Load(); n != 0 {
+			t.Errorf("an error's line hashed %d times, want 0", n)
+		}
+	})
+	t.Run("on", func(t *testing.T) {
+		t.Cleanup(Set(true))
+		on := observed(t, func(l *zap.Logger) { logBoth(l, Error, NamedError) })
+		zapped := observed(t, func(l *zap.Logger) { logBoth(l, zap.Error, zap.NamedError) })
+		for i := range on {
+			if on[i] != zapped[i] {
+				t.Errorf("with the switch on, line %d is not what zap logs:\n got %s\nwant %s", i, on[i], zapped[i])
+			}
+		}
+		if !carries(on[0]) {
+			t.Errorf("with the switch on, the error's text is not logged: %s", on[0])
+		}
+	})
+}
+
+// Error's off field reads err when the entry is encoded: a disabled line
+// neither names its kind nor formats its text.
+func TestADisabledErrorLineFormatsNothing(t *testing.T) {
+	t.Cleanup(Set(false))
+	var formatted atomic.Int64
+	err := countingError{&formatted}
+	logger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zapcore.InfoLevel))
+	for range 100 {
+		logger.Debug("parse", Error(err))
+	}
+	if n := formatted.Load(); n != 0 {
+		t.Fatalf("100 disabled lines formatted the error %d times, want 0", n)
+	}
+	logger.Info("parse", Error(err))
+	if n := formatted.Load(); n != 1 {
+		t.Fatalf("an encoded line formatted the error %d times, want 1", n)
+	}
+}
+
+// countingError counts the times its text is formatted.
+type countingError struct{ n *atomic.Int64 }
+
+func (e countingError) Error() string { e.n.Add(1); return canary }
+
+// An error is named by its cause however it was wrapped, past the text the
+// errors and fmt packages carry, an errno by what it says; one of text alone
+// by the sentinel it ends in, and failing that by its own type.
+func TestErrorKind(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{parseErr, "textproto.ProtocolError"},
+		{fmt.Errorf("invalid content-length: %w", &strconv.NumError{Func: "Atoi", Num: canary, Err: strconv.ErrSyntax}), "*strconv.NumError"},
+		{&url.Error{Op: "Get", URL: "http://app/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}}, "syscall.Errno(" + syscall.ECONNREFUSED.Error() + ")"},
+		{&net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}, "*net.OpError"},
+		{fmt.Errorf("%w: %s", io.ErrUnexpectedEOF, "the COM_QUERY response"), "io.ErrUnexpectedEOF"},
+		{fmt.Errorf("read the request: %w", fmt.Errorf("after %q: %w", canary, io.EOF)), "io.EOF"},
+		{errors.Join(parseErr, io.EOF), "*errors.joinError"},
+		{errors.New("unexpected " + canary), "*errors.errorString"},
+		{io.EOF, "io.EOF"},
+		{nil, "<nil>"},
+	} {
+		if got := ErrorKind(c.err); got != c.want {
+			t.Errorf("ErrorKind(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }
 

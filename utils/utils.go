@@ -345,12 +345,27 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 
 // LogError logs the error with the provided fields if the error is not context.Canceled.
 func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
+	LogErrorWith(logger, err, msg, []zap.Field{zap.Error(err)}, fields...)
+}
+
+// LogContentError is LogError for an error whose text can quote what the
+// application sent, as a parser's can (net/http quotes a header line it
+// cannot read whole, strconv the length it could not parse): the error is
+// logged as logcontent.Error logs it.
+func LogContentError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
+	LogErrorWith(logger, err, msg, []zap.Field{logcontent.Error(err)}, fields...)
+}
+
+// LogErrorWith is LogError for an error a line may not carry whole, whose text
+// can quote the application's content: errFields stand in for zap.Error(err)
+// (logcontent.Error, or the proxy's fields for a parser's error).
+func LogErrorWith(logger *zap.Logger, err error, msg string, errFields []zap.Field, fields ...zap.Field) {
 	if logger == nil {
 		fmt.Println("Failed to log error. Logger is nil.")
 		return
 	}
 	if !errors.Is(err, context.Canceled) {
-		logger.Error(msg, append(fields, zap.Error(err))...)
+		logger.Error(msg, append(fields, errFields...)...)
 	}
 }
 

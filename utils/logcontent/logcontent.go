@@ -12,7 +12,7 @@
 // away a value that can be guessed, or, for a URL, by a shape that keeps what
 // reads as a name (below). Setting EnvVar to 1 or true is the explicit
 // opt-in: each helper then logs the value itself, as zap.ByteString,
-// zap.Binary, zap.String and zap.Any do.
+// zap.Binary, zap.String, zap.Any and zap.Error do.
 //
 // With the switch off, the default, a line keeps the facts that are not
 // content (a message's type, an op's name, a protocol's or keploy's own ids,
@@ -44,6 +44,11 @@
 //   - Any logs a value's Go type, which is not content, and for a string or
 //     a byte slice its length and its fingerprint too, as String and Bytes
 //     log them, with what they give away.
+//   - Error logs an error by what it is (ErrorKind: textproto.ProtocolError,
+//     *strconv.NumError, syscall.Errno(connection reset by peer)) and its
+//     text's length, and no fingerprint: a parser's error quotes the value it
+//     could not read, a length or a header line, and a short one is found
+//     from its text's fingerprint as from its own.
 //   - logurl logs a URL, a path or a call by its shape (models.URLShape):
 //     every path segment and query name that does not read as a name, and
 //     every query value, written {}, as the lines a default run prints for a
@@ -71,12 +76,16 @@ package logcontent
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 
 	"go.uber.org/zap"
@@ -282,6 +291,93 @@ func Any(key string, v any) zap.Field {
 	return zap.Object(key, typeOnly{key, v})
 }
 
+// Error is zap.Error(err) with the switch on, for an error whose text can
+// quote content, as a parser's can: net/http quotes a header line it cannot
+// read whole, strconv the value it could not parse, a decoder the packet, a
+// database the statement it refused. With it off, the field is what err is
+// (ErrorKind) and its text's exact length, {"kind":
+// "textproto.ProtocolError", "len": 57}, and no fingerprint: the text holds
+// the value it quotes among words anyone can read in the parser's source, so
+// a short value (a PIN in a header line, the number strconv could not
+// parse) is found by hashing the texts it would make. A nil err is
+// zap.Error's, which logs nothing.
+//
+// ErrorKind and the text are computed when a core encodes the entry, not
+// here, so a disabled line costs one small allocation, for err, that
+// zap.Error's does not.
+func Error(err error) zap.Field {
+	return NamedError("error", err)
+}
+
+// NamedError is Error under key, as zap.NamedError(key, err) is zap.Error's.
+func NamedError(key string, err error) zap.Field {
+	if on.Load() || err == nil {
+		return zap.NamedError(key, err)
+	}
+	return zap.Object(key, errorDigest{err})
+}
+
+// ErrorKind is what err is, for a line that does not carry its text: the Go
+// type of the last error in its chain, as errors.Unwrap follows it, that is
+// more than text. errors.New's and fmt.Errorf's carry nothing but their text,
+// so an error is named by its cause however it was wrapped:
+// textproto.ProtocolError for net/http's "malformed MIME header",
+// *strconv.NumError for a length that is not a number, and an errno by what
+// it says, syscall.Errno(connection reset by peer), which is the kernel's and
+// not the application's. A chain of text alone is named by the standard
+// library's sentinel it ends in (io.ErrUnexpectedEOF), and failing that by
+// its own type, as errors.Join's is.
+func ErrorKind(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	var cause error
+	sentinel := ""
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if !textOnly(reflect.TypeOf(e)) {
+			cause = e
+		}
+		for _, s := range sentinels {
+			if e == s.err {
+				sentinel = s.name
+			}
+		}
+	}
+	if errno, ok := cause.(syscall.Errno); ok {
+		return "syscall.Errno(" + errno.Error() + ")"
+	}
+	switch {
+	case cause != nil:
+		return reflect.TypeOf(cause).String()
+	case sentinel != "":
+		return sentinel
+	}
+	return reflect.TypeOf(err).String()
+}
+
+// sentinels are the standard library's errors that are text alone, which a
+// parser's error most often ends in, by the names Go gives them.
+var sentinels = []struct {
+	err  error
+	name string
+}{
+	{io.EOF, "io.EOF"},
+	{io.ErrUnexpectedEOF, "io.ErrUnexpectedEOF"},
+	{io.ErrClosedPipe, "io.ErrClosedPipe"},
+	{io.ErrShortBuffer, "io.ErrShortBuffer"},
+	{io.ErrShortWrite, "io.ErrShortWrite"},
+	{context.Canceled, "context.Canceled"},
+}
+
+// textOnly reports whether t is an error type of the errors or fmt package,
+// which carry only their text and what they wrap.
+func textOnly(t reflect.Type) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.PkgPath() == "errors" || t.PkgPath() == "fmt"
+}
+
 // Fingerprint names b by a digest instead of its bytes: the first 12 hex
 // digits, 48 bits, of its sha256, with no key and no salt. Two lines, two
 // runs or two installations name the same payload alike, so it links equal
@@ -341,6 +437,15 @@ type lenOnly int
 
 func (n lenOnly) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddInt("len", int(n))
+	return nil
+}
+
+// errorDigest is an error by its kind and its text's length (Error).
+type errorDigest struct{ err error }
+
+func (e errorDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("kind", ErrorKind(e.err))
+	enc.AddInt("len", len(e.err.Error()))
 	return nil
 }
 

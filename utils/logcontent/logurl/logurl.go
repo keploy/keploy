@@ -33,6 +33,12 @@
 package logurl
 
 import (
+	"errors"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
@@ -74,6 +80,57 @@ func URL(u string) string {
 	}
 	return shape(u)
 }
+
+// Error is err as a log line may carry it, for an error whose text names a
+// URL: err itself with the switch on. With it off, a *url.Error in it (what
+// client.Do and url.Parse return, however wrapped) is written as its op, its
+// URL's shape and its cause's kind (logcontent.ErrorKind), `Get
+// "http://app:8080/reset/{}": syscall.Errno(connection refused)`, since its
+// cause can quote what the server answered (net/http's "malformed HTTP
+// response") or a piece of the URL (url.EscapeError); and each of urls,
+// which its text names in its own words, is written by its shape. The
+// result unwraps to err, so errors.Is and errors.As find what they find in
+// err, and it is err itself when its text names none of them.
+//
+// It is for a line only. An error a caller returns, or a report keeps, is
+// left whole: the switch decides what a log line carries, not what keploy
+// reports.
+func Error(err error, urls ...string) error {
+	if err == nil || logcontent.On() {
+		return err
+	}
+	text := err.Error()
+	logged := text
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		logged = strings.ReplaceAll(logged, uerr.Error(),
+			fmt.Sprintf("%s %q: %s", uerr.Op, shape(uerr.URL), logcontent.ErrorKind(uerr.Err)))
+	}
+	for _, u := range urls {
+		if u == "" {
+			continue
+		}
+		l := shape(u)
+		// Quoted first, as fmt's %q writes it, then as it is.
+		logged = strings.ReplaceAll(logged, strconv.Quote(u), strconv.Quote(l))
+		logged = strings.ReplaceAll(logged, u, l)
+	}
+	if logged == text {
+		return err
+	}
+	return loggedError{text: logged, err: err}
+}
+
+// loggedError is an error as a line may carry it (Error): its own text, and
+// the error it stands for underneath.
+type loggedError struct {
+	text string
+	err  error
+}
+
+func (e loggedError) Error() string { return e.text }
+
+func (e loggedError) Unwrap() error { return e.err }
 
 // shaped is a URL whose shape a core writes when it encodes the entry.
 type shaped string
