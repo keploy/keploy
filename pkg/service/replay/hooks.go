@@ -89,14 +89,14 @@ func (h *Hooks) beforeSimulate(ctx context.Context, tc *models.TestCase, at *tim
 			// Whatever the hook began (a freeze, a coverage window) ends,
 			// as after any case.
 			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
+				utils.LogContentError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 			return err
 		}
 		return nil
 	}
 	if err := h.instrumentation.BeforeSimulate(ctx, at, testSetID, tc.Name); err != nil {
-		utils.LogError(h.logger, err, "failed to call BeforeSimulate hook")
+		utils.LogContentError(h.logger, err, "failed to call BeforeSimulate hook")
 	}
 	return nil
 }
@@ -159,7 +159,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
 
 			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
+				utils.LogContentError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 
 			return resp, err
@@ -169,7 +169,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
+			utils.LogContentError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
@@ -218,7 +218,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
+			utils.LogContentError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
@@ -363,7 +363,7 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 
 	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {
-		utils.LogError(h.logger, err, "failed to call BeforeTestRun hook")
+		utils.LogContentError(h.logger, err, "failed to call BeforeTestRun hook")
 	}
 
 	return nil
@@ -378,7 +378,7 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, test
 	// (handled by HandleBeforeTestSetCompose in the agent process).
 
 	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
-		utils.LogError(h.logger, err, "failed to call BeforeTestSetCompose hook")
+		utils.LogContentError(h.logger, err, "failed to call BeforeTestSetCompose hook")
 	}
 
 	return nil
@@ -428,7 +428,7 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 	}
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
-		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")
+		utils.LogContentError(h.logger, err, "failed to call AfterTestRun hook")
 	}
 	return nil
 }
@@ -436,7 +436,7 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx)
 	if err != nil {
-		h.logger.Error("failed to get consumed mocks", zap.Error(err))
+		h.logger.Error("failed to get consumed mocks", logcontent.Error(err))
 		return nil, err
 	}
 	return consumedMocks, nil

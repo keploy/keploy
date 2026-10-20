@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -143,14 +144,14 @@ func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundS
 					// The agent died after it said "clear": its streams
 					// close, each judged by its marker below.
 					gone = err
-					m.logger.Debug("could not reach the keploy agent to end its streams; judging each by its marker as it closes", zap.Error(err))
+					m.logger.Debug("could not reach the keploy agent to end its streams; judging each by its marker as it closes", logcontent.Error(err))
 					continue
 				}
 				if utils.AgentGone(err) {
 					return m.endedEarly(false, s.kind, words, err)
 				}
 				m.logger.Warn("the keploy agent did not take the request to end its streams; ending them here, and what was still on its way is lost",
-					zap.Error(err), zap.String("next_step", words.endedHere))
+					logcontent.Error(err), zap.String("next_step", words.endedHere))
 				return false
 			case <-utils.StopNow():
 				// A stream that is through goes by its marker, whatever
@@ -193,7 +194,7 @@ func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundS
 func (m *mockService) endedEarly(strict bool, kind models.FrameStream, words drainWords, err error) (lost bool) {
 	fields := []zap.Field{zap.String("stream", string(kind))}
 	if err != nil {
-		fields = append(fields, zap.NamedError("end_request_error", err))
+		fields = append(fields, logcontent.NamedError("end_request_error", err))
 	}
 	if !strict {
 		m.logger.Warn("the keploy agent ended its stream before its end marker: what it had still to put on the stream, if anything, is lost",

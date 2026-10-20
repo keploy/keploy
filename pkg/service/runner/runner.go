@@ -16,6 +16,7 @@ import (
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -167,7 +168,7 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 		r.logger.Error("failed to load mocks; verify the recorded mocks exist and the mock store is accessible, then rerun the test",
 			zap.String("testCase", tc.Name),
 			zap.String("testSetID", opts.TestSetID),
-			zap.Error(err),
+			logcontent.Error(err),
 		)
 		return &TestResult{Passed: false, Error: fmt.Sprintf("failed to load mocks for test case %q: %v", tc.Name, err), Noise: tc.Noise}
 	}
@@ -204,7 +205,7 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	//    sent on subsequent UpdateMockParams (replay.go:1470-1486).
 	consumed, consumedErr := r.instrumentation.GetConsumedMocks(ctx)
 	if consumedErr != nil {
-		r.logger.Debug("failed to get consumed mocks", zap.Error(consumedErr))
+		r.logger.Debug("failed to get consumed mocks", logcontent.Error(consumedErr))
 	}
 	setup.mergeConsumed(consumed)
 
@@ -327,12 +328,12 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
-				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+				r.logger.Debug("failed to notify agent of graceful shutdown", logcontent.Error(err))
 			}
 			cancel()
 			if err := g.Wait(); err != nil {
 				r.logger.Error("mock teardown failed; check agent shutdown and cleanup logs to identify the failing teardown step",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.String("testSetID", testSetID),
 				)
 			}
@@ -505,7 +506,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		if errors.Is(err, provenswitch.ErrAgentSwitch) {
 			return nil, err
 		}
-		r.logger.Debug("failed to mark agent ready", zap.Error(err))
+		r.logger.Debug("failed to mark agent ready", logcontent.Error(err))
 	}
 
 	// useMappingBased mirrors replay's determineMockingStrategy

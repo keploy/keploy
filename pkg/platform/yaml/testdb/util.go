@@ -28,7 +28,7 @@ import (
 func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
 	if err != nil {
-		utils.LogError(logger, err, "error in flattening http response")
+		utils.LogContentError(logger, err, "error in flattening http response")
 	}
 	noise := tc.Noise
 	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
@@ -158,7 +158,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		httpSchema := buildHTTPSchema(tc, logger)
 		err := yaml.EncodeNode(&doc.Spec, httpSchema)
 		if err != nil {
-			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
+			utils.LogContentError(logger, err, "failed to encode testcase into a yaml doc")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
@@ -178,7 +178,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		var node yamlLib.Node
 		err := yaml.EncodeNode(&node, grpcSpec)
 		if err != nil {
-			utils.LogError(logger, err, "failed to encode gRPC schema to YAML node")
+			utils.LogContentError(logger, err, "failed to encode gRPC schema to YAML node")
 			return nil, err
 		}
 
@@ -364,7 +364,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 
 		var httpSpec models.HTTPSchema
 		if err := yamlTestcase.Spec.Decode(&httpSpec); err != nil {
-			utils.LogError(logger, err, "failed to decode HTTP JSON spec")
+			utils.LogContentError(logger, err, "failed to decode HTTP JSON spec")
 			return nil, err
 		}
 		tc.Created = httpSpec.Created
@@ -379,7 +379,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			if key == models.NoiseAssertion {
 				noiseMap, ok := raw.(map[models.AssertionType]interface{})
 				if !ok {
-					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", logcontent.Any("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {
@@ -402,7 +402,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 	case models.GRPC_EXPORT:
 		var grpcSpec models.GrpcSpec
 		if err := yamlTestcase.Spec.Decode(&grpcSpec); err != nil {
-			utils.LogError(logger, err, "failed to decode gRPC spec")
+			utils.LogContentError(logger, err, "failed to decode gRPC spec")
 			return nil, err
 		}
 		tc.Created = grpcSpec.Created
@@ -415,7 +415,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			if key == models.NoiseAssertion {
 				noiseMap, ok := raw.(map[models.AssertionType]interface{})
 				if !ok {
-					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", logcontent.Any("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {
@@ -466,7 +466,7 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 	case models.HTTP:
 		var httpSpec models.HTTPSchema
 		if err := json.Unmarshal(doc.Spec, &httpSpec); err != nil {
-			utils.LogError(logger, err, "failed to decode HTTP JSON spec")
+			utils.LogContentError(logger, err, "failed to decode HTTP JSON spec")
 			return nil, err
 		}
 		tc.Created = httpSpec.Created
@@ -479,7 +479,7 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 	case models.GRPC_EXPORT:
 		var grpcSpec models.GrpcSpec
 		if err := json.Unmarshal(doc.Spec, &grpcSpec); err != nil {
-			utils.LogError(logger, err, "failed to decode gRPC JSON spec")
+			utils.LogContentError(logger, err, "failed to decode gRPC JSON spec")
 			return nil, err
 		}
 		tc.Created = grpcSpec.Created

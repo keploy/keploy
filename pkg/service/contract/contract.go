@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/contract/consumer"
 	"go.keploy.io/server/v3/pkg/service/contract/provider"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -96,7 +97,7 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 	// Extract Query parameters
 	queryParams, err := ExtractQueryParams(custom.Spec.Request.URL)
 	if err != nil {
-		utils.LogError(logger, err, "failed to extract query parameters")
+		utils.LogContentError(logger, err, "failed to extract query parameters")
 		return models.OpenAPI{}, err
 	}
 	// Add Query parameters to the parameters
@@ -182,14 +183,14 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 			Responses:   byCode,
 		}
 	default:
-		utils.LogError(logger, err, "Unsupported Method")
+		utils.LogContentError(logger, err, "Unsupported Method")
 		return models.OpenAPI{}, err
 	}
 
 	// Extract the URL path
 	parsedURL, hostName := ExtractURLPath(custom.Spec.Request.URL)
 	if parsedURL == "" {
-		utils.LogError(logger, err, "failed to extract URL path")
+		utils.LogContentError(logger, err, "failed to extract URL path")
 		return models.OpenAPI{}, err
 	}
 	// Replace numeric identifiers in the path with dummy names (if exists)
@@ -248,7 +249,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 		httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, s.config.Path, "mocks")
 		if err != nil {
 			// Log and return error if HTTP mock retrieval fails.
-			utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", testSetID))
+			utils.LogContentError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", testSetID))
 			return err
 		}
 
@@ -282,14 +283,14 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 						// Convert the HTTP mock to OpenAPI documentation.
 						openapi, err := s.HTTPDocToOpenAPI(s.logger, *mock)
 						if err != nil {
-							utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
+							utils.LogContentError(s.logger, err, "failed to convert the yaml file to openapi")
 							return fmt.Errorf("failed to convert the yaml file to openapi")
 						}
 
 						// Validate the generated OpenAPI schema.
 						err = validateSchema(openapi)
 						if err != nil {
-							utils.LogError(s.logger, err, "failed to validate the OpenAPI schema")
+							utils.LogContentError(s.logger, err, "failed to validate the OpenAPI schema")
 							return err
 						}
 
@@ -330,7 +331,7 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 
 		testCases, err := s.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID))
+			utils.LogContentError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID))
 			return err
 		}
 		for _, tc := range testCases {
@@ -343,13 +344,13 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 
 			openapi, err := s.HTTPDocToOpenAPI(s.logger, httpSpec)
 			if err != nil {
-				utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
+				utils.LogContentError(s.logger, err, "failed to convert the yaml file to openapi")
 				return fmt.Errorf("failed to convert the yaml file to openapi")
 			}
 			// Validate the OpenAPI document
 			err = validateSchema(openapi)
 			if err != nil {
-				utils.LogError(s.logger, err, "failed to validate the OpenAPI schema")
+				utils.LogContentError(s.logger, err, "failed to validate the OpenAPI schema")
 				return err
 			}
 			// Save it using the OpenAPIDB
@@ -379,12 +380,12 @@ func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
 
 	err := s.GenerateTestsSchemas(ctx, s.config.Contract.Tests)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to generate tests schemas")
+		utils.LogContentError(s.logger, err, "failed to generate tests schemas")
 		return err
 	}
 	err = s.GenerateMocksSchemas(ctx, s.config.Contract.Services, mappings)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to generate mocks schemas")
+		utils.LogContentError(s.logger, err, "failed to generate mocks schemas")
 		return err
 	}
 	if err := saveServiceMappings(s.config.Contract.Mappings, filepath.Join(s.config.Path, "schema")); err != nil {
@@ -436,7 +437,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 	for _, testSetID := range testSetIDs {
 		tcs, err := s.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID), zap.String("path", keployPath), zap.String("hint", "ensure the test set directory contains valid YAML test case files"))
+			utils.LogContentError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID), zap.String("path", keployPath), zap.String("hint", "ensure the test set directory contains valid YAML test case files"))
 			return err
 		}
 		for _, tc := range tcs {
@@ -461,12 +462,12 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	inferred, err := InferSchema(testCases)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to infer OpenAPI schema from test cases")
+		utils.LogContentError(s.logger, err, "failed to infer OpenAPI schema from test cases")
 		return err
 	}
 
 	if err := inferred.Validate(ctx); err != nil {
-		utils.LogError(s.logger, err, "inferred OpenAPI schema validation failed")
+		utils.LogContentError(s.logger, err, "inferred OpenAPI schema validation failed")
 		return err
 	}
 
@@ -603,7 +604,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 
 		// Read the schema configuration YAML schemaConfigMappings
 		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "serviceMappings", &schemaConfigMappings, true); err != nil {
-			utils.LogError(s.logger, err, "failed to read the schema configuration file", zap.String("file", "serviceMappings"))
+			utils.LogContentError(s.logger, err, "failed to read the schema configuration file", zap.String("file", "serviceMappings"))
 			return err
 		}
 
@@ -661,7 +662,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 			// Retrieve the HTTP mocks from the mock database for the current test set
 			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"), "mocks")
 			if err != nil {
-				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
+				utils.LogContentError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), logcontent.Error(err))
 				return err
 			}
 
@@ -683,7 +684,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 				// Marshal the mock data to YAML format
 				mockYAML, err := yamlLib.Marshal(mock)
 				if err != nil {
-					utils.LogError(s.logger, err, "failed to marshal mock data", zap.Any("mock", mock))
+					utils.LogError(s.logger, err, "failed to marshal mock data", logcontent.Any("mock", mock))
 					return err
 				}
 
@@ -733,7 +734,7 @@ func (s *contract) Download(ctx context.Context, checkConfig bool) error {
 	} else if driven == models.ConsumerMode.String() {
 		err = s.DownloadMocks(ctx, path)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to download mocks")
+			utils.LogContentError(s.logger, err, "failed to download mocks")
 			return err
 		}
 
@@ -751,14 +752,14 @@ func (s *contract) Validate(ctx context.Context) error {
 	if s.config.Contract.Generate {
 		err := s.Generate(ctx, false)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to generate contract")
+			utils.LogContentError(s.logger, err, "failed to generate contract")
 			return err
 		}
 	}
 	if s.config.Contract.Download {
 		err := s.Download(ctx, false)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to download contract")
+			utils.LogContentError(s.logger, err, "failed to download contract")
 			return err
 		}
 	}
@@ -767,18 +768,18 @@ func (s *contract) Validate(ctx context.Context) error {
 		// Retrieve tests from the schema folder
 		testsMapping, err := s.GetAllTestsSchema(ctx)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to get tests from schema")
+			utils.LogContentError(s.logger, err, "failed to get tests from schema")
 			return err
 		}
 		// Retrieve mocks of each service from the download folder
 		mocksSchemasDownloaded, err := s.GetAllDownloadedMocksSchemas(ctx)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to get downloaded mocks schemas")
+			utils.LogContentError(s.logger, err, "failed to get downloaded mocks schemas")
 			return err
 		}
 		err = s.consumer.ValidateSchema(testsMapping, mocksSchemasDownloaded)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to validate schema")
+			utils.LogContentError(s.logger, err, "failed to validate schema")
 			return err
 		}
 	} else if s.config.Contract.Driven == models.ProviderMode.String() {

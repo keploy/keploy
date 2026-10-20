@@ -1192,7 +1192,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 // request as fmt prints it. That print is no content to fingerprint with the
 // switch off: it holds the request's pointers, which differ on every run.
 func sentRequestFields(req *http.Request) []zap.Field {
-	fields := []zap.Field{zap.String("method", req.Method), zap.String("path", req.URL.Path), zap.Array("header_names", utils.SortedKeys(req.Header))}
+	fields := []zap.Field{zap.String("method", req.Method), logurl.Field("path", req.URL.Path), zap.Array("header_names", utils.SortedKeys(req.Header))}
 	if logcontent.On() {
 		fields = append(fields, zap.String("request", fmt.Sprintf("%v", req)))
 	}
@@ -1892,7 +1892,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		if !match {
 			logger.Debug("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.String("reason", reason),
+				logcontent.String("reason", reason),
 				logcontent.String("expected_frame", expectedFrame.raw),
 				logcontent.String("actual_frame", frame))
 			mismatchInfo := &StreamMismatchInfo{
@@ -2006,7 +2006,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			}
 			logger.Debug("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.String("reason", reason),
+				logcontent.String("reason", reason),
 				logcontent.String("expected_frame", expected),
 				logcontent.String("actual_frame", line))
 			mismatchInfo := &StreamMismatchInfo{
@@ -2666,7 +2666,7 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		if !ok {
 			logger.Debug("multipart stream mismatch",
 				zap.Int("part_index", nextExpected),
-				zap.String("reason", reason),
+				logcontent.String("reason", reason),
 				zap.String("expected_part", expected.describe()),
 				zap.String("actual_part", actualPart.describe()))
 			mismatchInfo := &StreamMismatchInfo{

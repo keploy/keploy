@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -378,7 +379,7 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 				// As on the agent before it: a set hook that fails is
 				// logged and the run goes on (the replay's hooks), and
 				// the mocks and readiness after it still matter.
-				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
+				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", logcontent.Error(err))
 				continue
 			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)

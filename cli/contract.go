@@ -63,7 +63,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			}
 
 			if err != nil {
-				utils.LogError(logger, err, "failed to generate contract")
+				utils.LogContentError(logger, err, "failed to generate contract")
 				return nil
 			}
 
@@ -99,7 +99,7 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			err = contract.Download(ctx, true)
 
 			if err != nil {
-				utils.LogError(logger, err, "failed to download contract")
+				utils.LogContentError(logger, err, "failed to download contract")
 			}
 			return nil
 		},
@@ -131,7 +131,7 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			}
 			err = contract.Validate(ctx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to validate contract")
+				utils.LogContentError(logger, err, "failed to validate contract")
 			}
 			return nil
 		},

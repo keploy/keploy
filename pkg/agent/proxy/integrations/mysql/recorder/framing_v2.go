@@ -308,7 +308,7 @@ func warnLimited(logger *zap.Logger, sess *supervisor.Session, msg string, err e
 // warnFields are the fields each of the recorder's own warnings carries: err,
 // and the connection it is on.
 func warnFields(sess *supervisor.Session, err error) []zap.Field {
-	fields := []zap.Field{zap.Error(err), zap.String("connID", sess.ClientConnID)}
+	fields := []zap.Field{logcontent.Error(err), zap.String("connID", sess.ClientConnID)}
 	if sess.Opts.DstCfg != nil && sess.Opts.DstCfg.Addr != "" {
 		fields = append(fields, zap.String("dest", sess.Opts.DstCfg.Addr))
 	}

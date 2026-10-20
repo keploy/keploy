@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -209,7 +210,7 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 
 		if err := SanitizeFileInPlace(f, testName, aggSecrets); err != nil {
 			// Continue to next file
-			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
+			t.logger.Error("Failed to sanitize file", zap.String("file", f), logcontent.Error(err))
 			unsanitized = append(unsanitized, f)
 			continue
 		}

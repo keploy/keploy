@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -95,7 +96,7 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 			// serves, so say once per mock name why this one did not.
 			if _, warned := h.ptLoadWarned.LoadOrStore(m.Name, struct{}{}); !warned {
 				h.Logger.Warn("pass-through: the recorded response of this mock could not be loaded from the agent's on-disk mock store, so it is skipped; if no other recorded response serves the call, the application gets the default empty 200. Re-run the test set, and if this repeats, report it with this log",
-					zap.String("mock", m.Name), zap.Error(err))
+					zap.String("mock", m.Name), logcontent.Error(err))
 			}
 			continue
 		}

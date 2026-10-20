@@ -131,10 +131,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					return io.EOF
 				}
 				logger.Error("Connection closing due to match command error",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type))
-				utils.LogError(logger, err, "failed to match the command")
+				utils.LogContentError(logger, err, "failed to match the command")
 				return err
 			}
 
@@ -275,7 +275,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			//Encode the matched resp
 			buf, err := wire.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to encode the response", zap.String("response_type", packetType(&resp.PacketBundle)), logcontent.Any("response", resp))
+				utils.LogContentError(logger, err, "failed to encode the response", zap.String("response_type", packetType(&resp.PacketBundle)), logcontent.Any("response", resp))
 				return err
 			}
 

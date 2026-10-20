@@ -14,6 +14,7 @@ import (
 	models "go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -72,7 +73,7 @@ func (t *Tools) normalizeTestSet(ctx context.Context, testRun string, testSet co
 	if err != nil {
 		t.logger.Error("Failed to desanitize test set before normalization",
 			zap.String("testSetID", testSetID),
-			zap.Error(err))
+			logcontent.Error(err))
 		return fmt.Errorf("failed to desanitize test set %s: %w", testSetID, err)
 	}
 	if desanitized {
@@ -195,7 +196,7 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 				for _, f := range testCaseResult.TemplateFailures {
 					t.logger.Info("not normalizing a test case that failed on a template variable",
 						zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID),
-						zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), zap.String("why", f.Why),
+						zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), logcontent.String("why", f.Why),
 						zap.String("next_step", "if the app issues this value anew each run, make the place that issues it a {{capture ...}}; if the value changed on purpose, edit the expected value or re-record the test case. --allow-high-risk writes this run's value over the placeholder, and the next run fails on it"))
 				}
 				continue

@@ -201,9 +201,9 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			probeHTTP(ctx, h.Logger, "encode-chunked-req-done",
 				zap.Int64("dur_ns", time.Since(chunkedReqStart).Nanoseconds()),
 				zap.Int("finalReqLen", len(finalReq)),
-				zap.Error(err))
+				logcontent.Error(err))
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to handle chunked requests")
+				utils.LogContentError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err
 				return nil
 			}

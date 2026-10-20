@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -274,7 +275,7 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 		// the rest of the hook (a coverage window, say), its clock moves off
 		// the recorded request onto real time.
 		if err := agent.BeginRealTestCase(r.Context(), req.TestCaseName); err != nil {
-			a.logger.Error("could not put a test case that uses mock.real on the real clock", zap.String("testCase", req.TestCaseName), zap.Error(err))
+			a.logger.Error("could not put a test case that uses mock.real on the real clock", zap.String("testCase", req.TestCaseName), logcontent.Error(err))
 			code := http.StatusInternalServerError
 			if errors.Is(err, agent.ErrNoRealTestClock) {
 				code = http.StatusNotImplemented
@@ -438,10 +439,10 @@ var testCaseHoldMax = syncmgr.TestCaseHoldMax
 // handler's own (a test case that does not encode, an upload it cannot read).
 func streamWriteFailed(logger *zap.Logger, r *http.Request, msg string, err error) {
 	if r.Context().Err() != nil {
-		logger.Debug(msg, zap.Error(err))
+		logger.Debug(msg, logcontent.Error(err))
 		return
 	}
-	logger.Error(msg, zap.Error(err))
+	logger.Error(msg, logcontent.Error(err))
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
@@ -1071,7 +1072,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	mockChan, err := a.svc.GetOutgoing(ctx, outgoingReq.OutgoingOptions)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to get outgoing: %v", err), http.StatusInternalServerError)
-		a.logger.Error("failed to get outgoing", zap.Error(err))
+		a.logger.Error("failed to get outgoing", logcontent.Error(err))
 		return
 	}
 

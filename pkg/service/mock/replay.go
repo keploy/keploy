@@ -188,7 +188,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// Cancel so agent-monitor / app-runner goroutines unwind before drain.
 		cancel()
 		if err := m.teardownDrain("mock-replay", errGrp, teardown); err != nil {
-			utils.LogError(m.logger, err, "failed to drain mock-replay goroutines")
+			utils.LogContentError(m.logger, err, "failed to drain mock-replay goroutines")
 		}
 	}()
 
@@ -258,7 +258,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		if parent.Err() != nil {
 			return nil
 		}
-		utils.LogError(m.logger, err, "keploy could not hand its agent mock.real")
+		utils.LogContentError(m.logger, err, "keploy could not hand its agent mock.real")
 		return err
 	}
 
@@ -292,7 +292,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// proof of a run that had just failed.
 			return nil
 		}
-		utils.LogError(m.logger, err, "failed to enable mock serving")
+		utils.LogContentError(m.logger, err, "failed to enable mock serving")
 		return err
 	}
 
@@ -306,7 +306,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	empty := map[string]bool{}
 	filtered, unfiltered, failedPool, err := m.loadMocks(ctx, name, empty)
 	if err != nil {
-		utils.LogError(m.logger, err, "failed to load "+failedPool+" mocks", zap.String("mock-set", name))
+		utils.LogContentError(m.logger, err, "failed to load "+failedPool+" mocks", zap.String("mock-set", name))
 		return err
 	}
 	// What the agent holds: the pools less what this keploy never sends it
@@ -331,7 +331,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", m.userCommand, name)))
 	}
 	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
-		utils.LogError(m.logger, err, "failed to store mocks on the agent")
+		utils.LogContentError(m.logger, err, "failed to store mocks on the agent")
 		return err
 	}
 
@@ -343,7 +343,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 	if provenswitch.On() {
 		if err := m.pushTestBegins(ctx, name); err != nil {
-			utils.LogError(m.logger, err, "keploy cannot run the tests on the clocks they were recorded on", zap.String("mock-set", name))
+			utils.LogContentError(m.logger, err, "keploy cannot run the tests on the clocks they were recorded on", zap.String("mock-set", name))
 			return err
 		}
 	}
@@ -354,7 +354,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		gate = m.pushScopeGate(ctx, name, digest)
 	}
 	if err := m.pushScopeSkips(ctx, name, digest); err != nil {
-		utils.LogError(m.logger, err, "refusing to replay", zap.String("mock-set", name))
+		utils.LogContentError(m.logger, err, "refusing to replay", zap.String("mock-set", name))
 		return err
 	}
 
@@ -368,7 +368,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			AfterTime:  models.BaseTime,
 			BeforeTime: time.Now(),
 		}); err != nil {
-			utils.LogError(m.logger, err, "failed to arm the mock pool")
+			utils.LogContentError(m.logger, err, "failed to arm the mock pool")
 			return err
 		}
 	}
@@ -552,7 +552,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// round, whatever the test command did: that is the exit, and the
 	// receipt's.
 	if counts.learnErr != nil && appErr.AppErrorType != models.ErrInternal {
-		utils.LogError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
+		utils.LogContentError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: counts.learnErr}
 	}
 	m.propagateExit(appErr, "replay")
@@ -725,14 +725,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			failedBy = FailedByStrict
 			keployFailure = errors.New("--strict could not verify this replay: " + captureUnverified)
 			m.logger.Error("replay failed under --strict: keploy could not read whether the agent "+unread+", so a clean run could not be proven",
-				zap.String("mock-set", name), zap.Error(pidCheck.unreadable),
+				zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable),
 				zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why its count could not be read"))
 		} else {
 			if !m.config.Mock.Strict {
 				next += "; --strict fails such a run"
 			}
 			m.logger.Warn("this replay is not verified: keploy could not read whether the agent "+unread+", so a call may have reached the real dependency unmocked",
-				zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("next_step", next))
+				zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable), zap.String("next_step", next))
 		}
 	}
 	// The test command called what keploy cannot capture at all (decision
@@ -933,7 +933,7 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			return err
 		})
 	if err != nil {
-		m.logger.Debug("failed to drain captured-on-miss mocks", zap.Error(err))
+		m.logger.Debug("failed to drain captured-on-miss mocks", logcontent.Error(err))
 		return
 	}
 	if len(captured) == 0 {
@@ -1096,7 +1096,7 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 		table[testName] = names
 	}
 	if err := pusher.PushScopeTable(ctx, table); err != nil {
-		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
+		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", logcontent.Error(err))
 		return nil
 	}
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
@@ -1477,7 +1477,7 @@ func (m *mockService) pushScopeGate(ctx context.Context, name, digest string) re
 		// Nothing to gate, and nothing a gate-less agent could carry over.
 	default:
 		m.logger.Warn("could not tell the agent which tests to run; every test runs this replay",
-			zap.String("mock-set", name), zap.Error(err),
+			zap.String("mock-set", name), logcontent.Error(err),
 			zap.String("next_step", "run the keploy-agent of this keploy version"))
 	}
 	return requestedGate{}
@@ -1571,7 +1571,7 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 	root := gitTop()
 	sets := setTable(mapping, root)
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
-		m.logger.Warn("could not send the agent each set's mocks and recorded start; using the per-test mocks instead", zap.Error(err))
+		m.logger.Warn("could not send the agent each set's mocks and recorded start; using the per-test mocks instead", logcontent.Error(err))
 		return false
 	}
 	m.logger.Info("sent the agent each set's mocks and recorded start", zap.Int("sets", len(sets)), zap.String("mock-set", name))
@@ -1756,7 +1756,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 						m.logger.Debug("ids this run made in place of recorded ones", zap.Int("count", len(pairs)), logcontent.Any("pairs", pairs))
 						m.ids = ids.New(pairs)
 					} else {
-						m.logger.Debug("failed to read the ids this run made", zap.Error(err))
+						m.logger.Debug("failed to read the ids this run made", logcontent.Error(err))
 					}
 				}
 				return nil
@@ -2077,11 +2077,11 @@ func (m *mockService) emitServedMockEvents(ctx context.Context) {
 					// Once at Warn, then quiet: the likeliest cause is an agent
 					// older than this binary, which has no /mock/served route.
 					m.logger.Warn("cannot read served mocks; --emit-mock-events will emit nothing",
-						zap.Error(err),
+						logcontent.Error(err),
 						zap.String("next_step", "check the keploy agent is the same version as this binary"))
 					continue
 				}
-				m.logger.Debug("failed to read served mocks", zap.Error(err))
+				m.logger.Debug("failed to read served mocks", logcontent.Error(err))
 				continue
 			}
 			m.announceServed(served)

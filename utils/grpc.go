@@ -388,7 +388,7 @@ func ProtoTextToJSON(md protoreflect.MessageDescriptor, files []protoreflect.Fil
 	// Protoscope text -> raw protobuf wire
 	wire, err := ProtoTextToWire(text)
 	if err != nil {
-		LogError(logger, err, "failed to convert protoscope text to raw protobuf wire, cannot convert grpc response to json")
+		LogContentError(logger, err, "failed to convert protoscope text to raw protobuf wire, cannot convert grpc response to json")
 		return nil, false
 	}
 
@@ -396,7 +396,7 @@ func ProtoTextToJSON(md protoreflect.MessageDescriptor, files []protoreflect.Fil
 	j, err := ProtoWireToJSON(md, files, wire)
 	if err != nil {
 		// We don't know if it failed in unmarshal or marshal, so keep this generic.
-		LogError(logger, err, "failed to convert wire to json, cannot convert grpc response to json")
+		LogContentError(logger, err, "failed to convert wire to json, cannot convert grpc response to json")
 		return nil, false
 	}
 

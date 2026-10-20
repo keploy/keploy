@@ -1168,7 +1168,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", logcontent.String("json", s))
+		utils.LogContentError(log, err, "cannot convert json string into json object", logcontent.String("json", s))
 		return nil, err
 	}
 	return result, nil
@@ -2252,7 +2252,7 @@ func NormalizeNestedJSONForNoise(raw string, noise map[string][]string, log *zap
 
 	var v interface{}
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
-		utils.LogError(log, err, "failed to unmarshal decoded gRPC data for normalization")
+		utils.LogContentError(log, err, "failed to unmarshal decoded gRPC data for normalization")
 		return raw
 	}
 

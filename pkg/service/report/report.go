@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -84,7 +85,7 @@ func (r *Report) collectReports(ctx context.Context, runID string, testSetIDs []
 		clean := strings.TrimSuffix(ts, ReportSuffix)
 		rep, err := r.reportDB.GetReport(ctx, runID, clean)
 		if err != nil {
-			r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), zap.Error(err))
+			r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), logcontent.Error(err))
 			continue
 		}
 		if rep != nil {
@@ -113,7 +114,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 		rep, err := r.reportDB.GetReport(ctx, runID, clean)
 		if err != nil || rep == nil {
 			if err != nil {
-				r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), zap.Error(err))
+				r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), logcontent.Error(err))
 			}
 			continue
 		}
@@ -645,7 +646,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	}
 
 	if err := r.printFailedTestReports(ctx, failedTests); err != nil {
-		r.logger.Error("failed to print failed test reports", zap.Error(err))
+		r.logger.Error("failed to print failed test reports", logcontent.Error(err))
 		return err
 	}
 	r.logger.Info(fmt.Sprintf("✂️ CLI output truncated - see the %s report file for the complete diff.", latestRunID))
@@ -730,7 +731,7 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 	dec := yaml.NewDecoder(f)
 	err = dec.Decode(&lg)
 	if err != nil {
-		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
+		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), logcontent.Error(err))
 		return err
 	}
 
@@ -859,7 +860,7 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 		results, err := r.reportDB.GetReport(ctx, runID, cleanTestSetID)
 		if err != nil {
 			r.logger.Error("failed to get test case results for test set",
-				zap.String("test_set_id", cleanTestSetID), zap.Error(err))
+				zap.String("test_set_id", cleanTestSetID), logcontent.Error(err))
 			continue
 		}
 

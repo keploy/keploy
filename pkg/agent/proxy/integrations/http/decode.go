@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -132,7 +133,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
 				ce.Write(zap.Any("method", input.method),
-					zap.String("path", input.url.Path),
+					logurl.Field("path", input.url.Path),
 					logcontent.Any("url", input.url),
 					zap.Array("header_names", utils.SortedKeys(input.header)),
 					logcontent.Any("header", input.header),
@@ -185,7 +186,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				h.Logger.Debug("egress passthrough: serving without mock match",
 					zap.String("mode", string(mode)), zap.String("served", served),
-					zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+					logurl.Field("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
 				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
 						return
@@ -220,7 +221,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						if ctx.Err() != nil {
 							return
 						}
-						utils.LogError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(request)))
+						utils.LogContentError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(request)))
 						errCh <- e
 					}
 					recorded, keepAlive, derr := h.asyncEngine.Decide(ctx, lane, live)
@@ -286,7 +287,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 			if err != nil {
-				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogContentError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
 			}
@@ -297,7 +298,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if stub != nil {
 					matched = stub.Name
 				}
-				ce.Write(zap.Any("isMatched", ok), zap.String("mock", matched), logcontent.Any("stub", stub), zap.Error(err))
+				ce.Write(zap.Any("isMatched", ok), zap.String("mock", matched), logcontent.Any("stub", stub), logcontent.Error(err))
 			}
 
 			if !ok {
@@ -347,7 +348,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
 						zap.String("destination", report.Destination),
-						zap.String("actual", report.ActualSummary),
+						logurl.Field("actual", report.ActualSummary),
 						zap.String("match_phase", report.MatchPhase),
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
@@ -362,7 +363,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if opts.OnMiss.PassesThroughOnMiss() {
 					handled, phErr := h.serveOnMiss(ctx, clientConn, reqBuf, request, input.body, dstCfg, opts)
 					if phErr != nil {
-						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
+						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", logcontent.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
 					} else if handled {
 						// Served live — continue the keep-alive loop for the next
 						// request on this connection. Not reported as a miss.
@@ -424,7 +425,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Content-Encoding). Shared with the async serving branch above.
 			respBytes, err := h.buildMockResponseBytes(stub)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogContentError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
 			}

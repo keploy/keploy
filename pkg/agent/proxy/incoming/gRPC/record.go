@@ -15,6 +15,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
@@ -484,7 +486,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 
 			frame, err := frames.ReadFrame(buffer[:frameSize])
 			if err != nil {
-				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
+				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), logcontent.Error(err))
 				letGo(chunk, handled)
 				drainFrameChunks(ch)
 				return
@@ -495,7 +497,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			}
 
 			if err := sm.HandleFrame(frame, isOutgoing, chunk.timestamp); err != nil {
-				logger.Debug("stream manager error", zap.Error(err))
+				logger.Debug("stream manager error", logcontent.Error(err))
 			}
 			handled = true
 		}
@@ -535,7 +537,7 @@ func emitCompleteStreams(logger *zap.Logger, sm *pkg.DefaultStreamManager, captu
 		if path, ok := stream.GRPCReq.Headers.PseudoHeaders[":path"]; ok {
 			method = path
 		}
-		logger.Debug("captured gRPC test case (passthrough)", zap.String("method", method))
+		logger.Debug("captured gRPC test case (passthrough)", logurl.Field("method", method))
 		capture(stream)
 		sm.CleanupStream(stream.ID)
 	}

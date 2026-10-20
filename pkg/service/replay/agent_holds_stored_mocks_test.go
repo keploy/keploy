@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // The compose bring-up retry (pkg/client/app) replaces the injected keploy-agent
@@ -718,14 +719,18 @@ func TestEnsureAgentHoldsStoredMocks_ReportsTheAppsExitWhenTheAgentWentWithIt(t 
 			t.Fatalf("logged %q although the app's container had exited", e.Message)
 		}
 	}
-	var sawLogs bool
-	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
-		if e.ContextMap()["appLogs"] == f.logs {
-			sawLogs = true
+	// The app's last lines can hold what it was sent: the line names them
+	// by their length unless KEPLOY_LOG_CONTENT is set, and whole with it.
+	appLogsLine := func(logs *observer.ObservedLogs) (logged any, whole bool) {
+		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+			if v, ok := e.ContextMap()["appLogs"]; ok {
+				return v, strings.Contains(fmt.Sprint(e.ContextMap()), f.logs)
+			}
 		}
+		return nil, false
 	}
-	if !sawLogs {
-		t.Fatal("the app's last log lines were not logged with its exit")
+	if logged, whole := appLogsLine(logs); logged == nil || whole {
+		t.Fatalf("the app's last log lines were logged as %v with its exit, want them named by their length alone", logged)
 	}
 
 	// Diagnosis only: the repair is still attempted, and armed, as before.
@@ -734,6 +739,16 @@ func TestEnsureAgentHoldsStoredMocks_ReportsTheAppsExitWhenTheAgentWentWithIt(t 
 	}
 	if !r.agentHistoryIncompleteForRun.Load() {
 		t.Fatal("the consumption-history latch must still be armed, as before")
+	}
+
+	t.Cleanup(logcontent.Set(true))
+	f.rearmInstr = &rearmInstr{statsErrCalls: 2, outgoingErr: errors.New("dial tcp [::1]:61885: connect: connection refused")}
+	r, logs = newAppExitReplayer(f)
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err == nil {
+		t.Fatal("an agent that went with the app must still fail the test set")
+	}
+	if logged, _ := appLogsLine(logs); logged != f.logs {
+		t.Fatalf("with KEPLOY_LOG_CONTENT set the app's last log lines were logged as %v, want them whole", logged)
 	}
 }
 

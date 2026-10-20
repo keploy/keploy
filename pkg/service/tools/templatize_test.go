@@ -20,6 +20,7 @@ import (
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -835,6 +836,8 @@ func TestAssertChains_ReadsTheFuzzerBaselineAsTheFuzzerWritesIt(t *testing.T) {
 // the body answers, where main compares it as written), and templatize says
 // so, one line per place.
 func TestProcessTestCasesV2_TheCreatesOwnLocationUsesTheCapturedID(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	jsonType := map[string]string{"Content-Type": "application/json"}
 	cases := []*models.TestCase{
 		tcase("test-1", "POST", "http://h/users", jsonType, `{"name":"alice"}`, 201,
@@ -874,7 +877,46 @@ func TestProcessTestCasesV2_TheCreatesOwnLocationUsesTheCapturedID(t *testing.T)
 // the line names both values with the use as the edit for an id issued anew.
 // Applied, the edit passes Check, and the next run, over a set that now
 // holds placeholders, writes nothing.
+// A LINE OF TEMPLATIZE NAMES NO RECORDED VALUE without KEPLOY_LOG_CONTENT:
+// a crowded header's line names its places, and its edit, and a place left
+// written out, the value recorded there by its length alone, while the files
+// it writes are what they are with the switch on. The values are the app's
+// (an id, a token in a Location), and the line lands in keploy's log.
+func TestProcessTestCasesV2_ALineNamesNoRecordedValueWithoutLogContent(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	crowded := []*models.TestCase{
+		tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/users/usr_REC01"}, `{"id":"usr_REC01"}`),
+		tcase("test-2", "GET", "http://h/users/usr_REC01", nil, "", 200, nil, `{"ok":true}`),
+	}
+	written, _, logs := templatizeConf(t, crowded, nil)
+	assert.Equal(t, "http://h/users/{{string .id}}", written["test-2"].HTTPReq.URL, "the switch changes no file templatize writes")
+	said := logs.FilterMessageSnippet("holds more than one value").All()
+	require.Len(t, said, 1)
+	assert.Contains(t, said[0].Message, "(Location.path.0, Location.path.1)")
+	next := fmt.Sprint(said[0].ContextMap()["next_step"])
+	assert.Contains(t, next, "write {{string .id}} in place of the recorded value (9 bytes)")
+	for _, e := range logs.All() {
+		assert.NotContains(t, e.Message, "usr_REC01")
+		assert.NotContains(t, fmt.Sprint(e.ContextMap()), "usr_REC01")
+	}
+
+	repeated := []*models.TestCase{
+		tcase("test-1", "POST", "http://h/orders", nil, `{}`, 303, map[string]string{"Location": "/orders/ord_REC1"}, `{"id":"ord_REC1"}`),
+		tcase("test-2", "GET", "http://h/orders/ord_REC1", nil, "", 200, nil, `{"ok":true}`),
+	}
+	_, _, logs = templatizeConf(t, repeated, nil)
+	repeat := logs.FilterMessageSnippet("test-set-0/test-1 Location holds the value id captures and stays as recorded").All()
+	require.Len(t, repeat, 1)
+	assert.Contains(t, fmt.Sprint(repeat[0].ContextMap()["next_step"]), "write {{string .id}} in place of the recorded value (8 bytes) there")
+	for _, e := range logs.All() {
+		assert.NotContains(t, e.Message, "ord_REC1")
+		assert.NotContains(t, fmt.Sprint(e.ContextMap()), "ord_REC1")
+	}
+}
+
 func TestProcessTestCasesV2_ACrowdedLocationBesideItsOwnCaptureIsNamedWithTheUse(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	cases := []*models.TestCase{
 		tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/users/usr_REC01"}, `{"id":"usr_REC01"}`),
 		tcase("test-2", "GET", "http://h/users/usr_REC01", nil, "", 200, nil, `{"ok":true}`),
@@ -1200,6 +1242,8 @@ func replaySetWith(t *testing.T, cases []*models.TestCase, tmpl map[string]inter
 // a key for each value as templatize would: the one config.yaml gives it
 // already, or a new one, never one named after an earlier test case's id.
 func TestProcessTestCasesV2_ACrowdedLocationCapturesNone(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	jsonType := map[string]string{"Content-Type": "application/json"}
 	for _, c := range []struct {
 		name       string
@@ -1376,6 +1420,8 @@ func TestProcessTestCasesV2_ACrowdedLocationCapturesNone(t *testing.T) {
 // app does issue anew each run. A value the body gives first is captured
 // there, and the header keeps it written out, as main compares it.
 func TestProcessTestCasesV2_OnlyTheLocationOfA201Captures(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	for _, c := range []struct {
 		name, method, url string
 		status            int
@@ -1482,6 +1528,8 @@ func TestProcessTestCasesV2_OnlyTheLocationOfA201Captures(t *testing.T) {
 // beside it is not taken for the value the app issues (the header is
 // crowded, and named), and alone it is said and left as written.
 func TestProcessTestCasesV2_ALocationValueWithADelimiterIsNotRead(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	for _, c := range []struct {
 		name, loc, crowded string
 	}{
@@ -1576,6 +1624,8 @@ func TestProcessTestCasesV2_ARepeatedKeyIsReadAtItsLastOccurrence(t *testing.T) 
 // and a create answering /tasks/<id> passed, and the next request went to
 // /tasks/<id>.
 func TestProcessTestCasesV2_ALocationCountsEveryValueItsResponseIssues(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	for _, c := range []struct {
 		name       string
 		cfg        *config.Config
@@ -1828,6 +1878,8 @@ func TestProcessTestCasesV2_AnUntiedReadBackInAnArrayIsLeftAsRecorded(t *testing
 // "location" sorts after it and the cookie was captured. Header names are
 // read whatever their letter case.
 func TestProcessTestCasesV2_TheProducerIsTheFirstPlaceThatMayCapture(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	login := func(location string) []*models.TestCase {
 		return []*models.TestCase{
@@ -1934,6 +1986,8 @@ func TestProcessTestCasesV2_TheProducerIsTheFirstPlaceThatMayCapture(t *testing.
 // regression, fails after templatize, as the set as recorded fails, and the
 // header is written as recorded whatever its name's letter case.
 func TestProcessTestCasesV2_ATargetBesideACaptureStaysComparedAsWritten(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	fine := models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{"ok":true}`}
 	for _, c := range []struct {
@@ -2027,6 +2081,8 @@ func TestProcessTestCasesV2_ATargetBesideACaptureStaysComparedAsWritten(t *testi
 // read would accept any id there and send it on. Nothing is written, and the
 // redirect's line names the value.
 func TestProcessTestCasesV2_TheProducerIsInTheResponseThatGivesTheValueFirst(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	cases := []*models.TestCase{
 		tcase("test-1", "POST", "http://h/login", form, `u=a&p=b`, 302, map[string]string{"Location": "/home?sid=s_REC1"}, ``),
@@ -2065,6 +2121,8 @@ func TestProcessTestCasesV2_ALineAboutAValueLeftNamesItsPlace(t *testing.T) {
 // holds a capture is told no use can stand beside it (keploy test refuses a
 // header capture beside a use of a key its response captures).
 func TestProcessTestCasesV2_APlaceLeftWrittenOutIsSaidWithItsEdit(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	js := map[string]string{"Content-Type": "application/json"}
 	number := []*models.TestCase{
 		tcase("test-1", "POST", "http://h/orders", js, `{}`, 201, js, `{"id":7654321,"copy":7654321,"ref":"o-7654321"}`),
@@ -2227,6 +2285,8 @@ func TestProcessTestCasesV2_AStreamedResponseProducesNothing(t *testing.T) {
 // decoded too); and a JSON value a later occurrence of its key replaces is
 // not the body's value there, so it is not said.
 func TestProcessTestCasesV2_APlaceLeftWrittenOutIsReadAsTheReplayReadsIt(t *testing.T) {
+	// The lines name the recorded values only with logcontent on.
+	t.Cleanup(logcontent.Set(true))
 	js := map[string]string{"Content-Type": "application/json"}
 	said := func(logs *observer.ObservedLogs) map[string]string {
 		out := map[string]string{}

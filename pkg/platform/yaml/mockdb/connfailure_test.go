@@ -6,6 +6,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -212,6 +214,53 @@ func TestAConnectionFailureThisKeployCannotReplayIsSkippedLoudly(t *testing.T) {
 			if ws := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("connection-failure").All(); len(ws) != 1 || !strings.HasPrefix(ws[0].Message, "1 connection-failure mock in ") {
 				t.Fatalf("want one WARN counting the one connection failure read, got %v", ws)
 			}
+		})
+	}
+}
+
+// A connection failure the decoder itself refused is skipped with keploy's
+// words for why, and with the decoder's error by its kind unless
+// KEPLOY_LOG_CONTENT is set: yaml.v3 quotes the scalar it could not read,
+// which is the mock's, so the recorded traffic's. keploy's own refusal (an
+// outcome or a field a newer keploy writes) names only the format's words and
+// is logged whole either way, since it says to upgrade. The error itself,
+// which no line but these carries, is the same whatever the switch says.
+func TestASkippedConnectionFailureLogsTheDecodersErrorByItsKind(t *testing.T) {
+	const canary = "c4n4ry-r0w-v4lue"
+	cause := errors.New("yaml: unmarshal errors:\n  line 4: cannot unmarshal !!str `" + canary + "` into time.Time")
+	refused := connFailureDecoderFailed(cause)
+	if want := connFailureUndecodable(cause).Error(); refused.Error() != want {
+		t.Fatalf("the decoder's refusal reads %q, want connFailureUndecodable's %q", refused.Error(), want)
+	}
+	own := errors.New(`the connection failure uses outcome "reset", which this keploy does not support; upgrade keploy`)
+	for _, rewrite := range []bool{false, true} {
+		msg, level := "skipping a connection failure mock this keploy cannot replay", zapcore.ErrorLevel
+		if rewrite {
+			msg, level = "kept as written: a connection failure mock this keploy cannot replay", zapcore.DebugLevel
+		}
+		t.Run(fmt.Sprintf("rewrite=%v", rewrite), func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				skipConnFailure(logger, "cf-1", refused, rewrite)
+				logtest.Check(t, logs, canary, on, msg)
+				e := logs.FilterLevelExact(level).All()
+				if len(e) != 1 {
+					t.Fatalf("want one line at %s, got %v", level, logs.All())
+				}
+				fields := e[0].ContextMap()
+				if got := fmt.Sprint(fields["error"]); !strings.Contains(got, "does not decode as this keploy's format") || !strings.Contains(got, "upgrade keploy") {
+					t.Fatalf("the line's error %q does not say the mock does not decode and to upgrade keploy", got)
+				}
+				if kind := fmt.Sprint(fields["decoder_error"]); !on && !strings.Contains(kind, "*errors.errorString") {
+					t.Fatalf("the decoder's error is logged as %q, want its kind", kind)
+				}
+
+				logger, logs = logtest.Observe()
+				skipConnFailure(logger, "cf-2", own, rewrite)
+				if e := logs.FilterLevelExact(level).All(); len(e) != 1 || e[0].ContextMap()["error"] != own.Error() {
+					t.Fatalf("keploy's own refusal must be logged whole, got %v", logs.All())
+				}
+			})
 		})
 	}
 }

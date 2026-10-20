@@ -12,6 +12,7 @@ import (
 	matcher "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -281,7 +282,7 @@ func handleJSONDiff(validatedJSON matcher.ValidatedJSON, logDiffs matcher.DiffsP
 		if json.Valid([]byte(mockBodyStr)) {
 			patch, err := jsondiff.Compare(testBodyStr, mockBodyStr)
 			if err != nil {
-				logger.Debug("failed to compute json diff", zap.Error(err))
+				logger.Debug("failed to compute json diff", logcontent.Error(err))
 				return differencesCount, false, err
 			}
 			differencesCount = float64(len(patch))

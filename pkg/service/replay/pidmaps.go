@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -120,7 +121,7 @@ func (r *Replayer) pidMapCaptureIncomplete(ctx context.Context, testSetID string
 			// The user stopped the run under the proven switch (its read
 			// waits on the run's context alone): unverified, as any lost
 			// read, but not a WARN on top of the stop.
-			r.logger.Debug("the run was stopped before this test set's count was read", zap.String("test-set", testSetID), zap.Error(err))
+			r.logger.Debug("the run was stopped before this test set's count was read", zap.String("test-set", testSetID), logcontent.Error(err))
 			return pidMapVerdict{unverified: models.CaptureUnverified(r.pidMark.unreadable)}
 		}
 		return r.pidMapUnverified(testSetID, r.pidMark.unreadable)
@@ -160,7 +161,7 @@ func (r *Replayer) pidMapCaptureIncomplete(ctx context.Context, testSetID string
 func (r *Replayer) pidMapUnverified(testSetID string, err error) pidMapVerdict {
 	reason := models.CaptureUnverified(err)
 	r.logger.Warn("this test set is not verified: keploy could not read whether the agent tracked every process the application ran, so a call may have reached the real dependency unmocked; its mocks are not pruned and mappings.yaml is not written from it",
-		zap.String("test-set", testSetID), zap.Error(err), zap.String("reason", reason))
+		zap.String("test-set", testSetID), logcontent.Error(err), zap.String("reason", reason))
 	return pidMapVerdict{unverified: reason}
 }
 
@@ -173,15 +174,15 @@ func (r *Replayer) pidMapReadFailed(err error, established bool) error {
 		if !established {
 			// Never counted: an agent that does not count at all (an older
 			// image, non-Linux hooks). Its test sets are left as decided.
-			r.logger.Debug("the agent cannot say whether it tracked every process of the application; capture completeness is not checked", zap.Error(err))
+			r.logger.Debug("the agent cannot say whether it tracked every process of the application; capture completeness is not checked", logcontent.Error(err))
 			return nil
 		}
 		// A mark WAS read earlier, so the agent counts; a now-"unsupported"
 		// answer (a 404/501) is a lost count, not "never counts".
-		r.logger.Debug("the agent counted before but no longer does; treating it as an unreadable count", zap.Error(err))
+		r.logger.Debug("the agent counted before but no longer does; treating it as an unreadable count", logcontent.Error(err))
 		return err
 	}
-	r.logger.Debug("failed to read the agent's refused PID map inserts", zap.Error(err))
+	r.logger.Debug("failed to read the agent's refused PID map inserts", logcontent.Error(err))
 	return err
 }
 

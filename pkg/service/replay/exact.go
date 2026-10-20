@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -424,7 +425,7 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 		Exact:     &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)},
 	})
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))
+		utils.LogContentError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))
 	}
 	return err
 }
@@ -462,7 +463,7 @@ func (r *Replayer) serveExactAhead(ctx context.Context, plan *exactPlan, name st
 	}
 	if err := r.serveExactPool(ctx, plan, name); err != nil {
 		r.logger.Debug("could not name the next test case's calls in flight when it begins; they answer once it opens",
-			zap.String("testCase", name), zap.Error(err))
+			zap.String("testCase", name), logcontent.Error(err))
 	}
 }
 
@@ -493,7 +494,7 @@ func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next str
 	plan.aheadNamed = ""
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...)}})
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
+		utils.LogContentError(r.logger, err, "failed to serve the test set's pool between test cases")
 		return err
 	}
 	plan.aheadNamed = next

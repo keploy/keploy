@@ -173,7 +173,7 @@ func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSes
 	}
 	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode the http message into the yaml")
+		utils.LogContentError(logger, err, "failed to encode the http message into the yaml")
 		return err
 	}
 	return nil
@@ -192,7 +192,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 	err = h.decodeHTTP(ctx, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		if errors.Is(err, ErrMockNotMatched) {
-			h.Logger.Debug("mock miss — 502 already sent to client", zap.Error(err))
+			h.Logger.Debug("mock miss — 502 already sent to client", logcontent.Error(err))
 			return err
 		}
 		utils.LogContentError(h.Logger, err, "failed to decode the http message from the yaml")

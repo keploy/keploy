@@ -102,7 +102,7 @@ func MockRecord(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				if errors.Is(err, mockSvc.ErrRecordRefused) {
 					return err
 				}
-				utils.LogError(logger, err, "failed to record mocks")
+				utils.LogContentError(logger, err, "failed to record mocks")
 				// Record() returns nil after a merely-failing test command (it calls
 				// propagateExit and lets utils.ErrCode mirror the runner), so a
 				// non-nil error here is always a real Keploy failure and must not
@@ -165,7 +165,7 @@ func MockReplay(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 					}
 					return nil
 				}
-				utils.LogError(logger, err, "failed to replay mocks")
+				utils.LogContentError(logger, err, "failed to replay mocks")
 				// Replay() returns nil after a merely-failing test command (it calls
 				// propagateExit and lets utils.ErrCode mirror the runner), so a
 				// non-nil error here is always a real Keploy failure and must not

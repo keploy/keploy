@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +44,7 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 	}
 	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, models.IncomingOptions{Filters: m.config.Record.Filters})
 	if err != nil {
-		m.logger.Warn("the app's incoming requests are not recorded: could not read them from the agent", zap.Error(err))
+		m.logger.Warn("the app's incoming requests are not recorded: could not read them from the agent", logcontent.Error(err))
 		return nil
 	}
 	c := &caseCapture{done: make(chan struct{})}

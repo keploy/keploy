@@ -457,7 +457,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 		if part.FormName() == "metadata" {
 			var tc models.TestCase
 			if err := json.NewDecoder(part).Decode(&tc); err != nil {
-				utils.LogError(a.logger, err, "failed to decode metadata json")
+				utils.LogContentError(a.logger, err, "failed to decode metadata json")
 				continue
 			}
 			if tc.HasBinaryFile {
@@ -480,7 +480,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			if sanitizedFileName == "." || sanitizedFileName == string(filepath.Separator) || sanitizedFileName == "" {
 				sanitizedFileName = "testcase_blob"
 			}
-			a.logger.Debug("Received binary file part", zap.String("file_name", fileName), zap.String("sanitized_name", sanitizedFileName))
+			a.logger.Debug("Received binary file part", logcontent.String("file_name", fileName), logcontent.String("sanitized_name", sanitizedFileName))
 
 			savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), sanitizedFileName))
 			outFile, err := os.Create(savePath)
@@ -495,7 +495,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 				utils.LogError(a.logger, err, "failed to write file stream to disk")
 				continue
 			}
-			a.logger.Debug("Successfully wrote binary file to temp storage", zap.String("path", savePath))
+			a.logger.Debug("Successfully wrote binary file to temp storage", logcontent.String("path", savePath))
 			// Link matching file path logic
 			updated := false
 			for i := range pendingTestCase.HTTPReq.Form {
@@ -543,7 +543,7 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 				// End of the stream or connection closed during shutdown
 				break
 			}
-			utils.LogError(a.logger, err, "failed to decode test case from stream")
+			utils.LogContentError(a.logger, err, "failed to decode test case from stream")
 			break
 		}
 
@@ -839,7 +839,7 @@ func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mapp
 		var mapping models.TestMockMapping
 		if err := decoder.Decode(&mapping); err != nil {
 			if !utils.IsShutdownError(err) {
-				utils.LogError(a.logger, err, "failed to decode mapping from stream")
+				utils.LogContentError(a.logger, err, "failed to decode mapping from stream")
 			}
 			return false
 		}

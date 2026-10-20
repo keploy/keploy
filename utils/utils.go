@@ -39,6 +39,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"helm.sh/helm/v3/pkg/strvals"
@@ -192,7 +193,7 @@ func (m ReqMeta) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("method", m.method)
 	enc.AddString("host", m.host)
 	if m.url != nil {
-		enc.AddString("path", m.url.Path)
+		logurl.Field("path", m.url.Path).AddTo(enc)
 		logcontent.String("url", m.url.String()).AddTo(enc)
 	}
 	return nil

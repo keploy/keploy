@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -50,7 +51,7 @@ func ReexecWithSudo(logger *zap.Logger) {
 	args = append(args, os.Args[1:]...)
 
 	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
-	logger.Debug("Re-exec command", zap.Strings("args", args))
+	logger.Debug("Re-exec command", logcontent.Any("args", args))
 
 	// Use syscall.Exec to replace the current process
 	// This means no parent process remains - clean handoff

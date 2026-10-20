@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -884,7 +885,7 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 	looks.endable = false
 	b, err := br.BacklogBefore(context.Background(), stoppedAt)
 	r.logger.Debug("looked at what the keploy agent still holds from before the stop",
-		zap.String("frames", kind), zap.Stringer("agent_says", b.Verdict), zap.Uint64("progress", b.Progress), zap.Error(err))
+		zap.String("frames", kind), zap.Stringer("agent_says", b.Verdict), zap.Uint64("progress", b.Progress), logcontent.Error(err))
 	wait, gaveUp := looks.Look(b, err, r.frameProgress.Load())
 	if looks.LastGone() {
 		// The agent could not be reached: it is going away. This look says
@@ -900,7 +901,7 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 			zap.String("waiting_on", b.WaitingOn),
 			zap.Int("looks_without_progress", looks.Stalled()),
 			zap.Duration("quiet_before_each_look", r.frameQuietGrace()),
-			zap.NamedError("last_look_error", err),
+			logcontent.NamedError("last_look_error", err),
 			zap.String("next_step", "what the agent still held is not saved: test cases it had captured may be missing, or saved without their mocks, and the recording ends as failed. Re-record; if the agent was starved of CPU, give it more"))
 		return false
 	case !wait:
@@ -917,7 +918,7 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 	if b.Verdict == models.BacklogCannotTell && !looks.toldUnanswered {
 		looks.toldUnanswered = true
 		r.logger.Info("could not ask the keploy agent what it still holds from before the stop; waiting for it",
-			zap.String("frames", kind), zap.Error(err))
+			zap.String("frames", kind), logcontent.Error(err))
 	}
 	r.backlogHolds.Add(1)
 	return true
@@ -1661,7 +1662,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		defer r.reportDrainProgress(drainProgressEvery)()
 		err, timedOut := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-req", reqErrGrp, teardownDrainStall, r.drainProgress)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop request processing")
+			utils.LogContentError(r.logger, err, "failed to stop request processing")
 		}
 		if timedOut {
 			r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
@@ -1752,7 +1753,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// must not block teardown — the path SIGINT takes — indefinitely.
 		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
-			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			r.logger.Debug("failed to notify agent of graceful shutdown", logcontent.Error(err))
 		}
 		notifyCancel()
 		// Pcap + keylog flow over long-lived HTTP streams started in
@@ -1782,7 +1783,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// Waited for while the stop moves (drainProgress): the app's way
 		// out, what the agent captures of it, not a fixed time.
 		if err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-app", runAppErrGrp, teardownDrainStall, r.drainProgress); err != nil {
-			utils.LogError(r.logger, err, "failed to stop application")
+			utils.LogContentError(r.logger, err, "failed to stop application")
 		}
 		if !composeAgent {
 			// Read before the frames drain: the agent stays up while this
@@ -1808,7 +1809,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 		setupCtxCancel()
 		if err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-setup", setupErrGrp, teardownDrainStall, r.drainProgress); err != nil {
-			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
+			utils.LogContentError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
 		// recordDrainedCleanly gates the end-of-recording hook below. It stays true
@@ -1816,7 +1817,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// timeout path a mock/test-case writer may still be in flight (see below).
 		recordDrainedCleanly := true
 		if err, timedOut := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record", errGrp, teardownDrainStall, r.drainProgress); err != nil {
-			utils.LogError(r.logger, err, "failed to stop recording")
+			utils.LogContentError(r.logger, err, "failed to stop recording")
 		} else if timedOut {
 			recordDrainedCleanly = false
 		}
@@ -2317,7 +2318,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				return ctx.Err()
 			}
 			stopReason = "the keploy-agent docker compose started did not come up"
-			utils.LogError(r.logger, err, stopReason)
+			utils.LogContentError(r.logger, err, stopReason)
 			return fmt.Errorf("%s: %w", stopReason, err)
 		case appErr := <-appErrChan:
 			// The project stopped before the agent was ready. When the agent
@@ -2382,7 +2383,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	frames, err := r.GetTestAndMockChans(streamCtx)
 	if err != nil {
 		stopReason = "failed to get data frames"
-		utils.LogError(r.logger, err, stopReason)
+		utils.LogContentError(r.logger, err, stopReason)
 		if ctx.Err() == context.Canceled {
 			return err
 		}
@@ -2490,7 +2491,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			if errGrp != nil {
 				errGrp.Go(func() error {
 					if err := r.instrumentation.StreamPcapArtifacts(ctx, destDir); err != nil {
-						utils.LogError(r.logger, err, "pcap stream ended with error",
+						utils.LogContentError(r.logger, err, "pcap stream ended with error",
 							zap.String("destDir", destDir))
 					}
 					return nil
@@ -2513,7 +2514,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			return err
 		}
 		if err != nil {
-			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+			utils.LogContentError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
 	}
 

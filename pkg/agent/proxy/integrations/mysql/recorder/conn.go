@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
@@ -1047,7 +1048,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			// connection ended".
 			restoreShared = false
 			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
-				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", zap.Error(err))
+				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", logcontent.Error(err))
 			}
 		}
 
@@ -1474,7 +1475,7 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 	}
 	if err := recentGreetingFetchFailure(flight); err != nil {
 		logger.Debug("post-TLS MySQL: not dialling the server for its greeting again; a fetch failed moments ago",
-			zap.String("serverKey", key), zap.Error(err))
+			zap.String("serverKey", key), logcontent.Error(err))
 		return nil, err
 	}
 	dialLogger := logger
@@ -1532,7 +1533,7 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 			if r.Err != nil {
 				if !led && attempt == 0 && errors.Is(r.Err, models.ErrDstDialerUnavailable) {
 					logger.Debug("post-TLS MySQL: the shared greeting fetch could not dial from its own connection's namespace; trying with this connection's",
-						zap.String("serverKey", key), zap.Error(r.Err))
+						zap.String("serverKey", key), logcontent.Error(r.Err))
 					continue
 				}
 				return nil, r.Err

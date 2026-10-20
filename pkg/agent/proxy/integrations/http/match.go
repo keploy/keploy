@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -658,7 +659,11 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 	if err != nil {
 		return false
 	}
-	h.Logger.Debug("parsed URL", zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
+	// Checked first: it runs for every candidate mock, and a logurl field
+	// costs a line whose level is off an allocation that zap.String's does not.
+	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
+		ce.Write(logurl.Field("parsed URL", parsedURL.Path), logurl.Field("req path", reqPath))
+	}
 	mockPath := parsedURL.Path
 	if mockPath == reqPath {
 		return true
@@ -1132,7 +1137,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			// candidate mock of every request, and a logcontent field costs a
 			// line whose level is off an allocation that zap's does not.
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
-				ce.Write(zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), logcontent.String("mock url", mock.Spec.HTTPReq.URL))
+				ce.Write(zap.String("mock name", mock.Name), logurl.Field("input url", input.url.Path), logcontent.String("mock url", mock.Spec.HTTPReq.URL))
 			}
 			continue
 		}
@@ -1294,12 +1299,12 @@ func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", logcontent.Bytes("Req", mockBody))
+		utils.LogContentError(h.Logger, err, "failed to unmarshal the mock request body", logcontent.Bytes("Req", mockBody))
 		return false, err
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the request body", logcontent.Bytes("Req", reqBody))
+		utils.LogContentError(h.Logger, err, "failed to unmarshal the request body", logcontent.Bytes("Req", reqBody))
 		return false, err
 	}
 
@@ -1331,7 +1336,7 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 
 		ok, err := h.bodyMatch([]byte(mock.Spec.HTTPReq.Body), reqBody)
 		if err != nil {
-			h.Logger.Error("failed to do schema matching on request body", zap.Error(err))
+			h.Logger.Error("failed to do schema matching on request body", logcontent.Error(err))
 			break
 		}
 
@@ -1795,7 +1800,7 @@ func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*m
 			continue
 		}
 		h.Logger.Debug("strict req-body match rejected mock: non-noise field drift",
-			zap.String("mock name", m.Name), zap.Any("drift", drift))
+			zap.String("mock name", m.Name), zap.Array("drift", utils.SortedKeys(drift)))
 	}
 	return kept
 }

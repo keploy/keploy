@@ -31,7 +31,7 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 
 	parsedURL, err := url.Parse(extractedURL)
 	if err != nil || parsedURL.Hostname() == "" {
-		utils.LogError(logger, err, "error parsing URL")
+		utils.LogContentError(logger, err, "error parsing URL")
 		return nil
 	}
 
@@ -206,7 +206,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 
 				testCase, err := yaml.UnmarshalDoc(format, data)
 				if err != nil {
-					utils.LogError(logger, err, "failed to unmarshal test data", zap.String("file", testFile.Name()))
+					utils.LogContentError(logger, err, "failed to unmarshal test data", zap.String("file", testFile.Name()))
 					continue
 				}
 				if testCase == nil {
@@ -217,7 +217,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				var httpSchema models.HTTPSchema
 				err = testCase.Spec.Decode(&httpSchema)
 				if err != nil {
-					utils.LogError(logger, err, "failed to decode the HTTP schema")
+					utils.LogContentError(logger, err, "failed to decode the HTTP schema")
 					continue
 				}
 
@@ -234,7 +234,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				var curlRequest interface{}
 				err := json.Unmarshal([]byte(request.(string)), &curlRequest)
 				if err != nil {
-					utils.LogError(logger, err, "failed to unmarshal the request JSON")
+					utils.LogContentError(logger, err, "failed to unmarshal the request JSON")
 					continue
 				}
 				uniqueRequests = append(uniqueRequests, curlRequest)

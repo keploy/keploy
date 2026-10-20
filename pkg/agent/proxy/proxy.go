@@ -1236,9 +1236,9 @@ func (p *Proxy) recordMySQLOutgoing(
 			integrations.MYSQL, mocks, parserErrGrp, mysqlLogger,
 			clientConnID, destConnID, outgoingOpts); err != nil {
 			if isNetworkClosedErr(err) {
-				mysqlLogger.Debug("V2 record path: connection closed", zap.Error(err))
+				mysqlLogger.Debug("V2 record path: connection closed", logcontent.Error(err))
 			} else {
-				utils.LogError(mysqlLogger, err, "V2 record path failed for the MySQL probe branch",
+				utils.LogContentError(mysqlLogger, err, "V2 record path failed for the MySQL probe branch",
 					zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating"),
 				)
 			}
@@ -1320,7 +1320,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
 		// Counted as a capture loss just above; no miss (mockFailed).
-		utils.LogError(p.logger, err, "failed to mock the outgoing message")
+		utils.LogContentError(p.logger, err, "failed to mock the outgoing message")
 		return err
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
@@ -1401,7 +1401,7 @@ func mysqlSessionForRelay(srcConn, dstConn net.Conn, logger *zap.Logger) *integr
 // (the record-mode kill switch and GlobalPassthrough) do.
 func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Logger, parserType integrations.IntegrationType, session *integrations.RecordSession) error {
 	if session == nil || !relayableConn(session.Ingress) || !relayableConn(session.Egress) {
-		utils.LogError(logger, err, "parser declined but the session carried no conns to relay",
+		utils.LogContentError(logger, err, "parser declined but the session carried no conns to relay",
 			zap.String("parser", string(parserType)))
 		return nil
 	}
@@ -1417,7 +1417,7 @@ func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Lo
 		// they think.
 		logger.Warn("parser declined this connection; relaying raw and recording nothing for it",
 			zap.String("parser", string(parserType)),
-			zap.Error(err),
+			logcontent.Error(err),
 			zap.String("next_step", "user traffic is unaffected, but nothing on this connection is captured, so its test cases will report no mocks at replay. If this is traffic keploy should record, the parser declined it deliberately — check its port allowlist or sub-protocol support"),
 		)
 	}
@@ -2304,7 +2304,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 		err := clientConnErrGrp.Wait()
 		if err != nil {
-			p.logger.Debug("failed to handle the client connection", zap.Error(err))
+			p.logger.Debug("failed to handle the client connection", logcontent.Error(err))
 		}
 		// Every connection's handler has returned: the count of the
 		// connections the proxy could not route is final (untracked.go).
@@ -2766,7 +2766,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		err = parserErrGrp.Wait()
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
+			utils.LogContentError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 	}()
 
@@ -2868,9 +2868,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		case refusedLocally(err):
 			p.logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
 		case errors.Is(err, errLookIncomplete):
-			utils.LogError(p.logger, err, "keploy could not tell whether this connection speaks MySQL, and closed it", zap.String("server address", dstAddr), zap.String("next_step", "a recovered panic is logged above this line: report both to keploy"))
+			utils.LogContentError(p.logger, err, "keploy could not tell whether this connection speaks MySQL, and closed it", zap.String("server address", dstAddr), zap.String("next_step", "a recovered panic is logged above this line: report both to keploy"))
 		default:
-			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+			utils.LogContentError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 		}
 		return err
 	}
@@ -3088,7 +3088,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
+			utils.LogContentError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
 			return err
 		}
 		connectTargetHost = connectResult.TargetHost
@@ -3555,9 +3555,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if shouldRecordViaSupervisor(matchedParser) {
 				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, matchedParser, parserType, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
 					if isNetworkClosedErr(err) {
-						logger.Debug("V2 record path: connection closed", zap.Error(err))
+						logger.Debug("V2 record path: connection closed", logcontent.Error(err))
 					} else {
-						utils.LogError(logger, err, "V2 record path failed",
+						utils.LogContentError(logger, err, "V2 record path failed",
 							zap.String("parser", string(parserType)),
 							zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
 						)
@@ -3659,9 +3659,9 @@ func (p *Proxy) recordGenericOutgoing(
 	if shouldRecordViaSupervisor(genericParser) {
 		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, genericParser, integrations.GENERIC, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
 			if isNetworkClosedErr(err) {
-				logger.Debug("V2 generic record path: connection closed", zap.Error(err))
+				logger.Debug("V2 generic record path: connection closed", logcontent.Error(err))
 			} else {
-				utils.LogError(logger, err, "V2 generic record path failed",
+				utils.LogContentError(logger, err, "V2 generic record path failed",
 					zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
 				)
 			}
@@ -5020,7 +5020,7 @@ func handlerErrorFields(err error) []zap.Field {
 	if errors.As(err, &missed) {
 		return parserErrorFields(missed.err)
 	}
-	return []zap.Field{zap.Error(err)}
+	return []zap.Field{logcontent.Error(err)}
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
@@ -5313,7 +5313,7 @@ func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
 		// keploy's failure, counted as a capture loss where the parser
 		// returned it (countParserPanic): no miss, so neither the mismatch
 		// line nor a slot among the misses kept for the test's read.
-		utils.LogError(logger, err, "failed to mock the outgoing message")
+		utils.LogContentError(logger, err, "failed to mock the outgoing message")
 		return err
 	}
 	quiet := provenswitch.On() && isMockMiss(err)

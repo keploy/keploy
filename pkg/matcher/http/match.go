@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 
-	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 
 	"github.com/k0kubun/pp/v3"
@@ -23,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // Assignable global variables for system and utility functions
@@ -332,8 +332,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			for i := range res.HeadersResult {
 				if strings.ToLower(res.HeadersResult[i].Expected.Key) == "content-length" && !res.HeadersResult[i].Normal {
 					logger.Debug("Ignoring Content-Length mismatch since body content is identical",
-						zap.String("expected", strings.Join(res.HeadersResult[i].Expected.Value, ",")),
-						zap.String("actual", strings.Join(res.HeadersResult[i].Actual.Value, ",")))
+						logcontent.String("expected", strings.Join(res.HeadersResult[i].Expected.Value, ",")),
+						logcontent.String("actual", strings.Join(res.HeadersResult[i].Actual.Value, ",")))
 					res.HeadersResult[i].Normal = true
 				}
 			}
@@ -520,7 +520,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					logger.Debug("failed to compute json diff", zap.Error(err))
+					logger.Debug("failed to compute json diff", logcontent.Error(err))
 				}
 				for _, op := range patch {
 					if jsonComparisonResult.Matches() {
@@ -1040,6 +1040,6 @@ func assertRenderedDigests(res *models.Result, recordedBody, answerBody string, 
 		want := form(answerBody)
 		hr.Normal = strings.Join(hr.Actual.Value, ",") == want
 		logger.Debug("a digest header of a templated body is asserted over the answer's body",
-			zap.String("header", name), zap.String("want", want), zap.Bool("normal", hr.Normal))
+			zap.String("header", name), logcontent.String("want", want), zap.Bool("normal", hr.Normal))
 	}
 }

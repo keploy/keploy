@@ -229,7 +229,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	// empty one): templatize replaces that file, and reads its keys.
 	conf, err := t.testSetConf.ReadForUpdate(ctx, testSetID)
 	if err != nil {
-		utils.LogError(t.logger, err, "failed to read the test set's config.yaml; keploy templatize changed nothing in this set",
+		utils.LogContentError(t.logger, err, "failed to read the test set's config.yaml; keploy templatize changed nothing in this set",
 			zap.String("testSet", testSetID),
 			zap.String("next_step", "fix config.yaml so that it reads (the error says what is wrong with it), then run keploy templatize again"))
 		return err
@@ -243,7 +243,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 
 	held, err := heldIn(ctx, setFiles, testSetID, existing)
 	if err != nil {
-		utils.LogError(t.logger, err, "failed to read the test set's files; keploy templatize changed nothing in this set",
+		utils.LogContentError(t.logger, err, "failed to read the test set's files; keploy templatize changed nothing in this set",
 			zap.String("testSet", testSetID),
 			zap.String("next_step", "do what the error says, then run keploy templatize again"))
 		return err
@@ -278,7 +278,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	for _, i := range changed {
 		f, err := setFiles.TestCaseFile(ctx, edited[i], testSetID)
 		if err != nil {
-			utils.LogError(t.logger, err, "failed to write a test case; keploy templatize changed nothing in this set",
+			utils.LogContentError(t.logger, err, "failed to write a test case; keploy templatize changed nothing in this set",
 				zap.String("testSet", testSetID), zap.String("testCase", tcs[i].Name))
 			return err
 		}
@@ -295,7 +295,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	// hands the file to the group replaced below.
 	staged := stagedConfig{TestSetConfig: t.testSetConf, file: confFile, add: func(f setfile.File) { files = append(files, f) }}
 	if err := testset.WriteTemplatedConfig(ctx, staged, testSetID, existing); err != nil {
-		utils.LogError(t.logger, err, "failed to write test set; keploy templatize changed nothing in this set", zap.String("testSet", testSetID))
+		utils.LogContentError(t.logger, err, "failed to write test set; keploy templatize changed nothing in this set", zap.String("testSet", testSetID))
 		return err
 	}
 	if err := setFiles.ReplaceFiles(ctx, files); err != nil {
@@ -310,7 +310,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 
 	secrets, err := t.testSetConf.ReadSecret(ctx, testSetID)
 	if err != nil {
-		t.logger.Debug("Failed to read the test set's secrets", zap.Error(err))
+		t.logger.Debug("Failed to read the test set's secrets", logcontent.Error(err))
 	}
 	if len(secrets) > 0 {
 		if err := utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml"); err != nil {
@@ -390,7 +390,7 @@ func (t *Tools) sayCrowded(testSetID string, tcs []*models.TestCase, crowded []c
 	for _, c := range crowded {
 		names := make([]string, 0, len(c.candidates))
 		for _, l := range c.candidates {
-			names = append(names, fmt.Sprintf("%s %q", l.path, l.value))
+			names = append(names, placeSaid(l.path, l.value))
 		}
 		if c.created {
 			t.logger.Info(fmt.Sprintf("%s/%s response header %s holds more than one value its response gives first (%s), and a later request sends one of them: templatize captures none of them, since a header holds one capture and one recording cannot tell which value the app issues anew",
@@ -402,6 +402,27 @@ func (t *Tools) sayCrowded(testSetID string, tcs []*models.TestCase, crowded []c
 			testSetID, tcs[c.tc].Name, c.header, c.status, strings.Join(names, ", ")),
 			zap.String("next_step", crowdedNextStep(c)))
 	}
+}
+
+// valueSaid is a recorded value as a line of keploy templatize names it: the
+// application's, so quoted whole only with logcontent's switch on, and
+// otherwise by its length. The test files templatize writes hold it whole
+// either way; the switch decides only what the line says.
+func valueSaid(v string) string {
+	if logcontent.On() {
+		return strconv.Quote(v)
+	}
+	return fmt.Sprintf("the recorded value (%d bytes)", len(v))
+}
+
+// placeSaid is a place and the value recorded there, as a line of keploy
+// templatize names them: the place (Location.path.1), and its value only as
+// valueSaid lets it.
+func placeSaid(place, v string) string {
+	if logcontent.On() {
+		return place + " " + strconv.Quote(v)
+	}
+	return place
 }
 
 // crowdedNextStep is the edit for a header templatize captures nothing in,
@@ -418,7 +439,7 @@ func crowdedNextStep(c crowdedHeader) string {
 	var uses []string
 	for i, l := range c.candidates {
 		if i < len(c.own) && c.own[i] != "" {
-			uses = append(uses, fmt.Sprintf("%s in place of %q", templates.Format(false, templates.TypeString, c.own[i]), l.value))
+			uses = append(uses, fmt.Sprintf("%s in place of %s", templates.Format(false, templates.TypeString, c.own[i]), valueSaid(l.value)))
 		}
 	}
 	if len(uses) > 0 {
@@ -436,12 +457,12 @@ func crowdedNextStep(c crowdedHeader) string {
 	var edits, whole, fresh []string
 	for i, l := range c.candidates {
 		if l.unholdable {
-			whole = append(whole, strconv.Quote(l.value))
+			whole = append(whole, valueSaid(l.value))
 			continue
 		}
 		key := c.keys[i]
-		edits = append(edits, fmt.Sprintf("%s in place of %q (and %s where later requests send it)",
-			templates.Format(true, templates.TypeString, key), l.value, templates.Format(false, templates.TypeString, key)))
+		edits = append(edits, fmt.Sprintf("%s in place of %s (and %s where later requests send it)",
+			templates.Format(true, templates.TypeString, key), valueSaid(l.value), templates.Format(false, templates.TypeString, key)))
 		if !c.reused[i] {
 			fresh = append(fresh, key)
 		}
@@ -1316,8 +1337,8 @@ func repeatsOf(tcs []*models.TestCase, captures []capturePlan, untied func(*loca
 func (t *Tools) sayRepeats(testSetID string, tcs []*models.TestCase, captures []capturePlan) {
 	repeats := repeatsOf(tcs, captures, t.untiedInArray(testSetID, tcs))
 	for _, rp := range repeats {
-		next := fmt.Sprintf("if the app issues the value anew each run, write %s in place of %q there: that place then asserts it holds what this same answer gives at the capture of %s, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do",
-			rp.use, rp.value, rp.key)
+		next := fmt.Sprintf("if the app issues the value anew each run, write %s in place of %s there: that place then asserts it holds what this same answer gives at the capture of %s, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do",
+			rp.use, valueSaid(rp.value), rp.key)
 		if rp.use == "" {
 			next = "no use can stand there (" + rp.noUse + "): it stays as recorded"
 		}

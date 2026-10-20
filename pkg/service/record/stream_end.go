@@ -7,7 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
-	"go.uber.org/zap"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // StreamEndedLog is what a drain says (at debug) when it has read its stream
@@ -118,7 +118,7 @@ func (e *streamsEnd) request(r *Recorder, ender streamEnder, closes []func()) {
 	// The agent said it holds nothing more from before the stop: what is
 	// still on its way to this client is what a stream's close can lose,
 	// as with an agent that cannot end its streams.
-	r.logger.Info("could not ask the keploy agent to end its streams; ending them here", zap.Error(err))
+	r.logger.Info("could not ask the keploy agent to end its streams; ending them here", logcontent.Error(err))
 	e.failed.Store(true)
 	for _, c := range closes {
 		c()

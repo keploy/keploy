@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -32,7 +33,7 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.svc.MockOutgoing(r.Context(), OutgoingReq.OutgoingOptions); err != nil {
-		utils.LogError(a.logger, err, "failed to mock outgoing")
+		utils.LogContentError(a.logger, err, "failed to mock outgoing")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
@@ -172,7 +173,7 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		// encodes; log it if it ever does not.
 		if encErr := gob.NewEncoder(w).Encode(models.AgentResp{ErrorMsg: err.Error()}); encErr != nil {
 			utils.LogError(a.logger, encErr, "failed to encode storemocks error response",
-				zap.String("underlying", err.Error()))
+				logcontent.NamedError("underlying", err))
 		}
 	}
 
@@ -266,7 +267,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
-		utils.LogError(a.logger, err, "failed to update mock params")
+		utils.LogContentError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}

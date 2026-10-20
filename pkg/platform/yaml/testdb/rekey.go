@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -77,7 +78,7 @@ func (ts *TestYaml) beginRekey(set, test, path string) *rekey {
 	old, err := r.Hash(ts.TcsPath, path)
 	if err != nil {
 		ts.logger.Warn("keploy could not name a recording it is about to rewrite, so an entry of verdicts.yaml that names it is not moved onto the new one: that entry is now stale, and the test runs",
-			zap.String("testSet", set), zap.String("testCase", test), zap.Error(err),
+			zap.String("testSet", set), zap.String("testCase", test), logcontent.Error(err),
 			zap.String("next_step", "quarantine the test again if it is still to be skipped"))
 		return nil
 	}
@@ -95,7 +96,7 @@ func (k *rekey) done(logger *zap.Logger) {
 	}
 	if err != nil {
 		logger.Warn("keploy rewrote a test's recording but could not move its entry of verdicts.yaml onto the new one: that entry is now stale, and the test runs",
-			zap.String("testSet", k.set), zap.String("testCase", k.test), zap.Error(err),
+			zap.String("testSet", k.set), zap.String("testCase", k.test), logcontent.Error(err),
 			zap.String("next_step", "quarantine the test again if it is still to be skipped"))
 	}
 }
@@ -210,7 +211,7 @@ func BeginSetRewrite(logger *zap.Logger, keployDir, set string) *SetRewrite {
 		old, err := r.Hash(keployDir, path)
 		if err != nil {
 			logger.Warn("keploy could not name a recording it is about to rewrite, so an entry of verdicts.yaml that names it is not moved onto the new one: that entry is now stale, and the test runs",
-				zap.String("testSet", set), zap.String("testCase", test), zap.Error(err),
+				zap.String("testSet", set), zap.String("testCase", test), logcontent.Error(err),
 				zap.String("next_step", "quarantine the test again if it is still to be skipped"))
 			continue
 		}

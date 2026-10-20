@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -138,7 +139,7 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
-		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+		a.logger.Debug("scope begin failed", zap.String("name", req.Name), logcontent.Error(err))
 		code := http.StatusInternalServerError
 		if errors.Is(err, agent.ErrOneTestAtATime) {
 			// release1-cut §2.1: 422 one_test_at_a_time.
@@ -179,7 +180,7 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := endScope(r.Context(), a.svc, req); err != nil {
-		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
+		a.logger.Debug("scope end failed", zap.String("name", req.Name), logcontent.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

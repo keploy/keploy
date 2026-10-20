@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
@@ -500,7 +501,7 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 		// Use the existing ReadComposeFile method
 		compose, err := idc.ReadComposeFile(composePath)
 		if err != nil {
-			idc.logger.Debug("failed to read compose file, skipping", zap.String("path", composePath), zap.Error(err))
+			idc.logger.Debug("failed to read compose file, skipping", zap.String("path", composePath), logcontent.Error(err))
 			continue // Skip files that can't be read
 		}
 

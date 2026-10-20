@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -111,7 +112,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 					// decompression MaxTestCaseSize check further down, hit
 					// earlier — log it the same way, not as a decode failure.
 					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-						zap.String("path", req.URL.Path),
+						logurl.Field("path", req.URL.Path),
 						logcontent.String("url", req.URL.String()),
 						zap.String("method", req.Method))
 					return
@@ -152,7 +153,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
 		decodedBody, err := url.QueryUnescape(string(reqBody))
 		if err != nil {
-			utils.LogError(logger, err, "failed to decode the url-encoded request body")
+			utils.LogContentError(logger, err, "failed to decode the url-encoded request body")
 			return
 		}
 		reqBody = []byte(decodedBody)
@@ -163,7 +164,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		if err != nil {
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-					zap.String("path", req.URL.Path),
+					logurl.Field("path", req.URL.Path),
 					logcontent.String("url", req.URL.String()),
 					zap.String("method", req.Method))
 				return
@@ -180,7 +181,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int("totalSize", totalSize),
 			zap.Int("reqBodySize", len(reqBody)),
 			zap.Int("respBodySize", len(respBody)),
-			zap.String("path", req.URL.Path),
+			logurl.Field("path", req.URL.Path),
 			logcontent.String("url", req.URL.String()),
 			zap.String("method", req.Method))
 		return
@@ -194,7 +195,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		respBodySize = int64(len(respBody))
 		logger.Debug("response body exceeds 1MB during recording, storing only body size",
 			zap.Int64("body_size_bytes", respBodySize),
-			zap.String("path", req.URL.Path),
+			logurl.Field("path", req.URL.Path),
 			logcontent.String("url", req.URL.String()),
 			zap.String("method", req.Method))
 		respBody = []byte{} // clear the body — only size is stored
@@ -318,7 +319,7 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	if p := req.URL.Port(); p != "" {
 		dstPort, err = strconv.Atoi(p)
 		if err != nil {
-			utils.LogError(logger, err, "failed to obtain destination port from request")
+			utils.LogContentError(logger, err, "failed to obtain destination port from request")
 			return false
 		}
 	}
@@ -466,7 +467,7 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 			break
 		}
 		if err != nil {
-			utils.LogError(logger, err, "Error reading part")
+			utils.LogContentError(logger, err, "Error reading part")
 			continue
 		}
 		key := part.FormName()
@@ -620,7 +621,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	if totalSize > MaxTestCaseSize {
 		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
 			zap.Int("totalSize", totalSize),
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+			logurl.Field("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 		return
 	}
 
@@ -642,6 +643,6 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	case t <- testCase:
 		logger.Debug("Captured gRPC test case",
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+			logurl.Field("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 	}
 }

@@ -1872,7 +1872,7 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 		}
 	} else {
 		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
-			utils.LogError(a.logger, err, "failed to set mocks on proxy")
+			utils.LogContentError(a.logger, err, "failed to set mocks on proxy")
 			return err
 		}
 	}
@@ -2044,7 +2044,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// Load only what the filter will keep for this call (see loadPerTestMocks).
 	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart, alsoLoad...)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
+		utils.LogContentError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
 	}
 	carryOver, err := a.loadCarryOverLookahead(disk, params)

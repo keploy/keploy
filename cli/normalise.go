@@ -36,7 +36,7 @@ func Normalize(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				return nil
 			}
 			if err := tools.Normalize(ctx); err != nil {
-				utils.LogError(logger, err, "failed to normalize test cases")
+				utils.LogContentError(logger, err, "failed to normalize test cases")
 				return nil
 			}
 			return nil

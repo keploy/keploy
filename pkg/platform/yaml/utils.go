@@ -357,7 +357,7 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 
 	err = yaml.Unmarshal(configData, v)
 	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal YAML", zap.String("file", filePath))
+		utils.LogContentError(logger, err, "failed to unmarshal YAML", zap.String("file", filePath))
 		return err
 	}
 	return nil

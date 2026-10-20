@@ -112,7 +112,7 @@ func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) uti
 				a.logger.Info("docker compose started keploy's agent again in its retry; setting it up again",
 					zap.String("agentContainer", a.keployContainer))
 				if err := a.onAgentRestart(watch); err != nil && watch.Err() == nil {
-					utils.LogError(a.logger, err, "keploy's agent, started again by docker compose, could not be set up again; "+
+					utils.LogContentError(a.logger, err, "keploy's agent, started again by docker compose, could not be set up again; "+
 						"the application waits on it and will not start")
 				}
 				return nil

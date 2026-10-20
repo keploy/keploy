@@ -119,7 +119,7 @@ func (r *Replayer) logTemplateFailures(testCase, testSetID string, fs []template
 		}
 		r.logger.Warn("a template variable's place does not hold what it must, so the test case fails",
 			zap.String("testcase", testCase), zap.String("testset", testSetID),
-			zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), zap.String("why", f.Why),
+			zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), logcontent.String("why", f.Why),
 			zap.String("next_step", next))
 	}
 }
@@ -347,7 +347,7 @@ func (r *Replayer) logTemplateCheck(testSetID string, check templates.CheckResul
 		for _, f := range check.Refused[name] {
 			utils.LogError(r.logger, nil, "a test case's placeholder is refused; the test case fails without being sent",
 				zap.String("testset", testSetID), zap.String("testcase", f.TestCase), zap.String("placeholder", f.Placeholder),
-				zap.String("where", f.Where), zap.String("why", f.Why),
+				zap.String("where", f.Where), logcontent.String("why", f.Why),
 				zap.String("next_step", "edit the test case as the reason says, then run keploy test again"))
 		}
 	}
@@ -662,7 +662,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	}
 	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
-		utils.LogError(r.logger, err, "failed to insert report")
+		utils.LogContentError(r.logger, err, "failed to insert report")
 		return true, err
 	}
 	r.completeTestReportMu.Lock()
@@ -757,7 +757,7 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 			if !*warned {
 				*warned = true
 				r.logger.Warn("keploy could not read the test variables its agent bound; the report lists none for the test cases of this set that capture nothing",
-					zap.String("testcase", tc.Name), zap.Error(err))
+					zap.String("testcase", tc.Name), logcontent.Error(err))
 			}
 			return nil, nil, ""
 		}
@@ -791,7 +791,7 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 		why := fmt.Sprintf("the app answered %q here, but sent %q as %s to its dependency (%s %s) in this test",
 			c.Value, b.Value, c.Key, b.Mock, b.Place)
 		r.logger.Warn("a value this test case captured is not the one the application sent its dependency",
-			zap.String("testcase", tc.Name), zap.String("where", c.Where), zap.String("why", why),
+			zap.String("testcase", tc.Name), zap.String("where", c.Where), logcontent.String("why", why),
 			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
 		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -540,7 +541,7 @@ func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 		respDone := s.respHeadersReceived && s.respTrailersReceived && s.respEndStreamReceived
 
 		if reqDone && respDone {
-			sm.logger.Debug("Stream completed", zap.Any("stream", s))
+			sm.logger.Debug("Stream completed", logcontent.Any("stream", s))
 			s.isComplete = true
 		}
 	}
@@ -887,7 +888,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			// a partial stream and the reason it ended.
 			drainErr = err
 			logger.Debug("gRPC response stream ended with an error; recording what arrived",
-				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), logcontent.Error(err))
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))

@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -233,7 +234,7 @@ func (a *Agent) failLostScope(ctx context.Context, lost lostScope, at time.Time)
 	for _, o := range open {
 		a.closeWindow(o.name, int(o.pid), at)
 		if err := a.restorePool(ctx, o.name, int(o.pid)); err != nil {
-			a.logger.Debug("could not give back the pool of a test whose worker exited", zap.String("test", o.name), zap.Error(err))
+			a.logger.Debug("could not give back the pool of a test whose worker exited", zap.String("test", o.name), logcontent.Error(err))
 		}
 	}
 	if len(open) == 0 {

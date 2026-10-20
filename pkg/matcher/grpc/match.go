@@ -650,7 +650,7 @@ func compareGrpcMessage(
 
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &expectedDecodedData, &actualDecodedData)
 		if err != nil {
-			logger.Error("Failed to validate and marshal JSON for gRPC decoded data", zap.Error(err))
+			logger.Error("Failed to validate and marshal JSON for gRPC decoded data", logcontent.Error(err))
 			decodedDataNormal = false
 		} else if validatedJSON.IsIdentical() {
 			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)

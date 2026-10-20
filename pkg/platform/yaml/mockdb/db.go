@@ -415,7 +415,7 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 			break
 		}
 		if readErr != nil {
-			utils.LogError(ys.Logger, readErr, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
+			utils.LogContentError(ys.Logger, readErr, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 			return st, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
 		}
 		if decodeErr != nil {
@@ -1943,7 +1943,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			if readerIsJSON {
 				msg = "failed to decode the config mocks from json doc"
 			}
-			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
+			utils.LogContentError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
 			return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		if len(doc.mocks) == 0 {

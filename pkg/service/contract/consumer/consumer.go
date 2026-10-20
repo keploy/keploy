@@ -97,7 +97,7 @@ func (s *consumer) scoresForMocks(mocks []*models.OpenAPI, mockSet map[string]mo
 				// Handle any errors encountered during the comparison process.
 				if err != nil {
 					// Log the error and continue with the next iteration, skipping the current comparison.
-					utils.LogError(s.logger, err, "Error in matching the two models")
+					utils.LogContentError(s.logger, err, "Error in matching the two models")
 					continue
 				}
 
@@ -204,7 +204,7 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, models.CompareMode)
 					if err != nil {
 						// If an error occurs during comparison, return it
-						utils.LogError(s.logger, err, "Error in matching the two models")
+						utils.LogContentError(s.logger, err, "Error in matching the two models")
 						return models.Summary{}, err
 					}
 

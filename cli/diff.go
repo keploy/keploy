@@ -59,7 +59,7 @@ func Diff(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			}
 
 			if err := diffService.Compare(ctx, run1, run2, testSets); err != nil {
-				utils.LogError(logger, err, "failed to compare test runs")
+				utils.LogContentError(logger, err, "failed to compare test runs")
 				return nil
 			}
 			return nil

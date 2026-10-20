@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -126,7 +127,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	} else {
 		err := yaml.UnmarshalGeneric(detected, data, &config)
 		if err != nil {
-			utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
+			utils.LogContentError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
 			// Don't return early - continue with secret loading even if config is malformed.
 			// Use a fresh default value so secret hydration still has somewhere to land.
 			config = newValue[T]()
@@ -141,7 +142,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	// Always try to load secrets, regardless of whether config.yaml existed
 	secretValues, err := db.ReadSecret(ctx, testSetID)
 	if err != nil {
-		db.logger.Debug("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		db.logger.Debug("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), logcontent.Error(err))
 		// Don't return error here - missing secrets shouldn't fail the config loading
 		return config, nil
 	}
@@ -205,7 +206,7 @@ func (db *Db[T]) warnIfDroppingFields(ctx context.Context, testSetID string, inc
 			"could not check whether this test-set config write drops fields; "+
 				"the existing config could not be read",
 			zap.String("testSet", testSetID),
-			zap.Error(err),
+			logcontent.Error(err),
 		)
 		return
 	}
@@ -353,7 +354,7 @@ func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]i
 
 	var secretConfig map[string]interface{}
 	if err := yamlLib.Unmarshal(data, &secretConfig); err != nil {
-		utils.LogError(db.logger, err, "failed to unmarshal test-set secret file", zap.String("testSet", testSetID))
+		utils.LogContentError(db.logger, err, "failed to unmarshal test-set secret file", zap.String("testSet", testSetID))
 		return nil, err
 	}
 

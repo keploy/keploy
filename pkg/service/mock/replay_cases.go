@@ -13,6 +13,7 @@ import (
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -72,7 +73,7 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	}
 	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{Filters: m.config.Record.Filters})
 	if err != nil {
-		m.logger.Warn("the app's responses will not be compared with the recording: could not read its incoming requests", zap.Error(err))
+		m.logger.Warn("the app's responses will not be compared with the recording: could not read its incoming requests", logcontent.Error(err))
 		return nil
 	}
 	c := &actualCapture{done: make(chan struct{})}
@@ -288,12 +289,12 @@ func (m *mockService) recordedCases(ctx context.Context, name string) map[string
 	}
 	byFlow, err := reader.GetCases(ctx, name)
 	if err != nil {
-		m.logger.Debug("could not read which cases each flow recorded", zap.Error(err))
+		m.logger.Debug("could not read which cases each flow recorded", logcontent.Error(err))
 		return nil
 	}
 	tcs, err := m.testDB.GetTestCases(ctx, name)
 	if err != nil {
-		m.logger.Debug("could not read the recorded cases", zap.Error(err))
+		m.logger.Debug("could not read the recorded cases", logcontent.Error(err))
 		return nil
 	}
 	byName := make(map[string]*models.TestCase, len(tcs))

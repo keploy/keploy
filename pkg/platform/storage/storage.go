@@ -18,6 +18,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -159,7 +160,7 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	// Decode into struct from the raw bytes
 	var mockUploadResponse MockUploadResponse
 	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&mockUploadResponse); err != nil {
-		utils.LogError(s.logger, err, "failed to decode the response body", zap.Any("Response", resp), zap.String("body", string(bodyBytes)))
+		utils.LogError(s.logger, err, "failed to decode the response body", logcontent.Any("Response", resp), zap.String("body", string(bodyBytes)))
 		return err
 	}
 

@@ -71,7 +71,7 @@ func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string,
 		var testCase *models.OpenAPI
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+			utils.LogContentError(ts.logger, err, "failed to unmarshall YAML data")
 			return nil, err
 		}
 

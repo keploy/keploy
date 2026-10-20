@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -159,7 +160,7 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 			send = sess.EmitMockOnShutdown
 		}
 		if err := send(m); err != nil && logger != nil {
-			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
+			logger.Debug("generic v2: EmitMock returned error", logcontent.Error(err))
 		}
 	}
 	// hold is the connection's first exchange, and those after it, while the
@@ -310,7 +311,7 @@ drain:
 			if logger != nil && !isBenignReadErr(ev.err) {
 				logger.Debug("generic v2: stream read ended",
 					zap.String("dir", ev.dir.String()),
-					zap.Error(ev.err))
+					logcontent.Error(ev.err))
 			}
 			continue
 		}

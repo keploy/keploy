@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -127,16 +128,16 @@ func (m *mockService) pidMapReadFailed(when string, err error, established bool)
 			// No count was ever read: an agent that does not count at all (an
 			// older image, hooks without PID maps). Its sessions pass, as
 			// before this check existed -- failing them would fail every run.
-			m.logger.Debug("the agent cannot say whether it tracked every process of the test command; capture completeness is not checked", zap.String("when", when), zap.Error(err))
+			m.logger.Debug("the agent cannot say whether it tracked every process of the test command; capture completeness is not checked", zap.String("when", when), logcontent.Error(err))
 			return nil
 		}
 		// A count WAS read earlier, so the agent counts; a now-"unsupported"
 		// answer (a 404/501) is a count that was lost -- the agent restarted,
 		// perhaps to an older image -- not "never counts". It is unreadable.
-		m.logger.Debug("the agent counted before but no longer does; treating it as an unreadable count", zap.String("when", when), zap.Error(err))
+		m.logger.Debug("the agent counted before but no longer does; treating it as an unreadable count", zap.String("when", when), logcontent.Error(err))
 		return fmt.Errorf("%s: %w", when, err)
 	}
-	m.logger.Debug("failed to read the agent's refused PID map inserts", zap.String("when", when), zap.Error(err))
+	m.logger.Debug("failed to read the agent's refused PID map inserts", zap.String("when", when), logcontent.Error(err))
 	return fmt.Errorf("%s: %w", when, err)
 }
 

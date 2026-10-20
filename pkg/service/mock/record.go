@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -131,7 +132,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		cancel()
 		setupCancel()
 		if err := m.teardownDrain("mock-record", errGrp, teardown); err != nil {
-			utils.LogError(m.logger, err, "failed to drain mock-record goroutines")
+			utils.LogContentError(m.logger, err, "failed to drain mock-record goroutines")
 		}
 	}()
 
@@ -286,7 +287,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			return nil
 		}
 		stopReason = "keploy could not hand its agent mock.real"
-		utils.LogError(m.logger, err, stopReason)
+		utils.LogContentError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
@@ -323,7 +324,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			return nil
 		}
 		stopReason = "failed to start capturing outgoing calls"
-		utils.LogError(m.logger, err, stopReason)
+		utils.LogContentError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
@@ -610,7 +611,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			unread, reason = "captured every call the test command made", models.CaptureLossesUnverified(pidCheck.unreadable)
 		}
 		m.logger.Warn("the recording is kept, but keploy could not verify it is complete: it could not read whether the agent "+unread,
-			zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("reason", reason),
+			zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable), zap.String("reason", reason),
 			zap.String("next_step", "record again once the agent answers, or replay the set: under --on-miss fail (the default) a call it is missing fails the replay"))
 	}
 
@@ -660,7 +661,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			if parent.Err() != nil {
 				stopReason = "the recording was stopped before keploy read what each test did, so nothing was kept"
 			}
-			utils.LogError(m.logger, werr, stopReason, zap.String("mock-set", name),
+			utils.LogContentError(m.logger, werr, stopReason, zap.String("mock-set", name),
 				zap.String("next_step", "check the agent's log, then record again"))
 			return fmt.Errorf("%s: %w", stopReason, werr)
 		}
@@ -671,7 +672,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if recordReal, rerr = m.realRun(ctx); rerr != nil {
 			m.propagateExit(appErr, "record")
 			stopReason = "keploy could not read the run's mock.real destinations from its agent, so nothing was kept"
-			utils.LogError(m.logger, rerr, stopReason, zap.String("mock-set", name),
+			utils.LogContentError(m.logger, rerr, stopReason, zap.String("mock-set", name),
 				zap.String("next_step", "check the agent's log, then record again"))
 			return fmt.Errorf("%s: %w", stopReason, rerr)
 		}
@@ -864,7 +865,7 @@ func runnerPassed(appErr models.AppError) bool {
 func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 	windows, err := m.readWindows(ctx)
 	if err != nil {
-		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
+		m.logger.Debug("failed to read per-test scope windows from the agent", logcontent.Error(err))
 		return nil
 	}
 	return windows
@@ -1539,13 +1540,13 @@ func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks
 			zap.Stringer("agent_says", b.Verdict),
 			zap.String("waiting_on", b.WaitingOn),
 			zap.Int("looks_without_progress", looks.Stalled()),
-			zap.NamedError("last_look_error", err),
+			logcontent.NamedError("last_look_error", err),
 			zap.String("next_step", words.stalledNext))
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return false, true
 	}
 	if wait && b.Verdict == models.BacklogCannotTell && looks.Stalled() == 1 {
-		m.logger.Info("could not ask the keploy agent what it still holds from before the run ended; waiting for it", zap.Error(err))
+		m.logger.Info("could not ask the keploy agent what it still holds from before the run ended; waiting for it", logcontent.Error(err))
 	}
 	return wait, false
 }

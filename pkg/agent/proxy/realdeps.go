@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -182,7 +183,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		case errors.Is(rerr, realdeps.ErrNoName):
 			why := realdeps.UnreadableWhy(dstAddr, dec.Candidates, rerr.Error())
 			done(why)
-			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr), zap.String("why", why))
+			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr), logcontent.String("why", why))
 			return true, wrapped, nil
 		case rerr != nil:
 			if ctx.Err() == nil {
@@ -307,7 +308,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 		H2:       func() { p.realTracker.H2(dec.Label) },
 		Refused: func(why string) {
 			p.realTracker.Incomplete(dstAddr, why)
-			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
+			logger.Warn("keploy ended a mock.real connection: capture_incomplete", logcontent.String("why", why))
 		},
 		// The app's side over, the connection waits on the real server's
 		// answer: no work of keploy's, which a test's end, and a set's
@@ -319,7 +320,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 		AwaitsAnswer: func() func() { return integrations.MarkIdle(ctx) },
 	}
 	if err := r.Run(ctx); err != nil && !isNetworkClosedErr(err) && !errors.Is(err, context.Canceled) {
-		logger.Debug("a mock.real connection ended with an error", zap.Error(err))
+		logger.Debug("a mock.real connection ended with an error", logcontent.Error(err))
 	}
 	return nil
 }

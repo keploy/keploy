@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -138,7 +139,7 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 			warnFramingLost(logger, sess, "V2: mysql client packet out of sequence; the connection is no longer recorded", err)
 			return leaveOutInFlight(sess, handshake.firstCmdAt, err)
 		}
-		utils.LogError(logger, err, "V2: failed to handle initial mysql handshake")
+		utils.LogContentError(logger, err, "V2: failed to handle initial mysql handshake")
 		return err
 	}
 
@@ -543,7 +544,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			}
 			hsStore.PushFor(sharedKey, taker, sharedEntry)
 			logger.Debug("post-TLS V2: returned an unused shared greeting to the port FIFO",
-				zap.Uint16("dstPort", dstPort), zap.Error(err))
+				zap.Uint16("dstPort", dstPort), logcontent.Error(err))
 		}()
 	}
 	staleEntry := source == greetingCached
@@ -679,7 +680,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if sslReqPkt != nil {
 			reqs, resps, respOp, sErr := buildSyntheticPostTLSConfig(ctx, logger, decodeCtx, greetingPkt, sslReqPkt)
 			if sErr != nil {
-				logger.Debug("post-TLS V2: synthesize seq==0 config mock failed; emitting greeting-only config", zap.Error(sErr))
+				logger.Debug("post-TLS V2: synthesize seq==0 config mock failed; emitting greeting-only config", logcontent.Error(sErr))
 			} else {
 				res.req = reqs
 				res.resp = resps
@@ -1374,7 +1375,7 @@ func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervis
 		}
 		if !ack.OK {
 			logger.Debug("V2: relay declined the client-hold release; assuming no hold was armed",
-				zap.Error(ack.Err))
+				logcontent.Error(ack.Err))
 		}
 		return nil
 	}

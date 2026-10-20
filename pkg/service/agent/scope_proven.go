@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -613,7 +614,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// (one_test_at_a_time).
 		if open == id {
 			if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
-				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
+				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), logcontent.Error(err))
 			}
 		}
 		return models.ScopeEndResp{}, serr
@@ -634,7 +635,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// refuses only that call.
 		if open != "" {
 			if _, _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
-				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
+				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), logcontent.Error(err))
 			}
 			a.NoteRefusal(serr.Refusal())
 		}
@@ -685,7 +686,7 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 // the wire held.
 func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 	if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
-		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), zap.Error(err))
+		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), logcontent.Error(err))
 	}
 	a.logger.Warn("a test is counted failed: "+why, zap.String("test", id))
 }
@@ -721,7 +722,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		// not to read it: the end serves the pool again below (EndScopeAt)
 		// and, failing again, makes it the run's refusal.
 		if err := a.servePoolExactly(ctx); err != nil {
-			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
+			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), logcontent.Error(err))
 		}
 		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
 	}

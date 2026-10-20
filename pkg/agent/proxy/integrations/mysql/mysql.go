@@ -225,7 +225,7 @@ func (m *MySQL) recordLegacy(ctx context.Context, session *integrations.RecordSe
 	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader)
 
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
+		utils.LogContentError(logger, err, "failed to encode the mysql message into the yaml")
 		return err
 	}
 	return nil
@@ -252,7 +252,7 @@ func logRecordV2Error(logger *zap.Logger, err error) {
 	if err == nil || errors.Is(err, supervisor.ErrReported) {
 		return
 	}
-	utils.LogError(logger, err, "failed to encode the mysql message into the yaml",
+	utils.LogContentError(logger, err, "failed to encode the mysql message into the yaml",
 		zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor will have already fallen through to passthrough on the affected connection so user traffic continues"),
 	)
 }
@@ -264,7 +264,7 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 		// A miss is not a decode failure: the replayer logs it where it
 		// finds it, and the proxy reports it with its mismatch report.
 		if !errors.Is(err, models.ErrNoMockMatched) {
-			utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
+			utils.LogContentError(logger, err, "failed to decode the mysql message from the yaml")
 		}
 		return err
 	}

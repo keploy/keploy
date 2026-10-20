@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -418,7 +419,7 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 		mk, err := load()
 		if err != nil {
 			if m.logger != nil {
-				m.logger.Debug("a miss's diagnosis could not read a recording kept on disk; it names none of them", zap.String("mock", name), zap.Error(err))
+				m.logger.Debug("a miss's diagnosis could not read a recording kept on disk; it names none of them", zap.String("mock", name), logcontent.Error(err))
 			}
 			return false
 		}
@@ -461,7 +462,7 @@ func (m *MockManager) rangeRecorded(kind models.Kind, keys []string, visit func(
 		return
 	}
 	if err := src(kind, keys, visit); err != nil && m.logger != nil {
-		m.logger.Debug("a miss's diagnosis could not read the set's recordings kept on disk; it names none of them", zap.String("kind", string(kind)), zap.Error(err))
+		m.logger.Debug("a miss's diagnosis could not read the set's recordings kept on disk; it names none of them", zap.String("kind", string(kind)), logcontent.Error(err))
 	}
 }
 

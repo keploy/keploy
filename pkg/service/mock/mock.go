@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	stallclock "go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -332,7 +333,7 @@ func (m *mockService) notifyShutdown() {
 	notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := m.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
-		m.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		m.logger.Debug("failed to notify agent of graceful shutdown", logcontent.Error(err))
 	}
 }
 

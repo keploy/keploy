@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -391,7 +392,7 @@ func (a *AgentClient) appListening(ctx context.Context, port uint16) appListenin
 		// An agent without the route (older, or another build) answers 404
 		// or 501: that is "cannot tell", as is its own failure.
 		a.logger.Debug("the agent cannot say where the app listens",
-			zap.Uint16("port", port), zap.Error(agentRespErr("app listen addrs", res, body)))
+			zap.Uint16("port", port), logcontent.Error(agentRespErr("app listen addrs", res, body)))
 		return appListening{}
 	}
 	var resp models.AppListenAddrs

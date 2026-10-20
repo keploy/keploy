@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -107,9 +108,9 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 				// A miss is not a failure to simulate the handshake: it is
 				// logged where it is found, and the proxy reports it with
 				// its mismatch report.
-				logger.Debug("the initial handshake missed", zap.Error(err))
+				logger.Debug("the initial handshake missed", logcontent.Error(err))
 			} else {
-				utils.LogError(logger, err, "failed to simulate initial handshake")
+				utils.LogContentError(logger, err, "failed to simulate initial handshake")
 			}
 			errCh <- err
 			return
@@ -139,7 +140,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 		err = simulateCommandPhase(ctx, logger, clientConn, dst, mockDb, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
-				utils.LogError(logger, err, "failed to simulate command phase")
+				utils.LogContentError(logger, err, "failed to simulate command phase")
 			}
 			errCh <- err
 			return

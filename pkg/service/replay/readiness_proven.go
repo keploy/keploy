@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -335,10 +336,10 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			p.agent = nil
 			if health == "" {
 				p.dial = true
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", logcontent.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
 				startProbe()
 			} else {
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", logcontent.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
 			}
 		case r.err != nil:
 			// No progress seen (a transient failure, the agent
@@ -541,7 +542,7 @@ func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st m
 		fields = append(fields, zap.String("lastProbe", lastProbe))
 	}
 	if lastErr != "" {
-		fields = append(fields, zap.String("lastReadError", lastErr))
+		fields = append(fields, logcontent.String("lastReadError", lastErr))
 	}
 	p.logger.Info("still waiting for the application before the set's first test (KEPLOY_PROVEN=1)", fields...)
 }

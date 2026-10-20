@@ -409,7 +409,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			if ctx.Err() != nil {
 				return nil, nil, nil, ctx.Err()
 			}
-			utils.LogError(logger, err, "failed to get session mocks")
+			utils.LogContentError(logger, err, "failed to get session mocks")
 			return nil, nil, nil, err
 		}
 
@@ -429,12 +429,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				// root cause. Other command types tolerate the failure
 				// (connection pool is advisory for them) — log + continue.
 				if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
-					utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
+					utils.LogContentError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
 					return nil, nil, nil, fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
 				}
 				logger.Debug("failed to get mysql connection mocks; proceeding without per-connID pool",
 					zap.String("connID", connID),
-					zap.Error(cerr))
+					logcontent.Error(cerr))
 			} else {
 				connectionMocks = cm
 			}
@@ -3647,7 +3647,7 @@ func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName st
 	}
 	if logger != nil {
 		logger.Debug("built single-column session-variable result set",
-			zap.String("var", varName), zap.Any("value", val.Value))
+			zap.String("var", varName), logcontent.Any("value", val.Value))
 	}
 	return &mysql.Response{
 		PacketBundle: mysql.PacketBundle{

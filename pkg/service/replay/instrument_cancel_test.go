@@ -3,10 +3,10 @@ package replay
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap/zapcore"
 )
 
 // setupInstr is an agent whose Setup is the test's.
@@ -54,10 +54,12 @@ func TestASetupTheRunCancelledIsTheRunsCancellation(t *testing.T) {
 	if err == nil || errors.Is(err, context.Canceled) {
 		t.Fatalf("Start: %v, want the setup's failure", err)
 	}
-	// Start's own line, naming the cause (Instrument logs the failure too).
-	logged := run.errorLogs()
-	if want := "failed to instrument: failed setting up the environment: " + boom.Error(); !strings.Contains(strings.Join(logged, "\n"), want) {
-		t.Fatalf("a failed setup did not log %q at ERROR: %q", want, logged)
+	// Start's own line, naming the step and its cause (Instrument logs the
+	// failure too). The cause is keploy's own words for its setup, so it is
+	// logged whole, beside the step, not in the message.
+	said := run.said(zapcore.ErrorLevel, "failed to instrument")
+	if want := "failed setting up the environment: " + boom.Error(); len(said) != 1 || said[0].Message != "failed to instrument" || said[0].ContextMap()["error"] != want {
+		t.Fatalf("a failed setup did not log \"failed to instrument\" at ERROR with the error %q: %+v (all: %q)", want, said, run.errorLogs())
 	}
 	// Start's error names the cause and stays flat: its callers unwrap
 	// nothing new from a failure.

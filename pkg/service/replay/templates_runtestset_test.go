@@ -1822,8 +1822,12 @@ func TestRunTestSet_ACreatesLocationIsAssertedAsTheCapturedID(t *testing.T) {
 				for _, e := range logs.FilterMessageSnippet("a template variable's place does not hold what it must").All() {
 					m := e.ContextMap()
 					next := fmt.Sprint(m["next_step"])
+					// The why quotes the live answer and the value it
+					// wants, so the line names it by its length unless
+					// KEPLOY_LOG_CONTENT is set; the report keeps it whole.
+					_, hasWhy := m["why"]
 					if m["testcase"] == "test-1" && m["where"] == "header Location" && m["placeholder"] == "{{string .id}}" &&
-						strings.Contains(fmt.Sprint(m["why"]), "id's value") &&
+						hasWhy && !strings.Contains(fmt.Sprint(m["why"]), "id's value") &&
 						strings.Contains(next, "this run's value of id is what test-1/response body.id captured from this same answer") &&
 						strings.Contains(next, "re-record") && !strings.Contains(next, "normalize") {
 						warned++

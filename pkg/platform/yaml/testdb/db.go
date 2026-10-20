@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -590,12 +591,12 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		if fileFormat == yaml.FormatJSON {
 			var jd yaml.NetworkTrafficDocJSON
 			if err := json.Unmarshal(data, &jd); err != nil {
-				utils.LogError(ts.logger, err, "failed to unmarshal json testcase data", zap.String("testcase name", name))
+				utils.LogContentError(ts.logger, err, "failed to unmarshal json testcase data", zap.String("testcase name", name))
 				return nil, err
 			}
 			tc, err := DecodeJSON(&jd, ts.logger)
 			if err != nil {
-				utils.LogError(ts.logger, err, "failed to decode json testcase", zap.String("testcase name", name))
+				utils.LogContentError(ts.logger, err, "failed to decode json testcase", zap.String("testcase name", name))
 				return nil, err
 			}
 			tcs = append(tcs, tc)
@@ -604,7 +605,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 
 		testCase, err := yaml.UnmarshalDoc(fileFormat, data)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
+			utils.LogContentError(ts.logger, err, "failed to unmarshal testcase data")
 			return nil, err
 		}
 
@@ -615,7 +616,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 
 		tc, err := Decode(testCase, ts.logger)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to decode the testcase")
+			utils.LogContentError(ts.logger, err, "failed to decode the testcase")
 			return nil, err
 		}
 		tcs = append(tcs, tc)
@@ -1071,14 +1072,14 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 	if detected == yaml.FormatJSON {
 		var jd yaml.NetworkTrafficDocJSON
 		if err := json.Unmarshal(data, &jd); err != nil {
-			utils.LogError(ts.logger, err, "failed to unmarshal json testcase data")
+			utils.LogContentError(ts.logger, err, "failed to unmarshal json testcase data")
 			return err
 		}
 		tc, err = DecodeJSON(&jd, ts.logger)
 	} else {
 		testCase, err := yaml.UnmarshalDoc(detected, data)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
+			utils.LogContentError(ts.logger, err, "failed to unmarshal testcase data")
 			return err
 		}
 		if testCase == nil {
@@ -1087,14 +1088,14 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 		}
 		tc, err = Decode(testCase, ts.logger)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to decode the testcase")
+			utils.LogContentError(ts.logger, err, "failed to decode the testcase")
 			return err
 		}
 	}
 	// Both branches above already returned on a nil document or decode
 	// error; only the JSON branch's DecodeJSON err is left dangling here.
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to decode the testcase")
+		utils.LogContentError(ts.logger, err, "failed to decode the testcase")
 		return err
 	}
 	tc.Assertions = assertions
@@ -1122,13 +1123,13 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 
 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to encode the testcase")
+		utils.LogContentError(ts.logger, err, "failed to encode the testcase")
 		return err
 	}
 	yamlTc.Name = testCaseID
 	data, err = yaml.MarshalDoc(detected, yamlTc)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to marshal the testcase")
+		utils.LogContentError(ts.logger, err, "failed to marshal the testcase")
 		return err
 	}
 	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, detected)
@@ -1356,7 +1357,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					// Do not append non-existent paths to newPaths — they would
 					// cause replay failures when the system tries to read them.
 					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
-						zap.String("fileName", form.FileNames[j]),
+						logcontent.String("fileName", form.FileNames[j]),
 						zap.String("key", form.Key))
 				}
 			}

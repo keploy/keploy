@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -128,7 +129,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// encode the response
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[respIdx].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode handshake packet")
+		utils.LogContentError(logger, err, "failed to encode handshake packet")
 		return res, unencodableMiss(dst, stepGreeting, "server greeting", err)
 	}
 
@@ -303,7 +304,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 	// Not the packet: its auth response is the cleartext password under
 	// mysql_clear_password (PAM, LDAP, IAM tokens).
-	logger.Debug("matching handshake response", zap.String("user", hr41.Username), zap.String("database", printable(hr41.Database)), zap.String("auth_plugin", hr41.AuthPluginName))
+	logger.Debug("matching handshake response", logcontent.StringLen("user", hr41.Username), zap.String("database", printable(hr41.Database)), zap.String("auth_plugin", hr41.AuthPluginName))
 
 	// compared counts the candidates whose recorded HandshakeResponse41 was
 	// compared. closest is why the closest of them did not match, for the
@@ -466,7 +467,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// Encode the AuthSwitchRequest packet
 		buf, err = wire.EncodeToBinary(ctx, logger, &resp[respIdx].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to encode auth switch request packet")
+			utils.LogContentError(logger, err, "failed to encode auth switch request packet")
 			return res, unencodableMiss(dst, stepHandshakeResponse, "AuthSwitchRequest", err)
 		}
 
@@ -544,7 +545,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// no case ran, and the client waited for as long as it would.
 		refused, err := serveVerdict(ctx, logger, clientConn, dst, answered, &resp[respIdx].PacketBundle, handshakeMock, mockDb, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate native password")
+			utils.LogContentError(logger, err, "failed to simulate native password")
 			return res, err
 		}
 		res.refused = refused
@@ -558,7 +559,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// It means we need to simulate the caching_sha2_password
 		refused, err := simulateCacheSha2Password(ctx, logger, clientConn, dst, cacheSha2PassMock, handshakeMock, mockDb, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate caching_sha2_password")
+			utils.LogContentError(logger, err, "failed to simulate caching_sha2_password")
 			return res, err
 		}
 		res.refused = refused
@@ -598,7 +599,7 @@ func serveVerdict(ctx context.Context, logger *zap.Logger, clientConn net.Conn, 
 
 	buf, err := wire.EncodeToBinary(ctx, logger, verdict, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode the recorded verdict on the login")
+		utils.LogContentError(logger, err, "failed to encode the recorded verdict on the login")
 		return false, unencodableMiss(dst, step, "verdict on the login", err)
 	}
 
@@ -638,7 +639,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode auth more data packet")
+		utils.LogContentError(logger, err, "failed to encode auth more data packet")
 		return false, unencodableMiss(dst, stepCachingSha2, "AuthMoreData", err)
 	}
 
@@ -665,14 +666,14 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
 		refused, err := simulateFullAuth(ctx, logger, clientConn, dst, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate full auth")
+			utils.LogContentError(logger, err, "failed to simulate full auth")
 			return false, err
 		}
 		return refused, nil
 	case mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess):
 		refused, err := simulateFastAuthSuccess(ctx, logger, clientConn, dst, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate fast auth success")
+			utils.LogContentError(logger, err, "failed to simulate fast auth success")
 			return false, err
 		}
 		return refused, nil
@@ -705,7 +706,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		logger.Debug("This is an ssl request, simulating plain password in caching_sha2_password full auth")
 		refused, err := simulatePlainPassword(ctx, logger, clientConn, dst, fullAuthMocks, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate plain password in caching_sha2_password full auth")
+			utils.LogContentError(logger, err, "failed to simulate plain password in caching_sha2_password full auth")
 			return false, err
 		}
 		return refused, nil
@@ -777,7 +778,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		// encode the public key response
 		buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to encode public key response packet")
+			utils.LogContentError(logger, err, "failed to encode public key response packet")
 			return false, unencodableMiss(dst, stepPublicKey, "public key", err)
 		}
 

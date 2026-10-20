@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -152,7 +153,7 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	base, err := reader.GetCaptureLosses(readCtx)
 	switch {
 	case errors.Is(err, models.ErrCaptureLossesUnsupported):
-		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", zap.Error(err))
+		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", logcontent.Error(err))
 		w.off = true
 		if w.agent != nil {
 			w.agent.Stop()
@@ -478,7 +479,7 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		failed = true
 		w.logger.Error("the recording is not verified: keploy could not read whether its agent captured every call after the last test case was recorded ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.Error(w.finalErr),
+			logcontent.Error(w.finalErr),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
 	}
 	// Read last, after the final read: an agent started again before it
@@ -507,7 +508,7 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		w.logger.Error("the recording is not verified: keploy could not read whether its agent captured every call while these test cases were recorded ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.unverified),
-			zap.Error(why),
+			logcontent.Error(why),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
 	}
 	if judge == nil {

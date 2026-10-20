@@ -723,6 +723,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
+	// stopSaid is stopReason as the "stopping Keploy" line says it: the step
+	// the run stopped at, without the text of the error it stopped on, which
+	// the line before logs as logcontent lets it.
+	var stopSaid = stopReason
 	// summaryEmitted flips true once the normal TestRun summary fires. If the
 	// run stops gracefully before that (setup/instrument failure), the defer
 	// emits a TestRunAborted with the categorized reason instead.
@@ -734,7 +738,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		case <-parentCtx.Done():
 			break
 		default:
-			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
+			r.logger.Info("stopping Keploy", zap.String("reason", stopSaid))
 			// Keploy-initiated (not user Ctrl+C, which lands in the
 			// parentCtx.Done case above) graceful stop before any run summary
 			// was emitted — record why so the replay funnel can see where test
@@ -756,7 +760,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// POST — and therefore the whole teardown, which is the path SIGINT takes — forever.
 		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
-			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			r.logger.Debug("failed to notify agent of graceful shutdown", logcontent.Error(err))
 		}
 		notifyCancel()
 
@@ -771,19 +775,20 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// no progress, not by a time: a stop of the agent that keeps reporting
 		// its steps, past any number of seconds, is never cut (teardownDrain).
 		if err := r.teardownDrain("replay", g, teardownDrainStall, teardown); err != nil {
-			utils.LogError(r.logger, err, "failed to stop replaying")
+			utils.LogContentError(r.logger, err, "failed to stop replaying")
 		}
 
 		setupCtxCancel()
 		if err := r.teardownDrain("replay-setup", setupErrGrp, teardownDrainStall, teardown); err != nil {
-			utils.LogError(r.logger, err, "failed to stop replaying")
+			utils.LogContentError(r.logger, err, "failed to stop replaying")
 		}
 	}()
 
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
-		utils.LogError(r.logger, err, stopReason)
+		stopSaid = "failed to get all test set ids"
+		utils.LogError(r.logger, err, "failed to get all test set ids")
 		return fmt.Errorf("%s", stopReason)
 	}
 
@@ -795,6 +800,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// funnel signal, so surface it via the categorized stop reason
 		// rather than letting the default "completed" mask it.
 		stopReason = "no test sets found"
+		stopSaid = stopReason
 		return fmt.Errorf("%s", errMsg)
 	}
 
@@ -803,6 +809,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	selectedSets, err := r.selectTestSets(testSetIDs)
 	if err != nil {
 		stopReason = "a selected test set is not recorded"
+		stopSaid = stopReason
 		return err
 	}
 	r.logger.Info("Test Sets to be Replayed", zap.Strings("testSets", selectedSets))
@@ -815,6 +822,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// The reason goes out as telemetry too, so it leaves out the base
 			// path itself, which names a host of the user's.
 			stopReason = "cannot read the base path"
+			stopSaid = stopReason
 			utils.LogError(r.logger, err, "cannot replay against the base path",
 				zap.String("next_step", "write --base-path / test.basePath as an http or https URL with a host, as in http://localhost:8080 or https://staging.example.com/api, or as a path prefix such as /api"))
 			return fmt.Errorf("cannot replay against the base path: %w", err)
@@ -834,7 +842,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
-		utils.LogError(r.logger, err, stopReason)
+		stopSaid = "failed to get next test run id"
+		utils.LogError(r.logger, err, "failed to get next test run id")
 		return fmt.Errorf("%s", stopReason)
 	}
 
@@ -898,7 +907,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	inst, err := r.Instrument(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
-		utils.LogError(r.logger, err, stopReason)
+		stopSaid = "failed to instrument"
+		utils.LogError(r.logger, err, "failed to instrument")
 		if ctx.Err() == context.Canceled {
 			return err
 		}
@@ -1042,7 +1052,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		err := r.hookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
-			utils.LogError(r.logger, err, stopReason)
+			stopSaid = "failed to run before test hook"
+			utils.LogContentError(r.logger, err, "failed to run before test hook")
 			if ctx.Err() == context.Canceled {
 				return err
 			}
@@ -1149,7 +1160,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					(testSetStatus == models.TestSetStatusAppHalted ||
 						testSetStatus == models.TestSetStatusFaultUserApp ||
 						testSetStatus == models.TestSetStatusUserAbort) {
-					utils.LogError(r.logger, err,
+					utils.LogContentError(r.logger, err,
 						"test set failed because the app exited; continuing to next test set",
 						zap.String("test-set", testSet),
 						zap.String("status", string(testSetStatus)))
@@ -1158,7 +1169,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					break
 				}
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
-				utils.LogError(r.logger, err, stopReason)
+				stopSaid = "failed to run test set"
+				utils.LogContentError(r.logger, err, "failed to run test set")
 				return fmt.Errorf("%s", stopReason)
 			}
 			switch testSetStatus {
@@ -1427,11 +1439,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
 				err = cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
-					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+					utils.LogContentError(r.logger, err, "failed to update report with the coverage data")
 				}
 
 			} else {
-				r.logger.Debug("failed to calculate coverage for the test run", zap.Error(err))
+				r.logger.Debug("failed to calculate coverage for the test run", logcontent.Error(err))
 			}
 		}
 
@@ -1641,7 +1653,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	})
 	if err != nil {
 		stopReason := "failed setting up the environment"
-		utils.LogError(r.logger, err, stopReason)
+		utils.LogError(r.logger, err, "failed setting up the environment")
 		// Keep the cause: a setup the user's cancel ended (context.Canceled,
 		// from the agent's readiness wait, the retry's backoff, or the docker
 		// setup hooks, which get the run's ctx) is the run's cancellation,
@@ -1738,8 +1750,7 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 		return
 	}
 	if err := r.hookImpl.BeforeTestRun(ctx, testRunID); err != nil {
-		stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
+		utils.LogContentError(r.logger, err, "failed to run before test run hook")
 	}
 	r.firstRun = false
 }
@@ -1813,7 +1824,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.instrument && !serveTest {
 			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
-				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+				r.logger.Debug("failed to notify agent of graceful shutdown", logcontent.Error(err))
 			}
 			notifyCancel()
 		}
@@ -1822,7 +1833,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// teardown/SIGINT; by the set's teardown making no progress, not
 		// by a time (teardownDrain).
 		if err := r.teardownDrain("replay-testset", runTestSetErrGrp, testSetDrainStall, setTeardown); err != nil {
-			utils.LogError(r.logger, err, "error in testLoopErrGrp")
+			utils.LogContentError(r.logger, err, "error in testLoopErrGrp")
 		}
 	}()
 
@@ -1860,7 +1871,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to insert report")
+			utils.LogContentError(r.logger, err, "failed to insert report")
 			return models.TestSetStatusFailed, err
 		}
 		return models.TestSetStatusNoTestsToRun, nil
@@ -1895,7 +1906,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to insert report")
+			utils.LogContentError(r.logger, err, "failed to insert report")
 			return models.TestSetStatusFailed, err
 		}
 
@@ -2178,7 +2189,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
-			utils.LogError(r.logger, err, "failed to store mocks on agent")
+			utils.LogContentError(r.logger, err, "failed to store mocks on agent")
 			return nil, nil, err
 		}
 		perTestRegion = pkg.PerTestRegion(filtered)
@@ -2318,8 +2329,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
 		err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, testSetID, r.firstRun)
 		if err != nil {
-			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
-			utils.LogError(r.logger, err, stopReason)
+			utils.LogContentError(r.logger, err, "failed to run BeforeTestSetCompose hook")
 		}
 		r.firstRun = false
 		// Prepare header + body noise configuration for mock matching
@@ -2358,7 +2368,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.mockOutgoingForTestSet(runTestSetCtx, outgoingOpts)
 		if err != nil {
 			if ctx.Err() != context.Canceled {
-				utils.LogError(r.logger, err, "failed to mock outgoing")
+				utils.LogContentError(r.logger, err, "failed to mock outgoing")
 			}
 			return models.TestSetStatusFailed, err
 		}
@@ -2394,7 +2404,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusInternalErr, err
 		}
 		if err != nil {
-			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+			utils.LogContentError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
 		// A stack kept across sets has its app, which the last set's end
 		// stopped, started again now: this set is staged on the agent and
@@ -2508,7 +2518,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
-				utils.LogError(r.logger, err, "failed to mock outgoing")
+				utils.LogContentError(r.logger, err, "failed to mock outgoing")
 			}
 			return models.TestSetStatusFailed, err
 		}
@@ -2655,7 +2665,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to insert report")
+		utils.LogContentError(r.logger, err, "failed to insert report")
 		return models.TestSetStatusFailed, err
 	}
 
@@ -2716,7 +2726,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = resolvedStatus
 				exitLoop = true
 			} else {
-				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+				utils.LogContentError(r.logger, err, "failed to get consumed filtered mocks")
 			}
 		}
 	}
@@ -3116,7 +3126,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if replay == 0 {
 				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+						utils.LogContentError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 							zap.String("testcase", testCase.Name),
 							zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 					}
@@ -3183,7 +3193,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
 				} else {
-					utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+					utils.LogContentError(r.logger, err, "failed to update mock parameters on agent")
 				}
 				break
 			}
@@ -3337,7 +3347,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testSetStatus = resolvedStatus
 						exitLoop = true
 					} else {
-						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+						utils.LogContentError(r.logger, err, "failed to get consumed filtered mocks")
 					}
 					// On fetch failure, consumedMocks may carry stale/partial
 					// data from the previous test. Clear it so downstream uses
@@ -3939,7 +3949,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							r.logger.Debug("non-instrument GetConsumedMocks failed; skipping all consumed-mock-derived fields (MatchedCalls + MockMismatches) for this test",
 								zap.String("testSetID", testSetID),
 								zap.String("testCaseID", testCase.Name),
-								zap.Error(fetchErr))
+								logcontent.Error(fetchErr))
 						}
 					}
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
@@ -4235,7 +4245,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// in Phase 1 is not needed here — each tc is executed exactly once.
 			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+					utils.LogContentError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 						zap.String("testcase", tc.Name),
 						zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 				}
@@ -4291,7 +4301,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, tc)...)
 			}
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
+				utils.LogContentError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
 				break
 			}
@@ -4380,7 +4390,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				if err != nil {
 					streamConsumedErr = err
-					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+					utils.LogContentError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
 				} else {
 					for _, m := range consumedMocks {
 						totalConsumedMocks[m.Name] = m
@@ -4508,7 +4518,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 								zap.String("testset", testSetID),
 								zap.Error(streamErr))
 						} else {
-							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+							r.logger.Error("failed to read streaming response", logcontent.Error(streamErr))
 						}
 						noteNoAnswer(tc.Name, streamErr)
 						drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
@@ -4599,7 +4609,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if streamConsumedErr == nil {
 						streamConsumedErr = drainErr
 					}
-					utils.LogError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
+					utils.LogContentError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
 				}
 				for _, m := range additionalMocks {
 					totalConsumedMocks[m.Name] = m
@@ -5021,8 +5031,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	evidence := snapshotEvidence(testCaseResults)
 	err = r.hookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
-		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
+		utils.LogContentError(r.logger, err, "failed to run before test result hook")
 	}
 	// Under the proven switch the per-test verdicts, as the hook left them,
 	// drive the set: its counters, its status, and so the report, JUnit and the
@@ -5117,7 +5126,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if stopAppBeforeSetEnd != nil {
 			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
-				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+				r.logger.Debug("failed to notify agent of graceful shutdown", logcontent.Error(err))
 			}
 			notifyCancel()
 			logCtx, cancelLogs := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
@@ -5194,7 +5203,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case realErr != nil && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed):
 			notJudged = "keploy could not read the set's mock.real destinations from its agent: " + realErr.Error()
 			r.logger.Error("test-set is not judged: keploy could not read which mock.real destinations its run reached; the run goes on to the next test-set",
-				zap.String("test-set", testSetID), zap.Error(realErr))
+				zap.String("test-set", testSetID), logcontent.Error(realErr))
 			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
 		case realRun != nil:
@@ -5242,7 +5251,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if workerUnread != nil {
 				notJudged = alsoNotJudged(notJudged, "keploy could not read what the test set's worker scope (the calls no test owns) answered: "+workerUnread.Error())
 				r.logger.Error("test-set is not judged: keploy could not read from its agent what the calls no test owns answered; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
-					zap.String("test-set", testSetID), zap.Error(workerUnread))
+					zap.String("test-set", testSetID), logcontent.Error(workerUnread))
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
 			} else if len(workerMissing) > 0 {
@@ -5289,13 +5298,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); unclaimedErr != nil && runTestSetCtx.Err() != nil && (stopped || stoppedByUser()) {
 				r.logger.Debug("the read of the calls made after the set's last test was cut short by the set's stop; the stop is its status",
-					zap.String("test-set", testSetID), zap.Error(unclaimedErr))
+					zap.String("test-set", testSetID), logcontent.Error(unclaimedErr))
 				unclaimedErr = nil
 			}
 			if unclaimedErr != nil {
 				notJudged = alsoNotJudged(notJudged, "keploy could not read every call the application made after the set's last test that no mock answered: "+unclaimedErr.Error())
 				r.logger.Error("test-set is not judged: keploy could not read every call its application made after its last test; the run goes on to the next test-set",
-					zap.String("test-set", testSetID), zap.Int("callsRead", len(calls)), zap.Error(unclaimedErr))
+					zap.String("test-set", testSetID), zap.Int("callsRead", len(calls)), logcontent.Error(unclaimedErr))
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
 			}
@@ -5328,7 +5337,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			(testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 			notJudged = alsoNotJudged(notJudged, "not judged: keploy could not read from its agent what the application consumed as the set's end stopped it: "+consumedAtStopUnread.Error())
 			r.logger.Error("test-set is not judged: keploy could not read what its application consumed as it was stopped at the set's end; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
-				zap.String("test-set", testSetID), zap.Error(consumedAtStopUnread),
+				zap.String("test-set", testSetID), logcontent.Error(consumedAtStopUnread),
 				zap.String("next_step", "check the agent's log for why the read failed, then run the test-set again"))
 			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
@@ -5474,7 +5483,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.logger.Error("test-set is not judged: its application never got ready, so keploy fired none of its tests; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
-			zap.String("reason", notReady),
+			logcontent.String("reason", notReady),
 			zap.String("next_step", "start the application so that it listens where the set's first test dials (or answers its --health-url), see its logs in this report for why it did not, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
@@ -5679,7 +5688,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		unverifiedNotJudged = testSetStatus != models.TestSetStatusInternalErr
 		notJudged = alsoNotJudged(notJudged, captureUnverified)
 		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call the application made; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
-			zap.String("test-set", testSetID), zap.String("reason", captureUnverified),
+			zap.String("test-set", testSetID), logcontent.String("reason", captureUnverified),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
@@ -5708,7 +5717,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
 		} else if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
-			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
+			utils.LogContentError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
@@ -5781,7 +5790,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	reportCtx := context.WithoutCancel(runTestSetCtx)
 	err = r.reportDB.InsertReport(reportCtx, testRunID, testSetID, testReport)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to insert report")
+		utils.LogContentError(r.logger, err, "failed to insert report")
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
@@ -5886,7 +5895,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, startupCutoffTime)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to delete unused mocks")
+			utils.LogContentError(r.logger, err, "failed to delete unused mocks")
 		}
 	} else if r.config.Test.NoiseDetection() && r.instrument && !provenswitch.On() {
 		// (Under the proven switch only record's full round writes what was
@@ -5903,7 +5912,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if p, ok := r.mockDB.(mockNoisePersister); ok {
 			if err := p.PersistMockNoise(runTestSetCtx, testSetID, allConsumedAcrossCycles); err != nil {
-				utils.LogError(r.logger, err, "failed to persist learned request-body noise onto mocks")
+				utils.LogContentError(r.logger, err, "failed to persist learned request-body noise onto mocks")
 			}
 		} else {
 			r.logger.Debug("mockDB implementation does not support prune-free noise persistence; learned req_body_noise not persisted")
@@ -6290,12 +6299,12 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	}
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		utils.LogContentError(r.logger, err, "failed to get filtered mocks")
 		return nil, nil, err
 	}
 	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
+		utils.LogContentError(r.logger, err, "failed to get unfiltered mocks")
 		return nil, nil, err
 	}
 	return filtered, unfiltered, err
@@ -6307,7 +6316,7 @@ func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksR
 	set, err := reader.GetTestSetMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		// The pass that failed is the one the per-test pool was read in.
-		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		utils.LogContentError(r.logger, err, "failed to get filtered mocks")
 		return models.TestSetMocks{}, err
 	}
 	return set, nil
@@ -6341,7 +6350,7 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 			allSession, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
 			if err != nil {
 				r.logger.Debug("failed to read the session mocks for the report's mock lookup; the report will not describe them",
-					zap.String("testSetID", testSetID), zap.Error(err))
+					zap.String("testSetID", testSetID), logcontent.Error(err))
 				allSession = nil
 			}
 		}
@@ -6372,7 +6381,7 @@ func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[str
 	}
 	logFailed := func(pool string, err error) {
 		r.logger.Debug("failed to read the "+pool+" mocks for the report's mock lookup; the report will not describe them",
-			zap.String("testSetID", testSetID), zap.Error(err))
+			zap.String("testSetID", testSetID), logcontent.Error(err))
 	}
 	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
 		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
@@ -6493,7 +6502,7 @@ func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testC
 	recorded, err := reader.RecordedFirstTestStart(ctx, testSetID)
 	if err != nil {
 		r.logger.Warn("could not read when the test set's first test was recorded; its startup traffic is taken from the test cases it holds now",
-			zap.String("testSetID", testSetID), zap.Error(err))
+			zap.String("testSetID", testSetID), logcontent.Error(err))
 		return shape
 	}
 	if !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
@@ -6596,7 +6605,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// Send parameters to agent for filtering and mock updates
 	err := r.instrumentation.UpdateMockParams(ctx, params)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+		utils.LogContentError(r.logger, err, "failed to update mock parameters on agent")
 		return err
 	}
 
@@ -6712,11 +6721,11 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 			// the run exactly as it was before this check existed.
 			if errors.Is(err, models.ErrMockStatsUnsupported) {
 				r.logger.Debug("agent cannot report mock stats; skipping the stored-mocks check for this test set",
-					zap.String("testSetID", testSetID), zap.Error(err))
+					zap.String("testSetID", testSetID), logcontent.Error(err))
 				return nil
 			}
 			r.logger.Warn("could not verify the agent's stored mocks before firing tests; attempting re-registration",
-				zap.String("testSetID", testSetID), zap.Error(err))
+				zap.String("testSetID", testSetID), logcontent.Error(err))
 		}
 	}
 	if err == nil && agentHoldsStoredCorpus(stored, stats.Loaded) {
@@ -6792,7 +6801,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		if errors.Is(err, provenswitch.ErrAgentSwitch) {
 			return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and the new one cannot be run against: %w", err)
 		}
-		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+		utils.LogContentError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 	}
 	if agentWatch != nil {
 		agentWatch.Accept()
@@ -6843,7 +6852,9 @@ func (r *Replayer) appContainerExit(ctx context.Context) error {
 // compose stops every service the moment the app's container exits. The agent
 // that does not answer is then not a replaced one, and "replaced" sends
 // whoever reads it after the wrong thing: what failed is the app, and its own
-// output says why, so its recent logs are logged with the failure.
+// output says why, so its recent logs are logged with the failure: by their
+// length, unless KEPLOY_LOG_CONTENT is set, since an application's lines can
+// hold what it was sent.
 func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentErr error) error {
 	exit := r.appContainerExit(ctx)
 	if exit == nil {
@@ -6851,8 +6862,8 @@ func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentEr
 	}
 	r.logger.Error("the application's container is no longer running, and keploy-agent could not be set up for this test set during the docker compose bring-up; no test of this set was run",
 		zap.String("testSetID", testSetID), zap.Error(exit),
-		zap.String("appLogs", r.instrumentation.GetRecentAppLogs(ctx)),
-		zap.String("next_step", "fix why the application exited: its last log lines are in appLogs"))
+		logcontent.String("appLogs", r.instrumentation.GetRecentAppLogs(ctx)),
+		zap.String("next_step", "fix why the application exited: its last log lines say why, and docker compose logs prints them; keploy logs them in appLogs only with KEPLOY_LOG_CONTENT=1 set, since they can hold what the application was sent"))
 	return fmt.Errorf("%w during the docker compose bring-up, before test set %q ran any test; setting keploy-agent up for it failed as well: %w", exit, testSetID, agentErr)
 }
 
@@ -7080,7 +7091,7 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 		}
 	}
 	if assessmentErr != nil {
-		fields = append(fields, zap.NamedError("assessment_error", assessmentErr))
+		fields = append(fields, logcontent.NamedError("assessment_error", assessmentErr))
 	}
 
 	r.logger.Info(
@@ -8106,7 +8117,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockState) {
 	consumed, err := r.hookImpl.GetConsumedMocks(ctx)
 	if err != nil {
-		r.logger.Debug("could not fetch consumed mocks to validate reset re-send; not retrying", zap.Error(err))
+		r.logger.Debug("could not fetch consumed mocks to validate reset re-send; not retrying", logcontent.Error(err))
 		return true, nil
 	}
 	if len(consumed) > 0 {
@@ -8183,7 +8194,7 @@ func (r *Replayer) openTestErrorCapture(ctx context.Context, opened *bool) {
 			ContinueTestErrorCapture(context.Context) error
 		}); ok {
 			if err := c.ContinueTestErrorCapture(ctx); err != nil {
-				r.logger.Debug("failed to continue test error capture", zap.Error(err))
+				r.logger.Debug("failed to continue test error capture", logcontent.Error(err))
 			}
 			return
 		}
@@ -8202,7 +8213,7 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 		BeginTestErrorCapture(context.Context) error
 	}); ok {
 		if err := b.BeginTestErrorCapture(ctx); err != nil {
-			r.logger.Debug("failed to begin test error capture", zap.Error(err))
+			r.logger.Debug("failed to begin test error capture", logcontent.Error(err))
 		}
 	}
 }
@@ -8323,7 +8334,7 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCaseName),
 			zap.Int("callsRead", len(mockErrors)),
-			zap.Error(err),
+			logcontent.Error(err),
 		}
 		if provenswitch.On() {
 			r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged", fields...)
@@ -8345,7 +8356,7 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			result.FailureInfo.CaptureUnread = true
 		}
 		r.logger.Error("could not tell whether keploy's agent captured every call while this test ran; its test set is not judged",
-			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.lostErr))
+			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), logcontent.Error(read.lostErr))
 	case len(read.lost) > 0 && result != nil:
 		// A call keploy cannot capture at all (decision 20) leaves the test
 		// without a verdict; any other loss fails it.
@@ -8360,7 +8371,7 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			result.FailureInfo.CaptureUnread = true
 		}
 		r.logger.Error("could not read from keploy's agent which mock.real connections it could not capture while this test ran; its test set is not judged",
-			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.realErr))
+			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), logcontent.Error(read.realErr))
 	case len(read.realLost) > 0 && result != nil:
 		result.FailureInfo.CaptureIncomplete = append(append(models.CaptureLosses(nil), result.FailureInfo.CaptureIncomplete...), read.realLost...)
 	}

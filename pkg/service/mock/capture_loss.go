@@ -7,7 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.uber.org/zap"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // CaptureLossReader is an optional Instrumentation extension: every kind of
@@ -34,7 +34,7 @@ func (m *mockService) captureLossBaseline(ctx context.Context) lossBase {
 	}
 	at, err := reader.GetCaptureLosses(ctx)
 	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
-		m.logger.Debug("the agent cannot count what it could not capture; capture losses are not checked", zap.Error(err))
+		m.logger.Debug("the agent cannot count what it could not capture; capture losses are not checked", logcontent.Error(err))
 		return lossBase{}
 	}
 	return lossBase{at: at, checked: true, err: err}
@@ -69,7 +69,7 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 			return judged, nil
 		}
 		unchargedErr = err
-		m.logger.Warn("keploy could not read which of the run's capture losses no test was charged with, so every one of them is the run's", zap.Error(err))
+		m.logger.Warn("keploy could not read which of the run's capture losses no test was charged with, so every one of them is the run's", logcontent.Error(err))
 	}
 	all := append(models.CaptureLosses(nil), lost...)
 	if refused.Target > 0 {

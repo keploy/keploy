@@ -51,7 +51,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			err = record.Start(ctx)
 
 			if err != nil {
-				utils.LogError(logger, err, "failed to record")
+				utils.LogContentError(logger, err, "failed to record")
 				return nil
 			}
 

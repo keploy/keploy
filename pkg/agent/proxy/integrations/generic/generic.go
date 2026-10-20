@@ -131,7 +131,7 @@ func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models
 
 	err = decodeGeneric(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode the generic message")
+		utils.LogContentError(logger, err, "failed to decode the generic message")
 		return err
 	}
 	return nil

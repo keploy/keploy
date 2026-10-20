@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -49,7 +50,14 @@ func TestReportRealRunSaysWhatKeployCouldNotCapture(t *testing.T) {
 	first := logs.All()[0].ContextMap()
 	require.Equal(t, "10.0.0.7:443", first["destination"])
 	require.EqualValues(t, 2, first["connections"])
-	require.Contains(t, first["next_step"], why)
+	// The agent's why can quote the first bytes of a connection it could
+	// not name (realdeps.UnreadableWhy): the line carries it whole only with
+	// logcontent on, and by its length otherwise.
+	require.NotContains(t, fmt.Sprint(first["next_step"]), why)
+	restore := logcontent.Set(true)
+	logs, _ = rec(realRunInst{run: models.RealRun{Incomplete: []models.CaptureIncomplete{inc}}}, "db:5432")
+	restore()
+	require.Contains(t, logs.All()[0].ContextMap()["next_step"], why)
 
 	logs, failed = rec(realRunInst{err: errors.New("agent gone")}, "db:5432")
 	require.True(t, failed, "a recording keploy cannot tell is whole fails")

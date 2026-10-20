@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -760,15 +761,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			relay.abandon()
 			var gone *clientWriteError
 			if errors.As(err, &gone) {
-				logger.Debug("HTTP/1 ingress client connection closed while an interim response was forwarded to it", zap.Error(err))
+				logger.Debug("HTTP/1 ingress client connection closed while an interim response was forwarded to it", logcontent.Error(err))
 				return
 			}
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
-				logger.Debug("HTTP/1 ingress upstream closed while finishing close-under-pressure path", zap.Error(err))
+				logger.Debug("HTTP/1 ingress upstream closed while finishing close-under-pressure path", logcontent.Error(err))
 				return
 			}
 			logger.Error("Failed to read upstream response. Check upstream application health and network connectivity.",
-				zap.Error(err),
+				logcontent.Error(err),
 				zap.Duration("time_since_request_received", time.Since(reqTimestamp)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 			)
@@ -966,7 +967,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("streaming_exchange", streamingExchange),
 				zap.Bool("chunked_transfer", chunkedTransfer),
-				zap.String("path", req.URL.Path),
+				logurl.Field("path", req.URL.Path),
 				logcontent.String("url", req.URL.String()),
 				zap.String("method", req.Method),
 				zap.Int("status_code", resp.StatusCode),
@@ -1022,7 +1023,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			exchangeCaptureSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
 			if err != nil {
 				logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int64("response_bytes_seen", respBytesTotal),
 				)
@@ -1034,7 +1035,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Int("captured_exchange_bytes", exchangeCaptureSize),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int64("response_bytes_seen", respBytesTotal),
-					zap.String("path", capturedReq.URL.Path),
+					logurl.Field("path", capturedReq.URL.Path),
 					logcontent.String("url", capturedReq.URL.String()),
 					zap.String("method", capturedReq.Method),
 					zap.Int("status_code", capturedResp.StatusCode),
@@ -1047,7 +1048,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			reqData, err := dumpCapturedRequest(capturedReq, reqBodyBytes)
 			if err != nil {
 				logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int("captured_request_bytes", len(reqBodyBytes)),
 				)
@@ -1057,7 +1058,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 			if err != nil {
 				logger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.Int("captured_request_dump_bytes", len(reqData)),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 				)
@@ -1067,7 +1068,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			respData, err := dumpCapturedResponse(capturedResp, parsedHTTPReq, respBodyBytes)
 			if err != nil {
 				logger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.Int("status_code", capturedResp.StatusCode),
 					zap.Int64("response_bytes_seen", respBytesTotal),
 					zap.Int("captured_response_bytes", len(respBodyBytes)),
@@ -1077,7 +1078,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
 			if err != nil {
 				logger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
-					zap.Error(err),
+					logcontent.Error(err),
 					zap.Int("captured_response_dump_bytes", len(respData)),
 					zap.Int64("response_bytes_seen", respBytesTotal),
 					zap.Int("status_code", capturedResp.StatusCode),
@@ -1648,12 +1649,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			relay.abandon()
 			var gone *clientWriteError
 			if errors.As(err, &gone) {
-				logger.Debug("Failed to forward an interim response to client", zap.Error(err))
+				logger.Debug("Failed to forward an interim response to client", logcontent.Error(err))
 				return
 			}
 			if canReplay && interims == 0 && isStaleConnError(err) {
 				logger.Debug("Empty response from upstream; redial+replay",
-					zap.String("method", req.Method), zap.Error(err))
+					zap.String("method", req.Method), logcontent.Error(err))
 				if rerr := redial(); rerr != nil {
 					pm.logAppDialFailure(logger, "Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
 						rerr, zap.String("upstream", upstreamAddr))
@@ -1676,12 +1677,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				resp, _, err = readFinalResponse(upstreamReader, req, clientConn)
 				if errors.As(err, &gone) {
-					logger.Debug("Failed to forward an interim response to client", zap.Error(err))
+					logger.Debug("Failed to forward an interim response to client", logcontent.Error(err))
 					return
 				}
 				if err != nil {
 					logger.Error("Replay response read failed; upstream returned no response on the redialed connection either. Check application logs for crashes/restarts.",
-						zap.String("upstream", upstreamAddr), zap.Error(err))
+						zap.String("upstream", upstreamAddr), logcontent.Error(err))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1696,7 +1697,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
 					zap.Int64("content_length", req.ContentLength),
 					zap.Duration("time_since_request", time.Since(reqTimestamp)),
-					zap.Error(err))
+					logcontent.Error(err))
 				pm.appGone(clientConn)
 				return
 			}

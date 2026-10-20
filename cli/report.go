@@ -37,7 +37,7 @@ func Report(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 
 			err = report.GenerateReport(ctx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to generate report")
+				utils.LogContentError(logger, err, "failed to generate report")
 				return nil
 			}
 

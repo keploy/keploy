@@ -6,6 +6,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -24,10 +25,10 @@ func (r *Recorder) reportRealRun(ctx context.Context) {
 		r.realUnread.Store(&why)
 		if LossesJudgedLater() {
 			r.logger.Warn("keploy could not read from its agent which mock.real connections it could not capture: the recording is kept, and the auto-replay that follows judges each of its test cases",
-				zap.Error(err), zap.String("next_step", "check the agent's log for capture_incomplete lines"))
+				logcontent.Error(err), zap.String("next_step", "check the agent's log for capture_incomplete lines"))
 			return
 		}
-		utils.LogError(r.logger, err, "the recording may be incomplete: keploy could not read from its agent which mock.real connections it could not capture",
+		utils.LogContentError(r.logger, err, "the recording may be incomplete: keploy could not read from its agent which mock.real connections it could not capture",
 			zap.String("next_step", "check the agent's log for capture_incomplete lines, then re-record this test set"))
 		return
 	}
@@ -52,11 +53,11 @@ func (r *Recorder) reportRealRun(ctx context.Context) {
 			// The recording is kept: the pass that follows judges each of
 			// its test cases (finish hands it over).
 			r.logger.Warn("keploy could neither capture nor relay as real connections of it (capture_incomplete), and no test case holds what they carried: the recording is kept, and the auto-replay that follows judges each of its test cases",
-				zap.String("destination", k.dest), zap.Int("connections", counts[k]), zap.String("next_step", k.why+"; then re-record this test set to capture them"))
+				zap.String("destination", k.dest), zap.Int("connections", counts[k]), logcontent.String("next_step", k.why+"; then re-record this test set to capture them"))
 			continue
 		}
 		r.logger.Error("the recording is incomplete: keploy could neither capture nor relay as real connections of it (capture_incomplete), and no test case holds what they carried",
-			zap.String("destination", k.dest), zap.Int("connections", counts[k]), zap.String("next_step", k.why+"; then re-record this test set"))
+			zap.String("destination", k.dest), zap.Int("connections", counts[k]), logcontent.String("next_step", k.why+"; then re-record this test set"))
 	}
 }
 

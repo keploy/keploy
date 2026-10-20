@@ -19,6 +19,7 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -577,7 +578,7 @@ func (p *Proxy) recordViaSupervisor(
 	_ = r.DestStream().Close()
 
 	if relayErr := <-relayDone; relayErr != nil && !errors.Is(relayErr, context.Canceled) {
-		logger.Debug("relay exited with error", zap.Error(relayErr))
+		logger.Debug("relay exited with error", logcontent.Error(relayErr))
 	}
 	return err
 }

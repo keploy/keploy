@@ -878,7 +878,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		// Get test cases from the database
 		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(t.logger, err, "failed to get test cases", zap.String("testSet", testSetID))
+			utils.LogContentError(t.logger, err, "failed to get test cases", zap.String("testSet", testSetID))
 			return t.templatizeStopped(testSetID, testSets[i+1:], err)
 		}
 

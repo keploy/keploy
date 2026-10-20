@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -643,7 +644,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				lostStatements[stmtPrepareOk.StatementID] = struct{}{}
 			}
 			dropped++
-			fields := []zap.Field{zap.String("command", pendingCommand.Header.Type), zap.Error(undecodable)}
+			fields := []zap.Field{zap.String("command", pendingCommand.Header.Type), logcontent.Error(undecodable)}
 			if dropped == 1 {
 				logger.Warn("dropping a MySQL response that could not be decoded: its mock is not recorded, and the test cases recorded over it are left out", fields...)
 			} else {

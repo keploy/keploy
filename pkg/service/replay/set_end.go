@@ -83,6 +83,12 @@ type UncheckedHook interface {
 	// that run's alone, never an earlier run's. A run that ends before its
 	// report (an error that stops keploy test) is not asked. It must not
 	// block: it is asked on the set's end, with no deadline.
+	//
+	// The reason is the hook's own words, and keploy logs it as given,
+	// whatever KEPLOY_LOG_CONTENT says, as it logs its own reasons: it must
+	// name no customer content (no value of a recording, no request, no
+	// decrypted byte), and an error whose text can quote some goes in as
+	// what it is, not as its text (logcontent.ErrorKind).
 	Unchecked(testSetID string) string
 }
 

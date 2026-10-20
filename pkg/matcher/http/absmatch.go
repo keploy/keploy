@@ -200,7 +200,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
-			logger.Error("failed to validate and marshal json", zap.Error(err))
+			logger.Error("failed to validate and marshal json", logcontent.Error(err))
 			reqCompare.BodyResult.Normal = false
 			return false, reqCompare
 		}
@@ -374,7 +374,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
-			logger.Error("failed to validate and marshal json", zap.Error(err))
+			logger.Error("failed to validate and marshal json", logcontent.Error(err))
 			respCompare.BodyResult.Normal = false
 			return false, respCompare
 		}
