@@ -317,7 +317,10 @@ if is_build "$RECORD_BIN"; then
 fi
 
 TOKEN_MISS='no matching mock for outgoing call.*POST /oauth/token'
-RATE_MISS="no matching mock for outgoing call.*SELECT v FROM settings WHERE k = 'tax_rate'"
+# A miss's line names the call as its report does, and with KEPLOY_LOG_CONTENT
+# unset a report writes a statement's literals ? (the line's "actual", or, once
+# the line logs the call itself by its length, "actual_shape").
+RATE_MISS='no matching mock for outgoing call.*"actual(_shape)?": "COM_QUERY SELECT v FROM settings WHERE k = \?"'
 judged=true
 is_build "$REPLAY_BIN" || judged=false
 
