@@ -144,20 +144,38 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 	return nil
 }
 
-// hideDeletedFlags hides, under the proven switch, the flags of the deleted
-// settings cmd has from its --help: there each is an unknown flag, which
-// checkDeletedSettings refuses, so --help must not offer it. Without the
-// switch --help is as it was. AddFlags calls it once cmd has all its flags.
+// hideDeletedFlags hides, under the proven switch, every flag of cmd that the
+// switch refuses from its --help: the flags of the deleted settings, which
+// checkDeletedSettings refuses as unknown, and, for keploy record and keploy
+// test, the passthrough flags mock.real replaced (refusePassthroughFlags) and
+// test's --health-poll-timeout (refuseHealthPollTimeout). --help must not
+// offer a flag the command then refuses with exit 8. keploy mock record and
+// replay keep their own --pass-through-ports, the app's ingress port. Without
+// the switch --help is as it was. AddFlags calls it once cmd has all its
+// flags.
 func hideDeletedFlags(cmd *cobra.Command) {
 	if !provenswitch.On() {
 		return
 	}
-	for _, row := range deletedSettings() {
-		for _, name := range row.Flags {
+	hide := func(names ...string) {
+		for _, name := range names {
 			if cmd.Flags().Lookup(name) != nil {
 				_ = cmd.Flags().MarkHidden(name)
 			}
 		}
+	}
+	for _, row := range deletedSettings() {
+		hide(row.Flags...)
+	}
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		return
+	}
+	switch cmd.Name() {
+	case "test":
+		hide("health-poll-timeout")
+		fallthrough
+	case "record":
+		hide(passthroughFlags...)
 	}
 }
 

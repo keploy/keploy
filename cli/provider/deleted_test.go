@@ -255,9 +255,12 @@ func TestUnderTheSwitchTheSettingsExactServingReplacedAreDeleted(t *testing.T) {
 // changes nothing there instead of giving those flags as its remedy. Without
 // the switch --help is as it was.
 func TestUnderTheSwitchHelpListsNoDeletedFlag(t *testing.T) {
+	// Every flag of the command the switch refuses: the deleted settings',
+	// mock.real's passthrough flags (record and test), and test's readiness
+	// ceiling.
 	deletedFlags := map[string][]string{
-		"test":   {"disable-mapping", "update-test-mapping", "remove-unused-mocks", "fallBack-on-miss"},
-		"record": {"disable-mapping"},
+		"test":   {"disable-mapping", "update-test-mapping", "remove-unused-mocks", "fallBack-on-miss", "global-passthrough", "mocking", "pass-through-ports", "health-poll-timeout"},
+		"record": {"disable-mapping", "global-passthrough", "opportunistic-tls-intercept", "pass-through-ports"},
 	}
 	for _, on := range []bool{true, false} {
 		value := "0"
@@ -298,6 +301,29 @@ func TestUnderTheSwitchHelpListsNoDeletedFlag(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// keploy mock record and replay keep their own --pass-through-ports (the
+// app's ingress port) under the switch, so their --help still lists it.
+// Mutation: hide the passthrough flags of every command named record.
+func TestUnderTheSwitchMockKeepsItsPassThroughPortsInHelp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, verb := range []string{"record", "replay"} {
+		c := NewCmdConfigurator(zap.NewNop(), config.New())
+		parent := &cobra.Command{Use: "mock"}
+		cmd := &cobra.Command{Use: verb}
+		parent.AddCommand(cmd)
+		if err := c.AddFlags(cmd); err != nil {
+			t.Fatalf("AddFlags(mock %s): %v", verb, err)
+		}
+		f := cmd.Flags().Lookup("pass-through-ports")
+		if f == nil {
+			t.Fatalf("keploy mock %s has no --pass-through-ports", verb)
+		}
+		if f.Hidden {
+			t.Errorf("under the switch keploy mock %s --help does not list its own --pass-through-ports", verb)
+		}
 	}
 }
 
