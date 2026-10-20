@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -454,6 +455,11 @@ type Replayer struct {
 	// neverReadySets are those of them not judged because their application
 	// never got ready (proven switch): they ran no test, and have no results.
 	neverReadySets map[string]bool
+	// noVerdictSets are, per test set of this run, its tests that got no
+	// verdict (TestResult.VerdictUnknown), whatever the set's status:
+	// markNoVerdict. A stop that takes the set to USER_ABORT skips the rules
+	// that leave it not judged, and Start's exit code reads these.
+	noVerdictSets map[string][]string
 
 	logger          *zap.Logger
 	testDB          TestDB
@@ -683,22 +689,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// this defer runs. Pinned by TestStartThatRunsNoTestExitsNonZero.
 	parentCtx := ctx
 	testRunResult := true
-	defer func() {
-		r.completeTestReportMu.RLock()
-		failed := r.totalTestFailed
-		r.completeTestReportMu.RUnlock()
-		// A cancelled ROOT context is not a failure -- cancelled is not
-		// failed, and under a signal the error Start returns is usually the
-		// cancellation itself. What a Ctrl+C must not do is erase a failure
-		// already reached, and testRunResult and failed carry that. A
-		// DEADLINE, on the root or below it, is a different thing and still
-		// counts: only the root being cancelled is a user saying stop.
-		runErr := err
-		if stoppedByItsUser(parentCtx) {
-			runErr = nil
-		}
-		armRunExitCode(runErr, testRunResult, failed)
-	}()
+	// verdictReached: the loop over the selected test sets ended, every set
+	// with its status, or the round ended on one's: the run has its verdict,
+	// and a stop after it (the summary, coverage, the run's hooks, the
+	// teardown) takes nothing from it.
+	verdictReached := false
+	// Marks of tests with no verdict are this run's, read by the exit code
+	// below on every way out, the earliest included.
+	r.forgetNoVerdicts()
+	defer func() { r.armStartExitCode(stoppedByItsUser(parentCtx), err, testRunResult, verdictReached) }()
 
 	// A mock.real keploy cannot read is refused before anything runs (proven
 	// switch only). This run's first push starts the agent's REAL
@@ -1172,15 +1171,17 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				testSetResult = false
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusUserAbort:
-				// A Ctrl+C does not un-fail the tests that already ran; the
-				// defer at the top of Start records them.
+				// A Ctrl+C does not un-fail the tests that already ran, nor
+				// pass a test that got no verdict before it: the defer at
+				// the top of Start records them.
 				//
-				// It stays a nil return, so a run interrupted with nothing
-				// wrong yet still exits 0 -- cancelled is not failed, and
-				// that is the contract the rest of the CLI is built on (the
-				// enterprise binary reads its own `interrupted` reason for
-				// the same distinction). What is fixed here is only that a
-				// FAILURE already reached is no longer erased by the signal.
+				// It stays a nil return. With the proven switch off a run
+				// interrupted with nothing wrong yet still exits 0 --
+				// cancelled is not failed, and that is the contract the rest
+				// of the CLI is built on (the enterprise binary reads its own
+				// `interrupted` reason for the same distinction). Under the
+				// switch a run stopped before its verdict has none, and
+				// exits 128+N (armStoppedRunExitCode).
 				return nil
 			case models.TestSetStatusFailed:
 				testSetResult = false
@@ -1315,6 +1316,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 	}
+	verdictReached = true
 	// A run none of whose tests got a verdict (every test set, or every test,
 	// ignored or quarantined) verified nothing, so it does not pass, as a run
 	// with no tests to run does not. With the switch on or off: its exit code
@@ -1533,6 +1535,87 @@ func armRunExitCode(runErr error, testRunResult bool, failedTests int) {
 	case !testRunResult || failedTests > 0:
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 	}
+}
+
+// armStartExitCode records how Start ended in the process exit code, on
+// every way out of it: stopped is whether its user stopped it (its root
+// context was cancelled: stoppedByItsUser), err what Start returns,
+// testRunResult the verdict of the sets that reached one, and
+// verdictReached whether the loop over the selected sets ended.
+//
+// A cancelled ROOT context is not a failure -- cancelled is not failed, and
+// under a signal the error Start returns is usually the cancellation itself.
+// What a Ctrl+C must not do is erase a failure already reached, and
+// testRunResult and the failed count carry that, nor a test that got no
+// verdict (stoppedAfterNoVerdict). A DEADLINE, on the root or below it, is a
+// different thing and still counts: only the root being cancelled is a user
+// saying stop. Under the proven switch a stop before the verdict is never 0
+// (armStoppedRunExitCode).
+func (r *Replayer) armStartExitCode(stopped bool, err error, testRunResult, verdictReached bool) {
+	r.completeTestReportMu.RLock()
+	failed := r.totalTestFailed
+	r.completeTestReportMu.RUnlock()
+	runErr := err
+	if stopped {
+		runErr = nil
+		if testRunResult && r.stoppedAfterNoVerdict() {
+			testRunResult = false
+		}
+	}
+	armRunExitCode(runErr, testRunResult, failed)
+	armStoppedRunExitCode(r.logger, stopped && !verdictReached)
+}
+
+// armStoppedRunExitCode records, under the proven switch, a run its user's
+// signal stopped before it had its verdict (stoppedBeforeVerdict): it exits
+// 128+N for the signal NewCtx's handler took (SIGINT 130, SIGHUP 129,
+// SIGTERM 143; utils.InterruptExitCode), never 0, whatever the tests it
+// reached showed, as a `keploy mock replay` stopped before keploy judged it
+// does (keploy#4700). A test that got no verdict before the stop, and a set
+// whose tests all passed so far, are no pass of the suite (OBS-ctrlc). A
+// code armed first is kept (a failure the run reached: 1), and a stop that
+// is no signal's (a caller cancelling the run's context itself) arms
+// nothing. With the switch off a stopped run with nothing wrong exits 0, the
+// CLI's contract.
+func armStoppedRunExitCode(logger *zap.Logger, stoppedBeforeVerdict bool) {
+	if !stoppedBeforeVerdict || !provenswitch.On() || utils.ErrCode != 0 {
+		return
+	}
+	code := utils.InterruptExitCode()
+	if code == 0 {
+		return
+	}
+	utils.SetExitCodeOnce(code)
+	logger.Warn("the run was stopped before keploy judged it, so it has no verdict and does not pass ("+provenswitch.Env+"=1)",
+		zap.Int("exit_code", code),
+		zap.String("next_step", "run keploy test again and let it finish"))
+}
+
+// stoppedAfterNoVerdict reports, with the proven switch off, whether a test
+// of this run got no verdict before its user's stop (markNoVerdict), and
+// says so: the run does not pass. Such a test leaves its set not judged, and
+// fails the run, when the set ends on its own; a stop takes the set to
+// USER_ABORT, where that rule does not run, and the run exited 0 (OBS-ctrlc).
+// The one such test with the switch off is a wrong answer demoted to
+// OBSOLETE for a stale mapping, which a stop cannot make: the answer and
+// the mocks it consumed were read. Under the switch a stop before the
+// verdict exits 128+N whatever it reached (armStoppedRunExitCode), and a
+// test whose read the stop cut short has no verdict for the stop's sake.
+func (r *Replayer) stoppedAfterNoVerdict() bool {
+	if provenswitch.On() {
+		return false
+	}
+	sets := r.noVerdicts()
+	if len(sets) == 0 {
+		return false
+	}
+	for _, set := range slices.Sorted(maps.Keys(sets)) {
+		r.logger.Error("the run was stopped after tests of the test-set got no verdict, so it does not pass: each one's result in the report says why",
+			zap.String("test-set", set),
+			zap.Strings("tests", sets[set]),
+			zap.String("next_step", "do what each one's result says (for a stale mapping: "+models.MappingStaleRemedy+"), then run keploy test again"))
+	}
+	return true
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
@@ -5541,6 +5624,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// calls reached a real dependency (captureIncomplete, just above). Placed
 	// after those, so none is replaced by a remedy that re-records over it.
 	staleMapping := testsWithStaleMapping(testCaseResults)
+	// What of the set has no verdict, whatever the set's status: Start's
+	// exit code reads it for a set its user's stop took to USER_ABORT, where
+	// none of the rules here and below leaves it not judged (OBS-ctrlc).
+	r.markNoVerdict(testSetID, testsWithNoVerdict(testCaseResults))
 	staleWhy, staleOnly := "", ""
 	if len(staleMapping) > 0 {
 		if testSetStatus == models.TestSetStatusPassed || notJudged != "" {
