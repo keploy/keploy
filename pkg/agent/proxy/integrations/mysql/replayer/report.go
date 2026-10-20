@@ -30,7 +30,10 @@ const (
 // its handshake, and the recording holds no answer for it, for the reason
 // why. phase and candidates are the report's MatchPhase and CandidateCount.
 // why never holds a credential: a password mismatch names the step, not the
-// values.
+// values. Nor, unless KEPLOY_LOG_CONTENT is set, a login's username or
+// database: a mismatch of either names the field and passes its values
+// through models.ReportValue (matchHanshakeResponse41). why is the report's
+// Diff, which a report without content keeps as the parser's own words.
 //
 // The replayer returns it without answering the client, and the proxy closes
 // the connection, so this miss is the only account of why the application's
