@@ -3159,12 +3159,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// (pkg.ErrStreamHeldOpen): past its recording, every recorded
 			// message having come, or short of it (pkg.ErrStreamStalled,
 			// whose rest SimulateGRPC took from the recording). What came is
-			// compared, with the recorded trailers the app never sent, and
-			// the test has no verdict (FailureInfo.StreamHeldOpen, row W1).
+			// compared, with the recorded trailers the app never sent (as a
+			// gRPC client reads them, a Trailers-Only recording's from its
+			// one header block: models.GrpcResp.TrailersAsRead), and the
+			// test has no verdict (FailureInfo.StreamHeldOpen, row W1).
 			var heldOpen string
 			if loopErr != nil && errors.Is(loopErr, pkg.ErrStreamHeldOpen) {
 				if g, ok := resp.(*models.GrpcResp); ok && g != nil {
-					g.Trailers = sent.GrpcResp.Trailers
+					g.Trailers = sent.GrpcResp.TrailersAsRead()
 					heldOpen, loopErr = loopErr.Error(), nil
 				}
 			}
