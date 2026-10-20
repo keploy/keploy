@@ -296,3 +296,80 @@ func TestEveryVariableMissNamesNoValueByDefault(t *testing.T) {
 		})
 	}
 }
+
+// lifetimeMiss is pathMiss's call, with the proven switch off, against a
+// recording that states its HTTP mocks' lifetimes, as every recording today's
+// recorder makes does: its next steps say how to serve the call to every test
+// (sessionCallHint), naming the call's path.
+func lifetimeMiss(t *testing.T) *models.MockMismatchReport {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "0")
+	live := makeReq("GET", "/api/users/kp-live-id")
+	live.Host = "users.internal:8080"
+	rec := onHost("rec", "/api/users/kp-rec-id", "users.internal:8080")
+	rec.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	db := &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}
+	return newHTTP().buildHTTPMismatchReport(live, nil, db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1})
+}
+
+// The advice to declare a call shared names its path as the summary does: by
+// default with the segment the summary withholds written {} there too, and
+// said to be the call's own to write, so no door that keeps the advice (the
+// agent's, the MOCK MISMATCH table's, keploy report's) names the value the
+// summary withholds. With the switch on it names the call's path, as it did.
+func TestASessionCallHintNamesThePathAsTheSummaryDoes(t *testing.T) {
+	r := lifetimeMiss(t)
+	if r.ActualSummary != "GET /api/users/{}" || !r.ContentWithheld {
+		t.Fatalf("the summary is %q (withheld %v), want GET /api/users/{}", r.ActualSummary, r.ContentWithheld)
+	}
+	if want := `pathPrefix: "/api/users/{}"}], each {} the call's own segment there, which this report withholds)`; !strings.Contains(r.NextSteps, want) {
+		t.Errorf("the hint does not name the path as the summary does (%s):\n%s", want, r.NextSteps)
+	}
+	door := models.UnmatchedCall{Protocol: r.Protocol, ActualSummary: r.ActualSummary, Diff: r.Diff, NextSteps: r.NextSteps,
+		FieldDiffs: r.FieldDiffs, ClosestMockReq: r.ClosestMockReq, ReceivedReq: r.ReceivedReq, ContentWithheld: r.ContentWithheld}.ReportContent()
+	for _, text := range []string{reportText(t, r), door.ActualSummary + "\n" + door.Diff + "\n" + door.NextSteps} {
+		for _, v := range []string{"kp-live-id", "kp-rec-id"} {
+			if strings.Contains(text, v) {
+				t.Errorf("the default report carries %q:\n%s", v, text)
+			}
+		}
+	}
+	// A call on its closest recording's path, which differs elsewhere (a
+	// body value): the summary withholds no segment, so the hint names the
+	// path as it is and says nothing of a {}.
+	t.Setenv(provenswitch.Env, "0")
+	same := httpMockWithReq("rec", "POST", "http://users.internal:8080/api/users", `{"email":"kp-rec@example.com"}`,
+		map[string]string{"Content-Type": "application/json"}, nil)
+	same.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	body := makeReqWithQuery("POST", "/api/users", "")
+	body.Header.Set("Content-Type", "application/json")
+	r = newHTTP().buildHTTPMismatchReport(body, []byte(`{"email":"kp-live@example.com"}`), &mockMemDb{mocks: []*models.Mock{same}}, nil, nil, nil,
+		&matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{same}})
+	if want := `pathPrefix: "/api/users"}]), or record again`; !strings.Contains(r.NextSteps, want) || r.ActualSummary != "POST /api/users" {
+		t.Errorf("a miss on its recording's path: summary %q, hint does not name the path whole (%s):\n%s", r.ActualSummary, want, r.NextSteps)
+	}
+	t.Cleanup(logcontent.Set(true))
+	r = lifetimeMiss(t)
+	if want := `pathPrefix: "/api/users/kp-live-id"}]), or record again`; !strings.Contains(r.NextSteps, want) || r.ContentWithheld {
+		t.Errorf("with the switch on the hint does not name the call's path (%s):\n%s", want, r.NextSteps)
+	}
+}
+
+// summaryPath reads the path of a summary: without its query, and "/" for a
+// summary that names none.
+func TestSummaryPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"GET /api/users/{}":      "/api/users/{}",
+		"POST /{}/{}":            "/{}/{}",
+		"GET /a?b=c":             "/a",
+		"GET /":                  "/",
+		"GET":                    "/",
+		"":                       "/",
+		"GET api":                "/",
+		"connection phase: x /y": "/",
+	} {
+		if got := summaryPath(in); got != want {
+			t.Errorf("summaryPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
