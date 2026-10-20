@@ -107,7 +107,10 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 			}
 			report := h.buildHTTPMismatchReport(reqToHost("POST", "/oauth/token", "auth.example.com"), nil, db, tc.pool, nil, nil,
 				&matchDiag{phase: models.MatchPhaseSchema, candidates: len(tc.pool)})
-			got := strings.Contains(report.NextSteps, `sessionCalls: [{host: "auth.example.com", method: "POST", pathPrefix: "/oauth/token"}]`)
+			// The path the hint names is the summary's, whose segments a
+			// report without content may withhold
+			// (TestASessionCallHintNamesThePathAsTheSummaryDoes).
+			got := strings.Contains(report.NextSteps, `sessionCalls: [{host: "auth.example.com", method: "POST", pathPrefix: "/`)
 			if got != tc.want {
 				t.Fatalf("hint present %v, want %v:\n%s", got, tc.want, report.NextSteps)
 			}

@@ -1927,7 +1927,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	// Under the proven switch a test is served what its mapping names, and a
 	// declared call does not change that: the hint would not help.
 	if r != nil && !provenswitch.On() && statesHTTPLifetimes(mockDb, httpMocks) {
-		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request))
+		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, r))
 	}
 	return r
 }
@@ -1935,7 +1935,15 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 // sessionCallHint tells how to serve a call to every test, for a recording
 // that serves each test its own HTTP calls only: a test that never recorded
 // a call misses it though another test recorded it.
-func sessionCallHint(request *http.Request) string {
+//
+// It names the call's path as r, the call's report, names it: a report
+// without content (models.MockMismatchReport.ContentWithheld) names it by its
+// summary, where every segment that holds a value of the application's is
+// written {} (models.SummaryWithoutContent), and so does the hint, which the
+// report keeps whole as the parser's own words. A {} is a segment for the
+// user to write; a prefix cut at the first one would serve every call under
+// it to every test, which the user never asked for.
+func sessionCallHint(request *http.Request, r *models.MockMismatchReport) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
 		host = request.URL.Host
@@ -1944,8 +1952,28 @@ func sessionCallHint(request *http.Request) string {
 	if request.URL != nil && request.URL.Path != "" {
 		path = request.URL.Path
 	}
-	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
-		host, request.Method, path, mismatch.RecordCommand())
+	withheld := ""
+	if r.ContentWithheld {
+		path = summaryPath(r.ActualSummary)
+		if strings.Contains(path, "{}") {
+			withheld = ", each {} the call's own segment there, which this report withholds"
+		}
+	}
+	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]%s), or record again with '%s' so this test records it.",
+		host, request.Method, path, withheld, mismatch.RecordCommand())
+}
+
+// summaryPath is the path an HTTP miss's summary ("<method> <path>") names,
+// without a query: "/" when it names none.
+func summaryPath(summary string) string {
+	_, path, ok := strings.Cut(summary, " ")
+	if !ok || !strings.HasPrefix(path, "/") {
+		return "/"
+	}
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	return path
 }
 
 // statesHTTPLifetimes reports whether the recording being replayed states its
