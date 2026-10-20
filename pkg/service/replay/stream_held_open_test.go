@@ -54,6 +54,10 @@ const (
 	// wrongStart: sendNothing, with the HTTP side's status 500 against
 	// its recorded 200.
 	wrongStart
+	// holdPastEmpty: the gRPC side sends one empty message, as a
+	// recording keeps an answer of none, and holds its stream open past
+	// it.
+	holdPastEmpty
 )
 
 func newHeldOpenApps(t *testing.T) *heldOpenApps {
@@ -118,6 +122,8 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 				sends = 1
 			case sendNothing, wrongStart:
 				sends = 0
+			case holdPastEmpty:
+				out, sends = []byte{}, 1
 			}
 			for i := 0; i < sends; i++ {
 				if err := stream.SendMsg(&out); err != nil {
@@ -223,6 +229,35 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 			}
 		})
 	}
+
+	// A Trailers-Only recording kept as headers alone (enterprise's
+	// low-latency recorder before its fix: an empty stream the app answered
+	// OK in one HEADERS frame, kept as one empty message), and the app now
+	// sending one empty message and holding its stream open past it: what
+	// came is compared with the recording's status standing in for the
+	// trailers the app never sent, read off its one header block as a gRPC
+	// client reads it, so the status is not what differs.
+	t.Run("past a Trailers-Only recording kept as headers alone", func(t *testing.T) {
+		apps.mode.Store(holdPastEmpty)
+		t.Cleanup(func() { apps.mode.Store(asRecorded) })
+		legacy := *cases[1]
+		legacy.GrpcResp = models.GrpcResp{
+			Headers: models.GrpcHeaders{
+				PseudoHeaders:   map[string]string{":status": "200"},
+				OrdinaryHeaders: map[string]string{"content-type": "application/grpc", "grpc-status": "0"},
+			},
+			Trailers: models.GrpcHeaders{PseudoHeaders: map[string]string{}, OrdinaryHeaders: map[string]string{}},
+		}
+		h := newTmplHarness(t, &tmplConf{}, []*models.TestCase{&legacy}, nil)
+		h.run(t)
+		r := h.result(t, "test-2")
+		if !strings.Contains(r.FailureInfo.StreamHeldOpen, "past its recording") || len(r.VerdictUnknown()) == 0 {
+			t.Fatalf("test-2: %s, %+v; want no verdict: the app kept its stream open past its recording", r.Status, r.FailureInfo)
+		}
+		if !r.Result.StatusCode.Normal {
+			t.Fatalf("test-2: the status differs (%d -> %d), where the recording's stands in for the trailers the app never sent", r.Result.StatusCode.Expected, r.Result.StatusCode.Actual)
+		}
+	})
 
 	// Keepalives and nothing of the answer: nothing to compare, so each
 	// test fails closed, FAILED and marked not judged (AnswerStalled, the
