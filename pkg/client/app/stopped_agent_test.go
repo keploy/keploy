@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -519,5 +521,32 @@ func TestRunReadsHowTheAgentAndTheAppEnded(t *testing.T) {
 	}
 	if !got.AgentFailed() {
 		t.Fatal("an agent that exited 6 before the app ever started was not reported as having failed")
+	}
+}
+
+// The misses a stopped agent left are read as a live agent's are: by default
+// without the application's content, whatever the agent wrote, and whole only
+// with the switch on.
+func TestAStoppedAgentsMissesAreReadWithoutContentByDefault(t *testing.T) {
+	left := StoppedAgent{Outcome: []byte(`{"missed":[{"protocol":"HTTP","actual_summary":"POST /api/users?token=kp-left-query",` +
+		`"field_diffs":[{"path":"body.email","kind":"value_changed","expected":"kp-left-rec","actual":"kp-left-live"}],` +
+		`"closest_mock_req":"kp-left-mock-req","received_req":"kp-left-live-req"}]}`)}
+	got, err := left.MockOutcome()
+	if err != nil || len(got.Missed) != 1 {
+		t.Fatalf("MockOutcome() = %+v, %v", got, err)
+	}
+	b, _ := json.Marshal(got)
+	for _, c := range []string{"kp-left-query", "kp-left-rec", "kp-left-live", "kp-left-mock-req", "kp-left-live-req"} {
+		if strings.Contains(string(b), c) {
+			t.Errorf("the stopped agent's miss is read with %q: %s", c, b)
+		}
+	}
+	if m := got.Missed[0]; m.ActualSummary != "POST /api/users" || !m.ContentWithheld || len(m.FieldDiffs) != 1 || m.FieldDiffs[0].Path != "body.email" {
+		t.Errorf("the stopped agent's miss is read as %+v", m)
+	}
+	t.Cleanup(logcontent.Set(true))
+	got, _ = left.MockOutcome()
+	if m := got.Missed[0]; m.FieldDiffs[0].Expected != "kp-left-rec" || m.ReceivedReq != "kp-left-live-req" || m.ContentWithheld {
+		t.Errorf("with the switch on the stopped agent's miss is read as %+v", m)
 	}
 }

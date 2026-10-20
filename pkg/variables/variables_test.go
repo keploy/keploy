@@ -168,11 +168,12 @@ func TestSameJSONUnder_PatternsAndRedactedValues(t *testing.T) {
 
 func TestAnswerEditAndApplyEdits(t *testing.T) {
 	body := `{"a":{"id":"r1"},"n":7,"s":"7"}`
-	e1, why := AnswerEdit(body, []templates.PathSeg{{Key: "a"}, {Key: "id"}}, "r1", "l\"1")
+	shown := func(v string) string { return v }
+	e1, why := AnswerEdit(body, []templates.PathSeg{{Key: "a"}, {Key: "id"}}, "r1", "l\"1", shown)
 	if why != "" {
 		t.Fatal(why)
 	}
-	e2, why := AnswerEdit(body, []templates.PathSeg{{Key: "n"}}, "7", "8.5")
+	e2, why := AnswerEdit(body, []templates.PathSeg{{Key: "n"}}, "7", "8.5", shown)
 	if why != "" {
 		t.Fatal(why)
 	}
@@ -180,10 +181,10 @@ func TestAnswerEditAndApplyEdits(t *testing.T) {
 	if !ok || out != `{"a":{"id":"l\"1"},"n":8.5,"s":"7"}` {
 		t.Fatalf("ApplyEdits = %s, %v", out, ok)
 	}
-	if _, why := AnswerEdit(body, []templates.PathSeg{{Key: "n"}}, "7", "x"); why == "" {
+	if _, why := AnswerEdit(body, []templates.PathSeg{{Key: "n"}}, "7", "x", shown); why == "" {
 		t.Fatal("a value that is no number cannot stand at a number")
 	}
-	if _, why := AnswerEdit(body, []templates.PathSeg{{Key: "s"}}, "8", "9"); why == "" {
+	if _, why := AnswerEdit(body, []templates.PathSeg{{Key: "s"}}, "8", "9", shown); why == "" {
 		t.Fatal("a place that does not hold the recorded value cannot answer")
 	}
 	if _, ok := ApplyEdits(body, []Edit{{Start: 1, End: 5}, {Start: 3, End: 8}}); ok {

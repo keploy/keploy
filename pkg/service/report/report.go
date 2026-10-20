@@ -69,6 +69,15 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 	return r
 }
 
+// getReport reads a test set's report file as every format of keploy report
+// prints or writes it: its unmatched calls as a report may carry them
+// (models.TestReport.ReportContent). A file written with logcontent's switch
+// on, or by an older keploy, is read with it off without their values.
+func (r *Report) getReport(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
+	rep, err := r.reportDB.GetReport(ctx, runID, testSetID)
+	return rep.ReportContent(), err
+}
+
 // collectReports loads whole test-set reports for summary.
 func (r *Report) collectReports(ctx context.Context, runID string, testSetIDs []string) (map[string]*models.TestReport, error) {
 	res := make(map[string]*models.TestReport, len(testSetIDs))
@@ -82,7 +91,7 @@ func (r *Report) collectReports(ctx context.Context, runID string, testSetIDs []
 		}
 
 		clean := strings.TrimSuffix(ts, ReportSuffix)
-		rep, err := r.reportDB.GetReport(ctx, runID, clean)
+		rep, err := r.getReport(ctx, runID, clean)
 		if err != nil {
 			r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), zap.Error(err))
 			continue
@@ -110,7 +119,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 		}
 
 		clean := strings.TrimSuffix(ts, ReportSuffix)
-		rep, err := r.reportDB.GetReport(ctx, runID, clean)
+		rep, err := r.getReport(ctx, runID, clean)
 		if err != nil || rep == nil {
 			if err != nil {
 				r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), zap.Error(err))
@@ -856,7 +865,7 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 
 		cleanTestSetID := strings.TrimSuffix(testSetID, ReportSuffix)
 
-		results, err := r.reportDB.GetReport(ctx, runID, cleanTestSetID)
+		results, err := r.getReport(ctx, runID, cleanTestSetID)
 		if err != nil {
 			r.logger.Error("failed to get test case results for test set",
 				zap.String("test_set_id", cleanTestSetID), zap.Error(err))
@@ -1184,7 +1193,9 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 // renderUnmatchedCalls writes the structured mock-miss diagnostics
 // (FailureInfo.UnmatchedCalls) for a test. Field-diff paths use the noise
 // vocabulary, so the rendered output doubles as copy-paste material for
-// test.globalNoise / spec.assertions.noise.
+// test.globalNoise / spec.assertions.noise. A call's content is written only
+// as a report may carry it (logcontent's switch): a report file written with
+// the switch on, read with it off, is rendered without its values.
 func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	if len(test.FailureInfo.UnmatchedCalls) == 0 {
 		return
@@ -1193,8 +1204,9 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	// Set by any out-of-scope call below; the shared explanation is written
 	// ONCE for the whole test after the loop, never once per call — see
 	// models.OutOfScopeDestinationCauses.
-	var outOfScope bool
+	var outOfScope, withheld bool
 	for _, uc := range test.FailureInfo.UnmatchedCalls {
+		uc = uc.ReportContent()
 		sb.WriteString(fmt.Sprintf("  [%s] %s", uc.Protocol, uc.ActualSummary))
 		if uc.MatchPhase != "" {
 			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
@@ -1235,6 +1247,11 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 		if len(uc.FieldDiffs) > 0 {
 			sb.WriteString("    field differences (paths are noise-config compatible):\n")
 			for _, d := range uc.FieldDiffs {
+				if uc.ContentWithheld {
+					withheld = true
+					sb.WriteString(fmt.Sprintf("      %s\n", models.RenderFieldDiffs([]models.MockFieldDiff{d}, true)))
+					continue
+				}
 				switch d.Kind {
 				case models.DiffKindMissingInLive:
 					sb.WriteString(fmt.Sprintf("      %s: recorded %q, absent in live call\n", d.Path, d.Expected))
@@ -1262,6 +1279,9 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	if outOfScope {
 		sb.WriteString(models.RenderOutOfScopeDestinationCauses("  "))
 		sb.WriteString("\n")
+	}
+	if withheld {
+		sb.WriteString("  (" + models.ContentWithheldNote + ")\n")
 	}
 	sb.WriteString("\n")
 }

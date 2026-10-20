@@ -248,6 +248,44 @@ if [ "$default_rc" -eq 0 ] || [ -z "$statuses" ] || [ -n "$(yq -N '.tests[] | se
 fi
 echo "✓ the default replay failed every test and exited $default_rc"
 
+# The miss's report names the call and the field that differed, and none of
+# the values it was found in, unless KEPLOY_LOG_CONTENT opts in (it does not
+# here). The mutated recorded path (/api/v0-mismatch/) reaches a miss's report
+# only as content: the closest mock's rendered request (closest_mock_req) and
+# the recorded value of its "path" field diff. Only the misses are read: the
+# test's dependency rows name the recorded call by its path by design.
+for rf in "${reports[@]}"; do
+    calls=$(yq -o=json '[.tests[].failure_info.unmatched_calls[]?]' "$rf")
+    if grep -nE 'v0-mismatch|closest_mock_req|received_req' <<<"$calls"; then
+        echo "::error::$(basename "$rf")'s unmatched calls carry the recorded request's content with KEPLOY_LOG_CONTENT unset"
+        exit 1
+    fi
+    if [ "$(yq '[.tests[].failure_info.unmatched_calls[]? | select(.content_withheld != true)] | length' "$rf")" != 0 ]; then
+        echo "::error::$(basename "$rf") has an unmatched call that does not say its content was withheld"
+        echo "$calls" | head -60
+        exit 1
+    fi
+    if ! yq -e '[.tests[].failure_info.unmatched_calls[]?.field_diffs[]? | select(.path == "path" and .kind == "value_changed" and (has("expected") | not) and (has("actual") | not))] | length > 0' "$rf" >/dev/null; then
+        echo "::error::$(basename "$rf") does not name the path that differed, without its values"
+        echo "$calls" | head -60
+        exit 1
+    fi
+done
+# The same for what the replay printed: its MOCK MISMATCH table (the log
+# lines around it are not the report's) names the field and withholds both
+# values, and says once how to see them.
+table=$(sed -n '/=== MOCK MISMATCH ===/,$p' test_logs.txt | grep -v 'Keploy')
+if grep -n 'v0-mismatch' <<<"$table"; then
+    echo "::error::the MOCK MISMATCH table printed the recorded request's content with KEPLOY_LOG_CONTENT unset"
+    exit 1
+fi
+if ! grep -qE '^[^a-zA-Z]*path[^a-zA-Z(]*\(withheld\)[^a-zA-Z(]*\(withheld\)' <<<"$table" || ! grep -q 'values are withheld; set KEPLOY_LOG_CONTENT=1 to include them' <<<"$table"; then
+    echo "::error::the MOCK MISMATCH table does not name the path that differed with its values withheld"
+    echo "$table" | head -60
+    exit 1
+fi
+echo "✓ the default report and table name the miss without the recorded request's content"
+
 # Phase 2 asserts the NOT CHECKED branch, which needs every dependency
 # session-tier. A recording made before lifetimes were stated is, as
 # recorded: the default run above is that run. A recording that states them

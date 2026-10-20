@@ -18,6 +18,14 @@
 //
 // proxy.go extracts the report from the error chain and the replayer attaches
 // it to the failing test's FailureInfo.UnmatchedCalls.
+//
+// A report carries the application's content only with logcontent's switch
+// (KEPLOY_LOG_CONTENT) on, as a log line does: Build withholds it otherwise
+// (Withhold). The values of the field diffs, the rendered requests and a SQL
+// statement's literals are the builder's to withhold; the summary, the diff
+// and the next steps a parser writes are its own words, which name the call,
+// its fields and counts and never a value (models.ReportQuote and
+// models.ReportSQL carry one into them as the switch allows).
 package mismatch
 
 import (
@@ -30,6 +38,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // Canonical protocol names. Parsers must use these so report consumers can
@@ -65,7 +74,11 @@ type Builder struct {
 
 // NewReport starts a report for one missed call. actualSummary should be the
 // shortest string that identifies the live call ("POST /orders", "SELECT
-// (prepared stmt 12)", "find users").
+// (prepared stmt 12)", "find users"): for HTTP and gRPC its method and path,
+// for SQL its statement, and for any other protocol its command or operation,
+// never a key or a value the call carried. Build withholds a SQL statement's
+// literals, an HTTP target's query and the path segments its field diffs name
+// unless the switch is on (models.SummaryWithoutContent).
 func NewReport(protocol, actualSummary string) *Builder {
 	return &Builder{report: models.MockMismatchReport{
 		At:            time.Now(),
@@ -174,12 +187,17 @@ func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Bu
 // WithDiff sets an explicit human-readable diff, overriding the rendered
 // FieldDiffs summary. Prefer WithClosest + field diffs; use this only for
 // protocols where field decomposition is impossible (e.g. opaque binary).
+// It is the parser's own words, kept whatever the switch says, so it names
+// fields, places and counts and never a value the application sent or keploy
+// recorded: a value it must name goes through models.ReportQuote, a
+// statement through models.ReportSQL.
 func (b *Builder) WithDiff(diff string) *Builder {
 	b.report.Diff = diff
 	return b
 }
 
-// WithNextSteps sets the remediation hint shown to the user.
+// WithNextSteps sets the remediation hint shown to the user: the parser's own
+// words, as WithDiff's are.
 func (b *Builder) WithNextSteps(steps string) *Builder {
 	b.report.NextSteps = steps
 	return b
@@ -190,7 +208,8 @@ func (b *Builder) WithNextSteps(steps string) *Builder {
 // request, receivedReq is the live request the app sent. Both must already be
 // human-rendered (one field per line, JSON pretty-printed, sensitive values
 // redacted) by the parser. FieldDiffs remain the machine-readable companion;
-// these drive the highlighted whole-request view.
+// these drive the highlighted whole-request view. They are content: Build
+// drops them unless the switch is on.
 func (b *Builder) WithRenderedRequests(mockReq, receivedReq string) *Builder {
 	b.report.ClosestMockReq = mockReq
 	b.report.ReceivedReq = receivedReq
@@ -198,7 +217,8 @@ func (b *Builder) WithRenderedRequests(mockReq, receivedReq string) *Builder {
 }
 
 // Build renders the Diff string from FieldDiffs (when not explicitly set)
-// and returns the finished report.
+// and returns the finished report, without the application's content unless
+// the switch is on (Withhold).
 func (b *Builder) Build() *models.MockMismatchReport {
 	r := b.report
 	// Destination scope is decided BEFORE the next-steps default so the
@@ -217,8 +237,11 @@ func (b *Builder) Build() *models.MockMismatchReport {
 	if r.MatchPhase != models.MatchPhaseNoMocks {
 		r.DestinationScope = destinationScope(r.Destination, b.comparedDests)
 	}
+	// Before the Diff is rendered from the field diffs: withheld, they have
+	// no values to render.
+	Withhold(&r)
 	if r.Diff == "" {
-		r.Diff = RenderFieldDiffs(r.FieldDiffs)
+		r.Diff = models.RenderFieldDiffs(r.FieldDiffs, r.ContentWithheld)
 	}
 	if r.NextSteps == "" {
 		r.NextSteps = defaultNextSteps(&r)
@@ -226,26 +249,24 @@ func (b *Builder) Build() *models.MockMismatchReport {
 	return &r
 }
 
-// RenderFieldDiffs renders field diffs as a compact single-string summary for
-// surfaces that can't show structured data (legacy table cells, logs).
-func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
-	if len(diffs) == 0 {
-		return ""
+// Withhold is r as a parser hands it on: unchanged with logcontent's switch
+// (KEPLOY_LOG_CONTENT) on, and with it off without the application's content
+// (models.MockMismatchReport.WithoutContent): its field diffs keep their paths
+// and kinds and lose their values, its rendered requests are dropped, its
+// summary loses a SQL statement's literals, an HTTP target's query and every
+// path segment keploy knows holds a value (a test variable's place, or one a
+// field diff names), and it says so (ContentWithheld). Its Diff and NextSteps
+// are the parser's own words, and kept. Build applies it; a parser that
+// builds a report without the builder, or writes content or places into one
+// after Build, applies it before it reports the miss.
+func Withhold(r *models.MockMismatchReport) *models.MockMismatchReport {
+	if r == nil || logcontent.On() {
+		return r
 	}
-	parts := make([]string, 0, len(diffs))
-	for _, d := range diffs {
-		switch d.Kind {
-		case models.DiffKindMissingInLive:
-			parts = append(parts, fmt.Sprintf("%s: recorded %q, absent in live call", d.Path, d.Expected))
-		case models.DiffKindMissingInMock:
-			parts = append(parts, fmt.Sprintf("%s: live %q, absent in recording", d.Path, d.Actual))
-		case models.DiffKindTypeChanged:
-			parts = append(parts, fmt.Sprintf("%s: type changed (recorded %s, live %s)", d.Path, d.Expected, d.Actual))
-		default:
-			parts = append(parts, fmt.Sprintf("%s: recorded %q, live %q", d.Path, d.Expected, d.Actual))
-		}
-	}
-	return strings.Join(parts, "; ")
+	diff := r.Diff
+	*r = r.WithoutContent()
+	r.Diff = diff
+	return r
 }
 
 // mockMode is on when the agent serves a `keploy mock record|replay` session.

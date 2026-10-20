@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // healthPollInterval is how often the --health-url probe is retried while waiting for 2xx.
@@ -1702,6 +1703,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			VariablePlaces:   call.VariablePlaces,
 			NotOwned:         call.NotOwned,
 			Reason:           call.Reason,
+			ContentWithheld:  call.ContentWithheld,
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
@@ -1792,6 +1794,7 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 	}
 
 	fmt.Println("\n=========================== MOCK MISMATCH ===========================")
+	var withheld bool
 
 	testSetGroups := make(map[string][]TestFailure)
 	for _, failure := range tfs.failures {
@@ -1821,7 +1824,9 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			var anyOutOfScope bool
 			for _, failure := range testIDGroups[testID] {
 				if failure.FailureReason == models.ErrMockNotFound {
-					printMismatchReport(failure.MismatchReport)
+					if printMismatchReport(failure.MismatchReport) {
+						withheld = true
+					}
 					if failure.MismatchReport != nil &&
 						failure.MismatchReport.DestinationScope == models.DestinationScopeNotInComparedSet {
 						anyOutOfScope = true
@@ -1859,17 +1864,28 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			}
 		}
 	}
+	// Once for the table: every report above that names a field without its
+	// values says why the same way.
+	if withheld {
+		fmt.Printf("\n(%s)\n", models.ContentWithheldNote)
+	}
 	fmt.Println()
 }
 
 // printMismatchReport renders one unmatched outgoing call: a heading, then the
 // best available view — a side-by-side whole-request diff when the parser
 // rendered both requests, else the structured FIELD | EXPECTED | RECEIVED
-// table, else the one-line Diff — followed by the hint.
-func printMismatchReport(r *models.MockMismatchReport) {
+// table, else the one-line Diff — followed by the hint. It prints the
+// application's content only as a report may carry it (logcontent's switch),
+// and reports whether it named a field whose values it withheld.
+func printMismatchReport(r *models.MockMismatchReport) (withheld bool) {
 	if r == nil {
 		fmt.Println("  Outgoing call mock was not matched")
-		return
+		return false
+	}
+	if !logcontent.On() {
+		w := r.WithoutContent()
+		r = &w
 	}
 	// When nothing in the compared set targets this destination there is no
 	// meaningful "closest mock": the matcher picked the least-distant mock in
@@ -1913,10 +1929,12 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		// a request diff against it would mislead. The diff names the
 		// variable, the value it has in this test and the one the call sent.
 		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
+		withheld = r.ContentWithheld
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
 		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:
-		printFieldDiffTable(r.FieldDiffs)
+		printFieldDiffTable(r.FieldDiffs, r.ContentWithheld)
+		withheld = r.ContentWithheld
 	case r.Diff != "":
 		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
 	}
@@ -1924,6 +1942,7 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	if r.NextSteps != "" {
 		fmt.Printf("  Hint: %s\n", strings.ReplaceAll(r.NextSteps, "\n", " "))
 	}
+	return withheld
 }
 
 // printRequestDiff renders the closest mock's recorded request against the live
@@ -2008,8 +2027,11 @@ func splitRequestLine(line string) (method, target string) {
 
 // printFieldDiffTable renders the compact FIELD | EXPECTED | RECEIVED table —
 // the fallback when whole-request renders aren't available. Reads the
-// noise-vocabulary MockFieldDiff (Path/Kind/Expected/Actual).
-func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
+// noise-vocabulary MockFieldDiff (Path/Kind/Expected/Actual). withheld says
+// the diffs carry no values (models.MockMismatchReport.ContentWithheld): a
+// side the field has is then written models.WithheldValue, never as the empty
+// value it would read as.
+func printFieldDiffTable(fieldDiffs []models.MockFieldDiff, withheld bool) {
 	colWidths := tw.NewMapper[int, int]().Set(0, 24).Set(1, 40).Set(2, 40)
 	table := tablewriter.NewTable(os.Stdout,
 		tablewriter.WithRendition(tw.Rendition{
@@ -2024,13 +2046,16 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 	table.Header([]string{"FIELD", "EXPECTED (MOCK)", "RECEIVED (REQUEST)"})
 	for _, d := range fieldDiffs {
 		exp, rec := d.Expected, d.Actual
+		if withheld {
+			exp, rec = models.WithheldValue, models.WithheldValue
+		}
 		switch d.Kind {
 		case models.DiffKindMissingInLive:
 			rec = "(missing)"
 		case models.DiffKindMissingInMock:
 			exp = "(not recorded)"
 		case models.DiffKindTypeChanged:
-			exp, rec = "type "+d.Expected, "type "+d.Actual
+			exp, rec = "type "+exp, "type "+rec
 		}
 		table.Append([]string{d.Path, exp, rec})
 	}

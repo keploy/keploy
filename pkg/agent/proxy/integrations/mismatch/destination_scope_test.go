@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // destinationScope is the safety gate for the whole feature: it may only
@@ -471,8 +472,10 @@ func TestRenderOutOfScopeDestinationCauses(t *testing.T) {
 // The scope check is diagnostic only. It may set its own verdict and pick the
 // guidance; it must never touch the evidence a user reads to judge the miss
 // (candidate count, closest mock, field diffs, the cascade phase) or override
-// a hint the parser set explicitly.
+// a hint the parser set explicitly. The evidence holds the diffs' values, so
+// the report carries content (logcontent's switch on).
 func TestBuilder_OutOfScopeDestinationPreservesEvidence(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
 	diffs := []models.MockFieldDiff{
 		{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/api/orders", Actual: "/v1/metrics"},
 	}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 func TestRenderUnmatchedCalls_StructuredOutput(t *testing.T) {
@@ -195,8 +196,10 @@ func TestRenderUnmatchedCalls_NoCausesWithoutAnOutOfScopeMiss(t *testing.T) {
 
 // A call whose test variable did not hold names the variable's value in this
 // test and what the call sent (never "recorded"), and the diff naming the
-// variable and where the test bound it.
+// variable and where the test bound it: with logcontent's switch on, as the
+// values are content.
 func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
 	test := models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
 		Protocol: "HTTP", ActualSummary: "GET /orders/o9", ClosestMock: "mock-2", MatchPhase: models.MatchPhaseVariable,
 		Diff:       `mock mock-2: variable orderId is "o1" in this test (taken at mock-1 body.id), and this call sent "o9" at url.path[1]`,
