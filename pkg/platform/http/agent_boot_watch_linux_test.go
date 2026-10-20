@@ -422,6 +422,43 @@ func TestNamingTheAgentsContainerForgetsWhatWasKnownOfTheName(t *testing.T) {
 		t.Fatal("an answer at the agent's new address does not make its new container known")
 	}
 
+	// Another client's naming of the same name starts it afresh too: a name
+	// is two random bytes, and a later client's container that compose has
+	// not created yet is not the earlier client's, which keploy knew.
+	b := clientFor("http://127.0.0.1:3")
+	t.Cleanup(b.forgetAgentContainer)
+	b.nameAgentContainer(next)
+	if containerKnown(next) {
+		t.Fatal("another client named the same container, and it is known from the first client's")
+	}
+	// What a client forgets is only what it kept itself: the earlier client
+	// moving on to another container leaves the later client's, and its
+	// address, as they are. And an answer at the earlier client's address,
+	// from its agent, says nothing of the later client's container.
+	answeredAt("127.0.0.1:2")
+	if containerKnown(next) {
+		t.Fatal("an answer at the earlier client's address made the later client's container known")
+	}
+	a.nameAgentContainer(name)
+	if namedContainerOf(next) == nil {
+		t.Fatal("a client named another container, and forgot the one another client named since")
+	}
+	answeredAt("127.0.0.1:3")
+	if !containerKnown(next) {
+		t.Fatal("an answer at the later client's address does not make its container known, once the earlier client moved on")
+	}
+	// Nor does a client moving on forget the address a later client's agent
+	// now serves from, the same as its own was.
+	c := clientFor("http://127.0.0.1:3")
+	t.Cleanup(c.forgetAgentContainer)
+	third := name + "-third"
+	c.nameAgentContainer(third)
+	b.forgetAgentContainer()
+	answeredAt("127.0.0.1:3")
+	if !containerKnown(third) {
+		t.Fatal("a client moved on, and forgot the address a later client's agent serves from")
+	}
+
 	other := name + "-not-named"
 	knowContainer(other)
 	runOfContainer(other, true)
@@ -485,6 +522,73 @@ func TestTheReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer(t *testing.T) {
 			}
 			if err := e.awaitRelease(t, done, endLooks); err == nil || !strings.Contains(err.Error(), "ended without the keploy agent's container") {
 				t.Fatalf("the release ended with %v; want the run ended without the agent's container", err)
+			}
+		})
+	}
+}
+
+// The release of the app ends, too, once the run of the application is over
+// with the agent's container still there but not running: compose created it
+// and never started it, or it is paused or restarting, and the down that was
+// to remove it failed, or was cut by its bound. Nothing will start it once
+// the run is over, so whatever the engine says of its state, the release ends
+// at the watch's first look after the run's end, whether the run ends while
+// the release waits or before it began. A container that runs is not ended by
+// the run's end: its agent can still answer. One being removed is gone.
+func TestTheReleaseEndsOnceTheRunEndedLeavingTheAgentsContainerNotRunning(t *testing.T) {
+	for _, tc := range []struct {
+		state        string
+		releaseFirst bool
+	}{
+		{"created", true},
+		{"created", false},
+		{"paused", true},
+		{"restarting", true},
+	} {
+		order := "while the release waits"
+		if !tc.releaseFirst {
+			order = "before the release began"
+		}
+		t.Run(tc.state+", "+order, func(t *testing.T) {
+			fastLooks(t)
+			e := newStandInEngine(t)
+			e.set(t, tc.state)
+			srv := standInComposeAgent(t, e, nil)
+			t.Setenv("KEPLOY_PROVEN", "")
+			a := clientFor(srv.URL)
+			name := fmt.Sprintf("keploy-v3-left-%d", os.Getpid())
+			a.nameAgentContainer(name)
+			t.Cleanup(a.forgetAgentContainer)
+			a.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "exit 3", nil, models.SetupOptions{CommandType: string(utils.Native)}))
+			done := make(chan error, 1)
+			release := func() { go func() { done <- a.MakeAgentReadyForDockerCompose(context.Background()) }() }
+			run := func() {
+				if appErr := a.Run(context.Background(), models.RunOptions{}); appErr.AppErrorType != models.ErrUnExpected {
+					t.Fatalf("the project's run ended %+v; want its failure, %s", appErr, models.ErrUnExpected)
+				}
+			}
+			if tc.releaseFirst {
+				release()
+				// It waits, while the run that is to start the container
+				// has not ended.
+				e.awaitLooks(t, tc.state, 20, done)
+				run()
+			} else {
+				run()
+				release()
+			}
+			if err := e.awaitRelease(t, done, endLooks); err == nil || !strings.Contains(err.Error(), "ended with the keploy agent's container not running") {
+				t.Fatalf("the release ended with %v; want the run ended with the agent's container not running", err)
+			}
+
+			exited := containerExited(newEngineCLI(zap.NewNop()), name)
+			e.set(t, "running")
+			if code, ended := exited(context.Background()); ended {
+				t.Fatalf("containerExited = %d, %v of a container that runs, once its run is over; want not ended", code, ended)
+			}
+			e.set(t, "removing")
+			if code, ended := exited(context.Background()); !ended || code != containerGone {
+				t.Fatalf("containerExited = %d, %v of a container being removed; want containerGone, ended", code, ended)
 			}
 		})
 	}

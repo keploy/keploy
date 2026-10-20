@@ -77,6 +77,12 @@ type AgentClient struct {
 	// docker mode (docker run, or as a service docker compose starts); ""
 	// natively. Under mu. WatchAgentStart watches its start.
 	agentContainer string
+	// agentContainerEntry is what this client keeps of agentContainer in
+	// namedContainers, and agentContainerAt the agent address it is mapped
+	// at in containerAt (nameAgentContainer): what it forgets, and only
+	// that, when it names another (forgetAgentContainer). Under mu.
+	agentContainerEntry *namedContainer
+	agentContainerAt    string
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
