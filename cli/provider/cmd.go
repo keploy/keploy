@@ -499,6 +499,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test mode")
 		cmd.Flags().Bool("retry-passing-test", c.cfg.RetryPassing, "Enable retry passing test mode")
 		cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers: signing/tracing headers during mock matching, and per-request response headers (Date, X-Request-Id, trace ids) during response assertion")
+		cmd.Flags().Bool("disableIdentityAliasing", c.cfg.Test.DisableIdentityAliasing, "Disable rewriting the replay pod's own identity (name, uid, IP, node, host IP) to the recorded pod's during mock matching")
 		cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 		cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 		cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
@@ -1855,6 +1856,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Test.DisableAutoHeaderNoise, err = cmd.Flags().GetBool("disableAutoHeaderNoise")
 			if err != nil {
 				errMsg := "failed to read the --disableAutoHeaderNoise flag; check the flag name with --help and confirm this command supports it"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Test.DisableIdentityAliasing, err = cmd.Flags().GetBool("disableIdentityAliasing")
+			if err != nil {
+				errMsg := "failed to read the --disableIdentityAliasing flag; check the flag name with --help and confirm this command supports it"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
