@@ -285,9 +285,10 @@ fi
 # the set's first test, not the whole recording: reading it all OOM-killed the
 # replay agent of a long prod recording before its app started. The agent logs
 # what it staged and what its store holds, for every set. A build without that
-# change logs nothing, so the released binary is not held to it.
+# change logs nothing, so the released binary is not held to it. (An arm64
+# runner's build is build-no-race-linux-arm64/keploy.)
 case "${REPLAY_BIN:-}" in
-  */build/keploy|*/build-no-race/keploy) replay_is_build=true ;;
+  */build/keploy|*/build-no-race/keploy|*/build-no-race-linux-arm64/keploy) replay_is_build=true ;;
   *) replay_is_build=false ;;
 esac
 if [ "$replay_is_build" = true ]; then
