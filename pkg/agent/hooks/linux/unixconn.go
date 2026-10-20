@@ -454,8 +454,11 @@ func (u *unixConn) snapshot() models.CaptureLosses {
 	return out
 }
 
-// isMember reports whether tgid is a process of the application, as
-// pid_filter decides it: a target, not excluded.
+// isMember reports whether tgid is a process of the application: a target,
+// not excluded, as the PID maps hold it. Unlike pid_filter it does not
+// compare start times (pid_start_times), so an entry a dead process left
+// under the TGID counts: Unix sockets are not supported, and this owner
+// check is left as it was.
 func (h *Hooks) isMember(tgid uint32) bool {
 	h.objectsMutex.RLock()
 	defer h.objectsMutex.RUnlock()
@@ -497,8 +500,12 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 		defer utils.Recover(h.logger)
 		u.watch(h.logger, h.isMember)
 	}()
+	// Its programs' skipped runs are read with the hooks' (skipwatch.go):
+	// the counts as it closes stay counted.
+	h.skipsWatch(u.coll.Programs)
 	go func() {
 		<-ctx.Done()
+		h.skipsForget(u.coll.Programs)
 		u.close()
 	}()
 }
@@ -565,8 +572,11 @@ func (h *Hooks) DrainCaptureLosses(ctx context.Context) error {
 
 // CaptureLossesErr is why a count the hooks keep under the proven switch
 // cannot be told: the watch on the application's non-DNS UDP that could not
-// move its epoch on or read a report (udpwatch.go). What it would count is
-// unknown, never 0, so the agent reads no capture losses at all while it is
+// move its epoch on or read a report (udpwatch.go), or the count of
+// processes k_sock_create could not classify that could not be read
+// (skipwatch.go; a skip count that cannot be read is evidence missed, no
+// error). What it would count is unknown, never 0, so the agent reads no
+// capture losses at all while it is
 // (Agent.CaptureLosses). (A Unix-socket report keploy cannot see through is
 // a standing unix_unseen instead: unixLosses.)
 func (h *Hooks) CaptureLossesErr() error {
@@ -576,6 +586,14 @@ func (h *Hooks) CaptureLossesErr() error {
 	if w != nil {
 		if err := w.failure(); err != nil {
 			return fmt.Errorf("keploy cannot tell whether the application's UDP got a reply from a real destination: %w", err)
+		}
+	}
+	h.objectsMutex.RLock()
+	s := h.skips
+	h.objectsMutex.RUnlock()
+	if s != nil {
+		if err := s.err(); err != nil {
+			return fmt.Errorf("keploy cannot tell whether it could classify every process it saw make a socket: %w", err)
 		}
 	}
 	return nil

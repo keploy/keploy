@@ -299,3 +299,99 @@ func TestAContainerReadTheDaemonDidNotAnswerLeavesItsTestNotJudged(t *testing.T)
 		t.Fatalf("remedy %q: make the container's inspect answer, and nothing of TLS", r)
 	}
 }
+
+// A run of keploy's programs the kernel skipped is evidence only, never a
+// verdict (the founder's rule, 2026-10-21): the count is the kernel's
+// recursion_misses (5.12+), which 5.10 does not have, so it fails no test
+// and leaves none not judged. Split takes it into neither; Evidence takes
+// it. A skipped connection report covers every later test (counted from the
+// run's base); a skipped call's run is its test's own. Their text says the
+// kernel skipped during the recording.
+func TestAKernelSkipIsEvidenceNotAVerdict(t *testing.T) {
+	k, call := CaptureLossKernelSkip, CaptureLossKernelSkipCall
+	for _, kind := range []CaptureLossKind{k, call} {
+		if !kind.Evidence() || kind.NotJudged() {
+			t.Fatalf("%s: Evidence %v, NotJudged %v; want evidence only, no verdict", kind, kind.Evidence(), kind.NotJudged())
+		}
+	}
+	at := func(k CaptureLossKind, n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "keploy_tcp_recvmsg"}}
+	}
+	both := at(k, 1).Plus(at(call, 2))
+	if judged, notJudged := both.Split(); len(judged) != 0 || len(notJudged) != 0 {
+		t.Fatalf("Split = %+v, %+v; want neither: evidence is no verdict", judged, notJudged)
+	}
+	if got := both.Evidence(); !reflect.DeepEqual(got, both) {
+		t.Fatalf("Evidence = %+v, want both", got)
+	}
+	if k.PerTest() || !k.runScoped() {
+		t.Fatal("a skipped connection report covers every later test")
+	}
+	// Counted from the run's base: a test after the skip still carries it.
+	if got := at(k, 3).Charged(at(k, 3), at(k, 1), at(k, 3)); !reflect.DeepEqual(got, at(k, 2)) {
+		t.Fatalf("Charged = %+v, want what grew since the run began", got)
+	}
+	if !call.PerTest() || call.runScoped() {
+		t.Fatal("a skipped call's run is its test's own")
+	}
+	if got := at(call, 3).Charged(at(call, 1), nil, at(call, 2)); !reflect.DeepEqual(got, at(call, 1)) {
+		t.Fatalf("Charged = %+v, want the one since the previous test", got)
+	}
+	for _, l := range []CaptureLosses{at(k, 1), at(call, 1)} {
+		txt := l.EvidenceText()
+		for _, want := range []string{"during its recording the kernel skipped 1 capture run(s) of keploy's programs", "(keploy_tcp_recvmsg)"} {
+			if !strings.Contains(txt, want) {
+				t.Fatalf("%q lacks %q", txt, want)
+			}
+		}
+		if l.NotJudgedText() != "" || l.NotJudgedRemedy() != "" {
+			t.Fatalf("not-judged text %q, remedy %q, want none", l.NotJudgedText(), l.NotJudgedRemedy())
+		}
+	}
+}
+
+// A process keploy could not classify lives on: every test from it on is
+// not judged (run-scoped), never failed.
+func TestAProcessKeployCouldNotClassifyLeavesTheTestsFromItNotJudged(t *testing.T) {
+	k := CaptureLossUnclassified
+	if k.PerTest() || !k.NotJudged() || !k.runScoped() {
+		t.Fatal("an unclassified process taints the run's later tests, not judged")
+	}
+	l := CaptureLosses{{Kind: k, Count: 1, What: "the latest TGID 77"}}
+	if txt := l.NotJudgedText(); !strings.Contains(txt, "could not tell 1 time(s) whether a process was the application's") {
+		t.Fatalf("text %q", txt)
+	}
+	if r := l.NotJudgedRemedy(); !strings.Contains(r, "report it to keploy") || strings.Contains(r, "preempt") {
+		t.Fatalf("remedy %q", r)
+	}
+	if judged, notJudged := l.Split(); len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %v, %v", judged, notJudged)
+	}
+}
+
+// What a downstream build's capture saw and could not read, or stopped
+// recording a connection over, fails the test it happened in (judged), and
+// that test only (PerTest); the text says which.
+func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
+	for _, tc := range []struct {
+		k    CaptureLossKind
+		text string
+	}{
+		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried"},
+		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)"},
+	} {
+		if tc.k.NotJudged() || !tc.k.PerTest() || tc.k.runScoped() {
+			t.Fatalf("%s: a judged loss, the test's own", tc.k)
+		}
+		at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: tc.k, Count: n}} }
+		if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, at(2)) {
+			t.Fatalf("%s: Charged = %+v, want the 2 since the previous test", tc.k, got)
+		}
+		if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
+			t.Fatalf("%s: Split = %v, %v: judged", tc.k, judged, notJudged)
+		}
+		if txt := at(2).Text(); !strings.Contains(txt, tc.text) {
+			t.Fatalf("%s: text %q lacks %q", tc.k, txt, tc.text)
+		}
+	}
+}
