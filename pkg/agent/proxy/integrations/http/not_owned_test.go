@@ -330,3 +330,45 @@ func TestALearnStepMissOnACallMadeElsewhereAgainNamesItsRecording(t *testing.T) 
 		t.Fatalf("%d lookups, named %v, consumed %v", db.lookups, db.named, db.consumed)
 	}
 }
+
+// (LEARN-vs-NOTOWNED) A call the learn step named as a recording made
+// elsewhere, fresh or once more than it holds, is that recording's miss and
+// never one call more than the test recorded: decodeHTTP asks extraCall
+// nothing of it, whatever the test answered by the time the report is
+// written. Here the test's answered recordings (exact serving's list) hold
+// the very call, which the tracker did not when the learn step read it (a
+// concurrent call of the test answered it in between): the report names the
+// recording made elsewhere, with no extra-call kind or count beside it.
+func TestALearnStepMissOnACallMadeElsewhereIsNoExtraCall(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		spent    map[string]bool
+		notOwned bool
+	}{
+		{"fresh", nil, true},
+		{"again", map[string]bool{"other-test-poll": true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := learn.NewTracker()
+			tr.Begin()
+			db := &elsewhereDb{
+				learnDb:   &learnDb{perTest: []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2", "", nil, `{"jobs":[]}`)}},
+				elsewhere: []*models.Mock{learnRecorded("other-test-poll", -time.Second, "GET", "/v1/jobs?cursor=c1", "", nil, `{"jobs":["j1"]}`)},
+				spent:     tc.spent,
+				answered:  []*models.Mock{learnRecorded("answered-poll", -2*time.Second, "GET", "/v1/jobs?cursor=c1", "", nil, `{"jobs":["j0"]}`)},
+			}
+			// The fixture: asked, extraCall would count the call once.
+			t.Setenv(provenswitch.Env, "1")
+			if n := newHTTP().extraCall(context.Background(), live("GET", "/v1/jobs?cursor=c1", "", nil), db, nil, nil, nil, false, false, false, true); n != 1 {
+				t.Fatalf("fixture: extraCall counts the call %d times, want once", n)
+			}
+			code, r := learnStepMiss(t, tr, db, pollC1)
+			if code != http.StatusBadGateway || r == nil {
+				t.Fatalf("the app got %d (report %+v) for a call made elsewhere, want the miss's 502", code, r)
+			}
+			if r.NotOwned != tc.notOwned || r.ClosestMock != "other-test-poll" || r.MissKind != "" || r.Recorded != 0 {
+				t.Fatalf("the miss names %q (not owned: %v, kind %q of %d), want other-test-poll (not owned: %v) and no extra call", r.ClosestMock, r.NotOwned, r.MissKind, r.Recorded, tc.notOwned)
+			}
+		})
+	}
+}
