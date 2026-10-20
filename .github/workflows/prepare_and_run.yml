@@ -735,6 +735,11 @@ jobs:
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
+  run_kernel_floors:
+    # The hooks' root tests on the kernel floors, amd64 5.10 and arm64 6.6,
+    # each in a VM on a GitHub-hosted runner. It builds what it runs, so it
+    # needs no build job and runs for fork PRs too.
+    uses: ./.github/workflows/kernel-floors.yml
   run_golang_wsl:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_wsl.yml

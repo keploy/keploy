@@ -1,0 +1,19 @@
+# ARCH RELEASE UNIXCONN SHA256 URL...: the kernel each floor VM boots
+# (boot.sh), the Debian linux-image package it is unpacked from, by its sha256
+# and the URLs to fetch it from in order, and the way keploy's AF_UNIX report
+# (pkg/agent/hooks/linux/unixconn.go) must attach on it (check).
+#
+# amd64: 5.10, the floor keploy supports and Flipkart runs in production. This
+# is the exact kernel of the 5.10 CI hosts (Woodpecker's base-os: debian-11
+# agents print 5.10.0-46-cloud-amd64): Debian 11's cloud flavour, 5.10.262-1.
+# Bullseye's LTS ended, so the package is on the Debian archive's and the
+# snapshot service's mirrors only.
+#
+# arm64: 6.6, keploy's arm64 floor. From 6.4 arm64 attaches fentry and fexit
+# programs (ftrace direct calls), so a 6.6 kernel runs the same hooks as amd64
+# 5.10: unixconn attaches by fexit on both, and a kernel that made it fall back
+# to the syscall tracepoints would fail the floor. Debian 12's cloud flavour
+# from bookworm-backports, 6.6.13-1~bpo12+1, on the snapshot service only (the
+# backports suite has moved on).
+amd64 5.10.0-46-cloud-amd64 fexit 18d94781d1b3052e21967ac2262239e5f14fbf511d6c3e110629d7aa35340760 https://snapshot.debian.org/archive/debian-security/20260804T143235Z/pool/updates/main/l/linux-signed-amd64/linux-image-5.10.0-46-cloud-amd64_5.10.262-1_amd64.deb https://archive.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-image-5.10.0-46-cloud-amd64_5.10.262-1_amd64.deb
+arm64 6.6.13+bpo-cloud-arm64 fexit bc1857171a061040e6a0b7c5d5d248f7ac707ca3db61280d24e8eabc99debe7b https://snapshot.debian.org/archive/debian/20240327T204922Z/pool/main/l/linux-signed-arm64/linux-image-6.6.13%2Bbpo-cloud-arm64_6.6.13-1~bpo12%2B1_arm64.deb https://snapshot.debian.org/file/290084e69de5af90e0cbda16ba135b2755a74ed8

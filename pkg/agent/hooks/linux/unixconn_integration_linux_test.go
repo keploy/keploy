@@ -116,10 +116,17 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h.startUnixConn(ctx)
 	h.unixMu.Lock()
-	off := h.unix.off
+	off, fallback, why := h.unix.off, h.unix.fallback, h.unix.why
 	h.unixMu.Unlock()
 	if off != "" {
 		t.Fatalf("the AF_UNIX report did not load: %s", off)
+	}
+	// Which way the report attached on this kernel: the kernel-floor VMs
+	// (.github/scripts/kernel-floors) require the way kernels.txt names.
+	if fallback {
+		t.Logf("unixconn: attached at the syscall tracepoints on %s (fexit: %s)", kernelName(), why)
+	} else {
+		t.Logf("unixconn: attached by fexit on %s", kernelName())
 	}
 
 	// A member's own socket first, then the outsider's: the reports come in
