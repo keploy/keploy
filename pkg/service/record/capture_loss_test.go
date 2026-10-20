@@ -151,7 +151,7 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 	if fmt.Sprint(w.uncapturable) != "[test-2]" {
 		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
 	}
-	during := logs.FilterMessageSnippet("abandoned its handshake, or while the Docker daemon did not answer").All()
+	during := logs.FilterMessageSnippet("a TLS client that abandoned its handshake, a container the Docker daemon did not answer").All()
 	if len(during) != 1 || !strings.Contains(fmt.Sprint(during[0].ContextMap()["next_step"]), "trust keploy's CA") {
 		t.Fatalf("%d WARNs for the test case, want 1 with the CA-trust remedy: %+v", len(during), during)
 	}
@@ -362,7 +362,7 @@ func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t
 	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
 		t.Fatalf("%s; want nothing tainted and the recording kept", w)
 	}
-	charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
+	charged := logs.FilterMessageSnippet("a container the Docker daemon did not answer keploy's read of").All()
 	if len(charged) != 1 || fmt.Sprint(charged[0].ContextMap()["testCases"]) != "[test-1]" ||
 		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "(1 time(s)") ||
 		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "pg (postgres:16)") ||
@@ -375,5 +375,65 @@ func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t
 	}
 	if n := logs.FilterMessageSnippet("after the last test case").Len(); n != 0 {
 		t.Fatalf("%d lines charged the count after the last test case: the mocks charge it", n)
+	}
+}
+
+// A run of a downstream build's call program the kernel skipped after the
+// last test case is said as that, charged to no test case, never as an
+// abandoned TLS handshake with its CA remedy.
+func TestARecordingSaysAKernelSkipAfterItsLastTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	sk := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossKernelSkipCall, Count: n, What: "keploy_tcp_recvmsg_exit"}}
+	}
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, nil, nil, sk(1)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") {
+		t.Fatalf("%s; want the recording kept", w)
+	}
+	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
+	if len(late) != 1 || !strings.Contains(late[0].Message, "the kernel skipped runs of keploy's capture programs") || !strings.Contains(late[0].Message, "evidence, not a verdict") ||
+		strings.Contains(fmt.Sprint(late[0].ContextMap()["next_step"]), "trust keploy's CA") {
+		t.Fatalf("%d lines for the late skip, want one WARN about the kernel's skip, as evidence, without the CA remedy: %+v", len(late), late)
+	}
+}
+
+// A run of keploy's capture programs the kernel skipped while test cases
+// were recorded is evidence only (the kernel's recursion_misses, 5.12+):
+// one WARN names the test cases it covers, and the recording is not failed.
+// On a kernel without the count (5.10) the same recording ends the same,
+// without the WARN.
+func TestARecordingSaysAKernelSkipAsEvidence(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	sk := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: n, What: "keploy_tcp_connect"}}
+	}
+	run := func(answers []models.CaptureLosses) (bool, *observer.ObservedLogs) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: answers})
+		for _, n := range []string{"test-1", "test-2", "test-3"} {
+			w.afterTestCase(context.Background(), n)
+		}
+		w.afterTestCases(context.Background())
+		return w.finish("test-set-0"), logs
+	}
+	failed, logs := run([]models.CaptureLosses{nil, nil, sk(2), sk(2), sk(2)})
+	if failed {
+		t.Fatal("a recording failed on evidence")
+	}
+	said := logs.FilterMessageSnippet("evidence, not a verdict").All()
+	if len(said) != 1 || logs.Len() != 1 || fmt.Sprint(said[0].ContextMap()["testCases"]) != "[test-2 test-3]" ||
+		!strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), "during its recording the kernel skipped 2 capture run(s)") {
+		t.Fatalf("logged %+v, want one WARN naming test-2 and test-3 with the skip", logs.All())
+	}
+	// 5.10: no count, the same recording.
+	failed, logs = run([]models.CaptureLosses{nil})
+	if failed || logs.Len() != 0 {
+		t.Fatalf("without the count: failed %v, logged %+v; want the same recording, said nothing", failed, logs.All())
 	}
 }

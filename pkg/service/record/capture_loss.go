@@ -69,6 +69,15 @@ type captureWatch struct {
 	// first on already).
 	chargedNotJudged models.CaptureLosses
 	finalNotJudged   models.CaptureLosses
+	// evidenced are the test cases recorded while or after the kernel
+	// skipped runs of keploy's capture programs, and evidence what it
+	// skipped so far (models.CaptureLossKind.Evidence); chargedEvidence and
+	// finalEvidence are its charged and final counterparts. Evidence only,
+	// never a verdict: said, and no failure.
+	evidenced       []string
+	evidence        models.CaptureLosses
+	chargedEvidence models.CaptureLosses
+	finalEvidence   models.CaptureLosses
 	// unreadMocks is each saved mock, by name, whose stamp says the Docker
 	// daemon did not answer keploy's read of its container's configuration
 	// (models.ContainerUnreadMetadata), with the container named;
@@ -183,13 +192,20 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		test = w.base
 	}
 	w.last = now
-	judged, notJudged := now.Charged(w.base, w.base, test).Split()
+	charged := now.Charged(w.base, w.base, test)
+	judged, notJudged := charged.Split()
 	// Every loss so far: the reason names them all, not only this test
 	// case's own (an earlier one's failed handshake is still a reason the
 	// recording is incomplete), and each was charged to a test case by now.
 	allJudged, allNotJudged := now.Since(w.base).Split()
+	allEvidence := now.Since(w.base).Evidence()
 	w.charged = w.charged.Max(allJudged)
 	w.chargedNotJudged = w.chargedNotJudged.Max(allNotJudged)
+	w.chargedEvidence = w.chargedEvidence.Max(allEvidence)
+	if len(charged.Evidence()) > 0 {
+		w.evidenced = append(w.evidenced, name)
+		w.evidence = allEvidence
+	}
 	if len(judged) > 0 {
 		w.tainted = append(w.tainted, name)
 		w.lost = allJudged
@@ -284,6 +300,7 @@ func (w *captureWatch) afterTestCases(ctx context.Context) {
 		return
 	}
 	w.final, w.finalNotJudged = now.Since(w.base).Split()
+	w.finalEvidence = now.Since(w.base).Evidence()
 }
 
 // waitForReads waits, with the switch off, for the CA watch's reads still out
@@ -324,11 +341,20 @@ func (w *captureWatch) finish(testSetID string) bool {
 		// tell it lost one (an abandoned TLS handshake), or which container
 		// one reached (a container read the Docker daemon did not answer).
 		// The test cases are kept; the reason says which.
-		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture, while a TLS client abandoned its handshake, or while the Docker daemon did not answer keploy's read of a container they called: such calls are not in the mocks, or not as that container's ("+provenswitch.Env+"=1)",
+		w.logger.Warn("these test cases' calls may be missing from the mocks, or not be their container's: each was recorded during or after what the reason names, one of a call the application made that keploy cannot capture, a TLS client that abandoned its handshake, a container the Docker daemon did not answer keploy's read of, or a process keploy could not classify ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.uncapturable),
 			zap.String("reason", notJudged.NotJudgedText()),
 			zap.String("next_step", notJudged.NotJudgedRemedy()+", then re-record these test cases"))
+	}
+	if len(w.evidenced) > 0 {
+		// Evidence only (the kernel's recursion_misses, 5.12+): a kernel
+		// without the count records the same, and nothing fails.
+		w.logger.Warn("the kernel skipped runs of keploy's capture programs while these test cases were recorded: evidence, not a verdict; a call of theirs may be missing from the mocks, which their replay shows ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.Strings("testCases", w.evidenced),
+			zap.String("reason", w.evidence.EvidenceText()),
+			zap.String("next_step", models.KernelSkipRemedy))
 	}
 	var unmapped models.CaptureLosses
 	for name, what := range w.unreadMocks {
@@ -355,6 +381,12 @@ func (w *captureWatch) finish(testSetID string) bool {
 		case c.Kind.PerTest():
 			abandonedLate = append(abandonedLate, c)
 		}
+	}
+	if skippedLate := w.finalEvidence.Since(w.chargedEvidence); len(skippedLate) > 0 {
+		w.logger.Warn("the kernel skipped runs of keploy's capture programs after the last test case was recorded: evidence, not a verdict; no test case holds what they may have missed ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", skippedLate.EvidenceText()),
+			zap.String("next_step", models.KernelSkipRemedy))
 	}
 	if len(relayedLate) > 0 {
 		w.logger.Warn("the application sent data on connections keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",

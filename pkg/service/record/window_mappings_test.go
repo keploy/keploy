@@ -594,7 +594,7 @@ func TestStart_ProvenRecordChargesAnUnreadMockToItsTestCase(t *testing.T) {
 			if apart := logs.FilterMessageSnippet("mocks no test case holds").All(); len(apart) != 0 {
 				t.Fatalf("a mock test-1 holds was said to be no test case's: %+v", apart)
 			}
-			charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
+			charged := logs.FilterMessageSnippet("a container the Docker daemon did not answer keploy's read of").All()
 			if len(charged) != 1 || fmt.Sprint(charged[0].ContextMap()["testCases"]) != "[test-1]" ||
 				!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "pg (postgres:16)") {
 				t.Fatalf("%d WARNs for test cases, want one naming test-1, which holds the mock: %+v", len(charged), charged)
