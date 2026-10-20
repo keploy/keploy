@@ -195,11 +195,11 @@ func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
 	}
 }
 
-// Unix sockets keploy cannot see (a report that could not load, or stopped)
-// are a standing loss that leaves every test from then on NOT JUDGED, as a
-// call over one does: no mark takes it away, and it is no failure.
+// Unix sockets keploy cannot see (a report that loaded, and stopped) are a
+// standing loss that leaves every test from then on NOT JUDGED, as a call
+// over one does: no mark takes it away, and it is no failure.
 func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
-	unseen := CaptureLoss{Kind: CaptureLossUnixUnseen, Count: 1, What: "no trampoline"}
+	unseen := CaptureLoss{Kind: CaptureLossUnixUnseen, Count: 1, What: "keploy's report stopped: ring broken"}
 	if !unseen.Kind.NotJudged() {
 		t.Fatal("unix_unseen fails tests; want it to leave them not judged")
 	}
@@ -214,7 +214,7 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 	if len(judged) != 0 || len(notJudged) != 1 {
 		t.Fatalf("Split = %+v, %+v; want it not judged", judged, notJudged)
 	}
-	if text := notJudged.NotJudgedText(); !strings.Contains(text, "cannot see the application's calls over Unix sockets") || !strings.Contains(text, "no trampoline") {
+	if text := notJudged.NotJudgedText(); !strings.Contains(text, "report of the application's calls over Unix sockets stopped") || !strings.Contains(text, "ring broken") {
 		t.Fatalf("NotJudgedText = %q", text)
 	}
 	// Its remedy is keploy's report's: reaching the dependencies over TCP

@@ -92,12 +92,14 @@ const (
 	// at all. It is not a loss of something keploy saw: the test it taints
 	// is NOT JUDGED (NotJudged), never failed.
 	CaptureLossUnixSocket CaptureLossKind = "unix_socket"
-	// CaptureLossUnixUnseen (decision 20): keploy cannot see the
-	// application's calls over Unix sockets (a kernel that loads the report
-	// neither way, a report that stopped), so whether a test made one cannot
-	// be told. A state, not a count: a mark never takes it away (Since), and
-	// every test from then on carries it, NOT JUDGED, as a call over one
-	// would be. What says why.
+	// CaptureLossUnixUnseen (decision 20): keploy's report of the
+	// application's calls over Unix sockets stopped (it loaded, and then
+	// could not read on), so whether a test made one cannot be told. (A
+	// kernel that loads the report neither way is one WARN, not this: keploy
+	// does not support Unix sockets, and judges as without the report.) A
+	// state, not a count: a mark never takes it away (Since), and every test
+	// from then on carries it, NOT JUDGED, as a call over one would be. What
+	// says why.
 	CaptureLossUnixUnseen CaptureLossKind = "unix_unseen"
 	// CaptureLossUDPReply (4c c): the application's UDP other than DNS got a
 	// reply; keploy leaves such UDP where the application sends it, so it was
@@ -327,14 +329,11 @@ func (l CaptureLosses) NotJudgedText() string {
 // pycurl) sets CURLOPT_CAINFO itself, or its library's own option for it.
 const trustKeployCA = "Node.js: set NODE_EXTRA_CA_CERTS to keploy's CA certificate; the curl command line: --cacert, CURL_CA_BUNDLE or SSL_CERT_FILE; libcurl clients such as PHP's Guzzle and pycurl: CURLOPT_CAINFO (Guzzle's verify, pycurl's CAINFO), which libcurl does not take from those variables"
 
-// UnixUnseenRemedy is what to do when keploy cannot see the application's
-// calls over Unix sockets at all (CaptureLossUnixUnseen): its report of them
-// failed to load on this host (both ways: BPF trampolines, then the syscall
-// tracepoints, which keploy's other hooks already use outside DaemonSet and
-// target-container mode), or stopped while running. A state of keploy's, not
-// of the application's dependencies, so nothing done to them (reaching them
-// over TCP included) ends it. What says what failed.
-const UnixUnseenRemedy = "report the reason to keploy (its report of the application's Unix-socket calls failed to load here, or stopped; nothing done to the application or its dependencies changes that)"
+// UnixUnseenRemedy is what to do when keploy's report of the application's
+// calls over Unix sockets stopped while running (CaptureLossUnixUnseen). A
+// state of keploy's, not of the application's dependencies, so nothing done
+// to them (reaching them over TCP included) ends it. What says what failed.
+const UnixUnseenRemedy = "report the reason to keploy (its report of the application's Unix-socket calls stopped; nothing done to the application or its dependencies changes that)"
 
 // KernelSkipRemedy is what to do when the kernel skipped runs of keploy's
 // kernel programs (CaptureLossKernelSkip): a kernel that does not preempt
@@ -595,7 +594,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossUnixSocket:
 		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
 	case CaptureLossUnixUnseen:
-		return "keploy cannot see the application's calls over Unix sockets here, so whether this test or one before it made one cannot be told"
+		return "keploy's report of the application's calls over Unix sockets stopped, so whether this test or one before it made one cannot be told"
 	case CaptureLossServerFirst:
 		return fmt.Sprintf("the application's calls over a server-first protocol keploy has no parser for (its server greets first: SMTP, FTP, POP3) were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
 	case CaptureLossRefusedAtAccept:
