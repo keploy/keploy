@@ -178,9 +178,10 @@ func parseDiagMsg(b []byte) (diagTCP, error) {
 			var ti unix.TCPInfo
 			payload := attrs[unix.SizeofRtAttr:alen]
 			// The kernel's tcp_info may be longer (newer) than this one;
-			// one too short to carry the byte counts read here would be
-			// read as 0, unknown taken for nothing: it is no tcp_info.
-			if len(payload) >= int(unsafe.Offsetof(ti.Bytes_received)+unsafe.Sizeof(ti.Bytes_received)) {
+			// one too short to carry the byte counts read here (up to
+			// tcpi_notsent_bytes, Linux 4.6) would be read as 0, unknown
+			// taken for nothing: it is no tcp_info.
+			if len(payload) >= int(unsafe.Offsetof(ti.Notsent_bytes)+unsafe.Sizeof(ti.Notsent_bytes)) {
 				dst := unsafe.Slice((*byte)(unsafe.Pointer(&ti)), unsafe.Sizeof(ti))
 				copy(dst, payload)
 				d.info = &ti
