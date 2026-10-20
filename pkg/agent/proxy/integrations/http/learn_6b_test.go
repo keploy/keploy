@@ -89,6 +89,46 @@ func TestLearnMatchAStartUpValueOfTheSecondSetIsRefusedInEveryTest(t *testing.T)
 	}
 }
 
+// A set replayed against an app kept alive from the previous one: the
+// previous set's last test sent a value of the run (a client id minted at the
+// app's start), and the next set's start-up call carries it again, recorded
+// as the previous set's call was. The previous set's exchange, under a mock
+// name the next set numbers afresh, is no earlier place of the next set's: the
+// start-up call is paired as it would be with nothing served before it, never
+// refused as a use of the previous set's mock-3.
+func TestLearnMatchTheNextSetsStartUpIsNotExplainedByThePreviousSet(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	tr.Begin() // set 1's last test
+	ctx := learn.WithTracker(context.Background(), tr)
+	last := learnRecorded("mock-3", time.Second, "POST", "/v1/items", `{"client":"cid-7f3a9e21"}`, nil, `{"ok":true}`)
+	db := &learnDb{perTest: []*models.Mock{last}, observe: tr.ServedMock}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/items", `{"client":"cid-0b5d4c88"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+		t.Fatalf("set 1's last test's call is paired: served %v, miss %+v, err %v", served != nil, miss, err)
+	}
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Mock != "mock-3" {
+		t.Fatalf("set 1's last test does not keep its call: %+v", earlier)
+	}
+	tr.End()
+	tr.NewSet()
+	opts.LearnPool = true
+	boot := learnRecorded("mock-0", -time.Minute, "POST", "/v1/register", `{"client":"cid-7f3a9e21"}`, nil, `{"ok":true}`)
+	boot.TestModeInfo.Lifetime = models.LifetimeSession
+	bdb := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{boot}}, pool: map[time.Time]bool{boot.Spec.ReqTimestampMock: true}, observe: tr.ServedMock}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"client":"cid-0b5d4c88"}`, nil), bdb, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if served == nil || miss != nil {
+		why := ""
+		if miss != nil {
+			why = miss.res.Why
+		}
+		t.Fatalf("set 2's start-up call is not paired (%q): the previous set's mock-3 explained its client id", why)
+	}
+}
+
 // A set replayed against an app kept alive from the previous set (docker
 // compose reuses the stack across sets; --keep-app-alive) never makes its
 // start-up call again: its recorded start-up mock is never served, and the
