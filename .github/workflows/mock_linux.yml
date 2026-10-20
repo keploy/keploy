@@ -634,9 +634,10 @@ jobs:
       # on its way out is counted twice in tcpi_bytes_sent, once in the target
       # (pairbytes_localdrop_linux_test.go), in a network namespace of its own,
       # a netfilter rule dropping every 20th segment (deterministic).
-      # And the clean close whose FIN the wait finds unacknowledged
-      # (pairbytes_closes_linux_test.go), which needs a socket filter.
-      - name: Run the bytes wait's root tests (local drops, an unacknowledged FIN)
+      # And the clean close whose FIN the wait finds unacknowledged, and the
+      # orphan whose FIN is held unacknowledged, then let through
+      # (pairbytes_closes_linux_test.go), which need a socket filter.
+      - name: Run the bytes wait's root tests (local drops, unacknowledged FINs)
         run: |
           set -o pipefail
           go test -c -tags viper_bind_struct -o /tmp/proxy.test ./pkg/agent/proxy/
@@ -648,6 +649,12 @@ jobs:
           sudo /tmp/proxy.test -test.run "^TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss$" -test.count=5 -test.v | tee /tmp/lastack.out
           grep -q -- "--- PASS: TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss" /tmp/lastack.out
           if grep -q -- "--- SKIP" /tmp/lastack.out; then echo "::error::the LAST_ACK test skipped"; exit 1; fi
+          # The bytes wait on a closed connection whose orphan the filter
+          # holds from the application's FIN, or from the ACK of its own.
+          sudo /tmp/proxy.test -test.run "^(TestAnOrphansMoveRestartsTheBytesWaitsBudget|TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor)$" -test.count=5 -test.v | tee /tmp/orphanfin.out
+          grep -q -- "--- PASS: TestAnOrphansMoveRestartsTheBytesWaitsBudget" /tmp/orphanfin.out
+          grep -q -- "--- PASS: TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor" /tmp/orphanfin.out
+          if grep -q -- "--- SKIP" /tmp/orphanfin.out; then echo "::error::an orphan-FIN test skipped"; exit 1; fi
 
       - name: Run proven fire-and-forget e2e
         env:
