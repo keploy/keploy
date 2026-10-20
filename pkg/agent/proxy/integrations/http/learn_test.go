@@ -2318,7 +2318,10 @@ func TestLearnMatchAnswersAVariableInAnAnswerParkedOnDisk(t *testing.T) {
 
 // With no drift cache yet (a tracker before its first test: the app's
 // start-up calls in F), an earlier answer parked on disk is read back too,
-// and the learn step keeps working for the tests after it.
+// and the learn step keeps working for the tests after it. The start-up's
+// drifted exchange is the run's, an earlier place of every test of the set
+// (learn.Earlier.Run): the later test's value shares no word with it, which
+// would refuse that call for another reason (a word of it appears earlier).
 func TestLearnMatchReadsAParkedAnswerBeforeTheFirstTest(t *testing.T) {
 	h, n, opts := learnOn(t)
 	opts.LearnPool = true
@@ -2329,11 +2332,11 @@ func TestLearnMatchReadsAParkedAnswerBeforeTheFirstTest(t *testing.T) {
 	}
 	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{
 		parkedOnDisk(pool("pool-0", 0, "GET", "/v1/config", "", bigAnswer(`"region":"eu"`)), false),
-		pool("pool-1", time.Second, "POST", "/v1/register", `{"node":"n-1"}`, `{}`),
+		pool("pool-1", time.Second, "POST", "/v1/register", `{"node":"n-a"}`, `{}`),
 	}}}
 	tr := learn.NewTracker() // not begun: no drift cache
 	ctx := learn.WithTracker(context.Background(), tr)
-	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-2"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-b"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
 		t.Fatalf("start-up call: served %v miss %+v err %v", served, miss, err)
 	}
 	tr.Begin()
@@ -2352,6 +2355,30 @@ func TestLearnMatchReadsAParkedAnswerBeforeTheFirstTest(t *testing.T) {
 	case <-done:
 	case <-time.After(30 * time.Second):
 		t.Fatal("a later test's call never returned")
+	}
+}
+
+// A drifted start-up exchange is the run's, an earlier place of every test of
+// the set (learn.Earlier.Run): a later test's drifted value that holds a word
+// the start-up's held is refused, as one an earlier exchange of the test held
+// is, since keploy cannot tell whether it came from there; it is never
+// learned as noise. The reason names the set's start-up, not the test.
+func TestLearnMatchRefusesAWordTheSetsStartUpHeld(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	startUp := learnRecorded("pool-1", time.Second, "POST", "/v1/register", `{"node":"n-1"}`, nil, `{}`)
+	startUp.TestModeInfo.Lifetime = models.LifetimeSession
+	tr := learn.NewTracker()
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-2"}`, nil), &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{startUp}}}, n, opts); err != nil || served == nil || miss != nil {
+		t.Fatalf("start-up call: served %v miss %+v err %v", served, miss, err)
+	}
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", 2*time.Second, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{}`)}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"k-3"}`, nil), db, n, opts)
+	const why = "a word of it appears in the test set's start-up, in pool-1 at body.node"
+	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, why) {
+		t.Fatalf("served %v miss %+v err %v; want the call refused: %s", served, miss, err, why)
 	}
 }
 

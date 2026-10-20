@@ -781,10 +781,16 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			return ""
 		}
 		for _, e := range served {
+			// The run's exchange (Earlier.Run) is an earlier place of every
+			// test of the set: the set's start-up's.
+			where := "earlier in the test"
+			if e.Run {
+				where = "in the test set's start-up"
+			}
 			for _, s := range e.Seen {
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
-					return "a word of it appears earlier in the test, in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
+					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
 				}
 			}
 		}
