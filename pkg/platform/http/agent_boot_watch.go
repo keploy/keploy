@@ -364,8 +364,16 @@ const containerGone = -1
 // such container, and keploy never knew it to be there (see below).
 const containerNeverThere = -2
 
+// containerLeftNotRunning is containerExited's code for an agent container the
+// run of the application ended with still there, and not running: created and
+// never started, paused, or restarting, which the down after the run did not
+// remove (it failed, or was cut by its bound). Nothing starts it once the run
+// is over (see below).
+const containerLeftNotRunning = -3
+
 // AN AGENT'S CONTAINER THE ENGINE DOES NOT KNOW HAS ENDED ONLY ONCE IT WAS
-// THERE, OR ONCE THE RUN THAT WAS TO CREATE IT IS OVER.
+// THERE, OR ONCE THE RUN THAT WAS TO CREATE IT IS OVER; ONE THAT DOES NOT RUN,
+// ONCE IT HAS EXITED, OR ONCE THAT RUN IS OVER.
 //
 // The engine says the same of a container that is not there yet as of one
 // that is not there any more: `docker inspect` of a container docker compose
@@ -390,6 +398,14 @@ const containerNeverThere = -2
 //     hook wrote a file compose rejects, a service created before it hit a
 //     name conflict), or removed it before a look got to it; either way
 //     nothing will start it (containerNeverThere).
+//
+// The run's end ends, in the same way, the wait for a container the engine
+// has that does not run and has not exited: compose created it and did not
+// start it, or it is paused, or restarting, and the down after the run did
+// not remove it (the down failed, or was cut by its bound). It is the run that
+// starts it, and the run is over: nothing will start it now, whatever its
+// state (containerLeftNotRunning). One that runs is not ended by the run's
+// end: its agent can still answer.
 //
 // Until then it is one still to come, and the release waits for it, however
 // long compose takes to create it, as any wait for an agent's start waits for
@@ -417,18 +433,26 @@ type namedContainer struct {
 }
 
 // namedContainers is the agent containers this process's Setups named, by
-// name: at most one for each AgentClient that ran a docker Setup, kept for the
-// process's lifetime, which forgets its last one when it names another
-// (nameAgentContainer). A name is a Setup's own
-// (agentUtils.GenerateRandomContainerName), and its entry is new when the
-// Setup names it, so what is known of one is of its container. A name no
-// Setup named (a look at another container) notes nothing.
+// name. A name is a Setup's own (agentUtils.GenerateRandomContainerName), and
+// its entry is new when a Setup names it, of any client, so what is known of
+// one is of its container, not of an earlier container of that name. A name
+// no Setup named (a look at another container) notes nothing.
+//
+// What is kept is at most one entry for each AgentClient that ran a docker
+// Setup in this process, a few bytes each: the client forgets its last one
+// when it names another (nameAgentContainer), and only its own, so a later
+// client's entry of the same name is kept. Nothing tells a client's end, so
+// the last entry of each is kept for the process's lifetime: a process that
+// makes one client after another keeps one for each (enterprise's sandbox
+// makes one for each command it runs, not for each session).
 var namedContainers sync.Map // name -> *namedContainer
 
 // containerAt is the agent container each agent address (host:port) is
-// served from, as the Setup that named it set it up there: at most one for
-// each AgentClient too.
-var containerAt sync.Map // host:port -> name
+// served from, as the Setup that named it set it up there: its entry, not its
+// name, so that an answer of an earlier client's agent says nothing of a later
+// client's container that took the same name. At most one for each
+// AgentClient too.
+var containerAt sync.Map // host:port -> *namedContainer
 
 // namedContainerOf is what keploy has seen of container name; nil for one no
 // Setup named.
@@ -472,7 +496,7 @@ func containerRunEnded(name string) bool {
 // if keploy named the one served there, is there.
 func answeredAt(host string) {
 	if v, ok := containerAt.Load(host); ok {
-		knowContainer(v.(string))
+		v.(*namedContainer).known.Store(true)
 	}
 }
 
@@ -482,30 +506,36 @@ func answeredAt(host string) {
 // kept of the container it named before is forgotten.
 func (a *AgentClient) nameAgentContainer(name string) {
 	a.forgetAgentContainer()
-	namedContainers.Store(name, &namedContainer{})
+	c := &namedContainer{}
+	namedContainers.Store(name, c)
 	a.mu.Lock()
-	a.agentContainer = name
-	uri := a.conf.Agent.AgentURI
+	a.agentContainer, a.agentContainerEntry, a.agentContainerAt = name, c, ""
+	if uri := a.conf.Agent.AgentURI; uri != "" {
+		a.agentContainerAt = agentHost(uri)
+	}
+	at := a.agentContainerAt
 	a.mu.Unlock()
-	if uri != "" {
-		containerAt.Store(agentHost(uri), name)
+	if at != "" {
+		containerAt.Store(at, c)
 	}
 }
 
 // forgetAgentContainer forgets what keploy kept of the agent container this
-// client named last: the client sets up another, or none.
+// client named last, and its address: the client sets up another, or none.
+// Only what this client kept: an entry another client has made since, of the
+// same name or at the same address, is that client's.
 func (a *AgentClient) forgetAgentContainer() {
 	a.mu.Lock()
-	name := a.agentContainer
+	name, c, at := a.agentContainer, a.agentContainerEntry, a.agentContainerAt
+	a.agentContainerEntry, a.agentContainerAt = nil, ""
 	a.mu.Unlock()
-	if name == "" {
+	if c == nil {
 		return
 	}
-	namedContainers.Delete(name)
-	containerAt.Range(func(host, v any) bool {
-		containerAt.CompareAndDelete(host, name)
-		return true
-	})
+	namedContainers.CompareAndDelete(name, c)
+	if at != "" {
+		containerAt.CompareAndDelete(at, c)
+	}
 }
 
 // containerExited reports whether container name has ended (docker inspect's
@@ -513,7 +543,10 @@ func (a *AgentClient) forgetAgentContainer() {
 // again), and its exit code. For one the engine says is not there, it has
 // ended once keploy has known it to be there (containerGone), or once the run
 // that was to create it is over (containerNeverThere); before either, it is
-// one the engine has not created yet, which has not ended.
+// one the engine has not created yet, which has not ended. One that is there
+// and does not run, and has not exited (created, paused, restarting), has
+// ended once that run is over (containerLeftNotRunning): it is the run that
+// starts it. One being removed is gone. One that runs has not ended.
 func containerExited(cli *engineCLI, name string) func(context.Context) (int, bool) {
 	return func(ctx context.Context) (int, bool) {
 		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", name)
@@ -532,14 +565,21 @@ func containerExited(cli *engineCLI, name string) func(context.Context) (int, bo
 		}
 		knowContainer(name)
 		f := strings.Fields(string(out))
-		if len(f) != 2 || (f[0] != "exited" && f[0] != "dead") {
-			return 0, false
+		if len(f) >= 1 && f[0] == "removing" {
+			// Removed as keploy looks: the next look finds it gone.
+			return containerGone, true
 		}
-		code, err := strconv.Atoi(f[1])
-		if err != nil {
-			return 0, false
+		if len(f) == 2 && (f[0] == "exited" || f[0] == "dead") {
+			if code, err := strconv.Atoi(f[1]); err == nil {
+				return code, true
+			}
 		}
-		return code, true
+		if len(f) >= 1 && f[0] != "running" && containerRunEnded(name) {
+			cli.logger.Debug("the run of the application is over, and the keploy agent's container is there, not running; nothing will start it",
+				zap.String("container", name), zap.String("status", f[0]))
+			return containerLeftNotRunning, true
+		}
+		return 0, false
 	}
 }
 
@@ -705,6 +745,8 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 						why = "its container is gone (removed)"
 					case containerNeverThere:
 						why = "the application's run ended without its container"
+					case containerLeftNotRunning:
+						why = "the application's run ended with its container not running"
 					}
 					out <- startJudgment{verdict: bootExited, why: why, p: p}
 					return
@@ -843,6 +885,8 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan err
 				return errors.New("the keploy agent's container is gone (removed), and will not answer again")
 			case containerNeverThere:
 				return errors.New("the run of the application (docker compose up) ended without the keploy agent's container, which keploy never saw: compose did not create it (its output, or the run's error logged above, says why), or removed it before keploy saw it; the agent will not answer")
+			case containerLeftNotRunning:
+				return errors.New("the run of the application (docker compose up) ended with the keploy agent's container not running: compose created it and did not start it, or it is paused or restarting, and the down after the run did not remove it (docker inspect says its state; the run's error logged above, or compose's output, says why); nothing will start it now, and the agent will not answer")
 			}
 			if cause := agentExitCause(j.p.ExitCode); cause != nil {
 				return fmt.Errorf("%w: the keploy agent's container exited with code %d", cause, j.p.ExitCode)
