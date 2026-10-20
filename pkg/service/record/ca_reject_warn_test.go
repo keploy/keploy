@@ -42,12 +42,10 @@ func recordOff(t *testing.T, instr Instrumentation, names ...string) (bool, *obs
 	return w.finish("test-set-0", false), logs
 }
 
-// settle waits for the switch-off watch's reads asked for so far: a recording
-// whose reads keep up with its test cases.
+// settle waits for the watch's reads asked for so far (the CA watch's with
+// the switch off): a recording whose reads keep up with its test cases.
 func settle(w *captureWatch) {
-	if w.ca != nil {
-		w.ca.waitForReads()
-	}
+	w.waitForReads()
 }
 
 const caWarn = "TLS handshake(s) with keploy's proxy failed while this recording ran (a client that does not trust keploy's CA rejects keploy's certificate); those calls are not recorded"
@@ -564,8 +562,8 @@ func TestATestCaseWhoseReadNeverCameIsNamedNotChecked(t *testing.T) {
 func TestTheBaseReadIsGivenUpOnItsStall(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	clk := &stall.ManualClock{}
-	caReadClock = clk
-	t.Cleanup(func() { caReadClock = nil })
+	countReadClock = clk
+	t.Cleanup(func() { countReadClock = nil })
 	r := newWedgedReader(1, nil)
 	got := make(chan *captureWatch, 1)
 	go func() { got <- watchCaptureLosses(context.Background(), zap.NewNop(), r) }()

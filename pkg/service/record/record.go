@@ -1594,8 +1594,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	domainSet := telemetry.NewDomainSet()
 	var recordingStarted bool
 	// capWatch checks, under the proven switch, each saved test case against
-	// what the agent could not capture (capture_loss.go); nil until the agent
-	// is capturing, and then its methods are no-ops with the switch off.
+	// what the agent could not capture (capture_loss.go): each check is asked
+	// as the test case is saved, not waited for, and bounded, so one the
+	// agent never answers holds no test case up. nil until the agent is
+	// capturing; with the switch off it only reads for the CA WARN.
 	var capWatch *captureWatch
 	/*
 	 * WHEN CAPTURE ACTUALLY BEGAN, which is not when Start was entered.
@@ -1785,7 +1787,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 		if !composeAgent {
-			// Read before the frames drain: the agent stays up while this
+			// Asked before the frames drain, and made on the watch's own
+			// goroutine (waited for below): the agent stays up while this
 			// recording holds its streams open, even when the stop signal
 			// reached it too, and the app has stopped making calls.
 			if recordingStarted {

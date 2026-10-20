@@ -40,12 +40,15 @@ func pid(n uint64) models.CaptureLosses {
 	return models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: n}}
 }
 
+// record3 is a recording of three test cases whose checks keep up: each
+// made before the next test case is saved.
 func record3(t *testing.T, instr Instrumentation) (*captureWatch, bool, *observer.ObservedLogs) {
 	t.Helper()
 	core, logs := observer.New(zapcore.ErrorLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	return w, w.finish("test-set-0", false), logs
 }
@@ -119,6 +122,7 @@ func TestARecordingsFinalReadCountsEachTestCasesOwnHandshakes(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	if !w.finish("test-set-0", false) || w.String() != "tainted=[test-1,test-3] unverified=[]" {
@@ -143,6 +147,7 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	if w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[]" {
@@ -177,6 +182,7 @@ func TestARecordingSaysAServerFirstProtocolItPassedThrough(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	if w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[]" {
@@ -261,6 +267,7 @@ func TestARecordingThatCalledWhatKeployCannotCaptureWarnsAndDoesNotFail(t *testi
 	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, nil, db}})
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	if w.finish("test-set-0", false) {
 		t.Fatal("the recording failed for a call keploy cannot capture")
@@ -348,7 +355,9 @@ func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t
 	core, logs := observer.New(zapcore.WarnLevel)
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	w.afterTestCase(context.Background(), "test-1")
+	settle(w)
 	w.afterTestCase(context.Background(), "test-2")
+	settle(w)
 	marked := func(name string) *models.Mock {
 		return &models.Mock{Name: name, Spec: models.MockSpec{Metadata: map[string]string{models.ContainerUnreadMetadata: "container pg (postgres:16)"}}}
 	}
@@ -391,6 +400,7 @@ func TestARecordingSaysAKernelSkipAfterItsLastTestCase(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	if w.finish("test-set-0", false) {
@@ -418,6 +428,7 @@ func TestARecordingSaysAKernelSkipAsEvidence(t *testing.T) {
 		w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: answers})
 		for _, n := range []string{"test-1", "test-2", "test-3"} {
 			w.afterTestCase(context.Background(), n)
+			settle(w) // each check made before the next test case is saved
 		}
 		w.afterTestCases(context.Background())
 		return w.finish("test-set-0", false), logs
@@ -461,6 +472,7 @@ func TestARecordJudgedLaterKeepsItsLossesAsEvidence(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	if w.finish("test-set-0", false) {
@@ -496,6 +508,7 @@ func TestARecordJudgedLaterHandsOverWhatNoTestCaseHolds(t *testing.T) {
 	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, pid(2)}}
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
 	w.afterTestCase(context.Background(), "test-1")
+	settle(w) // made before the final read is asked
 	w.afterTestCases(context.Background())
 	if w.finish("test-set-0", true) {
 		t.Fatal("the recording failed on what a later pass judges")
@@ -516,6 +529,7 @@ func TestARecordNoPassJudgesFailsOnItsLosses(t *testing.T) {
 	instr := &countingInstr{answers: []models.CaptureLosses{nil, pid(1), pid(1)}}
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
 	w.afterTestCase(context.Background(), "test-1")
+	settle(w) // made before the final read is asked
 	w.afterTestCases(context.Background())
 	if !w.finish("test-set-0", false) {
 		t.Fatal("a recording no later pass judges did not fail on its loss")
@@ -534,6 +548,7 @@ func TestARecordWithTheSwitchOffIsAsBefore(t *testing.T) {
 	got := judgeLater(t)
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{pid(1)}})
 	w.afterTestCase(context.Background(), "test-1")
+	settle(w) // made before the final read is asked
 	if w.finish("test-set-0", false) || len(*got) != 0 {
 		t.Fatalf("with the switch off: failed or handed over %v", *got)
 	}
@@ -581,6 +596,7 @@ func TestARecordJudgedLaterSaysWhatFailsNothingAsBefore(t *testing.T) {
 		w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, abandoned(1), late}})
 		w.saved(unnamed)
 		w.afterTestCase(context.Background(), "test-1")
+		settle(w) // made before the final read is asked
 		w.afterTestCases(context.Background())
 		if w.finish("test-set-0", false) {
 			t.Fatalf("judged later %v: a recording that lost nothing judged failed", judged)
@@ -608,6 +624,7 @@ func TestARecordedLossThatTaintsLaterTestCasesIsCountedOnce(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil, nil, pid(1), pid(1), pid(1)}})
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	w.finish("test-set-0", false)
@@ -654,6 +671,7 @@ func TestARecordJudgedLaterHandsOverAnAgentStartedAgain(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	failed, incomplete := w.finishRun("test-set-0", false, "")
 	if failed || !incomplete || logs.Len() != 0 {
@@ -691,12 +709,14 @@ func TestARecordJudgedLaterIsIncompleteNotFailed(t *testing.T) {
 	judgeLater(t)
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil, pid(1)}})
 	w.afterTestCase(context.Background(), "test-1")
+	settle(w) // made before the final read is asked
 	w.afterTestCases(context.Background())
 	if fail, incomplete := w.finishRun("test-set-0", false, ""); fail || !incomplete {
 		t.Fatalf("finishRun = %v, %v; want not failed, incomplete", fail, incomplete)
 	}
 	w = watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
 	w.afterTestCase(context.Background(), "test-1")
+	settle(w) // made before the final read is asked
 	w.afterTestCases(context.Background())
 	if fail, incomplete := w.finishRun("test-set-0", false, ""); fail || incomplete {
 		t.Fatalf("finishRun = %v, %v with nothing lost; want neither", fail, incomplete)
@@ -732,6 +752,7 @@ func TestARecordJudgedLaterHandsOverAKernelSkipAsEvidence(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil, nil, sk, sk, sk}})
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
+		settle(w) // each check made before the next test case is saved
 	}
 	w.afterTestCases(context.Background())
 	if fail, incomplete := w.finishRun("test-set-0", false, ""); fail || incomplete {

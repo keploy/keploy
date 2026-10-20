@@ -11,9 +11,25 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
+
+// errCaptureCountSilent is why, under the proven switch, a read of the
+// agent's count was given up: keploy had the read's whole bound
+// (stall.HangBudget of its own runnable time) to run, and the agent did not
+// answer.
+var errCaptureCountSilent = fmt.Errorf("the keploy agent did not say whether it captured every call: keploy had %s of its own time to run, and it did not answer", stall.HangBudget)
+
+// errCaptureCountStopped is why a read the user's Ctrl+C ended (at an offer
+// of the stop's: utils.StopNow) is not read.
+var errCaptureCountStopped = errors.New("a Ctrl+C stopped keploy's wait for its agent to say whether it captured every call")
+
+// errCaptureCountNotRead is why a test case whose read had not come when the
+// recording ended (it was asked as finish began: a consumer of a record
+// drain that gave up) is not verified, and the final read, when it was asked
+// and no read since answered or failed.
+var errCaptureCountNotRead = errors.New("keploy's read of whether its agent captured every call had not come when the recording ended")
 
 // CaptureLossReader is an optional Instrumentation extension: every kind of
 // capture loss the agent has counted since it started (models.CaptureLosses).
@@ -35,17 +51,32 @@ type CaptureLossReader interface {
 // test case (JudgeLossesLater), it fails nothing, and hands what it found to
 // that pass. With the switch off, or an agent that cannot count, it does
 // nothing.
+//
+// The checks are countReads' (reads): the base read as capture begins, waited
+// for; then each test case's, asked as it is saved and not waited for, and
+// the final one, asked as the stop ends the capture; one at a time, in the
+// order asked. None is ended by the stop (only by the interrupt that gives
+// the stop's waits up, utils.StopNow), and each is given up once keploy had
+// stall.HangBudget of its own runnable time to run without an answer, so
+// an agent that never answers holds no read, and no stop, for longer: what a
+// read given up would have checked is then not verified, and the recording
+// fails, saying so; every test case and mock it saved is kept. A read that
+// lags counts every test case saved since the last together, each charged
+// with what it saw.
 type captureWatch struct {
 	logger *zap.Logger
-	reader CaptureLossReader
 	off    bool
 	base   models.CaptureLosses
 	// last is the count as the previous test case was checked, which a test
 	// case's own kinds (models.PerTest) count from; nil before the first.
 	last models.CaptureLosses
 	// baseErr is why the count could not be read when capture began; every
-	// test case is then unverified.
+	// test case is then unverified, and so is the recording's end (the final
+	// read is not made: afterTestCases).
 	baseErr error
+	// reads makes the test cases' and the final reads, under w.mu; nil with
+	// the switch off, or once the base read failed.
+	reads *countReads
 
 	mu         sync.Mutex
 	tainted    []string
@@ -65,6 +96,9 @@ type captureWatch struct {
 	charged  models.CaptureLosses
 	final    models.CaptureLosses
 	finalErr error
+	// finalRead: a read made once the final read was asked answered (final
+	// is its count); finalErr is then nil.
+	finalRead bool
 	// chargedNotJudged and finalNotJudged are charged's and final's
 	// counterparts for what leaves a test case without a verdict: an
 	// abandoned TLS handshake beyond the most the checks saw was after the
@@ -128,48 +162,48 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 		}
 		return w
 	}
-	w.reader = reader
 	// Begun before the count is read, so the agent that answers it is the
 	// one the recording's checks keep to.
 	if a, ok := instr.(agentInstanceWatcher); ok {
 		w.agent = a.WatchAgentInstance()
 	}
-	// No deadline of its own (rule 15): the agent's answer, or the
-	// connection's close, ends it. Not the stop: from here a stop drains what
+	w.reads = newCountReads(ctx, logger, reader, &w.mu, errCaptureCountSilent,
+		"whether it captured every call while this recording ran",
+		"the test cases it would check are then not verified, and the recording fails",
+		w.counted)
+	// Waited for, but not ended by the stop: from here a stop drains what
 	// the agent captured (Start), and each test case it saves is checked
 	// against this count, so a stop that cut the read short would fail the
-	// recording the user stopped as "not verified". A second interrupt, which
-	// gives the drain up, ends it.
-	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelRead()
-	go func() {
-		select {
-		case <-utils.StopNow():
-			cancelRead()
-		case <-readCtx.Done():
-		}
-	}()
-	base, err := reader.GetCaptureLosses(readCtx)
+	// recording the user stopped as "not verified". An agent that does not
+	// answer is given up on its bound (countReads.readNow), and every test
+	// case is then not verified.
+	base, err := w.reads.readNow()
 	switch {
 	case errors.Is(err, models.ErrCaptureLossesUnsupported):
 		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", zap.Error(err))
 		w.off = true
+		w.reads = nil
 		if w.agent != nil {
 			w.agent.Stop()
 			w.agent = nil
 		}
 	case err != nil:
+		if errors.Is(err, context.Canceled) {
+			// Its context is stop-proof: only utils.StopNow ends it.
+			err = errCaptureCountStopped
+		}
 		w.baseErr = err
+		w.reads = nil
 	default:
 		w.base = base.Without(models.CaptureLossContainerUnread)
 	}
 	return w
 }
 
-// afterTestCase checks the count as test case name is saved: an agent-life
-// loss since the recording began taints it, and a failed TLS handshake since
-// the previous check (models.PerTest) is its own. A check that failed leaves
-// the next one to count from the check before.
+// afterTestCase asks for the check of test case name, just saved
+// (countReads.askTest), and does not wait for it: an agent-life loss since
+// the recording began taints it, and a failed TLS handshake since the
+// previous check (models.PerTest) is its own (counted).
 func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 	if w == nil {
 		return
@@ -184,46 +218,69 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		w.mu.Unlock()
 		return
 	}
-	now, err := w.reader.GetCaptureLosses(context.WithoutCancel(ctx))
-	now = now.Without(models.CaptureLossContainerUnread) // charged by its mock (mapped)
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if err != nil {
-		w.unverified = append(w.unverified, name)
-		if w.readErr == nil {
+	w.reads.askTest(name)
+}
+
+// counted takes a check's answer (countReads.apply), w.mu held. Its test
+// cases (more than one when the reads lag) are each charged with what it
+// saw: one that failed, or was given up, leaves them not verified, and the
+// next one counts from the check before. One made once the final read was
+// asked is the final read's answer too (afterTestCases).
+func (w *captureWatch) counted(r countRead) {
+	if r.err != nil {
+		err := r.err
+		if errors.Is(err, context.Canceled) {
+			// Its context is stop-proof: only utils.StopNow ends it.
+			err = errCaptureCountStopped
+		}
+		w.unverified = append(w.unverified, r.names...)
+		if len(r.names) > 0 && w.readErr == nil {
 			w.readErr = err
+		}
+		if r.afterFinal && !w.finalRead {
+			w.finalErr = err
 		}
 		return
 	}
-	test := w.last
-	if test == nil {
-		test = w.base
+	now := r.losses.Without(models.CaptureLossContainerUnread) // charged by its mock (mapped)
+	if len(r.names) > 0 {
+		test := w.last
+		if test == nil {
+			test = w.base
+		}
+		w.last = now
+		charged := now.Charged(w.base, w.base, test)
+		if len(charged) > 0 {
+			for _, name := range r.names {
+				w.addEvidence(name, charged)
+			}
+		}
+		judged, notJudged := charged.Split()
+		// Every loss so far: the reason names them all, not only these test
+		// cases' own (an earlier one's failed handshake is still a reason the
+		// recording is incomplete), and each was charged to a test case by now.
+		allJudged, allNotJudged := now.Since(w.base).Split()
+		allEvidence := now.Since(w.base).Evidence()
+		w.charged = w.charged.Max(allJudged)
+		w.chargedNotJudged = w.chargedNotJudged.Max(allNotJudged)
+		w.chargedEvidence = w.chargedEvidence.Max(allEvidence)
+		if len(charged.Evidence()) > 0 {
+			w.evidenced = append(w.evidenced, r.names...)
+			w.evidence = allEvidence
+		}
+		if len(judged) > 0 {
+			w.tainted = append(w.tainted, r.names...)
+			w.lost = allJudged
+		}
+		if len(notJudged) > 0 {
+			w.uncapturable = append(w.uncapturable, r.names...)
+			w.notJudged = allNotJudged
+		}
 	}
-	w.last = now
-	charged := now.Charged(w.base, w.base, test)
-	if len(charged) > 0 {
-		w.addEvidence(name, charged)
-	}
-	judged, notJudged := charged.Split()
-	// Every loss so far: the reason names them all, not only this test
-	// case's own (an earlier one's failed handshake is still a reason the
-	// recording is incomplete), and each was charged to a test case by now.
-	allJudged, allNotJudged := now.Since(w.base).Split()
-	allEvidence := now.Since(w.base).Evidence()
-	w.charged = w.charged.Max(allJudged)
-	w.chargedNotJudged = w.chargedNotJudged.Max(allNotJudged)
-	w.chargedEvidence = w.chargedEvidence.Max(allEvidence)
-	if len(charged.Evidence()) > 0 {
-		w.evidenced = append(w.evidenced, name)
-		w.evidence = allEvidence
-	}
-	if len(judged) > 0 {
-		w.tainted = append(w.tainted, name)
-		w.lost = allJudged
-	}
-	if len(notJudged) > 0 {
-		w.uncapturable = append(w.uncapturable, name)
-		w.notJudged = allNotJudged
+	if r.afterFinal {
+		w.final, w.finalNotJudged = now.Since(w.base).Split()
+		w.finalEvidence = now.Since(w.base).Evidence()
+		w.finalRead, w.finalErr = true, nil
 	}
 }
 
@@ -285,11 +342,14 @@ func (w *captureWatch) addEvidence(name string, lost models.CaptureLosses) {
 	w.byTestCase[name] = w.byTestCase[name].Plus(lost)
 }
 
-// afterTestCases is the final read, once the app is stopped and before the
-// agent may stop: what was lost after the last test case was checked is
-// charged to no test case, so no test case's mocks miss it, and the
-// recording fails on it (design v14 §7.5: evidence charged to no test).
-// Without it a loss after the last test case went unsaid.
+// afterTestCases asks for the final read, once the app is stopped and before
+// the agent may stop (countReads.askFinal), and does not wait for it: what
+// was lost after the last test case was checked is charged to no test case,
+// so no test case's mocks miss it, and the recording fails on it (design v14
+// §7.5: evidence charged to no test). Without it a loss after the last test
+// case went unsaid. A test case's check made after it (the drain saves the
+// last test cases after it in a native or docker stop) charges that test
+// case instead.
 func (w *captureWatch) afterTestCases(ctx context.Context) {
 	if w == nil {
 		return
@@ -299,52 +359,46 @@ func (w *captureWatch) afterTestCases(ctx context.Context) {
 		return
 	}
 	if w.baseErr != nil {
-		return
-	}
-	// No deadline of its own (rule 15), as the base read: the agent's
-	// answer ends it, or the second interrupt, which gives the stop's waits
-	// up (the read is then "not verified", and the recording fails).
-	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelRead()
-	go func() {
-		select {
-		case <-utils.StopNow():
-			cancelRead()
-		case <-readCtx.Done():
+		// No count from the start to judge it against: what was lost after
+		// the last test case is not verified either, and a recording that
+		// saved no test case fails for it, as one whose final read failed.
+		w.mu.Lock()
+		if w.finalErr == nil {
+			w.finalErr = w.baseErr
 		}
-	}()
-	now, err := w.reader.GetCaptureLosses(readCtx)
-	now = now.Without(models.CaptureLossContainerUnread) // charged by its mock (mapped)
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if err != nil {
-		w.finalErr = err
+		w.mu.Unlock()
 		return
 	}
-	w.final, w.finalNotJudged = now.Since(w.base).Split()
-	w.finalEvidence = now.Since(w.base).Evidence()
+	w.reads.askFinal()
 }
 
-// waitForReads waits, with the switch off, for the CA watch's reads still out
-// (caRejectWatch.waitForReads): once the frame drains are over, while the
-// agent is up. With the switch on, the final read is waited for as it is made.
+// waitForReads waits for the reads still out (countReads.waitForReads, and
+// the CA watch's with the switch off): once the frame drains are over, while
+// the agent is up.
 func (w *captureWatch) waitForReads() {
-	if w == nil || !w.off {
+	if w == nil {
 		return
 	}
-	w.ca.waitForReads()
+	if w.off {
+		w.ca.waitForReads()
+		return
+	}
+	w.reads.waitForReads()
 }
 
-// finish says, at ERROR, which test cases were recorded while the agent could
-// not capture every call, or could not be checked, and reports whether the
-// recording is to fail for it: for that, or for realUncaptured (connections
-// to a mock.real destination keploy could neither capture nor relay). Where
-// a later pass judges each recorded test case (JudgeLossesLater), it fails
-// nothing: what it would fail on it says in one WARN, and hands to that pass
-// with the rest (RecordedLosses). What fails nothing either way (a call
-// keploy cannot capture, an abandoned handshake, a container not named,
-// data passed through, runs of keploy's programs the kernel skipped, a
-// process keploy could not classify) is said as it always is.
+// finish waits for the checks still out (countReads.wait, offering one more
+// Ctrl+C: every drain is over), then says, at ERROR, which test cases were
+// recorded while the agent could not capture every call, or could not be
+// checked, and reports whether the recording is to fail for it: for that, or
+// for realUncaptured (connections to a mock.real destination keploy could
+// neither capture nor relay). A check that had not come, or the final read,
+// is not verified: unknown is not none. Where a later pass judges each
+// recorded test case (JudgeLossesLater), it fails nothing: what it would
+// fail on it says in one WARN, and hands to that pass with the rest
+// (RecordedLosses). What fails nothing either way (a call keploy cannot
+// capture, an abandoned handshake, a container not named, data passed
+// through, runs of keploy's programs the kernel skipped, a process keploy
+// could not classify) is said as it always is.
 func (w *captureWatch) finish(testSetID string, realUncaptured bool) bool {
 	fail, _ := w.finishWith(testSetID, realUncaptured, "")
 	return fail
@@ -381,6 +435,7 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		(*judge)(l)
 		return false, l.Failing()
 	}
+	w.reads.wait(true)
 	w.mu.Lock()
 	failed := realUncaptured || realUnread != ""
 	// Unlocked before a judge is handed what was found.
@@ -390,6 +445,18 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 			w.mu.Unlock()
 		}
 	}()
+	if w.reads != nil {
+		w.reads.finished = true
+		if unread := w.reads.unreadLocked(); len(unread) > 0 {
+			w.unverified = append(w.unverified, unread...)
+			if w.readErr == nil {
+				w.readErr = errCaptureCountNotRead
+			}
+		}
+		if w.reads.finalAsked && !w.finalRead && w.finalErr == nil {
+			w.finalErr = errCaptureCountNotRead
+		}
+	}
 	if len(w.tainted) > 0 && judge == nil {
 		failed = true
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks ("+provenswitch.Env+"=1)",

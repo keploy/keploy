@@ -14,7 +14,8 @@ import (
 
 // watchThenFinal runs the watch over the reads in order: the base, then one
 // per step, where a step is a test case's check (its name) or the final read
-// (""). It returns whether the recording fails, and its ERRORs.
+// (""), each made before the next. It returns whether the recording fails,
+// and its ERRORs.
 func watchThenFinal(t *testing.T, instr *countingInstr, steps ...string) (bool, *observer.ObservedLogs) {
 	t.Helper()
 	core, logs := observer.New(zapcore.ErrorLevel)
@@ -22,9 +23,10 @@ func watchThenFinal(t *testing.T, instr *countingInstr, steps ...string) (bool, 
 	for _, s := range steps {
 		if s == "" {
 			w.afterTestCases(context.Background())
-			continue
+		} else {
+			w.afterTestCase(context.Background(), s)
 		}
-		w.afterTestCase(context.Background(), s)
+		settle(w) // each read made before the next step
 	}
 	return w.finish("test-set-0", false), logs
 }
