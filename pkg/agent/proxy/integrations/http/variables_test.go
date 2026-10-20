@@ -306,8 +306,16 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 			t.Fatal(err)
 		}
 		er := &http.Request{Method: "PUT", URL: encoded, Header: http.Header{"Content-Type": []string{"application/json"}}}
-		if off := h.buildHTTPMismatchReport(er, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil || off.ActualSummary != "PUT /orders/a/b" {
+		// The path decoded is two segments, neither the recorded one's
+		// (recval), so a report without content holes both: its path field
+		// diff's live value is the summary's path.
+		if off := h.buildHTTPMismatchReport(er, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil || off.ActualSummary != "PUT /orders/{}/{}" {
 			t.Fatalf("with the switch off a miss names its path decoded, as before, with no places: got %q %v", off.ActualSummary, off.VariablePlaces)
+		}
+		restore := logcontent.Set(true)
+		defer restore()
+		if off := h.buildHTTPMismatchReport(er, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil || off.ActualSummary != "PUT /orders/a/b" {
+			t.Fatalf("with the switch off and the content on a miss names its path decoded, as before, with no places: got %q %v", off.ActualSummary, off.VariablePlaces)
 		}
 	})
 	t.Run("buildHTTPMismatchReport with no closest mock takes the matcher's pool", func(t *testing.T) {
@@ -415,8 +423,15 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		if rep.ClosestMock != "mock-3" || len(rep.VariablePlaces) != 0 {
 			t.Fatalf("report closest %q places %v; want mock-3 and no place: mock-2 is on another route", rep.ClosestMock, rep.VariablePlaces)
 		}
-		if rep.ActualSummary != "GET /items/abcd" {
+		// No place, so the summary holes only the segment its path field
+		// diff finds is not the closest recording's (xyzw), and with the
+		// content on it names the call's path whole.
+		if rep.ActualSummary != "GET /items/{}" {
 			t.Fatalf("summary %q", rep.ActualSummary)
+		}
+		t.Cleanup(logcontent.Set(true))
+		if rep := h.buildHTTPMismatchReport(makeReq("GET", "/items/abcd"), nil, db, nil, nil, nil, diag); rep.ActualSummary != "GET /items/abcd" || len(rep.VariablePlaces) != 0 {
+			t.Fatalf("with the content on: summary %q places %v", rep.ActualSummary, rep.VariablePlaces)
 		}
 	})
 	t.Run("a report with no closest mock", func(t *testing.T) {
