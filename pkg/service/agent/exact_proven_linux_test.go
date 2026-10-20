@@ -1422,7 +1422,8 @@ func TestKeployTestOpensATestCaseWithItsVariablesInOneStep(t *testing.T) {
 // A proxy that keeps a replay's variables but cannot open a test with them in
 // one step does not open a keploy test case: begun apart, a call the test's
 // own mock answers between the two would bind in no scope of the test's, and
-// before a set's first test in the run's. Nothing of the test case is served.
+// before a set's first test in the run's. It is refused before anything of
+// it is settled, marked begun or served.
 func TestKeployTestRefusesATestCaseItCannotOpenWithItsVariables(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &keepingProxy{servingProxy: newServingProxy()}
@@ -1438,6 +1439,10 @@ func TestKeployTestRefusesATestCaseItCannotOpenWithItsVariables(t *testing.T) {
 		require.Error(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"own-1"}}, Variables: given}))
 	}
 	require.Zero(t, p.served, "a test case was opened apart from its variables")
+	a.scopeMu.Lock()
+	begun := a.testBegun["test-1"]
+	a.scopeMu.Unlock()
+	require.False(t, begun, "the refused test case was marked begun: it was refused after it was settled and served the worker's scope")
 	got := p.postTo(t, "/own-1", "x-1")
 	require.False(t, strings.HasPrefix(got, "200 "), "the refused test case's mock answered %s", got)
 }
