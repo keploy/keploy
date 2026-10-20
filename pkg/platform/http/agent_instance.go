@@ -33,8 +33,9 @@ func (t *instanceTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	res, err := base.RoundTrip(req)
 	if err == nil && res != nil {
-		// Any answer is the agent's: its container is there
-		// (containerKnown), whether or not the answer names its process.
+		// Any answer is the agent's: its container is there (known, on
+		// the entry of the Setup that set it up at this address), whether
+		// or not the answer names its process.
 		answeredAt(req.URL.Host)
 		// An answer that names no process says nothing about which one
 		// answered: an agent with the switch off, or one older than the

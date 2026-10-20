@@ -154,7 +154,7 @@ func TestAPausedContainerIsNotRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	running := containerRunning(newEngineCLI(zap.NewNop()), "keploy-v3")
+	running := containerRunning(newEngineCLI(zap.NewNop()), &namedContainer{name: "keploy-v3"})
 	for _, tc := range []struct {
 		status string
 		want   bool
@@ -389,36 +389,35 @@ func TestTheReleaseEndsOnTheRemovalOfAContainerKeployKnew(t *testing.T) {
 // A Setup's naming of its agent's container starts what is known of it
 // afresh: names are short and random, and a later Setup's container that
 // compose has not created yet is not an earlier one's that was removed, nor
-// one an earlier run ended without. The client forgets the container it
-// named before, and its address: what keploy keeps of agent containers is one
-// for each client, not one for each Setup a process ever made. A name no
-// Setup named notes nothing.
+// one an earlier run ended without. The client keeps the entry its naming
+// made, and forgets the container it named before, and its address: what
+// keploy keeps of agent containers outside its clients is an address for
+// each client, not one for each Setup a process ever made. A look at a name
+// the client did not name notes nothing on the one it did.
 func TestNamingTheAgentsContainerForgetsWhatWasKnownOfTheName(t *testing.T) {
 	name := fmt.Sprintf("keploy-v3-renamed-%d", os.Getpid())
 	a := clientFor("http://127.0.0.1:1")
 	t.Cleanup(a.forgetAgentContainer)
 	a.nameAgentContainer(name)
+	first := a.containerNamed(name)
 	answeredAt("127.0.0.1:1")
-	if !containerKnown(name) {
+	if !first.isKnown() {
 		t.Fatal("an answer at the agent's address does not make its container known")
 	}
-	runOfContainer(name, true)
+	first.noteRun(true)
 	a.nameAgentContainer(name)
-	if containerKnown(name) || containerRunEnded(name) {
+	if c := a.containerNamed(name); c == first || c.isKnown() || c.runOver() {
 		t.Fatal("a name a Setup took is still known, or its run over, from before it")
 	}
 
 	next := name + "-next"
 	a.conf.Agent.AgentURI = "http://127.0.0.1:2"
 	a.nameAgentContainer(next)
-	if namedContainerOf(name) != nil {
-		t.Fatal("the client named another container, and what was kept of the one before is still kept")
-	}
 	if _, ok := containerAt.Load("127.0.0.1:1"); ok {
 		t.Fatal("the client named another container, and its address before still names the one before")
 	}
 	answeredAt("127.0.0.1:2")
-	if !containerKnown(next) {
+	if !a.containerNamed(next).isKnown() {
 		t.Fatal("an answer at the agent's new address does not make its new container known")
 	}
 
@@ -428,23 +427,21 @@ func TestNamingTheAgentsContainerForgetsWhatWasKnownOfTheName(t *testing.T) {
 	b := clientFor("http://127.0.0.1:3")
 	t.Cleanup(b.forgetAgentContainer)
 	b.nameAgentContainer(next)
-	if containerKnown(next) {
+	later := b.containerNamed(next)
+	if later.isKnown() {
 		t.Fatal("another client named the same container, and it is known from the first client's")
 	}
 	// What a client forgets is only what it kept itself: the earlier client
-	// moving on to another container leaves the later client's, and its
-	// address, as they are. And an answer at the earlier client's address,
-	// from its agent, says nothing of the later client's container.
+	// moving on to another container leaves the later client's address as it
+	// is. And an answer at the earlier client's address, from its agent, says
+	// nothing of the later client's container.
 	answeredAt("127.0.0.1:2")
-	if containerKnown(next) {
+	if later.isKnown() {
 		t.Fatal("an answer at the earlier client's address made the later client's container known")
 	}
 	a.nameAgentContainer(name)
-	if namedContainerOf(next) == nil {
-		t.Fatal("a client named another container, and forgot the one another client named since")
-	}
 	answeredAt("127.0.0.1:3")
-	if !containerKnown(next) {
+	if !later.isKnown() {
 		t.Fatal("an answer at the later client's address does not make its container known, once the earlier client moved on")
 	}
 	// Nor does a client moving on forget the address a later client's agent
@@ -455,16 +452,142 @@ func TestNamingTheAgentsContainerForgetsWhatWasKnownOfTheName(t *testing.T) {
 	c.nameAgentContainer(third)
 	b.forgetAgentContainer()
 	answeredAt("127.0.0.1:3")
-	if !containerKnown(third) {
+	if !c.containerNamed(third).isKnown() {
 		t.Fatal("a client moved on, and forgot the address a later client's agent serves from")
 	}
 
-	other := name + "-not-named"
-	knowContainer(other)
-	runOfContainer(other, true)
-	if namedContainerOf(other) != nil || containerKnown(other) {
-		t.Fatal("a container no Setup named is kept")
+	other := a.containerNamed(name + "-not-named")
+	other.know()
+	other.noteRun(true)
+	if own := a.containerNamed(name); own == other || own.isKnown() || own.runOver() {
+		t.Fatal("a look at a container the client did not name noted on the one it did")
 	}
+
+	// A client that sets up an agent with no container (a native Setup)
+	// forgets the one it named, and its address: its watches watch no
+	// container, and its run is no container's.
+	a.forgetAgentContainer()
+	a.mu.Lock()
+	kept := a.agentContainer
+	a.mu.Unlock()
+	if kept != nil {
+		t.Fatal("the client forgot its container, and still has it")
+	}
+	if _, ok := containerAt.Load("127.0.0.1:2"); ok {
+		t.Fatal("the client forgot its container, and its address still names it")
+	}
+}
+
+// Two clients whose Setups drew the same name each have their own container:
+// a name is two random bytes, and a process can make one client after
+// another (enterprise's sandbox makes one for each command it runs), or have
+// two at once. What one client's run and one client's watch see is never
+// taken for the other's: the earlier client's run's end does not end the
+// later client's release, asked before the later client's run began, with
+// its container still to come; the earlier client's run's begin does not
+// undo the later client's run's end; and the earlier client's look at its own
+// container, while it is there, does not make the later client's known, so
+// that the later one, not created yet, is waited for, not taken for gone
+// once the earlier one is removed. The release goes through Run and
+// MakeAgentReadyForDockerCompose, as enterprise's callers drive it.
+func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
+	failingApp := func() *app.App {
+		return app.NewApp(zap.NewNop(), "exit 3", nil, models.SetupOptions{CommandType: string(utils.Native)})
+	}
+	release := func(c *AgentClient) <-chan error {
+		done := make(chan error, 1)
+		go func() { done <- c.MakeAgentReadyForDockerCompose(context.Background()) }()
+		return done
+	}
+	t.Run("the earlier client's run's end", func(t *testing.T) {
+		fastLooks(t)
+		e := newStandInEngine(t)
+		t.Setenv("KEPLOY_PROVEN", "")
+		name := fmt.Sprintf("keploy-v3-same-end-%d", os.Getpid())
+		earlier := clientFor(standInComposeAgent(t, e, nil).URL)
+		t.Cleanup(earlier.forgetAgentContainer)
+		earlier.nameAgentContainer(name)
+		later := clientFor(standInComposeAgent(t, e, nil).URL)
+		t.Cleanup(later.forgetAgentContainer)
+		later.nameAgentContainer(name)
+		earlier.apps.Store(uint64(0), failingApp())
+		if appErr := earlier.Run(context.Background(), models.RunOptions{}); appErr.AppErrorType != models.ErrUnExpected {
+			t.Fatalf("the earlier client's run ended %+v; want its failure, %s", appErr, models.ErrUnExpected)
+		}
+		done := release(later)
+		e.awaitLooks(t, "absent", 20, done)
+		e.set(t, "running")
+		if err := e.awaitRelease(t, done, 0); err != nil {
+			t.Fatalf("the later client's release ended with %v; want the agent's release, once its container runs", err)
+		}
+	})
+	t.Run("the earlier client's run's begin", func(t *testing.T) {
+		fastLooks(t)
+		e := newStandInEngine(t)
+		t.Setenv("KEPLOY_PROVEN", "")
+		name := fmt.Sprintf("keploy-v3-same-begin-%d", os.Getpid())
+		earlier := clientFor(standInComposeAgent(t, e, nil).URL)
+		t.Cleanup(earlier.forgetAgentContainer)
+		earlier.nameAgentContainer(name)
+		later := clientFor(standInComposeAgent(t, e, nil).URL)
+		t.Cleanup(later.forgetAgentContainer)
+		later.nameAgentContainer(name)
+		later.apps.Store(uint64(0), failingApp())
+		if appErr := later.Run(context.Background(), models.RunOptions{}); appErr.AppErrorType != models.ErrUnExpected {
+			t.Fatalf("the later client's run ended %+v; want its failure, %s", appErr, models.ErrUnExpected)
+		}
+		// The earlier client's run begins, and goes on until the test ends
+		// it. Its app says it has begun through a FIFO, whose read ends once
+		// the app has opened it and written: Run notes its run's begin
+		// before it starts the app.
+		began := filepath.Join(t.TempDir(), "began")
+		if err := syscall.Mkfifo(began, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		earlier.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec sleep 600", nil, models.SetupOptions{CommandType: string(utils.Native)}))
+		ctx, cancel := context.WithCancel(context.Background())
+		ran := make(chan models.AppError, 1)
+		go func() { ran <- earlier.Run(ctx, models.RunOptions{}) }()
+		t.Cleanup(func() {
+			cancel()
+			<-ran
+		})
+		if _, err := os.ReadFile(began); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.awaitRelease(t, release(later), endLooks); err == nil || !strings.Contains(err.Error(), "ended without the keploy agent's container") {
+			t.Fatalf("the later client's release ended with %v; want its run ended without the agent's container", err)
+		}
+	})
+	t.Run("the earlier client's look at its own container", func(t *testing.T) {
+		fastLooks(t)
+		e := newStandInEngine(t)
+		t.Setenv("KEPLOY_PROVEN", "")
+		name := fmt.Sprintf("keploy-v3-same-look-%d", os.Getpid())
+		// The earlier client's agent answers nothing: only its watch's look
+		// makes its container known.
+		earlier := clientFor(standInComposeAgent(t, e, func() int { return 0 }).URL)
+		t.Cleanup(earlier.forgetAgentContainer)
+		earlier.nameAgentContainer(name)
+		later := clientFor(standInComposeAgent(t, e, nil).URL)
+		t.Cleanup(later.forgetAgentContainer)
+		later.nameAgentContainer(name)
+		e.set(t, "running")
+		earlierDone := release(earlier)
+		e.awaitLooks(t, "running", 5, earlierDone)
+		e.set(t, "absent")
+		if err := e.awaitRelease(t, earlierDone, endLooks); err == nil || !strings.Contains(err.Error(), "the keploy agent's container is gone (removed)") {
+			t.Fatalf("the earlier client's release ended with %v; want its container gone", err)
+		}
+		// The later client's container is not created yet: its release
+		// waits for it.
+		done := release(later)
+		e.awaitLooks(t, "absent", 20, done)
+		e.set(t, "running")
+		if err := e.awaitRelease(t, done, 0); err != nil {
+			t.Fatalf("the later client's release ended with %v; want the agent's release, once its container runs", err)
+		}
+	})
 }
 
 // The release of the app ends once the run of the application that was to
@@ -581,7 +704,7 @@ func TestTheReleaseEndsOnceTheRunEndedLeavingTheAgentsContainerNotRunning(t *tes
 				t.Fatalf("the release ended with %v; want the run ended with the agent's container not running", err)
 			}
 
-			exited := containerExited(newEngineCLI(zap.NewNop()), name)
+			exited := containerExited(newEngineCLI(zap.NewNop()), a.containerNamed(name))
 			e.set(t, "running")
 			if code, ended := exited(context.Background()); ended {
 				t.Fatalf("containerExited = %d, %v of a container that runs, once its run is over; want not ended", code, ended)
@@ -611,7 +734,7 @@ func TestTheReleaseWaitsForTheContainerOfARunBegunAgain(t *testing.T) {
 	if appErr := a.Run(context.Background(), models.RunOptions{}); appErr.AppErrorType == "" {
 		t.Fatalf("the first run ended %+v; want its failure", appErr)
 	}
-	if !containerRunEnded(name) {
+	if !a.containerNamed(name).runOver() {
 		t.Fatal("setup: the first run is over, and is not noted so")
 	}
 
@@ -633,7 +756,7 @@ func TestTheReleaseWaitsForTheContainerOfARunBegunAgain(t *testing.T) {
 	if _, err := os.ReadFile(began); err != nil {
 		t.Fatal(err)
 	}
-	if containerRunEnded(name) {
+	if a.containerNamed(name).runOver() {
 		t.Fatal("the second run began, and the first one's end is still noted")
 	}
 
