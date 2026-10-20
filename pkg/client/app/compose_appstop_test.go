@@ -1387,3 +1387,99 @@ func TestTheRunsReadingAndAHaltsStopAreOfTheAppsService(t *testing.T) {
 		t.Fatalf("keploy's agent: running %v after %v; want stopped, as compose's abort stopped it", running, kills)
 	}
 }
+
+// keploy stops a compose app with a kill the docker daemon takes for a stop
+// (P101-c-A2 SF-3(b)): its own stop signal, or SIGINT when it declares none.
+// The daemon cancels a container's restart policy only for such a kill (and
+// SIGKILL); keploy's SIGINT to an app that declares stop_signal: SIGTERM
+// stopped it, the daemon started it again (restart: always, or on-failure on
+// a non-zero exit), and the set's end was read with it running, with nothing
+// said, its next set's start a no-op on a container the daemon had started
+// before the set was staged. keploy's start (the API's) arms the policy
+// again: an exit of its own after it is restarted as before.
+func TestTheComposeAppsStopIsOneTheDaemonTakesForAStop(t *testing.T) {
+	// The fake app stops on its signal at once: a stop that waits is a wrong one.
+	stallBudget(t, 2*time.Second)
+	for _, tc := range []struct {
+		restart, stopSignal, sent string
+		exitCode                  int
+	}{
+		{"always", "", "SIGINT", 0},
+		{"always", "SIGTERM", "SIGTERM", 0},
+		{"always", "TERM", "TERM", 0},
+		{"always", "15", "15", 0},
+		{"always", "SIGINT", "SIGINT", 0},
+		{"always", "SIGQUIT", "SIGQUIT", 0},
+		{"on-failure", "SIGTERM", "SIGTERM", 130},
+		{"unless-stopped", "SIGTERM", "SIGTERM", 0},
+		{"", "SIGTERM", "SIGTERM", 0},
+	} {
+		t.Run(tc.restart+"/"+tc.stopSignal, func(t *testing.T) {
+			d, app := appStack()
+			app.restart, app.stopSignal = tc.restart, tc.stopSignal
+			app.exitsOn = map[string]int{"SIGINT": tc.exitCode, "SIGTERM": tc.exitCode, "SIGQUIT": tc.exitCode}
+			a := stackApp(d, app.name)
+			if killed, err := a.StopComposeApp(context.Background()); err != nil || killed != "" {
+				t.Fatalf("the stop: said %q, err %v", killed, err)
+			}
+			running, restarts, kills := d.state(app.name)
+			if running || restarts != 0 || strings.Join(kills, ",") != tc.sent {
+				t.Fatalf("after keploy's stop the app's container runs %v (%d restarts by the daemon) after kills %v; want stopped by %s, not started again", running, restarts, kills, tc.sent)
+			}
+			if err := a.StartComposeApp(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.restart == "" {
+				return
+			}
+			d.exitOnItsOwn(app.name, 1)
+			if running, restarts, _ := d.state(app.name); !running || restarts != 1 {
+				t.Fatalf("after keploy's start an exit of its own: running %v, %d restarts; want its restart policy armed again", running, restarts)
+			}
+		})
+	}
+}
+
+// A compose app the docker daemon is starting again when keploy comes to stop
+// it exited on its own (the daemon calls it running): a halt, with that exit's
+// code, and nothing signalled. keploy's kill would cancel the restart, and
+// the app's own exit, after the set's last answer, was taken for keploy's
+// clean stop: the set passed.
+func TestAComposeAppTheDaemonIsRestartingIsAHalt(t *testing.T) {
+	for _, stopSignal := range []string{"", "SIGTERM"} {
+		t.Run("stop signal "+stopSignal, func(t *testing.T) {
+			stallBudget(t, 300*time.Millisecond)
+			d, app := appStack()
+			app.restart, app.stopSignal, app.holdRestart = "always", stopSignal, true
+			d.exitOnItsOwn(app.name, 3)
+			a := stackApp(d, app.name)
+			killed, err := a.StopComposeApp(context.Background())
+			if !errors.Is(err, models.ErrAppExitedOnItsOwn) || killed != "" {
+				t.Fatalf("the stop: said %q, err %v; want the app's own exit answered as a halt", killed, err)
+			}
+			if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+				t.Fatalf("the halt kept is %+v; want exit code 3", h)
+			}
+			if _, _, kills := d.state(app.name); len(kills) != 0 {
+				t.Fatalf("keploy signalled %v the app the daemon was starting again", kills)
+			}
+		})
+	}
+	// One keploy had stopped already, which the daemon is starting again
+	// (its stop was not one the daemon took for a stop), is no halt: keploy
+	// stops it again, which cancels the restart.
+	t.Run("keploy had stopped it", func(t *testing.T) {
+		d, app := appStack()
+		app.restart, app.holdRestart = "always", true
+		d.exitOnItsOwn(app.name, 0)
+		a := stackApp(d, app.name)
+		a.composeApp.stopping.Store(true)
+		killed, err := a.StopComposeApp(context.Background())
+		if err != nil || killed != "" || a.composeAppHalt() != nil {
+			t.Fatalf("the stop: said %q, err %v, halt %+v; want it stopped again, no halt", killed, err, a.composeAppHalt())
+		}
+		if running, _, kills := d.state(app.name); running || strings.Join(kills, ",") != "SIGINT" {
+			t.Fatalf("the app: running %v after %v; want its restart cancelled by keploy's interrupt", running, kills)
+		}
+	})
+}
