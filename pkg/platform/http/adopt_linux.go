@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -334,16 +336,33 @@ func heldPidfds() (map[int]bool, error) {
 	return held, nil
 }
 
-// A stop reads the daemons' progress every stopCheck, and escalates once
-// stopStallChecks reads in a row find none: the count the CLI stops its agent
-// by (utils.TeardownStallChecks), never a fixed grace. A press of Ctrl+C a
-// whole stopOffer after the stop's signal kills them at once. Variables for
-// the tests.
+// A stop reads the daemons' progress every stopCheck, and escalates once they
+// made none for stopStallChecks checks' worth of the time both they and keploy
+// could run (stopStall, utils.ExitClock): the count the CLI stops its agent by
+// (utils.TeardownStallChecks), never a fixed grace, and never the checks of a
+// daemon held off the CPU (a loaded host, its cgroup's quota spent), which
+// could not run to make progress. A press of Ctrl+C a whole stopOffer after
+// the stop's signal kills them at once. Variables for the tests.
 var (
 	stopCheck       = time.Second
 	stopStallChecks = uint64(utils.TeardownStallChecks)
 	stopOffer       = 5 * time.Second
 )
+
+// stopLooked, where a test sets it, is called at each check of a stop of the
+// daemons (the tests count them); atomic, as a test may reset it while a stop
+// it left runs on.
+var stopLooked atomic.Pointer[func()]
+
+// stopStall is the stall a stop of the daemons kills on: stopStallChecks
+// checks of stopCheck, of the time both they and keploy could run; the
+// longest Duration where that is longer.
+func stopStall() time.Duration {
+	if stopCheck > 0 && stopStallChecks > uint64(math.MaxInt64/int64(stopCheck)) {
+		return math.MaxInt64
+	}
+	return time.Duration(stopStallChecks) * stopCheck
+}
 
 // leftToKernel is what an earlier stop killed and found still there, held by
 // the kernel without progress, by pid and start time: no later stop waits for
@@ -371,12 +390,13 @@ type member struct {
 // utils.InterruptProcessTreeReached) that does not ignore SIGINT is acting
 // on it, and is not asked again, as a second signal ends many an application
 // mid-shutdown (Go's signal.NotifyContext once its stop is called). They are
-// killed only once they make no
-// progress on their way out across stopStallChecks reads -- a process or
+// killed only once they make no progress on their way out -- a process or
 // thread of theirs ending, a file or socket closed, storage read or written;
-// being scheduled is not, a daemon that ignores the request runs on -- and
-// waited for until gone, so a daemon one test set started is never judged in
-// the next and the application started again can bind its ports. While it
+// being scheduled is not, a daemon that ignores the request runs on -- for
+// stopStall of the time both they and keploy could run (utils.ExitClock: a
+// daemon held off the CPU accrues no stall), and waited for until gone, so a
+// daemon one test set started is never judged in the next and the
+// application started again can bind its ports. While it
 // waits, a drain does not give up on the run (utils.BeginDaemonStop): the
 // next test set starts once it is over. What the kernel holds after the kill
 // without progress is left to it, and said. The application served across
@@ -494,9 +514,10 @@ func members(pids []int) []member {
 }
 
 // stopMembers asks ms to stop, but those acting on keploy's interrupt
-// already, kills them once they make no progress on their way out (or at
-// once, at the press of Ctrl+C the stop offers), and waits until each has
-// exited, or is held by the kernel without progress. stallKill says why it
+// already, kills them once they make no progress on their way out for
+// stopStall of the time both they and keploy could run (or at once, at the
+// press of Ctrl+C the stop offers), and waits until each has exited, or is
+// held by the kernel without progress for as long. stallKill says why it
 // killed for want of progress; "" when it did not.
 func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string) {
 	pids := make([]int, 0, len(ms))
@@ -519,14 +540,22 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	defer notice.Withdraw()
 	t := time.NewTicker(stopCheck)
 	defer t.Stop()
+	procs := make([]utils.Reached, 0, len(ms))
+	for _, m := range ms {
+		procs = append(procs, utils.Reached{PID: m.pid, Start: m.start})
+	}
+	clock, release := utils.NewExitClock(procs)
+	defer release()
+	meter := stall.NewMeter(clock, stopStall())
+	defer meter.Stop()
 	var mark utils.ExitRatchet
 	mark.Advance(markExit(ms))
-	var quiet uint64
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
 		signalAll(ms, syscall.SIGKILL, true, nil)
-		killed, quiet = true, 0
+		killed = true
+		meter.Reset()
 		// What is left the kill ends, or the kernel holds: no press
 		// does more, and a closed channel read again would spin.
 		notice.Withdraw()
@@ -544,17 +573,20 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 			}
 			continue
 		}
+		if looked := stopLooked.Load(); looked != nil {
+			(*looked)()
+		}
 		if !killed && !offering && notice.Next() {
 			offering = true
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
 		if mark.Advance(markExit(ms)) {
-			quiet = 0
+			meter.Reset()
 			moved.Note()
 			continue
 		}
-		if quiet++; quiet < stopStallChecks {
+		if !meter.Expired() {
 			continue
 		}
 		if killed {
@@ -576,7 +608,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 		stalled := describe(cut)
 		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
 		if len(cut) > 0 {
-			stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, stopStallChecks)
+			stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out for %s after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, utils.StallRanSaid(meter.Grace()))
 		} else {
 			logger.Info("the daemons keploy killed ignored SIGTERM when it asked them to stop with it: they had no way out of their own to cut, so the set's end is judged",
 				zap.String("killed", describe(uncut)),

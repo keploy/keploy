@@ -20,11 +20,12 @@ import (
 // groups' leaders exiting, read on its pidfd; a docker run app's container
 // stopping: the daemon's wait, its main process's exit, its client's exit),
 // then a kill only when the app made no progress on its way out for
-// utils.StopStallBudget of keploy's runnable time (utils.WaitExitByEvents;
-// the watchdog's stall bound), or at the user's Ctrl+C, which the stop offers
-// once the run is interrupted. A starved host, keploy with it, takes as long
-// as it takes, and is no kill; an app starved alone has the stall bound to
-// show progress in. The drains wait for the stop (utils.BeginAppStop).
+// utils.StopStallBudget of the time both it and keploy could run
+// (utils.WaitExitByEvents, utils.ExitClock; the watchdog's stall bound), or
+// at the user's Ctrl+C, which the stop offers once the run is interrupted. A
+// starved host, or an app starved alone (its cgroup's quota spent), takes as
+// long as it takes, and is no kill: the stall accrues only as fast as the app
+// gets to run. The drains wait for the stop (utils.BeginAppStop).
 // Record and replay so stop the app the same way. A kill cuts the shutdown
 // short, and what the app would have done as it stopped is then not known,
 // so the stop says when it had to kill (AppError.StopKilled), and the set's

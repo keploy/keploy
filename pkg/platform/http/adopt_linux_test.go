@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/starvetest"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -239,9 +241,12 @@ func TestAdoptedDaemonsEndWithTheApplication(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	// Two quiet seconds escalate; the slow daemon's way out takes two, in
-	// steps a seventh as long.
-	stopCheck, stopStallChecks = 20*time.Millisecond, 100
+	// One quiet second escalates; the slow daemon's way out takes two, in
+	// steps of 0.3 s: twice the bound, so a stop that did not restart the
+	// stall at each of its steps would kill it, even counting the stall
+	// at half the wall time (a host so loaded that its daemons wait for a
+	// CPU half of it).
+	stopCheck, stopStallChecks = 20*time.Millisecond, 50
 
 	own := exec.Command("/bin/sh", "-c", "exec sleep 120")
 	if err := own.Start(); err != nil {
@@ -249,7 +254,8 @@ func TestAdoptedDaemonsEndWithTheApplication(t *testing.T) {
 	}
 	defer func() { _ = own.Process.Kill(); _ = own.Wait() }()
 
-	dir := t.TempDir()
+	// The slow daemon's last step out writes done: on no storage.
+	dir := starvetest.MemDir(t)
 	done := filepath.Join(dir, "done")
 	ready := func(name string) string { return filepath.Join(dir, name+".ready") }
 	polite := daemonize(t, `: > "$1"; exec sleep 120`, ready("polite"))
@@ -451,5 +457,21 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	}
 	if before > 1 {
 		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", before)
+	}
+}
+
+// The stall a stop of the daemons kills on is stopStallChecks checks of
+// stopCheck, and the longest Duration where that is longer: a test's "only a
+// press ends it" never wraps to a short one.
+func TestTheDaemonsStallIsItsChecksAndNeverWraps(t *testing.T) {
+	check, checks := stopCheck, stopStallChecks
+	t.Cleanup(func() { stopCheck, stopStallChecks = check, checks })
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	if got := stopStall(); got != 200*time.Millisecond {
+		t.Fatalf("10 checks of 20ms are %v, want 200ms", got)
+	}
+	stopCheck, stopStallChecks = 3, math.MaxUint64/2
+	if got := stopStall(); got != math.MaxInt64 {
+		t.Fatalf("a stall past the longest Duration is %v, want the longest", got)
 	}
 }
