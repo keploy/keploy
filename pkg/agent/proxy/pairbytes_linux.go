@@ -39,8 +39,8 @@ type pairTarget struct {
 	// sent is how much of want the application's socket had sent when the
 	// wait began (want less tcpi_notsent_bytes, and no less than what the
 	// proxy's side had acknowledged): bytes sent that never arrive were lost
-	// on their way, whatever ended the connection, and bytes not sent yet an
-	// abort drops unsent, as it would without keploy.
+	// on their way, whatever ended the connection; bytes not sent yet that a
+	// reset leaves missing cannot be told apart (pairReset).
 	sent uint64
 	// gone: the application's socket was already gone (closed, or reset)
 	// when the wait began. Its FIN, after everything it wrote, or a reset,
@@ -68,8 +68,10 @@ type pairTarget struct {
 // had not sent yet missing are unknown (dropped unsent, or sent later and
 // lost), as is any reset once its socket is gone; data is a capture loss, and
 // does not hold it back; so is a close with bytes unread, whenever a wait
-// holds it or not (pairClosing). A reset that reached the proxy's side before
-// the proxy closed it is still taken as no loss (pairReached), the older rule.
+// holds it or not (pairClosing). A reset that reached the proxy's side
+// before the proxy closed it is judged the same way (pairReached); one whose
+// application socket was gone when the wait began is still taken as no loss
+// (pairEnded), the older rule.
 //
 // It has no deadline of its own. It looks again at every read the proxy
 // begins or ends on a connection it keeps (inflight.go), at every close of a
@@ -264,15 +266,10 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		return true, nil
 	case ps.state == tcpClose:
 		// A reset reached the proxy's side before the proxy closed it (a
-		// close of its own is read before it begins: atClose). The
-		// kernel takes a reset only at the sequence number it expects next
-		// (RFC 5961), the application's snd_nxt: every byte the application
-		// had sent had arrived, and what it had not sent its own abort
-		// dropped, as it would have without keploy. (A reset a challenge
-		// ACK draws from the application's kernel breaks that premise, as
-		// pairReset says; this rule, older than the kept socket's, still
-		// takes it.)
-		return true, nil
+		// close of its own is read before it begins: atClose): what the
+		// application had sent when the wait began decides, as for any
+		// reset (pairReset).
+		return p.pairReset(t, ps.received)
 	case closed:
 		// Short of what was written, and the proxy closed it: what came
 		// after the close decides (pairAfterClose).
@@ -371,6 +368,7 @@ func (p *Proxy) pairAfterClose(t *pairTarget, at proxySide) (bool, error) {
 // the right edge of a SACKed hole is taken too. What the application had sent
 // when the wait began (t.sent) decides instead:
 //
+//   - a loss already charged on the connection: settled on it;
 //   - only its FIN missing: no loss (a FIN carries nothing);
 //   - fewer in than it had sent: bytes lost on their way. A loss;
 //   - all it had sent in: the rest was unsent when the wait began, and either
@@ -379,6 +377,11 @@ func (p *Proxy) pairAfterClose(t *pairTarget, at proxySide) (bool, error) {
 func (p *Proxy) pairReset(t *pairTarget, received uint64) (bool, error) {
 	switch {
 	case received >= t.want:
+		return true, nil
+	case t.pc.lost.Load():
+		// A loss already charged on the connection (its close tossed bytes
+		// unread), and so counted (pairLost), says it: nothing more to wait
+		// for.
 		return true, nil
 	case t.finCounted && t.want-received == 1:
 		return true, nil
@@ -552,9 +555,11 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 	case finIn(ps.state):
 		return true, nil
 	case ps.state == tcpClose:
-		// Its reset: taken, as pairReached takes one, for every byte it had
-		// sent having arrived, a premise a reset a challenge ACK draws
-		// breaks (pairReset).
+		// Its reset: taken as no loss, though with its socket gone what it
+		// had sent cannot be read, and a byte lost on its way just before
+		// the reset (which a challenge ACK draws) is missed: a known false
+		// green, kept on purpose for now, unlike pairReached's, which reads
+		// what the application had sent (pairReset).
 		return true, nil
 	case closed:
 		// The proxy closed its side while the application's was open (what
@@ -721,17 +726,44 @@ const unreadLost = "keploy's proxy closed a connection with bytes the applicatio
 
 // pairLost charges, once per connection, bytes the application wrote to pc
 // that the proxy never captured, or that it cannot tell it did, saying which
-// (msg).
+// (msg). pc.lost is set only once the loss is counted, and a caller that finds
+// the loss being charged by another waits for that count: whoever returns from
+// pairLost, or reads lost set, can rely on the count being in, so a wait that
+// settles on the loss never lets the test's read of its losses miss it.
 func (p *Proxy) pairLost(pc *pairedConn, msg string, fields ...zap.Field) {
-	if pc.noSession.Load() || !pc.lost.CompareAndSwap(false, true) {
+	if pc.noSession.Load() {
 		return
 	}
+	if !pc.lossMu.TryLock() {
+		if pairLostWaits != nil {
+			pairLostWaits()
+		}
+		pc.lossMu.Lock()
+		if pairLostWaited != nil {
+			pairLostWaited()
+		}
+	}
+	if pc.lost.Load() {
+		pc.lossMu.Unlock()
+		return
+	}
+	if pairLostCounting != nil {
+		pairLostCounting()
+	}
 	p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
+	pc.lost.Store(true)
+	pc.lossMu.Unlock()
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
 		zap.String("next_step", "keploy cannot vouch for the calls of the test that was open (under the proven switch, it and every later test are not verified); check the agent's log for why the connection ended"),
 	}, fields...)...)
 }
+
+// pairLostCounting, pairLostWaits and pairLostWaited are a test's: the first
+// runs while a loss is being charged, before it is counted; the second when a
+// caller finds one being charged and waits for it; the third once that wait is
+// over.
+var pairLostCounting, pairLostWaits, pairLostWaited func()
 
 // checkPairedBytes proves, once, on the canary's connection, that this
 // kernel's sock_diag gives the counts the wait reads (inet_diag and tcp_diag,
