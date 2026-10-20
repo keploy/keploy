@@ -418,6 +418,33 @@ func TestATestOpensCarryingWhatItsCallsInFlightBound(t *testing.T) {
 	}
 }
 
+// A new set begins the scope the next test's calls in flight bind in afresh,
+// as it begins the run's (NewVariableSet): a call of the previous set checked
+// in that scope before the set began binds stale in it, and the new set's
+// start-up is checked beside nothing that scope held, so it binds the run's
+// values freely.
+func TestANewSetBeginsTheScopeBegunEarlyAfresh(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mm := stagedManager(t, nil, nil)
+	mm.NewVariableSet()
+	ahead := mm.AheadVariables()
+	gen := ahead.Gen()
+	if _, _, _, ok := ahead.BindAll(gen, []models.VariableBinding{{Name: "order", Value: "V", Recorded: "o-0", Mock: "fetch", Place: "body.id"}}); !ok {
+		t.Fatal("the next test's call in flight did not bind in the scope begun early")
+	}
+	mm.NewVariableSet()
+	if _, _, stale, ok := ahead.BindAll(gen, []models.VariableBinding{{Name: "late", Value: "L", Recorded: "l-0", Mock: "fetch", Place: "body.id"}}); ok || !stale {
+		t.Fatalf("a call of the previous set, checked before the next began, bound in the next set's early scope: ok %v stale %v", ok, stale)
+	}
+	if got := mm.Variables().Beside(); len(got) != 0 {
+		t.Fatalf("the next set's start-up is checked beside %+v, of the previous set", got)
+	}
+	run := mm.Variables()
+	if _, _, _, ok := run.BindAll(run.Gen(), []models.VariableBinding{{Name: "run-session", Value: "V", Recorded: "s-0", Mock: "boot", Place: "body.session"}}); !ok {
+		t.Fatal("the next set's start-up was refused a value the previous set's early scope held")
+	}
+}
+
 // A test set staged without exact serving arms every test's recordings for
 // its start-up (setMocksWithWindowLocked): a start-up call one of them
 // answers binds that test's value, which cannot be told from the run's. The
