@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -493,6 +495,10 @@ func TestRunHoldsTheProjectAfterKeploysStopOfAnAppAttachedAlone(t *testing.T) {
 				container:       "app",
 				composeServices: []string{"app", "keploy-agent"},
 			}
+			// The project an earlier run read is not this run's: each run
+			// reads its own (composeAppProject).
+			stale := "an-earlier-runs-project"
+			a.composeApp.project.Store(&stale)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ran := make(chan models.AppError, 1)
@@ -500,6 +506,10 @@ func TestRunHoldsTheProjectAfterKeploysStopOfAnAppAttachedAlone(t *testing.T) {
 
 			for !strings.Contains(recordedLog(t, argvLog), "ARG up") {
 				time.Sleep(10 * time.Millisecond)
+			}
+			if p := a.composeApp.project.Load(); p != nil {
+				// Errorf: the run goes on to its end below.
+				t.Errorf("the run kept the compose project %q an earlier run read", *p)
 			}
 			if end == "the app's own exit, before the watch takes it" {
 				// The app exits on its own (no die event reaches the
@@ -737,5 +747,643 @@ func TestComposeAwaitTeardownIsDecidedUnderTheStopLock(t *testing.T) {
 	cancel()
 	if got := <-ended; got != composeTeardownCame {
 		t.Fatalf("an up that returned on keploy's stop under way ended %d; want held for keploy's teardown (%d)", got, composeTeardownCame)
+	}
+}
+
+// THE DOCKER DAEMON, AS KEPLOY'S STOP OF A COMPOSE APP MEETS IT.
+//
+// daemonModel holds containers as a docker daemon does, and answers by its
+// rules (moby v28): a reference is a full ID, else a name, else a unique ID
+// prefix (daemon.GetContainer); a list matches its label filters exactly
+// (MatchKVList); an events filter matches its labels exactly and its
+// container by a prefix of the ID or the name (FuzzyMatch). A kill with the
+// container's own stop signal, any kill of one that declares none, and
+// SIGKILL cancel its restart policy (killWithSignal, ExitOnNext); any kill
+// marks it stopped by hand (unless-stopped). An exit the policy restarts
+// leaves it restarting, which the daemon calls running, and its die is sent
+// while it is; the restart follows (at once here, unless held). A start
+// through the API arms the policy again and zeroes its restart count.
+type daemonModel struct {
+	docker.Client
+	mu      sync.Mutex
+	cs      []*modelContainer
+	signals []string // "<container's name>:<signal>", each kill as it came
+	subs    []modelSub
+	// starts counts the API's starts, by container name; inspects, the
+	// inspects, by the reference asked for.
+	starts, inspects map[string]int
+	// listErr, set, fails every list.
+	listErr error
+}
+
+type modelContainer struct {
+	id, name   string
+	labels     map[string]string
+	stopSignal string // declared stop signal ("" none)
+	restart    string // restart policy: "", "always", "on-failure", "unless-stopped"
+	// exitsOn: the code it exits with on each signal it acts on; SIGKILL
+	// always ends it, 137.
+	exitsOn         map[string]int
+	running         bool
+	restarting      bool
+	holdRestart     bool // a restart waits for finishRestart
+	canceled        bool // ExitOnNext
+	manuallyStopped bool
+	exitCode        int
+	restarts        int
+	stopWaiters     []chan struct{}
+}
+
+type modelSub struct {
+	ctx  context.Context
+	f    events.ListOptions
+	msgs chan events.Message
+}
+
+func modelSignal(s string) int {
+	s = strings.TrimPrefix(strings.ToUpper(s), "SIG")
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return map[string]int{"HUP": 1, "INT": 2, "QUIT": 3, "KILL": 9, "USR1": 10, "USR2": 12, "TERM": 15}[s]
+}
+
+func (d *daemonModel) add(c *modelContainer) *modelContainer {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if c.labels == nil {
+		c.labels = map[string]string{}
+	}
+	d.cs = append(d.cs, c)
+	return c
+}
+
+// lookup is daemon.GetContainer: a full ID, a name, a unique ID prefix.
+func (d *daemonModel) lookup(ref string) (*modelContainer, error) {
+	if ref == "" {
+		return nil, errdefs.InvalidParameter(errors.New("no container named"))
+	}
+	for _, c := range d.cs {
+		if c.id == ref {
+			return c, nil
+		}
+	}
+	for _, c := range d.cs {
+		if c.name == ref {
+			return c, nil
+		}
+	}
+	var found *modelContainer
+	for _, c := range d.cs {
+		if strings.HasPrefix(c.id, ref) {
+			if found != nil {
+				return nil, errors.New("multiple IDs found with provided prefix")
+			}
+			found = c
+		}
+	}
+	if found == nil {
+		return nil, errdefs.NotFound(fmt.Errorf("No such container: %s", ref))
+	}
+	return found, nil
+}
+
+func (c *modelContainer) attributes(extra map[string]string) map[string]string {
+	a := map[string]string{"name": c.name, "image": "img"}
+	for k, v := range c.labels {
+		a[k] = v
+	}
+	for k, v := range extra {
+		a[k] = v
+	}
+	return a
+}
+
+// emit sends a container event of c to every stream whose filters take it.
+func (d *daemonModel) emit(c *modelContainer, action events.Action, extra map[string]string) {
+	m := events.Message{Type: events.ContainerEventType, Action: action, TimeNano: time.Now().UnixNano(),
+		Actor: events.Actor{ID: c.id, Attributes: c.attributes(extra)}}
+	for _, s := range d.subs {
+		f := s.f.Filters
+		if f.Contains("type") && !f.ExactMatch("type", string(m.Type)) ||
+			f.Contains("event") && !f.ExactMatch("event", string(m.Action)) ||
+			f.Contains("label") && !f.MatchKVList("label", m.Actor.Attributes) ||
+			f.Contains("container") && !f.FuzzyMatch("container", m.Actor.ID) && !f.FuzzyMatch("container", m.Actor.Attributes["name"]) {
+			continue
+		}
+		select {
+		case s.msgs <- m:
+		case <-s.ctx.Done():
+		}
+	}
+}
+
+// exit ends c's process with code: monitor.go's handleContainerExit.
+func (d *daemonModel) exit(c *modelContainer, code int) {
+	c.exitCode = code
+	restart := false
+	if !c.canceled {
+		switch c.restart {
+		case "always":
+			restart = true
+		case "unless-stopped":
+			restart = !c.manuallyStopped
+		case "on-failure":
+			restart = code != 0
+		}
+	}
+	c.running, c.restarting = restart, restart
+	for _, w := range c.stopWaiters {
+		close(w)
+	}
+	c.stopWaiters = nil
+	d.emit(c, events.ActionDie, map[string]string{"exitCode": strconv.Itoa(code)})
+	if restart && !c.holdRestart {
+		d.restarted(c)
+	}
+}
+
+func (d *daemonModel) restarted(c *modelContainer) {
+	c.restarting, c.running = false, true
+	c.restarts++
+	d.emit(c, events.ActionStart, nil)
+}
+
+// finishRestart ends a held restart of the container named name: it runs
+// again, unless a kill cancelled the restart meanwhile.
+func (d *daemonModel) finishRestart(name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, _ := d.lookup(name)
+	if c.restarting {
+		d.restarted(c)
+	}
+}
+
+// exitOnItsOwn ends the container named name's process with code, as an app
+// that exits on its own does.
+func (d *daemonModel) exitOnItsOwn(name string, code int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, _ := d.lookup(name)
+	d.exit(c, code)
+}
+
+func (d *daemonModel) ContainerKill(_ context.Context, ref, signal string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, err := d.lookup(ref)
+	if err != nil {
+		return err
+	}
+	d.signals = append(d.signals, c.name+":"+signal)
+	if !c.running {
+		return errdefs.Conflict(fmt.Errorf("container %s is not running", c.id))
+	}
+	sig := modelSignal(signal)
+	if c.stopSignal == "" || sig == 9 || modelSignal(c.stopSignal) == sig {
+		c.canceled = true
+	}
+	c.manuallyStopped = true
+	if c.restarting {
+		// No process to signal: the monitor is told not to restart it.
+		if c.canceled {
+			c.restarting, c.running = false, false
+			for _, w := range c.stopWaiters {
+				close(w)
+			}
+			c.stopWaiters = nil
+		}
+		return nil
+	}
+	if sig == 9 {
+		d.exit(c, 137)
+		return nil
+	}
+	for s, code := range c.exitsOn {
+		if modelSignal(s) == sig {
+			d.exit(c, code)
+			break
+		}
+	}
+	return nil
+}
+
+func (d *daemonModel) ContainerWait(ctx context.Context, ref string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out, errs := make(chan container.WaitResponse, 1), make(chan error, 1)
+	c, err := d.lookup(ref)
+	if err != nil {
+		errs <- err
+		return out, errs
+	}
+	if !c.running {
+		out <- container.WaitResponse{StatusCode: int64(c.exitCode)}
+		return out, errs
+	}
+	w := make(chan struct{})
+	c.stopWaiters = append(c.stopWaiters, w)
+	go func() {
+		select {
+		case <-w:
+			out <- container.WaitResponse{}
+		case <-ctx.Done():
+			errs <- ctx.Err()
+		}
+	}()
+	return out, errs
+}
+
+func (d *daemonModel) ContainerStart(_ context.Context, ref string, _ container.StartOptions) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, err := d.lookup(ref)
+	if err != nil {
+		return err
+	}
+	if d.starts == nil {
+		d.starts = map[string]int{}
+	}
+	d.starts[c.name]++
+	if c.running {
+		return nil // 304: already started
+	}
+	c.running, c.restarting, c.canceled, c.manuallyStopped, c.restarts = true, false, false, false, 0
+	d.emit(c, events.ActionStart, nil)
+	return nil
+}
+
+func (d *daemonModel) ContainerStop(_ context.Context, ref string, _ container.StopOptions) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, err := d.lookup(ref)
+	if err != nil {
+		return err
+	}
+	d.signals = append(d.signals, c.name+":stop")
+	if c.running {
+		c.canceled, c.manuallyStopped = true, true
+		d.exit(c, 0)
+	}
+	return nil
+}
+
+func (d *daemonModel) ContainerInspect(_ context.Context, ref string) (container.InspectResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.inspects == nil {
+		d.inspects = map[string]int{}
+	}
+	d.inspects[ref]++
+	c, err := d.lookup(ref)
+	if err != nil {
+		return container.InspectResponse{}, err
+	}
+	status := "exited"
+	switch {
+	case c.restarting:
+		status = "restarting"
+	case c.running:
+		status = "running"
+	}
+	labels := map[string]string{}
+	for k, v := range c.labels {
+		labels[k] = v
+	}
+	return container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{ID: c.id, Name: "/" + c.name, RestartCount: c.restarts,
+			State: &container.State{Status: status, Running: c.running, Restarting: c.restarting, ExitCode: c.exitCode}},
+		Config: &container.Config{Labels: labels, StopSignal: c.stopSignal},
+	}, nil
+}
+
+func (d *daemonModel) ContainerList(_ context.Context, o container.ListOptions) ([]container.Summary, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.listErr != nil {
+		return nil, d.listErr
+	}
+	var out []container.Summary
+	for _, c := range d.cs {
+		if !o.All && !c.running {
+			continue
+		}
+		if o.Filters.Contains("label") && !o.Filters.MatchKVList("label", c.labels) {
+			continue
+		}
+		labels := map[string]string{}
+		for k, v := range c.labels {
+			labels[k] = v
+		}
+		out = append(out, container.Summary{ID: c.id, Names: []string{"/" + c.name}, Labels: labels})
+	}
+	return out, nil
+}
+
+func (d *daemonModel) Events(ctx context.Context, o events.ListOptions) (<-chan events.Message, <-chan error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	msgs, errs := make(chan events.Message, 16), make(chan error, 1)
+	d.subs = append(d.subs, modelSub{ctx: ctx, f: o, msgs: msgs})
+	return msgs, errs
+}
+
+// state is the container named name's: running (the daemon's word: a
+// restarting one runs), restarts, and the kills it got.
+func (d *daemonModel) state(name string) (running bool, restarts int, kills []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, _ := d.lookup(name)
+	for _, s := range d.signals {
+		if n, sig, _ := strings.Cut(s, ":"); n == name {
+			kills = append(kills, sig)
+		}
+	}
+	return c.running, c.restarts, kills
+}
+
+func (d *daemonModel) inspectsOf(ref string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.inspects[ref]
+}
+
+func (d *daemonModel) startsOf(name string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.starts[name]
+}
+
+// eventually fails t unless cond holds within a minute: a test's bound on a
+// wait the code under test may never end.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("not within a minute: %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// appStack is a daemon holding compose project "proj": keploy's agent
+// (keploy-v3-agent, its service keploy-agent) and the app's service "app",
+// its container as compose names it (proj-app-1, no container_name), which
+// exits 0 on SIGINT and on SIGTERM. app is the app's container.
+func appStack() (d *daemonModel, app *modelContainer) {
+	d = &daemonModel{}
+	d.add(&modelContainer{id: "a9e47c0de5", name: "keploy-v3-agent", running: true,
+		labels: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "keploy-agent"}})
+	app = d.add(&modelContainer{id: "f00dfeed01", name: "proj-app-1", running: true,
+		exitsOn: map[string]int{"SIGINT": 0, "SIGTERM": 0},
+		labels:  map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "app", composeOneOffLabelKey: "False"}})
+	return d, app
+}
+
+// stackApp is keploy's App of appStack's app, given by name (its
+// --container-name), its service found in the compose file keploy set up.
+func stackApp(d *daemonModel, name string) *App {
+	return &App{logger: zap.NewNop(), docker: d, kind: utils.DockerCompose, container: name,
+		composeService: "app", keployContainer: "keploy-v3-agent"}
+}
+
+// keploy's stop and start of a compose app are of the container compose made
+// for the app's service in the project of keploy's agent, whatever the name
+// keploy was given reaches (P101-b-n): the service's key, which names no
+// container (compose names it proj-app-1); its container_name; or a name that
+// reaches another stack's container, running or exited, which keploy leaves
+// alone. A one-off (`compose run`) of the service is not the app. Read by the
+// name, the stop found no container, took that for an app it had stopped, and
+// the set's end was read with the app running; or it interrupted the other
+// container, or took its exit for the app's halt.
+func TestTheComposeAppsStopIsOfTheContainerComposeMadeForItsService(t *testing.T) {
+	// The fake app stops on its signal at once: a stop that waits is a wrong one.
+	stallBudget(t, 2*time.Second)
+	for _, tc := range []struct {
+		name  string
+		given string
+		setup func(d *daemonModel, app *modelContainer)
+	}{
+		{"given the service's key", "app", nil},
+		{"given its container_name", "shop-app", func(_ *daemonModel, app *modelContainer) { app.name = "shop-app" }},
+		{"given a name another stack's running container has", "app", func(d *daemonModel, _ *modelContainer) {
+			d.add(&modelContainer{id: "0b0e00a1", name: "app", running: true, exitsOn: map[string]int{"SIGINT": 0},
+				labels: map[string]string{composeProjectLabelKey: "other", composeServiceLabelKey: "app"}})
+		}},
+		{"given a name an exited container has", "app", func(d *daemonModel, _ *modelContainer) {
+			d.add(&modelContainer{id: "0b0e00a1", name: "app", exitCode: 1,
+				labels: map[string]string{composeProjectLabelKey: "other", composeServiceLabelKey: "app"}})
+		}},
+		{"given a prefix of the app's ID", "f00d", nil},
+		{"a one-off of the service runs beside it", "app", func(d *daemonModel, _ *modelContainer) {
+			d.add(&modelContainer{id: "0e0ff0001", name: "proj-app-run-1a2b", running: true, exitsOn: map[string]int{"SIGINT": 0},
+				labels: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "app", composeOneOffLabelKey: "True"}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, app := appStack()
+			if tc.setup != nil {
+				tc.setup(d, app)
+			}
+			a := stackApp(d, tc.given)
+			killed, err := a.StopComposeApp(context.Background())
+			if err != nil || killed != "" {
+				t.Fatalf("the stop: said %q, err %v; want the app stopped on its interrupt", killed, err)
+			}
+			running, _, kills := d.state(app.name)
+			if running || strings.Join(kills, ",") != "SIGINT" {
+				t.Fatalf("the app's container: running %v after kills %v; want stopped by keploy's SIGINT: its set's end would be read with it running", running, kills)
+			}
+			d.mu.Lock()
+			all := append([]string(nil), d.signals...)
+			d.mu.Unlock()
+			if len(all) != 1 {
+				t.Fatalf("keploy signalled %v; want the app's container alone", all)
+			}
+			if a.composeAppHalt() != nil {
+				t.Fatalf("keploy took another container's exit for the app's halt: %+v", a.composeAppHalt())
+			}
+			if err := a.StartComposeApp(context.Background()); err != nil {
+				t.Fatalf("the start: %v", err)
+			}
+			if running, _, _ := d.state(app.name); !running || d.startsOf(app.name) != 1 {
+				t.Fatalf("after keploy's start the app's container runs %v (%d starts); want started once", running, d.startsOf(app.name))
+			}
+		})
+	}
+}
+
+// What keploy cannot tell for the app's container it does not stop, start or
+// take for an app that stopped: a scaled service (keploy stops one app), a
+// service with no container, a daemon that cannot list them, and an agent
+// whose project keploy cannot read are errors, each naming why, and nothing
+// is signalled. The set's end is then not read, rather than read with the
+// app running.
+func TestTheComposeAppsStopRefusesAContainerItCannotTell(t *testing.T) {
+	// The fake app stops on its signal at once: a stop that waits is a wrong one.
+	stallBudget(t, 2*time.Second)
+	for _, tc := range []struct {
+		name  string
+		setup func(d *daemonModel, app *modelContainer)
+		says  string
+	}{
+		{"a scaled service", func(d *daemonModel, _ *modelContainer) {
+			d.add(&modelContainer{id: "f00dfeed02", name: "proj-app-2", running: true, exitsOn: map[string]int{"SIGINT": 0},
+				labels: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "app"}})
+		}, `"app" runs 2 containers in compose project "proj"`},
+		{"no container of the service", func(_ *daemonModel, app *modelContainer) {
+			app.labels[composeServiceLabelKey] = "web"
+		}, `compose project "proj" has no container of the application's service "app"`},
+		{"a daemon that cannot list them", func(d *daemonModel, _ *modelContainer) {
+			d.listErr = errors.New("daemon busy")
+		}, "daemon busy"},
+		{"an agent whose project keploy cannot read", func(d *daemonModel, _ *modelContainer) {
+			d.cs[0].name = "gone"
+		}, `the compose project of keploy's agent's container "keploy-v3-agent"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, app := appStack()
+			tc.setup(d, app)
+			a := stackApp(d, "app")
+			killed, err := a.StopComposeApp(context.Background())
+			if err == nil || errors.Is(err, models.ErrAppExitedOnItsOwn) || !strings.Contains(err.Error(), tc.says) || killed != "" {
+				t.Fatalf("the stop: said %q, err %v; want an error that says %q", killed, err, tc.says)
+			}
+			d.mu.Lock()
+			signals := append([]string(nil), d.signals...)
+			d.mu.Unlock()
+			if len(signals) != 0 {
+				t.Fatalf("keploy signalled %v, a container it could not tell for the app's", signals)
+			}
+			if err := a.StartComposeApp(context.Background()); err == nil || !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("the start: err %v; want an error that says %q", err, tc.says)
+			}
+		})
+	}
+}
+
+// The watch ends the run on an exit of the app's container, found as compose
+// made it for the app's service in its project, whatever the name keploy was
+// given (the daemon's own filter rules apply); a die of another stack's
+// container of a service of the same name, or of a one-off of the app's
+// service, is not the app's, nor is one keploy asked for.
+func TestTheComposeAppsWatchIsOfTheContainerComposeMadeForItsService(t *testing.T) {
+	// The fake app stops on its signal at once: a stop that waits is a wrong one.
+	stallBudget(t, 2*time.Second)
+	d, app := appStack()
+	other := d.add(&modelContainer{id: "0b0e00a1", name: "app", running: true, exitsOn: map[string]int{"SIGINT": 0},
+		labels: map[string]string{composeProjectLabelKey: "other", composeServiceLabelKey: "app"}})
+	oneOff := d.add(&modelContainer{id: "0e0ff0001", name: "proj-app-run-1a2b", running: true,
+		labels: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "app", composeOneOffLabelKey: "True"}})
+	a := stackApp(d, "app")
+	ended := make(chan struct{}, 1)
+	stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+	defer stop()
+	eventually(t, "the watch asked the daemon for events", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.subs) > 0
+	})
+	// keploy's own stop of the app: no halt. The stop reads the app's
+	// container once; the watch reads it again for the stop's die, by the
+	// ID the event gives, before keploy starts it again.
+	if _, err := a.StopComposeApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the watch read the app's container for keploy's stop's die", func() bool { return d.inspectsOf(app.id) >= 2 })
+	if err := a.StartComposeApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	d.exitOnItsOwn(other.name, 1)
+	d.exitOnItsOwn(oneOff.name, 2)
+	d.exitOnItsOwn(app.name, 3)
+	select {
+	case <-ended:
+	case <-time.After(time.Minute):
+		t.Fatal("the app's container exited on its own and the run was not ended")
+	}
+	if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+		t.Fatalf("the halt kept is %+v; want the app's exit, code 3 (not another stack's 1, nor a one-off's 2)", h)
+	}
+}
+
+// A project keploy cannot read takes no exit for the app's: the watch does not
+// end the run on a die of a container of the app's service it cannot place
+// (another stack's, for all keploy can tell), and the stop at the set's end
+// reads the app's container itself.
+func TestTheComposeAppsWatchTakesNoExitWhoseProjectItCannotTell(t *testing.T) {
+	d, app := appStack()
+	d.cs[0].name = "gone" // keploy's agent cannot be read
+	core, logs := observer.New(zap.DebugLevel)
+	a := stackApp(d, "app")
+	a.logger = zap.New(core)
+	ended := make(chan struct{}, 1)
+	stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+	defer stop()
+	eventually(t, "the watch asked the daemon for events", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.subs) > 0
+	})
+	d.exitOnItsOwn(app.name, 3)
+	eventually(t, "the watch read the die", func() bool {
+		return logs.FilterMessageSnippet("an exit of its service's container is not taken for the application's").Len() > 0
+	})
+	select {
+	case <-ended:
+		t.Fatal("the run was ended on an exit keploy could not place in the app's project")
+	default:
+	}
+	if h := a.composeAppHalt(); h != nil {
+		t.Fatalf("a halt was kept: %+v", h)
+	}
+}
+
+// The app's project, once read, is kept for the run: keploy's stop and start
+// of the app still find it when its agent can no longer be read.
+func TestTheAppsComposeProjectIsKeptOnceRead(t *testing.T) {
+	stallBudget(t, 2*time.Second)
+	d, app := appStack()
+	a := stackApp(d, "app")
+	if _, err := a.StopComposeApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.cs[0].name = "gone"
+	d.mu.Unlock()
+	if err := a.StartComposeApp(context.Background()); err != nil {
+		t.Fatalf("the start, the agent no longer readable: %v", err)
+	}
+	if running, _, _ := d.state(app.name); !running {
+		t.Fatal("the app was not started again")
+	}
+}
+
+// The run's reading of how its up ended, and a halt's stop of the project,
+// are of the app's container as compose made it, and of keploy's agent's
+// project: not the container a name reaches, which can be another stack's
+// (whose project the halt would have stopped).
+func TestTheRunsReadingAndAHaltsStopAreOfTheAppsService(t *testing.T) {
+	d, app := appStack()
+	d.add(&modelContainer{id: "0b0e00a1", name: "app", running: true,
+		labels: map[string]string{composeProjectLabelKey: "other", composeServiceLabelKey: "app"}})
+	a := stackApp(d, "app")
+	if _, exited := a.composeAppExited(context.Background()); exited {
+		t.Fatal("an app that runs was read as exited")
+	}
+	d.exitOnItsOwn(app.name, 3)
+	if h, exited := a.composeAppExited(context.Background()); !exited || h.exitCode != 3 {
+		t.Fatalf("the app's container exited 3: read %+v, %v", h, exited)
+	}
+	if !a.stopComposeProject(context.Background()) {
+		t.Fatal("the app's project was not stopped")
+	}
+	if running, _, kills := d.state("app"); !running || len(kills) != 0 {
+		t.Fatalf("another stack's container was stopped (%v) on the app's halt", kills)
+	}
+	if running, _, kills := d.state("keploy-v3-agent"); running || strings.Join(kills, ",") != "stop" {
+		t.Fatalf("keploy's agent: running %v after %v; want stopped, as compose's abort stopped it", running, kills)
 	}
 }
