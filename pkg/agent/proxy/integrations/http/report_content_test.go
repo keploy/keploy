@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -371,5 +372,56 @@ func TestSummaryPath(t *testing.T) {
 		if got := summaryPath(in); got != want {
 			t.Errorf("summaryPath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// routeVariableMiss is, under the proven switch, the miss of a call whose
+// closest recording declares a test variable on its route (orderId at
+// url.path[1]) and differs from it in another segment: the call is
+// /orders/recval/items/kp-live-item, the recording
+// /orders/recval/items/kp-rec-item.
+func routeVariableMiss(t *testing.T) *models.MockMismatchReport {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	read := at(varMock("mock-2", "GET", "http://store/orders/recval/items/kp-rec-item", "", 200, `{}`,
+		models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
+	db := &varDb{perTest: []*models.Mock{read}}
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/recval/items/kp-live-item", ""))
+	if ok || diag == nil {
+		t.Fatalf("want a miss, got ok=%v diag=%+v", ok, diag)
+	}
+	return h.buildHTTPMismatchReport(makeReq("GET", "/orders/recval/items/kp-live-item"), nil, db, nil, nil, nil, diag)
+}
+
+// A miss on a route that declares a test variable names its path escaped,
+// with the variable's places written {} (withRoutePlaces), and by default the
+// segment its path diff finds differs is written {} too: the summary the
+// report keeps is the one its builder withheld, with the diff's values to
+// read, so adding the variable's places loses none of the diff's holes. Not
+// in the report, not through the agent's door, not in the miss's shape. With
+// the switch on the summary is the escaped path whole, as it was.
+func TestARouteVariableMissKeepsItsPathDiffHoles(t *testing.T) {
+	r := routeVariableMiss(t)
+	door := models.UnmatchedCall{Protocol: r.Protocol, ActualSummary: r.ActualSummary, Diff: r.Diff, NextSteps: r.NextSteps,
+		FieldDiffs: r.FieldDiffs, VariablePlaces: r.VariablePlaces, ContentWithheld: r.ContentWithheld}.ReportContent()
+	const want = "GET /orders/{}/items/{}"
+	for name, got := range map[string]string{"summary": r.ActualSummary, "door's summary": door.ActualSummary, "shape": models.MissShape(door)} {
+		if got != want {
+			t.Errorf("the default %s is %q, want %q", name, got, want)
+		}
+	}
+	for _, v := range []string{"kp-live-item", "kp-rec-item"} {
+		if text := reportText(t, r); strings.Contains(text, v) {
+			t.Errorf("the default report carries %q:\n%s", v, text)
+		}
+	}
+	if !slices.Contains(r.VariablePlaces, "url.path[1]") || !r.ContentWithheld {
+		t.Errorf("the report does not name the variable's place: %+v", r.VariablePlaces)
+	}
+	t.Cleanup(logcontent.Set(true))
+	if r := routeVariableMiss(t); r.ActualSummary != "GET /orders/recval/items/kp-live-item" || r.ContentWithheld ||
+		!slices.Contains(r.VariablePlaces, "url.path[1]") {
+		t.Errorf("with the switch on the summary is %q, places %v", r.ActualSummary, r.VariablePlaces)
 	}
 }

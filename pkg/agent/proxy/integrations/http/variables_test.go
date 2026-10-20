@@ -387,25 +387,47 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		}
 	})
 	t.Run("a call made again once the declaring mock was consumed", func(t *testing.T) {
-		for _, session := range [][]*models.Mock{nil, {varMock("mock-9", "GET", "http://store/health", "", 200, `{}`, nil)}} {
-			h := newHTTP()
-			db := &varDb{perTest: createAndReadBack("recval"), session: session}
-			if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"widget","item":"pen"}`)); !ok {
-				t.Fatal("the create should match")
+		for _, tc := range []struct {
+			session []*models.Mock
+			// withheld is the miss's shape by default: the variable's place
+			// written {}, and every segment the path diff against the
+			// closest recording finds differs. A closest GET /health
+			// differs at both of /orders/widget's segments.
+			withheld string
+		}{
+			{nil, "GET /orders/{}"},
+			{[]*models.Mock{varMock("mock-9", "GET", "http://store/health", "", 200, `{}`, nil)}, "GET /{}/{}"},
+		} {
+			miss := func() *models.MockMismatchReport {
+				h := newHTTP()
+				db := &varDb{perTest: createAndReadBack("recval"), session: tc.session}
+				if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"widget","item":"pen"}`)); !ok {
+					t.Fatal("the create should match")
+				}
+				if ok, _, _ := matchVar(t, h, db, liveReq("GET", "/orders/widget", "")); !ok {
+					t.Fatal("the read-back should match")
+				}
+				ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/widget", ""))
+				if ok {
+					t.Fatal("the call made again should miss: its mock was consumed")
+				}
+				return h.buildHTTPMismatchReport(makeReq("GET", "/orders/widget"), nil, db, nil, nil, nil, diag)
 			}
-			if ok, _, _ := matchVar(t, h, db, liveReq("GET", "/orders/widget", "")); !ok {
-				t.Fatal("the read-back should match")
-			}
-			ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/widget", ""))
-			if ok {
-				t.Fatal("the call made again should miss: its mock was consumed")
-			}
-			rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/widget"), nil, db, nil, nil, nil, diag)
-			if !slices.Contains(rep.VariablePlaces, "url.path[1]") {
-				t.Fatalf("with %d session mock(s): report phase %q closest %q places %v; want url.path[1], which holds orderId's value", len(session), rep.MatchPhase, rep.ClosestMock, rep.VariablePlaces)
-			}
-			if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, VariablePlaces: rep.VariablePlaces}); got != "GET /orders/{}" {
-				t.Fatalf("the miss's shape is %q, want GET /orders/{}", got)
+			for _, on := range []bool{false, true} {
+				restore := logcontent.Set(on)
+				rep := miss()
+				restore()
+				if !slices.Contains(rep.VariablePlaces, "url.path[1]") {
+					t.Fatalf("with %d session mock(s): report phase %q closest %q places %v; want url.path[1], which holds orderId's value", len(tc.session), rep.MatchPhase, rep.ClosestMock, rep.VariablePlaces)
+				}
+				want := tc.withheld
+				if on {
+					// The content on, only the variable's place is {}.
+					want = "GET /orders/{}"
+				}
+				if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, VariablePlaces: rep.VariablePlaces}); got != want {
+					t.Fatalf("with %d session mock(s), content %v: the miss's shape is %q, want %s", len(tc.session), on, got, want)
+				}
 			}
 		}
 	})
@@ -437,14 +459,22 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 	t.Run("a report with no closest mock", func(t *testing.T) {
 		read := at(varMock("mock-2", "GET", "http://store/orders/recval", "", 200, `{}`,
 			models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
-		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil)
+		key, places := routeSummary(makeReq("GET", "/orders/kqzxwvbn"), "GET /orders/kqzxwvbn", nil, []*models.Mock{read}, nil)
+		if !slices.Equal(places, []string{"url.path[1]"}) || key != "GET /orders/kqzxwvbn" {
+			t.Fatalf("summary %q, places %v; want the route's url.path[1]", key, places)
+		}
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: key}, places)
 		if !slices.Equal(r.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("places %v; want the route's url.path[1]", r.VariablePlaces)
 		}
 		for _, off := range []*http.Request{makeReq("GET", "/items/kqzxwvbn"), makeReq("DELETE", "/orders/kqzxwvbn"), makeReq("GET", "/orders/kqzxwvbn/lines")} {
-			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil)
-			if r.VariablePlaces != nil {
-				t.Fatalf("%s %s is off mock-2's route, yet carries places %v", off.Method, off.URL.Path, r.VariablePlaces)
+			actual := off.Method + " " + off.URL.Path
+			key, places := routeSummary(off, actual, nil, []*models.Mock{read}, nil)
+			if places != nil || key != actual {
+				t.Fatalf("%s %s is off mock-2's route, yet is named %q with places %v", off.Method, off.URL.Path, key, places)
+			}
+			if r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: actual}, places); r.VariablePlaces != nil || r.ActualSummary != actual {
+				t.Fatalf("%s %s with no place is changed: %+v", off.Method, off.URL.Path, r)
 			}
 		}
 	})

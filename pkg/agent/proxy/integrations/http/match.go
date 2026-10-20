@@ -2013,15 +2013,17 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// same order the matcher saw. Per-test FIRST, session second.
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			key, places := routeSummary(request, actualKey, nil, nil, variableTable(mockDb))
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, key).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb))
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), places)
 		}
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
-			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			key, places := routeSummary(request, actualKey, nil, nil, variableTable(mockDb))
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, key).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb))
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), places)
 		}
 		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
 		mocks = append(mocks, perTestMocks...)
@@ -2051,9 +2053,10 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 
 	if candidateCount == 0 && len(schemaSurvivors) == 0 {
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		key, places := routeSummary(request, actualKey, nil, nil, variableTable(mockDb))
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, key).
 			WithDestination(dest).
-			WithPhase(models.MatchPhaseNoMocks, 0).Build(), request, nil, nil, variableTable(mockDb))
+			WithPhase(models.MatchPhaseNoMocks, 0).Build(), places)
 	}
 
 	// Does anything the matcher just compared against even target this
@@ -2081,8 +2084,8 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
-		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount),
-			request, diag.closest, comparedPool, variableTable(mockDb))
+		key, places := routeSummary(request, actualKey, diag.closest, comparedPool, variableTable(mockDb))
+		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, key, diag, comparedDests, phase, candidateCount), places)
 	}
 	closestPool := httpMocks
 	if diag != nil && diag.live != nil {
@@ -2095,10 +2098,11 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	closestMock := pickClosestCandidate(request, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		key, places := routeSummary(request, actualKey, nil, comparedPool, variableTable(mockDb))
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, key).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDests).
-			WithPhase(phase, candidateCount).Build(), request, nil, comparedPool, variableTable(mockDb))
+			WithPhase(phase, candidateCount).Build(), places)
 	}
 	// The call the field diffs are computed from: under the proven switch a
 	// closest mock with variables is diffed with its recorded values at their
@@ -2160,7 +2164,8 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	// into the report YAML and the platform API.
 	redactFieldDiffs(fieldDiffs, closestMock.Noise)
 
-	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+	key, places := routeSummary(request, actualKey, closestMock, comparedPool, variableTable(mockDb))
+	b := mismatch.NewReport(mismatch.ProtocolHTTP, key).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
@@ -2177,7 +2182,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// of the misleading legacy "headers or body differ".
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
-	return withRoutePlaces(b.Build(), request, closestMock, comparedPool, variableTable(mockDb))
+	return withRoutePlaces(b.Build(), places)
 }
 
 // comparedDestinations returns the upstream authority of every mock in the
