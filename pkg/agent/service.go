@@ -248,17 +248,15 @@ type InFlightReader interface {
 // written to it when the wait began. Bytes that can no longer arrive (the
 // connection was reset, or the proxy closed it, first) are a capture loss
 // (models.CaptureLossAppBytesLost). No deadline of its own: each read the
-// proxy makes on such a connection, and its close, wakes it; so do looks of
-// its own at the orphaned socket of one the proxy closed while the
-// application's FIN is still on its way to it, which nothing else wakes it
-// for, and it answers unknown only once the agent could run for a hang
-// budget with nothing it waits on moving. A proxy that cannot tell answers
-// an error wrapping models.ErrProxyConnsUnsupported.
+// proxy makes on such a connection, and its close, wakes it; so does what
+// comes to one the proxy closed, whose socket it keeps open past the close
+// until the application's FIN, its reset or a byte of data. A proxy that
+// cannot tell answers an error wrapping models.ErrProxyConnsUnsupported.
 type PairedBytesWaiter interface {
 	WaitPairedBytes(ctx context.Context, appConns uint64) error
 	// PairedBytesProgress counts the waits' progress (a waited-for
-	// connection received more, saw its orphan change state, or was
-	// resolved), for a watchdog: it only ever grows.
+	// connection received more, or was resolved), for a watchdog: it only
+	// ever grows.
 	PairedBytesProgress() uint64
 }
 

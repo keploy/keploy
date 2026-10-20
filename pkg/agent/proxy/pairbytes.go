@@ -5,8 +5,6 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
-
-	"go.keploy.io/server/v3/utils/stall"
 )
 
 // The bytes on the application's connections that are already the proxy's
@@ -43,7 +41,52 @@ type pairedConn struct {
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
+	// kept: the proxy's close kept its socket open past the close
+	// (keepAfterClose), reading what the application sends after; end is
+	// what came, once the read has ended (ended).
+	kept atomic.Bool
+	end  atomic.Pointer[afterClose]
+	// handlerDone: its handler was done with it (remove) while its socket
+	// was kept: the read's end forgets it. Under pairedConns.mu.
+	handlerDone bool
+	// resetAtClose: the proxy's close reset it, with bytes unread (charged
+	// then): nothing that came after was taken.
+	resetAtClose atomic.Bool
+	// lingerReset: its handler reset it as it closed it (SO_LINGER 0),
+	// with nothing unread: nothing that came after was taken.
+	lingerReset atomic.Bool
+	// tls: the proxy served it over a TLS layer when it closed it: bytes
+	// after the close may be the client's close_notify.
+	tls atomic.Bool
+	// keepErr is why its close could not keep its socket open, if it
+	// could not.
+	keepErr atomic.Pointer[string]
 }
+
+// afterClose is what came to the proxy's socket of a paired connection after
+// the proxy closed it, as the socket kept open past the close read it
+// (keepAfterClose), and the socket's side as it came.
+type afterClose struct {
+	kind afterKind
+	side proxySide
+	err  error // afterFailed's
+}
+
+// afterKind is what ended the read of a socket kept open past its close.
+type afterKind uint8
+
+const (
+	// afterFIN: the application's FIN.
+	afterFIN afterKind = iota + 1
+	// afterReset: a reset, the application's (or its kernel's).
+	afterReset
+	// afterData: a byte of data, which the proxy, done reading, never took.
+	afterData
+	// afterStop: keploy's stop ended the read.
+	afterStop
+	// afterFailed: the read, or the side's read after it, failed (err).
+	afterFailed
+)
 
 // proxySide is what the wait reads of the proxy's side of a connection.
 type proxySide struct {
@@ -95,17 +138,13 @@ type pairedConns struct {
 	// gone, not hidden.
 	visible atomic.Bool
 	// progress counts what the bytes waits saw move: a waited-for
-	// connection that received more, whose orphan changed state, or that
-	// was resolved (PairedBytesProgress).
+	// connection that received more, or was resolved (PairedBytesProgress).
 	progress atomic.Uint64
-	// clk is the runnable clock a bytes wait measures its wait for an
-	// orphan on (orphanLooks); nil is the process's. A test sets it.
-	clk stall.Clock
 }
 
 // PairedBytesProgress counts the bytes waits' progress, for the agent's
 // watchdog (agent.PairedBytesWaiter): a waited-for connection that received
-// more, whose orphan changed state, or that was resolved. It only ever grows.
+// more, or was resolved. It only ever grows.
 func (p *Proxy) PairedBytesProgress() uint64 { return p.paired.progress.Load() }
 
 // add keeps an accepted connection the kernel paired with the application's
@@ -125,7 +164,9 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64) {
 }
 
 // remove forgets conn once the proxy is done with it, its socket closed. A
-// connection it does not keep is ignored.
+// connection it does not keep is ignored. One whose socket the close kept open
+// is forgotten once the socket's read has ended too (ended): until then a
+// wait still finds it, and what comes to it.
 func (s *pairedConns) remove(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,8 +174,25 @@ func (s *pairedConns) remove(conn net.Conn) {
 	if !ok {
 		return
 	}
+	if pc.kept.Load() && pc.end.Load() == nil {
+		pc.handlerDone = true
+		return
+	}
 	delete(s.byConn, conn)
 	close(pc.done)
+	s.wakeLocked()
+}
+
+// ended notes what came to pc's kept socket after its close (end), forgets pc
+// if its handler is done with it, and wakes the waits.
+func (s *pairedConns) ended(pc *pairedConn, end *afterClose) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pc.end.Store(end)
+	if pc.handlerDone {
+		delete(s.byConn, pc.conn)
+		close(pc.done)
+	}
 	s.wakeLocked()
 }
 
