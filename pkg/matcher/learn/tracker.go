@@ -14,10 +14,13 @@ import (
 // opens the next test's window, and the parsers find it on their
 // connection's context.
 type Tracker struct {
-	mu     sync.Mutex
-	epoch  uint64
-	served []Earlier
-	mocks  []*models.Mock
+	mu    sync.Mutex
+	epoch uint64
+	// setEpoch is the test number the running set began at (NewSet): its
+	// start-up's. A request of a lower number is of an earlier set.
+	setEpoch uint64
+	served   []Earlier
+	mocks    []*models.Mock
 	// before are the mocks served before the running test began: in the
 	// previous test, between tests, or while the next test's mocks were
 	// being put in place. The test's boundary and the mock store's do not
@@ -79,13 +82,15 @@ func NewTracker() *Tracker {
 // Mock names restart in every set (mock-0 again), so a mock served in one set
 // must not stand for, or hide, another set's mock of its name: the set's
 // start-up takes a test number no request of the previous set holds, so a
-// request of that set answered after the set changed is nobody's.
+// request of that set answered after the set changed is nobody's, and names
+// none of the new set's variables, its run's neither (Name, RunName).
 func (t *Tracker) NewSet() {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	t.epoch++
+	t.setEpoch = t.epoch
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.outside, t.outsideKept = nil, nil
@@ -316,9 +321,10 @@ func drifted(e Earlier) bool {
 // same for every call that uses it, no other variable's in the test
 // (variables are named per test), and none of reserved (the test case's
 // template keys). ok is false when that test has ended. A place of the run's
-// (RunName) is named the run's variable's name, whatever n; ok is false when
-// reserved holds that name (RunName). A nil tracker, which knows of no test,
-// names a variable by its place alone.
+// (RunName) is named the run's variable's name, whatever test of the set n
+// is; ok is false when reserved holds that name (RunName), or n is of an
+// earlier set: the set's run is not its. A nil tracker, which knows of no
+// test, names a variable by its place alone.
 func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (name string, ok bool) {
 	if t == nil {
 		name = varName(place)
@@ -329,6 +335,9 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if n < t.setEpoch {
+		return "", false
+	}
 	key := mock + "\x00" + place
 	if name, ok := t.runNames[key]; ok {
 		return name, !reserved[name]
@@ -359,15 +368,17 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 // start-up's bind carries it): the place is refused there (RunName).
 const runPrefix = "run-"
 
-// RunName names the variable bound at place of mock, an exchange of the run
-// (Earlier.Run): one name for the whole set, which no test's variable takes,
-// and none a test of the set took before it. reserved are the running test's
-// template keys: the name takes none of them when it is first given, and ok
-// is false when it was given earlier and reserved holds it, so that test
-// refuses the place rather than read its own key as the run's variable. A
-// nil tracker, which keeps no set, names it by its place alone, apart from
-// reserved.
-func (t *Tracker) RunName(mock, place string, reserved map[string]bool) (string, bool) {
+// RunName names, for a request of test number n (its start-up's included),
+// the variable bound at place of mock, an exchange of the run (Earlier.Run):
+// one name for the whole set, which no test's variable takes, and none a test
+// of the set took before it. reserved are the running test's template keys:
+// the name takes none of them when it is first given, and ok is false when
+// it was given earlier and reserved holds it, so that test refuses the place
+// rather than read its own key as the run's variable. ok is false, and no
+// name is given, when n is of an earlier set: the set's mock names are that
+// set's too, and its run is not this one. A nil tracker, which keeps no set,
+// names it by its place alone, apart from reserved.
+func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool) (string, bool) {
 	if t == nil {
 		name := runPrefix + varName(place)
 		for i := 2; reserved[name]; i++ {
@@ -377,6 +388,9 @@ func (t *Tracker) RunName(mock, place string, reserved map[string]bool) (string,
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if n < t.setEpoch {
+		return "", false
+	}
 	key := mock + "\x00" + place
 	if name, ok := t.runNames[key]; ok {
 		return name, !reserved[name]
