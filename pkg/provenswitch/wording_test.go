@@ -94,8 +94,10 @@ type rendered struct {
 // renderedStrings is every string of f the test checks: each literal, each +
 // chain that has provenswitch.Env in it (the chain's literals with the
 // variable's name between them), and each call whose arguments include
-// provenswitch.Env, its first literal argument with every verb read as the
-// variable's name.
+// provenswitch.Env, its format with every verb read as the variable's name.
+// The format is the call's first string argument: a literal, or a + chain of
+// strings (`"... %[1]s ... " + "... %[2]s=0 ..."`, a message too long for one
+// line), rendered as one.
 func renderedStrings(f *ast.File) []rendered {
 	var out []rendered
 	// inner are the + expressions inside a chain already rendered whole.
@@ -110,36 +112,8 @@ func renderedStrings(f *ast.File) []rendered {
 			if x.Op != token.ADD || inner[x] {
 				return true
 			}
-			var b strings.Builder
-			hasEnv := false
-			var walk func(e ast.Expr)
-			walk = func(e ast.Expr) {
-				switch y := e.(type) {
-				case *ast.ParenExpr:
-					walk(y.X)
-				case *ast.BinaryExpr:
-					if y.Op == token.ADD {
-						inner[y] = true
-						walk(y.X)
-						walk(y.Y)
-						return
-					}
-					b.WriteString("\x00")
-				case *ast.BasicLit:
-					s, _ := literal(y)
-					b.WriteString(s)
-				default:
-					if isEnv(e) {
-						hasEnv = true
-						b.WriteString(Env)
-						return
-					}
-					b.WriteString("\x00")
-				}
-			}
-			walk(x)
-			if hasEnv {
-				out = append(out, rendered{x.Pos(), b.String()})
+			if text, hasEnv, _ := chain(x, inner); hasEnv {
+				out = append(out, rendered{x.Pos(), text})
 			}
 		case *ast.CallExpr:
 			hasEnv := false
@@ -152,17 +126,70 @@ func renderedStrings(f *ast.File) []rendered {
 				return true
 			}
 			for _, a := range x.Args {
-				if lit, ok := a.(*ast.BasicLit); ok {
-					if s, ok := literal(lit); ok && strings.Contains(s, "%") {
-						out = append(out, rendered{lit.Pos(), verb.ReplaceAllString(s, Env)})
+				format, ok := "", false
+				switch y := a.(type) {
+				case *ast.BasicLit:
+					format, ok = literal(y)
+				case *ast.BinaryExpr:
+					if y.Op == token.ADD {
+						format, _, ok = chain(y, nil)
 					}
-					break
 				}
+				if !ok {
+					continue
+				}
+				if strings.Contains(format, "%") {
+					out = append(out, rendered{a.Pos(), verb.ReplaceAllString(format, Env)})
+				}
+				break
 			}
 		}
 		return true
 	})
 	return out
+}
+
+// chain renders e, a + chain: its string literals as they are,
+// provenswitch.Env as the variable's name, and anything else as \x00, which
+// no unsaidSwitch pattern reads through. hasEnv is whether provenswitch.Env
+// is in it, and hasLit whether a string literal is: a chain with none (n+1)
+// is no string. inner, when not nil, collects the chain's own + expressions,
+// so that Inspect does not render a part of a chain it rendered whole.
+func chain(e *ast.BinaryExpr, inner map[*ast.BinaryExpr]bool) (text string, hasEnv, hasLit bool) {
+	var b strings.Builder
+	var walk func(e ast.Expr)
+	walk = func(e ast.Expr) {
+		switch y := e.(type) {
+		case *ast.ParenExpr:
+			walk(y.X)
+		case *ast.BinaryExpr:
+			if y.Op == token.ADD {
+				if inner != nil {
+					inner[y] = true
+				}
+				walk(y.X)
+				walk(y.Y)
+				return
+			}
+			b.WriteString("\x00")
+		case *ast.BasicLit:
+			if s, ok := literal(y); ok {
+				hasLit = true
+				b.WriteString(s)
+				return
+			}
+			b.WriteString("\x00")
+		default:
+			if isEnv(e) {
+				hasEnv = true
+				b.WriteString(Env)
+				return
+			}
+			b.WriteString("\x00")
+		}
+	}
+	walk(e)
+	return b.String(), hasEnv, hasLit
 }
 
 var verb = regexp.MustCompile(`%(\[\d+\])?[sqv]`)

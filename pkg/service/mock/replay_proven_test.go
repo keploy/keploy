@@ -202,7 +202,9 @@ func TestRunOnlyIsRefusedUnderTheSwitch(t *testing.T) {
 }
 
 // A build that does not judge a replay refuses one under the switch: its
-// exit code would be the test command's alone.
+// exit code would be the test command's alone. The refusal gives the way
+// back: on Linux the proven model is on with KEPLOY_PROVEN unset, so only
+// KEPLOY_PROVEN=0 replays without it (P222).
 func TestAReplayUnderTheSwitchNeedsAJudgingBuild(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	replaysJudged.Store(false)
@@ -212,6 +214,7 @@ func TestAReplayUnderTheSwitchNeedsAJudgingBuild(t *testing.T) {
 	cfg.Mock.OnMiss = "fail"
 	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
 	require.ErrorContains(t, err, "needs a keploy build that judges each test")
+	require.ErrorContains(t, err, "; set "+provenswitch.Env+"=0 to replay without the proven model")
 }
 
 // replayErr runs one replay of a one-mock set against instr and returns its
@@ -284,12 +287,16 @@ func TestAFailedWindowsReadIsNoWindowsWithTheSwitchOff(t *testing.T) {
 
 // Under the switch a docker compose command is refused before anything
 // starts, by the record and the replay alike: keploy cannot tell which
-// process runs its tests, or read what each did.
+// process runs its tests, or read what each did. The refusal's way back is
+// KEPLOY_PROVEN=0, never "unset KEPLOY_PROVEN", which on Linux is the proven
+// model too (P222, ADJ-MOCKREC-COMPOSE).
 func TestComposeIsRefusedUnderTheSwitch(t *testing.T) {
 	provenOn(t)
 	instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	err := replayErr(t, instr, utils.DockerCompose)
 	require.ErrorContains(t, err, "keploy mock replay under the proven model runs the test command natively")
+	require.ErrorContains(t, err, "or set "+provenswitch.Env+"=0 to run without the proven model")
+	require.NotContains(t, err.Error(), "unset")
 	runs, hits := instr.counts()
 	require.Zero(t, runs, "the compose project was started")
 	require.Zero(t, hits, "the agent was waited for")
@@ -297,6 +304,8 @@ func TestComposeIsRefusedUnderTheSwitch(t *testing.T) {
 	rec := &runnerInstr{composeInstr: newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})}
 	err = recordSet(t, rec, nil, func(c *config.Config) { c.CommandType = string(utils.DockerCompose) })
 	require.ErrorContains(t, err, "keploy mock record under the proven model runs the test command natively")
+	require.ErrorContains(t, err, "or set "+provenswitch.Env+"=0 to run without the proven model")
+	require.NotContains(t, err.Error(), "unset")
 	opts, _ := rec.setup()
 	require.Zero(t, opts.Mode, "the agent was set up")
 }
