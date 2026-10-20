@@ -90,6 +90,13 @@ type FormData struct {
 	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
 }
 
+// HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
+// recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one
+// form of the stream: Keploy Cloud receives and serves a test case as JSON and
+// edits its Body (the golden body), so frames carried beside it would go stale
+// and outvote the edit. A test case read from frames has a Body that splits back
+// into them (streamChunksToLegacyBody), and the replay compares a stream that
+// kept no frames with its Body, read as the app's stream is read.
 type HTTPResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
