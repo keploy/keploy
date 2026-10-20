@@ -579,6 +579,15 @@ type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
 }
 
+// PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
+// proxy the names the replay's scope table puts in a pool slice, of every key,
+// so that the parsers' learn steps can tell the pool's mocks from a test's
+// where the replay sends no recorded test windows (keploy mock replay):
+// integrations.PoolMembership.
+type PoolNamesSetter interface {
+	SetPoolNames(names []string) error
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

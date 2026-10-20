@@ -452,6 +452,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	}
 	windows, _ := mockDb.(integrations.TestWindows)
 	inFlight, _ := mockDb.(integrations.InFlightOwner)
+	pools, _ := mockDb.(integrations.PoolMembership)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -467,7 +468,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight)
+		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight, pools)
 		// A protocol-phase mock (a handshake, a token fetch) is never a
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
@@ -539,7 +540,11 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 //     (IsFiltered, set from the test's mapping when the replay stages it),
 //     and the session mocks recorded inside its window. With no recorded
 //     windows any other session mock is no one's to pair.
-func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner) (own, pool bool) {
+//   - A replay that sends no recorded windows (keploy mock replay) sends its
+//     scope table instead (pools): a mock one of its pool slices names was
+//     recorded while no test was open, and is the pool's as one recorded
+//     outside every window is.
+func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner, pools integrations.PoolMembership) (own, pool bool) {
 	if owner != nil {
 		// A view with no test open in it cannot say whose a mock is: none
 		// is paired.
@@ -547,11 +552,24 @@ func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnershi
 		return known && owned, known && !owned
 	}
 	at := m.Spec.ReqTimestampMock
+	placed := false
 	if windows != nil {
 		// Recorded outside every recorded test's window (the start-up,
 		// between tests): the pool's, whatever tier or mapping holds it (a
 		// replay arms the start-up's names with every test's mapping).
-		if inside, known := windows.InRecordedTestWindow(at); known && !inside {
+		inside, known := windows.InRecordedTestWindow(at)
+		placed = known
+		if known && !inside {
+			if inFlight != nil && inFlight.InFlightIntoOpenTest(m) {
+				return true, false
+			}
+			return false, true
+		}
+	}
+	if !placed && pools != nil {
+		// No recorded windows: the scope table's pool slices name the mocks
+		// recorded while no test was open.
+		if inPool, known := pools.InPool(m); known && inPool {
 			if inFlight != nil && inFlight.InFlightIntoOpenTest(m) {
 				return true, false
 			}
@@ -844,6 +862,13 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
+			if !own && m.Spec.ReqTimestampMock.IsZero() {
+				// A pool mock's earlier places are every recording made
+				// before it: of one with no recorded time, none can be
+				// told, so where its value came from cannot be either.
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, "keploy cannot tell which recordings of the test set came before "+m.Name+", which has no recorded time, so it cannot tell whether what changed came from one"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
 			earlier := earlierThan(earlier, m)
 			// The paired mock with its answer: one the agent parked on disk
 			// (diskmocks.go) holds none until it is read back, and an echo

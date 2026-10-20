@@ -435,6 +435,27 @@ func InFlightIntoOpenTest(db MockMemDb, m *models.Mock) bool {
 	return ok && o.InFlightIntoOpenTest(m)
 }
 
+// PoolMembership is an optional MockMemDb capability: whether a mock is the
+// pool's by the replay's scope table (keploy mock replay under the proven
+// switch: a mock its recording made while no test was open, which the table
+// puts in a pool slice, not in a test's mapping). keploy mock replay sends no
+// recorded test windows (TestWindows does not know), and its mappings hold
+// each test's begin but not its end, so the table is the store's only word on
+// whose a mock is there. known is false until the replay sent the table.
+type PoolMembership interface {
+	InPool(m *models.Mock) (pool, known bool)
+}
+
+// InPool reports whether db says m is the pool's by the replay's scope table
+// (PoolMembership); known is false for a db that cannot tell.
+func InPool(db MockMemDb, m *models.Mock) (pool, known bool) {
+	p, ok := db.(PoolMembership)
+	if !ok {
+		return false, false
+	}
+	return p.InPool(m)
+}
+
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
 // the open test's own, which its mapping lists, rather than the pool's. A view
 // that scopes the pool to a test (`keploy mock replay`'s) knows; known is

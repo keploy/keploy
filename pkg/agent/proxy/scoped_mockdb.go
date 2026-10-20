@@ -573,6 +573,12 @@ func (s *scopedMockDb) InRecordedTestWindow(t time.Time) (bool, bool) {
 	return false, false
 }
 
+// InPool forwards integrations.PoolMembership: whose a mock is by the
+// replay's scope table is the store's, whatever view a worker reads.
+func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
+	return integrations.InPool(s.MockMemDb, m)
+}
+
 // SameRecordedTestWindow forwards integrations.TestWindows.
 func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
 	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {

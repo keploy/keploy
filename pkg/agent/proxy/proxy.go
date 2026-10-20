@@ -4487,6 +4487,17 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 	return nil
 }
 
+// SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
+// membership (MockManager.SetPoolNames).
+func (p *Proxy) SetPoolNames(names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolNames(names)
+	return nil
+}
+
 // SetAppClock makes the learn step read the app's clock through f
 // (agent.AppClockSetter).
 func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {

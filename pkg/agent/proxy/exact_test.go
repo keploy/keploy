@@ -1614,3 +1614,33 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 		t.Fatalf("after a new replay session: %s %v; want the last set's reader forgotten", names, err)
 	}
 }
+
+// The pool names the agent hands over (the replay's scope table's pool
+// slices) say which mocks are the pool's, through a worker's view too; none is
+// known before a replay sent them, and an empty table says no mock is.
+func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	a, b := &models.Mock{Name: "boot-0"}, &models.Mock{Name: "test-0"}
+	if _, known := mm.InPool(a); known {
+		t.Fatal("the pool is known before any replay sent its table")
+	}
+	mm.SetPoolNames([]string{"boot-0", ""})
+	for _, db := range []integrations.MockMemDb{mm, &scopedMockDb{MockMemDb: mm}} {
+		if pool, known := integrations.InPool(db, a); !pool || !known {
+			t.Fatalf("%T: boot-0 pool=%v known=%v; want the pool's", db, pool, known)
+		}
+		if pool, known := integrations.InPool(db, b); pool || !known {
+			t.Fatalf("%T: test-0 pool=%v known=%v; want known, not the pool's", db, pool, known)
+		}
+	}
+	mm.SetPoolNames(nil)
+	if pool, known := mm.InPool(a); pool || !known {
+		t.Fatalf("an empty table: boot-0 pool=%v known=%v; want known, not the pool's", pool, known)
+	}
+	mm.SetPoolNames([]string{"boot-0"})
+	mm.ResetForReplaySession()
+	if _, known := mm.InPool(a); known {
+		t.Fatal("a new replay session reads the last session's pool names")
+	}
+}

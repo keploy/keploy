@@ -533,6 +533,92 @@ func TestLearnMatchOutsideATestPairsOnlyThePool(t *testing.T) {
 	}
 }
 
+// umDb is a store as keploy mock replay's is under the proven switch: no
+// recorded test windows (it implements no integrations.TestWindows), and its
+// scope table's pool slices name the mocks recorded while no test was open
+// (integrations.PoolMembership; known is false before the replay sent the
+// table).
+type umDb struct {
+	mockMemDb
+	pool   map[string]bool
+	known  bool
+	pooled []*models.Mock
+	// inFlight are the mocks the store serves as its open test's, in flight
+	// when it began (integrations.InFlightOwner).
+	inFlight map[string]bool
+}
+
+func (d *umDb) InFlightIntoOpenTest(m *models.Mock) bool { return d.inFlight[m.Name] }
+
+func (d *umDb) GetSessionMocks() ([]*models.Mock, error) { return d.mocks, nil }
+func (d *umDb) InPool(m *models.Mock) (bool, bool)       { return d.pool[m.Name], d.known }
+func (d *umDb) UpdateUnFilteredMock(old, new *models.Mock) bool {
+	for i, p := range d.mocks {
+		if p == old {
+			d.mocks[i] = new
+			d.pooled = append(d.pooled, new)
+			return true
+		}
+	}
+	return false
+}
+
+// With no recorded windows (keploy mock replay), the scope table says which
+// mocks are the pool's: a start-up call in a full record is paired with the
+// start-up recording a pool slice names, and its changed field learned onto
+// it; one no pool slice names, or any before the replay sent the table, is
+// no one's to pair with no test open.
+func TestLearnMatchWithNoWindowsTheScopeTableSaysWhatIsThePools(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	ctx := learn.WithTracker(context.Background(), learn.NewTracker()) // the start-up: no test begun
+	for _, tc := range []struct {
+		what     string
+		pool     map[string]bool
+		known    bool
+		inFlight bool
+		paired   bool
+	}{
+		{"in a pool slice", map[string]bool{"boot-0": true}, true, false, true},
+		{"in no pool slice", map[string]bool{}, true, false, false},
+		{"before the table", map[string]bool{"boot-0": true}, false, false, false},
+		// The store's next test opened and the tracker has not begun it
+		// (the gap): one in flight into it is that test's, not the pool's.
+		{"in a pool slice, in flight into the store's open test", map[string]bool{"boot-0": true}, true, true, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			boot := learnRecorded("boot-0", 0, "POST", "/v1/events", `{"kind":"boot","at":"2026-10-19T10:00:00Z"}`, nil, `{"ok":true}`)
+			db := &umDb{mockMemDb: mockMemDb{mocks: []*models.Mock{boot}}, pool: tc.pool, known: tc.known, inFlight: map[string]bool{"boot-0": tc.inFlight}}
+			served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"kind":"boot","at":"2026-10-20T11:30:01Z"}`, nil), db, n, opts)
+			if (served != nil) != tc.paired {
+				t.Fatalf("served %v miss %+v; want paired=%v", served, miss, tc.paired)
+			}
+			if tc.paired && (len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.at": {}})) {
+				t.Fatalf("the start-up recording carries %+v; want body.at learned", db.pooled)
+			}
+		})
+	}
+}
+
+// windowsAndTable is learnDb that also answers from a scope table, which
+// names every mock the pool's: where the store knows the recorded windows,
+// they, not the table, say whose a mock is.
+type windowsAndTable struct{ *learnDb }
+
+func (windowsAndTable) InPool(*models.Mock) (bool, bool) { return true, true }
+
+func TestLearnMatchRecordedWindowsOutrankTheScopeTable(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	ctx := learn.WithTracker(context.Background(), learn.NewTracker())
+	// A test's mock, recorded inside a test's window (the fake places only
+	// its session mocks outside every window).
+	db := windowsAndTable{&learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"a1"}`, nil, `{}`)}}}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"at":"a2"}`, nil), db, n, opts); served != nil || miss == nil {
+		t.Fatalf("a mock the windows place inside a test was paired with no test open: served %v", served)
+	}
+}
+
 // ownedView is a view that scopes the pool to a test and knows of no open one.
 type ownedView struct{ *learnDb }
 
@@ -2722,5 +2808,20 @@ func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 				t.Fatalf("learned %v (miss %+v); want %v", learned, miss, tc.noise)
 			}
 		})
+	}
+}
+
+// A pool mock of no recorded time follows no recording the store can name:
+// keploy cannot tell where its values came from, and refuses it.
+func TestLearnMatchAPoolMockOfNoRecordedTimeIsRefused(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	ctx := learn.WithTracker(context.Background(), learn.NewTracker())
+	boot := learnRecorded("boot-0", 0, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
+	boot.Spec.ReqTimestampMock = time.Time{}
+	db := &umDb{mockMemDb: mockMemDb{mocks: []*models.Mock{boot}}, pool: map[string]bool{"boot-0": true}, known: true}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, "which has no recorded time") {
+		t.Fatalf("served %v miss %+v err %v; want refused, no recording is known to precede it", served, miss, err)
 	}
 }

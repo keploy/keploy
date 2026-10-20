@@ -119,6 +119,9 @@ type exactView struct {
 // for a replay session (view nil), off again at the next one.
 type exactState struct {
 	view atomic.Pointer[exactView]
+	// poolNames are the names the replay's scope table puts in a pool slice,
+	// of every key (SetPoolNames): nil until a replay sent one.
+	poolNames atomic.Pointer[map[string]struct{}]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -680,6 +683,36 @@ func (v *exactView) addOwned(owned []*models.Mock) {
 		v.owned = append(v.owned, c)
 	}
 }
+
+// SetPoolNames installs the names the replay's scope table puts in a pool
+// slice, of every key (keploy mock replay under the proven switch: the mocks
+// its recording made while no test was open). InPool reads them; a replay
+// that sends an empty table installs an empty set, which says no mock is the
+// pool's.
+func (m *MockManager) SetPoolNames(names []string) {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n != "" {
+			set[n] = struct{}{}
+		}
+	}
+	m.exact.poolNames.Store(&set)
+}
+
+// InPool reports whether mk is the pool's by the scope table SetPoolNames
+// installed (integrations.PoolMembership); known is false until one was. A
+// mock is named once in a recording, and the table is the running
+// recording's.
+func (m *MockManager) InPool(mk *models.Mock) (pool, known bool) {
+	set := m.exact.poolNames.Load()
+	if set == nil || mk == nil {
+		return false, false
+	}
+	_, pool = (*set)[mk.Name]
+	return pool, true
+}
+
+var _ integrations.PoolMembership = (*MockManager)(nil)
 
 // ServeExactPool turns exact serving on, or keeps it on, with no test open:
 // the pool slice names, of key, answers beside the protocol-phase mocks.
