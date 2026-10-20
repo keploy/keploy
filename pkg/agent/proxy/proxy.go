@@ -4161,6 +4161,14 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// so the two stay one set: a start-up call made again binds anew,
 		// and a test's use of a value bound before the repair is a miss,
 		// never an answer from a binding the learn step no longer knows.
+		//
+		// Neither is skipped for a call without StartsTestSet. The flag says
+		// a set begins; its absence does not say the set goes on: a CLI from
+		// before the flag (2026-10-17) sends none at any set. Kept across a
+		// set that does begin, the previous set's exchanges and run names,
+		// under the mock names the next set numbers afresh, would explain
+		// and answer the next set's calls as another mock's: a false pass,
+		// where forgetting at a repair is a false fail.
 		p.getMockManager().NewVariableSet()
 	}
 
