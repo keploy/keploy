@@ -638,6 +638,64 @@ func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 	}
 }
 
+// Before the set's first test, the first test's call in flight binds in a
+// scope begun early that reads the run's (variables.Table.ReadRunOf), while
+// the start-up still binds the run's. A start-up call's check reads what that
+// scope bound, as its bind does (variables.Table.Beside): one that sends, as
+// its variable, the live value the call in flight bound as another variable
+// recorded with another value is a miss with that evidence, found by the
+// check, never a bind the table refuses over a binding the check did not read
+// (which would check the call again, forever). Once the first test began, the
+// early scope is the next test's, and its values are another test's.
+func TestVariables_AStartUpCallIsCheckedBesideTheFirstTestsCallInFlight(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	boot := reusable(at(varMock("boot", "POST", "http://store/sessions", `{"key":"s-rec"}`, 200, `{}`,
+		models.MockVariables{"run-session": bindV("s-rec", "body.key")}), 1))
+	db := &varDb{session: []*models.Mock{boot}}
+	db.table.KeepRun()
+	var ahead variables.Table
+	ahead.ReadRunOf(&db.table)
+	ahead.Start(nil)
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []variables.Binding{{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch", Place: "body.id"}}); !ok {
+		t.Fatal("the call in flight could not bind order")
+	}
+	pool, _ := splitVariableMocks(db.session)
+	check := func(key string) ([]*varHit, *varProblem) {
+		t.Helper()
+		hits, problem, err := h.variablePass(context.Background(), liveReq("POST", "/sessions", `{"key":"`+key+`"}`), pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("variablePass: %v", err)
+		}
+		return hits, problem
+	}
+	hits, problem := check("V")
+	if len(hits) != 0 {
+		t.Fatalf("the start-up call's check let it bind run-session to order's live value (%d hits)", len(hits))
+	}
+	if problem == nil || problem.name != "run-session" || problem.actual != "V" || !strings.Contains(problem.why, "which is variable order's value") {
+		t.Fatalf("problem %+v, want run-session refused at order's value", problem)
+	}
+	if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/sessions", `{"key":"V"}`)); ok {
+		t.Fatal("the start-up call that sent order's live value was answered")
+	} else if diag == nil || diag.variable == nil || !strings.Contains(diag.variable.why, "which is variable order's value") {
+		t.Fatalf("the start-up call's miss says %+v; want order's value", diag)
+	}
+	if _, ok := db.table.Lookup("run-session"); ok {
+		t.Fatal("a refused start-up call bound run-session")
+	}
+
+	// The first test began: the early scope is the next test's.
+	db.table.Start(nil)
+	ahead.Reset()
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []variables.Binding{{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch", Place: "body.id"}}); !ok {
+		t.Fatal("the next test's call in flight could not bind order")
+	}
+	if hits, problem := check("V"); len(hits) == 0 {
+		t.Fatalf("a call of the first test was refused the next test's value: %+v", problem)
+	}
+}
+
 func TestVariables_AnEmptyValueBindsNothing(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, body := range []string{`{"id":null,"item":"pen"}`, `{"id":"","item":"pen"}`} {

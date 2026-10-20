@@ -477,6 +477,155 @@ func TestTable_AScopeBegunEarlyAndTheRunBindConcurrently(t *testing.T) {
 	}
 }
 
+// Before the set's first test, the first test's calls in flight bind in a
+// scope begun early (ReadRunOf) while the start-up still binds the run's.
+// Whichever binds first, the other is refused that value for another
+// variable recorded with another value: the first test, which carries the
+// early scope's bindings in beside the run's (StartCarrying), never holds two
+// variables at one live value. What a call's check reads before it binds
+// (Beside) holds the early scope's too while the table binds the run's, and
+// no longer once a scope began: two tests' variables may share a value.
+func TestTable_TheRunAndAScopeBegunEarlyKeepTheirValuesApart(t *testing.T) {
+	var vars, ahead Table
+	vars.KeepRun()
+	ahead.ReadRunOf(&vars)
+	ahead.Start(nil)
+	order := Binding{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch", Place: "body.id"}
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []Binding{order}); !ok {
+		t.Fatal("the call in flight could not bind order")
+	}
+	if got := vars.Beside(); len(got) != 1 || got[0].Name != "order" || got[0].Value != "V" {
+		t.Fatalf("before the first test, a start-up call's check reads %+v; want the call in flight's order", got)
+	}
+	session := Binding{Name: "run-session", Value: "V", Recorded: "s-rec", Mock: "boot", Place: "body.key"}
+	if bad, with, stale, ok := vars.BindAll(vars.Gen(), []Binding{session}); ok || stale || bad.Name != "run-session" || with.Name != "order" {
+		t.Fatalf("the start-up bound run-session to order's live value: ok %v stale %v, evidence %+v beside %+v", ok, stale, bad, with)
+	}
+	if with, took := vars.Bind(session); took || with.Name != "order" {
+		t.Fatalf("Bind took run-session at order's live value (%v, evidence %+v)", took, with)
+	}
+	if _, ok := vars.Lookup("run-session"); ok {
+		t.Fatal("a refused bind left run-session bound")
+	}
+	// Recorded with order's value, a variable of the run's is that value.
+	if _, _, _, ok := vars.BindAll(vars.Gen(), []Binding{{Name: "run-ref", Value: "V", Recorded: "o-rec", Mock: "boot"}}); !ok {
+		t.Fatal("a run's variable recorded with order's recorded value could not take its live value")
+	}
+	session.Value = "S"
+	if _, _, _, ok := vars.BindAll(vars.Gen(), []Binding{session}); !ok {
+		t.Fatal("run-session could not bind a value of its own")
+	}
+	vars.StartCarrying(nil, ahead.Snapshot())
+	first := vars.Snapshot()
+	for _, a := range first {
+		for _, b := range first {
+			if TwoValues(a, b) {
+				t.Fatalf("the first test holds %s and %s, recorded as two values, at one live value %q", a.Name, b.Name, b.Value)
+			}
+		}
+	}
+	if len(first) != 3 {
+		t.Fatalf("the first test holds %+v, want order, run-ref and run-session", first)
+	}
+
+	// Once a scope began, the early scope is the next test's: its values are
+	// no longer checked beside this test's.
+	ahead.Reset()
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []Binding{{Name: "poll", Value: "P", Recorded: "p-rec", Mock: "fetch-2"}}); !ok {
+		t.Fatal("the next test's call in flight could not bind poll")
+	}
+	if got := len(vars.Beside()); got != 3 {
+		t.Fatalf("the first test's check reads %d bindings, want its own 3 and none of the next test's", got)
+	}
+	if _, _, _, ok := vars.BindAll(vars.Gen(), []Binding{{Name: "late", Value: "P", Recorded: "l-rec", Mock: "use-1"}}); !ok {
+		t.Fatal("the first test was refused a value the next test's call in flight bound")
+	}
+
+	// The opposite order, as before: the run's first, and the call in flight
+	// is refused.
+	var vars2, ahead2 Table
+	vars2.KeepRun()
+	ahead2.ReadRunOf(&vars2)
+	ahead2.Start(nil)
+	if _, _, _, ok := vars2.BindAll(vars2.Gen(), []Binding{{Name: "run-session", Value: "V", Recorded: "s-rec", Mock: "boot"}}); !ok {
+		t.Fatal("the start-up could not bind run-session")
+	}
+	if _, _, _, ok := ahead2.BindAll(ahead2.Gen(), []Binding{order}); ok {
+		t.Fatal("the call in flight bound order to run-session's live value")
+	}
+}
+
+// The start-up and the first test's call in flight bind two variables, recorded
+// with two values, at one live value at once: exactly one of them takes it,
+// whichever goes first.
+func TestTable_TheRunAndAScopeBegunEarlyBindOneValueOnce(t *testing.T) {
+	for i := 0; i < 400; i++ {
+		var vars, ahead Table
+		vars.KeepRun()
+		ahead.ReadRunOf(&vars)
+		ahead.Start(nil)
+		var wg sync.WaitGroup
+		var inFlight, run bool
+		start := make(chan struct{})
+		binds := []func(){
+			func() {
+				_, _, _, inFlight = ahead.BindAll(ahead.Gen(), []Binding{{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch"}})
+			},
+			func() {
+				_, _, _, run = vars.BindAll(vars.Gen(), []Binding{{Name: "run-session", Value: "V", Recorded: "s-rec", Mock: "boot"}})
+			},
+		}
+		if i%2 == 1 {
+			binds[0], binds[1] = binds[1], binds[0]
+		}
+		for _, bind := range binds {
+			wg.Add(1)
+			go func(bind func()) {
+				defer wg.Done()
+				<-start
+				bind()
+			}(bind)
+		}
+		close(start)
+		wg.Wait()
+		if inFlight == run {
+			t.Fatalf("round %d: the call in flight bound %v and the start-up %v; want exactly one", i, inFlight, run)
+		}
+	}
+}
+
+// A scope begun early is checked beside the run it reads (ReadRunOf), and
+// that run's binds beside it: once it reads another table's run's, the
+// first table's binds no longer see its scope, nor it the first's run.
+func TestTable_AScopeBegunEarlyIsBesideTheRunItReadsOnly(t *testing.T) {
+	var old, cur, ahead Table
+	old.KeepRun()
+	cur.KeepRun()
+	ahead.ReadRunOf(&old)
+	ahead.ReadRunOf(&cur)
+	ahead.ReadRunOf(&cur)
+	ahead.Start(nil)
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []Binding{{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch"}}); !ok {
+		t.Fatal("the call in flight could not bind order")
+	}
+	if got := old.Beside(); len(got) != 0 {
+		t.Fatalf("a run the early scope no longer reads is checked beside %+v", got)
+	}
+	session := Binding{Name: "run-session", Value: "V", Recorded: "s-rec", Mock: "boot"}
+	if _, _, _, ok := old.BindAll(old.Gen(), []Binding{session}); !ok {
+		t.Fatal("a run the early scope no longer reads was refused order's live value")
+	}
+	if _, ok := ahead.Lookup("run-session"); ok {
+		t.Fatal("the early scope reads the run of a table it no longer reads")
+	}
+	if got := cur.Beside(); len(got) != 1 || got[0].Name != "order" {
+		t.Fatalf("the run the early scope reads is checked beside %+v; want order once", got)
+	}
+	if _, _, _, ok := cur.BindAll(cur.Gen(), []Binding{session}); ok {
+		t.Fatal("the run the early scope reads bound run-session to order's live value")
+	}
+}
+
 // BindAll is the only bind of a call: two variables recorded with two values
 // never share one live value, whatever the values look like (two reads of
 // one clock in one millisecond included), in one call, across calls, and
