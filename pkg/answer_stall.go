@@ -71,8 +71,9 @@ type AnswerStallError struct {
 	Came   string
 	// Keepalives: the app sent keepalives and nothing of its answer, and
 	// the keepalive rule ended the wait (row W1), not the grace.
-	// KeepalivesInBody: they were body bytes (an SSE comment, an NDJSON
-	// blank line), not frames beside it (a gRPC PING).
+	// KeepalivesInBody: they were body bytes (NDJSON blank lines), not
+	// frames beside it (a gRPC PING). An SSE comment is compared as a
+	// recorded frame is, and a recording of none is refused unread.
 	Keepalives       bool
 	KeepalivesInBody bool
 }
@@ -183,7 +184,9 @@ func keptOpenWithNothing(target string, answered bool, read int64) *AnswerStallE
 }
 
 // keptOpenWithKeepalivesOnly is keptOpenWithNothing for an HTTP stream whose
-// keepalives are body bytes (an SSE comment, an NDJSON blank line).
+// keepalives are body bytes: NDJSON blank lines, two before the first line.
+// (An SSE comment is compared as a frame; and a recording of no frame is
+// refused before its stream is read, ErrStreamNotRecorded.)
 func keptOpenWithKeepalivesOnly() *AnswerStallError {
 	return &AnswerStallError{Answered: true, Keepalives: true, KeepalivesInBody: true}
 }
