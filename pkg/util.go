@@ -1477,7 +1477,15 @@ func (b *brotliReadCloser) Close() error {
 // when there is no answer yet, or the answer has none) and on whether the
 // recording kept its body as frames. How the answer framed its length
 // (Transfer-Encoding: chunked, no Content-Length) is no evidence of a stream.
+//
+// A response that HTTP says has no body (the answer to a HEAD, a 1xx, 204 or
+// 304: models.HTTPResponseHasNoBody) is no stream, whatever its Content-Type
+// says: it has no frame to compare, and its status and headers are compared
+// as any response's are. Its recording's body is empty, and always will be.
 func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStreamConfig {
+	if streamResponseHasNoBody(tc, resp) {
+		return HTTPStreamConfig{Mode: HTTPStreamModeNone}
+	}
 	contentType := ""
 	if resp != nil {
 		contentType = resp.Header.Get("Content-Type")
@@ -1509,6 +1517,24 @@ func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStream
 	return HTTPStreamConfig{Mode: HTTPStreamModeNone}
 }
 
+// streamResponseHasNoBody reports whether the response DetectHTTPStreamConfig
+// looks at has no body by HTTP: resp, the app's answer, when there is one
+// (the method of the request it answers, its status), and otherwise tc's
+// recorded one.
+func streamResponseHasNoBody(tc *models.TestCase, resp *http.Response) bool {
+	method, status := "", 0
+	if tc != nil {
+		method, status = string(tc.HTTPReq.Method), tc.HTTPResp.StatusCode
+	}
+	if resp != nil {
+		status = resp.StatusCode
+		if resp.Request != nil {
+			method = resp.Request.Method
+		}
+	}
+	return models.HTTPResponseHasNoBody(method, status)
+}
+
 // IsHTTPStreamingTestCase reports whether a test case's recorded response is a
 // stream by keploy's one stream rule (DetectHTTPStreamConfig, on its recorded
 // Content-Type and frames): such a test case is replayed after its set's other
@@ -1526,7 +1552,9 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 // It returns whether they match, the captured body content, mismatch details (if any), and any error.
 //
 // Without the proven switch the comparison stops at the last recorded frame
-// (part, or byte), so a stream that goes on is not waited for. Under the
+// (part, or byte), so a stream that goes on is not waited for; a stream
+// recorded empty has none to stop at, and is read to its end under either
+// switch (streamRecordedEmpty). Under the
 // switch every response is compared whole (O-K): the stream is read to its
 // end, and a frame after the recorded ones is a difference (trailingFrame),
 // as are bytes beyond a recorded binary stream. A keepalive beyond the
@@ -1600,20 +1628,21 @@ func (streamStalledError) Error() string {
 func (streamStalledError) Is(target error) bool { return target == ErrStreamHeldOpen }
 
 // ErrStreamNotRecorded refuses a stream test whose recording keeps nothing
-// of its stream (no SSE event, NDJSON or text line, multipart part, or byte):
-// neither the frames it kept (StreamBody) nor its recorded body hold one, so
-// the app's stream has nothing to be compared with. Compared with nothing, a
-// stream passed on its first frame, whatever it held, with the proven switch
-// off. The test fails with the reason instead, under either switch, and its
-// stream is not read. A recording whose body was over 1 MB kept none of it
-// (BodySkipped); one of an empty body, or of keepalives alone (NDJSON blank
-// lines, SSE comments), has none. A text stream's blank lines are its lines.
+// of its stream (no SSE event, NDJSON line, multipart part, text line or
+// byte) and is not the recording of an empty stream: a recording whose body
+// was over 1 MB kept none of it (BodySkipped), and one of keepalives alone
+// (NDJSON blank lines, SSE comments) has none, of a stream the app held open.
+// Compared with nothing, a stream passed on its first frame, whatever it held,
+// with the proven switch off. The test fails with the reason instead, under
+// either switch, and its stream is not read. A recording of an empty stream
+// is compared, as any recording is (streamRecordedEmpty). A text stream's
+// blank lines are its lines.
 var ErrStreamNotRecorded = errors.New("keploy refuses this stream test: its recording keeps nothing of the stream to compare the app's stream with")
 
 // streamNotRecorded is ErrStreamNotRecorded for expected, a stream read by
 // unit (SSE event, line, part, byte), saying what its recording kept.
 func streamNotRecorded(expected models.HTTPResp, unit string) error {
-	why := "its recorded body is empty"
+	why := fmt.Sprintf("its recording holds no %s", unit)
 	switch {
 	case expected.BodySkipped && expected.BodySize > 0:
 		why = fmt.Sprintf("its body, %d bytes, was over 1 MB, and a recording does not save one", expected.BodySize)
@@ -1623,6 +1652,19 @@ func streamNotRecorded(expected models.HTTPResp, unit string) error {
 		why = fmt.Sprintf("its recorded body, of Content-Type %q, holds no %s", getHeaderValueCaseInsensitive(expected.Header, "Content-Type"), unit)
 	}
 	return fmt.Errorf("%w (%s)", ErrStreamNotRecorded, why)
+}
+
+// streamRecordedEmpty reports whether expected, a recording that keeps no
+// frame of its stream, is that of a stream that ended with nothing in it: its
+// body was saved (not BodySkipped) and is empty. The app's stream is compared
+// with that as with any recording, under either switch, and read to its end:
+// there is no last recorded frame to stop at, and stopping before the first
+// passed whatever came. A frame of it is one past the recording
+// (trailingFrame), a keepalive (an SSE comment, an NDJSON blank line) ends the
+// read with nothing of the answer compared, not judged
+// (keptOpenWithKeepalivesOnly), and its end with none passes.
+func streamRecordedEmpty(expected models.HTTPResp) bool {
+	return !expected.BodySkipped && expected.Body == ""
 }
 
 // trailingFrame is the mismatch of a frame the answer streamed after the
@@ -1758,7 +1800,10 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	if err != nil {
 		return false, "", nil, err
 	}
-	if !sseQueueHoldsAnEvent(expectedQueue) {
+	switch {
+	case len(expectedQueue) == 0 && streamRecordedEmpty(expectedResp):
+		readToEnd = true
+	case !sseQueueHoldsAnEvent(expectedQueue):
 		// Comments alone (keepalives) carry no event: compared with
 		// them, any stream would pass on its first keepalive.
 		return false, "", nil, streamNotRecorded(expectedResp, "SSE event")
@@ -1782,6 +1827,12 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 				// stream open past its recording, and the read ends there
 				// (ErrStreamHeldOpen).
 				if sseCommentsOnly(parseSSEFrame(frame)) {
+					if nextExpected == 0 {
+						// A recording of no frame (an empty
+						// stream's), and the app sent none:
+						// nothing of the answer to compare.
+						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
+					}
 					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
@@ -1850,7 +1901,10 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		return false, "", nil, err
 	}
 	if len(expectedQueue) == 0 {
-		return false, "", nil, streamNotRecorded(expectedResp, "NDJSON line")
+		if !streamRecordedEmpty(expectedResp) {
+			return false, "", nil, streamNotRecorded(expectedResp, "NDJSON line")
+		}
+		readToEnd = true
 	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1869,11 +1923,12 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			// them, with no line between, and the app stalled short of
 			// its recording (ErrStreamStalled): the lines that came
 			// matched theirs.
-			// A stall with no line come is nothing of the answer to
+			// Either with no line come is nothing of the answer to
 			// compare: it fails closed, not judged (ErrAnswerStalled).
-			// (A recording of no line is refused before the read,
-			// streamNotRecorded.)
 			if readToEnd && nextExpected >= len(expectedQueue) {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
+				}
 				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
 			}
 			keepalives++
@@ -1954,7 +2009,10 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		return false, "", nil, err
 	}
 	if len(expectedQueue) == 0 {
-		return false, "", nil, streamNotRecorded(expectedResp, "line")
+		if !streamRecordedEmpty(expectedResp) {
+			return false, "", nil, streamNotRecorded(expectedResp, "line")
+		}
+		readToEnd = true
 	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -2022,7 +2080,10 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 	readToEnd := provenswitch.On()
 	expectedBytes := expectedBinaryBytes(expectedResp)
 	if len(expectedBytes) == 0 {
-		return false, "", nil, streamNotRecorded(expectedResp, "byte")
+		if !streamRecordedEmpty(expectedResp) {
+			return false, "", nil, streamNotRecorded(expectedResp, "byte")
+		}
+		readToEnd = true
 	}
 	expectedSize := len(expectedBytes)
 	actualSize := 0
@@ -2519,16 +2580,26 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		return false, "", nil, fmt.Errorf("failed to read the recorded multipart body by its boundary %q: %w", expectedBoundary, err)
 	}
 	if len(expectedQueue) == 0 {
-		return false, "", nil, streamNotRecorded(expectedResp, fmt.Sprintf("multipart part of boundary %q", expectedBoundary))
+		if !streamRecordedEmpty(expectedResp) {
+			return false, "", nil, streamNotRecorded(expectedResp, fmt.Sprintf("multipart part of boundary %q", expectedBoundary))
+		}
+		readToEnd = true
 	}
 
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
-	reader := multipart.NewReader(stream, boundary)
+	answer := &byteCount{r: stream}
+	reader := multipart.NewReader(answer, boundary)
 
 	for {
 		part, partErr := reader.NextPart()
 		if partErr == io.EOF {
+			break
+		}
+		if partErr != nil && answer.n == 0 && errors.Is(partErr, io.EOF) {
+			// An answer that ended before its first byte holds no
+			// part: multipart.Reader reads it as an error ("NextPart:
+			// EOF"), not as the end of a stream of none.
 			break
 		}
 		if partErr != nil {
@@ -2591,6 +2662,18 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 	}
 
 	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, nil
+}
+
+// byteCount counts the bytes read through it.
+type byteCount struct {
+	r io.Reader
+	n int64
+}
+
+func (c *byteCount) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 type multipartPartPayload struct {
