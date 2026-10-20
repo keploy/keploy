@@ -75,16 +75,8 @@ func TestEveryPrintedExampleIsACommandLineKeployAccepts(t *testing.T) {
 	for source, text := range examples {
 		for _, line := range commandLines(text) {
 			checked[source]++
-			cmd, err := parseExample(line)
-			if err != nil {
+			if _, err := parseExample(line); err != nil {
 				t.Errorf("%s: %v", source, err)
-				continue
-			}
-			// A compose line that does not say which of the project's
-			// containers is the application is refused by record and test
-			// alike (`missing required --container-name`).
-			if app, _ := cmd.Flags().GetString("command"); utils.FindDockerCmd(app) == utils.DockerCompose && !cmd.Flags().Changed("container-name") {
-				t.Errorf("%s: %q runs docker compose and passes no --container-name", source, line)
 			}
 		}
 	}
@@ -182,6 +174,7 @@ func TestParseExampleRefusesALineKeployWouldNotRun(t *testing.T) {
 		`keploy diff a b c`,                          // too many arguments
 		`keploy normalize --tests ts1:tc1 tc2`,       // a value that needed quotes
 		`keploy bogus`,                               // no such command
+		`keploy record -c "docker compose up"`,       // no --container-name
 	} {
 		if _, err := parseExample(line); err == nil {
 			t.Errorf("parseExample accepted %q", line)
@@ -320,8 +313,7 @@ func parseExample(line string) (*cobra.Command, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%q names no keploy command: %w", line, err)
 	}
-	// The flag cobra adds to every command as it executes.
-	cmd.InitDefaultHelpFlag()
+	// --help: pflag answers ErrHelp for it, which cobra turns into the help.
 	if err := cmd.ParseFlags(rest); errors.Is(err, pflag.ErrHelp) {
 		return cmd, nil
 	} else if err != nil {
@@ -338,6 +330,14 @@ func parseExample(line string) (*cobra.Command, error) {
 	}
 	if err := cmd.ValidateArgs(args); err != nil {
 		return nil, fmt.Errorf("%q: `%s` rejects its arguments: %w", line, cmd.CommandPath(), err)
+	}
+	// A compose line that does not say which of the project's containers is
+	// the application is refused by record and test alike (`missing required
+	// --container-name`, or `container name not found` once compose is up).
+	if cmd.Name() == "record" || cmd.Name() == "test" {
+		if app, _ := cmd.Flags().GetString("command"); utils.FindDockerCmd(app) == utils.DockerCompose && !cmd.Flags().Changed("container-name") {
+			return nil, fmt.Errorf("%q runs docker compose and passes no --container-name", line)
+		}
 	}
 	return cmd, nil
 }
