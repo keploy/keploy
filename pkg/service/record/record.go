@@ -633,6 +633,16 @@ type Recorder struct {
 	// (drainProgress). readHoldSaid: the stop has said so.
 	readHolds    atomic.Uint64
 	readHoldSaid atomic.Bool
+	// unchecked counts the test cases the test-case drain has handed to its
+	// consumer that the consumer has neither asked the capture watch's check
+	// of (captureWatch.afterTestCase) nor failed to save: with capReads, the
+	// stop's frame drains hold the agent's streams open meanwhile too
+	// (holdForReads), so the check is asked, and made, while the agent is up.
+	// checkHolds counts the looks at which a drain held them for that alone:
+	// not progress for the stop's outer drains, which a consumer wedged in a
+	// save must not keep from giving up.
+	unchecked  atomic.Int64
+	checkHolds atomic.Uint64
 	// teardown is the recording's own teardown scope (Start): what keploy
 	// sees its stops do -- the agent's, the app's, the daemons', the
 	// compose project's down -- moves it, and it is progress for the stop's
@@ -861,24 +871,44 @@ func startedAgent(inst any) bool {
 
 // holdForReads reports whether a frame drain, its stream quiet for its bound,
 // holds the agent's streams open, and looks again once the stream has been
-// quiet for it once more, because the proven switch's capture watch has a
-// read of the agent's count asked and not yet answered, failed or given up
-// (capReads). An agent the stop reached too (CI's `sudo pkill -INT -f
-// keploy`, a Ctrl+C in a terminal) holds its own stop only while this
-// recording holds a stream open (routes.HoldStop), and goes once they end: a
-// read asked of it then is refused, and leaves what it would check not
-// verified, failing a recording that lost nothing. Each read is bounded
-// (countReads: stall.HangBudget of keploy's own runnable time), so this is
-// too; once they are through, the drain goes on as it would have (its look
-// at what the agent still holds, holdForBacklog, comes after). It says so,
-// at Info, the first time; a press at the drain's offer gives the drain up,
-// and ends the reads (utils.StopNow). Every look that holds counts as
-// progress for the stop's outer drains (drainProgress), which would
-// otherwise take a drain held for a read for a wedged one.
+// quiet for it once more, because under the proven switch the capture
+// watch's check of a test case the drain handed over is still to be asked
+// (unchecked: its consumer is still saving it), or a read of the agent's
+// count is asked and not yet answered, failed or given up (capReads). An
+// agent the stop reached too (CI's `sudo pkill -INT -f keploy`, a Ctrl+C in
+// a terminal) holds its own stop only while this recording holds a stream
+// open (routes.HoldStop), and goes once they end: a read asked of it then is
+// refused, and leaves what it would check not verified, failing a recording
+// that lost nothing. Once they are through, the drain goes on as it would
+// have (its look at what the agent still holds, holdForBacklog, comes after).
+// A test case read once the drains have asked the agent to end its streams
+// (one already on its way that this client's reader had not delivered when
+// the drain looked) is checked after them, and the agent may have gone: only
+// a hold of the agent's stop that outlives its streams would cover it.
+//
+// Each read is bounded (countReads: stall.HangBudget of keploy's own
+// runnable time), so its hold is too: every look that holds for one counts
+// as progress for the stop's outer drains (drainProgress), which would
+// otherwise take a drain held for a read for a wedged one, and the first
+// such look says so, at Info. A look that holds only for a test case still
+// being saved is not progress, and says nothing (the stop's drain report
+// says it is still saving): each test case the consumer takes is
+// (frameProgress), so a save wedged past the outer drains' stall still gets
+// them given up. A press at the drain's offer gives the drain up, and ends
+// the reads (utils.StopNow).
 func (r *Recorder) holdForReads() bool {
 	reads := r.capReads.Load()
-	if !reads.out() {
+	if reads == nil {
 		return false
+	}
+	// Read before the reads: the consumer asks a test case's check before
+	// it stops counting it, so one asked since is out below.
+	unchecked := r.unchecked.Load() > 0
+	if !reads.out() {
+		if unchecked {
+			r.checkHolds.Add(1)
+		}
+		return unchecked
 	}
 	r.readHolds.Add(1)
 	if r.readHoldSaid.CompareAndSwap(false, true) {
@@ -1472,6 +1502,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	r.mappingsStreamed.Store(0)
 	r.capReads.Store(nil)
 	r.readHoldSaid.Store(false)
+	r.unchecked.Store(0)
 
 	sessionStart := time.Now()
 
@@ -1727,11 +1758,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// could not capture (mock.real) is read before the drain, and what it
 	// lost after the last test case is asked for then, as of an agent this
 	// client started; the drain holds its streams open, and so the agent up,
-	// until that read, and every check asked before it, is answered (or
-	// given up: holdForReads). Its exit is then seen to (composeAgentEnder):
-	// it goes once the streams close, and one wedged in its stop is killed,
-	// rather than held for compose's grace, which waits on it. After a drain
-	// the stop began, the reads come with the stack still up.
+	// until that read, and the check of every test case it hands over before
+	// it ends them, is answered (or given up: holdForReads). Its exit is then seen to
+	// (composeAgentEnder): it goes once the streams close, and one wedged in
+	// its stop is killed, rather than held for compose's grace, which waits
+	// on it. After a drain the stop began, the reads come with the stack
+	// still up.
 	var composeDrain sync.Once
 	drainComposeAgent := func(agentGoing bool) {
 		composeDrain.Do(func() {
@@ -1839,8 +1871,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// stopped making calls: the agent stays up while this recording
 			// holds its streams open, even when the stop signal reached it
 			// too, and the drain holds them open until the final read, made
-			// on the watch's own goroutine, and every check asked before
-			// it, is answered (or given up: holdForReads).
+			// on the watch's own goroutine, and the check of every test case
+			// it hands over before it ends them, is answered (or given up:
+			// holdForReads).
 			if recordingStarted {
 				r.reportRealRun(ctx)
 				capWatch.afterTestCases(ctx)
@@ -2634,6 +2667,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// After the insert, which is what names an auto-named test case.
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
+				// Not saved: no check is asked for it (holdForReads).
+				r.unchecked.Add(-1)
 				windowMaps.addLostTest(testCase)
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
@@ -2671,6 +2706,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
 				capWatch.afterTestCase(ctx, testCase.Name)
+				// Asked: its read is out now, which holds the stop's drains
+				// in its turn (holdForReads).
+				r.unchecked.Add(-1)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
@@ -3111,6 +3149,21 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			opts.handing = func(tc *models.TestCase) func() {
 				name := tc.Name
 				return func() { recordedTests.Store(name, struct{}{}) }
+			}
+		}
+		// Each test case handed over is unchecked until its consumer has
+		// asked for its check, or failed to save it (holdForReads). Counted
+		// on this drain's goroutine as the hand-off completes, before any
+		// look of its own: at a look, every test case it handed is counted.
+		handing := opts.handing
+		opts.handing = func(tc *models.TestCase) func() {
+			handed := func() {}
+			if handing != nil {
+				handed = handing(tc)
+			}
+			return func() {
+				r.unchecked.Add(1)
+				handed()
 			}
 		}
 		forwardUntilDrained(ctx, r, incomingStream, incomingChan, abandoned, opts)

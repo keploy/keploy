@@ -44,11 +44,12 @@ var countReadEvery = drainProgressEvery
 // streams open (routes.HoldStop), and goes once they end: a read asked of it
 // then is refused. So with the proven switch on, where such a read fails the
 // recording, the stop's frame drains keep the agent's streams open while a
-// read asked is out (out, Recorder.holdForReads): the final read, asked as
-// the stop begins, and every test case's check asked before the drains end
-// the streams, are made while the agent is up, however slow the read before
-// them. The CA watch's reads, only said, are not waited for there: with the
-// switch off record ends as it did.
+// read asked is out (out, Recorder.holdForReads), and while a test case they
+// handed over is still being saved, its check yet to be asked: the final
+// read, asked as the stop begins, and the check of every test case handed
+// over before the drains end the streams, are made while the agent is up,
+// however slow the read before them or the save. The CA watch's reads, only
+// said, are not waited for there: with the switch off record ends as it did.
 //
 // While a drain may still save what the agent held, the reads stand no offer
 // of the stop's (utils.OfferStopNow): a press at it would close

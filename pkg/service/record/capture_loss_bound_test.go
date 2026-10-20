@@ -1347,3 +1347,272 @@ func TestACheckAfterTheSwitchsFailedFinalReadAnswersForIt(t *testing.T) {
 		t.Fatalf("%d reads; want the base, test-1's, the final read and test-2's", instr.reads)
 	}
 }
+
+// slowSaveDB is a test store whose insert of test case slow, once entered,
+// waits until release: a consumer slow to save what the stop's drain handed
+// it (a disk stalled under load). With fail set, that insert then fails.
+type slowSaveDB struct {
+	*recTestDB
+	slow    string
+	fail    bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newSlowSaveDB(slow string) *slowSaveDB {
+	return &slowSaveDB{recTestDB: &recTestDB{}, slow: slow, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (d *slowSaveDB) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
+	if tc.Name == d.slow {
+		close(d.entered)
+		<-d.release
+		if d.fail {
+			return errors.New("no space left on device")
+		}
+	}
+	return d.recTestDB.InsertTestCase(ctx, tc, testSetID, enableLog)
+}
+
+// stopWithSlowSave records test-1, stops, and once the final read has come
+// back hands the drain test-2, which the agent held from before the stop and
+// whose save is slow (db), and has the agent say it holds nothing more.
+func stopWithSlowSave(t *testing.T, a *stopHeldAgent, db *slowSaveDB) {
+	t.Helper()
+	captured := time.Now()
+	send := func(name string) {
+		t.Helper()
+		select {
+		case a.incoming <- tcAt(name, captured):
+		case <-time.After(30 * time.Second): // only turns a hang into a failure
+			t.Fatalf("%s was never taken", name)
+		}
+	}
+	waitAnswered := func(n int32, what string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second) // bounds only reads that never come
+		for a.answered.Load() < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s never came back", what)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	send("test-1")
+	waitAnswered(2, "test-1's check")
+	close(a.appEnd) // the stop
+	waitAnswered(3, "the final read")
+	send("test-2") // saved by the drain
+	within(t, db.entered, "test-2's save")
+	a.clear.Store(true)
+}
+
+// The check of a test case the stop's drain saves is made while the agent is
+// up however long its save takes: the drain hands it to the consumer, and,
+// its stream quiet and the agent holding nothing more, holds the agent's
+// streams open until the consumer has asked its check. The recording, which
+// lost nothing, passes. Before, the drain held them only for a read already
+// asked: with test-2 still being saved it ended them, the agent went, and
+// test-2's check, asked once its save was through, was refused; test-2 was
+// named not verified, and the recording failed (exit 1).
+func TestStart_TheSwitchsCheckOfATestCaseSavedSlowlyIsMadeWhileTheAgentIsHeld(t *testing.T) {
+	a := newStopHeldAgent(0)
+	db := newSlowSaveDB("test-2")
+	r, logs, done := startHeld(t, a, nil, func(r *Recorder) { r.testDB = db })
+	stopWithSlowSave(t, a, db)
+	deadline := time.Now().Add(30 * time.Second) // bounds only a drain that never looks
+	heldFor := func(n uint64) {
+		t.Helper()
+		for r.checkHolds.Load() < n {
+			select {
+			case <-a.ended:
+				t.Fatal("the recording ended the agent's streams, and the agent went, with test-2's check yet to be asked")
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the stop's drain never held the agent's streams for test-2's check: %v", logs.All())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	heldFor(r.checkHolds.Load() + 1)
+	// A look held for the save alone: it found every read through, and none
+	// is asked again until test-2's check, once its save is (a look before
+	// may have held for the final read, slow to come back, and said so).
+	from := logs.Len()
+	heldFor(r.checkHolds.Load() + 2)
+	for _, e := range logs.All()[from:] {
+		if e.Message == heldForReads {
+			t.Fatalf("said, at a look that held only for test-2's save, that it waits for the agent's reads: %v", logs.All()[from:])
+		}
+	}
+	close(db.release)
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 4 {
+		t.Fatalf("%d reads answered; want the base, test-1's check, the final read and test-2's check", n)
+	}
+}
+
+// A test case the drain handed whose save fails has no check to wait for:
+// the drain ends the agent's streams once the save has failed, rather than
+// holding them for a check that never comes until the stop's drain is given
+// up on its stall (which this test's drain clock never lets happen).
+func TestStart_ATestCaseTheDrainCouldNotSaveHoldsNoStream(t *testing.T) {
+	a := newStopHeldAgent(0)
+	db := newSlowSaveDB("test-2")
+	db.fail = true
+	r, logs, done := startHeld(t, a, nil, func(r *Recorder) {
+		r.testDB = db
+		r.drainClock = &stall.ManualClock{}
+	})
+	stopWithSlowSave(t, a, db)
+	held := r.checkHolds.Load()
+	deadline := time.Now().Add(30 * time.Second) // bounds only a drain that never looks
+	for r.checkHolds.Load() < held+1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop's drain never held the agent's streams for test-2's save: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(db.release)
+	within(t, a.ended, "the agent's streams ended once test-2's save failed")
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second): // only turns a hang into a failure
+		t.Fatal("Start never returned")
+	}
+	if gaveUp(logs, "record-req")() {
+		t.Fatal("the stop's drain was given up")
+	}
+	if n := a.refused.Load(); n != 0 {
+		t.Fatalf("%d reads refused; none was asked once the agent had gone", n)
+	}
+	if n := a.answered.Load(); n != 3 {
+		t.Fatalf("%d reads answered; want the base, test-1's check and the final read: test-2 was not saved", n)
+	}
+}
+
+// With the switch off nothing of this holds the agent's streams: the stop's
+// drain ends them with a test case's save still out, as it always has.
+func TestStart_WithTheSwitchOffTheDrainDoesNotWaitForATestCasesSave(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	a := newStopHeldAgent(0)
+	db := newSlowSaveDB("test-2")
+	r := exitCodeRecorder(a)
+	r.testDB = db
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	done := make(chan error, 1)
+	go func() { done <- r.Start(context.Background()) }()
+	captured := time.Now()
+	select {
+	case a.incoming <- tcAt("test-1", captured):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	close(a.appEnd)
+	select {
+	case a.incoming <- tcAt("test-2", captured):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-2 was never taken")
+	}
+	within(t, db.entered, "test-2's save")
+	a.clear.Store(true)
+	within(t, a.ended, "the agent's streams ended with test-2's save out")
+	close(db.release)
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second): // only turns a hang into a failure
+		t.Fatal("Start never returned")
+	}
+}
+
+// A save wedged past the stop drain's stall still gets the drain given up:
+// a look that holds the agent's streams only for a test case still being
+// saved is not progress (the consumer's hand-overs are), so a store that
+// never comes back cannot hold keploy record's stop forever. The recording's
+// end is said to be cut, as for any drain given up; once the save does come
+// back, its check is still made while the agent is up.
+func TestStart_ASaveWedgedPastTheDrainsStallGetsTheDrainGivenUp(t *testing.T) {
+	a := newStopHeldAgent(0)
+	db := newSlowSaveDB("test-2")
+	clk := &stall.ManualClock{}
+	r, logs, done := startHeld(t, a, nil, func(r *Recorder) {
+		r.testDB = db
+		r.drainClock = clk
+	})
+	stopWithSlowSave(t, a, db)
+	deadline := time.Now().Add(30 * time.Second) // bounds only a drain never given up
+	for advances := 0; !gaveUp(logs, "record-req")(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop's drain was not given up after %d of its stall bounds held only for a save", advances)
+		}
+		// The record-req drain has looked at its progress and waits again
+		// (Advance fires its timer, and it asks for the next once it has
+		// looked). A look of the frame drain that holds the agent's streams
+		// for test-2's save comes after that, and keploy then runs for the
+		// drain's whole bound: were such a look progress, the drain would
+		// see it, and never be given up.
+		if clk.Pending() == 0 {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		for since := r.checkHolds.Load(); r.checkHolds.Load() == since; {
+			if time.Now().After(deadline) {
+				t.Fatalf("the stop's drain was not given up after %d of its stall bounds held only for a save", advances)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		clk.Advance(teardownDrainStall)
+		advances++
+	}
+	select {
+	case <-a.ended:
+		t.Fatal("the agent's streams ended with test-2's check yet to be asked")
+	default:
+	}
+	close(db.release)
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second): // only turns a hang into a failure
+		t.Fatal("Start never returned")
+	}
+	if why := r.endCut.Load(); why == nil || !strings.Contains(*why, "made no progress") {
+		t.Fatalf("the recording's end was not said to be cut (%v); its drain was given up", why)
+	}
+	if n := a.refused.Load(); n != 0 {
+		t.Fatalf("%d reads refused; test-2's check was to be made while the agent was up", n)
+	}
+}
+
+// A recorder can be started again (Start), and what an earlier recording
+// left of its stop's holds is not this one's: a test case its consumer was
+// still saving when it ended (its drain given up on a stall), and its word
+// that the drains held the agent's streams for a read. This recording's
+// drains hold the agent's streams for its own read alone, say so, and end
+// them once it is answered. Were the earlier test case counted, they would
+// hold the streams for a check that never comes until the stop gave them up
+// (this test's drain clock never does); were the earlier word kept, this
+// stop's hold would go unsaid.
+func TestStart_ARecorderStartedAgainHoldsTheAgentsStreamsForItsOwnReadsAlone(t *testing.T) {
+	a := newStopHeldAgent(2) // the base read; test-1's check is slow
+	a.clear.Store(true)      // nothing held from before the stop
+	_, logs, done := startHeld(t, a, nil, func(r *Recorder) {
+		r.unchecked.Store(1)       // the earlier recording's consumer, still saving
+		r.readHoldSaid.Store(true) // the earlier recording's stop said it held
+		r.drainClock = &stall.ManualClock{}
+	})
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	within(t, a.asked, "test-1's check")
+	close(a.appEnd) // the stop, while test-1's check is out
+	if !releaseOnceHeldOrGone(t, a, logs) {
+		t.Fatal("the recording ended the agent's streams, and the agent went, with a read of its count out")
+	}
+	within(t, a.ended, "the agent's streams ended once this recording's reads were answered")
+	passedWhole(t, done, logs, &a.refused)
+}
