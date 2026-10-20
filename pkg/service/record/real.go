@@ -2,23 +2,38 @@ package record
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
+
+// errRealRunSilent is why the read of what keploy could not capture of
+// mock.real was given up: keploy had the read's whole bound (stall.HangBudget
+// of its own runnable time) to run, and the agent did not answer.
+var errRealRunSilent = fmt.Errorf("the keploy agent did not say which mock.real connections it could not capture: keploy had %s of its own time to run, and it did not answer", stall.HangBudget)
+
+// errRealRunStopped is why that read, ended by the user's Ctrl+C at an offer
+// of the stop's (utils.StopNow), is not read.
+var errRealRunStopped = errors.New("a Ctrl+C stopped keploy's wait for its agent to say which mock.real connections it could not capture")
 
 // reportRealRun says, as a recording ends under the proven switch with a
 // mock.real list, what keploy could neither capture nor relay as real
 // (capture_incomplete, design v14 §3.2): no test case holds what those
 // connections carried, and capture is never silent. The recording is
 // incomplete and the run fails, as for a capture loss (realUncaptured). A
-// read that fails is said, and fails the run the same way (realUnread):
-// whether the recording is whole cannot be told. Where a later pass judges
-// each test case (JudgeLossesLater), each is a WARN, and handed over.
+// read that fails, or that the agent does not answer (readRealRun), is
+// said, and fails the run the same way (realUnread): whether the recording
+// is whole cannot be told. Where a later pass judges each test case
+// (JudgeLossesLater), each is a WARN, and handed over.
 func (r *Recorder) reportRealRun(ctx context.Context) {
-	run, err := realclient.Run(context.WithoutCancel(ctx), r.instrumentation, r.mockReal())
+	run, err := r.readRealRun(ctx)
 	if err != nil {
 		why := "keploy could not read from its agent which mock.real connections it could not capture: " + err.Error()
 		r.realUnread.Store(&why)
@@ -94,6 +109,55 @@ func sessionEnd(stopReason string, agentHeldBack, captureLossy, storeWrote, agen
 		return "incomplete", "keploy's agent could not capture every call while it recorded, or could not be checked"
 	}
 	return "completed", ""
+}
+
+// readRealRun reads what the run saw of mock.real (realclient.Run) on the
+// stop's goroutine, and waits for it as the capture watch's reads are waited
+// for (countReads.readNow): the stop does not end it (the read is made once
+// the stop has ended record's context), the interrupt that gives the stop's
+// waits up (utils.StopNow) does, at once, and it is given up once keploy had
+// stall.HangBudget of its own runnable time to run without an answer, on
+// countReadClock, so a starved keploy is not taken for a silent agent and a
+// stop no one presses Ctrl+C at (CI's `sudo pkill -INT`) still ends. Once it
+// has waited countReadEvery it says so at Info, with the bound; it stands no
+// offer of the stop's (a press cannot be told from the copy of the stop's
+// own signal that sudo hands on). Without the switch or a list it asks
+// nothing.
+func (r *Recorder) readRealRun(ctx context.Context) (*models.RealRun, error) {
+	list := r.mockReal()
+	if len(list) == 0 {
+		return nil, nil
+	}
+	type answer struct {
+		run *models.RealRun
+		err error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		readCtx, cancelRead := stopProof(ctx)
+		defer cancelRead()
+		run, err := boundedAgentRead(readCtx, countReadClock, stall.HangBudget, errRealRunSilent, func(c context.Context) (*models.RealRun, error) {
+			return realclient.Run(c, r.instrumentation, list)
+		})
+		if errors.Is(err, context.Canceled) {
+			// Its context is stop-proof: only utils.StopNow ends it.
+			err = errRealRunStopped
+		}
+		got <- answer{run, err}
+	}()
+	tick := time.NewTicker(countReadEvery)
+	defer tick.Stop()
+	for said := false; ; {
+		select {
+		case a := <-got:
+			return a.run, a.err
+		case <-tick.C:
+			if !said {
+				said = true
+				r.logger.Info(fmt.Sprintf("Still waiting for the keploy agent to say which mock.real connections it could not capture; Ctrl+C does not cut this short: the read is given up once keploy has had %s of its own time to run without an answer", stall.HangBudget))
+			}
+		}
+	}
 }
 
 // mockReal is keploy.yml mock.real as the recorder reads it: only under the

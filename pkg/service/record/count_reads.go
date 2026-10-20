@@ -12,9 +12,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// countReadClock is the clock a record watch's reads of the agent's count are
-// bounded on (countReads): nil, keploy's own runnable time. Tests set one
-// they drive.
+// countReadClock is the clock keploy record's reads of its agent as a
+// recording ends are bounded on: a record watch's reads of the agent's count
+// (countReads), and the read of what it could not capture of mock.real
+// (Recorder.readRealRun). nil, keploy's own runnable time. Tests set one they
+// drive.
 var countReadClock stall.Clock
 
 // countReadEvery is how often a wait for those reads looks again, and so how
@@ -37,14 +39,26 @@ var countReadEvery = drainProgressEvery
 // to press Ctrl+C, so a stop no one presses Ctrl+C at (CI's pkill -INT) ends
 // too, and a starved keploy is not taken for a silent agent.
 //
+// An agent the stop reached too (CI's `sudo pkill -INT -f keploy`, a Ctrl+C
+// in a terminal) holds its own stop only while this recording holds its frame
+// streams open (routes.HoldStop), and goes once they end: a read asked of it
+// then is refused. So with the proven switch on, where such a read fails the
+// recording, the stop's frame drains keep the agent's streams open while a
+// read asked is out (out, Recorder.holdForReads): the final read, asked as
+// the stop begins, and every test case's check asked before the drains end
+// the streams, are made while the agent is up, however slow the read before
+// them. The CA watch's reads, only said, are not waited for there: with the
+// switch off record ends as it did.
+//
 // While a drain may still save what the agent held, the reads stand no offer
 // of the stop's (utils.OfferStopNow): a press at it would close
 // utils.StopNow, which the drains give up at. Once the frame drains are over
-// the stop waits for the reads still out before it lets the agent go
-// (waitForReads), saying so; it offers nothing and hears no press of its own
-// (it ends as the reads do: waitForReads says why). The watch's finish, after
-// every drain, waits for the rest, and there offers that one more Ctrl+C
-// stops the wait now (wait).
+// the stop waits for the reads still out (asked once the streams were
+// ending, with the switch on) before it lets the agent go (waitForReads),
+// saying so; it offers nothing and hears no press of its own (it ends as the
+// reads do: waitForReads says why). The watch's finish, after every drain,
+// waits for the rest, and there offers that one more Ctrl+C stops the wait
+// now (wait).
 type countReads struct {
 	logger *zap.Logger
 	reader CaptureLossReader
@@ -126,31 +140,40 @@ func stopProof(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // boundedRead reads the agent's count on ctx, which ends it, given up (silent)
-// once keploy had r.stall of its own runnable time to run without an answer:
-// a starved keploy is not taken for a silent agent.
+// once keploy had r.stall of its own runnable time to run without an answer
+// (boundedAgentRead).
 func (r *countReads) boundedRead(ctx context.Context) (models.CaptureLosses, error) {
+	return boundedAgentRead(ctx, r.clock, r.stall, r.silent, r.reader.GetCaptureLosses)
+}
+
+// boundedAgentRead makes read on ctx, which ends it, and gives it up (silent)
+// once keploy had bound of its own runnable time (on clock; nil, the
+// process's) to run without an answer: a starved keploy is not taken for a
+// silent agent. A read given up is left to end on its own context's end.
+func boundedAgentRead[T any](ctx context.Context, clock stall.Clock, bound time.Duration, silent error, read func(context.Context) (T, error)) (T, error) {
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 	type answer struct {
-		losses models.CaptureLosses
-		err    error
+		v   T
+		err error
 	}
 	got := make(chan answer, 1) // a read that outlives its bound does not block
 	go func() {
-		losses, err := r.reader.GetCaptureLosses(readCtx)
-		got <- answer{losses, err}
+		v, err := read(readCtx)
+		got <- answer{v, err}
 	}()
-	m := stall.NewMeter(r.clock, r.stall)
+	m := stall.NewMeter(clock, bound)
 	defer m.Stop()
+	var none T
 	for {
 		select {
 		case a := <-got:
-			return a.losses, a.err
+			return a.v, a.err
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return none, ctx.Err()
 		case <-m.Wait():
 			if m.Expired() {
-				return nil, r.silent
+				return none, silent
 			}
 		}
 	}
@@ -253,6 +276,18 @@ func (r *countReads) readAll() {
 		}
 		r.mu.Unlock()
 	}
+}
+
+// out reports whether a read asked for is not yet answered, failed or given
+// up: the stop's frame drains hold the agent's streams open meanwhile
+// (Recorder.holdForReads).
+func (r *countReads) out() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reading
 }
 
 // unreadLocked is, once the watch has finished (r.mu held), the test cases

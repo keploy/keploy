@@ -297,8 +297,10 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			// behind the traffic can be quiet for longer than any grace). One
 			// that does not answer may still hold something: only its "no",
 			// or a stall it makes no progress through, ends the drain
-			// (holdForBacklog).
-			if r.holdForBacklog(stoppedAt, &looks, o.kind) {
+			// (holdForBacklog). Before that, a read of the agent's count
+			// still out holds its streams open, and with them an agent the
+			// stop reached too (holdForReads).
+			if r.holdForReads() || r.holdForBacklog(stoppedAt, &looks, o.kind) {
 				quietUntil = time.Now().Add(quiet)
 				resetTimer(idle, quiet)
 				continue
@@ -621,6 +623,16 @@ type Recorder struct {
 	// what the agent still held from before the stop (holdForBacklog):
 	// progress for the stop's outer drains (drainProgress).
 	backlogHolds atomic.Uint64
+	// capReads is, under the proven switch, the capture watch's reads of the
+	// agent's count (captureWatch.reads), from once its base read answered:
+	// while one asked is out, the stop's frame drains hold the agent's
+	// streams open (holdForReads). nil otherwise.
+	capReads atomic.Pointer[countReads]
+	// readHolds counts the looks at which a frame drain held the agent's
+	// streams open for them: progress for the stop's outer drains
+	// (drainProgress). readHoldSaid: the stop has said so.
+	readHolds    atomic.Uint64
+	readHoldSaid atomic.Bool
 	// teardown is the recording's own teardown scope (Start): what keploy
 	// sees its stops do -- the agent's, the app's, the daemons', the
 	// compose project's down -- moves it, and it is progress for the stop's
@@ -847,6 +859,34 @@ func startedAgent(inst any) bool {
 	return ok && s.StartedAgent()
 }
 
+// holdForReads reports whether a frame drain, its stream quiet for its bound,
+// holds the agent's streams open, and looks again once the stream has been
+// quiet for it once more, because the proven switch's capture watch has a
+// read of the agent's count asked and not yet answered, failed or given up
+// (capReads). An agent the stop reached too (CI's `sudo pkill -INT -f
+// keploy`, a Ctrl+C in a terminal) holds its own stop only while this
+// recording holds a stream open (routes.HoldStop), and goes once they end: a
+// read asked of it then is refused, and leaves what it would check not
+// verified, failing a recording that lost nothing. Each read is bounded
+// (countReads: stall.HangBudget of keploy's own runnable time), so this is
+// too; once they are through, the drain goes on as it would have (its look
+// at what the agent still holds, holdForBacklog, comes after). It says so,
+// at Info, the first time; a press at the drain's offer gives the drain up,
+// and ends the reads (utils.StopNow). Every look that holds counts as
+// progress for the stop's outer drains (drainProgress), which would
+// otherwise take a drain held for a read for a wedged one.
+func (r *Recorder) holdForReads() bool {
+	reads := r.capReads.Load()
+	if !reads.out() {
+		return false
+	}
+	r.readHolds.Add(1)
+	if r.readHoldSaid.CompareAndSwap(false, true) {
+		r.logger.Info(fmt.Sprintf("Still waiting for the keploy agent to say whether it captured every call while this recording ran, before its streams end: an agent the stop reached too stops once they do; each read is given up once keploy has had %s of its own time to run without an answer", reads.stall))
+	}
+	return true
+}
+
 // holdForBacklog decides, for a drain whose stream has gone quiet after the
 // stop, whether it goes on waiting for what the agent still holds from before
 // the stop (true) or ends (false). It asks the agent (AgentClient.BacklogBefore)
@@ -925,10 +965,12 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 
 // drainProgress is what the stop's drains wait on while it moves: the frames
 // handed on, every look at which a frame drain decided to keep waiting for
-// the agent (holdForBacklog), which bounds its own wait, and every movement
-// keploy saw of the recording's stops (Recorder.teardown).
+// the agent (holdForBacklog), which bounds its own wait, or held its streams
+// open for a read of the agent's count (holdForReads), which each read's own
+// bound ends, and every movement keploy saw of the recording's stops
+// (Recorder.teardown).
 func (r *Recorder) drainProgress() uint64 {
-	return r.frameProgress.Load() + r.backlogHolds.Load() + r.teardown.Load().Moves()
+	return r.frameProgress.Load() + r.backlogHolds.Load() + r.readHolds.Load() + r.teardown.Load().Moves()
 }
 
 // teardownDrainStall bounds the drains of the recording's stop that wait on
@@ -1428,6 +1470,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	r.mockWriteStopped.Store(false)
 	r.heldFrames.Store(0)
 	r.mappingsStreamed.Store(0)
+	r.capReads.Store(nil)
+	r.readHoldSaid.Store(false)
 
 	sessionStart := time.Now()
 
@@ -1680,12 +1724,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// compose is stopping it (agentGoing: the app exited on its own, or a
 	// container of its project did, and compose stops the project). The agent
 	// then waits for the drain, and goes once its streams close: what it
-	// could not capture (mock.real), and what it lost after the last test
-	// case, are read first, while it is still up, as of an agent this client
-	// started. Its exit is then seen to (composeAgentEnder): it goes once the
-	// streams close, and one wedged in its stop is killed, rather than held
-	// for compose's grace, which waits on it. After a drain the stop began,
-	// the reads come with the stack still up.
+	// could not capture (mock.real) is read before the drain, and what it
+	// lost after the last test case is asked for then, as of an agent this
+	// client started; the drain holds its streams open, and so the agent up,
+	// until that read, and every check asked before it, is answered (or
+	// given up: holdForReads). Its exit is then seen to (composeAgentEnder):
+	// it goes once the streams close, and one wedged in its stop is killed,
+	// rather than held for compose's grace, which waits on it. After a drain
+	// the stop began, the reads come with the stack still up.
 	var composeDrain sync.Once
 	drainComposeAgent := func(agentGoing bool) {
 		composeDrain.Do(func() {
@@ -1695,8 +1741,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					r.reportRealRun(ctx)
 					capWatch.afterTestCases(ctx)
 				}
+				// Held for the reads asked so far (holdForReads); this
+				// waits for any asked as its streams were ending.
 				joined := drainFrames()
-				capWatch.waitForReads() // while the agent is up
+				capWatch.waitForReads()
 				if e, ok := r.instrumentation.(composeAgentEnder); ok {
 					// A drain given up on a stall may hold its stream open,
 					// and the agent waits for that stream: it is told to go.
@@ -1787,16 +1835,20 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 		if !composeAgent {
-			// Asked before the frames drain, and made on the watch's own
-			// goroutine (waited for below): the agent stays up while this
-			// recording holds its streams open, even when the stop signal
-			// reached it too, and the app has stopped making calls.
+			// Read, and asked for, before the frames drain, the app having
+			// stopped making calls: the agent stays up while this recording
+			// holds its streams open, even when the stop signal reached it
+			// too, and the drain holds them open until the final read, made
+			// on the watch's own goroutine, and every check asked before
+			// it, is answered (or given up: holdForReads).
 			if recordingStarted {
 				r.reportRealRun(ctx)
 				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
-			capWatch.waitForReads() // before the agent stops
+			// Any read asked as the streams were ending (a test case the
+			// drain saved late), before the agent is stopped.
+			capWatch.waitForReads()
 		}
 		// The stop had to kill the app, or the agent went before it had
 		// handed over what it captured: the recording's end is cut, and the
@@ -2398,6 +2450,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// What the agent could not capture is counted from here: the agent is
 	// capturing, and a native app has not started.
 	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
+	// Its reads hold the agent's streams open at the stop (holdForReads).
+	r.capReads.Store(capWatch.reads)
 	if agentStopping != nil {
 		// Compose is stopping the agent (the app exited on its own, or a
 		// container of its project did), and the agent waits for this drain

@@ -782,3 +782,568 @@ func TestStart_ACheckTheAgentNeverAnswersHoldsNoTestCaseUp(t *testing.T) {
 		t.Fatalf("saved [%s], deleted %v; want every test case kept", got, db.deleted)
 	}
 }
+
+// stopHeldAgent is a keploy agent the stop reached too, as CI's
+// `sudo pkill -INT -f keploy`, or a Ctrl+C in a terminal, reaches it: it
+// holds its own stop only while this recording holds its frame streams open
+// (routes.HoldStop). Asked to end them (EndRecordingStreams), it ends each at
+// its marker, and goes: a read of its count asked from then on is refused (its
+// HTTP server shuts down), while one it took before is answered. It says it
+// still holds something from before the stop, its capture moving (with stuck,
+// not moving), until clear is set, and holds read number slow until released.
+type stopHeldAgent struct {
+	*endingAgent
+	appEnd   chan struct{}
+	stuck    atomic.Bool
+	slow     int32
+	n        atomic.Int32
+	answered atomic.Int32
+	asked    chan struct{} // closed as read slow comes
+	release  chan struct{}
+	looks    atomic.Uint64
+	gone     atomic.Bool
+	refused  atomic.Int32
+	endOnce  sync.Once
+	ended    chan struct{} // closed once it has ended its streams
+}
+
+func newStopHeldAgent(slow int32) *stopHeldAgent {
+	return &stopHeldAgent{endingAgent: newEndingAgent(), appEnd: make(chan struct{}), slow: slow,
+		asked: make(chan struct{}), release: make(chan struct{}), ended: make(chan struct{})}
+}
+
+func (a *stopHeldAgent) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	if a.gone.Load() {
+		a.refused.Add(1)
+		return nil, errors.New("failed to ask the agent for its capture losses: dial tcp 127.0.0.1:43900: connect: connection refused")
+	}
+	if a.n.Add(1) == a.slow {
+		close(a.asked)
+		select {
+		case <-a.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	a.answered.Add(1)
+	return nil, nil
+}
+
+func (a *stopHeldAgent) BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error) {
+	if !a.clear.Load() {
+		// Still parsing what it captured before the stop: its capture
+		// moves, so the drain waits for it however long the test takes,
+		// unless it is stuck.
+		progress := a.looks.Add(1)
+		if a.stuck.Load() {
+			progress = 0
+		}
+		return models.AgentBacklog{Verdict: models.BacklogPending, EndMarkers: true, Progress: progress}, nil
+	}
+	return a.endingAgent.BacklogBefore(ctx, before)
+}
+
+func (a *stopHeldAgent) EndRecordingStreams(ctx context.Context, token string) error {
+	a.gone.Store(true) // its stop held for these streams alone
+	err := a.endingAgent.EndRecordingStreams(ctx, token)
+	a.endOnce.Do(func() {
+		a.end(models.TestCaseStream, func() { close(a.incoming) })
+		a.end(models.MockStream, func() { close(a.outgoing) })
+		a.end(models.MappingStream, func() { close(a.mappings) })
+		close(a.ended)
+	})
+	return err
+}
+
+func (a *stopHeldAgent) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	select {
+	case <-a.appEnd:
+	case <-ctx.Done():
+	}
+	return models.AppError{AppErrorType: models.ErrAppStopped}
+}
+
+// heldForReads is what the stop's frame drains say, once, when they keep the
+// agent's streams open for the switch's reads of its count.
+const heldForReads = "Still waiting for the keploy agent to say whether it captured every call while this recording ran, before its streams end: an agent the stop reached too stops once they do; each read is given up once keploy has had 1m0s of its own time to run without an answer"
+
+// releaseOnceHeldOrGone releases a's held read once the stop's drains say
+// they keep its streams open for it, or once the agent has gone (the
+// recording ended its streams with the read out): reports which.
+func releaseOnceHeldOrGone(t *testing.T, a *stopHeldAgent, logs *observer.ObservedLogs) (held bool) {
+	t.Helper()
+	defer close(a.release)
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that does neither
+	for {
+		if n := logs.FilterMessage(heldForReads).Len(); n > 0 {
+			if e := logs.FilterMessage(heldForReads).All()[0]; e.Level != zapcore.InfoLevel {
+				t.Fatalf("said at %v, want Info", e.Level)
+			}
+			return true
+		}
+		select {
+		case <-a.ended:
+			return false
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop neither held the agent's streams for its read nor ended them: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// startHeld starts a recording under the switch against a, logging at Info,
+// once setup (when set) has set its recorder up.
+func startHeld(t *testing.T, a Instrumentation, cfg *config.Config, setup func(*Recorder)) (*Recorder, *observer.ObservedLogs, <-chan error) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	r := exitCodeRecorder(a)
+	if cfg != nil {
+		r.config = cfg
+	}
+	if setup != nil {
+		setup(r)
+	}
+	core, logs := observer.New(zapcore.InfoLevel)
+	r.logger = zap.New(core)
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	done := make(chan error, 1)
+	go func() { done <- r.Start(context.Background()) }()
+	return r, logs, done
+}
+
+// passedWhole waits for Start, and fails the test unless the recording
+// passed, with nothing said to be not verified, and no read of the agent's
+// count was refused.
+func passedWhole(t *testing.T, done <-chan error, logs *observer.ObservedLogs, refused *atomic.Int32) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start returned %v", err)
+		}
+	case <-time.After(60 * time.Second): // only turns a hang into a failure
+		t.Fatal("Start never returned")
+	}
+	if n := logs.FilterMessageSnippet("is not verified").Len(); n != 0 || utils.ErrCode != 0 || refused.Load() != 0 {
+		t.Fatalf("exit code %d, %d reads refused, %d 'not verified' ERRORs: a recording that lost nothing failed, a read of it made once the agent had gone: %v",
+			utils.ErrCode, refused.Load(), n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+	}
+}
+
+// keploy record under the switch, natively, with an agent the stop reached
+// too and a check of test-1 slow to come back as the stop begins: the final
+// read, asked behind it, is made while the agent is up, because the stop's
+// drains hold the agent's streams open (and so its stop) until every read
+// asked is answered, saying so, and the recording, which lost nothing,
+// passes. Before, the drains ended the streams with the check out; the agent
+// went, the final read made after it was refused, and the recording failed
+// as not verified after its last test case (exit 1).
+func TestStart_TheSwitchsFinalReadIsMadeWhileTheAgentIsHeld(t *testing.T) {
+	a := newStopHeldAgent(2) // the base read; test-1's check is slow
+	a.clear.Store(true)      // nothing held from before the stop
+	_, logs, done := startHeld(t, a, nil, nil)
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	within(t, a.asked, "test-1's check")
+	close(a.appEnd) // the stop, while test-1's check is out
+	if !releaseOnceHeldOrGone(t, a, logs) {
+		t.Error("the recording ended the agent's streams, and the agent went, with a read of its count out")
+	}
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 3 {
+		t.Fatalf("%d reads answered; want the base, test-1's check and the final read", n)
+	}
+}
+
+// A read held out longer than the stop's drain may go without progress
+// (teardownDrainStall, of keploy's runnable time) does not get the drain
+// given up: each look that holds the agent's streams for it is progress, and
+// the read's own bound ends it. The drain says it holds them once. Without
+// that the drain was given up while the read was out ("teardown drain made
+// no progress"), the agent's streams left to it, and the recording's end
+// said to be cut.
+func TestStart_AReadOutPastTheDrainsStallDoesNotGiveTheDrainUp(t *testing.T) {
+	a := newStopHeldAgent(2) // the base read; test-1's check is slow
+	a.clear.Store(true)
+	clk := &stall.ManualClock{}
+	r, logs, done := startHeld(t, a, nil, func(r *Recorder) { r.drainClock = clk })
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	within(t, a.asked, "test-1's check")
+	close(a.appEnd)                              // the stop, while test-1's check is out
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that never holds
+	for logs.FilterMessage(heldForReads).Len() == 0 {
+		select {
+		case <-a.ended:
+			t.Fatal("the recording ended the agent's streams with a read of its count out")
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop never held the agent's streams for its read: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < 3; i++ {
+		// The record-req drain looks at its stall; a look holds the
+		// streams since; keploy then runs for the drain's whole bound.
+		for clk.Pending() == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the stop's drain never looked at its stall")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		for held := r.readHolds.Load(); r.readHolds.Load() == held; {
+			if time.Now().After(deadline) {
+				t.Fatal("the drain stopped holding the agent's streams with the read out")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		clk.Advance(teardownDrainStall)
+	}
+	if gaveUp(logs, "record-req")() {
+		t.Fatal("the drain was given up while it held the agent's streams for a read")
+	}
+	if n := logs.FilterMessage(heldForReads).Len(); n != 1 {
+		t.Fatalf("said %d times that it holds the agent's streams, want once", n)
+	}
+	close(a.release)
+	passedWhole(t, done, logs, &a.refused)
+}
+
+// While a read of the agent's count is out, the stop's frame drains hold the
+// agent's streams for it before they ask the agent what it still holds from
+// before the stop: a look that holds for the read is not one of the looks a
+// drain gives the agent's backlog to move (drainStallLooks). An agent slow to
+// answer the read is one slow to move its capture too (a starved agent);
+// were its backlog looked at meanwhile, the drain would give the backlog up
+// while the read was out ("it made no progress"), and a recording that lost
+// nothing fail. Once the read is answered, the drain asks, the agent says it
+// holds nothing more, and the recording passes.
+func TestStart_ADrainHeldForAReadDoesNotCountTheAgentsBacklogAgainstIt(t *testing.T) {
+	a := newStopHeldAgent(2) // the base read; test-1's check is slow
+	a.stuck.Store(true)      // its capture does not move while the read is out
+	r, logs, done := startHeld(t, a, nil, nil)
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	within(t, a.asked, "test-1's check")
+	close(a.appEnd) // the stop, while test-1's check is out
+	// Held for far more looks than a drain gives a backlog that does not move:
+	// at least one of the two frame drains looked more than drainStallLooks
+	// times.
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that never holds
+	for r.readHolds.Load() < 4*drainStallLooks {
+		select {
+		case <-a.ended:
+			t.Fatal("the recording ended the agent's streams with a read of its count out")
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop held the agent's streams for its read only %d times: %v", r.readHolds.Load(), logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := logs.FilterMessageSnippet("it made no progress").Len(); n != 0 {
+		t.Fatalf("a drain gave the agent's backlog up while it held the agent's streams for a read: %v", logs.FilterLevelExact(zapcore.ErrorLevel).All())
+	}
+	a.clear.Store(true) // its capture is through
+	close(a.release)
+	passedWhole(t, done, logs, &a.refused)
+}
+
+// keptAgent is a keploy agent the stop did not reach (keploy's record timer
+// ended the recording, or a Ctrl+C that only keploy got): it stays up once
+// its streams end, until keploy stops it (the context its Setup got ends, as
+// its process, or its container, then does), and from then on refuses every
+// read of its count, and fails the one it was answering. It holds nothing
+// from before the stop but test-2, captured before it, which it puts on the
+// test-case stream when asked to end its streams, before that stream's
+// marker; the mapping stream's marker comes only once test-2's check is asked
+// (read number slow, held until released), so the stop's drains end with
+// that read out.
+type keptAgent struct {
+	*endingAgent
+	appEnd     chan struct{}
+	captured   time.Time
+	setup      atomic.Pointer[context.Context]
+	slow       int32
+	n          atomic.Int32
+	answered   atomic.Int32
+	checkAsked chan struct{} // closed as read slow comes
+	release    chan struct{}
+	refused    atomic.Int32
+	endOnce    sync.Once
+}
+
+func newKeptAgent(slow int32) *keptAgent {
+	a := &keptAgent{endingAgent: newEndingAgent(), appEnd: make(chan struct{}), captured: time.Now(), slow: slow,
+		checkAsked: make(chan struct{}), release: make(chan struct{})}
+	a.clear.Store(true)
+	return a
+}
+
+func (a *keptAgent) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	a.setup.Store(&ctx)
+	return nil
+}
+
+// stopping is what ends once keploy stops the agent.
+func (a *keptAgent) stopping() <-chan struct{} {
+	return (*a.setup.Load()).Done()
+}
+
+// stopped reports whether keploy has stopped the agent.
+func (a *keptAgent) stopped() bool {
+	select {
+	case <-a.stopping():
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *keptAgent) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	if a.stopped() {
+		a.refused.Add(1)
+		return nil, errors.New("failed to ask the agent for its capture losses: dial tcp 127.0.0.1:43900: connect: connection refused")
+	}
+	if a.n.Add(1) == a.slow {
+		close(a.checkAsked)
+		select {
+		case <-a.release:
+		case <-a.stopping():
+			a.refused.Add(1)
+			return nil, errors.New("failed to ask the agent for its capture losses: read tcp 127.0.0.1:43900: connection reset by peer")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	a.answered.Add(1)
+	return nil, nil
+}
+
+func (a *keptAgent) EndRecordingStreams(ctx context.Context, token string) error {
+	err := a.endingAgent.EndRecordingStreams(ctx, token)
+	a.endOnce.Do(func() {
+		go func() {
+			a.incoming <- tcAt("test-2", a.captured)
+			a.end(models.TestCaseStream, func() { close(a.incoming) })
+			a.end(models.MockStream, func() { close(a.outgoing) })
+			<-a.checkAsked
+			a.end(models.MappingStream, func() { close(a.mappings) })
+		}()
+	})
+	return err
+}
+
+func (a *keptAgent) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	select {
+	case <-a.appEnd:
+	case <-ctx.Done():
+	}
+	return models.AppError{AppErrorType: models.ErrAppStopped}
+}
+
+// A read still out once the stop's frame drains are over (the check of a
+// test case the agent put on its stream as it ended it) is waited for before
+// keploy stops the agent, saying so with its bound, and is answered: the
+// recording, which lost nothing, passes. Stopped with the read out, the agent
+// fails it, and the test case it checks is named not verified (exit 1).
+func TestStart_AReadOutAsTheDrainsEndIsAnsweredBeforeKeployStopsTheAgent(t *testing.T) {
+	manualCounts(t)      // no read is given up on its bound here
+	a := newKeptAgent(4) // the base read, test-1's check, the final read; test-2's check is slow
+	_, logs, done := startHeld(t, a, nil, nil)
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	deadline := time.Now().Add(30 * time.Second) // bounds only reads that never come
+	for a.answered.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("test-1's check never came back")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	from := logs.Len() // what the stop says from here
+	close(a.appEnd)    // the stop
+	within(t, a.checkAsked, "test-2's check")
+	const waits = "Still waiting for the keploy agent to say whether it captured every call while this recording ran; Ctrl+C does not cut this short: each read is given up once keploy has had 1m0s of its own time to run without an answer"
+	for said := false; !said; {
+		if a.stopped() {
+			t.Fatal("keploy stopped the agent with test-2's check out")
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop never said it waits for test-2's check: %v", logs.All()[from:])
+		}
+		for _, e := range logs.All()[from:] {
+			said = said || (e.Message == waits && e.Level == zapcore.InfoLevel)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if a.stopped() {
+		t.Fatal("keploy stopped the agent with test-2's check out")
+	}
+	close(a.release)
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 4 {
+		t.Fatalf("%d reads answered; want the base, test-1's check, the final read and test-2's check", n)
+	}
+}
+
+// askedHooks notes each test case once its check is asked (the consumer asks
+// before AfterTestCaseInsert).
+type askedHooks struct {
+	BaseRecordHooks
+	asked chan string
+}
+
+func (h askedHooks) AfterTestCaseInsert(_ context.Context, info *TestCaseContext) error {
+	h.asked <- info.TestCase.Name
+	return nil
+}
+
+// The test cases the stop's drain saves are checked while the agent is up
+// too: test-3's check, asked while test-2's (slow to come back) is out, is
+// made before the drains let the agent's streams end, and the recording
+// passes. Before, the drain ended them once the agent said it held nothing
+// more; the agent went, and test-3's check, made after test-2's came back,
+// was refused: test-3 was named not verified, and the recording failed.
+func TestStart_TheSwitchsChecksOfTheDrainsTestCasesAreMadeWhileTheAgentIsHeld(t *testing.T) {
+	a := newStopHeldAgent(4) // the base read, test-1's check, the final read; test-2's check is slow
+	hooks := askedHooks{asked: make(chan string, 8)}
+	_, logs, done := startHeld(t, a, nil, func(r *Recorder) { r.hooks = hooks })
+	captured := time.Now()
+	send := func(name string) {
+		t.Helper()
+		select {
+		case a.incoming <- tcAt(name, captured):
+		case <-time.After(30 * time.Second): // only turns a hang into a failure
+			t.Fatalf("%s was never taken", name)
+		}
+		select {
+		case got := <-hooks.asked:
+			if got != name {
+				t.Fatalf("asked for %s's check, want %s's", got, name)
+			}
+		case <-time.After(30 * time.Second): // only turns a hang into a failure
+			t.Fatalf("%s's check was never asked", name)
+		}
+	}
+	send("test-1")
+	deadline := time.Now().Add(30 * time.Second) // bounds only reads that never come
+	for a.answered.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("test-1's check never came back")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(a.appEnd) // the stop
+	for a.answered.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("the final read never came back")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// What the agent still held from before the stop, saved by the drain.
+	send("test-2")
+	within(t, a.asked, "test-2's check")
+	send("test-3") // its check waits for test-2's
+	a.clear.Store(true)
+	if !releaseOnceHeldOrGone(t, a, logs) {
+		t.Error("the recording ended the agent's streams, and the agent went, with a read of its count out")
+	}
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 5 {
+		t.Fatalf("%d reads answered; want the base, the final read and test-1's, test-2's and test-3's checks", n)
+	}
+}
+
+// goingComposeAgent is a stopHeldAgent docker compose stops with the app's
+// project (the app exited on its own): it says so (WatchAgentStop), waits for
+// this recording's drain, and goes once its streams end.
+type goingComposeAgent struct {
+	*stopHeldAgent
+	compose *stoppingComposeAgent
+}
+
+func (g *goingComposeAgent) EndComposeAgent(release bool) { g.compose.EndComposeAgent(release) }
+func (g *goingComposeAgent) WatchAgentStop(ctx context.Context) <-chan struct{} {
+	return g.compose.WatchAgentStop(ctx)
+}
+func (g *goingComposeAgent) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	return g.compose.Run(ctx, opts)
+}
+
+// Under docker compose an agent compose stops with the project waits for
+// this recording's drain and goes once its streams end: the final read,
+// asked behind a check slow to come back, is made before the drain lets them
+// end, and the recording, which lost nothing, passes. Before, it was made
+// once the drain had ended them, the agent gone, and was refused (exit 1).
+func TestStart_TheSwitchsFinalReadIsMadeBeforeAComposeAgentGoes(t *testing.T) {
+	a := newStopHeldAgent(2) // the base read; test-1's check is slow
+	compose := &stoppingComposeAgent{endingAgent: a.endingAgent, stopping: make(chan struct{}), stackDown: make(chan struct{}), ending: make(chan struct{})}
+	g := &goingComposeAgent{stopHeldAgent: a, compose: compose}
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // the compose agent's health check
+	}))
+	defer health.Close()
+	cfg := &config.Config{}
+	cfg.CommandType = string(utils.DockerCompose)
+	cfg.Agent.AgentURI = health.URL
+	_, logs, done := startHeld(t, g, cfg, nil)
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	within(t, a.asked, "test-1's check")
+	a.clear.Store(true)
+	close(compose.stopping) // compose stops the agent, which waits for the drain
+	if !releaseOnceHeldOrGone(t, a, logs) {
+		t.Error("the recording ended the agent's streams, and the agent went, with a read of its count out")
+	}
+	within(t, compose.ending, "the drained agent seen to its end")
+	close(compose.stackDown)
+	passedWhole(t, done, logs, &a.refused)
+}
+
+// A read made after a final read that failed answers for it: in a native or
+// docker stop the drain saves its last test cases after the final read was
+// asked, and the check of one of them counts everything the agent lost
+// before the stop. The recording's end is then verified, and the recording,
+// which lost nothing, passes.
+func TestACheckAfterTheSwitchsFailedFinalReadAnswersForIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	// The base, test-1's check; the final read fails; test-2's check (the
+	// drain's) answers.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil}, errAt: map[int]error{3: errors.New("the agent's connection reset")}}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	w.afterTestCase(context.Background(), "test-1")
+	settle(w)
+	w.afterTestCases(context.Background())
+	settle(w)
+	w.afterTestCase(context.Background(), "test-2") // saved by the drain
+	if w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want both test cases checked, and the recording passed: %v", w, logs.All())
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("logged %v; want nothing: test-2's check answered for the final read", logs.All())
+	}
+	if instr.reads != 4 {
+		t.Fatalf("%d reads; want the base, test-1's, the final read and test-2's", instr.reads)
+	}
+}

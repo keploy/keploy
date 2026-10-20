@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -160,4 +162,190 @@ func TestTheSessionsEndSaysWhyItIsIncomplete(t *testing.T) {
 			t.Errorf("%s: %q, %q; want %q, %q", c.name, status, reason, c.status, c.reason)
 		}
 	}
+}
+
+// silentRealInst is an agent client whose agent never answers the read of
+// what the run saw of mock.real (GET /real/run): the read ends only as its
+// context does. It answers every read of its count (nothing lost), and its
+// app ends once appEnd is closed; its frame streams end when keploy says it
+// is shutting down.
+type silentRealInst struct {
+	*fakeInstr
+	appEnd chan struct{}
+	asked  chan struct{} // closed as the read comes
+	ended  chan struct{} // closed as it ends
+}
+
+func newSilentRealInst() *silentRealInst {
+	return &silentRealInst{fakeInstr: newFakeInstr(), appEnd: make(chan struct{}), asked: make(chan struct{}), ended: make(chan struct{})}
+}
+
+func (s *silentRealInst) PushRealDeps(context.Context, []string) error { return nil }
+
+func (s *silentRealInst) RealRun(ctx context.Context) (models.RealRun, error) {
+	close(s.asked)
+	<-ctx.Done()
+	close(s.ended)
+	return models.RealRun{}, ctx.Err()
+}
+
+func (s *silentRealInst) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	return nil, nil
+}
+
+func (s *silentRealInst) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	select {
+	case <-s.appEnd:
+	case <-ctx.Done():
+	}
+	return models.AppError{AppErrorType: models.ErrAppStopped}
+}
+
+func (s *silentRealInst) NotifyGracefulShutdown(context.Context) error {
+	close(s.mappings)
+	close(s.incoming)
+	close(s.outgoing)
+	return nil
+}
+
+// realRecorder is a Recorder of mock.real list real, logging at Info.
+func realRecorder(inst Instrumentation, real ...string) (*Recorder, *observer.ObservedLogs) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	cfg := &config.Config{}
+	cfg.Mock.Real = real
+	return &Recorder{logger: zap.New(core), config: cfg, instrumentation: inst}, logs
+}
+
+// saidTheRealBound waits for the stop to say, at Info, that it waits for the
+// agent to say what it could not capture of mock.real, that Ctrl+C does not
+// cut the wait short, and the read's bound.
+func saidTheRealBound(t *testing.T, logs *observer.ObservedLogs) {
+	t.Helper()
+	const want = "Still waiting for the keploy agent to say which mock.real connections it could not capture; Ctrl+C does not cut this short: the read is given up once keploy has had 1m0s of its own time to run without an answer"
+	deadline := time.Now().Add(30 * time.Second) // bounds only a wait that never says so
+	for logs.FilterMessage(want).Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the wait never said it waits, with its bound: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if e := logs.FilterMessage(want).All()[0]; e.Level != zapcore.InfoLevel {
+		t.Fatalf("said at %v, want Info", e.Level)
+	}
+}
+
+// realReadNotRead is why the one ERROR a mock.real read not answered gives
+// says it was not.
+func realReadNotRead(t *testing.T, logs *observer.ObservedLogs) string {
+	t.Helper()
+	errs := logs.FilterMessageSnippet("keploy could not read from its agent which mock.real connections it could not capture").All()
+	if len(errs) != 1 || errs[0].Level != zapcore.ErrorLevel {
+		t.Fatalf("%d ERRORs saying the mock.real read was not read, want 1: %v", len(errs), logs.All())
+	}
+	return fmt.Sprint(errs[0].ContextMap()["error"])
+}
+
+// As a recording ends under the switch with a mock.real list, a read of what
+// it could not capture the agent never answers holds the stop only until
+// keploy had its bound to run: it says it waits, and its bound; the stop
+// does not end it, a press finds no offer, and wall time keploy could not run
+// gives nothing up. The bound does, and the recording fails, saying the read
+// was not answered. Before, the read had no bound: the stop waited for it
+// forever.
+func TestReportRealRunIsGivenUpOnItsBound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stoppedRun(t)
+	clk := manualCounts(t)
+	inst := newSilentRealInst()
+	r, logs := realRecorder(inst, "db:5432")
+	ctx, stop := context.WithCancel(context.Background())
+	stop() // the stop has ended record's context: the read is made after it
+	done := make(chan struct{})
+	go func() { r.reportRealRun(ctx); close(done) }()
+	within(t, inst.asked, "the mock.real read")
+	saidTheRealBound(t, logs)
+	if utils.MarkInterruptedAgain() {
+		t.Fatal("the mock.real read stood an offer of the stop's")
+	}
+	for i := 0; i < 10; i++ {
+		clk.Pass() // wall time passes; keploy cannot run
+	}
+	time.Sleep(50 * time.Millisecond) // the wait looks again, every millisecond: it says so once
+	select {
+	case <-done:
+		t.Fatal("the mock.real read ended on the stop, a press, or wall time keploy could not run")
+	default:
+	}
+	if n := logs.FilterMessageSnippet("Still waiting for the keploy agent to say which mock.real").Len(); n != 1 {
+		t.Fatalf("said %d times that it waits, want once", n)
+	}
+	giveUp(t, clk)
+	within(t, done, "the mock.real read, given up on its bound")
+	within(t, inst.ended, "the end of the read the agent never answered")
+	require.NotNil(t, r.realUnread.Load(), "a recording whose mock.real read was not answered fails")
+	require.Equal(t, errRealRunSilent.Error(), realReadNotRead(t, logs))
+}
+
+// The interrupt that gave the stop's waits up (a drain's offer answered:
+// utils.StopNow) ends the mock.real read at once; the recording fails,
+// saying a Ctrl+C stopped the wait.
+func TestReportRealRunEndsWhenTheUserGaveTheStopsWaitsUp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stoppedRun(t)
+	manualCounts(t)
+	inst := newSilentRealInst()
+	r, logs := realRecorder(inst, "db:5432")
+	done := make(chan struct{})
+	go func() { r.reportRealRun(context.Background()); close(done) }()
+	within(t, inst.asked, "the mock.real read")
+	_, withdraw := utils.OfferStopNow() // a drain said another interrupt stops it now
+	defer withdraw()
+	if !utils.MarkInterruptedAgain() {
+		t.Fatal("the press did not answer the drain's offer")
+	}
+	within(t, done, "the mock.real read, at the press that gave the stop's waits up")
+	within(t, inst.ended, "the end of the read")
+	require.NotNil(t, r.realUnread.Load(), "a recording whose mock.real read was not answered fails")
+	require.Equal(t, errRealRunStopped.Error(), realReadNotRead(t, logs))
+}
+
+// keploy record under the switch, with a mock.real list and an agent that
+// never answers the read of what it could not capture of it: the stop says
+// it waits, with the bound, and Start returns once the read is given up on
+// it, the recording failed (exit 1), saying why. Before, Start never
+// returned.
+func TestStart_AMockRealReadTheAgentNeverAnswersHoldsNoStop(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	clk := manualCounts(t)
+	inst := newSilentRealInst()
+	r := exitCodeRecorder(inst)
+	r.config.Mock.Real = []string{"db:5432"}
+	core, logs := observer.New(zapcore.InfoLevel)
+	r.logger = zap.New(core)
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	done := make(chan error, 1)
+	go func() { done <- r.Start(context.Background()) }()
+	select {
+	case inst.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	close(inst.appEnd) // the stop
+	within(t, inst.asked, "the stop's mock.real read")
+	saidTheRealBound(t, logs)
+	giveUp(t, clk)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start returned %v", err)
+		}
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("Start did not return once the mock.real read was given up on its bound")
+	}
+	if utils.ErrCode != utils.ExitKeployError {
+		t.Fatalf("exit code %d, want %d: a recording keploy cannot tell is whole fails", utils.ErrCode, utils.ExitKeployError)
+	}
+	require.Equal(t, errRealRunSilent.Error(), realReadNotRead(t, logs))
 }

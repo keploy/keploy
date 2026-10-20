@@ -62,7 +62,9 @@ type CaptureLossReader interface {
 // read given up would have checked is then not verified, and the recording
 // fails, saying so; every test case and mock it saved is kept. A read that
 // lags counts every test case saved since the last together, each charged
-// with what it saw.
+// with what it saw. While one asked is out, the stop's frame drains hold the
+// agent's streams open (Recorder.holdForReads): an agent the stop reached too
+// goes once they end, and a read asked of it then would be refused.
 type captureWatch struct {
 	logger *zap.Logger
 	off    bool
