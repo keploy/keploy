@@ -216,8 +216,13 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	// Some synthetic config mocks (built from SSLRequest-only captures) cannot
 	// carry username and store it as empty. Treat empty expected username as a
 	// wildcard for backward-compatible replay matching.
+	//
+	// This error is the closest candidate's words in the miss's report
+	// (newConnectionMiss), and a username and a database are the
+	// application's login: each is named as a report may carry a value
+	// (models.ReportValue), withheld unless KEPLOY_LOG_CONTENT is set.
 	if exp.Username != "" && exp.Username != act.Username {
-		return fmt.Errorf("username mismatch for handshake response, expected: %s, actual: %s", exp.Username, act.Username)
+		return fmt.Errorf("username mismatch for handshake response, expected: %s, actual: %s", models.ReportValue(exp.Username), models.ReportValue(act.Username))
 	}
 
 	// DO NOT compare AuthResponse (salt-dependent)
@@ -227,7 +232,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 
 	// Match the Database (backward-compatible: ignore old mocks with junk bytes / off-by-one)
 	if !dbEqualCompat(exp.Database, act.Database) {
-		return fmt.Errorf("database mismatch for handshake response, expected: %s, actual: %s", printable(exp.Database), printable(act.Database))
+		return fmt.Errorf("database mismatch for handshake response, expected: %s, actual: %s", models.ReportValue(printable(exp.Database)), models.ReportValue(printable(act.Database)))
 	}
 
 	// Match the AuthPluginName (tolerate unknown/garbled plugin names in old mocks)
