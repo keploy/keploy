@@ -1320,6 +1320,82 @@ func TestStart_TheSwitchsFinalReadIsMadeBeforeAComposeAgentGoes(t *testing.T) {
 	passedWhole(t, done, logs, &a.refused)
 }
 
+// lateWordComposeAgent is a stopHeldAgent docker compose runs, which the stop
+// signal reached too (CI's `sudo pkill -INT -f keploy` matches the agent in
+// its container), but whose word that it did (WatchAgentStop) comes only
+// after keploy's own stop has begun its drain (a starved agent): keploy stops
+// the app itself (StopComposeApp, under the switch) and drains the agent from
+// its own stop. The agent, its stop held only for those streams, goes once
+// they end.
+type lateWordComposeAgent struct {
+	*stopHeldAgent
+	appStopped atomic.Bool
+	// seenToEnd: the recording saw the agent to its end (EndComposeAgent),
+	// which only a drain the agent's word began does.
+	seenToEnd atomic.Bool
+}
+
+func (l *lateWordComposeAgent) StopComposeApp(context.Context) (string, error) {
+	l.appStopped.Store(true)
+	return "", nil
+}
+
+func (l *lateWordComposeAgent) WatchAgentStop(context.Context) <-chan struct{} {
+	return make(chan struct{}) // too late: keploy's own stop drains first
+}
+
+func (l *lateWordComposeAgent) EndComposeAgent(bool) { l.seenToEnd.Store(true) }
+
+// Under docker compose, when keploy's own stop drains an agent the stop
+// reached too, the final read, asked behind a check slow to come back, is
+// made before the drain lets the agent's streams end, and the recording,
+// which lost nothing, passes. Before, the reads of that stop were asked only
+// once the drain had ended the streams: the agent had gone, the final read
+// was refused, and the recording failed as not verified after its last test
+// case (exit 1).
+func TestStart_TheSwitchsFinalReadIsMadeBeforeKeploysOwnStopLetsAComposeAgentGo(t *testing.T) {
+	a := newStopHeldAgent(2) // the base read; test-1's check is slow
+	a.clear.Store(true)      // nothing held from before the stop
+	l := &lateWordComposeAgent{stopHeldAgent: a}
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // the compose agent's health check
+	}))
+	defer health.Close()
+	t.Setenv(provenswitch.Env, "1")
+	r := exitCodeRecorder(l)
+	r.config.CommandType = string(utils.DockerCompose)
+	r.config.Agent.AgentURI = health.URL
+	core, logs := observer.New(zapcore.InfoLevel)
+	r.logger = zap.New(core)
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	within(t, a.asked, "test-1's check")
+	stop() // keploy's stop (its SIGINT), while test-1's check is out
+	if !releaseOnceHeldOrGone(t, a, logs) {
+		t.Error("the recording ended the agent's streams, and the agent went, with a read of its count out")
+	}
+	passedWhole(t, done, logs, &a.refused)
+	if !l.appStopped.Load() {
+		t.Fatal("keploy's stop did not stop the app itself before its drain")
+	}
+	if l.seenToEnd.Load() {
+		t.Fatal("keploy's own stop saw the agent to its end; it takes the stack down, the agent with it")
+	}
+	if n := a.answered.Load(); n != 3 {
+		t.Fatalf("%d reads answered; want the base, test-1's check and the final read", n)
+	}
+}
+
 // A read made after a final read that failed answers for it: in a native or
 // docker stop the drain saves its last test cases after the final read was
 // asked, and the check of one of them counts everything the agent lost

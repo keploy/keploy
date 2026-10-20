@@ -1759,16 +1759,25 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// lost after the last test case is asked for then, as of an agent this
 	// client started; the drain holds its streams open, and so the agent up,
 	// until that read, and the check of every test case it hands over before
-	// it ends them, is answered (or given up: holdForReads). Its exit is then seen to
-	// (composeAgentEnder): it goes once the streams close, and one wedged in
-	// its stop is killed, rather than held for compose's grace, which waits
-	// on it. After a drain the stop began, the reads come with the stack
-	// still up.
+	// it ends them, is answered (or given up: holdForReads). Its exit is then
+	// seen to (composeAgentEnder): it goes once the streams close, and one
+	// wedged in its stop is killed, rather than held for compose's grace,
+	// which waits on it.
+	//
+	// Under the proven switch the reads come first after a drain the stop
+	// began too, the app already stopped (StopComposeApp): the stop signal
+	// can reach the agent as well (CI's `sudo pkill -INT -f keploy` matches
+	// it in its container), and an agent whose word of that (agentGoing)
+	// comes only after keploy's own stop has begun the drain (a starved
+	// agent) goes as its streams end, and refuses a read made after; under
+	// the switch that fails a recording that lost nothing. With the switch
+	// off the reads (the CA watch's, only said) come after that drain, with
+	// the stack still up, as they always did.
 	var composeDrain sync.Once
 	drainComposeAgent := func(agentGoing bool) {
 		composeDrain.Do(func() {
 			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
-			if agentGoing {
+			if agentGoing || provenswitch.On() {
 				if recordingStarted {
 					r.reportRealRun(ctx)
 					capWatch.afterTestCases(ctx)
@@ -1777,6 +1786,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				// waits for any asked as its streams were ending.
 				joined := drainFrames()
 				capWatch.waitForReads()
+				if !agentGoing {
+					// keploy takes the stack down next, the agent with it.
+					return
+				}
 				if e, ok := r.instrumentation.(composeAgentEnder); ok {
 					// A drain given up on a stall may hold its stream open,
 					// and the agent waits for that stream: it is told to go.
