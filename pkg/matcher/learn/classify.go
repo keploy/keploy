@@ -1282,10 +1282,14 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 // compared with r's: an id stored as a number is read back as text), and a
 // value no linked write stored is never read back, however it looks.
 //
-// Two fields of the record written with r's recorded value that drifted to
-// two live values (each field's first write) are two values r may be: the
-// evidence does not say which field r reads, so r is read back from neither,
-// and its drift stays unexplained.
+// Every field of the record written with r's recorded value is a value r may
+// be, and the evidence does not say which field r reads: each holds its first
+// write's live value (a later write of a field carries it on). r is read back
+// only when every such field holds one live value, the earliest's: one field
+// that drifted to another, one that kept the recorded value, and one whose
+// live value F could not read ("": it may hold anything) are each another
+// value r may be, so r is read back from none, and its drift stays
+// unexplained.
 func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	if r.Unnamed || r.Value == "" || record == "" {
 		return Place{}, false
@@ -1294,12 +1298,11 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	var first Place
 	found := false
-	// The live value of each field's first write: a later write of a field
-	// carries it on.
+	// The live value of each field's first write.
 	firstLive := map[string]string{}
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if s.Side != Request || !s.Written || s.Record != record || s.Place == "" || s.Leaf.Value != r.Value || s.Live == s.Leaf.Value || s.Live == "" {
+			if s.Side != Request || !s.Written || s.Record != record || s.Place == "" || s.Leaf.Value != r.Value {
 				continue
 			}
 			if _, ok := firstLive[s.Place]; !ok {
@@ -1312,12 +1315,17 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 			}
 		}
 	}
+	// The earliest write kept the recorded value, or F could not read it:
+	// nothing this run wrote is r's.
+	if !found || first.Live == r.Value || first.Live == "" {
+		return Place{}, false
+	}
 	for _, live := range firstLive {
 		if live != first.Live {
 			return Place{}, false
 		}
 	}
-	return first, found
+	return first, true
 }
 
 // Named is e with each request place that holds one of vars (as its bind or
