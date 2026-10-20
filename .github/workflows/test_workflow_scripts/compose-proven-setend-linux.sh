@@ -29,6 +29,14 @@
 #      compose without it.
 #   4. keploy is interrupted (SIGTERM) as it replays: it exits, and leaves no
 #      container and no network of the project behind.
+#   5. keploy is given the app by its service's key (--container-name app),
+#      the service setting no container_name, so compose names its container
+#      <project>-app-1 (P101-b-n). keploy record's stop and each set's end
+#      stop are of the container compose made for the service: the
+#      recording holds the shutdown publish, the set as recorded passes, and
+#      a changed publish fails it. Read by the name, the stop found no
+#      container and took that for an app it had stopped: the recording
+#      lacked the publish, and the replay of a changed one passed, exit 0.
 # After every run no container or network of the project is left.
 #
 # Every wait is on an event: a line in a log, a file, or keploy's own exit.
@@ -51,6 +59,8 @@ ID=$$
 PROJECT="cps$ID"
 APP="cps-app-$ID"
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+# KNAME is the name keploy is given the app by (--container-name).
+KNAME="$APP"
 fail() {
   echo "FAIL: $*"
   FAIL=$((FAIL + 1))
@@ -207,12 +217,13 @@ newest_run() { sudo sh -c 'ls -1d keploy/reports/test-run-* 2>/dev/null' | sort 
 report() { echo "$(newest_run)/$1-report.yaml"; }
 set_status() { sudo grep -m1 '^status:' "$(report "$1")" 2>/dev/null | awk '{print $2}'; }
 
-# record N: a recording of /price/r<N>a and /price/r<N>b, under the switch.
-# keploy record's stop, its own, waits for the app's shutdown publish, which
-# the recording must hold.
+# record N [VAR=VALUE...]: a recording of /price/r<N>a and /price/r<N>b,
+# under the switch. keploy record's stop, its own, waits for the app's
+# shutdown publish, which the recording must hold.
 record() {
   local n=$1 log="record$1.log" pid before=$FAIL
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "docker compose -p $PROJECT up" --container-name "$APP" \
+  shift
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$RECORD_BIN" record -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
     --disable-tele > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
@@ -235,7 +246,7 @@ replay() {
   local name=$1 before
   shift
   before="$(newest_run)"
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$REPLAY_BIN" test -c "docker compose -p $PROJECT up" --container-name "$APP" \
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$REPLAY_BIN" test -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
     --delay 5 --disable-tele > "$name.log" 2>&1 </dev/null
   RC=$?
   [ "$(newest_run)" != "$before" ] || fail "$name: keploy test wrote no report (exit $RC)"
@@ -288,8 +299,60 @@ fi
 wait "$pid"
 no_orphans "4"
 
+# variant NAME [COMPOSE_APP_KEYS]: the cases below each run in a directory
+# and a project of their own (NAME), the app's service in its compose file as
+# above, its container named $APP-NAME, plus the keys COMPOSE_APP_KEYS gives;
+# a COMPOSE_APP_KEYS that begins no-container-name sets no container_name,
+# so compose names the container.
+variant() {
+  local keys=${2:-} cname="    container_name: $APP-$1"
+  case "$keys" in no-container-name*) cname="" keys="${keys#no-container-name}" ;; esac
+  cleanup
+  mkdir -p "$WORK/$1" && cp "$WORK/app.py" "$WORK/dep.py" "$WORK/$1/" && cd "$WORK/$1" || exit 1
+  PROJECT="cps$1$ID" KNAME="$APP-$1"
+  cat > docker-compose.yml <<YML
+services:
+  app:
+    image: $IMAGE
+$cname
+    working_dir: /w
+    volumes: [".:/w:z"]
+    command: python app.py
+    ports: ["$PORT:$PORT"]
+    environment:
+      - APP_PORT=$PORT
+      - DEP_URL=http://dep:9411
+      - SHUTDOWN_MSG=\${SHUTDOWN_MSG:-bye}
+      - HALT_AFTER=\${HALT_AFTER:-0}
+    depends_on: [dep]
+$keys
+  dep:
+    image: $DEP_IMAGE
+    working_dir: /w
+    volumes: [".:/w:z"]
+    command: python dep.py
+YML
+}
+
+echo "== 5. keploy given the app by its service's key =="
+variant svckey no-container-name
+KNAME=app
+record 0
+sudo grep -q '/shutdown' keploy/test-set-0/mocks.yaml 2>/dev/null || fail "5: the shutdown publish was not recorded: keploy record did not stop the app's container"
+replay svckey-as-recorded
+[ "$RC" -eq 0 ] || fail "5: keploy test exited $RC as recorded, want 0"
+[ "$(set_status test-set-0)" = PASSED ] || fail "5: test-set-0 is $(set_status test-set-0) as recorded, want PASSED"
+replay svckey-changed SHUTDOWN_MSG=changed
+[ "$RC" -ne 0 ] || fail "5: a changed shutdown publish: keploy test exited 0, want non-zero: the set's end was read with the app running"
+[ "$(set_status test-set-0)" = FAILED ] || fail "5: a changed shutdown publish: test-set-0 is $(set_status test-set-0), want FAILED"
+sudo grep -A6 '^unclaimed_calls:' "$(report test-set-0)" 2>/dev/null | grep -q '/shutdown' ||
+  fail "5: test-set-0 does not name the publish among the calls made after its last test"
+[ "$FAIL" -eq 0 ] || tail -60 svckey-changed.log
+
+cd "$WORK" || exit 1
+
 # A race build reports a data race and carries on: fail on one in any run.
-if grep -l "WARNING: DATA RACE" ./*.log; then
+if grep -l "WARNING: DATA RACE" ./*.log ./*/*.log 2>/dev/null; then
   fail "a data race, in the logs above"
 fi
 
