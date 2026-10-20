@@ -163,7 +163,8 @@ jobs:
   # changed shutdown publish fails its set; an app that exits on its own is
   # APP_HALTED; an interrupted keploy leaves no container or network behind.
   # The app given by its service's key is the container compose made for it
-  # (P101-b-n).
+  # (P101-b-n); under restart: always the daemon does not start it again
+  # after keploy's stop, which is one it takes for a stop (SF-3(b)).
   compose_proven_setend_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}

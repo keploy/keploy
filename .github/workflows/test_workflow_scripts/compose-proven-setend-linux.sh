@@ -37,6 +37,20 @@
 #      a changed publish fails it. Read by the name, the stop found no
 #      container and took that for an app it had stopped: the recording
 #      lacked the publish, and the replay of a changed one passed, exit 0.
+#   6. The app's service has restart: always and stop_signal: SIGTERM
+#      (P101-c-A2 SF-3(b)). Its first act is a startup call (POST /boot, a
+#      fast boot, as a Go app's), the two recordings' differ (BOOT_MSG a,
+#      then b), and the second recording is big (one 16 MB answer), so
+#      staging it takes keploy a while. keploy interrupts the app with its
+#      own stop signal, which the daemon takes for a stop, so it does not
+#      start it again: the replay booting a starts the app's container twice
+#      (compose's up, keploy's start for the second set), the first set
+#      passes, and the second fails on its startup call, which keploy's start
+#      made once the set was staged. Interrupted with SIGINT, the daemon
+#      started the app again 100 ms after each of keploy's stops; its startup
+#      call came while keploy staged the second set, which no set judged, and
+#      the second set passed, keploy test exit 0 (2 of 3 replays on
+#      a00bfa851).
 # After every run no container or network of the project is left.
 #
 # Every wait is on an event: a line in a log, a file, or keploy's own exit.
@@ -82,13 +96,17 @@ docker_pull_retry "$IMAGE"
 docker_pull_retry "$DEP_IMAGE"
 
 cat > dep.py <<'PY'
-import json, http.server
+import base64, json, os, http.server
 class H(http.server.BaseHTTPRequestHandler):
     def answer(self, obj):
         b = json.dumps(obj).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
+        if self.path.startswith("/blob/"):
+            # A big, incompressible answer: a big recording to stage.
+            self.answer({"blob": base64.b64encode(os.urandom(int(self.path.split("/")[2]))).decode()})
+            return
         self.answer({"path": self.path, "price": 42})
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -101,8 +119,24 @@ cat > app.py <<'PY'
 import http.server, json, os, signal, time, urllib.request
 DEP = os.environ["DEP_URL"]
 MSG = os.environ.get("SHUTDOWN_MSG") or "bye"
+BOOT = os.environ.get("BOOT_MSG") or ""
 HALT_AFTER = int(os.environ.get("HALT_AFTER") or "0")
 answered = 0
+while BOOT:
+    # A startup call, the app's first act (a fast boot), made once per
+    # start of it, again while the dependency is not up yet; one answered
+    # by no mock does not stop the app from listening.
+    try:
+        urllib.request.urlopen(urllib.request.Request(DEP + "/boot", data=json.dumps({"msg": BOOT}).encode(),
+                               method="POST", headers={"Content-Type": "application/json"}), timeout=10).read()
+        print("APP BOOTED", BOOT, flush=True)
+        break
+    except urllib.error.HTTPError as e:
+        print("APP BOOT CALL FAILED", BOOT, e, flush=True)
+        break
+    except OSError as e:
+        print("the dependency does not answer the boot call yet:", type(e).__name__, e, flush=True)
+        time.sleep(0.2)
 while True:
     try:
         urllib.request.urlopen(DEP + "/warmup").read()
@@ -113,6 +147,8 @@ while True:
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         global answered
+        if self.path.startswith("/bulk/"):
+            urllib.request.urlopen(DEP + "/blob/" + self.path.split("/")[2]).read()
         b = urllib.request.urlopen(DEP + self.path).read()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
@@ -152,6 +188,7 @@ services:
       - APP_PORT=$PORT
       - DEP_URL=http://dep:9411
       - SHUTDOWN_MSG=\${SHUTDOWN_MSG:-bye}
+      - BOOT_MSG=\${BOOT_MSG:-}
       - HALT_AFTER=\${HALT_AFTER:-0}
     depends_on: [dep]
   dep:
@@ -218,8 +255,9 @@ report() { echo "$(newest_run)/$1-report.yaml"; }
 set_status() { sudo grep -m1 '^status:' "$(report "$1")" 2>/dev/null | awk '{print $2}'; }
 
 # record N [VAR=VALUE...]: a recording of /price/r<N>a and /price/r<N>b,
-# under the switch. keploy record's stop, its own, waits for the app's
-# shutdown publish, which the recording must hold.
+# under the switch, and, with BULK set, of /bulk/$BULK (one dependency call
+# whose answer is BULK random bytes). keploy record's stop, its own, waits
+# for the app's shutdown publish, which the recording must hold.
 record() {
   local n=$1 log="record$1.log" pid before=$FAIL
   shift
@@ -229,7 +267,12 @@ record() {
   if await "$log" "$pid" "APP LISTENING" 1; then
     curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/r${n}a" || fail "record $n: GET /price/r${n}a failed"
     curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/r${n}b" || fail "record $n: GET /price/r${n}b failed"
-    wait_tests $((2 * (n + 1))) "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $((2 * (n + 1)))"
+    local want=$((2 * (n + 1)))
+    if [ -n "${BULK:-}" ]; then
+      curl -fsS -o /dev/null "http://127.0.0.1:$PORT/bulk/$BULK" || fail "record $n: GET /bulk/$BULK failed"
+      want=$((want + 1))
+    fi
+    wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
   else
     fail "record $n: keploy exited before the app listened"
   fi
@@ -323,6 +366,7 @@ $cname
       - APP_PORT=$PORT
       - DEP_URL=http://dep:9411
       - SHUTDOWN_MSG=\${SHUTDOWN_MSG:-bye}
+      - BOOT_MSG=\${BOOT_MSG:-}
       - HALT_AFTER=\${HALT_AFTER:-0}
     depends_on: [dep]
 $keys
@@ -332,6 +376,12 @@ $keys
     volumes: [".:/w:z"]
     command: python dep.py
 YML
+}
+# app_starts SINCE: how many times the daemon started the app's container
+# since SINCE (a time), as its events say.
+app_starts() {
+  sudo docker events --since "$1" --until "$(date +%s.%N)" --filter type=container --filter event=start \
+    --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=app --format '{{.Actor.ID}}' | wc -l
 }
 
 echo "== 5. keploy given the app by its service's key =="
@@ -349,6 +399,19 @@ sudo grep -A6 '^unclaimed_calls:' "$(report test-set-0)" 2>/dev/null | grep -q '
   fail "5: test-set-0 does not name the publish among the calls made after its last test"
 [ "$FAIL" -eq 0 ] || tail -60 svckey-changed.log
 
+echo "== 6. the app's restart policy =="
+variant restart "    restart: always
+    stop_signal: SIGTERM"
+record 0 BOOT_MSG=a
+BULK=16000000 record 1 BOOT_MSG=b
+since=$(date +%s.%N)
+replay restart-boot-a BOOT_MSG=a
+starts=$(app_starts "$since")
+[ "$starts" -eq 2 ] || fail "6: the app's container was started $starts times in the replay of two sets, want 2 (compose's up, keploy's start for the second set): the daemon started it again after keploy's stop"
+[ "$(set_status test-set-0)" = PASSED ] || fail "6: test-set-0, recorded booting a, replayed booting a, is $(set_status test-set-0), want PASSED"
+[ "$(set_status test-set-1)" = FAILED ] || fail "6: test-set-1, recorded booting b, replayed booting a, is $(set_status test-set-1), want FAILED: its startup call was judged by no set"
+[ "$RC" -ne 0 ] || fail "6: keploy test exited 0, want non-zero"
+[ "$FAIL" -eq 0 ] || tail -80 restart-boot-a.log
 cd "$WORK" || exit 1
 
 # A race build reports a data race and carries on: fail on one in any run.
