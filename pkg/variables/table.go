@@ -24,7 +24,9 @@ type Binding = models.VariableBinding
 // With KeepRun, a value bound before the set's first scope began (the run's
 // start-up, before its first test) is the run's: every scope of the set sees
 // it, until NewSet. What is bound once a scope began, in it or in the gap
-// after it, is that scope's, forgotten when the next begins. A table whose
+// after it, is that scope's, forgotten when the next begins. A scope begins
+// in the step that makes its mocks live (StartOpening), so no call its mocks
+// answer binds in the run's. A table whose
 // scope is the next test's, begun early, reads the run's (ReadRunOf); the
 // run's are bound beside its scope's (Beside), as its are beside the run's,
 // so the first test, which carries both in, holds no two variables recorded
@@ -45,6 +47,8 @@ type Table struct {
 	// keepRun: what is bound before the first scope began is the run's
 	// (KeepRun).
 	keepRun bool
+	// noRun: KeepRun keeps none until AllowRun (KeepNoRun).
+	noRun bool
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
@@ -203,12 +207,45 @@ func (t *Table) Bind(b Binding) (Binding, bool) {
 }
 
 // KeepRun makes what is bound before the first scope begins the run's, which
-// every scope of the set sees, instead of the first scope's to forget. It is
-// called before the start-up binds anything (MockManager.NewVariableSet, as
-// a test set's mocks are set up), and holds until the table is dropped.
+// every scope of the set sees, instead of the first scope's to forget, unless
+// KeepNoRun refused it since the last AllowRun. It is called before the
+// start-up binds anything (MockManager.NewVariableSet, as a test set's mocks
+// are set up), and holds until KeepNoRun.
 func (t *Table) KeepRun() {
 	t.mu.Lock()
-	t.keepRun = true
+	t.keepRun = !t.noRun
+	t.mu.Unlock()
+}
+
+// KeepNoRun undoes KeepRun, and refuses it until AllowRun: what is bound
+// before the first scope begins is the first scope's to forget, as without
+// KeepRun, and what the run's held so far goes with it
+// (MockManager.SetMocksWithWindow: a start-up that is served every test's
+// recordings binds nothing the run's can be told from a test's).
+func (t *Table) KeepNoRun() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.keepRun, t.noRun = false, true
+	if len(t.run) == 0 {
+		return
+	}
+	if t.vals == nil {
+		t.vals = make(map[string]Binding, len(t.run))
+	}
+	for n, b := range t.run {
+		if _, ok := t.vals[n]; !ok {
+			t.vals[n] = b
+		}
+	}
+	t.run = nil
+}
+
+// AllowRun lets a later KeepRun keep the run's again (a staging that serves
+// the start-up exactly). It keeps none itself: a scope a call was checked in
+// before it may have bound what is no run's.
+func (t *Table) AllowRun() {
+	t.mu.Lock()
+	t.noRun = false
 	t.mu.Unlock()
 }
 
@@ -348,6 +385,30 @@ func (t *Table) Start(given []Binding) {
 func (t *Table) StartCarrying(given, carried []Binding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.start(given, carried)
+}
+
+// StartOpening is StartCarrying in the step that opens the scope: open, what
+// makes the scope's mocks live (a test's view, the pool of its window), runs
+// under the table's lock, and the scope begins before the lock is let go. A
+// call reads the scope it is checked in (Gen) before the mocks it is checked
+// against: one that read the scope before, and the scope's mocks after, binds
+// stale (BindAll), and is checked again in the scope. So no call answered by a
+// mock of the scope binds before the scope began, in the scope before it or
+// in the run's (KeepRun), which every later scope of the set would read.
+// Opened in two steps, the mocks live and then the scope begun, a call of the
+// first scope answered between the two bound in the run's.
+//
+// open must call none of t's methods: it holds t's lock.
+func (t *Table) StartOpening(open func(), given, carried []Binding) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	open()
+	t.start(given, carried)
+}
+
+// start begins a scope (StartCarrying). t.mu is held.
+func (t *Table) start(given, carried []Binding) {
 	t.gen++
 	t.vals = nil
 	t.began = true

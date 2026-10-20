@@ -549,6 +549,17 @@ type ExactServer interface {
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
+// ExactTestOpener is an optional ExactServer capability of a proxy that keeps
+// the test variables a replay binds (VariableBinder): OpenExactTest opens test
+// as ServeExactTest does, and begins its variables with given bound in the
+// same step, so no call its mocks answer binds before them. Begun after the
+// test opened, a call its own mock answers between the two binds in no scope
+// of the test's: before a set's first test, in the run's, which every later
+// test of the set reads.
+type ExactTestOpener interface {
+	OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),
@@ -585,6 +596,15 @@ type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.
 	SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
+}
+
+// WindowedTestOpener is an optional WindowedProxy capability of a proxy that
+// keeps the test variables a replay binds (VariableBinder):
+// OpenTestWithWindow stages a test's window as SetMocksWithWindow does, and
+// begins the test's variables with given bound in the same step, as
+// ExactTestOpener opens a test under exact serving.
+type WindowedTestOpener interface {
+	OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) error
 }
 
 // AsyncMockLoader is an optional Proxy capability. The agent hands the proxy

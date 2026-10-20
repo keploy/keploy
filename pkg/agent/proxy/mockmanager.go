@@ -1113,6 +1113,38 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // Also resets the per-test droppedOutOfWindow counter, and closes the channel
 // WindowChanged handed out once the new trees and window are visible.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.keepRunOnlyForAnExactStartUp(start)
+	m.setMocksWithWindow(filtered, unfiltered, start, end)
+}
+
+// keepRunOnlyForAnExactStartUp, under the proven switch, decides at a
+// staging from models.BaseTime whether the set's start-up binds the run's.
+// Without exact serving such a staging arms every test's recordings for the
+// start-up (setMocksWithWindowLocked): a start-up call one of them answers
+// binds a value of that test's, which cannot be told from the run's, and
+// kept as the run's, every later test of the set would read it. The set
+// keeps no run's then (variables.Table.KeepNoRun): what its start-up binds
+// is the first test's to forget, as before the run's were kept, and the set's
+// Mock coming again (NewVariableSet, a re-registration) keeps none either,
+// while those trees are staged. Exact serving serves the start-up the set's
+// pool alone, what no test owns (ServeExactPool): its staging lets the next
+// set keep the run's again (AllowRun). It never turns them on itself: only a
+// new set does, whose gen makes every call checked before it stale. Called
+// outside the variables' lock (OpenTestWithWindow), which a staging takes
+// after it.
+func (m *MockManager) keepRunOnlyForAnExactStartUp(start time.Time) {
+	if !provenswitch.On() || !start.Equal(models.BaseTime) {
+		return
+	}
+	if m.exactView() == nil {
+		m.vars.KeepNoRun()
+		return
+	}
+	m.vars.AllowRun()
+}
+
+// setMocksWithWindow is SetMocksWithWindow but for the run's (KeepNoRun).
+func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
 	// Signal once the new trees and window are visible: the deferred calls
 	// run last in, first out, so swapMu is released first.
 	defer m.signalWindowChange()
@@ -1829,6 +1861,7 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 // gRPC, Kafka, etc.) can pass nil for `startup` and get behaviour
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
+	m.keepRunOnlyForAnExactStartUp(start)
 	// Signal once everything below has landed, startup additions included.
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
@@ -2261,16 +2294,41 @@ func (m *MockManager) InAheadScope(mk *models.Mock) bool {
 // values its test case's request gave bound, and, under exact serving, the
 // bindings the answers of its calls in flight made in the gap before it
 // (exactView.carried, aheadVars), after the given ones: a given value wins.
+//
+// Begun after the test's mocks went live, a call one of them answers between
+// the two binds in no scope of the test's: a replay opens a test with its
+// variables in one step (OpenExactTest, OpenTestWithWindow).
 func (m *MockManager) StartVariables(given []models.VariableBinding) {
+	m.vars.StartCarrying(given, m.carriedInto(m.exactView()))
+	m.aheadVars.Reset()
+}
+
+// carriedInto is what the answers of test view v's calls in flight bound in
+// the gap before it (exactView.carried, aheadVars): the bindings its
+// variables begin carrying. None for a view that is not a test's.
+func (m *MockManager) carriedInto(v *exactView) []models.VariableBinding {
+	if v == nil || v.test == "" || len(v.carried) == 0 {
+		return nil
+	}
 	var carry []models.VariableBinding
-	if v := m.exactView(); v != nil && v.test != "" && len(v.carried) > 0 {
-		for _, b := range m.aheadVars.Snapshot() {
-			if v.carried[b.Mock] {
-				carry = append(carry, b)
-			}
+	for _, b := range m.aheadVars.Snapshot() {
+		if v.carried[b.Mock] {
+			carry = append(carry, b)
 		}
 	}
-	m.vars.StartCarrying(given, carry)
+	return carry
+}
+
+// OpenTestWithWindow stages a test's window as SetMocksWithWindow does, and
+// begins the test's variables (StartVariables) with given bound, in the same
+// step (variables.Table.StartOpening): no call the window's mocks answer
+// binds before them. Opened in two steps, a call of a set's first test
+// answered between them bound in the run's, which every later test of the
+// set reads (NewVariableSet).
+func (m *MockManager) OpenTestWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) {
+	m.keepRunOnlyForAnExactStartUp(start)
+	carry := m.carriedInto(m.exactView())
+	m.vars.StartOpening(func() { m.setMocksWithWindow(filtered, unfiltered, start, end) }, given, carry)
 	m.aheadVars.Reset()
 }
 
@@ -2292,7 +2350,8 @@ func (m *MockManager) ResetVariables() {
 // up (Proxy.Mock, under the proven switch, beside the learn step's
 // Tracker.NewSet): every binding of the previous set is forgotten, its run's
 // too, and what this set's start-up binds before its first test begins is
-// the run's (variables.Table.KeepRun), which every test of the set reads,
+// the run's (variables.Table.KeepRun) when the start-up is served exactly
+// (keepRunOnlyForAnExactStartUp), which every test of the set reads,
 // as does the scope the next test's calls in flight bind in before it
 // begins (AheadVariables). A test's own bindings stay its own: each test
 // begins with none of the test before it (StartVariables, ResetVariables).

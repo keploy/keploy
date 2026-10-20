@@ -268,6 +268,51 @@ func TestTable_Start(t *testing.T) {
 	}
 }
 
+// A scope opened in one step (StartOpening) begins in the step that makes its
+// mocks live: open runs under the table's lock, so no call binds between the
+// two, and a call that read the scope before it opened binds stale. The scope
+// begins as StartCarrying begins one: a given value bound and marked, winning
+// over a carried one of its name, the carried as made, the run's kept; and
+// what the scope then binds is its own, never the run's.
+func TestTable_AScopeBeginsInTheStepThatOpensIt(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "s-1", Recorded: "s-0"}}); !ok {
+		t.Fatal("the start-up could not bind the run's session")
+	}
+	before := tb.Gen()
+	opened := false
+	tb.StartOpening(func() {
+		if tb.mu.TryLock() {
+			tb.mu.Unlock()
+			t.Error("the scope's mocks went live outside the table's lock: a call could bind between them and the scope")
+		}
+		opened = true
+	}, []Binding{{Name: "id", Value: "u1"}}, []Binding{{Name: "id", Value: "c-1"}, {Name: "order", Value: "o-1", Recorded: "o-0"}})
+	if !opened {
+		t.Fatal("the scope opened without making its mocks live")
+	}
+	if _, _, stale, ok := tb.BindAll(before, []Binding{{Name: "own", Value: "x-1", Recorded: "k-1"}}); ok || !stale {
+		t.Fatalf("a call that read the scope before it opened bound: ok %v stale %v", ok, stale)
+	}
+	if b, _ := tb.Lookup("id"); b.Value != "u1" || !b.Given {
+		t.Fatalf("id is %+v; want the given u1, marked given", b)
+	}
+	if b, _ := tb.Lookup("order"); b.Value != "o-1" || b.Given {
+		t.Fatalf("order is %+v; want o-1, carried as made", b)
+	}
+	if b, _ := tb.Lookup("session"); b.Value != "s-1" {
+		t.Fatalf("the run's session is %+v in the opened scope", b)
+	}
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "own", Value: "x-1", Recorded: "k-1"}}); !ok {
+		t.Fatal("the opened scope's call could not bind")
+	}
+	tb.Reset()
+	if _, ok := tb.Lookup("own"); ok {
+		t.Fatal("what the opened scope bound outlived it: it was bound in the run's")
+	}
+}
+
 // A value bound before the first scope began is the run's: every scope sees
 // it, and a scope's own bindings go with the scope when the next begins. A
 // value bound between two scopes is the ended scope's, never the run's, and a
@@ -316,6 +361,52 @@ func TestTable_RunBindingsOutliveScopes(t *testing.T) {
 	tb.Reset()
 	if b, _ := tb.Lookup("session"); b.Value != "live-2" {
 		t.Fatalf("the next set's test sees %q, want the new set's start-up value", b.Value)
+	}
+}
+
+// KeepNoRun undoes KeepRun: what the run's held, and what is bound after,
+// before the first scope began, is that scope's to forget as it begins; and
+// KeepRun keeps none again until AllowRun.
+func TestTable_KeepNoRunMakesTheStartUpsTheFirstScopesToForget(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	tb.BindAll(tb.Gen(), []Binding{{Name: "session", Value: "s-1", Recorded: "s-0"}})
+	tb.KeepNoRun()
+	if b, ok := tb.Lookup("session"); !ok || b.Value != "s-1" {
+		t.Fatalf("KeepNoRun dropped what the start-up bound before the first scope: %+v %v", b, ok)
+	}
+	tb.BindAll(tb.Gen(), []Binding{{Name: "order", Value: "o-1", Recorded: "o-0"}})
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "other", Value: "s-1", Recorded: "x-0"}}); ok {
+		t.Fatal("a bind took the live value another variable holds")
+	}
+	tb.Start(nil)
+	for _, name := range []string{"session", "order"} {
+		if b, ok := tb.Lookup(name); ok {
+			t.Fatalf("%s %+v outlived the first scope's begin: kept as the run's", name, b)
+		}
+	}
+	// KeepRun keeps none until AllowRun, a new set's too; AllowRun keeps
+	// none itself.
+	keeps := func() bool {
+		tb.BindAll(tb.Gen(), []Binding{{Name: "boot", Value: "b-1", Recorded: "b-0"}})
+		tb.Start(nil)
+		_, kept := tb.Lookup("boot")
+		return kept
+	}
+	tb.NewSet()
+	tb.KeepRun()
+	if keeps() {
+		t.Fatal("KeepRun kept the run's after KeepNoRun, before AllowRun")
+	}
+	tb.NewSet()
+	tb.AllowRun()
+	if keeps() {
+		t.Fatal("AllowRun kept the run's by itself")
+	}
+	tb.NewSet()
+	tb.KeepRun()
+	if !keeps() {
+		t.Fatal("KeepRun after AllowRun kept no run's")
 	}
 }
 

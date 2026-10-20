@@ -493,7 +493,26 @@ var _ integrations.StagedReader = (*MockManager)(nil)
 // pool view just before it answered as the test's mocks in flight when it
 // began (ServeExactPool's ahead): those count as answered, first, in the order
 // they did.
+//
+// It begins none of the test's variables: begun after, a call the test's own
+// mock answers between the two binds in no scope of the test's
+// (OpenExactTest).
 func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
+	m.serveExactTest(test, owned, false, nil)
+}
+
+// OpenExactTest opens test as ServeExactTest does, and begins its variables
+// (StartVariables) with given bound, in the same step (variables.Table.
+// StartOpening): no call its mocks answer binds before them. Opened in two
+// steps, a call of a set's first test answered between them bound in the
+// run's, which every later test of the set reads (NewVariableSet): another
+// test's value answered as this one's, a false pass.
+func (m *MockManager) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) {
+	m.serveExactTest(test, owned, true, given)
+}
+
+// serveExactTest is ServeExactTest, and, with begin, OpenExactTest.
+func (m *MockManager) serveExactTest(test string, owned []*models.Mock, begin bool, given []models.VariableBinding) {
 	answered, ahead := m.closeAhead()
 	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned))}
 	v.addOwned(owned)
@@ -518,10 +537,21 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 		}
 		v.carried[a.owned.Name] = true
 	}
-	m.exact.begun.add(m.stagingEpoch.Load(), owned)
-	m.exact.fired.Store(true)
-	m.exact.last.Store(v)
-	m.installExact(v)
+	install := func() {
+		m.exact.begun.add(m.stagingEpoch.Load(), owned)
+		m.exact.fired.Store(true)
+		m.exact.last.Store(v)
+		m.installExact(v)
+	}
+	if begin {
+		// What the test's calls in flight bound is read before the
+		// variables' lock is taken: the scope they bound in reads the run's
+		// of vars, and so locks vars first (variables.Table.ReadRunOf).
+		m.vars.StartOpening(install, given, m.carriedInto(v))
+		m.aheadVars.Reset()
+	} else {
+		install()
+	}
 	// Their consumes are flagged now, as this test's: the test before it was
 	// drained since (the replay drains it after the pool call), and this
 	// test's drain reads them. One this test does not own was answered for
