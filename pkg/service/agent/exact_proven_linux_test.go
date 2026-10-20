@@ -20,6 +20,7 @@ import (
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -262,7 +263,10 @@ func TestAMissAfterItsRecordingAnsweredNamesWhatDiffers(t *testing.T) {
 	require.Equal(t, "200 3", got[0])
 	require.True(t, strings.HasPrefix(got[1], "502"), "the changed call has no recorded answer: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer (path differs)")
+	// The segment the path differs in is the value its field diff withholds
+	// (KEPLOY_LOG_CONTENT unset): written {}, the one the recording has too
+	// kept. TestAMissOnAnotherPathIsNamedWholeWithTheContentOn names it whole.
+	require.Contains(t, e.Reason, "GET /{}/book to 127.0.0.1:18093 had no recorded answer (path differs)")
 	ev := windowOf(t, a, "o::TestMiss").Evidence
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
@@ -300,7 +304,7 @@ func TestARepeatedTestIDIsServedItsOwnMocksAfreshEachAttempt(t *testing.T) {
 		{calls: []string{"/n", "/n"}, want: []string{"200 one", "200 two"}},
 		{calls: []string{"/n", "/n", "/n"}, want: []string{"200 one", "200 two", "502"}, fails: "GET /n to 127.0.0.1:18093 was called 3 times, recorded 2", kind: models.MissExtraCall},
 		{calls: []string{"/n"}, want: []string{"200 one"}, fails: "recorded call GET 127.0.0.1:18093/n (mock-2) was never made"},
-		{calls: []string{"/n", "/n", "/o"}, want: []string{"200 one", "200 two", "502"}, fails: "GET /o to 127.0.0.1:18093 had no recorded answer", kind: models.MissInTest},
+		{calls: []string{"/n", "/n", "/o"}, want: []string{"200 one", "200 two", "502"}, fails: "GET /{} to 127.0.0.1:18093 had no recorded answer", kind: models.MissInTest}, // /o, not the recorded /n: withheld
 		{calls: []string{"/n", "/n", "/n"}, want: []string{"200 one", "200 two", "502"}, fails: "was called 3 times, recorded 2", kind: models.MissExtraCall},
 		{calls: []string{"/n", "/n"}, want: []string{"200 one", "200 two"}},
 	} {
@@ -327,6 +331,20 @@ func TestARepeatedTestIDIsServedItsOwnMocksAfreshEachAttempt(t *testing.T) {
 	require.Empty(t, e.Action, e.Reason)
 }
 
+// With KEPLOY_LOG_CONTENT=1 a miss on another path than its closest
+// recording's is named by its whole path, as it was before reports withheld
+// content: the reason a test fails for names the call the app made.
+func TestAMissOnAnotherPathIsNamedWholeWithTheContentOn(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/stock/book", "3", t0)},
+		map[string][]string{"o::TestMiss": {"mock-1"}}, map[string][]string{})
+	got, e := runTest(t, a, p, "TestMiss", "/stock/book", "/reserve/book")
+	require.Equal(t, "200 3", got[0])
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer (path differs)")
+}
+
 // A test owns its own mocks only: a call only another test recorded is a
 // miss in this test, and the other test's mock is still there for it.
 func TestAnotherTestsMockNeverAnswers(t *testing.T) {
@@ -337,7 +355,8 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 	require.Equal(t, "200 a", got[0])
 	require.True(t, strings.HasPrefix(got[1], "502"), got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /b to 127.0.0.1:18093 had no recorded answer")
+	// /b, not the closest recorded /a: the path's value, withheld.
+	require.Contains(t, e.Reason, "GET /{} to 127.0.0.1:18093 had no recorded answer")
 	ev := evidenceOf(t, a, "o::TestA")
 	require.Equal(t, models.MissInTest, ev.Misses[0].Kind)
 	got, e = runTest(t, a, p, "TestB", "/b")
@@ -845,7 +864,8 @@ func TestAMockTheStoreRefusedIsOwnedByNoTest(t *testing.T) {
 	require.Equal(t, "200 a", got[0])
 	require.True(t, strings.HasPrefix(got[1], "502"), got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /b to 127.0.0.1:18093 had no recorded answer")
+	// /b, not the closest recorded /a: the path's value, withheld.
+	require.Contains(t, e.Reason, "GET /{} to 127.0.0.1:18093 had no recorded answer")
 	got, e = runTest(t, a, p, "TestA", "/a")
 	require.Equal(t, []string{"200 a"}, got)
 	require.Equal(t, models.ScopeActionFail, e.Action, "a test that made no call to the refused mock passed")
@@ -1210,7 +1230,8 @@ func TestAnEarlierTestsLateCallIsNotTheNextTests(t *testing.T) {
 	}{
 		{"an extra call filed between tests", "/a", false, "GET /a to 127.0.0.1:18093, made before this one began, had no recorded answer"},
 		{"an extra call filed during the next test", "/a", true, "GET /a to 127.0.0.1:18093, made before this one began, had no recorded answer"},
-		{"a miss filed during the next test", "/zzz", true, "GET /zzz to 127.0.0.1:18093, made before this one began, had no recorded answer"},
+		// /zzz, not the closest recorded path: its value, withheld.
+		{"a miss filed during the next test", "/zzz", true, "GET /{} to 127.0.0.1:18093, made before this one began, had no recorded answer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, rp := exactAgent(t,

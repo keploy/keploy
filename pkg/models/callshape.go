@@ -511,13 +511,9 @@ func isMethodWord(s string) bool {
 // escaped path too, as a miss at a variable's place names it: decoded, a %2F
 // would shift the count.
 func holePathPlaces(shape string, places []string) string {
-	start := strings.IndexByte(shape, '/')
-	if start < 0 {
+	start, end, ok := shapePath(shape)
+	if !ok {
 		return shape
-	}
-	end := len(shape)
-	if q := strings.IndexByte(shape[start:], '?'); q >= 0 {
-		end = start + q
 	}
 	segs := strings.Split(shape[start+1:end], "/")
 	holed := false
@@ -531,6 +527,30 @@ func holePathPlaces(shape string, places []string) string {
 		return shape
 	}
 	return shape[:start+1] + strings.Join(segs, "/") + shape[end:]
+}
+
+// shapePath is where the path of a call's shape is: from its first slash
+// (start) to its query's '?' or its end (end); ok is false when it has none.
+func shapePath(shape string) (start, end int, ok bool) {
+	start = strings.IndexByte(shape, '/')
+	if start < 0 {
+		return 0, 0, false
+	}
+	end = len(shape)
+	if q := strings.IndexByte(shape[start:], '?'); q >= 0 {
+		end = start + q
+	}
+	return start, end, true
+}
+
+// shapePathSegments are the segments of the path of a call's shape, counted
+// as holePathPlaces counts them: from 0 after the leading slash.
+func shapePathSegments(shape string) ([]string, bool) {
+	start, end, ok := shapePath(shape)
+	if !ok {
+		return nil, false
+	}
+	return strings.Split(shape[start+1:end], "/"), true
 }
 
 // pathPlaceIndex is the segment a place "url.path[<n>]" names, read as a

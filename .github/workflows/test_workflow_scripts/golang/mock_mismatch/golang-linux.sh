@@ -200,18 +200,23 @@ if grep "WARNING: DATA RACE" test_logs.txt; then
 fi
 
 # Assert the SPECIFIC forced mismatch surfaced — an HTTP unmatched outgoing
-# call on the mutated /api/v2/ path. A generic banner (e.g. a routine DNS miss)
-# must NOT satisfy this, otherwise the suite could pass while the HTTP mismatch
-# was actually dropped. The per-call heading is "Mock mismatch: [HTTP] <METHOD>
-# <path>" and the live path is the unmutated /api/v2/... the app requested.
+# call on the mutated path. A generic banner (e.g. a routine DNS miss) must
+# NOT satisfy this, otherwise the suite could pass while the HTTP mismatch
+# was actually dropped. The per-call heading is "Mock mismatch: [HTTP]
+# <METHOD> <path>". The live path is the unmutated /api/v2/... the app
+# requested, and its closest recording's is /api/v0-mismatch/...: the miss's
+# "path" field diff finds the second segment differs, and with
+# KEPLOY_LOG_CONTENT unset the report withholds that diff's values and so
+# names the call's path with that segment written {}: /api/{}/..., the
+# segments the recording has too kept.
 mismatch_reported=false
-if grep -qE "Mock mismatch: \[HTTP\][^]]*/api/v2/" test_logs.txt; then
-    echo "✓ replay reported the forced HTTP /api/v2/ mock mismatch"
+if grep -qE "Mock mismatch: \[HTTP\][^]]*/api/\{\}/" test_logs.txt; then
+    echo "✓ replay reported the forced HTTP /api/{}/ mock mismatch"
     mismatch_reported=true
 fi
 
 # Equivalent specific check on the test-set report yaml: a SINGLE unmatched_calls
-# item whose protocol is HTTP *and* whose actual_summary references /api/v2/.
+# item whose protocol is HTTP *and* whose actual_summary references /api/{}/.
 # actual_summary appears only inside unmatched_calls items, and each item's
 # protocol line precedes its actual_summary, so tracking the most recent
 # protocol per item binds both fields to the same entry (independent greps
@@ -222,16 +227,16 @@ shopt -u nullglob
 for rf in "${reports[@]}"; do
     if awk '
         /protocol:/        { httpItem = ($0 ~ /HTTP/) }
-        /actual_summary:/  { if (httpItem && $0 ~ /\/api\/v2\//) { found = 1 } }
+        /actual_summary:/  { if (httpItem && index($0, "/api/{}/") > 0) { found = 1 } }
         END                { exit found ? 0 : 1 }
     ' "$rf"; then
-        echo "✓ $(basename "$rf") has a single HTTP /api/v2/ unmatched_calls entry"
+        echo "✓ $(basename "$rf") has a single HTTP /api/{}/ unmatched_calls entry"
         mismatch_reported=true
     fi
 done
 
 if [ "$mismatch_reported" != true ]; then
-    echo "::error::replay did NOT report the forced HTTP /api/v2/ mock mismatch"
+    echo "::error::replay did NOT report the forced HTTP /api/{}/ mock mismatch"
     echo "--- mismatch/unmatched lines in test_logs.txt ---"
     grep -iE "mismatch|unmatched|no matching" test_logs.txt | head -20
     echo "--- tail of test_logs.txt ---"
@@ -1210,7 +1215,7 @@ fi
 echo "✓ S1 ua-version: another version of the same client still matches under KEPLOY_PROVEN=1"
 
 echo "mock-mismatch e2e passed:"
-echo "  - the forced HTTP /api/v2/ unmatched call was reported;"
+echo "  - the forced HTTP unmatched call was reported, its differing path segment withheld;"
 echo "  - with the tier as an ordinary recording leaves it, every dependency is"
 echo "    session-tier, so the per-test assertion reported NOT CHECKED, said WHY,"
 echo "    and --assert-dependencies failed nothing it could not assert;"

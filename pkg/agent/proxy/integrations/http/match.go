@@ -2102,7 +2102,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	if mockPath != diffReq.URL.Path {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
-			Path: "path", Kind: models.DiffKindValueChanged,
+			Path: models.PathFieldDiff, Kind: models.DiffKindValueChanged,
 			Expected: mockPath, Actual: diffReq.URL.Path,
 		})
 	}

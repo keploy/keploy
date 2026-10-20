@@ -316,7 +316,11 @@ if is_build "$RECORD_BIN"; then
     stated MySQL COM_STMT_CLOSE '.*' connection
 fi
 
-TOKEN_MISS='no matching mock for outgoing call.*POST /oauth/token'
+# The token call's closest recording is on another route of the auth service
+# (GET /config/boot or GET /profile), so its path's field diff finds both of
+# its segments differ, and a default report writes both {}: the app's one
+# POST to the auth service, on its port.
+TOKEN_MISS='no matching mock for outgoing call.*"destination": "127\.0\.0\.1:'"$UP"'".*"actual(_shape)?": "POST /\{\}/\{\}"'
 # A miss's line names the call as its report does, and with KEPLOY_LOG_CONTENT
 # unset a report writes a statement's literals ? (the line's "actual", or, once
 # the line logs the call itself by its length, "actual_shape").
