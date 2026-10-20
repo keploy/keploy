@@ -250,6 +250,17 @@ jobs:
           artifact_name: docker-image-linux-amd64
           version: ${{ github.sha }}
 
+      # The containers, keploy's agent among them, run on Docker Desktop's
+      # Linux VM: its kernel, not Windows', is the one the agent meets. A
+      # print only, so it cannot fail the job.
+      - name: Docker's Linux VM kernel
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $kernel = docker info --format '{{.KernelVersion}}'
+          $arch = docker info --format '{{.Architecture}}'
+          Write-Host "Docker Desktop's Linux VM: kernel $kernel on $arch"
+
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
         with:

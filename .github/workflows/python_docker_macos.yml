@@ -47,6 +47,9 @@ jobs:
             exit 1
           fi
           echo "Docker Desktop is running."
+          # The containers run on Docker Desktop's Linux VM, not on macOS:
+          # its kernel is the one keploy's agent meets.
+          echo "Docker Desktop's Linux VM: kernel $(docker info --format '{{.KernelVersion}}') on $(docker info --format '{{.Architecture}}')"
 
       - id: image
         uses: ./.github/actions/download-image
