@@ -4274,10 +4274,34 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // single call so concurrent readers cannot observe a torn (newMocks,
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
 func (p *Proxy) SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+	p.stageWithWindow(ctx, filtered, unFiltered, start, end, func(m *MockManager) {
+		m.SetMocksWithWindow(filtered, unFiltered, start, end)
+	})
+	return nil
+}
+
+// OpenTestWithWindow stages a test's window as SetMocksWithWindow does, and
+// begins the test's variables with given bound in the same step
+// (MockManager.OpenTestWithWindow). With no mock manager there is nothing to
+// stage, nor to bind given to (StartVariables). Satisfies the agent's
+// optional WindowedTestOpener extension interface.
+func (p *Proxy) OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) error {
+	if p.getMockManager() == nil && len(given) > 0 {
+		return errNoMockManager
+	}
+	p.stageWithWindow(ctx, filtered, unFiltered, start, end, func(m *MockManager) {
+		m.OpenTestWithWindow(filtered, unFiltered, start, end, given)
+	})
+	return nil
+}
+
+// stageWithWindow is SetMocksWithWindow, the mock manager's part staged by
+// stage.
+func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, stage func(*MockManager)) {
 	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
-		m.SetMocksWithWindow(filtered, unFiltered, start, end)
+		stage(m)
 		p.dnsCache.Purge()
 	}
 	// A test set's staging (from models.BaseTime, the first since its Mock,
@@ -4290,7 +4314,6 @@ func (p *Proxy) SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*
 		// Engine owns the "first window doesn't count" rule.
 		p.asyncEngine.AdvanceWindow()
 	}
-	return nil
 }
 
 // opensTestWindow reports whether a staging from start opens a test's window,
@@ -4439,11 +4462,23 @@ var errNoMockManager = errors.New("the proxy serves no replay: no mock manager")
 
 // ServeExactTest implements agent.ExactServer (exact.go).
 func (p *Proxy) ServeExactTest(test string, owned []*models.Mock) error {
+	return p.openExact(func(m *MockManager) { m.ServeExactTest(test, owned) })
+}
+
+// OpenExactTest implements agent.ExactTestOpener: ServeExactTest, with the
+// test's variables begun with given bound in the same step
+// (MockManager.OpenExactTest).
+func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error {
+	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
+}
+
+// openExact opens a test under exact serving on the mock manager (open).
+func (p *Proxy) openExact(open func(*MockManager)) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
-	m.ServeExactTest(test, owned)
+	open(m)
 	if p.asyncEngine != nil {
 		// A test opening is a window as the async lanes count them: where a
 		// per-test SetMocksWithWindow advanced them before exact serving.
@@ -4511,7 +4546,11 @@ func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	return m.ExactTestOutcome()
 }
 
-var _ agent.ExactServer = (*Proxy)(nil)
+var (
+	_ agent.ExactServer        = (*Proxy)(nil)
+	_ agent.ExactTestOpener    = (*Proxy)(nil)
+	_ agent.WindowedTestOpener = (*Proxy)(nil)
+)
 
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {

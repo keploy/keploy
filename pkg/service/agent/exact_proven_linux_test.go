@@ -1080,6 +1080,12 @@ func echoMock(name, key string, at time.Time) *models.Mock {
 // postCharge sends POST /charge with key through the real HTTP matcher.
 func (p *servingProxy) postCharge(t *testing.T, key string) string {
 	t.Helper()
+	return p.postTo(t, "/charge", key)
+}
+
+// postTo sends POST path with body {"key":key} through the real HTTP matcher.
+func (p *servingProxy) postTo(t *testing.T, path, key string) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
@@ -1095,7 +1101,7 @@ func (p *servingProxy) postCharge(t *testing.T, key string) string {
 		_ = httpparser.New(zap.NewNop()).MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Port: 18093}, p.mm, models.OutgoingOptions{})
 	}()
 	body := `{"key":"` + key + `"}`
-	_, err = io.WriteString(app, "POST /charge HTTP/1.1\r\nHost: 127.0.0.1:18093\r\nContent-Type: application/json\r\nContent-Length: "+fmt.Sprint(len(body))+"\r\n\r\n"+body)
+	_, err = io.WriteString(app, "POST "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\nContent-Type: application/json\r\nContent-Length: "+fmt.Sprint(len(body))+"\r\n\r\n"+body)
 	require.NoError(t, err)
 	resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil)
 	require.NoError(t, err)
@@ -1303,4 +1309,166 @@ func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
 	require.Equal(t, 502, code, "a worker mock answered twice in the set")
 	code, _ = p.call(t, "/own")
 	require.Equal(t, 502, code, "a test case's mock answered between test cases")
+}
+
+// keyMock is a test's recording of POST path with body {"key":"k-1"}: its
+// variable key bound at body.key (used there, bound by an earlier call, when
+// use), answered at body.echo.
+func keyMock(name, path string, use bool, at time.Time) *models.Mock {
+	v := models.MockVariable{Recorded: "k-1", Answer: []string{"body.echo"}}
+	if use {
+		v.Use = []string{"body.key"}
+	} else {
+		v.Bind = "body.key"
+	}
+	resp := `{"echo":"k-1"}`
+	m := &models.Mock{
+		Version: models.GetVersion(), Name: name, Kind: models.HTTP,
+		Spec: models.MockSpec{
+			HTTPReq: &models.HTTPReq{Method: "POST", URL: "http://127.0.0.1:18093" + path,
+				Header: map[string]string{"Host": "127.0.0.1:18093", "Content-Type": "application/json"}, Body: `{"key":"k-1"}`},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Content-Length": fmt.Sprint(len(resp))}, Body: resp},
+			Variables:        models.MockVariables{"key": v},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		},
+	}
+	m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+	return m
+}
+
+// keepingProxy is exact serving's proxy whose mock manager keeps the test
+// variables a replay binds, begun apart from a test's opening. served counts
+// the tests it opened without them (ServeExactTest).
+type keepingProxy struct {
+	*servingProxy
+	served int
+}
+
+func (p *keepingProxy) ServeExactTest(test string, owned []*models.Mock) error {
+	p.served++
+	return p.servingProxy.ServeExactTest(test, owned)
+}
+
+func (p *keepingProxy) StartVariables(given []models.VariableBinding) bool {
+	p.mm.StartVariables(given)
+	return true
+}
+
+func (p *keepingProxy) BoundVariables() ([]models.VariableBinding, bool) {
+	return p.mm.BoundVariables(), true
+}
+
+func (p *keepingProxy) ResetVariables() { p.mm.ResetVariables() }
+
+// openingProxy is a keepingProxy that opens a test with its variables in one
+// step, as keploy's proxy does (proxy.Proxy.OpenExactTest).
+type openingProxy struct {
+	keepingProxy
+	opened int
+}
+
+func (p *openingProxy) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error {
+	p.opened++
+	p.mm.OpenExactTest(test, owned, given)
+	return nil
+}
+
+// keyNames is the names and values of bound, in its order.
+func keyNames(bound []models.VariableBinding) string {
+	out := make([]string, 0, len(bound))
+	for _, b := range bound {
+		out = append(out, b.Name+"="+b.Value)
+	}
+	return strings.Join(out, ",")
+}
+
+// keploy test under the switch: a test case's filter opens the test case
+// with its variables in one step (OpenTestCase), the values its request gave
+// bound. What its own call binds is the test case's: the next test case,
+// whose call only uses that variable, misses. A test opened in two steps (its
+// mocks live, then its variables) left a call of a set's first test that was
+// answered between them bound in the run's, which every later test reads.
+func TestKeployTestOpensATestCaseWithItsVariablesInOneStep(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := &openingProxy{keepingProxy: keepingProxy{servingProxy: newServingProxy()}}
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{keyMock("own-1", "/own-1", false, t0), keyMock("use-2", "/use-2", true, t0.Add(time.Second))}))
+	// The set begins (Proxy.Mock under the switch), and its staging goes in.
+	p.mm.NewVariableSet()
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: time.Now(),
+		Exact: &models.ExactServing{Stage: true},
+	}))
+	given := []models.VariableBinding{{Name: "id", Value: "u1", Recorded: "u0", Mock: "test case test-1", Place: "request"}}
+	require.NoError(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"own-1"}}, Variables: given}))
+	bound, kept := a.TestVariables()
+	require.True(t, kept)
+	require.Equal(t, "id=u1", keyNames(bound), "test-1 opens with the value its request gave")
+	require.Equal(t, `200 {"echo":"x-1"}`, p.postTo(t, "/own-1", "x-1"))
+	bound, _ = a.TestVariables()
+	require.Equal(t, "id=u1,key=x-1", keyNames(bound), "test-1 holds what its own call bound")
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}))
+	require.NoError(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-2", Owned: []string{"use-2"}}}))
+	bound, _ = a.TestVariables()
+	require.Empty(t, bound, "test-2 begins with test-1's bindings")
+	got := p.postTo(t, "/use-2", "x-1")
+	require.False(t, strings.HasPrefix(got, "200 "), "test-2's call, which only uses key, was answered %s with test-1's value", got)
+	require.Equal(t, 2, p.opened, "a test case opened without its variables")
+	require.Zero(t, p.served, "a test case opened without its variables")
+	require.Error(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}), "the pool call opened a test case")
+}
+
+// A proxy that keeps a replay's variables but cannot open a test with them in
+// one step does not open a keploy test case: begun apart, a call the test's
+// own mock answers between the two would bind in no scope of the test's, and
+// before a set's first test in the run's. Nothing of the test case is served.
+func TestKeployTestRefusesATestCaseItCannotOpenWithItsVariables(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := &keepingProxy{servingProxy: newServingProxy()}
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{keyMock("own-1", "/own-1", false, t0)}))
+	p.mm.NewVariableSet()
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: time.Now(),
+		Exact: &models.ExactServing{Stage: true},
+	}))
+	for _, given := range [][]models.VariableBinding{nil, {{Name: "id", Value: "u1", Recorded: "u0", Mock: "test case test-1", Place: "request"}}} {
+		require.Error(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"own-1"}}, Variables: given}))
+	}
+	require.Zero(t, p.served, "a test case was opened apart from its variables")
+	got := p.postTo(t, "/own-1", "x-1")
+	require.False(t, strings.HasPrefix(got, "200 "), "the refused test case's mock answered %s", got)
+}
+
+// keploy mock replay under the switch: a test begins (ProvenBegin) with its
+// variables, none bound, in the step that opens it, so what its own call
+// binds is the test's, and the next test, whose call only uses that variable,
+// misses.
+func TestKeployMockReplayOpensATestWithItsVariablesInOneStep(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := &openingProxy{keepingProxy: keepingProxy{servingProxy: newServingProxy()}}
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{keyMock("own-1", "/own-1", false, t0), keyMock("use-2", "/use-2", true, t0.Add(time.Second))}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::T1": {"own-1"}, "o::T2": {"use-2"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	claimSelf(t, a)
+	p.mm.NewVariableSet()
+	_, serr := a.ProvenBegin(ctx, begin("T1"))
+	require.Nil(t, serr)
+	require.Equal(t, `200 {"echo":"x-1"}`, p.postTo(t, "/own-1", "x-1"))
+	bound, _ := a.TestVariables()
+	require.Equal(t, "key=x-1", keyNames(bound), "T1 holds what its own call bound")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "T1", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("T2"))
+	require.Nil(t, serr)
+	bound, _ = a.TestVariables()
+	require.Empty(t, bound, "T2 begins with T1's bindings")
+	got := p.postTo(t, "/use-2", "x-1")
+	require.False(t, strings.HasPrefix(got, "200 "), "T2's call, which only uses key, was answered %s with T1's value", got)
+	require.Equal(t, 2, p.opened, "a test opened without its variables")
+	require.Zero(t, p.served, "a test opened without its variables")
 }
