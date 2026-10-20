@@ -948,23 +948,40 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 	return mismatch.Withhold(r)
 }
 
-// withRoutePlaces is r carrying, under the proven switch, the URL path places
-// a test variable holds on the call (routePathPlaces): segments that hold the
-// application's values, whatever else differs. The miss then names its path
-// escaped, as a place counts segments, so its shape writes them {}
-// (models.MissShape). A place of the closest mock off its route only writes
-// more {}. With the switch off, r is as built.
-func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) *models.MockMismatchReport {
-	if !provenswitch.On() || r == nil || request.URL == nil {
+// routeSummary is, under the proven switch, the summary a miss is built with
+// and the URL path places a test variable holds on the call
+// (routePathPlaces): segments that hold the application's values, whatever
+// else differs. With a place, the miss names its path escaped, as a place
+// counts segments, so its shape writes them {} (models.MissShape); a place of
+// the closest mock off its route only writes more {}. With the switch off, or
+// no place, it is actualKey and none.
+//
+// It is chosen before the report is built, so the builder withholds the
+// summary the report keeps (mismatch.Build): with its field diffs' values
+// still there to read, it holes every segment a path diff finds differs
+// (models.WithoutContent). A summary set after Build is withheld only by the
+// places a withheld report still names, which no longer tell which segments
+// the path diff found differ.
+func routeSummary(request *http.Request, actualKey string, closest *models.Mock, pool []*models.Mock, table *variables.Table) (string, []string) {
+	if !provenswitch.On() || request.URL == nil {
+		return actualKey, nil
+	}
+	places := routePathPlaces(request, closest, pool, table)
+	if len(places) == 0 {
+		return actualKey, nil
+	}
+	return request.Method + " " + request.URL.EscapedPath(), places
+}
+
+// withRoutePlaces is r, built with routeSummary's summary, carrying its
+// places: a report without content then names its path with them written {}
+// too (mismatch.Withhold). With no place, r is as built.
+func withRoutePlaces(r *models.MockMismatchReport, places []string) *models.MockMismatchReport {
+	if r == nil || len(places) == 0 {
 		return r
 	}
-	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
-		r.ActualSummary = request.Method + " " + request.URL.EscapedPath()
-		r.VariablePlaces = places
-		// The summary is set again, after Build: a report without content
-		// names it with the places written {} (mismatch.Withhold).
-		mismatch.Withhold(r)
-	}
+	r.VariablePlaces = places
+	mismatch.Withhold(r)
 	return r
 }
 
