@@ -283,6 +283,12 @@ func readSchedstat(path string) (onCPU, waited, slices uint64, ok bool) {
 	if err != nil {
 		return 0, 0, 0, false
 	}
+	return parseSchedstat(b)
+}
+
+// parseSchedstat parses a task's schedstat file (readSchedstat): zeros, or a
+// file too short, are no account, and ok is false.
+func parseSchedstat(b []byte) (onCPU, waited, slices uint64, ok bool) {
 	f := bytes.Fields(b)
 	if len(f) < 3 {
 		return 0, 0, 0, false

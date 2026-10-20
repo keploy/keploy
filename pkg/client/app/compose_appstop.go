@@ -329,9 +329,10 @@ func (a *App) composeAppHalt() *composeHalt {
 // app's stop waits (stopDockerRunByEvents): the daemon's word, or its main
 // process exiting (its pidfd), which a starved daemon is slow to report. It
 // kills only when the container's processes made no progress on its way out
-// for utils.StopStallBudget of keploy's runnable time, or at the user's
-// Ctrl+C, which it offers; never on a number of seconds. It says why it had
-// to kill, "" when the app exited on the interrupt, or had exited already.
+// for utils.StopStallBudget of the time both they and keploy could run
+// (utils.ExitClock), or at the user's Ctrl+C, which it offers; never on a
+// number of seconds. It says why it had to kill, "" when the app exited on
+// the interrupt, or had exited already.
 // The drains wait for it (utils.BeginAppStop). The app's exit is not a halt
 // (watchComposeApp) until StartComposeApp starts it again.
 func (a *App) StopComposeApp(ctx context.Context) (killed string, err error) {
@@ -409,7 +410,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 	default:
 		if w.readable {
-			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
+			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", utils.StopStallRanSaid())
 		} else {
 			killed = fmt.Sprintf("keploy could not read its container's processes, and the docker daemon did not say it had stopped, for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
 		}

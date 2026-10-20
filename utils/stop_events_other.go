@@ -20,6 +20,9 @@ var StopStallBudget = 5 * time.Second
 // StopStallSaid is how a kill names the bound it killed on: wall time here.
 func StopStallSaid() string { return StopStallBudget.String() }
 
+// StopStallRanSaid is StopStallSaid here, where no process is read.
+func StopStallRanSaid() string { return StopStallSaid() }
+
 // TreeOf reads no process here.
 func TreeOf(int) []Reached { return nil }
 

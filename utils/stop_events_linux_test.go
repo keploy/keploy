@@ -7,10 +7,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/starvetest"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -42,8 +45,8 @@ func readyLeader(t *testing.T, dir, command string) (pid int, reaped <-chan stru
 // seconds: an app whose shutdown takes longer than the old grace (3 s), here
 // sleeping 4 s on its way out, is no kill; nor is one that keeps closing what
 // it holds past the stall bound, as that is progress. One that makes no
-// progress (it ignores the interrupt) is killed once the stall bound of
-// keploy's runnable time has passed, and the stop says so.
+// progress (it ignores the interrupt) is killed once the stall bound of the
+// time both it and keploy could run has passed, and the stop says so.
 func TestAStopWaitsForTheAppsExitAndKillsOnlyOnAStall(t *testing.T) {
 	for _, tc := range []struct {
 		name, command string
@@ -74,12 +77,125 @@ trap 'for fd in 3 4 5 6 7 8; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' INT
 			if (killed != "") != tc.killed {
 				t.Fatalf("the stop said %q; want a kill %v", killed, tc.killed)
 			}
-			if tc.killed && !strings.Contains(killed, "made no progress on its way out for "+tc.stall.String()+" of keploy's runnable time") {
+			if tc.killed && !strings.Contains(killed, "made no progress on its way out for "+tc.stall.String()+" of its and keploy's runnable time") {
 				t.Fatalf("the kill is said as %q; want the stall rule named", killed)
 			}
 			awaitReaped(t, tc.name, reaped)
 		})
 	}
+}
+
+// An app held off the CPU (a loaded host, a cgroup whose quota its siblings
+// spent) from before keploy interrupts it, until the stop has looked at it
+// three times as often as a stall is judged on, could not run to act on the
+// interrupt: it made no progress, and is not judged for it. Released, it
+// exits on its interrupt, and the stop says no kill. Counted in keploy's
+// runnable time alone, it was killed for want of progress it could not make.
+func TestAStopDoesNotJudgeAnAppHeldOffTheCPU(t *testing.T) {
+	const bound = 300 * time.Millisecond
+	shortStall(t, bound)
+	var looks atomic.Uint64
+	looked := func() { looks.Add(1) }
+	exitLooked.Store(&looked)
+	defer exitLooked.Store(nil)
+	dir := starvetest.MemDir(t)
+	pid, reaped := readyLeader(t, dir, `trap 'touch out; exit 0' INT; touch ready; while :; do :; done`)
+	release := starvetest.Hold(t, pid)
+	type stopped struct {
+		killed string
+		err    error
+	}
+	done := make(chan stopped, 1)
+	go func() {
+		killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, nil)
+		done <- stopped{killed, err}
+	}()
+	var end stopped
+	ended := false
+	judged := 3 * uint64(bound/stall.CheckEvery(bound))
+	for !ended && looks.Load() < judged {
+		select {
+		case end = <-done:
+			ended = true
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if !ended {
+		if _, err := os.Stat(filepath.Join(dir, "out")); err == nil {
+			t.Fatal("the app got out while it was held off the CPU: the test held nothing")
+		}
+	}
+	release()
+	if !ended {
+		end = <-done
+	}
+	if end.err != nil {
+		t.Fatal(end.err)
+	}
+	if end.killed != "" {
+		t.Fatalf("the stop killed: %q", end.killed)
+	}
+	awaitReaped(t, "the app", reaped)
+}
+
+// An app whose way out waits on a process it starts as it stops (a shell's
+// trap, a stop command), held off the CPU, is as far as that process gets:
+// it sleeps, waiting, and is not judged for the time the child could not run.
+// The child is held from its start until the stop has looked at the app three
+// times as often as a stall is judged on, and only then let go; it ends, the
+// app with it, and the stop says no kill.
+func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
+	const bound = 300 * time.Millisecond
+	shortStall(t, bound)
+	var looks atomic.Uint64
+	looked := func() { looks.Add(1) }
+	exitLooked.Store(&looked)
+	defer exitLooked.Store(nil)
+	dir := starvetest.MemDir(t)
+	pid, reaped := readyLeader(t, dir, `trap 'sh -c "echo \$\$ > child; while [ ! -e release ]; do :; done"; exit 0' INT; touch ready; while :; do sleep 0.01; done`)
+	type stopped struct {
+		killed string
+		err    error
+	}
+	done := make(chan stopped, 1)
+	go func() {
+		killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, nil)
+		done <- stopped{killed, err}
+	}()
+	var child int
+	for deadline := time.Now().Add(time.Minute); child == 0; time.Sleep(time.Millisecond) {
+		if b, err := os.ReadFile(filepath.Join(dir, "child")); err == nil {
+			child, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the app's trap did not start its child")
+		}
+	}
+	release := starvetest.Hold(t, child)
+	var end stopped
+	ended := false
+	judged := 3 * uint64(bound/stall.CheckEvery(bound))
+	for !ended && looks.Load() < judged {
+		select {
+		case end = <-done:
+			ended = true
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if !ended {
+		end = <-done
+	}
+	if end.err != nil {
+		t.Fatal(end.err)
+	}
+	if end.killed != "" {
+		t.Fatalf("the stop killed: %q", end.killed)
+	}
+	awaitReaped(t, "the app", reaped)
 }
 
 // A process's way out is read on its exit marks: one ending, a thread ending,
