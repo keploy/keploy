@@ -109,13 +109,13 @@ if json_pass_supported; then
 fi
 
 # The strict mock-window replay further down runs only for a replay binary
-# from a build artifact (download-binary's build/keploy or
-# build-no-race/keploy): a published release on the cross-version matrix may
-# predate what it checks. The WSL lanes copy their binaries elsewhere and skip
-# it.
+# from a build artifact (download-binary's build/keploy, build-no-race/keploy,
+# or on an arm64 runner build-no-race-linux-arm64/keploy): a published release
+# on the cross-version matrix may predate what it checks. The WSL lanes copy
+# their binaries elsewhere and skip it.
 strict_phase=false
 case "${REPLAY_BIN:-}" in
-    */build/keploy|*/build-no-race/keploy) strict_phase=true ;;
+    */build/keploy|*/build-no-race/keploy|*/build-no-race-linux-arm64/keploy) strict_phase=true ;;
 esac
 
 # Keep the recordings as recorded for that replay. They have no mappings

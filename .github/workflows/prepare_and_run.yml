@@ -735,6 +735,14 @@ jobs:
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
+  run_golang_linux_arm64:
+    # A few Go samples, record and replay, on the arm64 runner's own kernel
+    # with the arm64 build (built for same-repo PRs and main only).
+    needs: [build-linux-arm64]
+    uses: ./.github/workflows/golang_linux.yml
+    with:
+      runner: ubuntu-24.04-arm
+      jobs_to_run: arm64
   run_kernel_floors:
     # The hooks' root tests on the kernel floors, amd64 5.10 and arm64 6.6,
     # each in a VM on a GitHub-hosted runner. It builds what it runs, so it

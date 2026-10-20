@@ -8,7 +8,7 @@ on:
         required: false
         default: 'ubuntu-latest'
       jobs_to_run:
-        description: 'Controls which jobs to run. "all" runs everything.'
+        description: 'Controls which jobs to run. "all" runs everything; "arm64" only golang_linux_arm64 (a few samples, for an arm64 runner).'
         type: string
         required: false
         default: 'all'
@@ -66,6 +66,11 @@ jobs:
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ matrix.app.enable_ssl != null && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -119,7 +124,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
   golang_linux_private:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ inputs.jobs_to_run != 'arm64' && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 20
     strategy:
@@ -141,6 +146,11 @@ jobs:
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -175,6 +185,128 @@ jobs:
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
+  # A few of the samples above, native, on an arm64 runner (prepare_and_run's
+  # run_golang_linux_arm64): keploy's arm64 build, its arm64 BPF objects and
+  # the runner's own kernel, which the amd64 jobs never meet. Arch-neutral
+  # samples only (multi-arch images, Go built on the runner). The binaries are
+  # this runner's architecture's: the PR's (on arm64 build-linux-arm64's,
+  # which is not a race build: there is none for arm64) and the latest
+  # release's asset for it. Its callers build the arm64 binary for same-repo
+  # pull requests and main only, so gin-mongo's private parsers are in it.
+  golang_linux_arm64:
+    if: ${{ inputs.jobs_to_run == 'arm64' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: gin-mongo
+            path: gin-mongo
+            script_dir: gin_mongo
+            ref: native-linux
+          - name: echo-mysql
+            path: echo-mysql
+            script_dir: echo_mysql
+            ref: main
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
+            ref: main
+        config:
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+        include:
+          # A recording the released arm64 keploy made, replayed by the PR's.
+          - app:
+              name: http-pokeapi
+              path: http-pokeapi
+              script_dir: http_pokeapi
+              ref: main
+            config:
+              job: record_latest_replay_build
+              record_src: latest
+              replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}, ${{ inputs.runner }})
+    steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          case "$RUNNER_ARCH" in
+            X64) yq=yq_linux_amd64 ;;
+            ARM64) yq=yq_linux_arm64 ;;
+            *) echo "::error::no yq for $RUNNER_ARCH"; exit 1 ;;
+          esac
+          echo "yq not present on this image; installing $yq"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            "https://github.com/mikefarah/yq/releases/latest/download/$yq" -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ runner.arch == 'ARM64' && 'build-no-race-linux-arm64' || 'build' }}
+
+      # As upload-latest fetches it for the amd64 jobs, for this runner's
+      # architecture.
+      - id: latest
+        name: Get the latest release (this runner's architecture)
+        if: ${{ matrix.config.record_src == 'latest' || matrix.config.replay_src == 'latest' }}
+        run: |
+          case "$RUNNER_ARCH" in
+            X64) asset=keploy_linux_amd64.tar.gz ;;
+            ARM64) asset=keploy_linux_arm64.tar.gz ;;
+            *) echo "::error::no keploy release asset for $RUNNER_ARCH"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/keploy-latest"
+          mkdir -p "$dir"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 \
+            "https://github.com/keploy/keploy/releases/latest/download/$asset" -o "$dir/keploy.tar.gz"
+          if ! gzip -t "$dir/keploy.tar.gz" 2>/dev/null; then
+            echo "::error::$asset is not a valid gzip archive (latest release asset unavailable?)"
+            head -c 200 "$dir/keploy.tar.gz" || true
+            exit 1
+          fi
+          tar -xzf "$dir/keploy.tar.gz" -C "$dir"
+          chmod +x "$dir/keploy"
+          echo "latest release: $("$dir/keploy" --version 2>/dev/null | tail -1), $asset"
+          echo "path=$dir/keploy" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: ${{ matrix.app.ref }}
+      - name: Run ${{ matrix.app.name }} application
+        env:
+          RECORD_BIN: ${{ matrix.config.record_src == 'latest' && steps.latest.outputs.path || steps.build.outputs.path }}
+          REPLAY_BIN: ${{ matrix.config.replay_src == 'latest' && steps.latest.outputs.path || steps.build.outputs.path }}
+          ENABLE_SSL: 'false'
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
+
   dns_dedup_test:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
@@ -197,6 +329,11 @@ jobs:
             replay_src: build
     name: dns_dedup - ${{ matrix.config.job }}
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout Keploy
         uses: actions/checkout@v4
         with:
@@ -259,6 +396,11 @@ jobs:
             replay_src: build
     name: mysql prune keeps prepared statements (${{ matrix.config.job }})
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -331,6 +473,11 @@ jobs:
             strip_lifetimes: true
     name: prune keeps a stateful sequence whole (${{ matrix.config.job }})
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -411,6 +558,11 @@ jobs:
             replay_src: build
     name: async lane value flip (${{ matrix.config.job }})
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -487,6 +639,11 @@ jobs:
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -572,6 +729,11 @@ jobs:
             replay_src: build
     name: mock lifetimes (${{ matrix.config.job }})
     steps:
+      - name: Kernel
+        run: |
+          uname -srm
+          echo "kernel $(uname -r) on $(uname -m)"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
