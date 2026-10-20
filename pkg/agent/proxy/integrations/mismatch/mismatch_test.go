@@ -136,12 +136,12 @@ func TestQueryParamDiffs(t *testing.T) {
 }
 
 func TestRenderFieldDiffs_AllKinds(t *testing.T) {
-	out := RenderFieldDiffs([]models.MockFieldDiff{
+	out := models.RenderFieldDiffs([]models.MockFieldDiff{
 		{Path: "body.a", Kind: models.DiffKindValueChanged, Expected: "1", Actual: "2"},
 		{Path: "header.B", Kind: models.DiffKindMissingInLive, Expected: "x"},
 		{Path: "query.c", Kind: models.DiffKindMissingInMock, Actual: "y"},
 		{Path: "body.d", Kind: models.DiffKindTypeChanged, Expected: "string: s", Actual: "number: 1"},
-	})
+	}, false)
 	for _, want := range []string{"body.a", "header.B", "query.c", "body.d", "absent in live", "absent in recording", "type changed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered diff missing %q: %s", want, out)

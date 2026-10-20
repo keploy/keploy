@@ -281,6 +281,12 @@ type MockMismatchReport struct {
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
+	// ContentWithheld says the report carries none of the application's
+	// content: it was made with logcontent's switch (KEPLOY_LOG_CONTENT) off,
+	// so its field diffs have no values, it has no rendered requests, and its
+	// summary has no SQL literal, no query and no path segment keploy knows
+	// holds a value (WithoutContent).
+	ContentWithheld bool
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

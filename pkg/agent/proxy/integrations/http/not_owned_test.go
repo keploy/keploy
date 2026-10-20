@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // stagedDb is a mockMemDb that stages more than its reads show
@@ -35,6 +36,8 @@ func (d stagedDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) 
 // strict comparison, is named as that recording; one that differs from every
 // such recording is not, nor is any with a store that stages nothing more.
 func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	const host = "localhost:50001"
 	elsewhere := onHost("other-test-delete", "/delete", host)
 	db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-get", "/get", host), elsewhere}}

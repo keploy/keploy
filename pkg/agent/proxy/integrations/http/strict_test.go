@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // onHost is a recorded GET of path on host, recorded as the recorder writes
@@ -89,6 +90,8 @@ func TestStrictComparesALegacyKeyedRecordingByAuthority(t *testing.T) {
 // The miss report names the destination that differs, and diffs against a
 // recorded request to the live destination when there is one.
 func TestStrictMissReportNamesTheHost(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	t.Setenv("KEPLOY_PROVEN", "1")
 	other := onHost("elsewhere", "/v1/items", "a.example")
 	got, diag := matchOnce(t, context.Background(), getTo("/v1/items", "c.example"), other)

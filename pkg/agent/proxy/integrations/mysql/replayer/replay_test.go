@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // A client that opens a MySQL connection waits to be greeted. With no MySQL
@@ -41,7 +42,10 @@ func TestAConnectionWithNoHandshakeMockIsAMiss(t *testing.T) {
 // A miss of the command phase names the upstream the client dialled, as one of
 // the connection phase does: Replay names it on any miss it returns. The query
 // below has no data mock to match, so the connection is closed unanswered.
+// The summary names the query whole, as a report carries it with
+// logcontent's switch on.
 func TestACommandMissNamesItsDestination(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
 	client, done := replay(t, &fakeMockDb{session: []*models.Mock{nativeHandshake()}})
 	client.greetAndAnswer("app", mysql.Native)
 	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {

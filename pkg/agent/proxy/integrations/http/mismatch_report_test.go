@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // httpMockWithReq builds an HTTP mock with full request details for
@@ -41,6 +42,8 @@ func makeReqWithQuery(method, path, rawQuery string) *http.Request {
 // A schema-match survivor should be preferred for the diff and its body/query
 // drift reported field-by-field with noise-vocabulary paths.
 func TestBuildHTTPMismatchReport_FieldDiffsAgainstSchemaSurvivor(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	h := newHTTP()
 	mock := httpMockWithReq("mock-1", "POST", "http://localhost:8080/api/orders?page=1",
 		`{"order_id":"o-1","ts":"111"}`, map[string]string{"Content-Type": "application/json"}, nil)

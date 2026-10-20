@@ -466,6 +466,11 @@ type UnmatchedCall struct {
 	// everywhere else, and for a call of that round keploy could not judge
 	// because its own store could not read a recorded answer back.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	// ContentWithheld mirrors MockMismatchReport.ContentWithheld: the call
+	// carries none of the application's content (KEPLOY_LOG_CONTENT unset),
+	// so FieldDiffs have no values and ClosestMockReq and ReceivedReq are
+	// empty, whatever the call sent.
+	ContentWithheld bool `json:"content_withheld,omitempty" yaml:"content_withheld,omitempty"`
 }
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

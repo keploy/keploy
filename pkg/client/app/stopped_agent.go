@@ -166,6 +166,9 @@ func (s StoppedAgent) MockOutcome() (models.MockOutcome, error) {
 	if err := json.Unmarshal(s.Outcome, &outcome); err != nil {
 		return models.MockOutcome{}, fmt.Errorf("failed to decode the replay outcome the keploy-agent container left: %w", err)
 	}
+	// Its misses are read as the agent client reads a live agent's: a report
+	// carries their content only when both this CLI and the agent opted in.
+	outcome.Missed = models.ReportContent(outcome.Missed)
 	return outcome, nil
 }
 
