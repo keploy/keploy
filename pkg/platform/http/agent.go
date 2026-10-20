@@ -74,15 +74,15 @@ type AgentClient struct {
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 
 	// agentContainer is the container Setup set the agent up to run in, in a
-	// docker mode (docker run, or as a service docker compose starts); ""
-	// natively. Under mu. WatchAgentStart watches its start.
-	agentContainer string
-	// agentContainerEntry is what this client keeps of agentContainer in
-	// namedContainers, and agentContainerAt the agent address it is mapped
-	// at in containerAt (nameAgentContainer): what it forgets, and only
-	// that, when it names another (forgetAgentContainer). Under mu.
-	agentContainerEntry *namedContainer
-	agentContainerAt    string
+	// docker mode (docker run, or as a service docker compose starts): the
+	// entry its naming made (nameAgentContainer), on which Run and the
+	// watches note what they see of it, its name with it; nil natively.
+	// agentContainerAt is the agent address it is mapped at in containerAt.
+	// Both are what the client forgets, and only that, when it sets up
+	// another agent (forgetAgentContainer). Under mu. WatchAgentStart
+	// watches its start.
+	agentContainer   *namedContainer
+	agentContainerAt string
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
@@ -1757,12 +1757,14 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 	// release that waits for it ends once the run is over without it
 	// (containerExited). Its end is noted last, once Run returns, whichever
 	// way it ends: after the app's run has returned (and with it compose's up
-	// and the down after it), or before the app's run began.
+	// and the down after it), or before the app's run began. Both are noted
+	// on this client's entry of the container, not by its name, which
+	// another client's Setup may have drawn too.
 	a.mu.Lock()
 	container := a.agentContainer
 	a.mu.Unlock()
-	runOfContainer(container, false)
-	defer runOfContainer(container, true)
+	container.noteRun(false)
+	defer container.noteRun(true)
 	app, err := a.getApp()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
@@ -2715,7 +2717,9 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	read, running := readBootFile(""), alwaysRunning
 	switch {
 	case isDockerCmd:
-		read, running = containerBootLook(a.logger, opts.KeployContainer)
+		// The container this Setup named: what its looks see is noted on
+		// the client's entry of it.
+		read, running = containerBootLook(a.logger, a.containerNamed(opts.KeployContainer))
 	case run != nil:
 		read = readBootFile(run.bootReport)
 		if run.bootPrompt {
@@ -2952,6 +2956,11 @@ func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
+	// A Setup sets up a new agent: the container the client named for the
+	// last one is not this one's. A docker Setup names its own below; a
+	// native one has none, and its watches watch its process, not that
+	// container.
+	a.forgetAgentContainer()
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
