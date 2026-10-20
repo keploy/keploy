@@ -470,6 +470,9 @@ type UnmatchedCall struct {
 	// so FieldDiffs have no values and ClosestMockReq and ReceivedReq are
 	// empty, whatever the call sent.
 	ContentWithheld bool `json:"content_withheld,omitempty" yaml:"content_withheld,omitempty"`
+	// RequestsIdentical mirrors MockMismatchReport.RequestsIdentical: the
+	// call's withheld rendered request was byte for byte its closest mock's.
+	RequestsIdentical bool `json:"requests_identical,omitempty" yaml:"requests_identical,omitempty"`
 }
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

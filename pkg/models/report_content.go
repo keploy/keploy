@@ -145,13 +145,14 @@ func DiffKindText(k MockFieldDiffKind) string {
 // WithoutContent is r without the application's content, as a report
 // carries it with logcontent's switch off (ContentWithheld): its field diffs
 // keep their paths and kinds and lose their values, the rendered requests are
-// dropped, and its summary is SummaryWithoutContent's. A report already
+// dropped, saying whether they were the same (RequestsIdentical), and its
+// summary is SummaryWithoutContent's. A report already
 // withheld (mismatch.Build) keeps its Diff and its summary's SQL, the
 // parser's own words, and loses again any content written into it since. Any
 // other report's Diff is text nobody vetted, so it is rendered again from the
 // field diffs' paths and kinds.
 func (r MockMismatchReport) WithoutContent() MockMismatchReport {
-	withholdContent(r.Protocol, r.VariablePlaces, &r.ActualSummary, &r.Diff, &r.FieldDiffs, &r.ClosestMockReq, &r.ReceivedReq, &r.ContentWithheld)
+	withholdContent(r.Protocol, r.VariablePlaces, &r.ActualSummary, &r.Diff, &r.FieldDiffs, &r.ClosestMockReq, &r.ReceivedReq, &r.RequestsIdentical, &r.ContentWithheld)
 	return r
 }
 
@@ -160,7 +161,7 @@ func (r MockMismatchReport) WithoutContent() MockMismatchReport {
 // printer of a report applies to a call it was handed, from an agent that may
 // not have withheld it or from a report file written with the switch on.
 func (c UnmatchedCall) WithoutContent() UnmatchedCall {
-	withholdContent(c.Protocol, c.VariablePlaces, &c.ActualSummary, &c.Diff, &c.FieldDiffs, &c.ClosestMockReq, &c.ReceivedReq, &c.ContentWithheld)
+	withholdContent(c.Protocol, c.VariablePlaces, &c.ActualSummary, &c.Diff, &c.FieldDiffs, &c.ClosestMockReq, &c.ReceivedReq, &c.RequestsIdentical, &c.ContentWithheld)
 	return c
 }
 
@@ -209,7 +210,7 @@ func (r *TestReport) ReportContent() *TestReport {
 	return &out
 }
 
-func withholdContent(protocol string, places []string, summary, diff *string, diffs *[]MockFieldDiff, mockReq, liveReq *string, withheld *bool) {
+func withholdContent(protocol string, places []string, summary, diff *string, diffs *[]MockFieldDiff, mockReq, liveReq *string, identical, withheld *bool) {
 	// The places a field diff names hold the application's values too.
 	known := append([]string(nil), places...)
 	for _, d := range *diffs {
@@ -225,6 +226,12 @@ func withholdContent(protocol string, places []string, summary, diff *string, di
 		*diff = RenderFieldDiffs(*diffs, true)
 	}
 	*diffs = fieldDiffsWithoutValues(*diffs)
+	if !*withheld || *mockReq != "" || *liveReq != "" {
+		// The requests the report holds now: those it was made with, or, in
+		// a report withheld before, one written into it since (a not-owned
+		// miss's recording), which the comparison made then was not of.
+		*identical = *mockReq != "" && *mockReq == *liveReq
+	}
 	*mockReq, *liveReq = "", ""
 	*withheld = true
 }

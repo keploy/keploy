@@ -281,6 +281,15 @@ type MockMismatchReport struct {
 	// summary has no SQL literal, no query and no path segment keploy knows
 	// holds a value (WithoutContent).
 	ContentWithheld bool
+	// RequestsIdentical says, of a report whose content is withheld, that its
+	// two rendered requests (ClosestMockReq, ReceivedReq) were byte for byte
+	// the same when they were dropped: the comparison a reader of a report
+	// with its content makes of the two, which holds no value (cloud triage
+	// reads a call the same as its closest mock as a mock keploy did not
+	// serve, not as a change of the application's). False when they
+	// differed or either was not rendered, and on a report that carries its
+	// content, whose reader compares the two (WithoutContent).
+	RequestsIdentical bool
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
