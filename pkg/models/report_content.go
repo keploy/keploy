@@ -218,12 +218,49 @@ func withholdContent(protocol string, places []string, summary, diff *string, di
 	if *withheld {
 		*summary = pathSummaryWithoutContent(protocol, *summary, known)
 	} else {
+		// Before the diffs lose their values: a diff of the whole path is
+		// read by them.
+		known = append(known, pathDiffPlaces(*summary, *diffs)...)
 		*summary = SummaryWithoutContent(protocol, *summary, known)
 		*diff = RenderFieldDiffs(*diffs, true)
 	}
 	*diffs = fieldDiffsWithoutValues(*diffs)
 	*mockReq, *liveReq = "", ""
 	*withheld = true
+}
+
+// PathFieldDiff is the path of the field diff that says a call's whole URL
+// path is not the recorded one (the HTTP matchers'): its recorded value is
+// the closest recording's path, its live value the call's.
+const PathFieldDiff = "path"
+
+// pathDiffPlaces are the places (url.path[<n>]) of the segments of summary's
+// path that a PathFieldDiff of diffs finds are not the recorded path's. The
+// diff's live value is the summary's path, so with its values withheld those
+// segments would still name them: they are the values that differ, whatever
+// their look. Each segment is compared with the recorded path's at the same
+// place and kept only when it is that one; a segment past the recorded
+// path's end, or after a place where the two paths do not line up, is named,
+// so what cannot be compared is withheld. It reads the diff's recorded
+// value, so it is applied before the values are withheld.
+func pathDiffPlaces(summary string, diffs []MockFieldDiff) []string {
+	segs, ok := shapePathSegments(summary)
+	if !ok {
+		return nil
+	}
+	var places []string
+	for _, d := range diffs {
+		if d.Path != PathFieldDiff {
+			continue
+		}
+		recorded := strings.Split(strings.TrimPrefix(d.Expected, "/"), "/")
+		for i, s := range segs {
+			if i >= len(recorded) || recorded[i] != s {
+				places = append(places, "url.path["+strconv.Itoa(i)+"]")
+			}
+		}
+	}
+	return places
 }
 
 // fieldDiffsWithoutValues is diffs with their paths and kinds and no values,

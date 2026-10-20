@@ -1,6 +1,8 @@
 package http
 
 import (
+	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -86,6 +88,62 @@ func TestAnHTTPMissReportCarriesTheContentWithTheSwitchOn(t *testing.T) {
 	}
 	if r.ContentWithheld || r.ClosestMockReq == "" || r.ReceivedReq == "" {
 		t.Errorf("with the switch on the report is %+v", r)
+	}
+}
+
+// pathMiss is the default report of a GET of /api/users/kp-live-id whose
+// closest recording is of /api/users/kp-rec-id on the same host: through the
+// strict comparison under the proven switch, or the request matcher without
+// it. Each finds the path differs and says so in a field diff of the whole
+// path.
+func pathMiss(t *testing.T, proven bool) *models.MockMismatchReport {
+	t.Helper()
+	live := func() *http.Request {
+		r := makeReq("GET", "/api/users/kp-live-id")
+		r.Host = "users.internal:8080"
+		r.Header = http.Header{"Accept": []string{"application/json"}}
+		return r
+	}
+	rec := onHost("rec", "/api/users/kp-rec-id", "users.internal:8080")
+	db := &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}
+	diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1}
+	if proven {
+		t.Setenv(provenswitch.Env, "1")
+		ok, _, d, err := newHTTP().match(context.Background(), getTo("/api/users/kp-live-id", "users.internal:8080"), db, nil, nil, nil, true, false, false, true, true)
+		if err != nil || ok || d == nil || d.closest == nil {
+			t.Fatalf("the strict comparison: ok %v, err %v, diag %+v", ok, err, d)
+		}
+		diag = d
+	}
+	return newHTTP().buildHTTPMismatchReport(live(), nil, db, nil, nil, nil, diag)
+}
+
+// A miss whose path is not its closest recording's names the path as what
+// differs, and by default neither path: the field diff loses its values, and
+// the summary, which names the call's path, loses the segment that differs
+// and keeps the ones the recording has too. Under the proven switch or not.
+// With the switch on the summary is the call's path, as it always was.
+func TestAMissOnAnotherPathNamesNoSegmentThatDiffersByDefault(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		r := pathMiss(t, proven)
+		text := reportText(t, r)
+		for _, v := range []string{"kp-live-id", "kp-rec-id"} {
+			if strings.Contains(text, v) {
+				t.Errorf("proven %v: the default report carries %q:\n%s", proven, v, text)
+			}
+		}
+		if r.ActualSummary != "GET /api/users/{}" {
+			t.Errorf("proven %v: the summary is %q, want GET /api/users/{}", proven, r.ActualSummary)
+		}
+		if !strings.Contains(r.Diff, "path: value changed") || !r.ContentWithheld {
+			t.Errorf("proven %v: the report does not say the path differs: %q, %+v", proven, r.Diff, r.FieldDiffs)
+		}
+	}
+	t.Cleanup(logcontent.Set(true))
+	for _, proven := range []bool{false, true} {
+		if r := pathMiss(t, proven); r.ActualSummary != "GET /api/users/kp-live-id" || r.ContentWithheld {
+			t.Errorf("proven %v, switch on: the summary is %q", proven, r.ActualSummary)
+		}
 	}
 }
 
