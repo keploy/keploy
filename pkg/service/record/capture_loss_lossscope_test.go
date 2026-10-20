@@ -26,7 +26,7 @@ func watchThenFinal(t *testing.T, instr *countingInstr, steps ...string) (bool, 
 		}
 		w.afterTestCase(context.Background(), s)
 	}
-	return w.finish("test-set-0"), logs
+	return w.finish("test-set-0", false), logs
 }
 
 const afterLast = "after the last test case was recorded, and no test case holds"

@@ -39,7 +39,7 @@ func recordOff(t *testing.T, instr Instrumentation, names ...string) (bool, *obs
 		settle(w)
 	}
 	w.afterTestCases(context.Background())
-	return w.finish("test-set-0"), logs
+	return w.finish("test-set-0", false), logs
 }
 
 // settle waits for the switch-off watch's reads asked for so far: a recording
@@ -116,7 +116,7 @@ func TestWithTheSwitchOnTheCAWarnIsNotSaid(t *testing.T) {
 	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
 	w.afterTestCase(context.Background(), "test-1")
 	w.afterTestCases(context.Background())
-	if !w.finish("test-set-0") {
+	if !w.finish("test-set-0", false) {
 		t.Fatal("with the switch on a failed handshake fails the recording")
 	}
 	if n := logs.FilterMessageSnippet(caWarn).Len(); n != 0 {
@@ -167,7 +167,7 @@ func TestAFailedHandshakeAroundTheStopIsStillSaid(t *testing.T) {
 	settle(w)
 	count.Store(3)
 	w.afterTestCases(ctx) // the teardown's final read
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || all[0].Message != "3 "+caWarn {
 		t.Fatalf("logged %v, want one WARN %q", all, "3 "+caWarn)
@@ -220,7 +220,7 @@ func TestReadsAtOnceAreCountedInOrder(t *testing.T) {
 		}
 	}
 	close(o.release)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || all[0].Message != "2 "+caWarn {
 		t.Fatalf("logged %v; the agent counted 2", all)
@@ -294,7 +294,7 @@ func TestATestCaseTheDrainSavesAfterTheFinalReadIsNamed(t *testing.T) {
 	w.afterTestCases(context.Background())
 	settle(w)
 	w.afterTestCase(context.Background(), "test-2")
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || all[0].Message != "2 "+caWarn {
 		t.Fatalf("logged %v, want one WARN %q", all, "2 "+caWarn)
@@ -323,7 +323,7 @@ func TestAStopBeforeCaptureBeganIsNoWatch(t *testing.T) {
 	}
 	w.afterTestCase(ctx, "test-1")
 	w.afterTestCases(ctx)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	if logs.Len() != 0 {
 		t.Fatalf("logged %v", logs.All())
 	}
@@ -406,7 +406,7 @@ func giveUp(t *testing.T, clk *stall.ManualClock) {
 // has said what it had to.
 func finishing(w *captureWatch) <-chan struct{} {
 	done := make(chan struct{})
-	go func() { w.finish("test-set-0"); close(done) }()
+	go func() { w.finish("test-set-0", false); close(done) }()
 	return done
 }
 
@@ -526,7 +526,7 @@ func TestATestCaseWhoseReadNeverCameIsNamedNotChecked(t *testing.T) {
 	settle(w)
 	w.afterTestCase(context.Background(), "test-2") // saved by the drain; its read fails
 	settle(w)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || all[0].Message != "1 "+caWarn {
 		t.Fatalf("logged %v, want one WARN %q", all, "1 "+caWarn)
@@ -552,7 +552,7 @@ func TestATestCaseWhoseReadNeverCameIsNamedNotChecked(t *testing.T) {
 	settle(w)
 	w.afterTestCase(context.Background(), "test-2")
 	settle(w)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all = logs.All()
 	if len(all) != 1 || all[0].ContextMap()["testCasesNotChecked"] != nil || fmt.Sprint(all[0].ContextMap()["testCases"]) != "[test-1]" {
 		t.Fatalf("logged %v; want test-1 named, and nothing said not checked", all)
@@ -587,7 +587,7 @@ func TestAnAskAfterFinishReadsNothing(t *testing.T) {
 	instr := &countingInstr{answers: []models.CaptureLosses{nil}}
 	t.Setenv(provenswitch.Env, "")
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	w.afterTestCase(context.Background(), "test-1")
 	w.afterTestCases(context.Background())
 	settle(w)
@@ -665,7 +665,7 @@ func TestAReadThatLagsNamesEveryTestCaseItCounts(t *testing.T) {
 	w.afterTestCase(context.Background(), "test-3")
 	close(o.release) // test-1's read: 1; the next, for test-2 and test-3: 2
 	w.afterTestCases(context.Background())
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || all[0].Message != "2 "+caWarn {
 		t.Fatalf("logged %v, want one WARN %q", all, "2 "+caWarn)
@@ -837,7 +837,7 @@ func TestUnreadTestCasesWithoutAFinalRead(t *testing.T) {
 	settle(w)
 	w.afterTestCase(context.Background(), "test-2") // fails
 	settle(w)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || fmt.Sprint(all[0].ContextMap()["testCases"]) != "[test-1]" || fmt.Sprint(all[0].ContextMap()["testCasesNotChecked"]) != "[test-2]" {
 		t.Fatalf("logged %v; want test-1 counted and test-2 not checked", all)
@@ -850,7 +850,7 @@ func TestUnreadTestCasesWithoutAFinalRead(t *testing.T) {
 	settle(w)
 	w.afterTestCases(context.Background())
 	settle(w)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all = logs.All()
 	if len(all) != 1 || !strings.HasPrefix(all[0].Message, "keploy could not check") || fmt.Sprint(all[0].ContextMap()["testCasesNotChecked"]) != "[test-1]" {
 		t.Fatalf("nothing was counted and test-1 was not checked; it said %v", all)
@@ -904,7 +904,7 @@ func TestAReadAfterTheFinalOneCoversAnUnreadTestCase(t *testing.T) {
 	settle(w)
 	w.afterTestCase(context.Background(), "test-2") // saved by the drain; its read fails
 	settle(w)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	if logs.Len() != 0 {
 		t.Fatalf("a clean recording said %v", logs.All())
 	}
@@ -949,7 +949,7 @@ func TestAReadTakenBeforeTheFinalOneCoversNothing(t *testing.T) {
 	settle(w)
 	w.afterTestCase(context.Background(), "test-2") // its read fails
 	settle(w)
-	w.finish("test-set-0")
+	w.finish("test-set-0", false)
 	all := logs.All()
 	if len(all) != 1 || fmt.Sprint(all[0].ContextMap()["testCasesNotChecked"]) != "[test-2]" {
 		t.Fatalf("logged %v; want test-2 said not checked", all)

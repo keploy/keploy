@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -30,8 +31,10 @@ type CaptureLossReader interface {
 // are the test case's they happened in -- so each test case is checked as it
 // is saved: every one whose check sees a loss is named at the end, and the
 // recording fails. A test case whose check could not be read is named as
-// unverified, and fails the recording too. With the switch off, or an agent
-// that cannot count, it does nothing.
+// unverified, and fails the recording too. Where a later pass judges each
+// test case (JudgeLossesLater), it fails nothing, and hands what it found to
+// that pass. With the switch off, or an agent that cannot count, it does
+// nothing.
 type captureWatch struct {
 	logger *zap.Logger
 	reader CaptureLossReader
@@ -82,6 +85,11 @@ type captureWatch struct {
 	// ca is, with the proven switch off, the WARN of the TLS handshakes a
 	// client failed with keploy's certificate (caRejectWatch); nil with it on.
 	ca *caRejectWatch
+	// byTestCase is what each test case's check charged it with, judged
+	// and not judged kinds alike, and the containers its mapping named the
+	// daemon did not answer the read of (mapped): the evidence a later
+	// judging pass reads (RecordedLosses).
+	byTestCase map[string]models.CaptureLosses
 	// agent watches which agent process answers (models.AgentInstanceWatch):
 	// the counts are the process's, from when it started, and the test cases
 	// and mocks it captured are in its memory until it hands them over. An
@@ -183,7 +191,11 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		test = w.base
 	}
 	w.last = now
-	judged, notJudged := now.Charged(w.base, w.base, test).Split()
+	charged := now.Charged(w.base, w.base, test)
+	if len(charged) > 0 {
+		w.addEvidence(name, charged)
+	}
+	judged, notJudged := charged.Split()
 	// Every loss so far: the reason names them all, not only this test
 	// case's own (an earlier one's failed handshake is still a reason the
 	// recording is incomplete), and each was charged to a test case by now.
@@ -243,8 +255,19 @@ func (w *captureWatch) mapped(test string, entries []models.MockEntry) {
 		if !slices.Contains(w.uncapturable, test) {
 			w.uncapturable = append(w.uncapturable, test)
 		}
-		w.unreadLost = w.unreadLost.Plus(models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: what}})
+		lost := models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: what}}
+		w.unreadLost = w.unreadLost.Plus(lost)
+		w.addEvidence(test, lost)
 	}
+}
+
+// addEvidence adds lost to what test case name was charged with. Called
+// with w.mu held.
+func (w *captureWatch) addEvidence(name string, lost models.CaptureLosses) {
+	if w.byTestCase == nil {
+		w.byTestCase = map[string]models.CaptureLosses{}
+	}
+	w.byTestCase[name] = w.byTestCase[name].Plus(lost)
 }
 
 // afterTestCases is the final read, once the app is stopped and before the
@@ -298,19 +321,59 @@ func (w *captureWatch) waitForReads() {
 
 // finish says, at ERROR, which test cases were recorded while the agent could
 // not capture every call, or could not be checked, and reports whether the
-// recording is to fail for it.
-func (w *captureWatch) finish(testSetID string) bool {
-	if w == nil {
-		return false
-	}
-	if w.off {
-		w.ca.finish(testSetID) // said, never a failure
-		return false
+// recording is to fail for it: for that, or for realUncaptured (connections
+// to a mock.real destination keploy could neither capture nor relay). Where
+// a later pass judges each recorded test case (JudgeLossesLater), it fails
+// nothing: what it would fail on it says in one WARN, and hands to that pass
+// with the rest (RecordedLosses). What fails nothing either way (a call
+// keploy cannot capture, an abandoned handshake, a container not named) is
+// said as it always is.
+func (w *captureWatch) finish(testSetID string, realUncaptured bool) bool {
+	fail, _ := w.finishWith(testSetID, realUncaptured, "")
+	return fail
+}
+
+// finishRun is finish as a recording's end takes it, with realUnread, why
+// keploy could not read which mock.real connections it could neither
+// capture nor relay ("" when it could), which fails it as realUncaptured
+// does: whether the run fails, and whether the recording is incomplete,
+// which it is too when what would have failed it was handed to a later
+// pass.
+func (w *captureWatch) finishRun(testSetID string, realUncaptured bool, realUnread string) (fail, incomplete bool) {
+	fail, handed := w.finishWith(testSetID, realUncaptured, realUnread)
+	return fail, fail || handed
+}
+
+// finishWith is finish with realUnread (finishRun), and whether what it
+// handed a later pass holds what fails a recording judged on its own
+// (RecordedLosses.Failing). A set is handed over when the watch ran, and,
+// where it did not (an agent that cannot count, the switch off), only for
+// mock.real connections lost or unread.
+func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnread string) (fail, handed bool) {
+	judge := lossJudge.Load()
+	if w == nil || w.off {
+		if w != nil {
+			w.ca.finish(testSetID) // said, never a failure
+		}
+		if judge == nil || !realUncaptured && realUnread == "" {
+			return realUncaptured || realUnread != "", false
+		}
+		// Nothing was counted (an agent that cannot count): the mock.real
+		// connections are all there is to hand over.
+		l := RecordedLosses{TestSetID: testSetID, RealUncaptured: realUncaptured, RealUnread: realUnread}
+		(*judge)(l)
+		return false, l.Failing()
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	failed := false
-	if len(w.tainted) > 0 {
+	failed := realUncaptured || realUnread != ""
+	// Unlocked before a judge is handed what was found.
+	locked := true
+	defer func() {
+		if locked {
+			w.mu.Unlock()
+		}
+	}()
+	if len(w.tainted) > 0 && judge == nil {
 		failed = true
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
@@ -372,14 +435,14 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.String("reason", abandonedLate.NotJudgedText()),
 			zap.String("next_step", "if the client does not trust keploy's CA: "+abandonedLate.NotJudgedRemedy()+", then re-record"))
 	}
-	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 {
+	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 && judge == nil {
 		failed = true
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call after the last test case was recorded, and no test case holds what those calls carried ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.String("reason", afterLast.Text()),
 			zap.String("next_step", "fix what the reason names, then re-record"))
 	}
-	if w.finalErr != nil {
+	if w.finalErr != nil && judge == nil {
 		failed = true
 		w.logger.Error("the recording is not verified: keploy could not read whether its agent captured every call after the last test case was recorded ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
@@ -388,8 +451,11 @@ func (w *captureWatch) finish(testSetID string) bool {
 	}
 	// Read last, after the final read: an agent started again before it
 	// answered that read holding none of what the one before counted.
+	var restarted string
 	if w.agent != nil {
-		if rep, replaced := w.agent.Replacement(); replaced {
+		if rep, replaced := w.agent.Replacement(); replaced && judge != nil {
+			restarted = "the agent (" + rep.First + ") was started again while it recorded, as " + rep.Next + ": what it counted it could not capture, and what it captured but had not handed over, went with it"
+		} else if replaced {
 			failed = true
 			w.logger.Error("the recording is not verified: keploy's agent was started again while it recorded, and what the agent before counted it could not capture, and what it captured but had not handed over, went with it ("+provenswitch.Env+"=1)",
 				zap.String("testSetID", testSetID),
@@ -400,7 +466,7 @@ func (w *captureWatch) finish(testSetID string) bool {
 		w.agent.Stop()
 		w.agent = nil
 	}
-	if len(w.unverified) > 0 {
+	if len(w.unverified) > 0 && judge == nil {
 		failed = true
 		why := w.baseErr
 		if why == nil {
@@ -412,7 +478,200 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.Error(why),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
 	}
-	return failed
+	if judge == nil {
+		return failed, false
+	}
+	l := w.recordedLocked(testSetID, realUncaptured, realUnread, restarted)
+	locked = false
+	w.mu.Unlock()
+	if l.Failing() {
+		// What fails nothing either way was said above, as it always is.
+		w.logger.Warn("keploy's agent could not capture every call, or could not be checked, while this test set was recorded: the recording is kept, and the auto-replay that follows judges each of its test cases ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.Strings("testCases", l.FailingTestCases()),
+			zap.String("reason", l.Text()),
+			zap.String("next_step", "the auto-replay's lines say which test cases replay and are kept; for one that is not, fix what the reason names (the agent's log says why a count could not be read), then re-record it"))
+	}
+	(*judge)(l)
+	return false, l.Failing()
+}
+
+// RecordedLosses is what keploy record's capture watch found while one test
+// set was recorded, under the proven switch, for a pass that judges each
+// recorded test case itself (JudgeLossesLater): enterprise's auto-replay,
+// which keeps only the test cases that replay. A loss in record is then
+// evidence, not a verdict: a test case whose recording lost a call does not
+// replay, and that test case is not kept, while the others are.
+type RecordedLosses struct {
+	TestSetID string
+	// ByTestCase is what each test case was charged with, by its window:
+	// kinds that fail a test case (judged) and kinds that leave it without
+	// a verdict alike (models.CaptureLosses.Split tells them apart). A kind
+	// that taints every later test case (not models.CaptureLossKind.PerTest)
+	// is in each of them, counted from the set's start.
+	ByTestCase map[string]models.CaptureLosses
+	// Uncharged is what was lost after the last test case was checked,
+	// beyond what the checks charged, which no test case holds: the set's.
+	// Judged kinds only: a not-judged one fails nothing, and is said as the
+	// set ends.
+	Uncharged models.CaptureLosses
+	// Unverified are the test cases whose count could not be read, and
+	// UnverifiedWhy why. NotVerified is why what no test case holds could
+	// not be verified (the final read failed, or the agent was started
+	// again while it recorded), "" when it could.
+	Unverified    []string
+	UnverifiedWhy string
+	NotVerified   string
+	// RealUncaptured: connections to a mock.real destination keploy could
+	// neither capture nor relay. RealUnread is why keploy could not read
+	// whether there were any, "" when it could.
+	RealUncaptured bool
+	RealUnread     string
+}
+
+// Failing says l holds what fails a recording judged on its own (finish with
+// no pass registered): a judged loss, a count that could not be read, or
+// connections neither captured nor relayed. A pass that judges no test case
+// of the set is to fail the recording on it.
+func (l RecordedLosses) Failing() bool {
+	if l.RealUncaptured || l.RealUnread != "" || l.NotVerified != "" || len(l.Unverified) > 0 || len(l.Uncharged) > 0 {
+		return true
+	}
+	for _, lost := range l.ByTestCase {
+		if judged, _ := lost.Split(); len(judged) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCases are the test cases l names, sorted.
+func (l RecordedLosses) TestCases() []string {
+	var out []string
+	for n := range l.ByTestCase {
+		out = append(out, n)
+	}
+	for _, n := range l.Unverified {
+		if _, ok := l.ByTestCase[n]; !ok {
+			out = append(out, n)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// FailingTestCases are the test cases l names with what fails a recording
+// judged on its own: a judged loss, or a count that could not be read.
+// Sorted.
+func (l RecordedLosses) FailingTestCases() []string {
+	var out []string
+	for _, n := range l.TestCases() {
+		judged, _ := l.ByTestCase[n].Split()
+		if len(judged) > 0 || slices.Contains(l.Unverified, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// Lost is everything the set's recording lost, each loss once: a test case's
+// own (models.CaptureLossKind.PerTest) added up, a kind that taints every
+// later test case at the most any held (each holds all of it so far), and
+// what no test case holds.
+func (l RecordedLosses) Lost() models.CaptureLosses {
+	var own, spans models.CaptureLosses
+	for _, lost := range l.ByTestCase {
+		for _, c := range lost {
+			if c.Kind.PerTest() {
+				own = own.Plus(models.CaptureLosses{c})
+			} else {
+				spans = spans.Max(models.CaptureLosses{c})
+			}
+		}
+	}
+	return own.Plus(spans).Plus(l.Uncharged)
+}
+
+// Text is l in a sentence: what was lost, and what could not be read.
+func (l RecordedLosses) Text() string {
+	var parts []string
+	judged, notJudged := l.Lost().Split()
+	if t := judged.Text(); t != "" {
+		parts = append(parts, t)
+	}
+	if t := notJudged.NotJudgedText(); t != "" {
+		parts = append(parts, t)
+	}
+	if len(l.Unverified) > 0 {
+		t := fmt.Sprintf("the count could not be read for %d test case(s)", len(l.Unverified))
+		if l.UnverifiedWhy != "" {
+			t += " (" + l.UnverifiedWhy + ")"
+		}
+		parts = append(parts, t)
+	}
+	if l.NotVerified != "" {
+		parts = append(parts, l.NotVerified)
+	}
+	if l.RealUncaptured {
+		parts = append(parts, "keploy could neither capture nor relay connections to a mock.real destination")
+	}
+	if l.RealUnread != "" {
+		parts = append(parts, l.RealUnread)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// lossJudge is the pass JudgeLossesLater named, nil for none.
+var lossJudge atomic.Pointer[func(RecordedLosses)]
+
+// LossesJudgedLater says a pass registered with JudgeLossesLater judges what
+// the recording loses.
+func LossesJudgedLater() bool { return lossJudge.Load() != nil }
+
+// JudgeLossesLater says that a later pass judges each test case keploy record
+// records (enterprise's auto-replay, under the proven switch): from here on
+// the capture watch fails no recording, and hands what it found in each test
+// set, as it ends, to judge (RecordedLosses), which decides. Such a pass that
+// judges none of a set's test cases (it did not run, or replayed none) is to
+// fail the recording on what judge was given, when it is Failing: nothing
+// else proved those test cases. undo restores record's own judging (a test's
+// cleanup, a run whose auto-replay is turned off). One pass at a time: a
+// second registration replaces the first, and its undo leaves none.
+func JudgeLossesLater(judge func(RecordedLosses)) (undo func()) {
+	lossJudge.Store(&judge)
+	return func() { lossJudge.CompareAndSwap(&judge, nil) }
+}
+
+// recordedLocked is what w found in test set testSetID (RecordedLosses);
+// restarted says why the agent's counts went with it, "" when they did not.
+// Called with w.mu held.
+func (w *captureWatch) recordedLocked(testSetID string, realUncaptured bool, realUnread, restarted string) RecordedLosses {
+	l := RecordedLosses{TestSetID: testSetID, RealUncaptured: realUncaptured, RealUnread: realUnread, Unverified: slices.Clone(w.unverified)}
+	if len(l.Unverified) > 0 {
+		why := w.baseErr
+		if why == nil {
+			why = w.readErr
+		}
+		if why != nil {
+			l.UnverifiedWhy = why.Error()
+		}
+	}
+	if len(w.byTestCase) > 0 {
+		l.ByTestCase = make(map[string]models.CaptureLosses, len(w.byTestCase))
+		for n, lost := range w.byTestCase {
+			l.ByTestCase[n] = slices.Clone(lost)
+		}
+	}
+	l.Uncharged = w.final.Since(w.charged)
+	var why []string
+	if w.finalErr != nil {
+		why = append(why, "the count could not be read after the last test case: "+w.finalErr.Error())
+	}
+	if restarted != "" {
+		why = append(why, restarted)
+	}
+	l.NotVerified = strings.Join(why, "; ")
+	return l
 }
 
 // String is a one-line account, for tests.

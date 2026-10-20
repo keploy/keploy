@@ -47,7 +47,7 @@ func record3(t *testing.T, instr Instrumentation) (*captureWatch, bool, *observe
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
 	}
-	return w, w.finish("test-set-0"), logs
+	return w, w.finish("test-set-0", false), logs
 }
 
 // Under the proven switch the test case being recorded at a loss and every
@@ -121,7 +121,7 @@ func TestARecordingsFinalReadCountsEachTestCasesOwnHandshakes(t *testing.T) {
 		w.afterTestCase(context.Background(), n)
 	}
 	w.afterTestCases(context.Background())
-	if !w.finish("test-set-0") || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+	if !w.finish("test-set-0", false) || w.String() != "tainted=[test-1,test-3] unverified=[]" {
 		t.Fatalf("%s; want test-1 and test-3 tainted and the recording failed", w)
 	}
 	if n := len(logs.FilterMessageSnippet("after the last test case").All()); n != 0 {
@@ -145,7 +145,7 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 		w.afterTestCase(context.Background(), n)
 	}
 	w.afterTestCases(context.Background())
-	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+	if w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[]" {
 		t.Fatalf("%s; want nothing tainted and the recording kept", w)
 	}
 	if fmt.Sprint(w.uncapturable) != "[test-2]" {
@@ -179,7 +179,7 @@ func TestARecordingSaysAServerFirstProtocolItPassedThrough(t *testing.T) {
 		w.afterTestCase(context.Background(), n)
 	}
 	w.afterTestCases(context.Background())
-	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+	if w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[]" {
 		t.Fatalf("%s; want nothing tainted and the recording kept", w)
 	}
 	if fmt.Sprint(w.uncapturable) != "[test-2]" {
@@ -237,7 +237,7 @@ func TestTheCaptureWatchIsOffWithoutTheSwitchOrACount(t *testing.T) {
 		w.afterTestCase(context.Background(), n)
 		settle(w) // each read made before the next test case is saved
 	}
-	if failed := w.finish("test-set-0"); failed || logs.Len() != 0 || off.reads != 4 {
+	if failed := w.finish("test-set-0", false); failed || logs.Len() != 0 || off.reads != 4 {
 		t.Fatalf("switch off: failed %v, logged %v, after %d reads; want no failure, nothing said of a PID map loss, and the CA WARN's 4 reads", failed, logs.All(), off.reads)
 	}
 	t.Setenv(provenswitch.Env, "1")
@@ -262,7 +262,7 @@ func TestARecordingThatCalledWhatKeployCannotCaptureWarnsAndDoesNotFail(t *testi
 	for _, n := range []string{"test-1", "test-2", "test-3"} {
 		w.afterTestCase(context.Background(), n)
 	}
-	if w.finish("test-set-0") {
+	if w.finish("test-set-0", false) {
 		t.Fatal("the recording failed for a call keploy cannot capture")
 	}
 	warns := logs.FilterMessageSnippet("keploy cannot capture").All()
@@ -359,7 +359,7 @@ func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t
 	w.mapped("test-2", []models.MockEntry{{Name: "mock-8"}})
 	w.mapped("test-1", []models.MockEntry{{Name: "mock-7"}}) // named again: charged once
 	w.afterTestCases(context.Background())
-	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+	if w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[]" {
 		t.Fatalf("%s; want nothing tainted and the recording kept", w)
 	}
 	charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
@@ -375,5 +375,289 @@ func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t
 	}
 	if n := logs.FilterMessageSnippet("after the last test case").Len(); n != 0 {
 		t.Fatalf("%d lines charged the count after the last test case: the mocks charge it", n)
+	}
+}
+
+// judgeLater has the capture watch hand what it finds to a later pass, for
+// the test's life, and returns what was handed.
+func judgeLater(t *testing.T) *[]RecordedLosses {
+	t.Helper()
+	var got []RecordedLosses
+	t.Cleanup(JudgeLossesLater(func(l RecordedLosses) { got = append(got, l) }))
+	return &got
+}
+
+// Where a later pass judges each recorded test case (enterprise's
+// auto-replay), a loss in record fails nothing: the recording is kept, the
+// loss is said at WARN, never ERROR, and handed over as evidence on the test
+// case whose window it fell in. That pass keeps the test cases that replay.
+func TestARecordJudgedLaterKeepsItsLossesAsEvidence(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := judgeLater(t)
+	// Test case 2 loses a call; test case 3 is recorded after it (a taint,
+	// so 3 carries it too).
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, pid(1), pid(1), pid(1)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0", false) {
+		t.Fatal("the recording failed on a loss a later pass judges")
+	}
+	if n := len(logs.FilterLevelExact(zapcore.ErrorLevel).All()); n != 0 {
+		t.Fatalf("%d ERROR lines, want none: the loss is evidence", n)
+	}
+	if len(logs.FilterMessageSnippet("the auto-replay that follows judges each of its test cases").All()) != 1 {
+		t.Fatalf("no WARN that auto-replay judges the test cases: %+v", logs.All())
+	}
+	if len(*got) != 1 {
+		t.Fatalf("handed %d accounts, want 1", len(*got))
+	}
+	l := (*got)[0]
+	if l.TestSetID != "test-set-0" || !l.Failing() || fmt.Sprint(l.TestCases()) != "[test-2 test-3]" {
+		t.Fatalf("handed %+v, want test-set-0's, failing, naming test-2 and test-3", l)
+	}
+	if lost := l.ByTestCase["test-2"]; len(lost) != 1 || lost[0].Kind != models.CaptureLossPIDMap {
+		t.Fatalf("test-2's evidence %v, want the PID-map refusal", lost)
+	}
+	if _, ok := l.ByTestCase["test-1"]; ok {
+		t.Fatal("test-1, recorded before the loss, carries evidence")
+	}
+}
+
+// What was lost after the last test case, and connections to a mock.real
+// destination neither captured nor relayed, are the set's: handed over, and
+// failing the set if the later pass judges none of it.
+func TestARecordJudgedLaterHandsOverWhatNoTestCaseHolds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := judgeLater(t)
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, pid(2)}}
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
+	w.afterTestCase(context.Background(), "test-1")
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0", true) {
+		t.Fatal("the recording failed on what a later pass judges")
+	}
+	l := (*got)[0]
+	if len(l.Uncharged) != 1 || l.Uncharged[0].Count != 2 || !l.RealUncaptured || !l.Failing() || len(l.TestCases()) != 0 {
+		t.Fatalf("handed %+v, want the 2 lost after the last test case and the mock.real connections, the set's", l)
+	}
+}
+
+// Without a later pass (keploy record alone, or an auto-replay turned off),
+// record judges its own losses as it always did: the recording fails, and
+// mock.real connections neither captured nor relayed fail it too.
+func TestARecordNoPassJudgesFailsOnItsLosses(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	undo := JudgeLossesLater(func(RecordedLosses) { t.Fatal("handed over with the pass undone") })
+	undo()
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, pid(1), pid(1)}}
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
+	w.afterTestCase(context.Background(), "test-1")
+	w.afterTestCases(context.Background())
+	if !w.finish("test-set-0", false) {
+		t.Fatal("a recording no later pass judges did not fail on its loss")
+	}
+	w = watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
+	if !w.finish("test-set-0", true) {
+		t.Fatal("mock.real connections neither captured nor relayed did not fail the recording")
+	}
+}
+
+// With the switch off only the CA WARN runs, as without a later pass,
+// judged later or not: nothing fails, nothing is handed over, and the WARN
+// is said the same.
+func TestARecordWithTheSwitchOffIsAsBefore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	got := judgeLater(t)
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{pid(1)}})
+	w.afterTestCase(context.Background(), "test-1")
+	if w.finish("test-set-0", false) || len(*got) != 0 {
+		t.Fatalf("with the switch off: failed or handed over %v", *got)
+	}
+	said := func() string {
+		instr := &countingInstr{answers: []models.CaptureLosses{nil, tlsFailed(1, "to api.example:443"), tlsFailed(2, "to pay.example:443")}}
+		failed, logs := recordOff(t, instr, "test-1")
+		if failed {
+			t.Fatal("the recording failed with the switch off")
+		}
+		var lines []string
+		for _, e := range logs.All() {
+			lines = append(lines, e.Level.String()+" "+e.Message+" "+fmt.Sprint(e.ContextMap()))
+		}
+		return strings.Join(lines, "\n")
+	}
+	later := said()
+	if !strings.Contains(later, caWarn) || len(*got) != 0 {
+		t.Fatalf("judged later, switch off: said %q, handed %v; want the CA WARN, nothing handed", later, *got)
+	}
+	undo := JudgeLossesLater(func(RecordedLosses) {})
+	undo()
+	if alone := said(); alone != later {
+		t.Fatalf("the CA WARN judged later %q, without a later pass %q: want them the same", later, alone)
+	}
+}
+
+// Where a later pass judges the test cases, what fails nothing either way is
+// said exactly as without it, each at WARN with its remedy: a test case
+// recorded while a TLS client abandoned its handshake, a handshake abandoned
+// after the last test case, data on a connection keploy passes through after
+// it, and a mock whose container the Docker daemon did not name that no
+// test case holds.
+func TestARecordJudgedLaterSaysWhatFailsNothingAsBefore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	abandoned := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: n, What: "to db:5432"}}
+	}
+	late := abandoned(2).Plus(models.CaptureLosses{{Kind: models.CaptureLossServerFirst, Count: 1, What: "to smtp:25"}})
+	unnamed := &models.Mock{Name: "mock-9", Spec: models.MockSpec{Metadata: map[string]string{models.ContainerUnreadMetadata: "container pg (postgres:16)"}}}
+	run := func(judged bool) []string {
+		if judged {
+			judgeLater(t)
+		}
+		core, logs := observer.New(zapcore.DebugLevel)
+		w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, abandoned(1), late}})
+		w.saved(unnamed)
+		w.afterTestCase(context.Background(), "test-1")
+		w.afterTestCases(context.Background())
+		if w.finish("test-set-0", false) {
+			t.Fatalf("judged later %v: a recording that lost nothing judged failed", judged)
+		}
+		var said []string
+		for _, e := range logs.All() {
+			said = append(said, e.Level.String()+" "+e.Message+" "+fmt.Sprint(e.ContextMap()))
+		}
+		return said
+	}
+	alone := run(false)
+	if len(alone) != 4 {
+		t.Fatalf("judged alone: %q, want the four WARNs", alone)
+	}
+	if later := run(true); fmt.Sprint(later) != fmt.Sprint(alone) {
+		t.Fatalf("judged later: %q, want what record says alone: %q", later, alone)
+	}
+}
+
+// A loss that taints every later test case is in each of them, counted from
+// the set's start: the account says it once, not once per test case.
+func TestARecordedLossThatTaintsLaterTestCasesIsCountedOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := judgeLater(t)
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil, nil, pid(1), pid(1), pid(1)}})
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	w.finish("test-set-0", false)
+	l := (*got)[0]
+	if lost := l.Lost(); len(lost) != 1 || lost[0].Count != 1 {
+		t.Fatalf("Lost() = %v, want the one PID-map refusal", lost)
+	}
+	if want := (models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1}}).Text(); !strings.Contains(l.Text(), want) {
+		t.Fatalf("Text() = %q, want it to say %q", l.Text(), want)
+	}
+}
+
+// Failing is what fails a recording judged on its own: each of a judged
+// loss, a test case whose count could not be read, what could not be
+// verified, a loss no test case holds and mock.real connections neither
+// captured nor relayed; never a not-judged kind alone, or nothing.
+func TestWhatFailsARecordingJudgedOnItsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		l    RecordedLosses
+		want bool
+	}{
+		{"nothing", RecordedLosses{}, false},
+		{"a not-judged kind", RecordedLosses{ByTestCase: map[string]models.CaptureLosses{"t": {{Kind: models.CaptureLossTLSAbandoned, Count: 1}}}}, false},
+		{"a judged loss", RecordedLosses{ByTestCase: map[string]models.CaptureLosses{"t": pid(1)}}, true},
+		{"an unread count", RecordedLosses{Unverified: []string{"t"}}, true},
+		{"not verified", RecordedLosses{NotVerified: "the count could not be read after the last test case"}, true},
+		{"a loss no test case holds", RecordedLosses{Uncharged: pid(1)}, true},
+		{"mock.real connections", RecordedLosses{RealUncaptured: true}, true},
+	} {
+		if got := c.l.Failing(); got != c.want {
+			t.Errorf("%s: Failing() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Handed to a later pass, an agent started again while it recorded is what
+// could not be verified, and the watch of it ends as it does without one.
+func TestARecordJudgedLaterHandsOverAnAgentStartedAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := judgeLater(t)
+	instr := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: true}}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	failed, incomplete := w.finishRun("test-set-0", false, "")
+	if failed || !incomplete || logs.Len() != 0 {
+		t.Fatalf("failed %v, incomplete %v, logged %v at ERROR: want not failed, incomplete, nothing logged", failed, incomplete, logs.All())
+	}
+	if !instr.watch.stopped {
+		t.Fatal("the agent's watch was not stopped")
+	}
+	if l := (*got)[0]; !strings.Contains(l.NotVerified, "started again") || !l.Failing() {
+		t.Fatalf("handed %+v, want it not verified for the restart", l)
+	}
+}
+
+// An agent that cannot count capture losses leaves nothing to hand over but
+// mock.real connections neither captured nor relayed, which the later pass
+// takes too: the recording fails on neither.
+func TestARecordJudgedLaterWithAnAgentThatCannotCount(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := judgeLater(t)
+	unsupported := &countingInstr{errAt: map[int]error{1: models.ErrCaptureLossesUnsupported}, answers: []models.CaptureLosses{nil}}
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), unsupported)
+	if w.finish("test-set-0", false) || len(*got) != 0 {
+		t.Fatalf("with nothing to hand over: handed %v", *got)
+	}
+	if fail, incomplete := w.finishRun("test-set-0", true, ""); fail || !incomplete || len(*got) != 1 || !(*got)[0].RealUncaptured {
+		t.Fatalf("with mock.real connections lost: handed %+v, want them handed over, the recording not failed", *got)
+	}
+}
+
+// A recording whose losses were handed to a later pass is not failed, and is
+// incomplete all the same (the session's telemetry says so); one with
+// nothing that would fail it is neither.
+func TestARecordJudgedLaterIsIncompleteNotFailed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	judgeLater(t)
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil, pid(1)}})
+	w.afterTestCase(context.Background(), "test-1")
+	w.afterTestCases(context.Background())
+	if fail, incomplete := w.finishRun("test-set-0", false, ""); fail || !incomplete {
+		t.Fatalf("finishRun = %v, %v; want not failed, incomplete", fail, incomplete)
+	}
+	w = watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
+	w.afterTestCase(context.Background(), "test-1")
+	w.afterTestCases(context.Background())
+	if fail, incomplete := w.finishRun("test-set-0", false, ""); fail || incomplete {
+		t.Fatalf("finishRun = %v, %v with nothing lost; want neither", fail, incomplete)
+	}
+}
+
+// A failed read of the mock.real connections is handed over as that, not as
+// connections lost, and fails the recording judged on its own.
+func TestARecordHandsOverAFailedReadOfMockReal(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	unread := "keploy could not read from its agent which mock.real connections it could not capture: agent gone"
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
+	if fail, _ := w.finishRun("test-set-0", false, unread); !fail {
+		t.Fatal("a recording judged on its own did not fail on an unread mock.real")
+	}
+	got := judgeLater(t)
+	w = watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
+	if fail, _ := w.finishRun("test-set-0", false, unread); fail {
+		t.Fatal("failed where a later pass judges")
+	}
+	if l := (*got)[0]; l.RealUncaptured || !strings.Contains(l.RealUnread, "agent gone") || !l.Failing() || strings.Contains(l.Text(), "could neither capture nor relay") {
+		t.Fatalf("handed %+v (%q), want the failed read as that", l, l.Text())
 	}
 }
