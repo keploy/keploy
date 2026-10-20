@@ -4412,6 +4412,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							// it open (the stall rule, or its keepalives):
 							// not judged, failing closed (ruling a).
 							sayNoAnswer(r.logger, tc.Name, streamErr, "failed to read streaming response")
+						} else if errors.Is(streamErr, pkg.ErrStreamNotRecorded) {
+							// Its recording keeps no frame: refused, its
+							// stream unread, never passed on nothing.
+							r.logger.Error("refusing this streaming test: its recording keeps nothing of its stream to compare the app's answer with; failing it",
+								zap.String("testcase", tc.Name),
+								zap.String("testset", testSetID),
+								zap.Error(streamErr))
 						} else {
 							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
 						}
