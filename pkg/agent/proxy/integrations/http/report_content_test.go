@@ -425,3 +425,39 @@ func TestARouteVariableMissKeepsItsPathDiffHoles(t *testing.T) {
 		t.Errorf("with the switch on the summary is %q, places %v", r.ActualSummary, r.VariablePlaces)
 	}
 }
+
+// sameCallMiss is the miss of a call that is its closest recording to the
+// byte, as a call misses when the mock that answered it is not this test's
+// to serve: no field differs, and the two rendered requests are the same.
+func sameCallMiss(t *testing.T) *models.MockMismatchReport {
+	t.Helper()
+	mock := httpMockWithReq("mock-1", "POST", "http://users.internal:8080/api/users?customer=kp-rec-cust",
+		`{"email":"kp-rec@example.com"}`, map[string]string{"Content-Type": "application/json"}, nil)
+	req := makeReqWithQuery("POST", "/api/users", "customer=kp-rec-cust")
+	req.Header.Set("Content-Type", "application/json")
+	diag := &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{mock}}
+	return newHTTP().buildHTTPMismatchReport(req, []byte(`{"email":"kp-rec@example.com"}`), &mockMemDb{mocks: []*models.Mock{mock}}, nil, nil, nil, diag)
+}
+
+// A default report drops the rendered requests and says whether they were
+// the same, which a reader told a mock keploy did not serve from a changed
+// call by: true for a call that is its closest recording, false for one that
+// is not. With the switch on the requests are kept, the same, and nothing
+// else is said.
+func TestADefaultHTTPReportSaysItsRequestsWereTheSame(t *testing.T) {
+	r := sameCallMiss(t)
+	if len(r.FieldDiffs) != 0 || !r.RequestsIdentical || r.ClosestMockReq != "" || r.ReceivedReq != "" || !r.ContentWithheld {
+		t.Errorf("the default report of a call that is its closest recording: diffs %+v, identical %v, requests %q %q", r.FieldDiffs, r.RequestsIdentical, r.ClosestMockReq, r.ReceivedReq)
+	}
+	if text := reportText(t, r); strings.Contains(text, "kp-rec") {
+		t.Errorf("the default report carries the request:\n%s", text)
+	}
+	if r := piiMiss(t); r.RequestsIdentical {
+		t.Errorf("the default report of a call with other values says its requests were the same")
+	}
+	t.Cleanup(logcontent.Set(true))
+	r = sameCallMiss(t)
+	if r.RequestsIdentical || r.ClosestMockReq == "" || r.ClosestMockReq != r.ReceivedReq || r.ContentWithheld {
+		t.Errorf("with the switch on: identical %v, requests %q %q", r.RequestsIdentical, r.ClosestMockReq, r.ReceivedReq)
+	}
+}

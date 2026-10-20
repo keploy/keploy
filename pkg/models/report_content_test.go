@@ -310,3 +310,54 @@ func TestRenderFieldDiffs(t *testing.T) {
 		t.Errorf("no diffs rendered %q", got)
 	}
 }
+
+// A report without content drops its two rendered requests, and a reader
+// that compared them (cloud triage: a call the same as its closest mock is
+// a mock keploy did not serve, not a change of the application's) reads the
+// comparison from RequestsIdentical instead: true when the two were byte for
+// byte the same as they were dropped, false when they differed or either was
+// not rendered. It is made where the requests are dropped, while the report
+// still has them; a report withheld before keeps it, unless a request was
+// written into it since (a not-owned miss's recording), when it says what the
+// report holds now. With the switch on nothing is dropped and nothing is set:
+// the reader compares the two, as before.
+func TestAWithheldReportSaysWhetherItsRequestsWereTheSame(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mock, live    string
+		withheldAfter bool
+		was           bool
+		want          bool
+	}{
+		{name: "the same requests", mock: "GET /a kp-canary-mock-req", live: "GET /a kp-canary-mock-req", want: true},
+		{name: "other requests", mock: "GET /a kp-canary-mock-req", live: "GET /a kp-canary-live-req"},
+		{name: "none rendered"},
+		{name: "only the recording rendered", mock: "GET /a kp-canary-mock-req"},
+		{name: "withheld before, the same", withheldAfter: true, was: true, want: true},
+		{name: "withheld before, other", withheldAfter: true},
+		{name: "withheld before, a recording written since", mock: "GET /b kp-canary-mock-req", withheldAfter: true, was: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /a", ClosestMock: "mock-1",
+				ClosestMockReq: tc.mock, ReceivedReq: tc.live, ContentWithheld: tc.withheldAfter, RequestsIdentical: tc.was}
+			got := r.WithoutContent()
+			if got.RequestsIdentical != tc.want || got.ClosestMockReq != "" || got.ReceivedReq != "" || !got.ContentWithheld {
+				t.Errorf("report: identical %v (want %v), requests %q %q, withheld %v", got.RequestsIdentical, tc.want, got.ClosestMockReq, got.ReceivedReq, got.ContentWithheld)
+			}
+			c := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /a", ClosestMock: "mock-1",
+				ClosestMockReq: tc.mock, ReceivedReq: tc.live, ContentWithheld: tc.withheldAfter, RequestsIdentical: tc.was}.ReportContent()
+			if c.RequestsIdentical != tc.want || c.ClosestMockReq != "" || c.ReceivedReq != "" {
+				t.Errorf("call: identical %v (want %v), requests %q %q", c.RequestsIdentical, tc.want, c.ClosestMockReq, c.ReceivedReq)
+			}
+		})
+	}
+	t.Cleanup(logcontent.Set(true))
+	c := UnmatchedCall{Protocol: "HTTP", ClosestMock: "mock-1", ClosestMockReq: "GET /a", ReceivedReq: "GET /a"}.ReportContent()
+	if c.RequestsIdentical || c.ClosestMockReq != "GET /a" || c.ReceivedReq != "GET /a" {
+		t.Errorf("with the switch on the call is %+v", c)
+	}
+	b, err := yaml.Marshal(c)
+	if err != nil || strings.Contains(string(b), "requests_identical") {
+		t.Errorf("with the switch on the call's yaml names requests_identical: %s %v", b, err)
+	}
+}
