@@ -305,7 +305,7 @@ func TestARecordedStreamBodyThatCannotBeReadFails(t *testing.T) {
 // app's stream with. It is refused, with the reason, under either switch, and
 // never passes. A recording that saved its body is compared with it, however
 // little it holds (TestAStreamRecordedEmptyIsComparedWithItsEmptyStream,
-// TestAStreamRecordedWithNoEventIsComparedWithWhatItHolds).
+// TestAStreamRecordedWithKeepalivesAloneIsComparedWithWhatItHolds).
 func TestAStreamTestWithNothingRecordedIsRefused(t *testing.T) {
 	modes := []struct {
 		name        string
@@ -410,21 +410,30 @@ func TestAStreamRecordedEmptyIsComparedWithItsEmptyStream(t *testing.T) {
 	}
 }
 
-// A stream recorded with no event in it, its body saved and holding
-// keepalives or blank lines alone (an SSE body of comments, or of blank lines,
-// an NDJSON body of blank lines, a multipart body of no part), is compared
-// with what it holds, as one recorded empty is, under either switch, kept as
-// YAML or carried as JSON: the app's stream is read to its end, a stream that
-// ends as recorded passes, one with an event (a line, a part) the recording
-// does not have fails, judged different, and one that goes on with keepalives
-// past the recording has nothing but keepalives of it to compare, not judged.
-// It is not refused: re-recording the app gives the same recording. With the
-// switch off a stream passed once the recorded keepalives had come, whatever
-// followed.
-func TestAStreamRecordedWithNoEventIsComparedWithWhatItHolds(t *testing.T) {
+// A stream recorded with keepalives or blank lines alone, its body saved, is
+// compared with what it holds, kept as YAML or carried as JSON, never
+// refused: re-recording the app gives the same recording.
+//
+// An SSE body of comments (": ok", which a notification endpoint that had no
+// event sends as it opens the stream) holds frames, its comments, and is
+// compared by them in order, as any recording is: with the switch off the
+// comparison stops at the last of them (a stream that goes on is not waited
+// for), and under the switch it reads the stream to its end, an event past
+// them failing it and a keepalive past them ending the read, not judged (the
+// app held the stream open past its recording).
+//
+// A body that holds no frame (an SSE body of blank lines, an NDJSON body of
+// blank lines, which a recording keeps none of, a multipart body of no part)
+// has none to stop at, so the stream is read to its end under either switch:
+// a stream that ends as recorded passes, one with an event (a line, a part)
+// fails, judged different, and one of a keepalive has nothing of it to
+// compare, not judged. With the switch off such a stream passed on its first
+// frame, compared with nothing.
+func TestAStreamRecordedWithKeepalivesAloneIsComparedWithWhatItHolds(t *testing.T) {
 	const (
 		pass      = "passes"
 		notJudged = "not judged"
+		heldOpen  = "held open"
 		part      = "--frame\r\nContent-Type: text/plain\r\n\r\npart one\r\n--frame--\r\n"
 	)
 	sse := HTTPStreamConfig{Mode: HTTPStreamModeSSE}
@@ -432,7 +441,9 @@ func TestAStreamRecordedWithNoEventIsComparedWithWhatItHolds(t *testing.T) {
 	multi := HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: "frame"}
 	type answer struct {
 		body string
-		want string // pass, notJudged, or the reason it differs
+		// want is pass, notJudged, heldOpen, or the reason it differs;
+		// wantOff, when set, is that with the switch off.
+		want, wantOff string
 	}
 	for _, c := range []struct {
 		name, contentType, body string
@@ -440,36 +451,37 @@ func TestAStreamRecordedWithNoEventIsComparedWithWhatItHolds(t *testing.T) {
 		answers                 []answer
 	}{
 		{"sse of a keepalive", "text/event-stream", ": ok\n\n", sse, []answer{
-			{": ok\n\n", pass},
-			{": ok\n\ndata: x\n\n", "the stream went on after its 1 recorded frames"},
-			{"data: x\n\n", "comment-position mismatch"},
-			{": ok\n\n: ok\n\n", notJudged},
-			{"", "expected 1 frames but only received 0"},
+			{": ok\n\n", pass, ""},
+			{": ok\n\ndata: x\n\n", "the stream went on after its 1 recorded frames", pass},
+			{"data: x\n\n", "comment-position mismatch", ""},
+			{": ok\n\n: ok\n\n", heldOpen, pass},
+			{"", "expected 1 frames but only received 0", ""},
 		}},
 		{"sse of keepalives", "text/event-stream", ": ping\n\n: ping\n\n", sse, []answer{
-			{": ping\n\n: ping\n\n", pass},
-			{": ping\n\n: ping\n\nevent: tick\ndata: 1\n\n", "the stream went on after its 2 recorded frames"},
-			{": ping\n\n: ping\n\n: ping\n\n", notJudged},
+			{": ping\n\n: ping\n\n", pass, ""},
+			{": ping\n\n: ping\n\nevent: tick\ndata: 1\n\n", "the stream went on after its 2 recorded frames", pass},
+			{": ping\n\n: ping\n\n: ping\n\n", heldOpen, pass},
+			{": ping\n\n", "expected 2 frames but only received 1", ""},
 		}},
 		{"sse of blank lines", "text/event-stream", "\n\n\n\n", sse, []answer{
-			{"", pass},
-			{"\n\n", pass},
-			{"data: x\n\n", "the stream went on after its 0 recorded frames"},
-			{": ping\n\n", notJudged},
+			{"", pass, ""},
+			{"\n\n", pass, ""},
+			{"data: x\n\n", "the stream went on after its 0 recorded frames", ""},
+			{": ping\n\n", notJudged, ""},
 		}},
 		{"ndjson of blank lines", "application/x-ndjson", "\n\n", ndjson, []answer{
-			{"", pass},
-			{"{\"a\":1}\n", "the stream went on after its 0 recorded frames"},
-			{"\n", notJudged},
+			{"", pass, ""},
+			{"{\"a\":1}\n", "the stream went on after its 0 recorded frames", ""},
+			{"\n", notJudged, ""},
 		}},
 		{"multipart of no part", "multipart/x-mixed-replace; boundary=frame", "--frame--\r\n", multi, []answer{
-			{"", pass},
-			{"--frame--\r\n", pass},
-			{part, "the stream went on after its 0 recorded frames"},
+			{"", pass, ""},
+			{"--frame--\r\n", pass, ""},
+			{part, "the stream went on after its 0 recorded frames", ""},
 		}},
 		{"multipart of blank lines", "multipart/x-mixed-replace; boundary=frame", "\r\n\r\n", multi, []answer{
-			{"", pass},
-			{part, "the stream went on after its 0 recorded frames"},
+			{"", pass, ""},
+			{part, "the stream went on after its 0 recorded frames", ""},
 		}},
 	} {
 		for _, carried := range []string{"yaml", "json"} {
@@ -480,9 +492,13 @@ func TestAStreamRecordedWithNoEventIsComparedWithWhatItHolds(t *testing.T) {
 						resp = throughJSON(t, &models.TestCase{Kind: models.HTTP, HTTPResp: resp}).HTTPResp
 					}
 					for _, a := range c.answers {
+						want := a.want
+						if a.wantOff != "" && !provenswitch.On() {
+							want = a.wantOff
+						}
 						ok, _, info, err := CompareHTTPStream(resp, strings.NewReader(a.body), c.cfg, map[string]struct{}{}, zap.NewNop())
 						require.False(t, errors.Is(err, ErrStreamNotRecorded), "answer %q: compared, not refused: %v", a.body, err)
-						switch a.want {
+						switch want {
 						case pass:
 							require.NoError(t, err, "answer %q", a.body)
 							require.True(t, ok, "answer %q, as recorded, passes: %+v", a.body, info)
@@ -490,13 +506,85 @@ func TestAStreamRecordedWithNoEventIsComparedWithWhatItHolds(t *testing.T) {
 							require.False(t, ok, "answer %q: keepalives alone are nothing of the answer to compare", a.body)
 							require.Nil(t, info, "answer %q", a.body)
 							require.True(t, errors.Is(err, ErrAnswerStalled), "answer %q: not judged: %v", a.body, err)
+						case heldOpen:
+							require.True(t, ok, "answer %q: what came matched", a.body)
+							require.Nil(t, info, "answer %q: what came matched", a.body)
+							require.True(t, errors.Is(err, ErrStreamHeldOpen), "answer %q: held open past its recording, not judged: %v", a.body, err)
 						default:
 							require.NoError(t, err, "answer %q: judged", a.body)
 							require.False(t, ok, "answer %q must not pass", a.body)
 							require.NotNil(t, info, "answer %q", a.body)
-							require.Equal(t, a.want, info.Reason, "answer %q", a.body)
+							require.Equal(t, want, info.Reason, "answer %q", a.body)
 						}
 					}
+				})
+			})
+		}
+	}
+}
+
+// readPast is a stream that streams body, all of it in its first read, and is
+// then held open: a read past body is one keploy waits on the app for, which
+// returns errReadPast here.
+type readPast struct {
+	body string
+	read bool
+	past int
+}
+
+var errReadPast = errors.New("read past the stream's recorded frames")
+
+func (r *readPast) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		return copy(p, r.body), nil
+	}
+	r.past++
+	return 0, errReadPast
+}
+
+// With the switch off a stream's comparison stops at its last recorded frame
+// (line, part, byte) and does not wait on a stream the app keeps open past
+// it, whatever that frame is, an SSE comment among them: a recording of SSE
+// comments alone holds frames, and is compared as any recording is. Read on,
+// the stream the app held open ended only on the client's timeout, and the
+// test failed on that. Under the switch every stream is read to its end.
+func TestWithTheSwitchOffAStreamIsNotReadPastItsLastRecordedFrame(t *testing.T) {
+	for _, c := range []struct {
+		name, contentType, body string
+		cfg                     HTTPStreamConfig
+		answer                  string // what the app streams before it holds the stream open, when not body
+	}{
+		{"sse of a keepalive", "text/event-stream", ": ok\n\n", HTTPStreamConfig{Mode: HTTPStreamModeSSE}, ""},
+		{"sse of keepalives", "text/event-stream", ": ok\n\n: ping\n\n", HTTPStreamConfig{Mode: HTTPStreamModeSSE}, ""},
+		{"sse of an event", "text/event-stream", "data: a\n\n", HTTPStreamConfig{Mode: HTTPStreamModeSSE}, ""},
+		{"ndjson", "application/x-ndjson", "{\"a\":1}\n", HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}, ""},
+		{"plain-text", "text/plain", "line one\n", HTTPStreamConfig{Mode: HTTPStreamModePlainText}, ""},
+		{"multipart", "multipart/x-mixed-replace; boundary=frame", "--frame\r\nContent-Type: text/plain\r\n\r\npart one\r\n--frame--\r\n", HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: "frame"},
+			// The next part's boundary, and no part yet.
+			"--frame\r\nContent-Type: text/plain\r\n\r\npart one\r\n--frame\r\n"},
+		{"binary", "application/octet-stream", "\x00\x01\x02", HTTPStreamConfig{Mode: HTTPStreamModeBinary}, ""},
+	} {
+		for _, carried := range []string{"yaml", "json"} {
+			t.Run(c.name+"/"+carried, func(t *testing.T) {
+				switchStates(t, func(t *testing.T) {
+					resp := recordedThroughYAML(t, models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": c.contentType}, Body: c.body})
+					if carried == "json" {
+						resp = throughJSON(t, &models.TestCase{Kind: models.HTTP, HTTPResp: resp}).HTTPResp
+					}
+					answer := c.answer
+					if answer == "" {
+						answer = c.body
+					}
+					stream := &readPast{body: answer}
+					ok, _, info, err := CompareHTTPStream(resp, stream, c.cfg, map[string]struct{}{}, zap.NewNop())
+					if provenswitch.On() {
+						require.NotZero(t, stream.past, "under the switch a stream is read to its end")
+						return
+					}
+					require.Zero(t, stream.past, "read past the last recorded frame of a stream the app holds open")
+					require.NoError(t, err)
+					require.True(t, ok, "every recorded frame came: %+v", info)
 				})
 			})
 		}
@@ -534,12 +622,12 @@ func TestAMultipartStreamRecordedEmptyFailsAnAnswerOfNoPart(t *testing.T) {
 // A response HTTP says has no body (the answer to a HEAD, a 1xx, 204 or 304)
 // is no stream, whatever its Content-Type says: it is compared as any
 // response is, by its status and headers, YAML or carried as JSON. Which
-// response has none the answer says, not the recording. A HEAD's answer has
-// none whatever the app does, so a HEAD test is no stream test. A recorded
-// 204, 304 or 1xx is a stream test as any of its Content-Type is, and is sent
-// as one: an answer with no body is compared as a response, and an answer of
-// a stream is read as a stream, bounded as a stream's read is (its first
-// keepalive, or its first frame past the recording, ends it). Read whole, as
+// response has none the answer says, not the recording. A recorded HEAD, 204,
+// 304 or 1xx is a stream test as any of its Content-Type is, and is sent as
+// one: an answer with no body (any answer to a HEAD) is compared as a
+// response, and an answer of a stream to another method is read as a stream,
+// bounded as a stream's read is (its first keepalive, or its first frame past
+// the recording, ends it). Read whole, as
 // a response's is, a stream the app never ends is never read to its end. An
 // answer of no body to a recorded stream is not read as a stream either: it
 // differs from the recording by its status.
@@ -566,13 +654,11 @@ func TestAResponseWithNoBodyIsNoStream(t *testing.T) {
 					if carried == "json" {
 						tc = throughJSON(t, tc)
 					}
-					if a.method == http.MethodHead {
-						require.False(t, IsHTTPStreamingTestCase(tc), "a HEAD's answer has no body: no stream test")
-					} else {
-						require.True(t, IsHTTPStreamingTestCase(tc), "a recorded %d is sent as a stream test: the app's answer says whether it has a body", a.status)
-					}
+					require.True(t, IsHTTPStreamingTestCase(tc), "a recorded %s answered %d is sent as a stream test: the app's answer says whether it has a body", a.method, a.status)
 					answer := &http.Response{StatusCode: a.status, Header: http.Header{"Content-Type": {ct}}, Request: &http.Request{Method: a.method}}
 					require.Equal(t, HTTPStreamModeNone, DetectHTTPStreamConfig(tc, answer).Mode, "an answer with no body is no stream")
+					answer.Request = nil
+					require.Equal(t, HTTPStreamModeNone, DetectHTTPStreamConfig(tc, answer).Mode, "an answer naming no request answers the test's, of its recorded method")
 					if a.method != http.MethodHead {
 						streamed := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {ct}}, Request: &http.Request{Method: a.method}}
 						require.NotEqual(t, HTTPStreamModeNone, DetectHTTPStreamConfig(tc, streamed).Mode, "a recorded %d answered with a stream is read as one", a.status)
