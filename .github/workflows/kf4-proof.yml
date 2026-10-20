@@ -1,0 +1,78 @@
+name: K-KF4 proof (side branch only)
+# Proof run for train/ci/kernel-floor-K-KF4, on a branch of its own
+# (train/ci/kernel-floor-K-KF4-proof): runs the two jobs that change set adds
+# to prepare_and_run.yml, and the arm64 build the second needs, on a push to
+# that branch; and, on the self-hosted macOS and Windows runners, the steps
+# that change set adds to the Docker Desktop lanes, as those lanes have them.
+# Never merged.
+on:
+  push:
+    branches: [train/ci/kernel-floor-K-KF4-proof]
+
+env:
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
+jobs:
+  build-linux-arm64:
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Build Keploy (non-race, linux/arm64)
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p out/build-no-race-linux-arm64
+          go build -tags=viper_bind_struct -o out/build-no-race-linux-arm64/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-no-race-linux-arm64
+          path: out/build-no-race-linux-arm64/keploy
+
+  run_golang_linux_arm64:
+    needs: [build-linux-arm64]
+    uses: ./.github/workflows/golang_linux.yml
+    with:
+      runner: ubuntu-24.04-arm
+      jobs_to_run: arm64
+
+  run_kernel_floors:
+    uses: ./.github/workflows/kernel-floors.yml
+
+  # golang_docker_macos.yml / python_docker_macos.yml's step, as they have it.
+  docker_desktop_kernel_macos:
+    timeout-minutes: 10
+    runs-on: [self-hosted, macOS, native]
+    steps:
+      - name: Verify Docker Desktop is running (macOS)
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
+          fi
+          echo "Docker Desktop is running."
+          # The containers run on Docker Desktop's Linux VM, not on macOS:
+          # its kernel is the one keploy's agent meets.
+          echo "Docker Desktop's Linux VM: kernel $(docker info --format '{{.KernelVersion}}') on $(docker info --format '{{.Architecture}}')"
+
+  # golang_docker_windows.yml's step, as it has it.
+  docker_desktop_kernel_windows:
+    timeout-minutes: 10
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Docker's Linux VM kernel
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $kernel = docker info --format '{{.KernelVersion}}'
+          $arch = docker info --format '{{.Architecture}}'
+          Write-Host "Docker Desktop's Linux VM: kernel $kernel on $arch"
