@@ -1747,6 +1747,16 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 }
 
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+	// The agent's container this run is to create, under docker compose: a
+	// release that waits for it ends once the run is over without it
+	// (containerExited). Its end is noted last, once Run returns, whichever
+	// way it ends: after the app's run has returned (and with it compose's up
+	// and the down after it), or before the app's run began.
+	a.mu.Lock()
+	container := a.agentContainer
+	a.mu.Unlock()
+	runOfContainer(container, false)
+	defer runOfContainer(container, true)
 	app, err := a.getApp()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")

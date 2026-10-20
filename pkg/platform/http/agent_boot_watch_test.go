@@ -1135,14 +1135,22 @@ func TestEngineSaysGoneReadsTheEnginesNotThereWhereverItIsSaid(t *testing.T) {
 
 // Against the real engine CLI, where there is one: a container it does not
 // know does not run, whatever the CLI's version says of it, and wherever it
-// says it; and it has ended (containerGone) once keploy has known it to be
-// there, not before (one docker compose has not created yet).
+// says it. Nor has it ended while it is one docker compose has not created
+// yet: keploy has never known it to be there, and the run that is to create
+// it is not over. It has ended once keploy has known it to be there
+// (containerGone: removed), and, never known, once that run is over
+// (containerNeverThere). Each run of the test names the container afresh,
+// through a client's Setup naming (nameAgentContainer), and forgets it at its
+// end: nothing it knew is left for the next (-count, -shuffle).
 func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	cli := newEngineCLI(zap.NewNop())
 	if _, err := cli.stdout(context.Background(), "version", "--format", "{{.Server.Version}}"); err != nil {
 		t.Skipf("no container engine to ask here: %v", err)
 	}
 	name := fmt.Sprintf("keploy-v3-no-such-%d", os.Getpid())
+	a := clientFor("http://127.0.0.1:1/agent")
+	t.Cleanup(a.forgetAgentContainer)
+	a.nameAgentContainer(name)
 	n := 0
 	running := runningByStatus(func(ctx context.Context) ([]byte, error) {
 		if n++; n == 1 {
@@ -1156,12 +1164,26 @@ func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	if running(context.Background()) {
 		t.Fatal("the engine does not know the container, and it is still taken to run")
 	}
-	if code, ended := containerExited(cli, name)(context.Background()); ended {
-		t.Fatalf("containerExited = %d, %v of a container keploy never knew to be there; want not ended", code, ended)
+	exited := containerExited(cli, name)
+	if code, ended := exited(context.Background()); ended {
+		t.Fatalf("containerExited = %d, %v of a container keploy never knew to be there, whose run is not over; want not ended", code, ended)
 	}
+	runOfContainer(name, false)
+	if code, ended := exited(context.Background()); ended {
+		t.Fatalf("containerExited = %d, %v of a container whose run has begun; want not ended", code, ended)
+	}
+	runOfContainer(name, true)
+	if code, ended := exited(context.Background()); !ended || code != containerNeverThere {
+		t.Fatalf("containerExited = %d, %v once the run that was to create it is over; want containerNeverThere, ended", code, ended)
+	}
+	a.nameAgentContainer(name)
 	knowContainer(name)
-	if code, ended := containerExited(cli, name)(context.Background()); !ended || code != containerGone {
-		t.Fatalf("containerExited = %d, %v; want containerGone, ended", code, ended)
+	if code, ended := exited(context.Background()); !ended || code != containerGone {
+		t.Fatalf("containerExited = %d, %v of a container keploy knew; want containerGone, ended", code, ended)
+	}
+	runOfContainer(name, true)
+	if code, ended := exited(context.Background()); !ended || code != containerGone {
+		t.Fatalf("containerExited = %d, %v of a container keploy knew, whose run is over; want containerGone, ended", code, ended)
 	}
 }
 
