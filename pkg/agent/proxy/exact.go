@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -139,6 +141,8 @@ type exactState struct {
 	// recorded is where a miss's diagnosis reads the set's recordings the
 	// trees do not hold (SetRecordingSource).
 	recorded recordingSource
+	// before is where RecordedBefore reads what the trees do not hold.
+	before recordedBeforeSource
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -466,6 +470,61 @@ func (m *MockManager) consumedInSet(name string) bool {
 	_, ok := m.consumedPersistent[name]
 	return ok
 }
+
+// recordedBeforeSource is where RangeRecordedBefore reads the staged set's
+// recordings the trees do not hold, by request time (SetRecordedBefore).
+type recordedBeforeSource struct {
+	mu  sync.Mutex
+	src func(t time.Time, visit func(*models.Mock) bool) error
+}
+
+// SetRecordedBefore sets where RangeRecordedBefore reads the staged set's
+// recordings the trees do not hold (the agent's on-disk store of per-test
+// mocks: DiskMocks.RangeRecordedBefore, which decodes one at a time); nil for
+// none, when every one is in the trees. The agent sets it as it stages a
+// set.
+func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) {
+	m.exact.before.mu.Lock()
+	defer m.exact.before.mu.Unlock()
+	m.exact.before.src = src
+}
+
+// RangeRecordedBefore visits every recording of the staged set made before
+// t, by request time, of any kind (integrations.RecordedBeforeReader): those
+// in the manager's trees (StagedMocks), then those the agent keeps on disk
+// (SetRecordedBefore), each once, until visit returns false. A recording a
+// tree holds a copy of (the open test's own, loaded from disk) is visited
+// from the tree. The disk's are visited as the source decodes them, one at a
+// time: the manager keeps none of them, only which it visited.
+func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
+	seen := map[string]bool{}
+	id := func(mk *models.Mock) string {
+		return mk.Name + "\x00" + string(mk.Kind) + "\x00" + strconv.FormatInt(mk.Spec.ReqTimestampMock.UnixNano(), 10)
+	}
+	for _, mk := range m.StagedMocks() {
+		if mk == nil || !mk.Spec.ReqTimestampMock.Before(t) || seen[id(mk)] {
+			continue
+		}
+		seen[id(mk)] = true
+		if !visit(mk) {
+			return nil
+		}
+	}
+	m.exact.before.mu.Lock()
+	src := m.exact.before.src
+	m.exact.before.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	return src(t, func(mk *models.Mock) bool {
+		if mk == nil || !mk.Spec.ReqTimestampMock.Before(t) || seen[id(mk)] {
+			return true
+		}
+		return visit(mk)
+	})
+}
+
+var _ integrations.RecordedBeforeReader = (*MockManager)(nil)
 
 // StagedMocks is every mock staged in the manager's trees (per-test, session,
 // startup, in that order), whatever the open view shows: exact serving spends

@@ -4517,6 +4517,18 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
+// SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
+func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordedBefore(src)
+	return nil
+}
+
+var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
+
 // SetRecordingSource implements agent.RecordingSourceSetter (exact.go).
 func (p *Proxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
 	m := p.getMockManager()

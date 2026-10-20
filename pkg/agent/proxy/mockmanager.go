@@ -621,6 +621,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// own.
 	m.exact.worker.Store(nil)
 	m.SetRecordingSource(nil)
+	m.SetRecordedBefore(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}

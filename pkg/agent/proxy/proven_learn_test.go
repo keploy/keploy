@@ -834,3 +834,87 @@ func TestALearnStepVariableRidesExactServing(t *testing.T) {
 		}
 	}
 }
+
+// Staged as the agent stages a set under its default strict mock window: a
+// test's own recordings stay on disk until that test opens, and the trees
+// hold the pool. At start-up a pool refresh recorded between tests, whose
+// token test 1's own login answered, is refused as it is with every
+// recording in memory: the learn step reads every recording made before the
+// pool's, the on-disk ones too (MockManager.RecordedBefore over the agent's
+// DiskMocks), and the token came from the login.
+func TestAPoolMocksEarlierPlacesAreReadFromTheDiskToo(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	base := time.Now().Add(-time.Hour)
+	w1 := models.TestWindow{TestCase: "test-1", Start: base.Add(time.Minute), End: base.Add(2 * time.Minute)}
+	w2 := models.TestWindow{TestCase: "test-2", Start: base.Add(4 * time.Minute), End: base.Add(5 * time.Minute)}
+	login := r3Mock("mock-1", w1.Start.Add(time.Second), "POST", "/v1/login", `{"user":"u-7"}`, `{"token":"tok-0c41b2"}`)
+	login.TestModeInfo.Lifetime = models.LifetimePerTest
+	refresh := r3Mock("mock-2", base.Add(3*time.Minute), "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, `{"ok":true}`)
+	refresh.DeriveLifetime()
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	if err := disk.Add(login); err != nil {
+		t.Fatal(err)
+	}
+	disk.Finalize()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
+	mm.SetMocksWithWindow(nil, []*models.Mock{refresh}, models.BaseTime, time.Now())
+	mm.SetRecordedBefore(disk.RangeRecordedBefore)
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-2"})
+	body := `{"token":"tok-9d8e7f"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /v1/sessions/refresh HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code == http.StatusOK && got == `{"ok":true}` {
+		t.Fatalf("the refresh was answered from the pool's recording, its token learned as noise: %+v", r3States(mm)["mock-2"].ReqBodyNoise)
+	}
+	if noise := r3States(mm)["mock-2"].ReqBodyNoise; len(noise) != 0 {
+		t.Fatalf("learned %v onto the pool's recording", noise)
+	}
+}
+
+// A test's own call reads its earlier places in its own test, as before: a
+// row of another test the agent keeps on disk is no earlier place of it, so
+// a value that coincides with one is still learned.
+func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	base := time.Now().Add(-time.Hour)
+	w1 := models.TestWindow{TestCase: "test-1", Start: base.Add(time.Minute), End: base.Add(2 * time.Minute)}
+	w2 := models.TestWindow{TestCase: "test-2", Start: base.Add(4 * time.Minute), End: base.Add(5 * time.Minute)}
+	other := r3Mock("mock-1", w1.Start.Add(time.Second), "GET", "/v1/notes", "", `{"note":"n-0c41b2"}`)
+	other.TestModeInfo.Lifetime = models.LifetimePerTest
+	own := r3Mock("mock-5", w2.Start.Add(time.Second), "POST", "/v1/notes", `{"note":"n-0c41b2"}`, `{"ok":true}`)
+	own.TestModeInfo.Lifetime = models.LifetimePerTest
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, m := range []*models.Mock{other, own} {
+		if err := disk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
+	mm.SetMocksWithWindow([]*models.Mock{own}, nil, w2.Start, w2.End)
+	mm.SetRecordedBefore(disk.RangeRecordedBefore)
+	mm.ServeExactTest("test-2", []*models.Mock{own})
+	p.ContinueTestErrorCapture()
+	body := `{"note":"n-9d8e7f"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /v1/notes HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code != http.StatusOK || got != `{"ok":true}` {
+		t.Fatalf("the test's own call was refused (%d %s): another test's row on disk read as its earlier place", code, got)
+	}
+}

@@ -601,10 +601,18 @@ func earlierThan(earlier []learn.Earlier, paired *models.Mock) []learn.Earlier {
 // test. Another recorded test's mock is not: a late call of the previous
 // test finds its earlier places in its own test, and a call of this test is
 // not refused for a coincidence with another test's rows (in the same
-// second, a clock read of each). With no recorded windows every one is kept
-// (it errs to refusing).
-func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integrations.TestWindows) []*models.Mock {
-	if windows == nil {
+// second, a clock read of each). That is only so of the open test's own
+// mock (own) that the store places inside a recorded test's window. Any
+// other paired mock (the pool's, recorded at the start-up, between tests or
+// wherever a view says it is the pool's; a test's own in flight when it
+// began, outside every window) may carry a value from any mock recorded
+// before it, a test's too: every one is kept, as with no recorded windows
+// (it errs to refusing; earlierRaw reads those recorded before it).
+func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integrations.TestWindows, own bool) []*models.Mock {
+	if windows == nil || !own {
+		return mocks
+	}
+	if inside, known := windows.InRecordedTestWindow(paired.Spec.ReqTimestampMock); !known || !inside {
 		return mocks
 	}
 	out := mocks[:0:0]
@@ -623,6 +631,38 @@ func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integration
 	}
 	return out
 }
+
+// recordedBeforeOf visits, of a paired mock whose earlier places are every
+// recording made before it (ofPairedTest: the pool's, a test's own outside
+// every window, or one the store cannot place), every recording of the set
+// made before it, wherever the store keeps it
+// (integrations.RecordedBeforeReader), one at a time: such a value may have
+// flowed from any of them, a test's own too, which the store keeps on disk
+// until that test opens. nil for the open test's own mock (own) inside a
+// recorded test's window, whose earlier places are its own test's, and for a
+// store with no such reader.
+func recordedBeforeOf(mockDb integrations.MockMemDb, paired *models.Mock, windows integrations.TestWindows, own bool) func(visit func(*models.Mock) bool) error {
+	at := paired.Spec.ReqTimestampMock
+	if own && windows != nil {
+		if inside, known := windows.InRecordedTestWindow(at); known && inside {
+			return nil
+		}
+	}
+	rb, ok := mockDb.(integrations.RecordedBeforeReader)
+	if !ok {
+		return nil
+	}
+	return func(visit func(*models.Mock) bool) error { return rb.RangeRecordedBefore(at, visit) }
+}
+
+// recordedUnread is the store's failure to read the recordings before a pool
+// mock (recordedBeforeOf): what they held cannot be told.
+type recordedUnread struct{ err error }
+
+func (e recordedUnread) Error() string {
+	return "read the recordings before the call: " + e.err.Error()
+}
+func (e recordedUnread) Unwrap() error { return e.err }
 
 // stagedOf is every mock the store stages, served or not and whatever its
 // view shows (integrations.StagedReader); none for a store that keeps none.
@@ -645,7 +685,7 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
 // disk and that cannot be read back, and why; no mock is then returned, since
 // what it held cannot be told.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) (out []learn.Raw, err error) {
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier) (out []learn.Raw, err error) {
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -681,6 +721,29 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 				return nil, err
 			}
 		}
+	}
+	if recorded == nil {
+		return out, nil
+	}
+	// Streamed, one at a time, and read without the cache (which keys by
+	// the mock and would keep every one): only its text stays.
+	var readErr error
+	if err := recorded(func(m *models.Mock) bool {
+		if m == nil || leafed[m.Name] || !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
+			return true
+		}
+		r, err := learn.ReadRaw(m, false)
+		if err != nil {
+			readErr = fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+			return false
+		}
+		out = append(out, r)
+		return true
+	}); err != nil {
+		return nil, recordedUnread{err}
+	}
+	if readErr != nil {
+		return nil, readErr
 	}
 	return out, nil
 }
@@ -794,7 +857,14 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of "+m.Name+", so it cannot tell whether the answer echoes what changed"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows), ofPairedTest(sc.visible, m, windows)...), ofPairedTest(stagedOf(mockDb), m, windows)...), earlier)
+			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(stagedOf(mockDb), m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier)
+			var unread recordedUnread
+			if errors.As(err, &unread) {
+				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
+					zap.String("mock", m.Name), zap.Error(err))
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read the recordings of the test set made before "+m.Name+", so it cannot tell whether what changed came from there"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
 			if err != nil {
 				h.Logger.Warn("the learn step cannot read back an earlier recorded answer the agent parked on disk; learning nothing from this call",
 					zap.String("mock", m.Name), zap.Error(err))

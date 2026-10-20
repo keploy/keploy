@@ -535,6 +535,16 @@ type RecordingSourceSetter interface {
 	SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }
 
+// RecordedBeforeSetter is implemented by a proxy whose learn step reads, as
+// the earlier places of a pool recording, every recording of the staged set
+// made before it (integrations.RecordedBeforeReader), the ones the agent keeps
+// on disk too: a test's own are staged only as it opens. SetRecordedBefore
+// sets where (src visits the on-disk mocks recorded before t, by request
+// time, decoding one at a time; nil for none). Nothing it reads is served.
+type RecordedBeforeSetter interface {
+	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
+}
+
 type ExactServer interface {
 	// ServeExactTest opens test, served exactly owned: its test mocks, in
 	// recorded order. A test opened again starts with none answered.

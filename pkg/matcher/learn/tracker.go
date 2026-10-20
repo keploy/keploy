@@ -73,7 +73,7 @@ type Tracker struct {
 
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
-	return &Tracker{}
+	return &Tracker{drifts: NewDriftCache()}
 }
 
 // NewSet starts the next test set's replay on the same agent: what was served
@@ -96,7 +96,7 @@ func (t *Tracker) NewSet() {
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
-	t.answered, t.drifts = nil, nil
+	t.answered, t.drifts = nil, NewDriftCache()
 	t.open, t.began = false, false
 	t.mu.Unlock()
 }
@@ -212,7 +212,8 @@ func (t *Tracker) ServedMock(m *models.Mock) {
 }
 
 // Drifts is what each value drifted, kept for the running test (Classify),
-// nil (a cache of one request's) when no test began.
+// and before the set's first test for its start-up, so that the start-up's
+// calls read each earlier recording's text once.
 func (t *Tracker) Drifts() *DriftCache {
 	if t == nil {
 		return nil

@@ -73,3 +73,23 @@ func TestTrackerTellsTestSetsApart(t *testing.T) {
 		}
 	}
 }
+
+// The start-up's calls share one drift cache, so each earlier recording's
+// text is read once there; a test, and a new set, start afresh.
+func TestTrackerKeepsADriftCacheForTheStartUp(t *testing.T) {
+	tr := NewTracker()
+	startUp := tr.Drifts()
+	if startUp == nil || tr.Drifts() != startUp {
+		t.Fatal("the start-up's calls share no drift cache")
+	}
+	tr.Begin()
+	test := tr.Drifts()
+	if test == startUp {
+		t.Fatal("the first test read the start-up's cache")
+	}
+	tr.End()
+	tr.NewSet()
+	if d := tr.Drifts(); d == nil || d == startUp || d == test {
+		t.Fatal("a new set's start-up has no cache of its own")
+	}
+}

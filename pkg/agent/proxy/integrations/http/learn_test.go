@@ -1258,7 +1258,7 @@ func TestOfPairedTest(t *testing.T) {
 	db := &learnDb{mockMemDb: mockMemDb{}, otherTest: map[time.Time]bool{other: true}}
 	db.mocks = []*models.Mock{at("pool", pool)}
 	paired := at("paired", own.Add(time.Millisecond))
-	got := ofPairedTest([]*models.Mock{at("pool", pool), at("own", own), at("other", other), nil}, paired, db)
+	got := ofPairedTest([]*models.Mock{at("pool", pool), at("own", own), at("other", other), nil}, paired, db, true)
 	var names []string
 	for _, m := range got {
 		names = append(names, m.Name)
@@ -1266,8 +1266,58 @@ func TestOfPairedTest(t *testing.T) {
 	if strings.Join(names, ",") != "pool,own" {
 		t.Fatalf("kept %v", names)
 	}
-	if len(ofPairedTest([]*models.Mock{at("other", other)}, paired, nil)) != 1 {
+	if len(ofPairedTest([]*models.Mock{at("other", other)}, paired, nil, true)) != 1 {
 		t.Fatal("with no recorded windows every mock is kept")
+	}
+	// A paired mock of the pool's may carry a value of any test's, outside
+	// every window or inside one.
+	if got := ofPairedTest([]*models.Mock{at("own", own), at("other", other)}, at("pool", pool), db, true); len(got) != 2 {
+		t.Fatalf("a mock outside every window kept %d of 2 earlier places", len(got))
+	}
+	if got := ofPairedTest([]*models.Mock{at("own", own), at("other", other)}, paired, db, false); len(got) != 2 {
+		t.Fatalf("a pool mock inside a window kept %d of 2 earlier places", len(got))
+	}
+}
+
+// poolView is a view that scopes the pool to a test and says each mock it
+// knows is the pool's, not the open test's.
+type poolView struct{ *recordedBeforeDb }
+
+func (poolView) OwnedByTest(*models.Mock) (bool, bool) { return false, true }
+
+// A pool mock the store places inside a recorded test's window (a view says
+// it is the pool's) may carry a value from any recording made before it, as
+// one outside every window may: a token another test's login answered, kept
+// on disk, is refused, not learned as noise.
+func TestLearnMatchAPoolMockInsideAWindowReadsEveryEarlierRecording(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	login := learnRecorded("mock-0", 0, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+	refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
+	db := poolView{&recordedBeforeDb{learnDb: &learnDb{perTest: []*models.Mock{refresh}, otherTest: map[time.Time]bool{login.Spec.ReqTimestampMock: true}}, onDisk: []*models.Mock{login}}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, "holds earlier (in mock-0)") {
+		t.Fatalf("served %v miss %+v err %v; want refused, the token another test's login answered", served, miss, err)
+	}
+}
+
+// At start-up a pool mock recorded between tests can be paired in a full
+// record; a value it was recorded with that a test's own mock answered
+// before it flowed from there, and is refused, not learned as noise.
+func TestLearnMatchAPoolMocksValueFromATestIsRefused(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	ctx := learn.WithTracker(context.Background(), learn.NewTracker()) // no test has begun
+	login := learnRecorded("mock-0", 0, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+	refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
+	refresh.TestModeInfo.Lifetime = models.LifetimeSession
+	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{refresh}}, staged: []*models.Mock{login}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, "holds earlier (in mock-0)") {
+		t.Fatalf("served %v miss %+v err %v pooled %+v; want refused, the token answered earlier by mock-0", served, miss, err, db.pooled)
 	}
 }
 
@@ -2426,5 +2476,84 @@ func TestLearnMatchFindsAValueAParkedMongoAnswerHeld(t *testing.T) {
 	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"ref":"oid-99bb00"}`, nil), db, n, opts)
 	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "mock-0") {
 		t.Fatalf("served %v miss %+v; want the value refused as one mock-0 answered", served, miss)
+	}
+}
+
+// recordedBeforeDb is learnDb whose store reads every recording before an
+// instant (integrations.RecordedBeforeReader): those it keeps on disk
+// (onDisk), or err.
+type recordedBeforeDb struct {
+	*learnDb
+	onDisk []*models.Mock
+	err    error
+}
+
+func (d *recordedBeforeDb) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
+	if d.err != nil {
+		return d.err
+	}
+	for _, m := range d.onDisk {
+		if m.Spec.ReqTimestampMock.Before(t) && !visit(m) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// A pool mock's earlier places are read from every recording the store keeps
+// before it, the ones it keeps on disk too (a test's own, until its test
+// opens): a token a test's login answered there is refused. A store that
+// cannot read them refuses.
+func TestLearnMatchAPoolMocksEarlierPlacesAreEveryRecordingBeforeIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		why  string
+	}{
+		{"on disk", nil, "holds earlier (in mock-0)"},
+		{"on a disk that cannot be read", errors.New("disk mocks: store closed"), "cannot read the recordings of the test set made before mock-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			opts.LearnPool = true
+			ctx := learn.WithTracker(context.Background(), learn.NewTracker())
+			login := learnRecorded("mock-0", 0, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+			refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
+			refresh.TestModeInfo.Lifetime = models.LifetimeSession
+			db := &recordedBeforeDb{learnDb: &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{refresh}}}, onDisk: []*models.Mock{login}, err: tc.err}
+			served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+			if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, tc.why) {
+				t.Fatalf("served %v miss %+v err %v pooled %+v; want refused: %s", served, miss, err, db.pooled, tc.why)
+			}
+		})
+	}
+}
+
+// inFlightDb is recordedBeforeDb whose store serves some mocks as the open
+// test's, in flight when it began (integrations.InFlightOwner).
+type inFlightDb struct {
+	*recordedBeforeDb
+	inFlight map[string]bool
+}
+
+func (d *inFlightDb) InFlightIntoOpenTest(m *models.Mock) bool { return d.inFlight[m.Name] }
+
+// A test's own call in flight when its test began (sent in the gap before
+// its window, answered inside it) is in no recorded window: its earlier
+// places are every recording made before it, so a token test 1's login
+// answered (kept on disk) is refused, not learned as noise.
+func TestLearnMatchAnOwnCallInFlightReadsEveryEarlierRecording(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	tr := learn.NewTracker()
+	tr.Begin() // test 2
+	ctx := learn.WithTracker(context.Background(), tr)
+	login := learnRecorded("mock-0", 0, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+	refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
+	refresh.TestModeInfo.Lifetime = models.LifetimeSession
+	db := &inFlightDb{recordedBeforeDb: &recordedBeforeDb{learnDb: &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{refresh}}}, onDisk: []*models.Mock{login}}, inFlight: map[string]bool{"mock-1": true}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, "mock-0") {
+		t.Fatalf("served %v miss %+v err %v; want refused, the token answered earlier by mock-0", served, miss, err)
 	}
 }

@@ -373,6 +373,22 @@ type StagedReader interface {
 	StagedMocks() []*models.Mock
 }
 
+// RecordedBeforeReader is an optional MockMemDb capability: it visits every
+// recording of the staged test set made before t (by request time), of any
+// kind, whether the store holds it in its trees or keeps it on disk (a test's
+// own recordings are staged only as that test opens), served or not, each
+// once, until visit returns false. A recording kept on disk is decoded for
+// visit alone and kept by no one: visit must not keep m (or any part of it a
+// cache would key by m) past its return, so that no reader holds every
+// recording at once. For the learn step's earlier places of a recording that
+// is the pool's, which may carry a value any recording made before it held:
+// nothing it visits is handed out, nor served. err is why the store cannot
+// read them all; the learn step then refuses, as it cannot tell where a value
+// came from.
+type RecordedBeforeReader interface {
+	RangeRecordedBefore(t time.Time, visit func(m *models.Mock) bool) error
+}
+
 // TestWindows is an optional MockMemDb capability: where the request time of
 // a recorded mock falls among the replay's test windows. The learn step tells
 // the open test's own mocks, the pool's and other tests' apart by it where
