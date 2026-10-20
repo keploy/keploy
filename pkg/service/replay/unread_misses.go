@@ -303,6 +303,10 @@ func (r *Replayer) startFailedRow(run *templates.Run, sent, view *models.TestCas
 		}
 		start := view.GrpcResp
 		start.Headers = got.Headers
+		// The recording's status stands in with its trailers, a
+		// Trailers-Only answer's from its one header block, which the
+		// app's headers have just replaced.
+		start.Trailers = view.GrpcResp.TrailersAsRead()
 		probe := start
 		if same, _ := r.compareGRPCResp(view, &probe, testSetID, false, true); same {
 			return nil, false
