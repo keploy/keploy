@@ -1264,11 +1264,11 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 // ReadBack is where a value of a recorded answer was written earlier in this
 // run, by a write the read is linked to, with another value than its
 // recording's: the request place, held whole, of the earliest exchange served
-// before that marked it Written into record (Seen.Record), whose recorded
-// value is r's and whose live value differs from it. record is the record
-// the read names, as the adapter names it (the record its filter or its
-// identity names); "" for a read the adapter links to no record, which reads
-// nothing back.
+// before that marked a place a variable can hold Written into record
+// (Seen.Record), whose recorded value is r's and whose live value differs
+// from it. record is the record the read names, as the adapter names it (the
+// record its filter or its identity names); "" for a read the adapter links
+// to no record, which reads nothing back.
 //
 // That is where the value was first stored, so every read of it, and every
 // later write that carries it on, follows one variable. A call that answers
@@ -1282,14 +1282,17 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 // compared with r's: an id stored as a number is read back as text), and a
 // value no linked write stored is never read back, however it looks.
 //
-// Every field of the record written with r's recorded value is a value r may
-// be, and the evidence does not say which field r reads: each holds its first
-// write's live value (a later write of a field carries it on). r is read back
-// only when every such field holds one live value, the earliest's: one field
-// that drifted to another, one that kept the recorded value, and one whose
-// live value F could not read ("": it may hold anything) are each another
-// value r may be, so r is read back from none, and its drift stays
-// unexplained.
+// Every write into the record of r's recorded value is a value r may be, and
+// the evidence does not say which write r reads: another field's, or a later
+// write of one field (which carries the value on when it holds the same live
+// value, and replaces it when it holds another). One at no place a variable
+// can hold is one too: the store answers what it wrote all the same, though
+// no variable is bound there. r is read back only when every such write holds
+// one live value, other than the recorded one: a write that drifted to
+// another, one that kept the recorded value, and one whose live value F
+// could not read ("": it may hold anything) are each another value r may be,
+// in whichever order they came, so r is read back from none, and its drift
+// stays unexplained.
 func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	if r.Unnamed || r.Value == "" || record == "" {
 		return Place{}, false
@@ -1298,32 +1301,31 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	var first Place
 	found := false
-	// The live value of each field's first write.
-	firstLive := map[string]string{}
+	// live is the live value every write of r's recorded value holds, once
+	// one was seen (wrote).
+	live, wrote := "", false
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if s.Side != Request || !s.Written || s.Record != record || s.Place == "" || s.Leaf.Value != r.Value {
+			if s.Side != Request || !s.Written || s.Record != record || s.Leaf.Value != r.Value {
 				continue
 			}
-			if _, ok := firstLive[s.Place]; !ok {
-				firstLive[s.Place] = s.Live
+			if !wrote {
+				live, wrote = s.Live, true
+			} else if s.Live != live {
+				return Place{}, false
 			}
-			if !found {
-				first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
-				found = true
+			if s.Place == "" || found {
+				continue
 			}
+			first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
+			found = true
 		}
 	}
-	// The earliest write kept the recorded value, or F could not read it:
-	// nothing this run wrote is r's.
-	if !found || first.Live == r.Value || first.Live == "" {
+	// No write is at a place a variable can hold, the writes kept the
+	// recorded value, or F could not read it: nothing this run wrote is r's.
+	if !found || live == r.Value || live == "" {
 		return Place{}, false
-	}
-	for _, live := range firstLive {
-		if live != first.Live {
-			return Place{}, false
-		}
 	}
 	return first, true
 }

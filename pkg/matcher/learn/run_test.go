@@ -369,7 +369,7 @@ func TestReadBack(t *testing.T) {
 	named.Seen[0].Written = false
 	unknown := wrote("mock-8", t0, order, "body.tag", String, "t-rec", "")
 	earlier := []Earlier{
-		wrote("mock-3", t0.Add(time.Second), order, "body.code", String, "BJBM-NZBS", "QQRT-XKCD"),
+		wrote("mock-3", t0.Add(time.Second), order, "body.code", String, "BJBM-NZBS", "FRST-XKCD"),
 		wrote("mock-1", t0.Add(-time.Second), order, "body.code", String, "BJBM-NZBS", "FRST-XKCD"),
 		wrote("mock-2", t0, order, "body.created", Number, "1792000000000", "1792000555000"),
 		wrote("mock-4", t0, order, "body.pin", String, "48213", "90717"),
@@ -421,15 +421,16 @@ func TestReadBack(t *testing.T) {
 	}
 }
 
-// Two fields of one record written with the same recorded value whose first
-// writes hold two live values are two values a read of it may be: which
-// field the read reads, the evidence does not say, so it is read back from
-// neither (the answer's drift is then unexplained, and refused). That holds
-// whether both drifted, one drifted and the other kept the recorded value,
-// or F could not read the other's live value. Where both drifted to one
-// live value, the read is read back from the earliest. A field written twice
-// is read back from its first write, as before: one whose first write kept
-// the recorded value is that value.
+// Writes into one record of the same recorded value that hold two live
+// values are two values a read of it may be: which write the read reads, the
+// evidence does not say, so it is read back from none (the answer's drift is
+// then unexplained, and refused). That holds whether they are two fields or
+// one field written twice, whether both drifted, one drifted and the other
+// kept the recorded value (in either order), or F could not read the other's
+// live value, and whether the other is at a place a variable can hold or not
+// (a field keploy binds no variable at holds a value the store answers all
+// the same). Where every write drifted to one live value, the read is read
+// back from the earliest at a place a variable can hold.
 func TestReadBackOfTwoFieldsWithOneRecordedValue(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	const order = "orders\x00o-live-1"
@@ -452,8 +453,12 @@ func TestReadBackOfTwoFieldsWithOneRecordedValue(t *testing.T) {
 			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "LIVE-1"),
 			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
 		}, "mock-1", "LIVE-1"},
-		{"one field written twice", []Earlier{
+		{"one field written twice, two live values", []Earlier{
 			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-2"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		{"one field written twice, one live value", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-1"),
 			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
 		}, "mock-1", "LIVE-1"},
 		{"a field of another record", []Earlier{
@@ -479,8 +484,8 @@ func TestReadBackOfTwoFieldsWithOneRecordedValue(t *testing.T) {
 			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
 			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", ""),
 		}, "", ""},
-		// One field's first write is the value it holds: a field first
-		// written as recorded and drifted later is two values the read may be.
+		// One field written with two values held each in turn: the read
+		// may be either, in either order.
 		{"one field written as recorded, then drifted", []Earlier{
 			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "SAME-1"),
 			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-1"),
@@ -488,7 +493,25 @@ func TestReadBackOfTwoFieldsWithOneRecordedValue(t *testing.T) {
 		{"one field drifted, then written as recorded", []Earlier{
 			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
 			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "SAME-1"),
+		}, "", ""},
+		// A field at no place a variable can hold, written with the
+		// recorded value, is a value the read may be too.
+		{"two fields of one exchange, one at no place, two live values", []Earlier{{Mock: "mock-1", At: t0, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.code", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Place: "body.code", Written: true, Record: order},
+			{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "LIVE-2", Written: true, Record: order},
+		}}}, "", ""},
+		{"a field at no place written first, two live values", []Earlier{
+			{Mock: "mock-0", At: t0, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "LIVE-2", Written: true, Record: order}}},
+			wrote("mock-1", t0.Add(time.Second), order, "body.code", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		{"a field at no place written first, one live value", []Earlier{
+			{Mock: "mock-0", At: t0, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Written: true, Record: order}}},
+			wrote("mock-1", t0.Add(time.Second), order, "body.code", String, "SAME-1", "LIVE-1"),
 		}, "mock-1", "LIVE-1"},
+		{"a field at no place that kept the recorded value", []Earlier{
+			wrote("mock-1", t0, order, "body.code", String, "SAME-1", "LIVE-1"),
+			{Mock: "mock-2", At: t0.Add(time.Second), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "SAME-1", Written: true, Record: order}}},
+		}, "", ""},
 		{"no field drifted", []Earlier{
 			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "SAME-1"),
 			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "SAME-1"),
