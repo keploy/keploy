@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -113,6 +114,24 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+}
+
+// HTTPResponseHasNoBody reports whether a response carries no body whatever
+// its headers say (RFC 9112 §6.3): the answer to a HEAD, an interim 1xx, 204
+// or 304. Not a 101, nor a 2xx to a CONNECT: their message has no body either,
+// but the connection then carries another protocol, which is no next HTTP
+// message. It is the one rule for this, the proxy's framing and the replay's
+// stream detection alike.
+func HTTPResponseHasNoBody(reqMethod string, status int) bool {
+	return reqMethod == http.MethodHead || IsInterimHTTPStatus(status) || status == http.StatusNoContent || status == http.StatusNotModified
+}
+
+// IsInterimHTTPStatus reports whether code is an interim response's (RFC 9110
+// 15.2): a 1xx other than 101 (Switching Protocols). An interim response has
+// no body, and the final response to the same request comes after it on the
+// connection. After a 101 the connection speaks another protocol: it is final.
+func IsInterimHTTPStatus(code int) bool {
+	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
 }
 
 // MongoDB's BSON DateTime is an int64 count of milliseconds, so the default
