@@ -537,6 +537,11 @@ type Test struct {
 	// its mock from a replay pod. Default off: the rewrite is on whenever a
 	// set carries a recorded identity.
 	DisableIdentityAliasing bool `json:"disableIdentityAliasing" yaml:"disableIdentityAliasing" mapstructure:"disableIdentityAliasing"`
+	// IdentityAliasResponses also puts the replay pod's own identity back into
+	// the served responses (headers, textual bodies), for an app that compares
+	// a dependency's answer with itself. Default off: the app gets the
+	// response as recorded, which is what its test cases hold.
+	IdentityAliasResponses bool `json:"identityAliasResponses" yaml:"identityAliasResponses" mapstructure:"identityAliasResponses"`
 	// AutoReplay marks the run as auto-replay: the pass that replays a test set
 	// immediately after recording it, against the SAME application build.
 	//

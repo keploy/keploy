@@ -118,9 +118,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// URL, the headers (the Host among them, so the destination read
 			// below sees it) and the body, before any pass compares the call
 			// (identity package). The served response gets the live identity
-			// back (aliasReverse).
+			// back only when the replay asked for it (IdentityAliasing.Responses).
 			alias := identity.For(opts)
 			aliasIdentity(alias, input)
+			var aliasBack *identity.Rewriter
+			if opts.Identity.ReverseResponses() {
+				aliasBack = alias.Reverse()
+			}
 
 			// Under the proven switch the request's destination is read once,
 			// as it comes: a use of its connection's container in the scope
@@ -411,7 +415,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Serialize the matched mock's response to wire bytes (hydrates a
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
-			respBytes, err := h.buildMockResponseBytesAliased(stub, alias.Reverse())
+			respBytes, err := h.buildMockResponseBytesAliased(stub, aliasBack)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err

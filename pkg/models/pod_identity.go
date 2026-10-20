@@ -77,16 +77,32 @@ func PodIdentityFromMetadata(meta map[string]interface{}) (PodIdentity, bool) {
 // recorded pod. Disabled turns that off (--disableIdentityAliasing). A nil
 // IdentityAliasing, or one without recorded pods, aliases nothing: a set
 // recorded before the identity was written, or outside Kubernetes.
+//
+// Responses also puts the agent's OWN identity back into the headers and a
+// textual body of a served response (--identityAliasResponses). Off by
+// default: an app that copies what a dependency answered into its own
+// response (a pod list, a lease) then answers as recorded, which is what its
+// test case holds; on, an app that compares a dependency's answer with
+// itself (a controller dropping its own pod from a list, a lease holder
+// check) sees itself. One or the other fits an app; the recorded data is the
+// safer default.
 type IdentityAliasing struct {
 	RecordedPods []PodIdentity `json:"recordedPods,omitempty"`
 	Disabled     bool          `json:"disabled,omitempty"`
+	Responses    bool          `json:"responses,omitempty"`
 }
 
 // NewIdentityAliasing is the options for recordedPods, or nil when there is
 // nothing to carry: no recorded pod and the aliasing not disabled.
-func NewIdentityAliasing(recordedPods []PodIdentity, disabled bool) *IdentityAliasing {
+func NewIdentityAliasing(recordedPods []PodIdentity, disabled, responses bool) *IdentityAliasing {
 	if len(recordedPods) == 0 && !disabled {
 		return nil
 	}
-	return &IdentityAliasing{RecordedPods: recordedPods, Disabled: disabled}
+	return &IdentityAliasing{RecordedPods: recordedPods, Disabled: disabled, Responses: responses}
+}
+
+// ReverseResponses reports whether served responses get the live identity
+// put back: aliasing on, and Responses asked for.
+func (a *IdentityAliasing) ReverseResponses() bool {
+	return a != nil && !a.Disabled && a.Responses
 }

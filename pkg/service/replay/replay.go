@@ -2273,7 +2273,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
-			Identity:                  models.NewIdentityAliasing(recordedPods, r.config.Test.DisableIdentityAliasing),
+			Identity:                  models.NewIdentityAliasing(recordedPods, r.config.Test.DisableIdentityAliasing, r.config.Test.IdentityAliasResponses),
 		}
 		err = r.mockOutgoingForTestSet(runTestSetCtx, outgoingOpts)
 		if err != nil {
@@ -2425,7 +2425,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
-			Identity:                  models.NewIdentityAliasing(recordedPods, r.config.Test.DisableIdentityAliasing),
+			Identity:                  models.NewIdentityAliasing(recordedPods, r.config.Test.DisableIdentityAliasing, r.config.Test.IdentityAliasResponses),
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
