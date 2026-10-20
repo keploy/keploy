@@ -90,18 +90,19 @@ type Edit struct {
 // AnswerEdit is the edit that makes the scalar of body at path hold value,
 // written as that scalar's JSON type is written. The scalar must hold recorded
 // (the variable's recorded value); otherwise, or when value cannot stand
-// there, it says why.
-func AnswerEdit(body string, path []templates.PathSeg, recorded, value string) (Edit, string) {
+// there, it says why, writing each value it names (as the JSON text writes
+// it) through show: the caller decides what of the values its reader may see.
+func AnswerEdit(body string, path []templates.PathSeg, recorded, value string, show func(string) string) (Edit, string) {
 	l, ok := JSONLeafAt(body, path)
 	if !ok {
 		return Edit{}, "the recorded response holds no scalar there"
 	}
 	if !SameValue(recorded, l.Value(body), IsNumberLeaf(l)) {
-		return Edit{}, "the recorded response holds " + l.Raw(body) + " there, not the variable's recorded value " + quote(recorded)
+		return Edit{}, "the recorded response holds " + show(l.Raw(body)) + " there, not the variable's recorded value " + show(quote(recorded))
 	}
 	raw, ok := scalarText(l.Kind, value)
 	if !ok {
-		return Edit{}, "the value " + quote(value) + " cannot stand at a place the recording holds " + l.Raw(body)
+		return Edit{}, "the value " + show(quote(value)) + " cannot stand at a place the recording holds " + show(l.Raw(body))
 	}
 	return Edit{Start: l.Start, End: l.End, Raw: raw}, ""
 }

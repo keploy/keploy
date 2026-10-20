@@ -3724,6 +3724,12 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 	if err := json.NewDecoder(res.Body).Decode(&mockErrors); err != nil {
 		return nil, fmt.Errorf("failed to decode mock errors response: %s", err.Error())
 	}
+	// The CLI's reports read their calls from the agent here (under compose,
+	// from the outcome the stopped agent left: ComposeAgentOutcome). An agent
+	// withholds their content unless its switch lets it carry it, but it may
+	// be older than this CLI, or opted in where this CLI is not: a report
+	// carries content only when both are.
+	mockErrors = models.ReportContent(mockErrors)
 	// The agent read incompletely: the list is what it read, and the error
 	// says it may be missing calls.
 	if cause := res.Header.Get(models.UnmatchedCallsUnreadHeader); cause != "" {

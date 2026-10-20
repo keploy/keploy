@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -142,12 +143,14 @@ func init() {
 
 // markNotOwned makes report the miss of a call that is m, a recording the
 // open view does not show (notOwnedRecording): m is its closest mock, with no
-// field named as differing, since none does, and its rendered request is m's.
+// field named as differing, since none does, and its rendered request is m's,
+// which is content: withheld as Build withholds it (mismatch.Withhold).
 func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 	report.ClosestMock, report.NotOwned = m.Name, true
 	report.FieldDiffs, report.Differs = nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
+	mismatch.Withhold(report)
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open

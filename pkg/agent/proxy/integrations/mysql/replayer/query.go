@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -179,9 +180,13 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					}
 				}
 				closestQuery := sqlStatementIdentity(miss.closestQuery)
+				// The statements' literals and the bound parameters are the
+				// application's values: the diff and the summary carry them only
+				// as the report may (models.ReportSQL), shaped whole before they
+				// are cut, so a cut never ends inside a literal.
 				diff := ""
 				if actualQuery != "" || closestQuery != "" {
-					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
+					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(models.ReportSQL(actualQuery), 200), truncate(models.ReportSQL(closestQuery), 200))
 				}
 				if miss.why != "" {
 					diff = strings.TrimSpace(diff + "\n" + miss.why)
@@ -199,7 +204,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				report := &models.MockMismatchReport{
 					At:            time.Now(),
 					Protocol:      "MySQL",
-					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 160))),
+					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(models.ReportSQL(actualQuery), 160))),
 					Destination:   dst,
 					ClosestMock:   miss.closestMock,
 					Diff:          diff,
@@ -212,6 +217,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// from an empty mock pool.
 					CandidateCount: miss.candidateCount,
 				}
+				// Built without the builder: its field diffs' values are
+				// withheld here, as Build withholds them, and it says so.
+				mismatch.Withhold(report)
 				if miss.matchPhase == models.MatchPhaseNoMocks {
 					// The pool held no data mock for the command phase to compare
 					// against — at most handshake/config mocks survived the

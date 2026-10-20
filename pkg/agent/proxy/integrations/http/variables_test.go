@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // varDb is the mock store of a replay under the proven switch: per-test mocks
@@ -192,6 +193,8 @@ func TestVariables_BindThenUseAndAnswer(t *testing.T) {
 }
 
 func TestVariables_AUseOfAnotherValueIsAMissWithEvidence(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct{ name, asked string }{
 		{"another id", "ord-other-3"},
@@ -241,6 +244,12 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/kqzxwv"), nil, db, nil, nil, nil, diag)
 		if len(rep.FieldDiffs) != 0 || !slices.Contains(rep.VariablePlaces, "url.path[1]") {
 			t.Fatalf("report diffs %+v places %v; want no diff and the mock's url.path[1]", rep.FieldDiffs, rep.VariablePlaces)
+		}
+		// The place is the route's, not a field diff's: by default the
+		// summary still names the path with it {}, as the report carries no
+		// content.
+		if rep.ActualSummary != "GET /orders/{}" {
+			t.Fatalf("the miss names its path %q, want GET /orders/{}", rep.ActualSummary)
 		}
 		if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, VariablePlaces: rep.VariablePlaces}); got != "GET /orders/{}" {
 			t.Fatalf("the miss's shape is %q, want GET /orders/{}", got)
@@ -360,8 +369,10 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 			t.Fatalf("want a miss in another phase, got ok=%v diag=%+v", ok, diag)
 		}
 		rep := h.buildHTTPMismatchReport(&http.Request{Method: "PUT", URL: u, Header: http.Header{"Content-Type": []string{"application/json"}}}, live.body, db, nil, nil, nil, diag)
-		if rep.ActualSummary != "PUT /files/a%2Fb/kqzxwvbn" {
-			t.Fatalf("the miss names its path %q; want it escaped, as a place counts it", rep.ActualSummary)
+		// Escaped, as a place counts it, and, as a report carries no content
+		// by default, with the variable's place written {}.
+		if rep.ActualSummary != "PUT /files/a%2Fb/{}" {
+			t.Fatalf("the miss names its path %q; want it escaped, as a place counts it, and its variable's place {}", rep.ActualSummary)
 		}
 		if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, FieldDiffs: rep.FieldDiffs, VariablePlaces: rep.VariablePlaces}); got != "PUT /files/{}/{}" {
 			t.Fatalf("the miss's shape is %q, want PUT /files/{}/{}", got)
@@ -439,8 +450,8 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		ok, _, diag := matchVar(t, h, db, &req{method: "GET", url: u, header: http.Header{"Content-Type": []string{"application/json"}, "Host": []string{"store"}}})
 		wantProblem(t, ok, diag, "")
 		rep := h.buildHTTPMismatchReport(&http.Request{Method: "GET", URL: u}, nil, db, nil, nil, nil, diag)
-		if rep.ActualSummary != "GET /files/a%2Fb/othervalue" {
-			t.Fatalf("the miss names its path %q; want it escaped, as a place counts it", rep.ActualSummary)
+		if rep.ActualSummary != "GET /files/a%2Fb/{}" {
+			t.Fatalf("the miss names its path %q; want it escaped, as a place counts it, and its variable's place {}", rep.ActualSummary)
 		}
 		if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, FieldDiffs: rep.FieldDiffs, VariablePlaces: rep.VariablePlaces}); got != "GET /files/{}/{}" {
 			t.Fatalf("the miss's shape is %q, want GET /files/{}/{}", got)
@@ -1119,6 +1130,8 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 // a type change against the recording, a use before the binding call and a
 // value another variable holds are no field difference (the diff says it).
 func TestVariables_TheEvidenceSaysWhatDiffers(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	t.Setenv(provenswitch.Env, "1")
 	h := newHTTP()
 	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"123","item":"pen"}`, 201, `{}`,
@@ -1140,6 +1153,8 @@ func TestVariables_TheEvidenceSaysWhatDiffers(t *testing.T) {
 // The report renders the call as it was received; only its field diffs leave
 // a variable's place out, and only for a call to the mock's route.
 func TestVariables_TheReportRendersTheCallAsReceived(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	t.Setenv(provenswitch.Env, "1")
 	h := newHTTP()
 	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1","item":"pen"}`, 201, `{}`,
@@ -1243,6 +1258,8 @@ func TestVariables_ACallOfThePreviousPoolBindsNothingInTheNextTest(t *testing.T)
 // kind of variable place; a variable place that changed its JSON type is
 // named.
 func TestVariables_TheClosestMockDiffLeavesEveryVariablePlaceOut(t *testing.T) {
+	// The report's values are content: it carries them with the switch on.
+	t.Cleanup(logcontent.Set(true))
 	t.Setenv(provenswitch.Env, "1")
 	h := newHTTP()
 	m := at(varMock("mock-1", "POST", "http://store/orders/o-rec?trace=t-rec", `{"id":"i-rec","n":"5","item":"pen"}`, 201, `{}`,
