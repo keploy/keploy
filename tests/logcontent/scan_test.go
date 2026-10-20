@@ -24,8 +24,35 @@
 //
 // fmt.Sprintf, fmt.Sprint and string concatenation feeding a line are read
 // through: such a value is safe when each of its parts is, and a site when
-// one is not, with the whole expression named. A value built that way and
-// put in a variable first is the variable at the line.
+// one is not, with the whole expression named. A local string variable is
+// read through to what is assigned to it (localAssigns): it is safe when
+// every value assigned to it that can reach the line is, and a site at the
+// line, named as the variable, when one is not. A variable whose values
+// cannot all be seen (a parameter, a range's or a type switch's, one
+// assigned from a call's several results or whose address is taken) is a
+// site where it is logged. An error variable is followed the same way, to
+// every value that can reach the line, each unsafe origin named.
+//
+// What can reach a line is decided by its function's control flow, and
+// only ever overstated (reaches): an assignment every path to the line runs
+// replaces what came before it (one in a statement list before the line's
+// statement, an if's, a switch's or a for's Init, one inside the closure
+// that holds the line), unless a label a goto names lies between them; a
+// value assigned after the line reaches it round a loop, or through a
+// closure called more than once, and any value assigned in a closure the
+// line is not in reaches it; a block that returns after a value, with no
+// break or continue between, keeps it from the lines after the block; and
+// a deferred closure's value reaches only the deferred closures and those
+// that may run after the function returns. In a function with a goto, only
+// the replacing assignment counts.
+//
+// An error's text is the error wherever it goes (taint): put in a local
+// string variable, concatenated or formatted into a line's message or a
+// field, it is reported as the error it is, by its origin, at the place it
+// is put; formatted into another error's text (fmt.Errorf, errors.New, a
+// printf wrapper's), the error made is as safe as the errors it formats.
+// So an allowlist entry that says an error's format is keploy's words never
+// stands for the errors formatted into it.
 //
 // A log helper of keploy's, an unexported function that hands a parameter of
 // its own, unchanged, to a line as its message, as an error it logs whole or
@@ -74,6 +101,7 @@ import (
 	"go/types"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,6 +152,13 @@ type scanner struct {
 	// its errors are as safe as the arguments it is given for them.
 	passes map[*types.Func]map[int]bool
 	why    map[*types.Func]string // the first unsafe return of each unsafe function (debugging the scan)
+	// text and textPasses are keploy's functions that return a text
+	// (textSummary): whether what one returns is safe, given safe
+	// arguments for the parameters textPasses names, which it puts in it.
+	text       map[*types.Func]int8
+	textPasses map[*types.Func]map[int]bool
+	// parents are each function body's nodes' parents (pathTo).
+	parents map[*ast.BlockStmt]map[ast.Node]ast.Node
 	// listed are the allowlist's error texts (errorf and errors.New sites)
 	// that carry no content: an error built by one is as safe as the
 	// errors it wraps.
@@ -169,6 +204,9 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 	s.safe = map[*types.Func]int8{}
 	s.passes = map[*types.Func]map[int]bool{}
 	s.why = map[*types.Func]string{}
+	s.text = map[*types.Func]int8{}
+	s.parents = map[*ast.BlockStmt]map[ast.Node]ast.Node{}
+	s.textPasses = map[*types.Func]map[int]bool{}
 	for _, p := range pkgs {
 		for _, f := range p.Syntax {
 			name := p.Fset.File(f.Pos()).Name()
@@ -464,7 +502,42 @@ type fileScan struct {
 	// parameters they come from.
 	summarizing *types.Signature
 	passed      map[int]bool
-	gated       int // inside if logcontent.On() { ... }
+	// summarizingText: the function summarized returns a text
+	// (textSummary), and a string parameter it puts in it is passed, as an
+	// error parameter it returns is.
+	summarizingText bool
+	gated           int // inside if logcontent.On() { ... }
+	// errOK: an error, or its text, counts as safe (errSafe), for a value
+	// whose errors taint has reported or followed.
+	errOK int
+	// assigns are the local string variables' values (localAssigns), and
+	// following the values safe is reading, against a cycle.
+	assigns   map[*types.Var]localValues
+	following map[ast.Expr]bool
+}
+
+// localValues are the values assigned to a local variable, and whether they
+// are all of them; body is the function they are read in, jumps says it
+// holds a goto, and labels are the statements its gotos name, where control
+// may enter a statement list other than at its start.
+type localValues struct {
+	set      []assigned
+	ok       bool
+	declared bool
+	opaque   string // why not every value can be seen ("" when they can)
+	body     *ast.BlockStmt
+	jumps    bool
+	labels   []ast.Node // the statements a goto in body names
+}
+
+// assigned is one value a local variable is given (rhs, nil for a zero
+// value) and the statement that gives it (at); multi: rhs is a call, one of
+// whose results it is; kills: it replaces what the variable held (not +=).
+type assigned struct {
+	at    ast.Node
+	rhs   ast.Expr
+	multi bool
+	kills bool
 }
 
 func (fs *fileScan) walk(n ast.Node) {
@@ -585,12 +658,20 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		// A keploy function that formats its arguments into an error or a
 		// line (framingLost(format, args...)): each call is judged as
 		// fmt.Errorf's is, by what it formats.
+		kind := kindMessage
+		if sig := f.Type().(*types.Signature); sig.Results().Len() == 1 && implementsError(sig.Results().At(0).Type()) {
+			kind = kindErrorf
+		}
 		if what, bad := fs.formatText(call.Args[i:], i < len(call.Args) && call.Ellipsis == token.NoPos); bad {
-			kind := kindMessage
-			if sig := f.Type().(*types.Signature); sig.Results().Len() == 1 && implementsError(sig.Results().At(0).Type()) {
-				kind = kindErrorf
-			}
 			fs.report(call, kind, f.Name()+"("+what+")")
+		}
+		if kind == kindMessage {
+			// A wrapper that writes a line: the errors it formats are
+			// logged, as a message's are. One that makes an error is
+			// as safe as they are (callOrigin).
+			for _, a := range call.Args[i:] {
+				fs.reportErrorParts(f.Name(), a, nil)
+			}
 		}
 		return
 	}
@@ -725,7 +806,9 @@ func (fs *fileScan) formatText(args []ast.Expr, spread bool) (string, bool) {
 	if len(args) == 0 {
 		return "", false
 	}
-	if !fs.safe(args[0]) {
+	// The errors a format or a value holds the text of are judged where the
+	// error made is logged, as the errors it wraps are (callOrigin).
+	if !fs.errSafe(args[0]) {
 		bad = append(bad, "format "+fs.text(args[0]))
 	}
 	verbs := formatVerbs(fs.info, args[0])
@@ -747,7 +830,7 @@ func (fs *fileScan) formatText(args []ast.Expr, spread bool) (string, bool) {
 			}
 			return
 		}
-		if fs.isError(a) || !formatsAsText(fs.info.TypeOf(a)) || fs.safe(a) {
+		if fs.isError(a) || !formatsAsText(fs.info.TypeOf(a)) || fs.errSafe(a) {
 			return
 		}
 		bad = append(bad, fs.text(a))
@@ -826,7 +909,7 @@ func (fs *fileScan) wrapperParam(e ast.Expr) bool {
 }
 
 func (fs *fileScan) errorsNewText(call *ast.CallExpr) (string, bool) {
-	if len(call.Args) != 1 || fs.safe(call.Args[0]) {
+	if len(call.Args) != 1 || fs.errSafe(call.Args[0]) {
 		return "", false
 	}
 	return "errors.New(" + fs.text(call.Args[0]) + ")", true
@@ -868,6 +951,11 @@ func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
 	if fs.safe(v) || fs.ownMarshaler(v) {
 		return
 	}
+	// An error's text in the value is the error; the value is a site of
+	// its own when the rest of it is not safe.
+	if fs.reportErrorParts(ctor, v, nil) && fs.errSafe(v) {
+		return
+	}
 	fs.report(at, kindField, ctor+"("+fs.text(v)+")")
 }
 
@@ -889,7 +977,607 @@ func (fs *fileScan) message(m ast.Expr) {
 			return
 		}
 	}
+	// Every other error whose text it holds (a second one, one put in a
+	// local variable first) is reported at its own place.
+	if fs.reportErrorParts("message", m, errPart) && fs.errSafe(m) {
+		return
+	}
 	fs.report(m, kindMessage, fs.text(m))
+}
+
+// reportErrorParts reports each error whose text v is made of (taint) but
+// skip, the one its caller reported, as an error logged whole: one written
+// in v at its own place, by what logs it (ctor), and one a local variable
+// holds at the place it is put in the variable ("via" the variable, which a
+// line or two may log). It is true when v holds any error's text, skip's
+// included.
+func (fs *fileScan) reportErrorParts(ctor string, v, skip ast.Expr) bool {
+	found := false
+	fs.taint(v, nil, map[ast.Expr]bool{}, func(part ast.Expr, via *ast.Ident) {
+		found = true
+		switch {
+		case part == skip:
+		case via != nil:
+			fs.loggedError(part, "via "+via.Name, part)
+		default:
+			fs.loggedError(part, ctor, part)
+		}
+	})
+	return found
+}
+
+// taint calls f for each error, or error's text, that e's text is made of:
+// through concatenation, fmt.Sprint*, a conversion, the strings and strconv
+// packages' functions, and the values assigned to a local string variable
+// that can reach where it is read (localAssigns, reaching); via is the
+// variable a part was first reached through, or nil for one written in e
+// itself. seen are the values already followed, against a cycle.
+func (fs *fileScan) taint(e ast.Expr, via *ast.Ident, seen map[ast.Expr]bool, f func(part ast.Expr, via *ast.Ident)) {
+	e = ast.Unparen(e)
+	if fs.isError(e) {
+		f(e, via)
+		return
+	}
+	switch x := e.(type) {
+	case *ast.BinaryExpr:
+		if x.Op == token.ADD {
+			fs.taint(x.X, via, seen, f)
+			fs.taint(x.Y, via, seen, f)
+		}
+	case *ast.CallExpr:
+		if tv, ok := fs.info.Types[x.Fun]; ok && tv.IsType() {
+			for _, a := range x.Args {
+				fs.taint(a, via, seen, f)
+			}
+			return
+		}
+		fn := calleeFunc(fs.info, x)
+		if fn == nil {
+			return
+		}
+		if p := funcPkg(fn); (p == "fmt" && strings.HasPrefix(fn.Name(), "Sprint")) || p == "strings" || p == "strconv" {
+			for _, a := range x.Args {
+				fs.taint(a, via, seen, f)
+			}
+			return
+		}
+		if strings.HasPrefix(funcPkg(fn), module) {
+			// A text of keploy's (textSummary) holds the arguments it is
+			// given for the parameters it puts in it.
+			if ok, passes := fs.s.textSummary(fn); ok {
+				for i := range passes {
+					if a := callArg(fs.info, x, fn, i); a != nil {
+						fs.taint(a, via, seen, f)
+					}
+				}
+			}
+		}
+	case *ast.Ident:
+		v, ok := fs.info.Uses[x].(*types.Var)
+		if !ok || !isString(v.Type()) {
+			return
+		}
+		if via == nil {
+			via = x
+		}
+		for _, r := range fs.reaching(v, x) {
+			if r != nil && !seen[r] {
+				seen[r] = true
+				fs.taint(r, via, seen, f)
+			}
+		}
+	}
+}
+
+// taintOrigin: the first error whose text e is made of (taint) whose origin
+// can hold content, and false; or true when there is none.
+func (fs *fileScan) taintOrigin(e ast.Expr, depth int) (string, bool) {
+	bad := ""
+	fs.taint(e, nil, map[ast.Expr]bool{}, func(part ast.Expr, _ *ast.Ident) {
+		if bad != "" {
+			return
+		}
+		if o, safe := fs.origin(part, depth+1); !safe {
+			bad = o
+		}
+	})
+	return bad, bad == ""
+}
+
+// errSafe: e is safe but for the errors, or errors' texts, it is made of,
+// which the caller judges by their origins.
+func (fs *fileScan) errSafe(e ast.Expr) bool {
+	fs.errOK++
+	defer func() { fs.errOK-- }()
+	return fs.safe(e)
+}
+
+// varValues are the values assigned to v, a variable declared in a function
+// the scan is in, wherever it is assigned in it (v's scope is in that
+// function), cached. They are not all of them (opaque) when it is a range's
+// variable, or its address is taken (what is written through the pointer is
+// not seen); a type switch's variable and a parameter are not declared in
+// the body, and a named result starts as its zero value.
+func (fs *fileScan) varValues(v *types.Var) localValues {
+	if lv, ok := fs.assigns[v]; ok {
+		return lv
+	}
+	lv := localValues{}
+	defer func() {
+		if fs.assigns == nil {
+			fs.assigns = map[*types.Var]localValues{}
+		}
+		fs.assigns[v] = lv
+	}()
+	if v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
+		return lv
+	}
+	var ftype *ast.FuncType
+	for i := len(fs.funcs) - 1; i >= 0; i-- {
+		fn := fs.funcs[i]
+		if fn.Pos() <= v.Pos() && v.Pos() < fn.End() {
+			switch f := fn.(type) {
+			case *ast.FuncDecl:
+				ftype, lv.body = f.Type, f.Body
+			case *ast.FuncLit:
+				ftype, lv.body = f.Type, f.Body
+			}
+			break
+		}
+	}
+	if lv.body == nil {
+		return lv
+	}
+	if ftype.Results != nil {
+		for _, fl := range ftype.Results.List {
+			for _, n := range fl.Names {
+				if fs.info.Defs[n] == v {
+					lv.declared = true
+					lv.set = append(lv.set, assigned{at: ftype, kills: true}) // its zero value
+				}
+			}
+		}
+	}
+	is := func(e ast.Expr) bool {
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		return ok && (fs.info.Defs[id] == v || fs.info.Uses[id] == v)
+	}
+	gotos := map[string]bool{}
+	ast.Inspect(lv.body, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BranchStmt); ok && b.Tok == token.GOTO && b.Label != nil {
+			gotos[b.Label.Name] = true
+		}
+		return true
+	})
+	ast.Inspect(lv.body, func(n ast.Node) bool {
+		if l, ok := n.(*ast.LabeledStmt); ok && gotos[l.Label.Name] {
+			lv.labels = append(lv.labels, l)
+		}
+		return true
+	})
+	ast.Inspect(lv.body, func(n ast.Node) bool {
+		switch st := n.(type) {
+		case *ast.BranchStmt:
+			if st.Tok == token.GOTO {
+				lv.jumps = true
+			}
+		case *ast.AssignStmt:
+			for j, l := range st.Lhs {
+				if !is(l) {
+					continue
+				}
+				if id := ast.Unparen(l).(*ast.Ident); fs.info.Defs[id] == v {
+					lv.declared = true
+				}
+				switch {
+				case st.Tok != token.DEFINE && st.Tok != token.ASSIGN && st.Tok != token.ADD_ASSIGN:
+					lv.opaque = "assigned by " + st.Tok.String()
+				case len(st.Rhs) == len(st.Lhs):
+					lv.set = append(lv.set, assigned{at: st, rhs: st.Rhs[j], kills: st.Tok != token.ADD_ASSIGN})
+				case len(st.Rhs) == 1:
+					lv.set = append(lv.set, assigned{at: st, rhs: st.Rhs[0], multi: true, kills: true}) // v, err := f()
+				}
+			}
+		case *ast.ValueSpec:
+			for j, id := range st.Names {
+				if fs.info.Defs[id] != v {
+					continue
+				}
+				lv.declared = true
+				switch {
+				case len(st.Values) == 0:
+					lv.set = append(lv.set, assigned{at: st, kills: true}) // its zero value
+				case len(st.Values) == len(st.Names):
+					lv.set = append(lv.set, assigned{at: st, rhs: st.Values[j], kills: true})
+				default:
+					lv.set = append(lv.set, assigned{at: st, rhs: st.Values[0], multi: true, kills: true})
+				}
+			}
+		case *ast.RangeStmt:
+			if (st.Key != nil && is(st.Key)) || (st.Value != nil && is(st.Value)) {
+				lv.opaque = "range"
+			}
+		case *ast.UnaryExpr:
+			if st.Op == token.AND && is(st.X) {
+				lv.opaque = "address taken"
+			}
+		}
+		return true
+	})
+	return lv
+}
+
+// localAssigns are the values assigned to v, a local variable of a string
+// type (varValues), and whether they are all of them: they are not when it is
+// a parameter or a result, a range's or a type switch's variable, assigned
+// from a call's several results, or when its address is taken. A string is
+// immutable, so what the variable holds where it is read is one of the values
+// assigned to it that can reach there (reaching).
+func (fs *fileScan) localAssigns(v *types.Var) localValues {
+	if !isString(v.Type()) {
+		return localValues{}
+	}
+	lv := fs.varValues(v)
+	lv.ok = lv.declared && lv.opaque == ""
+	for _, a := range lv.set {
+		if a.multi {
+			lv.ok = false
+		}
+		if _, ok := a.at.(*ast.FuncType); ok {
+			lv.ok = false // a named result
+		}
+	}
+	return lv
+}
+
+// reaching are the values assigned to v (localAssigns) that it can hold
+// where use reads it, or nil when they cannot all be seen (lv.ok false,
+// which the callers tell apart by localAssigns).
+func (fs *fileScan) reaching(v *types.Var, use *ast.Ident) []ast.Expr {
+	lv := fs.localAssigns(v)
+	if !lv.ok {
+		return nil
+	}
+	var out []ast.Expr
+	for _, a := range lv.set {
+		if fs.reaches(lv, a, use, v) {
+			out = append(out, a.rhs)
+		}
+	}
+	return out
+}
+
+// reaches: the value a assigns to v can be what v holds at use, both in
+// lv.body. It is false only where control cannot carry it there: another
+// assignment of v that every path from a to use runs (one in a statement
+// list that holds use further on, after which a does not come before use,
+// and no label a goto names lies between it and use) replaces it; or, in a
+// function without a goto, a comes after use and no loop holds both, or a
+// block that holds a and not use returns (or panics) after it, with no
+// break or continue between. Any value assigned in a closure reaches: a closure runs when it
+// is called, which may be after any assignment, and more than once. So does
+// any value read in one, unless the closure itself replaces it before the
+// read (err = c.Close(); if err != nil { ... } in a deferred func): control
+// enters the closure only at its start, whenever it is called.
+func (fs *fileScan) reaches(lv localValues, a assigned, use ast.Node, v *types.Var) bool {
+	pa, pu := fs.pathTo(lv.body, a.at), fs.pathTo(lv.body, use)
+	if pa == nil || pu == nil {
+		return true
+	}
+	n := 0
+	for n < len(pa) && n < len(pu) && pa[n] == pu[n] {
+		n++
+	}
+	// A closure deferred runs as the function returns, after every line of
+	// its body but those of the closures deferred: what one assigns reaches
+	// only those, and the closures that may run after the function returns
+	// (a goroutine's, a callback's).
+	deferredUse := false
+	for i := range pu {
+		if _, ok := pu[i].(*ast.FuncLit); ok {
+			deferredUse = true
+		}
+	}
+	for i := n; i < len(pa); i++ {
+		if deferred(pa, i) && !deferredUse {
+			return false
+		}
+	}
+	for _, x := range pa[n:] {
+		if _, ok := x.(*ast.FuncLit); ok {
+			return true
+		}
+	}
+	for i := len(pu) - 1; i >= n; i-- {
+		if _, ok := pu[i].(*ast.FuncLit); ok {
+			// The use is in a closure a is outside of: a reaches unless
+			// an assignment inside the closure replaces it on every path
+			// from the closure's start to the use.
+			return !fs.replaced(lv, a, pu[i:])
+		}
+	}
+	for i, x := range pa[:n] {
+		// A closure around both, of a variable declared outside it: what
+		// one call assigns, the next reads, unless the closure replaces
+		// it before the use (replaced). A closure called once, where it
+		// is written and outside any loop or other closure (defer func()
+		// { ... }()), has no next call: it reads as the lines around it
+		// do.
+		if fl, ok := x.(*ast.FuncLit); ok && !(fl.Pos() <= v.Pos() && v.Pos() < fl.End()) && (lv.jumps || !calledOnce(pa, i)) {
+			return !fs.replaced(lv, a, pu)
+		}
+	}
+	if fs.replaced(lv, a, pu) {
+		return false
+	}
+	if lv.jumps {
+		// A goto may carry a value to any line, before it or after a
+		// return; only an assignment no label lets control round
+		// replaces it.
+		return true
+	}
+	if a.at.Pos() >= use.Pos() {
+		for _, x := range pa[:n] {
+			switch x.(type) {
+			case *ast.ForStmt, *ast.RangeStmt:
+				return true // round the loop
+			}
+		}
+		return false
+	}
+	for _, x := range pa[n:] {
+		list := stmtList(x)
+		for j, st := range list {
+			if st.Pos() <= a.at.Pos() && a.at.End() <= st.End() {
+				for _, after := range list[j+1:] {
+					if terminates(fs.info, after) {
+						return false
+					}
+					if branches(after) {
+						break // a break or a continue may leave first
+					}
+				}
+				break
+			}
+		}
+	}
+	return true
+}
+
+// calledOnce: path[i] is a closure called where it is written, by a
+// statement of its own (func() { ... }(), defer or go func() { ... }()), and
+// no loop or other closure holds that statement: it runs once each time the
+// function does.
+func calledOnce(path []ast.Node, i int) bool {
+	if _, ok := path[i].(*ast.FuncLit); !ok || i < 2 {
+		return false
+	}
+	c, ok := path[i-1].(*ast.CallExpr)
+	if !ok || ast.Unparen(c.Fun) != path[i] {
+		return false
+	}
+	switch path[i-2].(type) {
+	case *ast.DeferStmt, *ast.GoStmt, *ast.ExprStmt:
+	default:
+		return false
+	}
+	for _, x := range path[:i-2] {
+		switch x.(type) {
+		case *ast.ForStmt, *ast.RangeStmt, *ast.FuncLit:
+			return false
+		}
+	}
+	return true
+}
+
+// deferred: path[i] is a closure a defer statement calls (defer func() {
+// ... }()).
+func deferred(path []ast.Node, i int) bool {
+	if _, ok := path[i].(*ast.FuncLit); !ok || i < 2 {
+		return false
+	}
+	c, ok := path[i-1].(*ast.CallExpr)
+	if !ok || ast.Unparen(c.Fun) != path[i] {
+		return false
+	}
+	_, ok = path[i-2].(*ast.DeferStmt)
+	return ok
+}
+
+// replaced: another assignment of v replaces a's value on every path to the
+// use whose path (from lv.body) is pu: a statement of a list around the use,
+// before the statement that holds it, assigns v whole (kills), and a is not
+// between the two in that list. Control enters a list only at its start, so
+// whatever comes from before the assignment, or from after the use round a
+// loop, runs it first. So does the Init of an if, a switch or a for
+// statement whose body, condition or cases hold the use (if err = f(); err
+// != nil { ... }): whatever comes from outside the statement runs its Init
+// first.
+func (fs *fileScan) replaced(lv localValues, a assigned, pu []ast.Node) bool {
+	for i := 0; i+1 < len(pu); i++ {
+		if init := stmtInit(pu[i]); init != nil && pu[i+1] != ast.Node(init) &&
+			!(pu[i].Pos() <= a.at.Pos() && a.at.Pos() < pu[i].End()) && !labelIn(lv, init.End(), pu[len(pu)-1].Pos()) {
+			for _, k := range lv.set {
+				if k.kills && k.at == ast.Node(init) {
+					return true
+				}
+			}
+		}
+		list := stmtList(pu[i])
+		if list == nil {
+			continue
+		}
+		u := -1
+		for j, st := range list {
+			if st == pu[i+1] {
+				u = j
+			}
+		}
+		if u < 0 {
+			continue
+		}
+		for _, k := range lv.set {
+			if !k.kills || k.at == a.at {
+				continue
+			}
+			for j := 0; j < u; j++ {
+				if !holdsDirectly(list[j], k.at) {
+					continue
+				}
+				if !(list[j].Pos() <= a.at.Pos() && a.at.Pos() < list[u].End()) && !labelIn(lv, list[j].End(), pu[len(pu)-1].Pos()) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// labelIn: a statement a goto names lies between from and to, where
+// control can enter past an assignment without running it.
+func labelIn(lv localValues, from, to token.Pos) bool {
+	for _, l := range lv.labels {
+		if from <= l.Pos() && l.Pos() <= to {
+			return true
+		}
+	}
+	return false
+}
+
+// branches: st holds a break, a continue or a goto (outside a closure),
+// after which the statements that follow it in its list need not run.
+func branches(st ast.Stmt) bool {
+	found := false
+	ast.Inspect(st, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.BranchStmt:
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// holdsDirectly: st is at, or the declaration statement of at, a spec.
+func holdsDirectly(st ast.Stmt, at ast.Node) bool {
+	if ast.Node(st) == at {
+		return true
+	}
+	if d, ok := st.(*ast.DeclStmt); ok {
+		if g, ok := d.Decl.(*ast.GenDecl); ok {
+			for _, sp := range g.Specs {
+				if ast.Node(sp) == at {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// stmtList is the statements n runs in order: a block's, a case's.
+func stmtList(n ast.Node) []ast.Stmt {
+	switch b := n.(type) {
+	case *ast.BlockStmt:
+		return b.List
+	case *ast.CaseClause:
+		return b.Body
+	case *ast.CommClause:
+		return b.Body
+	}
+	return nil
+}
+
+// stmtInit is the Init statement of an if, a switch or a for statement, or
+// nil.
+func stmtInit(n ast.Node) ast.Stmt {
+	switch s := n.(type) {
+	case *ast.IfStmt:
+		return s.Init
+	case *ast.SwitchStmt:
+		return s.Init
+	case *ast.TypeSwitchStmt:
+		return s.Init
+	case *ast.ForStmt:
+		return s.Init
+	}
+	return nil
+}
+
+// terminates: st leaves the function, whatever happens before it: a return,
+// or a call of panic.
+func terminates(info *types.Info, st ast.Stmt) bool {
+	switch x := st.(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.ExprStmt:
+		if c, ok := x.X.(*ast.CallExpr); ok && isBuiltin(info, c.Fun, "panic") {
+			return true
+		}
+	}
+	return false
+}
+
+// pathTo is the nodes from root down to n, n last, or nil when root does not
+// hold n, read from root's parents (built once per root).
+func (fs *fileScan) pathTo(root *ast.BlockStmt, n ast.Node) []ast.Node {
+	parents, ok := fs.s.parents[root]
+	if !ok {
+		parents = map[ast.Node]ast.Node{}
+		var stack []ast.Node
+		ast.Inspect(root, func(x ast.Node) bool {
+			if x == nil {
+				stack = stack[:len(stack)-1]
+				return false
+			}
+			if len(stack) > 0 {
+				parents[x] = stack[len(stack)-1]
+			}
+			stack = append(stack, x)
+			return true
+		})
+		if fs.s.parents == nil {
+			fs.s.parents = map[*ast.BlockStmt]map[ast.Node]ast.Node{}
+		}
+		fs.s.parents[root] = parents
+	}
+	var path []ast.Node
+	for x := n; x != nil; x = parents[x] {
+		path = append(path, x)
+		if x == ast.Node(root) {
+			for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+				path[i], path[j] = path[j], path[i]
+			}
+			return path
+		}
+	}
+	return nil
+}
+
+// localSafe: v is a local string variable every value of which that can
+// reach use is safe (reaching). A value still being read (a cycle, s = s +
+// "x") is taken as safe, so that the other values decide.
+func (fs *fileScan) localSafe(v *types.Var, use *ast.Ident) bool {
+	if !fs.localAssigns(v).ok {
+		return false
+	}
+	if fs.following == nil {
+		fs.following = map[ast.Expr]bool{}
+	}
+	for _, r := range fs.reaching(v, use) {
+		if r == nil || fs.following[r] {
+			continue
+		}
+		fs.following[r] = true
+		safe := fs.safe(r)
+		delete(fs.following, r)
+		if !safe {
+			return false
+		}
+	}
+	return true
 }
 
 // loggedError: e, an error (or its text), logged whole by what at at.
@@ -1027,9 +1715,25 @@ func (fs *fileScan) safe(e ast.Expr) bool {
 	if fs.gatedValue(e) || fs.wrapperParam(e) {
 		return true
 	}
+	if fs.errOK > 0 && fs.isError(e) {
+		return true // judged by its origin, where taint found it
+	}
 	switch x := e.(type) {
 	case *ast.Ident:
-		return connIDName.MatchString(x.Name)
+		if connIDName.MatchString(x.Name) {
+			return true
+		}
+		v, ok := fs.info.Uses[x].(*types.Var)
+		if !ok {
+			return false
+		}
+		if fs.summarizingText {
+			if i := fs.summarizedParam(v); i >= 0 && !reassigned(fs.info, fs.funcs[0], v) {
+				fs.passed[i] = true // its callers' to judge
+				return true
+			}
+		}
+		return fs.localSafe(v, x)
 	case *ast.SelectorExpr:
 		return connIDName.MatchString(x.Sel.Name)
 	case *ast.TypeAssertExpr: // ctx.Value(models.ClientConnectionIDKey).(string)
@@ -1091,8 +1795,109 @@ func (fs *fileScan) safe(e ast.Expr) bool {
 		case pkg == module+"/pkg/models" && shapes[f.Name()]:
 			return true // a call's, a path's or a statement's shape, which keeps no value
 		}
+		if strings.HasPrefix(pkg, module) && isString(fs.info.TypeOf(x)) {
+			return fs.textSafe(x, f)
+		}
 	}
 	return false
+}
+
+// textSafe: c, a call of f, keploy's, returns a safe text: f's own text is
+// safe (textSummary), and so is each argument it puts in it. An error among
+// them is judged by its origin, or, under errSafe, where taint finds it.
+func (fs *fileScan) textSafe(c *ast.CallExpr, f *types.Func) bool {
+	ok, passes := fs.s.textSummary(f)
+	if !ok {
+		return false
+	}
+	for i := range passes {
+		a := callArg(fs.info, c, f, i)
+		if a == nil {
+			return false
+		}
+		if fs.isError(a) {
+			if fs.errOK > 0 {
+				continue
+			}
+			if _, safe := fs.origin(a, 1); !safe {
+				return false
+			}
+			continue
+		}
+		if !fs.safe(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// callArg is the argument c gives f's i-th parameter, or nil when it cannot
+// be read apart (f(g()), a variadic's values).
+func callArg(info *types.Info, c *ast.CallExpr, f *types.Func, i int) ast.Expr {
+	sig, _ := f.Type().(*types.Signature)
+	if sig == nil || i >= len(c.Args) || (sig.Variadic() && i >= sig.Params().Len()-1) {
+		return nil
+	}
+	if len(c.Args) == 1 && isTuple(info.TypeOf(c.Args[0])) {
+		return nil
+	}
+	return c.Args[i]
+}
+
+// textSummary: what f, keploy's, returns as its one result, a text, is safe
+// but for the parameters it puts in it, whose indices it returns: each
+// return is safe (errSafe), and so is the origin of every error whose text
+// it holds (taintOrigin), a parameter of f's being passed to its callers to
+// judge. A method's receiver is read as any value is (its enum and number
+// fields are safe, its strings are not), and an interface's method, a
+// function value or one still being read (a recursion) is not safe.
+func (s *scanner) textSummary(f *types.Func) (bool, map[int]bool) {
+	f = f.Origin()
+	if v, ok := s.text[f]; ok {
+		return v > 0, s.textPasses[f]
+	}
+	s.text[f] = 0 // in progress: not safe
+	if s.computeText(f) {
+		s.text[f] = 1
+	} else {
+		s.text[f] = -1
+	}
+	return s.text[f] > 0, s.textPasses[f]
+}
+
+func (s *scanner) computeText(f *types.Func) bool {
+	sig, _ := f.Type().(*types.Signature)
+	if sig == nil || sig.Results().Len() != 1 || !isString(sig.Results().At(0).Type()) {
+		return false
+	}
+	d, ok := s.decls[f]
+	if !ok {
+		return false
+	}
+	fs := &fileScan{s: s, p: d.p, info: d.p.TypesInfo, fset: d.p.Fset, file: d.file, funcs: []ast.Node{d.decl},
+		summarizing: sig, passed: map[int]bool{}, summarizingText: true}
+	safe := true
+	ast.Inspect(d.decl.Body, func(n ast.Node) bool {
+		if !safe {
+			return false
+		}
+		switch r := n.(type) {
+		case *ast.FuncLit:
+			return false // a closure's returns are its own
+		case *ast.ReturnStmt:
+			if len(r.Results) != 1 || !fs.errSafe(r.Results[0]) {
+				safe = false // a bare return of a named result, or a value that is not safe
+			} else if _, ok := fs.taintOrigin(r.Results[0], 1); !ok {
+				safe = false
+			}
+			return false
+		}
+		return true
+	})
+	if safe && len(fs.passed) > 0 {
+		s.textPasses[f] = fs.passed
+	}
+	return safe
 }
 
 // connIDKey: k names a context's connection id (models.ClientConnectionIDKey).
@@ -1224,6 +2029,9 @@ var safeOriginTypes = map[string]bool{
 // assigned to it before e in the functions around it.
 func (fs *fileScan) origin(e ast.Expr, depth int) (string, bool) {
 	e = ast.Unparen(e)
+	if tv, ok := fs.info.Types[e]; ok && tv.IsNil() {
+		return "nil", true // err = nil: no error, and no text
+	}
 	if depth > 4 {
 		return "?", false
 	}
@@ -1328,7 +2136,15 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 	switch {
 	case pkg == "errors" && f.Name() == "New":
 		what, bad := fs.errorsNewText(c)
-		return "errors.New", !bad || fs.listedText(kindErrorsNew, what)
+		safe := !bad || fs.listedText(kindErrorsNew, what)
+		if safe && len(c.Args) == 1 {
+			// errors.New(err.Error()), errors.New(why): the errors whose
+			// text it is
+			if o, ok := fs.taintOrigin(c.Args[0], depth); !ok {
+				return "errors.New(" + o + ")", false
+			}
+		}
+		return "errors.New", safe
 	case pkg == "fmt" && f.Name() == "Errorf":
 		what, bad := fs.errorfText(c)
 		safe := !bad || fs.listedText(kindErrorf, what)
@@ -1338,6 +2154,21 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 				o, s := fs.origin(a, depth+1)
 				wrapped = append(wrapped, o)
 				safe = safe && s
+			}
+		}
+		if safe {
+			// The errors whose text its format or a value holds (a
+			// stopReason that formatted one): an entry that lists the
+			// format as keploy's words does not stand for them.
+			for _, a := range c.Args {
+				if fs.isError(a) {
+					continue
+				}
+				if o, ok := fs.taintOrigin(a, depth); !ok {
+					wrapped = append(wrapped, o)
+					safe = false
+					break
+				}
 			}
 		}
 		if len(wrapped) == 0 {
@@ -1368,6 +2199,24 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 	if strings.HasPrefix(pkg, module) {
 		if !fs.s.returnsSafe(f) {
 			return name, false
+		}
+		if i, ok := printfWrapper(f); ok {
+			// framingLost(format, args...): the error it makes formats
+			// its values (with %v, which wraps nothing), so it is as
+			// safe as the errors among them and those whose text one
+			// holds. A call that passes its own args... on is its
+			// callers' to judge, as fmt.Errorf's is.
+			for _, a := range c.Args[i:] {
+				o, s := "", true
+				if fs.isError(a) {
+					o, s = fs.origin(a, depth+1)
+				} else {
+					o, s = fs.taintOrigin(a, depth)
+				}
+				if !s {
+					return name + "(" + o + ")", false
+				}
+			}
 		}
 		// A parameter it returns is as safe as the argument it is given.
 		for i := range fs.s.passes[f.Origin()] {
@@ -1556,110 +2405,90 @@ func (fs *fileScan) namedResultOrigin(use *ast.Ident, v *types.Var) (string, boo
 	return o, safe
 }
 
-// localOrigin follows v, a local variable or a parameter, to the last value
-// assigned to it before use, in the innermost function around use that
-// assigns it.
+// localOrigin follows v, a local variable or a parameter, to every value
+// assigned to it that can reach use (varValues, reaches): each must have a
+// safe origin, and the first that does not is named. A parameter is its
+// callers' to judge only while its function is summarized (returnsSafe).
 func (fs *fileScan) localOrigin(use *ast.Ident, v *types.Var, depth int) (string, bool) {
 	for i := len(fs.funcs) - 1; i >= 0; i-- {
 		fn := fs.funcs[i]
 		var ftype *ast.FuncType
-		var body *ast.BlockStmt
 		switch f := fn.(type) {
 		case *ast.FuncDecl:
-			ftype, body = f.Type, f.Body
+			ftype = f.Type
 		case *ast.FuncLit:
-			ftype, body = f.Type, f.Body
+			ftype = f.Type
 		}
-		if ftype.Params != nil {
-			for _, fl := range ftype.Params.List {
-				for _, n := range fl.Names {
-					if fs.info.Defs[n] == v {
-						if i := fs.summarizedParam(v); i >= 0 && !reassigned(fs.info, fn, v) {
-							fs.passed[i] = true
-							return "param " + n.Name, true
-						}
-						return "param " + n.Name, false
-					}
-				}
-			}
+		if ftype.Params == nil {
+			continue
 		}
-		isResult := false
-		if ftype.Results != nil {
-			for _, fl := range ftype.Results.List {
-				for _, n := range fl.Names {
-					if fs.info.Defs[n] == v {
-						isResult = true
+		for _, fl := range ftype.Params.List {
+			for _, n := range fl.Names {
+				if fs.info.Defs[n] == v {
+					if i := fs.summarizedParam(v); i >= 0 && !reassigned(fs.info, fn, v) {
+						fs.passed[i] = true
+						return "param " + n.Name, true
 					}
+					return "param " + n.Name, false
 				}
 			}
 		}
-		var rhs ast.Expr
-		found := false
-		ast.Inspect(body, func(n ast.Node) bool {
-			if n == nil || n.Pos() >= use.Pos() {
-				return false
-			}
-			if _, ok := n.(*ast.FuncLit); ok && n.End() < use.Pos() {
-				return false // a closure's assignments are its own
-			}
-			switch st := n.(type) {
-			case *ast.AssignStmt:
-				for j, l := range st.Lhs {
-					id, ok := ast.Unparen(l).(*ast.Ident)
-					if !ok || (fs.info.Defs[id] != v && fs.info.Uses[id] != v) {
-						continue
-					}
-					found = true
-					switch {
-					case len(st.Rhs) == len(st.Lhs):
-						rhs = st.Rhs[j]
-					case len(st.Rhs) == 1:
-						rhs = st.Rhs[0]
-					}
-				}
-			case *ast.ValueSpec:
-				for j, id := range st.Names {
-					if fs.info.Defs[id] != v {
-						continue
-					}
-					found = true
-					rhs = nil
-					switch {
-					case len(st.Values) == len(st.Names):
-						rhs = st.Values[j]
-					case len(st.Values) == 1:
-						rhs = st.Values[0]
-					}
-				}
-			}
-			return true
-		})
-		if !found {
-			if isResult {
-				return "result " + v.Name(), false
+	}
+	lv := fs.varValues(v)
+	if !lv.declared {
+		return "unassigned", false
+	}
+	if lv.opaque != "" {
+		return lv.opaque + " " + v.Name(), false
+	}
+	// Every unsafe value is named, so that what the allowlist says of the
+	// error is said of each.
+	first := ""
+	var bad []string
+	for _, a := range lv.set {
+		if !fs.reaches(lv, a, use, v) {
+			continue
+		}
+		if a.rhs == nil {
+			continue // a zero value: no error
+		}
+		o, safe := fs.assignedOrigin(a.rhs, use, v, depth)
+		if !safe {
+			if !slices.Contains(bad, o) {
+				bad = append(bad, o)
 			}
 			continue
 		}
-		if rhs == nil {
-			return "declared", false
+		if first == "" {
+			first = o
 		}
-		if c, ok := ast.Unparen(rhs).(*ast.CallExpr); ok {
-			if f := calleeFunc(fs.info, c); f != nil {
-				if f.Name() == "Error" && len(c.Args) == 0 {
-					return fs.origin(c, depth+1)
-				}
-				return fs.callOrigin(c, f, depth+1)
-			}
-			return "call " + fs.text(c.Fun), false
-		}
-		if id, ok := ast.Unparen(rhs).(*ast.Ident); ok && id != use {
-			if v2, ok := fs.info.Uses[id].(*types.Var); ok && v2 != v {
-				return fs.origin(id, depth+1)
-			}
-		}
-		return fs.origin(rhs, depth+1)
 	}
-	return "unassigned", false
+	if len(bad) > 0 {
+		return strings.Join(bad, " & "), false
+	}
+	if first == "" {
+		first = "nil"
+	}
+	return first, true
+}
+
+// assignedOrigin is the origin of rhs, a value assigned to v.
+func (fs *fileScan) assignedOrigin(rhs ast.Expr, use *ast.Ident, v *types.Var, depth int) (string, bool) {
+	if c, ok := ast.Unparen(rhs).(*ast.CallExpr); ok {
+		if f := calleeFunc(fs.info, c); f != nil {
+			if f.Name() == "Error" && len(c.Args) == 0 {
+				return fs.origin(c, depth+1)
+			}
+			return fs.callOrigin(c, f, depth+1)
+		}
+		return "call " + fs.text(c.Fun), false
+	}
+	if id, ok := ast.Unparen(rhs).(*ast.Ident); ok && id != use {
+		if v2, ok := fs.info.Uses[id].(*types.Var); ok && v2 == v {
+			return "nil", true // v = v: its other values decide
+		}
+	}
+	return fs.origin(rhs, depth+1)
 }
 
 func isTuple(t types.Type) bool {
