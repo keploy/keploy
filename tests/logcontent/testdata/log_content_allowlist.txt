@@ -295,8 +295,9 @@ pkg/agent/proxy/integrations/http/decode.go | field | zap.String(served) | 1 | k
 pkg/agent/proxy/integrations/http/decode.go | message | msg | 1 | the message a log helper is given: each of its callers passes one of keploy's literals
 pkg/agent/proxy/integrations/http/encode.go | field | zap.String(upstream) | 2 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/integrations/http/encode.go | field | zap.String(upstreamErrorClass(err)) | 2 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/agent/proxy/integrations/http/learn.go | errorf | fmt.Errorf(m.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/learn.go | field | zap.String(l.Recorded.Path) | 1 | a body field's path (body.user.id): where a value sits, not the value
-pkg/agent/proxy/integrations/http/learn.go | field | zap.String(m.Name) | 1 | mocks' names, which keploy gives them (mock-N)
+pkg/agent/proxy/integrations/http/learn.go | field | zap.String(m.Name) | 3 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/match.go | error | zap.Error(err) <- regexp.Compile | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(bestC.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(bestMatch.Name) | 2 | mocks' names, which keploy gives them (mock-N)
@@ -458,7 +459,6 @@ pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/tls.Ha
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/util.DialDestination | 5 | a dial's error: net's OpError (the addresses and an errno), a timeout, or keploy's own text about the dial
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- pkg/agent/proxy/util.DialDestinationTLS | 1 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
 pkg/agent/proxy/proxy.go | error | utils.LogError(err) <- unassigned | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
-pkg/agent/proxy/proxy.go | error | zap.Error(err) <- (pkg/agent/proxy.speculativeUpstreamTLS).join | 1 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
 pkg/agent/proxy/proxy.go | error | zap.Error(err) <- (pkg/agent/proxy/cbshim.CBShim).AttachToProcessTree | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/proxy/proxy.go | error | zap.Error(err) <- (pkg/agent/proxy/cbshim.CBShim).Close | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/proxy/proxy.go | error | zap.Error(err) <- pkg/agent/proxy.dialPostgresSSLUpstream | 1 | a dial's error: net's OpError (the addresses and an errno), a timeout, or keploy's own text about the dial
@@ -469,15 +469,14 @@ pkg/agent/proxy/proxy.go | error | zap.Error(err) <- pkg/agent/proxy/util.DialDe
 pkg/agent/proxy/proxy.go | errorf | fmt.Errorf(addr) | 5 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | errorf | fmt.Errorf(unreadCause) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/proxy.go | field | dialPostgresSSLUpstream(addr) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
-pkg/agent/proxy/proxy.go | field | probeDial(addr) | 3 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
+pkg/agent/proxy/proxy.go | field | probeDial(addr) | 2 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | field | probeDial(dstAddr) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
-pkg/agent/proxy/proxy.go | field | zap.String(addr) | 7 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
+pkg/agent/proxy/proxy.go | field | zap.String(addr) | 5 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | field | zap.String(clientID) | 1 | an opaque token keploy makes for a connection or its process (ConnKey, ConnProc, a store key)
 pkg/agent/proxy/proxy.go | field | zap.String(connectResult.TargetAddr) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | field | zap.String(destID) | 1 | an opaque token keploy makes for a connection or its process (ConnKey, ConnProc, a store key)
 pkg/agent/proxy/proxy.go | field | zap.String(dstAddr) | 26 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | field | zap.String(errorKind(err)) | 1 | an error's kind (its type's name, or the sentinel it ends in), not its text
-pkg/agent/proxy/proxy.go | field | zap.String(negotiated) | 1 | a protocol's version or a TLS parameter (ALPN, cipher, SNI as a host)
 pkg/agent/proxy/proxy.go | field | zap.String(p.upstreamTLSCACert) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/agent/proxy/proxy.go | field | zap.String(probe.Reason) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/proxy.go | field | zap.String(r.ClosestMock) | 1 | mocks' names, which keploy gives them (mock-N)
@@ -485,15 +484,12 @@ pkg/agent/proxy/proxy.go | field | zap.String(r.Destination) | 1 | an address (h
 pkg/agent/proxy/proxy.go | field | zap.String(r.DestinationScope) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/proxy.go | field | zap.String(r.MatchPhase) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/proxy.go | field | zap.String(r.Protocol) | 1 | a protocol's name for a message kind, a command, a phase, an auth plugin or a packet type: a word from the protocol's closed set, or a Go type's name
-pkg/agent/proxy/proxy.go | field | zap.String(sni) | 1 | a DNS name the app resolved and its query type: a host, which a URL's shape keeps too (logurl)
 pkg/agent/proxy/proxy.go | field | zap.String(sniHost) | 1 | a DNS name the app resolved and its query type: a host, which a URL's shape keeps too (logurl)
 pkg/agent/proxy/proxy.go | field | zap.String(state.NegotiatedProtocol) | 1 | a protocol's version or a TLS parameter (ALPN, cipher, SNI as a host)
 pkg/agent/proxy/proxy.go | field | zap.String(tlsConn.ConnectionState().NegotiatedProtocol) | 2 | a protocol's version or a TLS parameter (ALPN, cipher, SNI as a host)
 pkg/agent/proxy/proxy.go | field | zap.String(v) | 1 | a value the user gave keploy (a flag, a config key, a path, the app's command), echoed back to them
-pkg/agent/proxy/proxy.go | field | zap.Strings(cfg.NextProtos) | 1 | a protocol's version or a TLS parameter (ALPN, cipher, SNI as a host)
 pkg/agent/proxy/proxy.go | field | zap.Strings(nextProtos) | 2 | a protocol's version or a TLS parameter (ALPN, cipher, SNI as a host)
 pkg/agent/proxy/proxy.go | field | zap.Strings(shapes) | 1 | calls' shapes (models.CallShape and the like), which write every value {}
-pkg/agent/proxy/proxy.go | field | zap.Strings(specCfg.NextProtos) | 1 | a protocol's version or a TLS parameter (ALPN, cipher, SNI as a host)
 pkg/agent/proxy/proxy.go | message | msg | 1 | the message a log helper is given: each of its callers passes one of keploy's literals
 pkg/agent/proxy/realdeps.go | error | zap.Error(err) <- (pkg/agent/containerkey.Keyer).Lookup | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/agent/proxy/realdeps.go | error | zap.Error(err) <- ? | 1 | a dial's error: net's OpError (the addresses and an errno), a timeout, or keploy's own text about the dial
@@ -1267,6 +1263,12 @@ pkg/service/realclient/realclient.go | field | zap.Strings(real) | 1 | a value t
 pkg/service/record/asynchook.go | field | zap.String(base) | 2 | an async lane as the user configured it: its name, its type and its match patterns
 pkg/service/record/asynchook.go | field | zap.String(lane.Name) | 1 | an async lane as the user configured it: its name, its type and its match patterns
 pkg/service/record/asynchook.go | field | zap.String(lane.Type) | 1 | an async lane as the user configured it: its name, its type and its match patterns
+pkg/service/record/ca_reject_warn.go | field | zap.String(next) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/ca_reject_warn.go | field | zap.String(testSetID) | 2 | a test set's or a run's id, which keploy gives it (test-set-N)
+pkg/service/record/ca_reject_warn.go | field | zap.String(to) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
+pkg/service/record/ca_reject_warn.go | field | zap.Strings(c.tests) | 1 | a test case's name, which keploy gives it (test-N)
+pkg/service/record/ca_reject_warn.go | field | zap.Strings(notChecked) | 3 | a test case's name, which keploy gives it (test-N)
+pkg/service/record/ca_reject_warn.go | message | msg | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String("if the client does not trust keploy's CA: " + abandonedLate.NotJudgedRemedy() + ", then re-record") | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(abandonedLate.NotJudgedText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(afterLast.Text()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
@@ -1329,8 +1331,10 @@ pkg/service/record/uijoin_record.go | error | zap.Error(err) <- (pkg/service/rec
 pkg/service/record/uijoin_record.go | field | zap.String(a.CaptureID) | 1 | a field of the UI-join annotation keploy's capture SDK writes: its keys, numbers and the app's origins (a scheme and a host), not a request's content
 pkg/service/record/uijoin_record.go | field | zap.String(testSetID) | 6 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/uijoin_record.go | field | zap.String(uiJoinStorableHint(a)) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/service/record/unreachable_port.go | field | zap.String(tc.Name) | 1 | a test case's name, which keploy gives it (test-N)
+pkg/service/record/unreachable_port.go | field | zap.String(tc.Name) | 2 | a test case's name, which keploy gives it (test-N)
 pkg/service/record/unreachable_port.go | message | fmt.Sprintf("test cases recorded on the app's port %d cannot be replayed at that port from the host: %s", tc.AppPort, reason) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/unreachable_port.go | message | fmt.Sprintf("test cases recorded on the app's port %d cannot be replayed from the host at host port %d, where it is published: %s", tc.AppPort, sentTo, reason) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/unreachable_port.go | message | msg | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/window_mappings.go | error | zap.Error(err) <- (pkg/service/record.MappingDb).UpsertBatch | 1 | the test or mock store's own error reading or writing its files (os's: a path and an errno, or keploy's own text)
 pkg/service/record/window_mappings.go | error | zap.Error(err) <- (pkg/service/record.MappingDb).UpsertWorker | 1 | the test or mock store's own error reading or writing its files (os's: a path and an errno, or keploy's own text)
 pkg/service/record/window_mappings.go | field | zap.String(testSetID) | 6 | a test set's or a run's id, which keploy gives it (test-set-N)
@@ -1369,6 +1373,7 @@ pkg/service/replay/pidmaps.go | field | zap.String(testSetID) | 3 | a test set's
 pkg/service/replay/pidmaps.go | message | msg | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/replay/proven_verdicts.go | field | zap.String(testSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/replay/proven_verdicts.go | field | zap.Strings(shapes) | 1 | calls' shapes (models.CallShape and the like), which write every value {}
+pkg/service/replay/published_ports.go | field | zap.String(testSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/replay/readiness_proven.go | field | zap.String(lastProbe) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/replay/readiness_proven.go | field | zap.String(net.JoinHostPort(p.host, p.port)) | 2 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/service/replay/readiness_proven.go | field | zap.String(p.listeningOn(st)) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations

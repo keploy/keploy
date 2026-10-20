@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -114,7 +115,7 @@ func newCARejectWatch(ctx context.Context, logger *zap.Logger, reader CaptureLos
 	c := &caRejectWatch{logger: logger, reader: reader, ctx: ctx, stall: stall.HangBudget, clock: caReadClock, every: drainProgressEvery}
 	n, _, err := c.boundedRead(ctx)
 	if err != nil {
-		logger.Debug("keploy cannot read its agent's count of failed TLS handshakes; it will not say which test cases a client that rejected keploy's certificate was recorded in", zap.Error(err))
+		logger.Debug("keploy cannot read its agent's count of failed TLS handshakes; it will not say which test cases a client that rejected keploy's certificate was recorded in", logcontent.Error(err))
 		return nil
 	}
 	c.last = n
@@ -259,7 +260,7 @@ func (c *caRejectWatch) readAll() {
 			// Its test cases are the next read's to count.
 			c.pending = append(names, c.pending...)
 			c.logger.Debug("keploy could not read its agent's count of failed TLS handshakes; the next read counts what it missed",
-				zap.Int("testCases", len(names)), zap.Error(err))
+				zap.Int("testCases", len(names)), logcontent.Error(err))
 		case len(names) > 0:
 			grew := growth(c.last, n)
 			c.last = n
