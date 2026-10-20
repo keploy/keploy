@@ -84,6 +84,44 @@ func TestARunsBindingIsEveryTestsUntilTheNextSet(t *testing.T) {
 	}
 }
 
+// namedVar is m with its variable key renamed name.
+func namedVar(m *models.Mock, name string) *models.Mock {
+	m.Spec.Variables = models.MockVariables{name: m.Spec.Variables["key"]}
+	return m
+}
+
+// Before a set's first test, the first test's call in flight (answered in the
+// gap before it, in the scope begun early) and the start-up's call bind in
+// either order. Whichever sends second, as its variable, the live value the
+// other bound as another variable recorded with another value is a miss: the
+// first test never begins with two variables at one live value.
+func TestTheStartUpAndTheFirstTestsCallInFlightKeepTheirValuesApart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, aheadFirst := range []bool{true, false} {
+		boot := namedVar(varMockOf("boot", "/session", "s-rec", false, models.LifetimeSession), "run-session")
+		fetch := namedVar(varMockOf("fetch", "/order", "o-rec", false, models.LifetimePerTest), "order")
+		mm := stagedManager(t, []*models.Mock{fetch}, []*models.Mock{boot})
+		mm.NewVariableSet()
+		mm.ServeExactPool("-", []string{"boot"}, fetch)
+		first, second := "/order", "/session"
+		if !aheadFirst {
+			first, second = second, first
+		}
+		if got := postKey(t, mm, first, "V"); got != `200 {"echo":"V"}` {
+			t.Fatalf("aheadFirst %v: %s was answered %s", aheadFirst, first, got)
+		}
+		if got := postKey(t, mm, second, "V"); strings.HasPrefix(got, "200 ") {
+			t.Fatalf("aheadFirst %v: %s, which sent %s's live value as another variable, was answered %s", aheadFirst, second, first, got)
+		}
+		mm.ServeExactTest("test-1", []*models.Mock{fetch})
+		mm.StartVariables(nil)
+		bound := mm.BoundVariables()
+		if len(bound) != 1 {
+			t.Fatalf("aheadFirst %v: the first test begins with %+v bound; want only what %s bound", aheadFirst, bound, first)
+		}
+	}
+}
+
 // The replay reaches Mock once per test set (Agent.MockOutgoing): under the
 // switch that begins the set's variables, so what the set's start-up binds
 // before its first test is the run's, and the next Mock forgets it. With the

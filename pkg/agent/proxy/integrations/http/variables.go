@@ -620,8 +620,10 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			return nil, p
 		}
 		// Two variables are two values: a value the test bound already, as
-		// another variable recorded with another value, is that one's.
-		others := table.Snapshot()
+		// another variable recorded with another value, is that one's, and
+		// so is one the next test's calls in flight bound while this call
+		// binds the run's (variables.Table.Beside, which the bind checks).
+		others := table.Beside()
 		for _, b := range others {
 			hit.saw[b.Name] = b.Value
 		}
