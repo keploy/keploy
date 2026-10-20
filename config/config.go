@@ -411,8 +411,9 @@ type MockCmd struct {
 	// and never mocked, in record, in judging and in CI, for keploy mock and
 	// keploy test alike (design v14 §4): address entries (localhost:5432,
 	// 10.0.4.7:6379), name entries (auth.example.com:8443) and container
-	// entries (container:redis). Read only under the proven switch
-	// (KEPLOY_PROVEN=1); without it the key is ignored.
+	// entries (container:redis). Read only under the proven model (on by
+	// default on Linux, KEPLOY_PROVEN=1 elsewhere); with it off
+	// (KEPLOY_PROVEN=0, or unset on Windows and macOS) the key is ignored.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" mapstructure:"real"`
 }
 

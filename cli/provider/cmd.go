@@ -1229,8 +1229,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	// A KEPLOY_PROVEN keploy cannot read would otherwise mean "off" without a
-	// word, and run a staging lane on the old paths. Checked after the logger
+	// A KEPLOY_PROVEN keploy cannot read would otherwise mean the platform's
+	// default without a word (on on Linux, off on Windows and macOS), whichever
+	// side the user meant: KEPLOY_PROVEN=off would run the proven model on
+	// Linux. Checked after the logger
 	// moved to stderr for machine-readable output, so the refusal never lands
 	// in a document. Not for the agent: its switch comes from its --proven flag
 	// alone, and its own environment is ignored (see the agent arm below).
@@ -1317,8 +1319,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	// Under the proven switch a deleted setting's flag is unknown, and its
 	// keploy.yml key is ignored, with one notice (U18, deleted.go). Not for
-	// the agent: its CLI forwards no deleted flag. The refusal is a usage
-	// error (exit 8), as cobra's own unknown flag is.
+	// the agent: the user gives it no flag, and the CLI that starts it passes
+	// --disable-mapping=<the CLI's own value> on every start
+	// (pkg/platform/docker, pkg/platform/http), which the agent takes as given:
+	// refused there, as a deleted flag is whatever its value, every agent
+	// would fail to start. The refusal is a usage error (exit 8), as cobra's
+	// own unknown flag is.
 	if cmd.Name() != "agent" {
 		if err := c.checkDeletedSettings(cmd); err != nil {
 			utils.LogError(c.logger, err, "refusing a deleted flag")
