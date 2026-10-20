@@ -74,6 +74,11 @@ testdata
 # in-place YAML encoder must write them byte for byte as EncodeMock did.
 !pkg/platform/yaml/mockdb/testdata/
 !pkg/platform/yaml/mockdb/testdata/**
+# The log-content guard's allowlist (the places a value reaches a log line
+# ungated that carry no content, with why) and the fixture its scan is held
+# to (tests/logcontent).
+!tests/logcontent/testdata/
+!tests/logcontent/testdata/**
 
 #Ignore the c and header files
 *.c
