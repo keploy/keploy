@@ -534,6 +534,9 @@ func bestKey(header string, noise map[string][]string) string {
 const nextStepRefused = "edit the test case's placeholder as the reason says, then run keploy test again"
 
 // refusalError is why a refused test case fails, as its log line says it.
+// A refusal's why can quote the test case's own value (urlDelimiter's names
+// the recorded value), so the line logs it as logcontent.Error does; the set's
+// load (logTemplateCheck) names each refusal's place and placeholder.
 func refusalError(fs []templates.Refusal) error {
 	msgs := make([]string, 0, len(fs))
 	for _, f := range fs {
@@ -548,7 +551,7 @@ func refusalError(fs []templates.Refusal) error {
 // sent and nothing compared, so the result holds no comparison: no status,
 // header or body row, and no category but the refusal's.
 func (r *Replayer) failRefusedTest(ctx context.Context, testRunID, testSetID string, tc *models.TestCase, refusals []templates.Refusal) error {
-	utils.LogError(r.logger, refusalError(refusals), "failed the test without sending it",
+	utils.LogContentError(r.logger, refusalError(refusals), "failed the test without sending it",
 		zap.String("testcase", tc.Name),
 		zap.String("next_step", nextStepRefused))
 	res := r.refusedResult(testSetID, tc, reportRefusals(refusals), models.TemplateVariable)

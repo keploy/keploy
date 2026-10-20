@@ -353,7 +353,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
 						logcontent.String("diff", report.Diff),
-						zap.String("next_step", report.NextSteps))
+						// The next step can name the call's path whole
+						// (sessionCallHint's pathPrefix), and a path can hold
+						// the application's value; the report keeps it.
+						logcontent.String("next_step", report.NextSteps))
 				}
 
 				// On-miss policy (keploy mock replay --on-miss): passthrough or

@@ -300,3 +300,26 @@ type sendingHook struct {
 func (h *sendingHook) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 	return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{APITimeout: 3})
 }
+
+// A test case refused when its set loaded fails unsent, and its refusal's
+// why can quote the test case's own value (a URL part's recorded value that
+// holds a delimiter). The line that fails it logs the refusals without it,
+// unless KEPLOY_LOG_CONTENT is set; its report keeps the why whole, whatever
+// the switch says.
+func TestFailRefusedTest_TheRefusalIsLoggedWithoutTheValueItQuotes(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		db := &prReportDB{}
+		r := &Replayer{logger: logger, config: &config.Config{}, reportDB: db}
+		why := "the URL is read by its parts, and the recorded value \"" + canary + "/x\" holds \"/\", which delimits a path segment: no answer can hold it there"
+		tc := &models.TestCase{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://api.test/a"}}
+		refused := []templates.Refusal{{TestCase: "test-1", Where: "response header Location", Placeholder: "{{string .id}}", Why: why}}
+		if err := r.failRefusedTest(context.Background(), "test-run-0", "test-set-0", tc, refused); err != nil {
+			t.Fatal(err)
+		}
+		logtest.Check(t, logs, canary, on, "failed the test without sending it")
+		if len(db.results) != 1 || len(db.results[0].TemplateFailures) != 1 || !strings.Contains(db.results[0].TemplateFailures[0].Why, why) {
+			t.Fatalf("the report does not keep the refusal's why whole: %+v", db.results)
+		}
+	})
+}

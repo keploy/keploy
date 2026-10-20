@@ -5402,7 +5402,10 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", r.NextSteps),
+			// An HTTP miss's next step can name the call's path whole (the
+			// pathPrefix of the session call to declare), and a path can hold
+			// the application's value (/reset/<token>); the report keeps it.
+			logcontent.String("next_step", r.NextSteps),
 		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss

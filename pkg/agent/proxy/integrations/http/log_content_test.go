@@ -117,6 +117,31 @@ func TestDecodeHTTP_AMissedCallsDiffCarriesNoValue(t *testing.T) {
 	})
 }
 
+// A miss of a recording that states its mocks' lifetimes gets a next step
+// that names the call's path whole (sessionCallHint: the pathPrefix to
+// declare), and a path can hold the application's value (/reset/<token>).
+// The miss's line logs that next step without it, unless KEPLOY_LOG_CONTENT
+// is set; the report keeps it whole.
+func TestDecodeHTTP_AMissedCallsNextStepCarriesNoPath(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	const pathCanary = canary + "-path"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		closest := learnRecorded("mock-closest", 0, "GET", "http://api.test/reset/recorded-token", "", nil, `{"ok":true}`)
+		closest.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+		call := "GET /reset/" + pathCanary + " HTTP/1.1\r\nHost: api.test\r\n\r\n"
+		app, done := decodeLogged(t, logger, call, &mockMemDb{mocks: []*models.Mock{closest}})
+		_ = readUntil(app, noMockAnswer, 2*time.Second)
+		wantMockMiss(t, done)
+		const msg = "no matching http mock found for outgoing request"
+		logtest.Check(t, logs, pathCanary, on, msg)
+		next := fmt.Sprint(logs.FilterMessage(msg).All()[0].ContextMap()["next_step"])
+		if on && !strings.Contains(next, "sessionCalls: [{host: \"api.test\", method: \"GET\", pathPrefix: \"/reset/"+pathCanary+"\"}]") {
+			t.Fatalf("precondition: the next step names no session call for the path: %s", next)
+		}
+	})
+}
+
 // A request's metadata names its method, host and path, not its query's
 // values, unless KEPLOY_LOG_CONTENT is set.
 func TestDecodeHTTP_ARequestsMetadataCarriesNoQuery(t *testing.T) {

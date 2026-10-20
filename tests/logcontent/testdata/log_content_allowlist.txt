@@ -290,7 +290,6 @@ pkg/agent/proxy/integrations/http/decode.go | field | zap.String(matched) | 1 | 
 pkg/agent/proxy/integrations/http/decode.go | field | zap.String(report.ClosestMock) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/decode.go | field | zap.String(report.Destination) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/integrations/http/decode.go | field | zap.String(report.MatchPhase) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/agent/proxy/integrations/http/decode.go | field | zap.String(report.NextSteps) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/integrations/http/decode.go | field | zap.String(report.Protocol) | 1 | a protocol's name for a message kind, a command, a phase, an auth plugin or a packet type: a word from the protocol's closed set, or a Go type's name
 pkg/agent/proxy/integrations/http/decode.go | field | zap.String(served) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/integrations/http/decode.go | message | msg | 1 | the message a log helper is given: each of its callers passes one of keploy's literals
@@ -485,7 +484,6 @@ pkg/agent/proxy/proxy.go | field | zap.String(r.ClosestMock) | 1 | mocks' names,
 pkg/agent/proxy/proxy.go | field | zap.String(r.Destination) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | field | zap.String(r.DestinationScope) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/proxy.go | field | zap.String(r.MatchPhase) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/agent/proxy/proxy.go | field | zap.String(r.NextSteps) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/agent/proxy/proxy.go | field | zap.String(r.Protocol) | 1 | a protocol's name for a message kind, a command, a phase, an auth plugin or a packet type: a word from the protocol's closed set, or a Go type's name
 pkg/agent/proxy/proxy.go | field | zap.String(sni) | 1 | a DNS name the app resolved and its query type: a host, which a URL's shape keeps too (logurl)
 pkg/agent/proxy/proxy.go | field | zap.String(sniHost) | 1 | a DNS name the app resolved and its query type: a host, which a URL's shape keeps too (logurl)
@@ -1491,7 +1489,7 @@ pkg/service/replay/replay.go | sugar | sugar.Infoln(models.HighlightPassingStrin
 pkg/service/replay/skip_reason.go | field | zap.String(reason) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/replay/skip_reason.go | field | zap.String(testCaseID) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/replay/skip_reason.go | field | zap.String(testSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
-pkg/service/replay/templates.go | errors.New | errors.New("refused when the test set loaded: " + strings.Join(msgs, "; ")) | 1 | a test case's name, a placeholder's text ({{.key}}) and where it sits: the template's names, not the values it renders
+pkg/service/replay/templates.go | errors.New | errors.New("refused when the test set loaded: " + strings.Join(msgs, "; ")) | 1 | content: a refusal's why, which can quote the test case's recorded value (urlDelimiter names it); every line that logs the error gates it
 pkg/service/replay/templates.go | field | zap.String(c.Key) | 1 | names keploy gives: a mock's, a test case's or a test set's
 pkg/service/replay/templates.go | field | zap.String(c.Where) | 2 | a variable's place (body.<path>, header.<name>): where in a request keploy's templating looks, not a value
 pkg/service/replay/templates.go | field | zap.String(entry) | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic

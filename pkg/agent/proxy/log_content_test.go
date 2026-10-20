@@ -49,6 +49,23 @@ func TestSendMockNotFoundError_TheMissLineCarriesNoValueTheCallSent(t *testing.T
 	})
 }
 
+// An HTTP miss's next step can name the call's path whole: the HTTP parser
+// writes the session call to declare, pathPrefix included, into it when the
+// recording states its mocks' lifetimes. The one miss line logs that next
+// step without it, unless KEPLOY_LOG_CONTENT is set.
+func TestSendMockNotFoundError_TheMissLinesNextStepCarriesNoPath(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		p := &Proxy{logger: logger, errChannel: make(chan error, 4)}
+		miss := &models.MockMismatchReport{Protocol: "HTTP", Destination: "api.test:443", ClosestMock: "mock-0",
+			ActualSummary: "GET /reset/{}", MatchPhase: models.MatchPhaseExhausted,
+			NextSteps: `Request structure changed since recording. Each test is served the HTTP calls it recorded. ` +
+				`(sessionCalls: [{host: "api.test", method: "GET", pathPrefix: "/reset/` + canary + `"}])`}
+		p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, miss))
+		logtest.Check(t, logs, canary, on, "mock mismatch: no matching mock for outgoing call")
+	})
+}
+
 // The misses a set's first test discards are named by their shapes, unless
 // KEPLOY_LOG_CONTENT is set.
 func TestCaptureWindow_TheDiscardedMissesAreNamedWithoutTheValuesTheySent(t *testing.T) {
