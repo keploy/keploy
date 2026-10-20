@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,17 @@ import (
 // for its exit on events, a kill only when it made no progress on its way
 // out, and the kill is said) and starts it again (StartComposeApp), while the
 // agent and the app's dependencies run on.
+//
+// The app's container is the one compose made for the app's service in the
+// project of keploy's agent (composeAppContainer), not the one a name reaches
+// (P101-b-n).
+
+// The labels compose puts on each container it makes for a service.
+const (
+	composeProjectLabelKey = "com.docker.compose.project"
+	composeServiceLabelKey = "com.docker.compose.service"
+	composeOneOffLabelKey  = "com.docker.compose.oneoff"
+)
 
 // composeAppState is what keploy knows of a compose app's container.
 type composeAppState struct {
@@ -47,6 +59,119 @@ type composeAppState struct {
 	// halted is how the app's container exited when keploy had not asked
 	// it to (watchComposeApp); nil while it has not.
 	halted atomic.Pointer[composeHalt]
+	// project is the app's compose project, kept once read
+	// (composeAppProject); nil while it has not been. Each run reads it
+	// afresh.
+	project atomic.Pointer[string]
+}
+
+// THE APP'S CONTAINER IS THE ONE COMPOSE MADE FOR THE APP'S SERVICE (P101-b-n).
+//
+// keploy is given the app by a name (--container-name), which its setup finds
+// in the compose file as a service's container_name or as the service's key
+// (findContainerInServices). The key names no container: compose names a
+// service's container <project>-<service>-<n> unless it sets container_name.
+// And a name can reach a container that is not the app's: another stack's
+// with that name, or one whose ID begins with it (the daemon takes a unique
+// ID prefix for a name). keploy's stop at a set's end, read by that name,
+// found no container and took that for an app it had stopped already, so the
+// set's end was read with the app running and a call it made after the read
+// was judged by no one, while the set passed; keploy record's stop missed it
+// the same way, so its recording lacked the app's shutdown too. Or keploy
+// interrupted the other container in the app's place, or took its exit for
+// the app's halt.
+//
+// So keploy stops, starts and watches the container compose made for the
+// app's service (composeService, the service keploy's setup wired to its
+// agent) in the project of keploy's agent, as compose labels them. The
+// agent's container is named by keploy, one per run, so its compose label is
+// the project the up ran. A service with no such container, or with several
+// (a scaled service: keploy stops one app), and a project keploy cannot read,
+// are errors, which leave the set's end unread rather than read with the app
+// running. With no service known (keploy did not set the compose file up), it
+// is the name, as before.
+
+// composeAppProject is the app's compose project: the compose label on
+// keploy's agent's container (compose's own, in-process or not), kept once
+// read; "" while it cannot be read. The inspect is bounded only as a hang
+// guard (utils.StopStallBudget), as the stop's other calls to the daemon are.
+func (a *App) composeAppProject(ctx context.Context) string {
+	if p := a.composeApp.project.Load(); p != nil {
+		return *p
+	}
+	ictx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
+	p := a.composeProjectLabelOf(ictx, a.keployContainer)
+	cancel()
+	if p != "" {
+		a.composeApp.project.Store(&p)
+	}
+	return p
+}
+
+// composeAppContainer is the ID of the app's container: the one compose made
+// for the app's service in the app's project (composeAppProject), one-offs
+// (`compose run`) aside. With no service known, it is the name keploy was
+// given, as before. The list is bounded only as a hang guard, as
+// composeAppProject's inspect is.
+func (a *App) composeAppContainer(ctx context.Context) (string, error) {
+	if a.composeService == "" {
+		return a.container, nil
+	}
+	project := a.composeAppProject(ctx)
+	if project == "" {
+		return "", fmt.Errorf("keploy could not read the compose project of keploy's agent's container %q, so it cannot tell which container is the application's", a.keployContainer)
+	}
+	lctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
+	list, err := a.docker.ContainerList(lctx, container.ListOptions{All: true, Filters: filters.NewArgs(
+		filters.Arg("label", composeProjectLabelKey+"="+project),
+		filters.Arg("label", composeServiceLabelKey+"="+a.composeService),
+	)})
+	cancel()
+	if err != nil {
+		return "", fmt.Errorf("keploy could not list the containers of the application's service %q in compose project %q: %w", a.composeService, project, err)
+	}
+	var ids []string
+	for _, c := range list {
+		if !isComposeOneOffLabel(c.Labels) {
+			ids = append(ids, c.ID)
+		}
+	}
+	switch len(ids) {
+	case 1:
+		return ids[0], nil
+	case 0:
+		return "", fmt.Errorf("compose project %q has no container of the application's service %q", project, a.composeService)
+	}
+	return "", fmt.Errorf("the application's service %q runs %d containers in compose project %q; keploy stops and starts one application", a.composeService, len(ids), project)
+}
+
+// isComposeOneOffLabel reports whether labels are those of a one-off
+// container compose made (`compose run`): not the app keploy runs.
+func isComposeOneOffLabel(labels map[string]string) bool {
+	return strings.EqualFold(labels[composeOneOffLabelKey], "true")
+}
+
+// isComposeAppEvent reports whether m, an event the watch asked for, is of
+// the app's container (composeAppContainer), told from the labels the event
+// carries: of the app's service, in the app's project, not a one-off. With no
+// service known, the watch asked for the container by its name. A project
+// keploy cannot read takes no event for the app's: the stop at the set's end
+// reads the app's container itself.
+func (a *App) isComposeAppEvent(ctx context.Context, m events.Message) bool {
+	if a.composeService == "" {
+		return true
+	}
+	attrs := m.Actor.Attributes
+	if attrs[composeServiceLabelKey] != a.composeService || isComposeOneOffLabel(attrs) {
+		return false
+	}
+	project := a.composeAppProject(ctx)
+	if project == "" {
+		a.logger.Debug("keploy could not read the application's compose project; an exit of its service's container is not taken for the application's",
+			zap.String("container", m.Actor.ID))
+		return false
+	}
+	return attrs[composeProjectLabelKey] == project
 }
 
 // composeHalt is an exit of the app's container keploy did not ask for.
@@ -82,7 +207,10 @@ func composeStopsTheApp() bool {
 // is kept (composeApp.halted) and end is called, once, to end the run. The
 // stream is the daemon's own events, from the moment the watch begins; a
 // stream that breaks is asked for again from the last event it gave, so no
-// exit is missed.
+// exit is missed. It is of the containers of the app's service, as compose
+// labels them (composeAppDieFilter): the app's container does not exist yet
+// when the watch begins, and its name is compose's; the app's is told among
+// them by their labels (isComposeAppEvent).
 func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -91,12 +219,8 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 		since := time.Now()
 		for wctx.Err() == nil {
 			msgs, errs := a.docker.Events(wctx, events.ListOptions{
-				Since: fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
-				Filters: filters.NewArgs(
-					filters.Arg("type", string(events.ContainerEventType)),
-					filters.Arg("container", a.container),
-					filters.Arg("event", string(events.ActionDie)),
-				),
+				Since:   fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
+				Filters: a.composeAppDieFilter(),
 			})
 		stream:
 			for {
@@ -135,9 +259,31 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 	}
 }
 
-// composeAppDied reports whether m, a die event of the app's container, is
-// an exit keploy did not ask for, keeping it if so.
+// composeAppDieFilter is what the watch asks the daemon for: the die events
+// of the containers of the app's service, or, with no service known, of the
+// container keploy was given by name, as before.
+func (a *App) composeAppDieFilter() filters.Args {
+	args := filters.NewArgs(
+		filters.Arg("type", string(events.ContainerEventType)),
+		filters.Arg("event", string(events.ActionDie)),
+	)
+	if a.composeService != "" {
+		args.Add("label", composeServiceLabelKey+"="+a.composeService)
+	} else {
+		args.Add("container", a.container)
+	}
+	return args
+}
+
+// composeAppDied reports whether m, a die event of a container of the app's
+// service, is an exit of the app's container keploy did not ask for, keeping
+// it if so.
 func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
+	// Told before the stop lock, from the event's own labels: an exit that is
+	// not the app's container's has nothing to decide.
+	if !a.isComposeAppEvent(ctx, m) {
+		return false
+	}
 	// Decided under stopMu, as keploy's stops and starts of the container
 	// are made: a stop is either not begun (the exit is a halt) or through
 	// (stopping says the exit was keploy's), and a start either not begun or
@@ -147,9 +293,14 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	a.composeApp.stopMu.Lock()
 	defer a.composeApp.stopMu.Unlock()
 	// An event of a run of the container that keploy has started again since
-	// is not this run's end.
+	// is not this run's end. The container read is the one that died, by
+	// the ID the event gives.
+	ref := a.container
+	if a.composeService != "" && m.Actor.ID != "" {
+		ref = m.Actor.ID
+	}
 	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
-	info, err := a.docker.ContainerInspect(ictx, a.container)
+	info, err := a.docker.ContainerInspect(ictx, ref)
 	icancel()
 	if err == nil && info.ContainerJSONBase != nil && info.State != nil && info.State.Running {
 		return false
@@ -164,7 +315,7 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	}
 	a.composeApp.halted.Store(&composeHalt{exitCode: code})
 	a.logger.Info("the application's container exited, and keploy had not stopped it: ending the run",
-		zap.String("container", a.container), zap.Int("exitCode", code))
+		zap.String("container", a.container), zap.String("id", m.Actor.ID), zap.Int("exitCode", code))
 	return true
 }
 
@@ -265,9 +416,13 @@ func (a *App) composeAwaitTeardown(ctx context.Context, halt <-chan struct{}, en
 // one compose only created (an up that failed leaves it so), nor one that
 // runs, nor one that cannot be read.
 func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
+	id, err := a.composeAppContainer(ctx)
+	if err != nil {
+		return composeHalt{}, false
+	}
 	ictx, cancel := context.WithTimeout(ctx, dockerInspectBudget)
 	defer cancel()
-	info, err := a.docker.ContainerInspect(ictx, a.container)
+	info, err := a.docker.ContainerInspect(ictx, id)
 	if err != nil || info.ContainerJSONBase == nil || info.State == nil || info.State.Running {
 		return composeHalt{}, false
 	}
@@ -284,9 +439,15 @@ func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
 // captured, and goes when that drain is through (its grace under keploy record
 // is 24 h, a bound on an agent that never goes, not when one does), as it did
 // under the abort. `compose up` then returns, its containers gone.
-// It is false when it could not tell or list the project.
+// It is false when it could not tell or list the project. The project is
+// the app's (composeAppProject), not the label of the container a name
+// reaches, which can be another stack's; with no service known, that label,
+// as before.
 func (a *App) stopComposeProject(ctx context.Context) bool {
-	project := a.composeProjectLabel(ctx)
+	project := a.composeAppProject(ctx)
+	if project == "" && a.composeService == "" {
+		project = a.composeProjectLabel(ctx)
+	}
 	if project == "" {
 		a.logger.Warn("keploy could not tell the application's compose project; taking it down instead",
 			zap.String("container", a.container))
@@ -325,7 +486,8 @@ func (a *App) composeAppHalt() *composeHalt {
 
 // StopComposeApp stops the app's container of a compose stack, under the
 // proven switch, its stack running on (keploy's agent among it): SIGINT to the
-// container, then a wait for it to stop on the stop's events, as a docker run
+// container compose made for the app's service (composeAppContainer), then a
+// wait for it to stop on the stop's events, as a docker run
 // app's stop waits (stopDockerRunByEvents): the daemon's word, or its main
 // process exiting (its pidfd), which a starved daemon is slow to report. It
 // kills only when the container's processes made no progress on its way out
@@ -361,7 +523,11 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	}
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	w := a.watchContainer(wctx, a.container)
+	id, err := a.composeAppContainer(wctx)
+	if err != nil {
+		return "", fmt.Errorf("keploy could not tell which container is the application's, to stop it: %w", err)
+	}
+	w := a.watchContainer(wctx, id)
 	defer w.release()
 	if !w.running {
 		if w.seen && !wasStopping {
@@ -374,8 +540,8 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	}
 	a.composeApp.stopping.Store(true)
 	// Asked for before the interrupt: an exit before it is still seen.
-	daemonSaid, waitErr := a.docker.ContainerWait(wctx, a.container, container.WaitConditionNotRunning)
-	if err := a.signalComposeApp(wctx, "SIGINT"); err != nil {
+	daemonSaid, waitErr := a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)
+	if err := a.signalComposeApp(wctx, id, "SIGINT"); err != nil {
 		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
 			return "", nil
 		}
@@ -415,7 +581,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 		}
 	}
 	a.logger.Warn("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
-	if err := a.signalComposeApp(wctx, "SIGKILL"); err != nil {
+	if err := a.signalComposeApp(wctx, id, "SIGKILL"); err != nil {
 		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
 			// It had stopped, or was gone, by the kill: no kill reached it.
 			return "", nil
@@ -431,13 +597,13 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	return killed, nil
 }
 
-// signalComposeApp sends signal to the app's container. The call is bounded
-// only as a hang guard (utils.StopStallBudget): a daemon that never answers
-// cannot hold the stop for good.
-func (a *App) signalComposeApp(ctx context.Context, signal string) error {
+// signalComposeApp sends signal to the app's container, id. The call is
+// bounded only as a hang guard (utils.StopStallBudget): a daemon that never
+// answers cannot hold the stop for good.
+func (a *App) signalComposeApp(ctx context.Context, id, signal string) error {
 	kctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
 	defer cancel()
-	return a.docker.ContainerKill(kctx, a.container, signal)
+	return a.docker.ContainerKill(kctx, id, signal)
 }
 
 // StartComposeApp starts the app's container of a compose stack again, under
@@ -449,11 +615,15 @@ func (a *App) StartComposeApp(ctx context.Context) error {
 	// apart by the container running once it is through.
 	a.composeApp.stopMu.Lock()
 	defer a.composeApp.stopMu.Unlock()
+	id, err := a.composeAppContainer(ctx)
+	if err != nil {
+		return fmt.Errorf("keploy could not tell which container is the application's, to start it again: %w", err)
+	}
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's
 	// calls are: a wedged daemon cannot hold the set for good.
 	sctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
 	defer cancel()
-	if err := a.docker.ContainerStart(sctx, a.container, container.StartOptions{}); err != nil {
+	if err := a.docker.ContainerStart(sctx, id, container.StartOptions{}); err != nil {
 		return fmt.Errorf("keploy could not start the application's container %q again: %w", a.container, err)
 	}
 	a.composeApp.stopping.Store(false)
