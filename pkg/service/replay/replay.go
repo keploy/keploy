@@ -5707,19 +5707,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// recording stays as recorded for a round that can.
 	//
 	// Nor is anything kept of a set the round did not judge (P056-h), as
-	// the prune below is held for it: its verdict, which judging reads, is
-	// not there to stand for what it learned. An agent started again
-	// mid-set holds none of the earlier places the one before served, so a
-	// value that flowed from one is learned as noise; a run that stopped
-	// part-way learned on tests it never judged; a set whose every test is
-	// ignored (IGNORED, below) verified nothing.
+	// the prune below is held for it: a verdict for each of its tests, which
+	// judging reads, is not there to stand for what it learned. An agent
+	// started again mid-set holds none of the earlier places the one before
+	// served, so a value that flowed from one is learned as noise; a run
+	// that stopped part-way, PASSED or FAILED so far, learned on tests it
+	// never judged; an ignored test, or one the run did not select, verified
+	// nothing of what was learned while the set ran.
 	if r.learning() && r.instrument {
 		if unchecked != "" {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
-		} else if !judgedSet(testSetStatus, everyTestIgnored(testSetStatus, success, failure, obsolete, ignored)) {
-			r.logger.Warn("keploy did not keep what this full round of the record learned: the test-set has no verdict, so nothing judged what it learned; its recording stays as recorded, for a round that judges it",
+		} else if !judgedSet(testSetStatus, testNames(testCases), testCaseResults, resultsComplete) {
+			r.logger.Warn("keploy did not keep what this full round of the record learned: the test-set, or one of its tests, has no verdict, so nothing judged what it learned; its recording stays as recorded, for a round that judges it",
 				zap.String("testSetID", testSetID),
 				zap.String("status", string(testSetStatus)))
 		} else if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
