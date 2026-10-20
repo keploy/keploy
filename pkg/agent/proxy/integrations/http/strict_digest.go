@@ -99,7 +99,9 @@ func recordedRequestDigest(m *models.Mock, n strictNoise) requestDigest {
 }
 
 // requestDigestOf names what a request digest reads besides the request:
-// keploy.yml's noise n (integrations.ElsewhereQuery's DigestOf).
+// keploy.yml's noise n (integrations.ElsewhereQuery's DigestOf), with its url
+// noise patterns in the order masking applies them (NewRequestNoise keeps one
+// order under the switch).
 func requestDigestOf(n strictNoise) string {
 	var b strings.Builder
 	b.WriteString("http-request\x00")

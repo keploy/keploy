@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	yamlLib "gopkg.in/yaml.v3"
@@ -152,5 +154,44 @@ func TestANoBodyResponseKeepsItsContentLength(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Under the proven switch keploy.yml's url noise comes in one order on every
+// call (NewRequestNoise). Masking applies the patterns in turn, so where two
+// overlap their order decides what is compared: in a map's order, new per
+// call, one call fit its recording and the same call next did not. And the
+// lookup of a recording made elsewhere keeps the staged recordings' digests
+// under the patterns in their order (requestDigestOf): each order a call came
+// with digested every staged recording again.
+func TestRequestNoiseKeepsOneURLNoiseOrderUnderTheSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	// a+ first masks /v1/ab and /v1/aab alike (each to the placeholder and
+	// a b); ab first masks /v1/ab whole and /v1/aab but for its first a.
+	opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{
+		"url": {`a+`: {}, `ab`: {}, `/v9/c[0-9]+`: {}, `/v9/d[0-9]+`: {}, `/v9/e[0-9]+`: {}},
+	}}
+	const host = "api.test"
+	rec := onHost("rec", "/v1/ab", host)
+	db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{rec}}
+	ctx := context.Background()
+	var order []string
+	digestOf, fits := map[string]bool{}, map[bool]int{}
+	for i := 0; i < 200; i++ {
+		rn := NewRequestNoise(h.Logger, opts)
+		if i == 0 {
+			order = rn.URL
+		} else if !reflect.DeepEqual(rn.URL, order) {
+			t.Fatalf("call %d read the url noise as %q, call 0 as %q", i, rn.URL, order)
+		}
+		digestOf[requestDigestOf(h.newLearnNoise(opts, rn).strict)] = true
+		fits[notOwnedRecording(ctx, getTo("/v1/aab", host), db, h.newStrictNoise(rn.Header, rn.Body, rn.URL)) == rec]++
+	}
+	if len(digestOf) != 1 {
+		t.Fatalf("one keploy.yml named %d digest tables over 200 calls", len(digestOf))
+	}
+	if len(fits) != 1 {
+		t.Fatalf("one call fit its recording on %d calls of 200 and not on %d", fits[true], fits[false])
 	}
 }

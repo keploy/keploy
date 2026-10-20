@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -631,12 +632,24 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 	// segment in both the mock and request paths (see MatchURLPath). The
 	// value slice is unused — like requestbody, matching is by pattern, not
 	// by a value-regex — so an entry is presence-only.
+	//
+	// Under the proven switch the patterns come in one order, sorted, on
+	// every call. Masking applies them in turn (maskURLNoise), so where two
+	// overlap their order decides what is compared; and a lookup of a
+	// recording made elsewhere keeps the staged recordings' digests under
+	// the patterns in their order (requestDigestOf). In the map's order,
+	// new on each call, one call's verdict could differ from the next's,
+	// and each order seen digested every staged recording again. With the
+	// switch off they keep the map's order, as before.
 	var urlNoise []string
 	if opts.NoiseConfig != nil {
 		if un, ok := opts.NoiseConfig["url"]; ok {
 			urlNoise = make([]string, 0, len(un))
 			for k := range un {
 				urlNoise = append(urlNoise, k)
+			}
+			if provenswitch.On() {
+				sort.Strings(urlNoise)
 			}
 		}
 	}

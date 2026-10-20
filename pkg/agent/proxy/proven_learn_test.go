@@ -1269,6 +1269,58 @@ func TestALearnStepLooksUpARecordingMadeElsewhereWithoutComparingEveryOne(t *tes
 	}
 }
 
+// keploy.yml's url noise of several patterns keeps one digest table for the
+// staging: each staged recording is digested once whatever the order of the
+// patterns (a map's), as with none. The patterns are applied in turn, and a
+// digest is kept under them in their order (requestDigestOf), so they come
+// in one order on every call: in the map's, new per call, every staged
+// recording was digested, and kept, again for each order a call came with.
+func TestALearnStepDigestsEachStagedRecordingOnceWhateverItsURLNoise(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 1000)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	body := func(id int, ts string) string { return fmt.Sprintf(`{"id":%d,"ts":"%s"}`, id, ts) }
+	const others, calls = 200, 30
+	var all, own []*models.Mock
+	for j := 0; j < others; j++ {
+		m := r3Mock(fmt.Sprintf("other-%d", j), now.Add(time.Duration(j)*time.Microsecond), "POST", "/v1/orders", body(100000+j, "2024-01-01T00:00:00Z"), `{"ok":true}`)
+		m.DeriveLifetime()
+		all = append(all, m)
+	}
+	for i := 0; i < calls; i++ {
+		m := r3Mock(fmt.Sprintf("own-%d", i), now.Add(time.Second+time.Duration(i)*time.Millisecond), "POST", "/v1/orders", body(i, "2024-01-01T00:00:00Z"), `{"ok":true}`)
+		m.DeriveLifetime()
+		all = append(all, m)
+		own = append(own, m)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+		{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	store := &comparingStore{MockManager: mm}
+	mm.ServeExactTest("test-b", own)
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{
+		"url": {`/v9/a[0-9]+`: {}, `/v9/b[0-9]+`: {}, `/v9/c[0-9]+`: {}, `/v9/d[0-9]+`: {}, `/v9/e[0-9]+`: {}},
+	}}
+	post := func(b string) string {
+		return fmt.Sprintf("POST /v1/orders HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(b), b)
+	}
+	for i := 0; i < calls; i++ {
+		if code, _ := r3Send(t, p, store, opts, post(body(i, "2026-10-20T00:00:00Z"))); code != http.StatusOK {
+			t.Fatalf("drifted call %d: %d", i, code)
+		}
+	}
+	if d, staged := store.digested.Load(), int64(len(all)); d == 0 || d > staged {
+		t.Fatalf("%d digests computed for %d staged recordings over %d calls; want each recording's once", d, staged, calls)
+	}
+}
+
 // The lookup of a recording made elsewhere reads every part of a request, not
 // its body alone: with hundreds of other tests' recordings of the very GET
 // operation staged, whose bodies are all empty, a drifted call of the open
