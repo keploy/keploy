@@ -315,6 +315,18 @@ func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
 // exactView returns the view exact serving shows, nil when it is off.
 func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 
+// InPoolSlice reports whether the mock named name is in the claim key's pool
+// slice served now (ServeExactPool); known is false while exact serving is off,
+// a test is open, or no slice is served (integrations.PoolSlice).
+func (m *MockManager) InPoolSlice(name string) (in, known bool) {
+	v := m.exactView()
+	if v == nil || v.test != "" || v.pool == nil {
+		return false, false
+	}
+	_, in = v.pool[name]
+	return in, true
+}
+
 // ExactServing reports whether the manager serves each test exactly its own
 // mocks (KEPLOY_PROVEN, S12): every read shows one view, which changes as a
 // test begins and ends, and a consume the view refuses returns false. A

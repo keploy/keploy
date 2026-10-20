@@ -21,9 +21,10 @@ import (
 // TestClock is an optional extension of AgentHooks, for a build that freezes
 // the clock of the run's processes. Under the proven switch, a replay moves
 // that clock to each test's recorded begin while the test is open, and back
-// to the run's start time when it ends (design v14 §3.4): a test sees the
-// instant its recording saw, whatever ran before it. The start time is the
-// anchor SetFreezeAnchor gave the build.
+// to the clock outside tests when it ends (design v14 §3.4): a test sees the
+// instant its recording saw, whatever ran before it. The clock outside tests
+// is the run's start time, the anchor SetFreezeAnchor gave the build, or
+// real time under a claim whose tests all run on it (RealOutsideClock).
 //
 // The agent calls both under its clock lock, one move at a time; an
 // implementation must not call back into the agent.
@@ -32,7 +33,7 @@ type TestClock interface {
 	// recording. A zero at (a recording made before keploy kept it) keeps the
 	// run's start time.
 	BeginTestClock(ctx context.Context, test string, at time.Time) error
-	// EndTestClock moves the run's clock back to its start time.
+	// EndTestClock moves the run's clock back to the clock outside tests.
 	EndTestClock(ctx context.Context, test string) error
 }
 
@@ -40,11 +41,29 @@ type TestClock interface {
 // put the run's clock on real time while a test is open: a test whose
 // recording lists a mock.real destination runs on the real clock, in every
 // replay (design v14 §3.4, F3), since the real dependency answers at real
-// time. EndTestClock moves the clock back to the run's start time after it,
-// as after any test. The agent calls it under its clock lock, as it calls
-// BeginTestClock.
+// time. EndTestClock moves the clock back to the clock outside tests after
+// it, as after any test (RealOutsideClock). The agent calls it under its
+// clock lock, as it calls BeginTestClock.
 type RealTestClock interface {
 	BeginRealTestClock(ctx context.Context, test string) error
+}
+
+// RealOutsideClock is an optional extension of RealTestClock, for a build
+// that can keep the run's clock on real time outside tests too. A claim whose
+// key's recorded tests all run on the real clock (realKey) puts the clock
+// outside tests on real time, until a claim of another key puts it back at
+// the run's start time: what the key's process does before, between and
+// after its tests (a Playwright spec's beforeAll, a Go package's setup) runs
+// on the timeline its tests run on, as in their recording, where all of it
+// ran on real time. A value it sets there with a lifetime (a cookie's
+// Max-Age, a token's expiry) then holds in the tests, which run hours or days
+// after the recording's start time. A key with a test that runs at its
+// recorded begin keeps the start time, and so does a key no recorded test
+// carries (a worker's own claim). Unless a test holds the clock, it moves
+// there at once; EndTestClock moves back there. The agent calls it under its
+// clock lock.
+type RealOutsideClock interface {
+	OutsideTestClock(ctx context.Context, real bool) error
 }
 
 // TimeFiler is an optional extension of AgentHooks: the clock record the
@@ -77,6 +96,13 @@ var ErrNoTestClock = errors.New("this keploy agent freezes the run's clock but c
 // would run at its recorded begin against a dependency that answers at real
 // time.
 var ErrNoRealTestClock = errors.New("this keploy agent freezes the run's clock but cannot put it on real time for a test that uses mock.real")
+
+// ErrNoRealOutsideClock is claimTestClock's refusal of a claim whose key's
+// tests all run on the real clock when the build freezes the run's clock but
+// cannot keep it on real time outside them (RealOutsideClock): what the key
+// does outside its tests would run at the start time, hours or days before
+// its tests.
+var ErrNoRealOutsideClock = errors.New("this keploy agent freezes the run's clock but cannot keep it on real time outside tests that use mock.real")
 
 // SetTestBegins installs when each test of the replayed recording began, by
 // test name, and the mock.real destinations each test's recording lists
@@ -307,16 +333,111 @@ func workerGone(pid int, start string) bool {
 	return now != start
 }
 
+// claimTestClock sets the run's clock outside tests for a claim of key in a
+// replay (RealOutsideClock): real time when every recorded test of key runs
+// on the real clock, the run's start time otherwise. It moves nothing while
+// the clock outside tests stays what it is, so a run with no such key never
+// calls the build. Called under the wire, when no test is open.
+func (a *Agent) claimTestClock(ctx context.Context, key string) error {
+	c, ok := testClock()
+	if !ok {
+		return nil
+	}
+	real := a.realKey(key)
+	a.clockMu.Lock()
+	defer a.clockMu.Unlock()
+	if real == a.clockOutsideReal {
+		return nil
+	}
+	oc, ok := c.(RealOutsideClock)
+	if !ok {
+		if TimeFile() == "" {
+			return nil
+		}
+		return ErrNoRealOutsideClock
+	}
+	if err := oc.OutsideTestClock(ctx, real); err != nil {
+		return err
+	}
+	a.clockOutsideReal = real
+	return nil
+}
+
+// realKey reports whether every test of the replayed recording that the
+// claim's key names (its ID's path is key, models.TestID) lists a mock.real
+// destination, and at least one does. The recording's tests are those of the
+// scope table and of the begins.
+func (a *Agent) realKey(key string) bool {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	real := false
+	for id, dests := range a.testReal {
+		if len(dests) > 0 && keyNames(key, testPath(id)) {
+			real = true
+			break
+		}
+	}
+	if !real {
+		return false
+	}
+	atBegin := func(id string) bool { return keyNames(key, testPath(id)) && len(a.testReal[id]) == 0 }
+	for id := range a.scopeTable {
+		if atBegin(id) {
+			return false
+		}
+	}
+	for id := range a.testBegins {
+		if atBegin(id) {
+			return false
+		}
+	}
+	return true
+}
+
+// keyNames reports whether a claim of key covers the tests whose ID's path is
+// path: the key is that path (a test file, a package), or a part of it, below
+// it (path/<part>...: a harness that claims each describe group of a test file
+// on its own, so its beforeAll's calls are that group's).
+func keyNames(key, path string) bool {
+	return path != "" && (key == path || strings.HasPrefix(key, path+"/"))
+}
+
+// testPath is the path of a test's ID ([project::]path::name, models.TestID):
+// the part before its last "::", which always ends the path, without the
+// project; "" for a bare name.
+func testPath(id string) string {
+	i := strings.LastIndex(id, "::")
+	if i < 0 {
+		return ""
+	}
+	p := id[:i]
+	if j := strings.LastIndex(p, "::"); j >= 0 {
+		p = p[j+2:]
+	}
+	return p
+}
+
 // releaseTestClock moves the run's clock back to its start time when a move
-// is in force, for a new session, and frees it: one section of the clock's
-// lock, so a late begin of the previous session cannot slip in between. A
-// clock that cannot move back stays marked moved, so the next try moves it
-// again.
+// is in force, or the clock outside tests is real time, for a new session,
+// and frees it: one section of the clock's lock, so a late begin of the
+// previous session cannot slip in between. A clock that cannot move back
+// stays marked moved, so the next try moves it again.
 func (a *Agent) releaseTestClock(ctx context.Context) error {
 	c, ok := testClock()
 	a.clockMu.Lock()
 	defer a.clockMu.Unlock()
 	a.clockHeld, a.clockHeldStart = scopeKey{}, ""
+	if a.clockOutsideReal {
+		// The new session's clock outside tests is its start time until a
+		// claim says otherwise.
+		if oc, isOutside := c.(RealOutsideClock); ok && isOutside {
+			if err := oc.OutsideTestClock(ctx, false); err != nil {
+				a.logger.Error("keploy could not move the run's clock outside tests back to its start time", zap.Error(err))
+				return err
+			}
+		}
+		a.clockOutsideReal = false
+	}
 	moved := a.clockMoved
 	if moved.name == "" || !ok {
 		a.clockMoved = scopeKey{}

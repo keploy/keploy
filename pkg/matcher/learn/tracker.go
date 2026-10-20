@@ -51,6 +51,42 @@ type Tracker struct {
 	// mock and place), and taken the names given.
 	names map[string]string
 	taken map[string]bool
+	// minted are the values the running test made (Minted), in the order
+	// they first appeared.
+	minted []Minted
+	// keyed: the run is under a claim (NewKey, the proven wire's claim of a
+	// test process): its calls outside every test are its claim key's, and
+	// what they sent first is an earlier place of the key's tests. The rest
+	// is the current key's, kept across its tests: the exchanges the learn
+	// step served outside every test (leaf by leaf), the values they made,
+	// the names of the key's variables (by where each is bound) and those
+	// names taken, and every name a test's variable took in the key.
+	keyed         bool
+	outsideServed []Earlier
+	outsideMinted []Minted
+	outsideNames  map[string]string
+	outsideTaken  map[string]bool
+	keyTaken      map[string]bool
+}
+
+// Minted is a value the running test made: one that first appears in the
+// test's recording at a request place of one of the test's own HTTP calls,
+// where F saw it drift (a name or an id the test, or the app, mints anew on
+// every run). The learn step learns it there as noise or as an echo of that
+// call; a later call of the same test whose recorded answer holds it whole
+// makes it a variable of the whole test: bound where it first appeared, and
+// answered there with this run's value.
+type Minted struct {
+	// Mock and Place are where it first appeared: the mock's name, and the
+	// variable place (VarPlace) of its request that held it whole.
+	Mock, Place string
+	// Recorded is its value in the recording, Live the value F saw there.
+	Recorded, Live string
+	// Type is the type of the request leaf that held it: String or Number.
+	Type Type
+	// Outside: a call of the claim key made outside every test made it
+	// (Tracker.MintOutside); it is the key's, not one test's.
+	Outside bool
 }
 
 // NewTracker makes a tracker with no test open.
@@ -70,6 +106,9 @@ func (t *Tracker) NewSet() {
 	t.mu.Lock()
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.outside, t.outsideKept = nil, nil
+	t.minted = nil
+	t.keyed = false
+	t.forgetKey()
 	t.open = false
 	t.mu.Unlock()
 }
@@ -93,8 +132,44 @@ func (t *Tracker) Begin() {
 	t.answered = nil
 	t.drifts = NewDriftCache()
 	t.names, t.taken = nil, nil
+	t.minted = nil
 	t.open = true
 	t.mu.Unlock()
+}
+
+// Mint notes a value test number n made (Minted): nothing when that test has
+// ended, for a value of another type than a string or a number, for an empty
+// one, or when the test made a value recorded equal already (the first place
+// it appeared at binds it).
+func (t *Tracker) Mint(n uint64, m Minted) {
+	if t == nil || m.Recorded == "" || m.Live == "" || m.Type != String && m.Type != Number {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.epoch != n || !t.open {
+		return
+	}
+	for _, have := range t.minted {
+		if have.Recorded == m.Recorded {
+			return
+		}
+	}
+	t.minted = append(t.minted, m)
+}
+
+// Minted are the values test number n made so far (Mint), in the order they
+// first appeared; none once that test has ended.
+func (t *Tracker) Minted(n uint64) []Minted {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.epoch != n {
+		return nil
+	}
+	return append([]Minted(nil), t.minted...)
 }
 
 // End ends the running test: until the next Begin no test is open, and a
@@ -283,10 +358,120 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	}
 	base := varName(place)
 	name = base
-	for i := 2; t.taken[name] || reserved[name]; i++ {
+	for i := 2; t.taken[name] || reserved[name] || t.outsideTaken[name]; i++ {
 		name = base + "-" + strconv.Itoa(i)
 	}
 	t.names[key], t.taken[name] = name, true
+	if t.keyTaken != nil {
+		t.keyTaken[name] = true
+	}
+	return name, true
+}
+
+// NewKey begins a claim (the proven wire's claim of a test process, under
+// key): what the previous claim's calls made outside every test is no earlier
+// place of this claim's tests (a test process run again runs its beforeAll
+// again, and mints its values anew). From now on a call outside every test is
+// this claim's (ServedOutside, MintOutside, OutsideName).
+func (t *Tracker) NewKey(string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.keyed = true
+	t.forgetKey()
+	t.mu.Unlock()
+}
+
+// forgetKey drops the claim key's state. The caller holds mu.
+func (t *Tracker) forgetKey() {
+	t.outsideServed, t.outsideMinted = nil, nil
+	t.outsideNames, t.outsideTaken, t.keyTaken = map[string]string{}, map[string]bool{}, map[string]bool{}
+}
+
+// Keyed reports whether the run is under a claim (NewKey).
+func (t *Tracker) Keyed() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.keyed
+}
+
+// ServedOutside adds an exchange the learn step served while no test was
+// open to the claim key's (Earlier.Outside): an earlier place of every later
+// test of the key. Nothing while a test is open, or with no claim.
+func (t *Tracker) ServedOutside(e Earlier) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.keyed || t.open {
+		return
+	}
+	e.Outside, e.Own = true, false
+	t.outsideServed = append(t.outsideServed, e)
+}
+
+// MintOutside notes a value a call of the claim key made outside every test
+// (Minted.Outside), as Mint does a test's.
+func (t *Tracker) MintOutside(m Minted) {
+	if t == nil || m.Recorded == "" || m.Live == "" || m.Type != String && m.Type != Number {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.keyed || t.open {
+		return
+	}
+	for _, have := range t.outsideMinted {
+		if have.Recorded == m.Recorded {
+			return
+		}
+	}
+	m.Outside = true
+	t.outsideMinted = append(t.outsideMinted, m)
+}
+
+// Outside are the claim key's exchanges served outside every test and the
+// values they made, in order; none with no claim.
+func (t *Tracker) Outside() ([]Earlier, []Minted) {
+	if t == nil {
+		return nil, nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.keyed {
+		return nil, nil
+	}
+	return append([]Earlier(nil), t.outsideServed...), append([]Minted(nil), t.outsideMinted...)
+}
+
+// OutsideName is the name of the claim key's variable bound at place of
+// mock (a call made outside every test): the same for every call of the key
+// that carries it, and no other variable's in the key (a test's variables
+// avoid it too: Name). ok is false with no claim.
+func (t *Tracker) OutsideName(mock, place string) (name string, ok bool) {
+	if t == nil {
+		return "", false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.keyed {
+		return "", false
+	}
+	key := mock + "\x00" + place
+	if name, ok := t.outsideNames[key]; ok {
+		return name, true
+	}
+	base := varName(place)
+	name = base
+	for i := 2; t.outsideTaken[name] || t.keyTaken[name] || t.taken[name]; i++ {
+		name = base + "-" + strconv.Itoa(i)
+	}
+	t.outsideNames[key], t.outsideTaken[name] = name, true
 	return name, true
 }
 

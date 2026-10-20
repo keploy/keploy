@@ -106,6 +106,23 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+
+	// exactBody: MarshalYAML writes Body as it is (WithExactBody).
+	exactBody bool
+}
+
+// WithExactBody is h written with its body exactly as it is: MarshalYAML
+// writes a streamed body (NDJSON, SSE, streamed text) as the chunks of a
+// stream only when they give the body back byte for byte, and as the flat
+// string otherwise. The chunks keep a stream's frames, not its bytes: they
+// drop the newline after its last line, its blank lines and its CRs, and an
+// SSE field's space after the colon. A mock's writer uses it: a replay serves
+// a mock's body as it was recorded, and the app reads a stream by its bytes,
+// a line once its newline comes. A test case keeps the chunked form, whose
+// frames its stream comparison reads.
+func (h HTTPResp) WithExactBody() HTTPResp {
+	h.exactBody = true
+	return h
 }
 
 // MongoDB's BSON DateTime is an int64 count of milliseconds, so the default

@@ -11,6 +11,12 @@
 //   - a variable: the value appeared earlier in the test's recording, and is
 //     followed from that earlier place (bound there, asserted here).
 //
+// A value learned as noise or as an echo at a request place of one of the
+// test's own calls is one the test made there (Minted). When a later call of
+// the same test answers it whole (a list that holds the name the test just
+// created), it is the test's variable: bound where it first appeared, and
+// answered at the later call with the live value.
+//
 // Echoes and variables are written as the mock's variables
 // (models.MockVariables), which every replay after F follows (the HTTP
 // parser's variable pass).

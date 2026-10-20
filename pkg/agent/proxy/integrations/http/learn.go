@@ -452,6 +452,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	}
 	windows, _ := mockDb.(integrations.TestWindows)
 	inFlight, _ := mockDb.(integrations.InFlightOwner)
+	slice, _ := mockDb.(integrations.PoolSlice)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -467,7 +468,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight)
+		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight, slice)
 		// A protocol-phase mock (a handshake, a token fetch) is never a
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
@@ -539,12 +540,22 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 //     (IsFiltered, set from the test's mapping when the replay stages it),
 //     and the session mocks recorded inside its window. With no recorded
 //     windows any other session mock is no one's to pair.
-func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner) (own, pool bool) {
+func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner, slice integrations.PoolSlice) (own, pool bool) {
 	if owner != nil {
 		// A view with no test open in it cannot say whose a mock is: none
 		// is paired.
 		owned, known := owner.OwnedByTest(m)
 		return known && owned, known && !owned
+	}
+	if slice != nil {
+		// Under a claim, while no test is open, the store serves the claim
+		// key's own slice of the pool (its calls outside every test, by the
+		// record's mapping): a mock of that slice is the pool's, decided by
+		// the key, not by a recorded time (keploy mock replay seeds no
+		// recorded test window).
+		if in, known := slice.InPoolSlice(m.Name); known && in {
+			return false, true
+		}
 	}
 	at := m.Spec.ReqTimestampMock
 	if windows != nil {
@@ -730,6 +741,23 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		// left (MockManager.observeServed), so it is in one of the two.
 		test, earlier, served, before := tracker.Test()
 		windows, _ := mockDb.(integrations.TestWindows)
+		// Under a claim, in a full record (which re-makes the pool), what
+		// the claim key's calls made outside every test sent first (a
+		// Playwright beforeAll seeding a name) is the key's: an earlier
+		// place of the key's tests, followed as a variable of the key. A
+		// call outside every test reads only the key's earlier calls.
+		keyScope := opts.LearnPool && tracker.Keyed()
+		outsideCall := keyScope && !tracker.Open()
+		var outsideMinted []learn.Minted
+		if keyScope {
+			var outsideEarlier []learn.Earlier
+			outsideEarlier, outsideMinted = tracker.Outside()
+			if outsideCall {
+				earlier = outsideEarlier
+			} else {
+				earlier = append(append([]learn.Earlier(nil), earlier...), outsideEarlier...)
+			}
+		}
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -757,11 +785,33 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if own && !tracker.Answer(test, picked) {
 				continue
 			}
-			// The claim reads the scope's owners (ownedKey), as the
-			// matcher's does: a stated recording no open test owns is a
-			// reusable one, kept and served in turn (cursorPick), never
-			// used up.
-			out, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+			// A recorded answer of the test's own that holds a value the
+			// test made earlier is answered with this run's value, and what
+			// that is learned (mintedAnswers).
+			var minted pairing
+			switch {
+			case own:
+				minted = h.mintedAnswers(tracker, test, picked, pairing{}, reservedNames(givenBindings(mockDb)), append(tracker.Minted(test), outsideMinted...))
+			case outsideCall:
+				minted = h.mintedAnswers(tracker, test, picked, pairing{}, nil, outsideMinted)
+			}
+			var (
+				out     *models.Mock
+				claimed bool
+				why     string
+			)
+			if len(minted.vars) > 0 {
+				out, claimed, why, err = h.claimLearned(ctx, picked, mockDb, minted, sc.owner())
+			}
+			if len(minted.vars) == 0 || why != "" {
+				// The claim reads the scope's owners (ownedKey), as the
+				// matcher's does: a stated recording no open test owns is a
+				// reusable one, kept and served in turn (cursorPick), never
+				// used up.
+				out, claimed, err = h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+			} else if claimed {
+				h.logMintedAnswers(picked, minted.vars)
+			}
 			if err != nil || !claimed {
 				if own {
 					tracker.Unanswer(test, picked.Name)
@@ -774,6 +824,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			commit()
 			if e, ok := n.servedExchange(picked, nil, rec, recordedParts(picked), liveShape, live, out, own); ok {
 				tracker.Served(test, e)
+				if outsideCall {
+					tracker.ServedOutside(e)
+				}
 			}
 			return out, nil, nil
 
@@ -802,10 +855,17 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			learned := learn.Classify(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp))
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			given := givenBindings(mockDb)
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, outsideCall, learned, earlier, given)
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
+			switch {
+			case own:
+				plan = h.mintedAnswers(tracker, test, m, plan, reservedNames(given), append(tracker.Minted(test), outsideMinted...))
+			case outsideCall:
+				plan = h.mintedAnswers(tracker, test, m, plan, nil, outsideMinted)
 			}
 			if own && !tracker.Answer(test, m) {
 				continue
@@ -828,8 +888,21 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
+			h.logMintedAnswers(m, plan.vars)
+			// What this call's request carried first in the test, a later
+			// call's answer may hold (mintedAnswers).
+			for _, v := range plan.minted {
+				if outsideCall {
+					tracker.MintOutside(v)
+					continue
+				}
+				tracker.Mint(test, v)
+			}
 			if e, ok := n.servedExchange(m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
 				tracker.Served(test, e)
+				if outsideCall {
+					tracker.ServedOutside(e)
+				}
 			}
 			return out, nil, nil
 		}
@@ -844,12 +917,15 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 // pairing is what the learn step learned on a paired mock: its noise, its
 // variables (an echo included), the variables of the test bound at an earlier
 // mock that it uses (binds, by that mock), and each variable's value in this
-// call, for its answer.
+// call, for its answer. minted are the values this call's request carried
+// first in the test (learned here as noise or as an echo), which the tracker
+// keeps once the call is answered (learn.Tracker.Mint).
 type pairing struct {
 	noise  map[string][]string
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
+	minted []learn.Minted
 }
 
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
@@ -870,13 +946,20 @@ type pairing struct {
 //     here under the key's name with no bind, whatever else Classify found:
 //     the test case is earlier than any call it makes. Its name is the key's
 //     alone in the test: no other variable takes it.
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
+//   - A value learned as noise or as an echo at a variable place of one of
+//     the test's own calls first appeared there: the test made it (minted).
+//     It stays what it was learned as until a later call of the test answers
+//     it whole (mintedAnswers): then it is the test's variable, bound here.
+//   - outside: m is a pool call of the claim key, made while no test is open,
+//     in a full record (learnMatch). What it sends first is the key's
+//     (minted, Outside): a later call of the key, outside every test or in
+//     one of its tests, that sends it again uses the key's variable, bound
+//     here, and one that answers it answers it. Its names are the key's
+//     (learn.Tracker.OutsideName).
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own, outside bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
-	reserved := make(map[string]bool, len(given))
-	for _, g := range given {
-		reserved[g.Name] = true
-	}
+	reserved := reservedNames(given)
 	answers := func(l learn.Learned, from []learn.Leaf) []string {
 		var out []string
 		for _, a := range from {
@@ -911,6 +994,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		switch l.Kind {
 		case learn.KindNoise:
 			p.noise[r.Path] = []string{}
+			if place, ok := learn.VarPlace(r, jsonReq); ok && (own || outside) {
+				p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: place, Recorded: r.Value, Live: l.Live.Value, Type: r.Type, Outside: outside})
+			}
 
 		case learn.KindVariable:
 			from := l.From
@@ -921,7 +1007,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
 			case !from.Whole || from.Var == "":
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
-			case !own || !from.Own:
+			case !(own || outside) || !from.Own && !from.Outside:
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 			}
 			use, ok := learn.VarPlace(r, jsonReq)
@@ -932,11 +1018,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
+			if from.Outside {
+				// The claim key's variable, bound at a call made outside
+				// every test.
+				name, ok = tracker.OutsideName(from.Mock, from.Var)
+			}
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			v := p.vars[name]
-			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
+			v.Recorded, v.Use, v.Outside = r.Value, appendNew(v.Use, use), from.Outside
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			p.vars[name] = v
 			b := p.binds[from.Mock]
@@ -945,10 +1036,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.binds[from.Mock] = b
 			}
 			bv := b[name]
-			bv.Recorded, bv.Bind = r.Value, from.Var
+			bv.Recorded, bv.Bind, bv.Outside = r.Value, from.Var, from.Outside
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
-			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
+			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var, Outside: from.Outside}
 
 		case learn.KindUnaccounted:
 			return p, r.Path + " changed, and " + l.Why
@@ -979,15 +1070,147 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				continue
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
+			if outside {
+				// Named as the key's: a later call of the key that answers
+				// it makes it the key's variable (mintedAnswers).
+				name, ok = tracker.OutsideName(m.Name, place)
+			}
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			echoed[r.Value] = name
 			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
+			if own || outside {
+				p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: place, Recorded: r.Value, Live: l.Live.Value, Type: r.Type, Outside: outside})
+			}
 		}
 	}
 	return p, ""
+}
+
+// reservedNames are the names of the values the test case gave (its template
+// keys): no other variable of the test takes one.
+func reservedNames(given []variables.Binding) map[string]bool {
+	reserved := make(map[string]bool, len(given))
+	for _, g := range given {
+		reserved[g.Name] = true
+	}
+	return reserved
+}
+
+// mintedAnswers is p, what the learn step learned on the test's own mock m
+// in test number n (or on a pool call of the claim key made outside every
+// test), with the answer places of m's recorded answer that hold a value of
+// minted, made at an earlier call (learn.Minted: the test's, or the claim
+// key's): a scalar of the answer's JSON body that holds the value whole, of
+// the type the request carried it as (a string or a number), so never a word
+// of a longer text, an object key or a header. Each makes the value a
+// variable (the test's, or the key's: Outside): answered here with this
+// run's value, and bound where it first appeared (the bind rides on m's
+// state onto that call, which turns what was learned there, noise or an
+// echo, into the variable's bind). An answer place a variable of p answers
+// already is left to it. When m's answer cannot hold them all, p is returned
+// as it was: the call is answered as it was before.
+func (h *HTTP) mintedAnswers(tracker *learn.Tracker, test uint64, m *models.Mock, p pairing, reserved map[string]bool, minted []learn.Minted) pairing {
+	if len(minted) == 0 {
+		return p
+	}
+	// A big answer the disk store keeps apart from its mock (strict mock
+	// windows: proxy.EligibleForResponseSpill) is read loaded, as it is
+	// served: m's own Spec holds no answer then.
+	loaded, err := withResponse(m)
+	if err != nil || loaded.Spec.HTTPResp == nil {
+		return p
+	}
+	taken := map[string]bool{}
+	for _, v := range p.vars {
+		for _, a := range v.Answer {
+			taken[a] = true
+		}
+	}
+	leaves := respLeaves(loaded.Spec.HTTPResp)
+	vars, binds := models.MockVariables{}, map[string]models.MockVariables{}
+	values := make(map[string]variables.Binding, len(p.values))
+	for k, v := range p.values {
+		values[k] = v
+	}
+	for _, v := range minted {
+		if v.Mock == m.Name {
+			// Its own answer: an echo, learned with its request.
+			continue
+		}
+		var at []string
+		for _, a := range leaves {
+			if !strings.HasPrefix(a.Path, "body") || a.Unnamed || a.Type != v.Type || !variables.SameValue(v.Recorded, a.Value, v.Type == learn.Number) {
+				continue
+			}
+			place, ok := learn.VarPlace(a, true)
+			if !ok || taken[place] {
+				continue
+			}
+			taken[place] = true
+			at = append(at, place)
+		}
+		if len(at) == 0 {
+			continue
+		}
+		var name string
+		var ok bool
+		if v.Outside {
+			name, ok = tracker.OutsideName(v.Mock, v.Place)
+		} else {
+			name, ok = tracker.Name(test, v.Mock, v.Place, reserved)
+		}
+		if !ok {
+			// The test ended: nothing more is learned in it.
+			return p
+		}
+		if have, ok := p.vars[name]; ok && (have.Recorded != v.Recorded || have.Outside != v.Outside) {
+			continue
+		}
+		vars[name] = models.MockVariable{Recorded: v.Recorded, Answer: at, Outside: v.Outside}
+		if binds[v.Mock] == nil {
+			binds[v.Mock] = models.MockVariables{}
+		}
+		binds[v.Mock][name] = models.MockVariable{Recorded: v.Recorded, Bind: v.Place, Outside: v.Outside}
+		if _, ok := values[name]; !ok {
+			values[name] = variables.Binding{Name: name, Value: v.Live, Recorded: v.Recorded, Mock: v.Mock, Place: v.Place, Outside: v.Outside}
+		}
+	}
+	if len(vars) == 0 {
+		return p
+	}
+	out := pairing{noise: p.noise, minted: p.minted, vars: mergeVariables(p.vars, vars), binds: mergeBinds(p.binds, binds), values: values}
+	// The answer must hold every variable with this run's value, as the
+	// variable pass answers it in the replays after F.
+	decls, problem := readDecls(&models.Mock{Name: m.Name, Spec: models.MockSpec{Variables: out.vars}})
+	if problem == "" {
+		if _, vp := h.renderAnswers(loaded, &varHit{mock: m, decls: decls, local: out.values}, &variables.Table{}); vp != nil {
+			problem = vp.why
+		}
+	}
+	if problem != "" {
+		h.Logger.Debug("the answer of a later call holds a value the test made, and cannot be answered with this run's value; it is served as recorded",
+			zap.String("mock", m.Name), zap.String("why", problem))
+		return p
+	}
+	return out
+}
+
+// logMintedAnswers says, for a served mock, each answer place of a value the
+// test made that it learned (a variable m answers and whose request places
+// are another call's: mintedAnswers).
+func (h *HTTP) logMintedAnswers(m *models.Mock, vars models.MockVariables) {
+	for name, v := range vars {
+		if v.Bind != "" || len(v.Use) > 0 {
+			continue
+		}
+		for _, a := range v.Answer {
+			h.Logger.Info("learned an answer that holds a value the test made earlier; it is answered with this run's value",
+				zap.String("mock", m.Name), zap.String("field", a), zap.String("variable", name))
+		}
+	}
 }
 
 // givenBindings are the values the running test case's request gave

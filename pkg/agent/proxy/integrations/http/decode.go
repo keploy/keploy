@@ -505,14 +505,35 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	// server's. Those it did not match are sent as recorded.
 	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
 	noBody := responseHasNoBody(method, stub.Spec.HTTPResp.StatusCode)
+	// A response its client left before the end (metaClientLeft) is served
+	// as the client had it: its recorded part, and no end. It is framed so
+	// that it stays open (chunked, with no last chunk; an HTTP/1.0 one by
+	// the connection, which the serving loop keeps open), and the serving
+	// loop then waits on the client, which goes away as it did when it was
+	// recorded.
+	unfinished := stub.Spec.Metadata[metaClientLeft] == "true"
+	http10 := protoMajor == 1 && protoMinor == 0
 	var headers string
 	for key, values := range header {
+		if unfinished && (strings.EqualFold(key, "Content-Length") || strings.EqualFold(key, "Transfer-Encoding")) {
+			continue
+		}
 		if key == "Content-Length" && !noBody {
 			values = []string{strconv.Itoa(len(respBody))}
 		}
 		for _, value := range values {
 			headers += fmt.Sprintf("%s: %s\r\n", key, value)
 		}
+	}
+	if unfinished {
+		if http10 {
+			return []byte(statusLine + headers + "\r\n" + respBody), nil
+		}
+		out := statusLine + headers + "Transfer-Encoding: chunked\r\n\r\n"
+		if respBody != "" {
+			out += fmt.Sprintf("%x\r\n%s\r\n", len(respBody), respBody)
+		}
+		return []byte(out), nil
 	}
 	return []byte(statusLine + headers + "\r\n" + respBody), nil
 }

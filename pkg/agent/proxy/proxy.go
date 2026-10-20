@@ -4369,6 +4369,18 @@ func (p *Proxy) ResetVariables() {
 	}
 }
 
+// BeginClaimVariables begins a claim's scope outside its tests: the
+// variables the previous claim's calls outside every test bound are dropped
+// (variables.Table.StartOutside), and the learn step's record of the key's
+// calls outside its tests starts afresh (learn.Tracker.NewKey). Satisfies the
+// agent's optional ClaimVariables extension interface.
+func (p *Proxy) BeginClaimVariables(key string) {
+	if m := p.getMockManager(); m != nil {
+		m.Variables().StartOutside()
+	}
+	p.learnTracker.NewKey(key)
+}
+
 // StartVariables begins a test's variables with the values its test case's
 // request gave bound (variables.Table.Start). false when the proxy keeps no
 // mock manager to hold them. Satisfies the agent's optional VariableBinder

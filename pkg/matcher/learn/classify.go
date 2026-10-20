@@ -42,8 +42,12 @@ type Earlier struct {
 	At time.Time
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
-	Own  bool
-	Seen []Seen
+	Own bool
+	// Outside: a pool call made outside every test under the claim key the
+	// test runs in (a Playwright beforeAll): its values are the key's, which
+	// the key's tests carry (Tracker.ServedOutside).
+	Outside bool
+	Seen    []Seen
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
@@ -90,6 +94,9 @@ type Place struct {
 	Whole bool
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
+	// Outside: the mock is a call of the claim key made outside every test
+	// (Earlier.Outside).
+	Outside bool
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -948,7 +955,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			}
 			if found, whole := sources(dc.of(s.Leaf.Value, s.Live), v); found {
 				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own}, true
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Outside: e.Outside}, true
 			}
 		}
 	}

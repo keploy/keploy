@@ -175,6 +175,9 @@ type Agent struct {
 	// while the holder's has exited (or its pid is another process's now)
 	// knows the holder's end will never come.
 	clockHeldStart string
+	// clockOutsideReal: the run's clock outside tests is real time, not its
+	// start time, for the current claim's key (claimTestClock).
+	clockOutsideReal bool
 
 	// scope state backs the /agent/scope/* and /agent/mock/stats API that a
 	// user's test runner (pytest / go test / jest / glue-code) calls to mark

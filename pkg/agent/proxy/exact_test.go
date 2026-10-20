@@ -1541,3 +1541,48 @@ func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
 		t.Fatalf("an identical second call in the gap named the next test's call in flight %q, which answered here already", got)
 	}
 }
+
+// A browser's CORS preflight, as the HTTP recorder records it (tagged config,
+// stated session): protocol-phase. Exact serving answers it before the first
+// test, in a test and after it, as often as the browser sends it, through the
+// door the HTTP parser consumes a reusable recording by (UpdateUnFilteredMock),
+// and no test owns it: a test is owed only its own calls, however many
+// preflights its browser sent.
+func TestACORSPreflightIsAnsweredInAndOutOfTestsAsOftenAsAsked(t *testing.T) {
+	pf := exactMock("preflight", 0, models.LifetimeSession)
+	pf.Spec.HTTPReq = &models.HTTPReq{Method: "OPTIONS", URL: "/query",
+		Header: map[string]string{"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST"}}
+	pf.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimeSession}
+	query := httpCall("query", time.Second, "/query")
+	mm := stagedManager(t, nil, []*models.Mock{pf, query})
+
+	answer := func(where string) {
+		t.Helper()
+		for i := 0; i < 3; i++ {
+			reusable, _ := mm.GetSessionMocks()
+			var found *models.Mock
+			for _, mk := range reusable {
+				if mk.Name == "preflight" {
+					found = mk
+				}
+			}
+			if found == nil {
+				t.Fatalf("%s, preflight %d: not in the reusable read %v", where, i+1, exactNames(reusable))
+			}
+			served := *found
+			served.TestModeInfo.SortOrder++
+			if !mm.UpdateUnFilteredMock(found, &served) {
+				t.Fatalf("%s, preflight %d: its consume was refused", where, i+1)
+			}
+		}
+	}
+	mm.ServeExactPool("k", nil)
+	answer("before the first test")
+	mm.ServeExactTest("T", []*models.Mock{query})
+	answer("in the test")
+	if _, consumed, unconsumed, ok := mm.ExactTestOutcome(); !ok || len(consumed) != 0 || strings.Join(unconsumed, ",") != "query" {
+		t.Fatalf("outcome: consumed %v, unconsumed %v; want only the test's own call owed", consumed, unconsumed)
+	}
+	mm.ServeExactPool("k", nil)
+	answer("after the test")
+}

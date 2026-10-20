@@ -781,6 +781,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 				cur, ok := vars(m)[n]
 				if ok {
 					cur.Echo = cur.Echo && b.Echo
+					cur.Outside = cur.Outside || b.Outside
 					if cur.Bind == "" {
 						cur.Bind = b.Bind
 					}

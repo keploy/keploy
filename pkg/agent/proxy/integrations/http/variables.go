@@ -33,10 +33,12 @@ import (
 //     values), the type kept at a noise place. No score, no lenient pass.
 //  2. Its variables must hold. A variable already bound in the test must have
 //     its value at every place of the call (bound once: a binding place
-//     holds it too). One not yet bound is bound here only at its binding
-//     place, to a value that is not empty and is no other variable's; a use
-//     before the call that binds it does not hold. An echo variable belongs
-//     to this call alone.
+//     holds it too). A variable of the claim key (Outside: bound by a call
+//     made outside every test) is read and bound in the key's scope, which
+//     every test of the key reads, instead of the test's. One not yet bound
+//     is bound here only at its binding place, to a value that is not empty
+//     and is no other variable's; a use before the call that binds it does
+//     not hold. An echo variable belongs to this call alone.
 //  3. Among the mocks that fit and hold, the first in record order answers;
 //     reusable recordings of one call answer in record order, each once, then
 //     the last again (served marks, pickHit). It is consumed as any mock, its
@@ -59,9 +61,12 @@ type varDecl struct {
 	name     string
 	recorded string
 	echo     bool
-	bind     *varPlace
-	use      []varPlace
-	answer   []varPlace
+	// outside: the claim key's variable (models.MockVariable.Outside), bound
+	// and read in the key's scope of the table, not the test's.
+	outside bool
+	bind    *varPlace
+	use     []varPlace
+	answer  []varPlace
 }
 
 // requestPlaces is the variable's bind place (first) and uses.
@@ -71,6 +76,15 @@ func (d varDecl) requestPlaces() []varPlace {
 		out = append(out, *d.bind)
 	}
 	return append(out, d.use...)
+}
+
+// lookup is d's binding in force in table: in the claim key's scope for the
+// key's variable, in the test's otherwise.
+func (d varDecl) lookup(table *variables.Table) (variables.Binding, bool) {
+	if d.outside {
+		return table.LookupOutside(d.name)
+	}
+	return table.Lookup(d.name)
 }
 
 // hasVariables reports whether m is served by the variable pass.
@@ -132,7 +146,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, outside: mv.Outside}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -156,6 +170,9 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		}
 		if d.echo && d.bind == nil {
 			return nil, fmt.Sprintf("the echo variable %s has no bind place: an echo is what this call sends", name)
+		}
+		if d.echo && d.outside {
+			return nil, fmt.Sprintf("the echo variable %s is declared the claim key's: an echo is this call's alone", name)
 		}
 		if d.bind == nil && len(d.use) == 0 && len(d.answer) == 0 {
 			return nil, fmt.Sprintf("variable %s names no place", name)
@@ -572,7 +589,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			hit.local[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
 			continue
 		}
-		if bound, ok := table.Lookup(d.name); ok {
+		if bound, ok := d.lookup(table); ok {
 			if !variables.SameValue(bound.Recorded, d.recorded, false) {
 				if bound.Given {
 					// A template key holds one recorded value for the whole
@@ -611,9 +628,13 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
 			return nil, p
 		}
-		// Two variables are two values: a value the test bound already, as
-		// another variable recorded with another value, is that one's.
-		others := table.Snapshot()
+		// Two variables are two values: a value the test (or its claim key)
+		// bound already, as another variable recorded with another value,
+		// is that one's. The key's variable is checked against the key's.
+		others := table.OutsideSnapshot()
+		if !d.outside {
+			others = append(others, table.Snapshot()...)
+		}
 		for _, b := range taken {
 			others = append(others, b)
 		}
@@ -626,7 +647,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 			}
 		}
-		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
+		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Outside: d.outside}
 	}
 	for _, d := range decls {
 		if b, ok := taken[d.name]; ok {
@@ -791,16 +812,16 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 	if resp == nil {
 		return nil, &varProblem{mock: served.Name, why: "it declares answer places but has no recorded response", next: "re-record the test"}
 	}
-	valueOf := func(name string) (variables.Binding, bool) {
-		if b, ok := hit.local[name]; ok {
+	valueOf := func(d varDecl) (variables.Binding, bool) {
+		if b, ok := hit.local[d.name]; ok {
 			return b, true
 		}
 		for _, b := range hit.binds {
-			if b.Name == name {
+			if b.Name == d.name && b.Outside == d.outside {
 				return b, true
 			}
 		}
-		return table.Lookup(name)
+		return d.lookup(table)
 	}
 	header := maps.Clone(resp.Header)
 	var edits []variables.Edit
@@ -809,7 +830,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 		if len(d.answer) == 0 {
 			continue
 		}
-		b, ok := valueOf(d.name)
+		b, ok := valueOf(d)
 		if !ok {
 			// fitVariables leaves no answer without a value; this guards that.
 			return nil, &varProblem{mock: served.Name, name: d.name, why: fmt.Sprintf("it answers variable %s, which no call has bound in this test", d.name), next: "re-record the test"}
@@ -984,7 +1005,7 @@ func routePathPlaces(request *http.Request, closest *models.Mock, pool []*models
 	}
 	if table != nil {
 		bound := map[string]bool{}
-		for _, b := range table.Snapshot() {
+		for _, b := range append(table.Snapshot(), table.OutsideSnapshot()...) {
 			if b.Value != "" {
 				bound[b.Value] = true
 			}

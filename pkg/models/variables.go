@@ -54,6 +54,12 @@ type MockVariable struct {
 	// dependency echoes): bound at Bind for this exchange, answered, and
 	// never asked of another call.
 	Echo bool `json:"echo,omitempty" yaml:"echo,omitempty" bson:"echo,omitempty"`
+	// Outside marks a variable of the claim key, not of one test: a value a
+	// call made outside every test sent first (a Playwright beforeAll that
+	// seeds a name), bound there and holding for every test of the key that
+	// follows, until a new claim begins (a test process run again, which
+	// runs its beforeAll again). Every call that declares it says so.
+	Outside bool `json:"outside,omitempty" yaml:"outside,omitempty" bson:"outside,omitempty"`
 }
 
 // Clone returns a copy of v that shares no map or slice with it; nil for an
@@ -72,8 +78,8 @@ func (v MockVariables) Clone() MockVariables {
 }
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
-// both keeps a's bind and both's uses and answers, and is an echo only when
-// both say so.
+// both keeps a's bind and both's uses and answers, is an echo only when both
+// say so, and is the claim key's (Outside) when either says so.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -91,6 +97,7 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Echo = cur.Echo && v.Echo
+		cur.Outside = cur.Outside || v.Outside
 		out[name] = cur
 	}
 	return out
@@ -151,4 +158,7 @@ type VariableBinding struct {
 	// value), not one the application made: it binds the variable for the
 	// calls that use it, and is never another variable's value.
 	Given bool `json:"given,omitempty" yaml:"given,omitempty"`
+	// Outside marks a variable of the claim key (MockVariable.Outside):
+	// bound by a call made outside every test, for every test of the key.
+	Outside bool `json:"outside,omitempty" yaml:"outside,omitempty"`
 }

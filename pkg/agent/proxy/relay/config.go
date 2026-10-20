@@ -277,6 +277,26 @@ type Config struct {
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
 
+	// OnReceiverGone is told that a direction's stream ends because the peer
+	// its bytes are relayed to went away, before that stream ends (before
+	// the tee closes), on the forwarder that found it:
+	//
+	//   - the write of one of dir's chunks failed (the peer closed or reset
+	//     the connection): the forwarder returns, so that chunk, which the
+	//     tee took, is the stream's last, and undelivered is how many bytes
+	//     at its end the peer did not take. It is told before
+	//     OnMarkMockIncomplete is told of the write error (MarkWriteError);
+	//   - the client reset the connection (its read failed with
+	//     ECONNRESET): the destination's direction (fakeconn.FromDest) is
+	//     told, with undelivered 0, for the relay stops reading the
+	//     destination there.
+	//
+	// So a parser that reaches the end of fakeconn.FromDest's stream can tell
+	// a response the client left before its end from one the server cut or
+	// the capture lost. A chunk the tee refused is not told of: the stream
+	// has a hole there, which the drop reports. Nil is safe.
+	OnReceiverGone func(dir fakeconn.Direction, undelivered int)
+
 	// OnCaptureDesync is invoked at most once per direction, the first time
 	// a chunk is dropped on that tee. It returns whether the hole costs the
 	// owner's recording anything, and the tee warns of the hole only then. An

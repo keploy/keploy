@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
@@ -926,8 +927,15 @@ func (r *Relay) forward(
 						zap.Error(werr),
 					)
 				}
+				// This chunk is the direction's last: the forwarder
+				// returns. Say so first, with what of it the peer never
+				// took, so a parser that reaches the stream's end knows
+				// the peer left there (Config.OnReceiverGone).
+				if teed && r.cfg.OnReceiverGone != nil {
+					r.cfg.OnReceiverGone(dir, n-max(wn, 0))
+				}
 				if r.cfg.OnMarkMockIncomplete != nil {
-					r.cfg.OnMarkMockIncomplete("write_error")
+					r.cfg.OnMarkMockIncomplete(MarkWriteError)
 				}
 				return werr
 			}
@@ -948,6 +956,13 @@ func (r *Relay) forward(
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return io.EOF
+			}
+			// The client reset the connection: the relay stops reading
+			// the destination, whose stream ends here because the client
+			// left (Config.OnReceiverGone). A clean EOF is not that: a
+			// client that half-closes may still read its answer.
+			if dir == fakeconn.FromClient && errors.Is(err, syscall.ECONNRESET) && r.cfg.OnReceiverGone != nil {
+				r.cfg.OnReceiverGone(fakeconn.FromDest, 0)
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause
 			// (and cleared by endPause once the pause lifts) is the
@@ -974,6 +989,11 @@ func (r *Relay) forward(
 		}
 	}
 }
+
+// MarkWriteError is the reason the relay marks a mock incomplete for
+// (Config.OnMarkMockIncomplete) when it could not write bytes on to their
+// peer: the peer did not get them.
+const MarkWriteError = "write_error"
 
 // currentPauseCh snapshots the current pause channel under the mutex.
 // Returns nil if no pause is active. The forwarder uses the result to

@@ -800,10 +800,11 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 // learn step learned onto the mock read from disk: its learned noise, its
 // variables, and binds, the variables other mocks of its test use that are
 // bound at it. It returns what it added, sorted, each as "<path> (noise)",
-// "<place> (variable <name>: bind|use)" or "<place> (echo <name>)". Noise and
-// variables are monotonic (what is on disk stays), with one exception: a
-// place that is a variable's is never noise, so learned noise there is
-// dropped (the learn step may have learned a value as noise at the call
+// "<place> (variable <name>: bind|use)", "<place> (variable <name>:
+// answer)" (of a variable the mock only answers) or "<place> (echo <name>)".
+// Noise and variables are monotonic (what is on disk stays), with one
+// exception: a place that is a variable's is never noise, so learned noise
+// there is dropped (the learn step may have learned a value as noise at the call
 // that first sent it, before a later call showed it flowed on).
 func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
@@ -892,14 +893,16 @@ func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 }
 
 // mergeVariable is two declarations of one variable in one call as one: a
-// bind place from either, every use and answer place of both, and an echo
-// only when both say so (a call another uses the value of is not its echo).
+// bind place from either, every use and answer place of both, an echo only
+// when both say so (a call another uses the value of is not its echo), and
+// the claim key's (Outside) when either says so.
 func mergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
 		a.Recorded, a.Echo = b.Recorded, b.Echo
 	} else {
 		a.Echo = a.Echo && b.Echo
 	}
+	a.Outside = a.Outside || b.Outside
 	if a.Bind == "" {
 		a.Bind = b.Bind
 	}
@@ -942,6 +945,20 @@ func variableAdded(name string, was, next models.MockVariable) []string {
 	for _, u := range next.Use {
 		if !have[u] {
 			out = append(out, u+" (variable "+name+": use)")
+		}
+	}
+	// A call that only answers the variable (another call binds it: a value
+	// the test made, which a later answer holds) is said by its answer
+	// places, so a write that adds nothing else still rewrites the file.
+	if next.Bind == "" && len(next.Use) == 0 {
+		had := map[string]bool{}
+		for _, a := range was.Answer {
+			had[a] = true
+		}
+		for _, a := range next.Answer {
+			if !had[a] {
+				out = append(out, a+" (variable "+name+": answer)")
+			}
 		}
 	}
 	return out

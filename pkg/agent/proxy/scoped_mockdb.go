@@ -561,6 +561,14 @@ func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
 	return false, false
 }
 
+// InPoolSlice forwards integrations.PoolSlice.
+func (s *scopedMockDb) InPoolSlice(name string) (bool, bool) {
+	if p, ok := s.MockMemDb.(integrations.PoolSlice); ok {
+		return p.InPoolSlice(name)
+	}
+	return false, false
+}
+
 // StatementCatalog forwards the staged set's statement catalog: describe-only,
 // the same for every view (it serves no test's answer).
 func (s *scopedMockDb) StatementCatalog(kind models.Kind) []*models.Mock {

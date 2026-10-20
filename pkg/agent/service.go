@@ -475,6 +475,18 @@ type VariableResetter interface {
 	ResetVariables()
 }
 
+// ClaimVariables is the optional extension implemented by proxies that keep
+// the test variables a replay binds and the learn step's tracker. Under the
+// proven switch the agent calls it in a replay when a new claim begins (a
+// test process claims the run, or claims another key): the claim key's
+// variables, bound by its calls made outside every test (a Playwright
+// beforeAll), start afresh (variables.Table.StartOutside), and so does the
+// learn step's record of those calls (learn.Tracker.NewKey). A proxy that
+// lacks it keeps no claim key's variables.
+type ClaimVariables interface {
+	BeginClaimVariables(key string)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back

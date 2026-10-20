@@ -345,11 +345,20 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 					"keploy could not start the calls of "+key+" made outside its tests afresh: "+err.Error(), "check the agent's log")
 			}
+			// So do the variables those calls bind: what the new claim's
+			// beforeAll mints is bound anew, for the key's tests.
+			a.beginClaimVariables(key)
 		}
 		// Calls made from now while no test is open are this key's.
 		if err := a.applyPool(ctx); err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy could not arm the recorded calls of "+key+" made outside its tests: "+err.Error(), "check the agent's log")
+		}
+		// What the key does outside its tests runs on the clock its tests
+		// run on when they all run on real time (RealOutsideClock).
+		if err := a.claimTestClock(ctx, key); err != nil {
+			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+				"keploy could not set the run's clock outside the tests of "+key+": "+err.Error(), "check the agent's log")
 		}
 	}
 	// The clock record the run's processes read: the integration exports it

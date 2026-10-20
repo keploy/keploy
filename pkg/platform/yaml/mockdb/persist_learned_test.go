@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -142,5 +143,137 @@ func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
 	}
 	if want := map[string][]string{"body.key": {}, "body.other": {}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch off: noise written %v, want %v", got, want)
+	}
+}
+
+// A value the test made, learned as noise at the call that first sent it,
+// that a later call's answer holds whole: the later call only answers the
+// variable (its answer places are what is added there), and its bind rides
+// onto the first call, where it replaces the noise. A file that would gain
+// nothing but such an answer is still rewritten.
+func TestPersistLearnedWritesAVariableALaterCallOnlyAnswers(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(f), func(t *testing.T) {
+			dir := t.TempDir()
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", f)
+			ctx := context.Background()
+			set := "test-set-0"
+			if err := ys.InsertMock(ctx, noiseTestMock(`{"input":{"name":"e2e-1"}}`), set); err != nil {
+				t.Fatal(err)
+			}
+			list := noiseTestMock(`{"query":"branches"}`)
+			list.Spec.HTTPResp.Body = `{"branches":[{"name":"main"},{"name":"e2e-1"}]}`
+			if err := ys.InsertMock(ctx, list, set); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			answerOnly := models.MockVariables{"name": {Recorded: "e2e-1", Answer: []string{"body.branches[1].name"}}}
+			states := map[string]models.MockState{
+				"mock-0": {Name: "mock-0", ReqBodyNoise: map[string][]string{"body.input.name": {}}},
+				"mock-1": {Name: "mock-1", Variables: answerOnly,
+					Binds: map[string]models.MockVariables{"mock-0": {"name": {Recorded: "e2e-1", Bind: "body.input.name"}}}},
+			}
+			added, err := ys.PersistLearned(ctx, set, states)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string][]string{
+				"mock-0": {"body.input.name (variable name: bind)"},
+				"mock-1": {"body.branches[1].name (variable name: answer)"},
+			}
+			if !reflect.DeepEqual(added, want) {
+				t.Fatalf("added %v, want %v", added, want)
+			}
+			read := func() map[string]*models.Mock {
+				byName := map[string]*models.Mock{}
+				for _, get := range []func(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error){ys.GetUnFilteredMocks, ys.GetFilteredMocks} {
+					ms, err := get(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, m := range ms {
+						byName[m.Name] = m
+					}
+				}
+				return byName
+			}
+			byName := read()
+			if want := (models.MockVariables{"name": {Recorded: "e2e-1", Bind: "body.input.name"}}); !reflect.DeepEqual(byName["mock-0"].Spec.Variables, want) {
+				t.Fatalf("mock-0's variables %+v, want %+v", byName["mock-0"].Spec.Variables, want)
+			}
+			if len(byName["mock-0"].Spec.ReqBodyNoise) != 0 {
+				t.Fatalf("mock-0's noise %v: the variable's bind place is no noise", byName["mock-0"].Spec.ReqBodyNoise)
+			}
+			if !reflect.DeepEqual(byName["mock-1"].Spec.Variables, answerOnly) {
+				t.Fatalf("mock-1's variables %+v, want %+v", byName["mock-1"].Spec.Variables, answerOnly)
+			}
+
+			// Another answer place alone, on a file that has the bind: still
+			// written.
+			more := models.MockVariables{"name": {Recorded: "e2e-1", Answer: []string{"body.branches[0].name"}}}
+			added, err = ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-1": {Name: "mock-1", Variables: more}})
+			if err != nil || !reflect.DeepEqual(added, map[string][]string{"mock-1": {"body.branches[0].name (variable name: answer)"}}) {
+				t.Fatalf("added %v err %v", added, err)
+			}
+			if got := read()["mock-1"].Spec.Variables["name"].Answer; !reflect.DeepEqual(got, []string{"body.branches[0].name", "body.branches[1].name"}) {
+				t.Fatalf("mock-1's answers %v", got)
+			}
+		})
+	}
+}
+
+// A claim key's variable (Outside) is written as such on every mock that
+// declares it, the pool call's bind included, and read back: the replay
+// binds and reads it in the key's scope. Merged with a declaration that does
+// not say so (the pool call's own echo), it stays the key's.
+func TestPersistLearnedWritesAClaimKeysVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(f), func(t *testing.T) {
+			dir := t.TempDir()
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", f)
+			ctx := context.Background()
+			set := "test-set-0"
+			pool := noiseTestMock(`{"name":"r-1"}`)
+			pool.Spec.HTTPResp.Body = `{"name":"r-1"}`
+			if err := ys.InsertMock(ctx, pool, set); err != nil {
+				t.Fatal(err)
+			}
+			list := noiseTestMock(`{"query":"roles"}`)
+			list.Spec.HTTPResp.Body = `{"roles":["r-1"]}`
+			if err := ys.InsertMock(ctx, list, set); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			states := map[string]models.MockState{
+				"mock-0": {Name: "mock-0", Variables: models.MockVariables{"name": {Recorded: "r-1", Bind: "body.name", Answer: []string{"body.name"}, Echo: true}}},
+				"mock-1": {Name: "mock-1", Variables: models.MockVariables{"name": {Recorded: "r-1", Answer: []string{"body.roles[0]"}, Outside: true}},
+					Binds: map[string]models.MockVariables{"mock-0": {"name": {Recorded: "r-1", Bind: "body.name", Outside: true}}}},
+			}
+			if _, err := ys.PersistLearned(ctx, set, states); err != nil {
+				t.Fatal(err)
+			}
+			byName := map[string]*models.Mock{}
+			for _, get := range []func(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error){ys.GetUnFilteredMocks, ys.GetFilteredMocks} {
+				ms, err := get(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, m := range ms {
+					byName[m.Name] = m
+				}
+			}
+			if want := (models.MockVariables{"name": {Recorded: "r-1", Bind: "body.name", Answer: []string{"body.name"}, Outside: true}}); !reflect.DeepEqual(byName["mock-0"].Spec.Variables, want) {
+				t.Fatalf("the pool call's variables %+v, want %+v", byName["mock-0"].Spec.Variables, want)
+			}
+			if want := states["mock-1"].Variables; !reflect.DeepEqual(byName["mock-1"].Spec.Variables, want) {
+				t.Fatalf("the list's variables %+v, want %+v", byName["mock-1"].Spec.Variables, want)
+			}
+		})
 	}
 }

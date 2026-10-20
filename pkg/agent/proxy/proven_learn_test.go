@@ -710,6 +710,43 @@ func TestALearnStepAProtocolPhaseMockAnswersAgain(t *testing.T) {
 	}
 }
 
+// A browser's CORS preflight, as the HTTP recorder records it (tagged config,
+// stated session), recorded inside the test's window: the learn step answers
+// each of the test's preflights with it, however many the browser sends, and
+// never pairs it: it learns nothing onto it.
+func TestALearnStepACORSPreflightAnswersAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	pf := r3Mock("mock-preflight", now.Add(100*time.Millisecond), "OPTIONS", "/query", "", "")
+	pf.Spec.HTTPReq.Header = map[string]string{"Host": "deps.example", "Origin": "http://localhost:3000",
+		"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}
+	pf.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimeSession}
+	pf.DeriveLifetime()
+	if !pf.IsProtocolPhase() {
+		t.Fatal("precondition: protocol-phase")
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{pf}, nil)
+	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	preflight := "OPTIONS /query HTTP/1.1\r\nHost: deps.example\r\nOrigin: http://localhost:3000\r\n" +
+		"Access-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\n\r\n"
+	for i := 0; i < 3; i++ {
+		if code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, preflight); code != http.StatusOK {
+			misses, _ := p.GetMockErrors(context.Background())
+			t.Fatalf("preflight %d missed: %d %s %+v", i+1, code, got, misses)
+		}
+	}
+	if noise := r3States(mm)["mock-preflight"].ReqBodyNoise; len(noise) != 0 {
+		t.Fatalf("the learn step paired a preflight and learned %v onto it", noise)
+	}
+}
+
 // (Round-8 review.) per-test tier (consumed mocks are deleted), concurrent identical calls,
 // more calls than recordings: each recording answers once, the extra calls
 // miss, and the same-key recording of another endpoint is never paired

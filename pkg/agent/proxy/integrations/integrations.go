@@ -430,6 +430,17 @@ type TestOwnership interface {
 	OwnedByTest(m *models.Mock) (owned, known bool)
 }
 
+// PoolSlice is an optional MockMemDb capability of the proven wire: while no
+// test is open under exact serving, the store serves the claim key's own slice
+// of the pool (its calls outside every test, by the record's mapping:
+// MockManager.ServeExactPool). InPoolSlice says whether the mock named name is
+// in the slice served now; known is false while a test is open or the store
+// serves no slice. It tells the learn step whose a pool mock is by the claim's
+// key, never by a time.
+type PoolSlice interface {
+	InPoolSlice(name string) (in, known bool)
+}
+
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
 // snapshot narrowed to the mocks recorded inside one test window, without
 // walking the rest of it.

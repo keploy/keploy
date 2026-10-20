@@ -9,6 +9,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -111,6 +112,18 @@ func (a *Agent) restartKey(key string) error {
 	names := append([]string(nil), a.proven.pool[key]...)
 	a.provenMu.Unlock()
 	return r.RestartExactKey(key, names)
+}
+
+// beginClaimVariables starts the claim key's variables, those its calls made
+// outside every test bind, afresh on the proxy (coreAgent.ClaimVariables),
+// and the learn step's record of those calls, under the proven switch.
+func (a *Agent) beginClaimVariables(key string) {
+	if !provenswitch.On() {
+		return
+	}
+	if cv, ok := a.Proxy.(coreAgent.ClaimVariables); ok {
+		cv.BeginClaimVariables(key)
+	}
 }
 
 // serveTestExactly opens test id under exact serving: its test mocks, the
