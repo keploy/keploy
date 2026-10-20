@@ -1692,18 +1692,19 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			// Carried across so the CLI rendering can tell an out-of-scope
 			// destination from a drifted request; the two need different
 			// artifacts, not just different hints.
-			DestinationScope: call.DestinationScope,
-			CandidateCount:   call.CandidateCount,
-			FieldDiffs:       call.FieldDiffs,
-			ClosestMockReq:   call.ClosestMockReq,
-			ReceivedReq:      call.ReceivedReq,
-			MissKind:         call.Kind,
-			Recorded:         call.Recorded,
-			Differs:          call.Differs,
-			VariablePlaces:   call.VariablePlaces,
-			NotOwned:         call.NotOwned,
-			Reason:           call.Reason,
-			ContentWithheld:  call.ContentWithheld,
+			DestinationScope:  call.DestinationScope,
+			CandidateCount:    call.CandidateCount,
+			FieldDiffs:        call.FieldDiffs,
+			ClosestMockReq:    call.ClosestMockReq,
+			ReceivedReq:       call.ReceivedReq,
+			MissKind:          call.Kind,
+			Recorded:          call.Recorded,
+			Differs:           call.Differs,
+			VariablePlaces:    call.VariablePlaces,
+			NotOwned:          call.NotOwned,
+			Reason:            call.Reason,
+			ContentWithheld:   call.ContentWithheld,
+			RequestsIdentical: call.RequestsIdentical,
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
