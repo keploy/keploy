@@ -513,7 +513,7 @@ func TestTheAgentDrainsTheHooksReportsBeforeItReadsThem(t *testing.T) {
 // Unix sockets keploy cannot see leave every test not judged, never failed:
 // the replayed test's outcome stands, its window carries unix_unseen.
 func TestUnixSocketsKeployCannotSeeLeaveTestsNotJudged(t *testing.T) {
-	unseen := models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: "no trampoline"}}
+	unseen := models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: "keploy's report stopped: ring broken"}}
 	a, _ := wireAgent(t, models.MODE_TEST)
 	a.Hooks = unixHooks{losses: unseen}
 	claimSelf(t, a)
