@@ -177,6 +177,64 @@ func TestAWithheldCallHolesThePlacesItLearnedSince(t *testing.T) {
 	}
 }
 
+// A miss whose path is not the closest recording's says so in a field diff
+// of the whole path, whose live value is the summary's path. Without
+// content the diff loses its values, and the summary loses the segments the
+// diff finds differ, at the places the two paths line up and past them: the
+// segments the recording has there too are kept, so the report still says
+// which call it was. A report already withheld, at the agent's door or in a
+// report file, keeps the summary its builder made: its diff has no values
+// left to compare, and comparing against none would hole every segment.
+func TestAPathDiffHolesTheSegmentsItFindsDiffer(t *testing.T) {
+	pathDiff := func(recorded, live string) MockFieldDiff {
+		return MockFieldDiff{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: recorded, Actual: live}
+	}
+	for _, c := range []struct {
+		name, summary, recorded, want string
+	}{
+		{"one segment", "GET /api/users/kp-live-id", "/api/users/kp-rec-id", "GET /api/users/{}"},
+		{"the query cut too", "GET /api/users/kp-live-id?x=kp-q", "/api/users/kp-rec-id", "GET /api/users/{}"},
+		{"two segments", "GET /api/kp-live-org/users/kp-live-id", "/api/kp-rec-org/users/kp-rec-id", "GET /api/{}/users/{}"},
+		{"past the recorded end", "GET /api/users/kp-live-id/kp-live-sub", "/api/users", "GET /api/users/{}/{}"},
+		{"shorter than the recording", "GET /api/kp-live-id", "/api/users/kp-rec-id", "GET /api/{}"},
+		{"shifted: what cannot be lined up", "GET /v2/api/users/kp-live-id", "/api/users/kp-rec-id", "GET /{}/{}/{}/{}"},
+		{"no recorded path", "GET /api/kp-live-id", "", "GET /{}/{}"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			call := UnmatchedCall{Protocol: "HTTP", ActualSummary: c.summary,
+				FieldDiffs: []MockFieldDiff{pathDiff(c.recorded, strings.SplitN(strings.TrimPrefix(c.summary, "GET "), "?", 2)[0])}}
+			out := call.WithoutContent()
+			if out.ActualSummary != c.want {
+				t.Errorf("summary %q, want %q", out.ActualSummary, c.want)
+			}
+			if out.FieldDiffs[0] != (MockFieldDiff{Path: PathFieldDiff, Kind: DiffKindValueChanged}) || out.Diff != "path: value changed" {
+				t.Errorf("the path diff is %+v, the diff %q", out.FieldDiffs, out.Diff)
+			}
+			r := MockMismatchReport{Protocol: "HTTP", ActualSummary: c.summary, FieldDiffs: call.FieldDiffs}
+			if got := r.WithoutContent().ActualSummary; got != c.want {
+				t.Errorf("the report's summary %q, want %q", got, c.want)
+			}
+			// At a later door, withheld: kept as made.
+			if again := out.WithoutContent(); again.ActualSummary != c.want {
+				t.Errorf("withheld again, the summary is %q, want %q", again.ActualSummary, c.want)
+			}
+		})
+	}
+	// A diff of any other field is no path's: the summary keeps its path.
+	other := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/users/42",
+		FieldDiffs: []MockFieldDiff{{Path: "body.path", Kind: DiffKindValueChanged, Expected: "/x", Actual: "/y"}}}
+	if got := other.WithoutContent().ActualSummary; got != "GET /api/users/42" {
+		t.Errorf("a body field named path holed the summary: %q", got)
+	}
+	// With the switch on a writer keeps the call whole.
+	t.Cleanup(logcontent.Set(true))
+	on := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/users/kp-live-id",
+		FieldDiffs: []MockFieldDiff{pathDiff("/api/users/kp-rec-id", "/api/users/kp-live-id")}}
+	if got := on.ReportContent(); got.ActualSummary != on.ActualSummary || got.FieldDiffs[0].Actual != "/api/users/kp-live-id" {
+		t.Errorf("with the switch on the call is %+v", got)
+	}
+}
+
 // A report file read with the switch off loses the values of every call it
 // holds, its tests' and its set's, and the report it was read from is left
 // as it was. With the switch on it is read as written.

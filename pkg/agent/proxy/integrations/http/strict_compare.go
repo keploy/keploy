@@ -221,7 +221,7 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 			return nil
 		}
 	}
-	return []strictField{field(valueDiff("path", rec, live))}
+	return []strictField{field(valueDiff(models.PathFieldDiff, rec, live))}
 }
 
 // queryDiffs compares two queries: the same parameters, each with the same
