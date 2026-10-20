@@ -32,16 +32,59 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 	}
 	switch f := mockDb.(type) {
 	case integrations.StagedKeyFinder:
-		path := ""
-		if input.url != nil {
-			path = input.url.Path
-		}
-		target := strings.Join(input.header.Values(amzTargetHeader), ",")
-		f.FindStagedNotOwnedByKeys(models.HTTP, RequestKeysOf(input.method, path, target, n.loose()), match)
+		f.FindStagedNotOwnedByKeys(models.HTTP, callRequestKeys(input, n), match)
 	case integrations.StagedFinder:
 		f.FindStagedNotOwned(models.HTTP, match)
 	}
 	return found
+}
+
+// callRequestKeys are the request keys a live call asks the agent's disk
+// store by (RequestKeysOf), under keploy.yml's noise n.
+func callRequestKeys(input *req, n strictNoise) []string {
+	path := ""
+	if input.url != nil {
+		path = input.url.Path
+	}
+	target := strings.Join(input.header.Values(amzTargetHeader), ",")
+	return RequestKeysOf(input.method, path, target, n.loose())
+}
+
+// elsewhereRecording is, for a request record's full round would pair with a
+// recording of its scope it drifted from, the staged recording the open view
+// does not show that the request is, exactly (strictSame, under keploy.yml's
+// noise n): another test's, any test's with no test open, or a worker-scope
+// one whose place the run has not reached; whether or not a call of the set
+// consumed it or a miss named it (integrations.FindStagedElsewhere). notOwned:
+// no call consumed it and no miss named it, and it is named for this request
+// now (as notOwnedRecording names one). Otherwise the request is that
+// recording once more than it holds. nil for none. Only the recordings whose
+// digest may be the request's are compared (requestDigest).
+func elsewhereRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) (rec *models.Mock, notOwned bool) {
+	live := liveDestination(ctx, input)
+	digest := liveRequestDigest(input, n)
+	matched := map[string]*models.Mock{}
+	q := integrations.ElsewhereQuery{
+		Keys:     callRequestKeys(input, n),
+		Digest:   func(m *models.Mock) any { return recordedRequestDigest(m, n) },
+		DigestOf: requestDigestOf(n),
+		RulesOut: func(d any) bool {
+			rd, ok := d.(requestDigest)
+			return ok && rd.rulesOut(digest)
+		},
+		Match: func(m *models.Mock) bool {
+			if !strictSame(input, live, m, n) {
+				return false
+			}
+			matched[m.Name] = m
+			return true
+		},
+	}
+	name, notOwned := integrations.FindStagedElsewhere(mockDb, models.HTTP, q)
+	if name == "" {
+		return nil, false
+	}
+	return matched[name], notOwned
 }
 
 // amzTargetHeader names an AWS JSON-protocol call's action.
@@ -148,6 +191,25 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 	report.FieldDiffs, report.Differs = nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
+}
+
+// markMadeAgain makes report the miss of a call that is m, a recording the
+// open view does not show, once more than m holds: a call of the set
+// consumed m, or an earlier miss was named as it (elsewhereRecording). m is
+// its closest mock, with no field named as differing, since none does, and
+// its rendered request is m's; it is not named as not owned, since m was
+// named, or answered, already.
+func markMadeAgain(report *models.MockMismatchReport, m *models.Mock) {
+	report.ClosestMock, report.NotOwned = m.Name, false
+	report.FieldDiffs, report.Differs = nil, nil
+	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
+	report.NextSteps = madeAgainNextSteps(m.Name)
+}
+
+// madeAgainNextSteps says what a miss on a call that is a recording the open
+// view does not show, made once more than it holds (markMadeAgain), means.
+func madeAgainNextSteps(name string) string {
+	return fmt.Sprintf("This request is %s again: keploy recorded %s once, outside this test (in another test's window, or between tests), and this replay has already made the call once, so no recording is left to answer it here. keploy's learn step learns nothing from it, nor onto this test's own recording of the same call. The application makes this call more times than it did when it was recorded; if that is expected, record the test set again.", name, name)
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open

@@ -353,6 +353,73 @@ type StagedKeyFinder interface {
 	FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string
 }
 
+// ElsewhereFinder is an optional MockMemDb extension under exact serving (the
+// proven switch), for a call record's full round would pair with a recording
+// of its scope that it drifted from: the staged recording of kind, among
+// those the open view does not show, that the call is (ElsewhereQuery.Match),
+// whether or not a call of the set consumed it or a miss named it; "" for
+// none. Such a call did not change: it is that recording, made where it was
+// not recorded, and nothing of the scope's recording may be learned or
+// served for it.
+//
+// notOwned is true when the recording is one no call consumed and no miss
+// named yet (what StagedFinder finds): it is then named for this call, which
+// a parser reports as that recording's (MockMismatchReport.NotOwned). Each
+// recording is named once, so a second identical call, or the call again
+// after the recording answered, finds it with notOwned false: the call is one
+// more than the recording holds, and is not named. A recording no call
+// consumed and no miss named is preferred to one either did.
+//
+// It looks in the store's trees, then, when no recording there is named for
+// the call, in what it keeps on disk under the query's Keys (as
+// StagedKeyFinder does). The query's digest narrows what is compared. For
+// the decision only: the mock is never handed out, nor served.
+type ElsewhereFinder interface {
+	FindStagedElsewhere(kind models.Kind, q ElsewhereQuery) (name string, notOwned bool)
+}
+
+// FindStagedElsewhere asks mockDb's ElsewhereFinder for the recording made
+// elsewhere that q's call is. A store with none names, through its
+// StagedKeyFinder or StagedFinder, only a recording no call consumed and no
+// miss named (notOwned); "" from a store with neither.
+func FindStagedElsewhere(mockDb MockMemDb, kind models.Kind, q ElsewhereQuery) (name string, notOwned bool) {
+	switch f := mockDb.(type) {
+	case ElsewhereFinder:
+		return f.FindStagedElsewhere(kind, q)
+	case StagedKeyFinder:
+		name = f.FindStagedNotOwnedByKeys(kind, q.Keys, q.Match)
+	case StagedFinder:
+		name = f.FindStagedNotOwned(kind, q.Match)
+	}
+	return name, name != ""
+}
+
+// ElsewhereQuery is what ElsewhereFinder looks for.
+type ElsewhereQuery struct {
+	// Keys are the request keys (models.RequestKeys) every recording Match
+	// may accept is indexed under, for what the store keeps on disk; none
+	// looks in its trees alone.
+	Keys []string
+	// Digest, with RulesOut, is what the parser reads of a recording to tell
+	// that it is not the call without comparing the two: a store computes it
+	// once per recording and staging, and keeps it for every query of the
+	// same DigestOf, so that a lookup compares the call only with the
+	// recordings that may be it.
+	Digest func(*models.Mock) any
+	// DigestOf names what Digest reads besides the recording (the run's
+	// noise): two queries of one DigestOf share their recordings' digests.
+	DigestOf string
+	// RulesOut reports, of a recording's digest, that Match would not accept
+	// the recording: it is then neither compared nor, once its digest is
+	// kept, read back from disk. It never rules out a recording Match
+	// accepts.
+	RulesOut func(digest any) bool
+	// Match reports whether a recording is the call. It is asked at most
+	// once per recording, and of no recording once it has answered true for
+	// one that notOwned names.
+	Match func(*models.Mock) bool
+}
+
 // BegunOwnerReader is an optional MockMemDb extension under exact serving:
 // whether a staged mock (one StagedFinder names) is owned by a test that has
 // begun in the current staging. A parser whose answer depends on what a test

@@ -252,7 +252,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			case provenswitch.On() && opts.Learn:
 				// Record's full round: the learn step decides every request
 				// (design v14 §7.2).
-				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, noise), opts)
 				ok = stub != nil
 			default:
 				// Under the switch a replay first honours what the learn step
@@ -260,7 +260,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// matcher as before.
 				proven := provenswitch.On()
 				if proven {
-					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, noise), opts)
 					ok = stub != nil
 				}
 				if !ok && err == nil {
@@ -289,7 +289,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
-					lmiss = h.orderMiss(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					lmiss = h.orderMiss(reqCtx, input, mockDb, h.newLearnNoise(opts, noise))
 				}
 				if lmiss != nil {
 					diag = lmiss.diag()
@@ -300,12 +300,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				// A call the learn step named as a recording made elsewhere
-				// before pairing it (learnMiss.elsewhere) is that recording:
+				// A call the learn step found to be a recording made
+				// elsewhere before pairing it (learnMiss.elsewhere, or
+				// learnMiss.again once more than it holds) is that recording:
 				// it is no recording of the test's, answered or not.
-				namedElsewhere := lmiss != nil && lmiss.elsewhere != nil
+				madeElsewhere := lmiss != nil && (lmiss.elsewhere != nil || lmiss.again != nil)
 				n := 0
-				if !namedElsewhere {
+				if !madeElsewhere {
 					n = h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
 				if n == 0 && lmiss == nil {
@@ -322,16 +323,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// explains it.
 				var elsewhere *models.Mock
 				switch {
-				case namedElsewhere && report != nil:
-					// Named once, by the learn step: a recording is named
-					// for one miss at most (integrations.StagedFinder).
+				case madeElsewhere:
+					// Looked up once, by the learn step: a recording is
+					// named for one miss at most (integrations.StagedFinder).
 					elsewhere = lmiss.elsewhere
 				case n == 0 && report != nil && provenswitch.On():
 					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
 				}
-				if elsewhere != nil {
+				switch {
+				case report == nil:
+				case elsewhere != nil:
 					markNotOwned(report, elsewhere)
-				} else if lmiss != nil {
+				case madeElsewhere:
+					markMadeAgain(report, lmiss.again)
+				case lmiss != nil:
 					lmiss.explain(report)
 				}
 				if report != nil {

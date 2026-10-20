@@ -50,3 +50,42 @@ func TestLearnedEntryIsExactUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// Names reports whether an entry names a field, whatever the field's value:
+// every field Covers excuses, and every field an entry with patterns names
+// that a value of it does not match. It never names what no entry does, nor
+// part of a field's name. Signature is the fields named: one for lookups
+// whose entries name the same fields, whatever their patterns, another for
+// any other.
+func TestNoiseLookupNamesWhatItMayExcuse(t *testing.T) {
+	l := NewNoiseLookup(map[string][]string{"ts": {}, "user.ID": {`^u-\d+$`}})
+	for _, tc := range []struct {
+		path  string
+		value string
+		named bool
+	}{
+		{"ts", "1", true},
+		{"items[].ts", "1", true},
+		{"user.id", "u-1", true},
+		{"user.id", "admin", true},
+		{"paid", "1", false},
+		{"superuser.id", "u-1", false},
+		{"id", "u-1", false},
+	} {
+		if got := l.Names(tc.path); got != tc.named {
+			t.Errorf("Names(%q) = %v, want %v", tc.path, got, tc.named)
+		}
+		if l.Covers(tc.path, tc.value, true) && !l.Names(tc.path) {
+			t.Errorf("Covers excuses %q (%q), which Names does not name", tc.path, tc.value)
+		}
+	}
+	same := NewNoiseLookup(map[string][]string{"user.id": {}, "TS": {`^\d+$`}})
+	if l.Signature() != same.Signature() {
+		t.Errorf("lookups naming one set of fields have signatures %q and %q", l.Signature(), same.Signature())
+	}
+	for _, other := range []map[string][]string{{"ts": {}}, {"ts": {}, "user.name": {}}, {"ts": {}, "user.id": {}, "x": {}}, nil} {
+		if NewNoiseLookup(other).Signature() == l.Signature() {
+			t.Errorf("%v has the signature of %v", other, l)
+		}
+	}
+}

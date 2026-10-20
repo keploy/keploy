@@ -314,6 +314,16 @@ func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string,
 
 var _ integrations.StagedKeyFinder = (*scopedMockDb)(nil)
 
+// FindStagedElsewhere forwards the store's lookup of a recording made
+// elsewhere (integrations.FindStagedElsewhere): the learn step on a view made
+// before exact serving began asks the bare manager, as a miss's diagnosis
+// does.
+func (s *scopedMockDb) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool) {
+	return integrations.FindStagedElsewhere(s.MockMemDb, kind, q)
+}
+
+var _ integrations.ElsewhereFinder = (*scopedMockDb)(nil)
+
 // StagedOwnerBegun forwards the store's (integrations.BegunOwnerReader);
 // false from a store that cannot tell.
 func (s *scopedMockDb) StagedOwnerBegun(name string) bool {

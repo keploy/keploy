@@ -63,10 +63,20 @@ type learnNoise struct {
 	// url is keploy.yml's url noise: what a pattern matches in a path or a
 	// query value is not compared.
 	url []*regexp.Regexp
+	// strict is the request noise as the strict comparison reads it, for
+	// the lookup of a recording made elsewhere (elsewhereRecording), as a
+	// miss's diagnosis reads it.
+	strict strictNoise
 }
 
-func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
-	n := learnNoise{headers: map[string]bool{}, body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
+// newLearnNoise is the noise the learn step reads under opts, rn being the
+// request noise the call was read with (NewRequestNoise).
+func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, rn RequestNoise) learnNoise {
+	n := learnNoise{headers: map[string]bool{}, body: matcher.NewNoiseLookup(rn.Body), url: compileURLNoise(h.Logger, rn.URL)}
+	n.strict = strictNoise{header: make(map[string]bool, len(rn.Header)), body: n.body, url: n.url}
+	for k := range rn.Header {
+		n.strict.header[strings.ToLower(k)] = true
+	}
 	if opts.NoiseConfig != nil {
 		for k := range opts.NoiseConfig["header"] {
 			n.headers[strings.ToLower(k)] = true
@@ -394,9 +404,10 @@ type learnMiss struct {
 	closest *models.Mock
 	pool    []*models.Mock
 	// elsewhere is the recording made elsewhere that the request is
-	// (notOwnedRecording), named, before the learn step paired it: the miss
-	// is that recording's. nil for any other miss.
-	elsewhere *models.Mock
+	// (elsewhereRecording), named for it, before the learn step paired it:
+	// the miss is that recording's (not owned). again is one the request is
+	// once more than it holds, named for nothing. nil for any other miss.
+	elsewhere, again *models.Mock
 }
 
 // scope is what a request's scope offers: the HTTP candidates learn.Pair
@@ -894,16 +905,31 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
 			// A request that is a recording made elsewhere, exactly (another
 			// test's, or a worker-scope one whose place the run has not
-			// reached: notOwnedRecording), did not change: it is that
+			// reached: elsewhereRecording), did not change: it is that
 			// recording, made where it was not recorded. It is named so
 			// before it is paired, as a miss on it is (S12, a2), so that no
 			// drift from this scope's recording of the same operation is
-			// learned or served for it. Only a request that matched no
-			// recording in scope exactly gets here: one that did is that
-			// recording's, as outside the learn step.
-			if elsewhere := h.madeElsewhere(ctx, input, mockDb, opts); elsewhere != nil {
-				res.Outcome, res.Reason, res.Why = learn.Miss, "", "it is "+elsewhere.Name+", a recording made elsewhere"
-				return nil, &learnMiss{res: res, closest: m, pool: sc.http, elsewhere: elsewhere}, nil
+			// learned or served for it. So is a request that is such a
+			// recording once more than it holds (a call of the set consumed
+			// it, or an earlier miss was named as it: two identical calls
+			// made elsewhere, or the call made again where it was not
+			// recorded): a miss naming it, not named as not owned again.
+			//
+			// Only a request that matched no recording in scope exactly gets
+			// here: one that did is that recording's, as outside the learn
+			// step. And learn.Pair has already decided one call more than
+			// the test recorded (a request one of its own answered
+			// recordings is: a miss, never Paired), which decodeHTTP relies
+			// on when it does not count such a miss as an extra call.
+			if rec, notOwned := elsewhereRecording(ctx, input, mockDb, n.strict); rec != nil {
+				miss := &learnMiss{res: res, closest: m, pool: sc.http}
+				if notOwned {
+					miss.res.Why, miss.elsewhere = "it is "+rec.Name+", a recording made elsewhere", rec
+				} else {
+					miss.res.Why, miss.again = "it is "+rec.Name+" again, a recording made elsewhere that this replay already made", rec
+				}
+				miss.res.Outcome, miss.res.Reason = learn.Miss, ""
+				return nil, miss, nil
 			}
 			if stuck(m) {
 				return refused(m, res, sc)
@@ -1009,16 +1035,6 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 		return r.Revision()
 	}
 	return 0
-}
-
-// madeElsewhere is the recording made elsewhere that a request of record's
-// full round is (notOwnedRecording), compared under the request noise opts
-// gives, as the miss's own diagnosis compares it; nil for none. It names the
-// recording for this request's miss: it is asked only of a request that is
-// then a miss.
-func (h *HTTP) madeElsewhere(ctx context.Context, input *req, mockDb integrations.MockMemDb, opts models.OutgoingOptions) *models.Mock {
-	rn := NewRequestNoise(h.Logger, opts)
-	return notOwnedRecording(ctx, input, mockDb, h.newStrictNoise(rn.Header, rn.Body, rn.URL))
 }
 
 // pairing is what the learn step learned on a paired mock: its noise, its

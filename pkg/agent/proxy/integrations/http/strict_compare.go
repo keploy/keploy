@@ -167,6 +167,27 @@ func strictDiff(input *req, live destination, m *models.Mock, n strictNoise) []s
 	return out
 }
 
+// strictSame reports whether m's recording is the live request outside known
+// noise (strictDiff finds no field), deciding at the first part that differs:
+// the method, the destination, the path, the query, the headers, the body.
+func strictSame(input *req, live destination, m *models.Mock, n strictNoise) bool {
+	r := m.Spec.HTTPReq
+	if r == nil || string(r.Method) != input.method || len(destinationDiff(live, m)) > 0 {
+		return false
+	}
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	recPath, recQuery := recordedURL(r)
+	livePath := ""
+	var liveQuery url.Values
+	if input.url != nil {
+		livePath, liveQuery = input.url.Path, input.url.Query()
+	}
+	return len(k.pathDiffs(recPath, livePath)) == 0 &&
+		len(k.queryDiffs(recQuery, liveQuery)) == 0 &&
+		len(k.headerDiffs(r.Header, input.header, input.sentBody())) == 0 &&
+		len(k.bodyDiffs(r, input)) == 0
+}
+
 func valueDiff(path, expected, actual string) models.MockFieldDiff {
 	return models.MockFieldDiff{Path: path, Kind: models.DiffKindValueChanged, Expected: expected, Actual: actual}
 }

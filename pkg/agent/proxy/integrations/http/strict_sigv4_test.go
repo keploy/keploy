@@ -390,7 +390,7 @@ func TestStrictTheJavaSDKsRetryHeaderIsNoise(t *testing.T) {
 // strict matcher does: one list (models.ProvenOnlyFlakyHeaders).
 func TestTheLearnStepReadsTheProvenOnlyStaticHeaders(t *testing.T) {
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	n := h.newLearnNoise(models.OutgoingOptions{}, nil, nil)
+	n := h.newLearnNoise(models.OutgoingOptions{}, RequestNoise{})
 	for _, k := range models.ProvenOnlyFlakyHeaders {
 		if !n.headers[k] {
 			t.Fatalf("the learn step compares %s, which the strict matcher excuses", k)

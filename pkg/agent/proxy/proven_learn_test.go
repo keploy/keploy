@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -198,7 +201,7 @@ func r3Mock(name string, at time.Time, method, target, body, resp string) *model
 
 // r3Send sends one request through the HTTP integration with the proxy's
 // tracker and miss reporter.
-func r3Send(t *testing.T, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+func r3Send(t *testing.T, p *Proxy, mm integrations.MockMemDb, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
 	app, agentEnd := net.Pipe()
 	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
@@ -1049,5 +1052,297 @@ func TestALearnStepNamesACallMadeElsewhereBeforePairingIt(t *testing.T) {
 		"GET /v1/jobs?cursor=c2 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
 	if code != http.StatusOK || body != `{"jobs":[]}` {
 		t.Fatalf("test B's own call: %d %s", code, body)
+	}
+}
+
+// pollsOfAAndB stages, under exact serving, test A's poll (mock-a, cursor=c1)
+// and test B's poll of the same operation (mock-b, cursor=c2), each recorded
+// in its test's window, for record's full round.
+func pollsOfAAndB(t *testing.T) (*Proxy, *MockManager, *models.Mock, *models.Mock) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	a := r3Mock("mock-a", now, "GET", "/v1/jobs?cursor=c1", "", `{"jobs":["j1"]}`)
+	b := r3Mock("mock-b", now.Add(time.Second), "GET", "/v1/jobs?cursor=c2", "", `{"jobs":[]}`)
+	for _, m := range []*models.Mock{a, b} {
+		m.DeriveLifetime()
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+		{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, []*models.Mock{a, b}, models.BaseTime, now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	return p, mm, a, b
+}
+
+const pollOfA = "GET /v1/jobs?cursor=c1 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+
+// (LEARN-vs-NOTOWNED) A call that is another test's recording once more than
+// it holds is that recording made again, not the open test's call changed:
+// the same poll of test A's made twice in test B's window (A recorded it
+// once), or A's poll made in A and then again in B's window. The first call
+// made elsewhere is named not owned (judging bakes it into the worker
+// scope); one more is a miss naming the recording it repeats. Neither is
+// answered with B's recording, and B's recording learns nothing from
+// either: every later replay would pass whatever cursor B sent.
+func TestALearnStepRefusesACallMadeElsewhereOnceMoreThanItsRecordingHolds(t *testing.T) {
+	t.Run("two polls of A in B's window", func(t *testing.T) {
+		p, mm, _, b := pollsOfAAndB(t)
+		mm.ServeExactTest("test-b", []*models.Mock{b})
+		p.ContinueTestErrorCapture()
+		c1, b1 := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, pollOfA)
+		c2, b2 := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, pollOfA)
+		st := r3States(mm)
+		if _, noise := st["mock-b"].ReqBodyNoise["url.query.cursor"]; noise || c1 == http.StatusOK || c2 == http.StatusOK {
+			t.Fatalf("a poll of A in B was answered from B's recording (%d %s, then %d %s), which learned %v", c1, b1, c2, b2, st["mock-b"].ReqBodyNoise)
+		}
+		misses, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(misses) != 2 || !misses[0].NotOwned || misses[0].ClosestMock != "mock-a" || misses[1].NotOwned || misses[1].ClosestMock != "mock-a" || misses[1].Reason != "" {
+			t.Fatalf("want the first poll named mock-a not owned and the second mock-a again; misses %+v", misses)
+		}
+	})
+	t.Run("A's poll again in B's window", func(t *testing.T) {
+		p, mm, a, b := pollsOfAAndB(t)
+		mm.ServeExactTest("test-a", []*models.Mock{a})
+		p.ContinueTestErrorCapture()
+		if code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, pollOfA); code != http.StatusOK || body != `{"jobs":["j1"]}` {
+			t.Fatalf("A's poll in A: %d %s", code, body)
+		}
+		if misses, err := p.GetMockErrors(context.Background()); err != nil || len(misses) != 0 {
+			t.Fatalf("A's poll in A missed: %+v, %v", misses, err)
+		}
+		mm.ServeExactTest("test-b", []*models.Mock{b})
+		p.ContinueTestErrorCapture()
+		code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, pollOfA)
+		st := r3States(mm)
+		if _, noise := st["mock-b"].ReqBodyNoise["url.query.cursor"]; noise || code == http.StatusOK {
+			t.Fatalf("A's poll again in B was answered from B's recording (%d %s), which learned %v", code, body, st["mock-b"].ReqBodyNoise)
+		}
+		misses, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(misses) != 1 || misses[0].NotOwned || misses[0].ClosestMock != "mock-a" || misses[0].Reason != "" {
+			t.Fatalf("want A's poll again named mock-a, not as not owned; misses %+v", misses)
+		}
+		// B's own call is still B's recording's.
+		p.ContinueTestErrorCapture()
+		if code, body = r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, "GET /v1/jobs?cursor=c2 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"); code != http.StatusOK || body != `{"jobs":[]}` {
+			t.Fatalf("test B's own call: %d %s", code, body)
+		}
+	})
+}
+
+// comparingStore is a mock manager that counts the recordings its lookups of
+// a recording made elsewhere compare with a call, and the digests they
+// compute, of every kind of lookup.
+type comparingStore struct {
+	*MockManager
+	compared, digested atomic.Int64
+}
+
+func (c *comparingStore) counted(match func(*models.Mock) bool) func(*models.Mock) bool {
+	return func(m *models.Mock) bool {
+		c.compared.Add(1)
+		return match(m)
+	}
+}
+
+func (c *comparingStore) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool) {
+	q.Match = c.counted(q.Match)
+	if digest := q.Digest; digest != nil {
+		q.Digest = func(m *models.Mock) any {
+			c.digested.Add(1)
+			return digest(m)
+		}
+	}
+	return c.MockManager.FindStagedElsewhere(kind, q)
+}
+
+func (c *comparingStore) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	return c.MockManager.FindStagedNotOwned(kind, c.counted(match))
+}
+
+func (c *comparingStore) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	return c.MockManager.FindStagedNotOwnedByKeys(kind, keys, c.counted(match))
+}
+
+// The lookup of a recording made elsewhere runs on every call of record's
+// full round the learn step would pair, and most of that round's calls
+// drift: it must not cost a comparison with every recording staged. With
+// hundreds of other tests' recordings of the very operation (one method, one
+// path, a JSON body each) staged, a drifted call of the open test compares
+// with none of them but the one that learned a field (its own noise excuses
+// what a digest reads, so it has none): their bodies' digests are not its. A
+// call that is one of them is compared with that one (and the one with no
+// digest) alone, and named; so is a call that is the one that learned, modulo
+// what it learned. Each recording's digest is computed once for the staging,
+// not once per call.
+func TestALearnStepLooksUpARecordingMadeElsewhereWithoutComparingEveryOne(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 1000)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	pad := ""
+	for i := 0; i < 40; i++ {
+		pad += fmt.Sprintf(`"f%d":"v%d",`, i, i)
+	}
+	body := func(id int, ts string) string {
+		return fmt.Sprintf(`{%s"id":%d,"ts":"%s"}`, pad, id, ts)
+	}
+	const others, calls = 400, 10
+	var all, own []*models.Mock
+	for j := 0; j < others; j++ {
+		m := r3Mock(fmt.Sprintf("other-%d", j), now.Add(time.Duration(j)*time.Microsecond), "POST", "/v1/orders", body(100000+j, "2024-01-01T00:00:00Z"), `{"ok":true}`)
+		m.DeriveLifetime()
+		all = append(all, m)
+	}
+	// Two of them are calls of the open test's last two recordings, made
+	// elsewhere: other-moved exactly, other-learned modulo the field it
+	// learned.
+	moved := r3Mock("other-moved", now.Add(time.Duration(others)*time.Microsecond), "POST", "/v1/orders", body(calls-2, "2023-01-01T00:00:00Z"), `{"ok":true}`)
+	learned := r3Mock("other-learned", now.Add(time.Duration(others+1)*time.Microsecond), "POST", "/v1/orders", body(calls-1, "2022-01-01T00:00:00Z"), `{"ok":true}`)
+	learned.Spec.ReqBodyNoise = map[string][]string{"body.ts": {}}
+	for _, m := range []*models.Mock{moved, learned} {
+		m.DeriveLifetime()
+		all = append(all, m)
+	}
+	for i := 0; i < calls; i++ {
+		m := r3Mock(fmt.Sprintf("own-%d", i), now.Add(time.Second+time.Duration(i)*time.Millisecond), "POST", "/v1/orders", body(i, "2024-01-01T00:00:00Z"), `{"ok":true}`)
+		m.DeriveLifetime()
+		all = append(all, m)
+		own = append(own, m)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+		{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	store := &comparingStore{MockManager: mm}
+	mm.ServeExactTest("test-b", own)
+	p.ContinueTestErrorCapture()
+	post := func(b string) string {
+		return fmt.Sprintf("POST /v1/orders HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(b), b)
+	}
+	for i := 0; i < calls-2; i++ {
+		before := store.compared.Load()
+		if code, _ := r3Send(t, p, store, models.OutgoingOptions{Learn: true}, post(body(i, "2026-10-20T00:00:00Z"))); code != http.StatusOK {
+			t.Fatalf("drifted call %d: %d", i, code)
+		}
+		if n := store.compared.Load() - before; n != 1 {
+			t.Fatalf("drifted call %d compared with %d recordings made elsewhere; want other-learned alone, the one with no digest", i, n)
+		}
+	}
+	if d, staged := store.digested.Load(), int64(others+2+calls); d > staged {
+		t.Fatalf("%d digests computed for %d staged recordings: one is computed more than once", d, staged)
+	}
+	// A call of the open test's next recording that is other-moved's
+	// exactly.
+	before := store.compared.Load()
+	if code, _ := r3Send(t, p, store, models.OutgoingOptions{Learn: true}, post(body(calls-2, "2023-01-01T00:00:00Z"))); code == http.StatusOK {
+		t.Fatal("a call that is another test's recording was answered from the open test's")
+	}
+	if n := store.compared.Load() - before; n < 1 || n > 2 {
+		t.Fatalf("a call that is other-moved compared with %d recordings, want other-moved (and other-learned)", n)
+	}
+	// One of its last that is other-learned's, modulo the field it learned.
+	if code, _ := r3Send(t, p, store, models.OutgoingOptions{Learn: true}, post(body(calls-1, "2026-10-20T00:00:00Z"))); code == http.StatusOK {
+		t.Fatal("a call that is another test's recording, modulo what it learned, was answered from the open test's")
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 2 || !misses[0].NotOwned || misses[0].ClosestMock != "other-moved" || !misses[1].NotOwned || misses[1].ClosestMock != "other-learned" {
+		t.Fatalf("want the calls named other-moved and other-learned, not owned; misses %+v", misses)
+	}
+}
+
+// The lookup of a recording made elsewhere reads every part of a request, not
+// its body alone: with hundreds of other tests' recordings of the very GET
+// operation staged, whose bodies are all empty, a drifted call of the open
+// test compares with none of them when they differ from it in their query
+// (a poll's cursor), or in a header the comparison reads. A call that is one
+// of them is compared with that one alone, and named not owned.
+func TestALearnStepLooksUpARecordingMadeElsewhereByEveryPartOfTheRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 1000)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	get := func(name string, at time.Time, target, ref string) *models.Mock {
+		m := r3Mock(name, at, "GET", target, "", `{"ok":true}`)
+		m.Spec.HTTPReq.Header["X-Order-Ref"] = ref
+		m.DeriveLifetime()
+		return m
+	}
+	const others = 300
+	var all, own []*models.Mock
+	for j := 0; j < others; j++ {
+		at := now.Add(time.Duration(2*j) * time.Microsecond)
+		all = append(all,
+			get(fmt.Sprintf("other-poll-%d", j), at, fmt.Sprintf("/v1/jobs?cursor=x%d&ts=T0", j), "r"),
+			get(fmt.Sprintf("other-config-%d", j), at.Add(time.Microsecond), "/v1/config", fmt.Sprintf("r%d", j)))
+	}
+	at := func(i int) time.Time { return now.Add(time.Second + time.Duration(i)*time.Millisecond) }
+	own = append(own,
+		get("poll-0", at(0), "/v1/jobs?cursor=o0&ts=T0", "r"),
+		get("poll-1", at(1), "/v1/jobs?cursor=o1&ts=T0", "r"),
+		get("config-0", at(2), "/v1/config", "QX81"),
+		get("config-1", at(3), "/v1/config", "QX82"))
+	all = append(all, own...)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+		{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	store := &comparingStore{MockManager: mm}
+	mm.ServeExactTest("test-b", own)
+	p.ContinueTestErrorCapture()
+	call := func(target, ref string) string {
+		return fmt.Sprintf("GET %s HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nX-Order-Ref: %s\r\n\r\n", target, ref)
+	}
+	for _, tc := range []struct {
+		what, request string
+		answered      bool
+		compared      int64
+	}{
+		{"poll-0 with its ts drifted", call("/v1/jobs?cursor=o0&ts=T1", "r"), true, 0},
+		{"config-0 with its X-Order-Ref drifted", call("/v1/config", "ZT44"), true, 0},
+		{"other-poll-9's call", call("/v1/jobs?cursor=x9&ts=T0", "r"), false, 1},
+		{"other-config-7's call", call("/v1/config", "r7"), false, 1},
+	} {
+		before := store.compared.Load()
+		code, _ := r3Send(t, p, store, models.OutgoingOptions{Learn: true}, tc.request)
+		if (code == http.StatusOK) != tc.answered {
+			misses, _ := p.GetMockErrors(context.Background())
+			t.Fatalf("%s: %d, want answered %v; misses %+v", tc.what, code, tc.answered, misses)
+		}
+		if n := store.compared.Load() - before; n != tc.compared {
+			t.Fatalf("%s compared with %d recordings made elsewhere, want %d", tc.what, n, tc.compared)
+		}
+	}
+	if d, staged := store.digested.Load(), int64(len(all)); d > staged {
+		t.Fatalf("%d digests computed for %d staged recordings: one is computed more than once", d, staged)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 2 || !misses[0].NotOwned || misses[0].ClosestMock != "other-poll-9" || !misses[1].NotOwned || misses[1].ClosestMock != "other-config-7" {
+		t.Fatalf("want the calls named other-poll-9 and other-config-7, not owned; misses %+v", misses)
 	}
 }

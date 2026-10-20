@@ -146,6 +146,66 @@ type exactState struct {
 	recorded recordingSource
 	// before is where RecordedBefore reads what the trees do not hold.
 	before recordedBeforeSource
+	// digests are the staged recordings' digests a parser's lookups of a
+	// recording made elsewhere read (FindStagedElsewhere).
+	digests recordingDigests
+}
+
+// recordingDigests are one staging's recordings' digests under each parser
+// comparison that asks for them (integrations.ElsewhereQuery.Digest, by its
+// DigestOf), each computed once: by mock for a recording in the trees (a
+// mock the trees swap for another, one that learned, say, is a recording of
+// its own, with a digest of its own), and by name for one read from disk,
+// which nothing changes while it is staged. A staging after it starts
+// afresh. Every lookup reads a digest for each recording it passes, from
+// concurrent calls: reads take no lock.
+type recordingDigests struct {
+	table atomic.Pointer[digestTable]
+}
+
+// digestTable is the digests of one staging, by DigestOf.
+type digestTable struct {
+	epoch uint64
+	of    sync.Map // DigestOf -> *digestsOf
+}
+
+// digestsOf is one staging's digests under one DigestOf.
+type digestsOf struct {
+	byMock sync.Map // *models.Mock -> digest
+	byName sync.Map // name -> digest, of a recording read from disk
+}
+
+// of is the digests of staging epoch under the comparison named of: a fresh
+// table when the one kept was another staging's.
+func (r *recordingDigests) of(epoch uint64, of string) *digestsOf {
+	var t *digestTable
+	for {
+		t = r.table.Load()
+		if t != nil && t.epoch == epoch {
+			break
+		}
+		fresh := &digestTable{epoch: epoch}
+		if r.table.CompareAndSwap(t, fresh) {
+			t = fresh
+			break
+		}
+	}
+	if d, ok := t.of.Load(of); ok {
+		return d.(*digestsOf)
+	}
+	d, _ := t.of.LoadOrStore(of, &digestsOf{})
+	return d.(*digestsOf)
+}
+
+// rulesOut reports whether the digest kept in store under key (computed from
+// mk when none is kept yet) says mk is not q's call.
+func rulesOut(store *sync.Map, key any, mk *models.Mock, q integrations.ElsewhereQuery) bool {
+	d, kept := store.Load(key)
+	if !kept {
+		d = q.Digest(mk)
+		store.Store(key, d)
+	}
+	return q.RulesOut(d)
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -427,6 +487,136 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 	return found
 }
 
+// FindStagedElsewhere is, under exact serving, the staged recording of kind
+// the open view does not show that q's call is (integrations.ElsewhereFinder):
+// first in the trees (per-test, session, startup, in that order), then, when
+// none there is one no call of the set consumed and no miss named, in the
+// recordings kept on disk under q.Keys, in recorded order. notOwned: the
+// recording is the first of those that no call consumed and no miss named,
+// now named for this call (as FindStagedNotOwned names one); otherwise it is
+// the first one either did, named for nothing: the call is one more than it
+// holds. "" for none.
+//
+// A recording whose digest (q.Digest, computed once per recording and
+// staging) rules it out (q.RulesOut) is not compared, nor read back from
+// disk once its digest is kept: a lookup compares the call only with the
+// recordings that may be it, and reads, of each other recording, its name
+// and its kept digest.
+func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (name string, notOwned bool) {
+	v := m.exactView()
+	if v == nil || q.Match == nil {
+		return "", false
+	}
+	epoch := m.stagingEpoch.Load()
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	var digests *digestsOf
+	if q.Digest != nil && q.RulesOut != nil {
+		digests = m.exact.digests.of(epoch, q.DigestOf)
+	}
+	fresh, again := "", ""
+	// seen are the recordings compared, or passed as shown, by name: a name
+	// staged twice is compared once.
+	seen := map[string]bool{}
+	// inTrees are the names the trees hold, which the recordings kept on
+	// disk are not looked up for again: kept only when there are some.
+	var inTrees map[string]bool
+	if len(q.Keys) > 0 && m.hasRecordingSource() {
+		inTrees = map[string]bool{}
+	}
+	// try reports whether mk, which the view does not own and whose digest
+	// may be the call's, is the call and named for it: the lookup is then
+	// over. What the view shows answers in scope.
+	try := func(mk *models.Mock) bool {
+		seen[mk.Name] = true
+		if v.shows(mk) {
+			return false
+		}
+		spent := m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name)
+		if spent && again != "" {
+			// One recording the call is again is all a miss names.
+			return false
+		}
+		if !q.Match(mk) {
+			return false
+		}
+		if !spent && m.exact.named.claim(epoch, mk.Name) {
+			fresh = mk.Name
+			return true
+		}
+		if again == "" {
+			// Consumed, or named for an earlier miss (a concurrent one
+			// included, which claimed it first).
+			again = mk.Name
+		}
+		return false
+	}
+	for _, t := range trees {
+		if t == nil || fresh != "" {
+			continue
+		}
+		t.rangeValues(func(val interface{}) bool {
+			mk, _ := val.(*models.Mock)
+			if mk == nil || mk.Kind != kind || seen[mk.Name] {
+				return true
+			}
+			// The view's own: the open test's, or the next test's calls in
+			// flight in a pool view.
+			if _, own := v.index[mk.Name]; own {
+				return true
+			}
+			if inTrees != nil {
+				inTrees[mk.Name] = true
+			}
+			if digests != nil && rulesOut(&digests.byMock, mk, mk, q) {
+				return true
+			}
+			return !try(mk)
+		})
+	}
+	if fresh == "" && inTrees != nil {
+		// The recordings kept on disk, each read back only while its digest
+		// is unknown or may be the call's.
+		m.rangeRecorded(kind, q.Keys, func(name string, load func() (*models.Mock, error)) bool {
+			if seen[name] || inTrees[name] {
+				return true
+			}
+			if _, own := v.index[name]; own {
+				return true
+			}
+			if digests != nil {
+				if d, kept := digests.byName.Load(name); kept && q.RulesOut(d) {
+					return true
+				}
+			}
+			if (m.consumedInSet(name) || m.exact.named.has(epoch, name)) && again != "" {
+				return true
+			}
+			mk, err := load()
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Debug("a lookup of a recording made elsewhere could not read a recording kept on disk; it names none of them", zap.String("mock", name), zap.Error(err))
+				}
+				return false
+			}
+			if mk == nil || mk.Kind != kind {
+				return true
+			}
+			if digests != nil && rulesOut(&digests.byName, name, mk, q) {
+				return true
+			}
+			return !try(mk)
+		})
+	}
+	if fresh != "" {
+		return fresh, true
+	}
+	return again, false
+}
+
+var _ integrations.ElsewhereFinder = (*MockManager)(nil)
+
 // RecordingSource visits, of the test set staged, every recorded mock of kind
 // indexed under any of keys (models.RequestKeys) that the agent keeps out of
 // the manager's trees (its on-disk store of per-test mocks), once each, in
@@ -448,6 +638,14 @@ func (m *MockManager) SetRecordingSource(src RecordingSource) {
 	m.exact.recorded.mu.Lock()
 	defer m.exact.recorded.mu.Unlock()
 	m.exact.recorded.src = src
+}
+
+// hasRecordingSource reports whether the manager has a recording source
+// (SetRecordingSource): recordings kept out of its trees.
+func (m *MockManager) hasRecordingSource() bool {
+	m.exact.recorded.mu.Lock()
+	defer m.exact.recorded.mu.Unlock()
+	return m.exact.recorded.src != nil
 }
 
 // rangeRecorded visits what the recording source holds of kind under keys

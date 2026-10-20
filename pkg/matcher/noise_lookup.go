@@ -35,6 +35,24 @@ func NewNoiseLookup(noise map[string][]string) NoiseLookup {
 	return NoiseLookup{idx: buildNoiseIndex(noise, nil)}
 }
 
+// Names reports whether an entry names the field at path, whatever its value:
+// Covers may excuse it (an entry with patterns excuses only a value they
+// match), and excuses nothing an entry does not name.
+func (l NoiseLookup) Names(path string) bool {
+	_, noisy := l.idx.matchWholeFields(strings.ToLower(path))
+	return noisy
+}
+
+// Signature is the fields the lookup names, as one string: two lookups of
+// one signature name the same fields (Names).
+func (l NoiseLookup) Signature() string {
+	keys := make([]string, 0, len(l.idx.entries))
+	for _, e := range l.idx.entries {
+		keys = append(keys, e.keyLower)
+	}
+	return strings.Join(keys, "\x00")
+}
+
 // Covers reports whether the leaf at path is noise. value is its text when it
 // is a scalar (scalar true); a container is excused only by an entry with no
 // patterns.

@@ -1644,3 +1644,194 @@ func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
 		t.Fatal("a new replay session reads the last session's pool names")
 	}
 }
+
+// treeMock is the mock the trees hold under name, nil for none.
+func treeMock(mm *MockManager, name string) (*TreeDb, *models.Mock) {
+	for _, t := range []*TreeDb{mm.filtered, mm.unfiltered, mm.startup} {
+		if t == nil {
+			continue
+		}
+		var found *models.Mock
+		t.rangeValues(func(v interface{}) bool {
+			if mk, _ := v.(*models.Mock); mk != nil && mk.Name == name {
+				found = mk
+				return false
+			}
+			return true
+		})
+		if found != nil {
+			return t, found
+		}
+	}
+	return nil, nil
+}
+
+// The learn step's lookup of a recording made elsewhere
+// (FindStagedElsewhere) finds the staged recording the open view does not
+// show that the call is, whether or not a call of the set consumed it or a
+// miss named it: one neither did is named for the call (notOwned), one
+// either did is found again, named for nothing. One neither did is
+// preferred: two identical calls made elsewhere name a recording each, and
+// a third finds the first again, in whichever tree they are held. The open
+// test's own is never found, nor one the view shows (a worker-scope
+// recording the run reached).
+func TestFindStagedElsewhereFindsTheCallsRecordingAgainOnceItIsSpent(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	other := httpCall("other", time.Second, "/delete")
+	consumed := httpCall("consumed", 1700*time.Millisecond, "/notify")
+	pollA := httpCall("poll-a", 5*time.Second, "/jobs")
+	pollB := httpCall("poll-b", 6*time.Second, "/jobs")
+	// Another test's per-test recordings, held in one tree only: a spent
+	// one ahead of one no call spent there does not hide it.
+	feedA := httpCall("feed-a", 7*time.Second, "/feed")
+	feedB := httpCall("feed-b", 8*time.Second, "/feed")
+	// A worker-scope recording the run reached is shown: it answers here,
+	// it is not made elsewhere.
+	worker := httpCall("worker", 9*time.Second, "/config")
+	mm := stagedManager(t, []*models.Mock{feedA, feedB}, []*models.Mock{own, other, consumed, pollA, pollB, worker})
+	mm.ServeExactWorker([]string{"worker"})
+	find := func(match func(*models.Mock) bool) (string, bool) {
+		return mm.FindStagedElsewhere(models.HTTP, integrations.ElsewhereQuery{Match: match})
+	}
+	byName := func(name string) func(*models.Mock) bool {
+		return func(m *models.Mock) bool { return m.Name == name }
+	}
+	jobs := func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" }
+	feed := func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/feed" }
+
+	mm.ServeExactTest("T2", []*models.Mock{consumed})
+	if !mm.DeleteFilteredMock(*consumed) {
+		t.Fatal("T2 could not consume its own recording")
+	}
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	for _, tc := range []struct {
+		match    func(*models.Mock) bool
+		name     string
+		notOwned bool
+	}{
+		{byName("own"), "", false},
+		{byName("other"), "other", true},
+		{byName("other"), "other", false},
+		{byName("consumed"), "consumed", false},
+		{jobs, "poll-a", true},
+		{jobs, "poll-b", true},
+		{jobs, "poll-a", false},
+		{feed, "feed-a", true},
+		{feed, "feed-b", true},
+		{feed, "feed-a", false},
+		{byName("worker"), "", false},
+	} {
+		if name, notOwned := find(tc.match); name != tc.name || notOwned != tc.notOwned {
+			t.Fatalf("found %q (not owned %v), want %q (%v)", name, notOwned, tc.name, tc.notOwned)
+		}
+	}
+	// A lookup of the miss's kind after it names none of them again.
+	if got := mm.FindStagedNotOwned(models.HTTP, byName("other")); got != "" {
+		t.Fatalf("a recording the learn step named was named for a miss after: %q", got)
+	}
+	// Without exact serving: nothing.
+	off := stagedManager(t, nil, []*models.Mock{httpCall("other", time.Second, "/delete")})
+	if name, _ := off.FindStagedElsewhere(models.HTTP, integrations.ElsewhereQuery{Match: byName("other")}); name != "" {
+		t.Fatalf("without exact serving the lookup found %q", name)
+	}
+}
+
+// A lookup compares a call only with the recordings whose digest is the
+// call's (or that have none), computes each recording's digest once for the
+// staging (again for a recording the trees swap for another, and afresh in
+// the next staging), and reads a recording kept on disk back only while its
+// digest is unknown or the call's.
+func TestFindStagedElsewhereComparesOnlyWhatItsDigestSaysMayBeTheCall(t *testing.T) {
+	a := httpCall("a", time.Second, "/v1/orders")
+	b := httpCall("b", 2*time.Second, "/v1/orders")
+	undigested := httpCall("undigested", 3*time.Second, "/v1/orders")
+	onDisk := httpCall("on-disk", 4*time.Second, "/v1/orders")
+	digestOf := map[string]uint64{"a": 1, "b": 2, "on-disk": 3}
+	all := []*models.Mock{a, b, undigested}
+	mm := stagedManager(t, nil, all)
+	decoded, decodedInTrees := 0, 0
+	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		// The store keeps a and undigested on disk too: the trees hold them,
+		// so they are never read back.
+		for _, inTrees := range []*models.Mock{a, undigested} {
+			if !visit(inTrees.Name, func() (*models.Mock, error) { decodedInTrees++; return inTrees, nil }) {
+				return nil
+			}
+		}
+		visit(onDisk.Name, func() (*models.Mock, error) { decoded++; return onDisk, nil })
+		return nil
+	})
+	var digested, compared []string
+	query := func(live uint64, is string) integrations.ElsewhereQuery {
+		return integrations.ElsewhereQuery{
+			Keys: []string{"k"}, DigestOf: "test",
+			Digest: func(m *models.Mock) any {
+				digested = append(digested, m.Name)
+				if d, ok := digestOf[m.Name]; ok {
+					return d
+				}
+				return nil
+			},
+			// A recording with no digest (nil) is compared.
+			RulesOut: func(d any) bool {
+				n, ok := d.(uint64)
+				return ok && n != live
+			},
+			Match: func(m *models.Mock) bool {
+				compared = append(compared, m.Name)
+				return m.Name == is
+			},
+		}
+	}
+	mm.ServeExactPool("k", nil)
+	if name, notOwned := mm.FindStagedElsewhere(models.HTTP, query(2, "b")); name != "b" || !notOwned {
+		t.Fatalf("found %q (%v), want b", name, notOwned)
+	}
+	if want := []string{"b", "undigested"}; !reflect.DeepEqual(compared, want) && !reflect.DeepEqual(compared, []string{"b"}) {
+		t.Fatalf("compared %v; want only the recordings whose digest may be the call's", compared)
+	}
+	// A call none is: compared with the undigested one alone, and the disk
+	// recording read back once, for its digest.
+	compared, digested = nil, nil
+	if name, _ := mm.FindStagedElsewhere(models.HTTP, query(9, "")); name != "" {
+		t.Fatalf("found %q for a call no recording is", name)
+	}
+	if !reflect.DeepEqual(compared, []string{"undigested"}) || decoded != 1 || !reflect.DeepEqual(digested, []string{"undigested", "on-disk"}) {
+		t.Fatalf("compared %v, decoded %d, digested %v; want undigested compared, on-disk read back once for its digest", compared, decoded, digested)
+	}
+	compared, digested = nil, nil
+	if name, _ := mm.FindStagedElsewhere(models.HTTP, query(9, "")); name != "" || decoded != 1 || len(digested) != 0 {
+		t.Fatalf("found %q, decoded %d, digested %v; want nothing read back or digested again", name, decoded, digested)
+	}
+	// A recording the trees swap for another is digested again.
+	tree, held := treeMock(mm, "a")
+	swapped := *held
+	if tree == nil || !tree.swapValue(held.TestModeInfo, held, &swapped) {
+		t.Fatal("fixture: could not swap a's recording")
+	}
+	digested = nil
+	mm.FindStagedElsewhere(models.HTTP, query(9, ""))
+	if !reflect.DeepEqual(digested, []string{"a"}) {
+		t.Fatalf("after a's recording was swapped, digested %v; want a again", digested)
+	}
+	if decodedInTrees != 0 {
+		t.Fatalf("%d recordings the trees hold were read back from disk", decodedInTrees)
+	}
+	// The next staging digests afresh, and keeps nothing of the one before:
+	// a session's stagings would otherwise pin every recording they staged.
+	_, before := treeMock(mm, "b")
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.ServeExactPool("k", nil)
+	digested = nil
+	mm.FindStagedElsewhere(models.HTTP, query(9, ""))
+	sort.Strings(digested)
+	if got := strings.Join(digested, ","); !strings.Contains(got, "a,b,") || !strings.HasSuffix(got, "undigested") {
+		t.Fatalf("the next staging digested %v; want a, b and undigested again", digested)
+	}
+	if _, after := treeMock(mm, "b"); after == before {
+		t.Fatal("fixture: the next staging holds the very mock the one before held")
+	}
+	if _, kept := mm.exact.digests.of(mm.stagingEpoch.Load(), "test").byMock.Load(before); kept {
+		t.Fatal("the next staging keeps the digest of a recording the one before staged")
+	}
+}
