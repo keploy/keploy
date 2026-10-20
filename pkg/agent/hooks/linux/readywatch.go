@@ -652,13 +652,34 @@ func (h *Hooks) MarkReadiness() (models.AppReadiness, error) {
 	if w == nil {
 		return models.AppReadiness{}, fmt.Errorf("%w: this agent watches no application's readiness", models.ErrReadinessUnsupported)
 	}
-	for _, m := range []*ebpf.Map{w.maps.ReadySeen, w.maps.ReadyHolders} {
+	// ready_holders first, then ready_seen. A member's exec between the two
+	// clears notes its command line in both (the holder, and a live run);
+	// cleared this way, ready_seen's live count goes with the second clear,
+	// so the command line is new to the set when it is run again, and a
+	// restart once that run exited. The other way round, the live count
+	// stayed with no holder to let it go, and every later run of the command
+	// line was a repeat, never a restart. What is left (pre-flip
+	// W6-ready-holders-generation): the window's run is still a holder, and
+	// its exit, or its exec of another command line, after a fresh run of its
+	// command line started, lets go of the fresh run's live count; the count
+	// then stays one short until every run of the command line has exited
+	// (ready_release stops at 0), and until then a run beside a single live
+	// run is a false restart, each time; a start not judged, never a false
+	// pass.
+	for i, m := range []*ebpf.Map{w.maps.ReadyHolders, w.maps.ReadySeen} {
 		if err := clearMap(m); err != nil {
 			return models.AppReadiness{}, fmt.Errorf("forget what the last set's processes did: %w", err)
+		}
+		if i == 0 && markBetweenClears != nil {
+			markBetweenClears()
 		}
 	}
 	return h.AppReadiness(math.MaxUint64)
 }
+
+// markBetweenClears, when a test sets it, runs between MarkReadiness's two
+// clears: an exec there is the window the clears' order is for.
+var markBetweenClears func()
 
 // clearMap deletes every entry of m, whatever its key and value sizes. An
 // iteration the kernel's own deletes abort (ready_holders loses an entry at
