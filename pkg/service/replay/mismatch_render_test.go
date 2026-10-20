@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // captureStdout runs fn with os.Stdout redirected and returns what it printed.
@@ -161,8 +162,10 @@ func TestPrintFailuresTable_NoCausesWithoutAnOutOfScopeMiss(t *testing.T) {
 
 // A variable that did not hold is printed as the diff naming the variable,
 // its value in this test and what the call sent; never as a request diff
-// against the recording, which holds neither.
+// against the recording, which holds neither. The values are content, which
+// the table prints with the switch on.
 func TestPrintMismatchReport_AVariableThatDidNotHold(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
 	r := &models.MockMismatchReport{
 		Protocol: "HTTP", ActualSummary: "GET /orders/o9", ClosestMock: "mock-2", MatchPhase: models.MatchPhaseVariable,
 		Diff:           `mock mock-2: variable orderId is "o1" in this test (taken at mock-1 body.id), and this call sent "o9" at url.path[1]`,

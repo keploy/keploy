@@ -5291,7 +5291,8 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
-					Reason: parserErr.MismatchReport.Reason,
+					Reason:          parserErr.MismatchReport.Reason,
+					ContentWithheld: parserErr.MismatchReport.ContentWithheld,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
@@ -5304,7 +5305,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 				// stay out of the report (they are already logged).
 				errs = append(errs, models.UnmatchedCall{
 					At:            parserErr.At,
-					Protocol:      "unknown",
+					Protocol:      models.ProtocolUnknown,
 					ActualSummary: parserErr.Err.Error(),
 					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
 					Kind:          parserErr.MissKind,
@@ -5316,6 +5317,12 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 				errs[i].BeforeSet = true
 				errs[i].Kind = models.MissOutsideTest
 			}
+		}
+		// Every miss leaves the agent here, whichever parser reported it and
+		// however it built its report: none carries the application's
+		// content unless the switch lets reports carry it.
+		for i := first; i < len(errs); i++ {
+			errs[i] = errs[i].ReportContent()
 		}
 	}
 	if unreadCause != "" {

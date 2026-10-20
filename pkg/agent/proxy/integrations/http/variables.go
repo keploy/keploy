@@ -488,7 +488,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				return refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name))
 			}
 			if !variables.SameValue(d.recorded, r.value, r.number()) {
-				return refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q", r.value, vp.raw, d.name, d.recorded))
+				return refuse(fmt.Sprintf("its recorded request holds %s at %s, not variable %s's recorded value %s", models.ReportQuote(r.value), vp.raw, d.name, models.ReportQuote(d.recorded)))
 			}
 			l, ok := live.read(vp.place)
 			if !ok {
@@ -497,7 +497,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			if l.body && l.kind != r.kind && typeChange == nil {
 				typeChange = &varProblem{
 					mock: m.Name, name: d.name, place: vp.raw, kind: models.DiffKindTypeChanged, expected: r.raw, actual: l.raw,
-					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, l.raw, r.raw),
+					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, models.ReportValue(l.raw), models.ReportValue(r.raw)),
 					next: "the application changed the type of the value it sends at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
 				}
 			}
@@ -578,7 +578,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 					// A template key holds one recorded value for the whole
 					// set: a call that names it with another is no call of
 					// another test, but a declaration keploy cannot follow.
-					return refuse(fmt.Sprintf("it names variable %s after the template key the test case's request sends, but records it as %q where config.yaml records %q: the learn step and the templates disagree", d.name, d.recorded, bound.Recorded))
+					return refuse(fmt.Sprintf("it names variable %s after the template key the test case's request sends, but records it as %s where config.yaml records %s: the learn step and the templates disagree", d.name, models.ReportQuote(d.recorded), models.ReportQuote(bound.Recorded)))
 				}
 				// Recorded with another value than the one the test bound: a
 				// call of another test (reusable mocks are seen by every
@@ -621,7 +621,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			if !b.Given && b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded {
 				return nil, &varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
-					why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, v.value, b.Name, b.Mock, b.Place),
+					why:  fmt.Sprintf("this call binds variable %s at %s to %s, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, models.ReportQuote(v.value), b.Name, b.Mock, b.Place),
 					next: fmt.Sprintf("the application sent %s's value where it sent %s's when the test was recorded: fix the application, or re-record the test if that is intended", b.Name, d.name),
 				}
 			}
@@ -650,7 +650,7 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 		}
 		return &varProblem{
 			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
-			why:  fmt.Sprintf("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, want, boundMock, boundPlace, verb, l.value, vp.raw),
+			why:  fmt.Sprintf("variable %s is %s in this test (taken at %s %s), and this call %s %s at %s", d.name, models.ReportQuote(want), boundMock, boundPlace, verb, models.ReportQuote(l.value), vp.raw),
 			next: fmt.Sprintf("the application sent another value at %s than the one it made in this test: if that is intended, re-record the test; otherwise fix the application", vp.raw),
 		}
 	}
@@ -810,7 +810,9 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 		for _, vp := range d.answer {
 			switch vp.place.Part {
 			case variables.PartBody:
-				e, why := variables.AnswerEdit(resp.Body, vp.place.Path, d.recorded, b.Value)
+				// The values it names are the application's: a miss's
+				// evidence carries them as a report may (models.ReportValue).
+				e, why := variables.AnswerEdit(resp.Body, vp.place.Path, d.recorded, b.Value, models.ReportValue)
 				if why != "" {
 					return nil, &varProblem{mock: served.Name, name: d.name, place: vp.raw, expected: d.recorded, actual: b.Value,
 						why: fmt.Sprintf("its answer place %s cannot hold variable %s: %s", vp.raw, d.name, why), next: "re-record the test"}
@@ -820,7 +822,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 				key, ok := headerKey(header, vp.place.Name)
 				if !ok || header[key] != d.recorded || len(resp.HeaderLineLengths[key]) > 1 {
 					return nil, &varProblem{mock: served.Name, name: d.name, place: vp.raw, expected: d.recorded,
-						why: fmt.Sprintf("its recorded response does not hold variable %s's recorded value %q as the one value of %s", d.name, d.recorded, vp.raw), next: "re-record the test"}
+						why: fmt.Sprintf("its recorded response does not hold variable %s's recorded value %s as the one value of %s", d.name, models.ReportQuote(d.recorded), vp.raw), next: "re-record the test"}
 				}
 				header[key] = b.Value
 				changed[strings.ToLower(key)] = true
@@ -941,7 +943,9 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 			r.VariablePlaces = append(r.VariablePlaces, place)
 		}
 	}
-	return r
+	// The places hold the application's values: a report without content
+	// names the path with them written {} (mismatch.Withhold).
+	return mismatch.Withhold(r)
 }
 
 // withRoutePlaces is r carrying, under the proven switch, the URL path places
@@ -957,6 +961,9 @@ func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closes
 	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
 		r.ActualSummary = request.Method + " " + request.URL.EscapedPath()
 		r.VariablePlaces = places
+		// The summary is set again, after Build: a report without content
+		// names it with the places written {} (mismatch.Withhold).
+		mismatch.Withhold(r)
 	}
 	return r
 }

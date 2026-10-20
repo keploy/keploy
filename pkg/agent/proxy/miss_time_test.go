@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -28,7 +29,9 @@ func TestAMissWithoutATimeIsStampedOnACopy(t *testing.T) {
 // The miss the agent returns is its report field for field: every field the
 // two share is carried from one to the other (see the reverse in
 // pkg/service/replay), so a field added to both is carried or fails here.
+// The fields hold content, which the miss carries with the switch on.
 func TestAMissCarriesEveryFieldOfItsReport(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
 	// Both ways through sendMockNotFoundError: a report with its time, and one
 	// without, which it stamps on a copy -- that copy carries the rest.
 	for _, stamped := range []bool{false, true} {
