@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	yamlLib "gopkg.in/yaml.v3"
 
@@ -21,14 +22,16 @@ import (
 // recorded body and none of its frames (HTTPResp.StreamBody is not JSON).
 // RunTestSet compares the app's stream with that body split into frames: the
 // recorded stream passes and a changed one fails, under either switch. A
-// stream recorded empty, or with keepalives alone, is compared with what it
-// holds: it passes when the app streams that and ends, and fails when the app
-// streams an event it does not hold. A recording that saved nothing of its
-// stream (a body over 1 MB) is refused, its stream unread (the result's body,
-// which would say why, the matcher empties for such a recording; the log
-// says it). With the switch off a
-// changed stream passed: it was compared with no recorded frame, and one after
-// a recorded keepalive passed once the keepalive had come.
+// stream recorded empty is compared with no frame: it passes when the app
+// streams nothing, and fails when the app streams. One of keepalives alone is
+// compared by them, as any recording is by its frames: it passes when the app
+// streams them, and an event after them fails it under the switch, which
+// reads a stream to its end, and passes with the switch off, which stops at
+// the last recorded frame. A recording that saved nothing of its stream (a
+// body over 1 MB) is refused, its stream unread (the result's body, which
+// would say why, the matcher empties for such a recording; the log says it).
+// With the switch off a changed stream passed: it was compared with no
+// recorded frame.
 func TestRunTestSetComparesAStreamTestCarriedAsJSONByItsBody(t *testing.T) {
 	const (
 		recorded = "id: 1\nevent: price\ndata: {\"sku\":\"a\",\"price\":10}\n\nid: 2\nevent: price\ndata: {\"sku\":\"b\",\"price\":20}\n\n"
@@ -41,7 +44,10 @@ func TestRunTestSetComparesAStreamTestCarriedAsJSONByItsBody(t *testing.T) {
 		skipped  bool   // the recording did not save its body: over 1 MB
 		answer   string // what the app streams
 		wantPass bool
-		wantBody string // in the result's body
+		// passesSwitchOff: it passes with the switch off, where the
+		// comparison stops at the last recorded frame.
+		passesSwitchOff bool
+		wantBody        string // in the result's body, unless it passes
 		// wantUnread: refused before the app's stream is read.
 		wantUnread bool
 	}{
@@ -50,7 +56,7 @@ func TestRunTestSetComparesAStreamTestCarriedAsJSONByItsBody(t *testing.T) {
 		{name: "a stream recorded empty passes when the app streams nothing", body: "", answer: "", wantPass: true},
 		{name: "a stream recorded empty fails when the app streams", body: "", answer: recorded, wantBody: `"sku":"a"`},
 		{name: "a stream of keepalives alone passes when the app streams them and ends", body: ": ping\n\n", answer: ": ping\n\n", wantPass: true},
-		{name: "a stream of keepalives alone fails when the app streams events after them", body: ": ping\n\n", answer: ": ping\n\n" + recorded, wantBody: `"sku":"a"`},
+		{name: "a stream of keepalives alone is read past them only under the switch", body: ": ping\n\n", answer: ": ping\n\n" + recorded, passesSwitchOff: true, wantBody: `"sku":"a"`},
 		{name: "a stream not saved is refused", skipped: true, answer: recorded, wantUnread: true},
 	} {
 		for _, on := range []bool{false, true} {
@@ -92,10 +98,11 @@ func TestRunTestSetComparesAStreamTestCarriedAsJSONByItsBody(t *testing.T) {
 				if got == nil {
 					t.Fatalf("no result for the stream test; results: %+v", h.report.results)
 				}
-				if pass := got.Status == models.TestStatusPassed; pass != c.wantPass {
-					t.Errorf("status %s; want passed=%v (result body %q)", got.Status, c.wantPass, got.Res.Body)
+				wantPass := c.wantPass || c.passesSwitchOff && !on
+				if pass := got.Status == models.TestStatusPassed; pass != wantPass {
+					t.Errorf("status %s; want passed=%v (result body %q)", got.Status, wantPass, got.Res.Body)
 				}
-				if !strings.Contains(got.Res.Body, c.wantBody) {
+				if !(wantPass && c.passesSwitchOff) && !strings.Contains(got.Res.Body, c.wantBody) {
 					t.Errorf("result body %q; want it to hold %q", got.Res.Body, c.wantBody)
 				}
 				if unread := read.Load() == 0; c.wantUnread && !unread {
@@ -154,9 +161,9 @@ func carryAsJSON(t *testing.T, tc *models.TestCase) {
 // RunTestSet compares it as any response, by its status and headers: an SSE or
 // NDJSON endpoint's answer to a HEAD, or its 204 (how the SSE spec tells an
 // EventSource to stop reconnecting), passes when answered alike, YAML or
-// carried as JSON, under either switch. A HEAD test is no stream test; a
-// recorded 204 is sent as a stream test, and its answer says whether it has a
-// body. An answer that differs fails.
+// carried as JSON, under either switch. Each is sent as a stream test, by its
+// Content-Type, and its answer says whether it has a body. An answer that
+// differs fails.
 func TestRunTestSetComparesAResponseWithNoBodyByItsStatusAndHeaders(t *testing.T) {
 	type answer struct {
 		status      int
@@ -217,8 +224,8 @@ func TestRunTestSetComparesAResponseWithNoBodyByItsStatusAndHeaders(t *testing.T
 					if carried == "json" {
 						carryAsJSON(t, tc)
 					}
-					if streaming := pkg.IsHTTPStreamingTestCase(tc); streaming != (c.method != http.MethodHead) {
-						t.Fatalf("IsHTTPStreamingTestCase = %v for a recorded %s answered %d; want a stream test unless its request is a HEAD", streaming, c.method, c.status)
+					if !pkg.IsHTTPStreamingTestCase(tc) {
+						t.Fatalf("IsHTTPStreamingTestCase = false for a recorded %s answered %d; want a stream test, by its Content-Type", c.method, c.status)
 					}
 					h.replayer.hookImpl = newHooks(prLogger(), h.replayer.config, h.replayer.instrumentation, false)
 					_ = h.run(t)
@@ -333,6 +340,100 @@ func TestRunTestSetEndsARecordedNoContentAnsweredByAnEndlessStream(t *testing.T)
 					t.Fatalf("a recorded 204 answered with a 200 stream passed: %+v", got.Result)
 				}
 			})
+		}
+	}
+}
+
+// An SSE recording of a keepalive alone (": ok", which a notification
+// endpoint that had no event while it was recorded sends as it opens the
+// stream) whose app sends that keepalive and then keeps the stream open, idle
+// or on heartbeats, as the app did when it was recorded. Its recorded frame
+// is compared, as any recording's are, kept as YAML or carried as JSON, with
+// the real hooks. With the switch off the comparison stops at the last
+// recorded frame, as it does for a recording of events, so the test passes
+// once the recorded keepalive came: it is not read on to the client's timeout
+// and failed on that, nor left not judged on the app's next heartbeat. Under
+// the switch the stream is read to its end: held open past its recording, it
+// is not judged (idle, by the stall rule; on heartbeats, by the first one
+// past the recording), never a pass.
+func TestRunTestSetAKeepaliveRecordingTheAppHoldsOpen(t *testing.T) {
+	saved := pkg.AnswerStallGrace
+	pkg.AnswerStallGrace = 300 * time.Millisecond
+	t.Cleanup(func() { pkg.AnswerStallGrace = saved })
+	const keepalive = ": ok\n\n"
+	for _, c := range []struct {
+		name       string
+		heartbeats int // sent after the recorded keepalive, before the app idles
+		// heldOpen is what the result says under the switch: not judged,
+		// the app held the stream open past its recording.
+		heldOpen string
+	}{
+		{name: "idle", heldOpen: "every recorded frame came, and the stream did not end"},
+		{name: "on heartbeats", heartbeats: 64, heldOpen: "the app kept the stream open past its recording"},
+	} {
+		app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header()["Date"] = nil
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			for i := 0; i <= c.heartbeats; i++ {
+				if _, err := io.WriteString(w, keepalive); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			// The stream stays open until keploy closes it.
+			<-r.Context().Done()
+		}))
+		t.Cleanup(func() {
+			app.CloseClientConnections()
+			app.Close()
+		})
+		for _, carried := range []string{"yaml", "json"} {
+			for _, on := range []bool{false, true} {
+				sw := map[bool]string{false: "switch-off", true: "switch-on"}[on]
+				t.Run(c.name+"/"+carried+"/"+sw, func(t *testing.T) {
+					if on {
+						t.Setenv(provenswitch.Env, "1")
+					} else {
+						t.Setenv(provenswitch.Env, "")
+					}
+					h := newPartialRunHarness(t, 2, 0)
+					tc := h.cases[1]
+					tc.HTTPReq.Method = http.MethodGet
+					tc.HTTPReq.URL = app.URL + "/notifications"
+					tc.HTTPResp = models.HTTPResp{StatusCode: http.StatusOK, Header: map[string]string{"Content-Type": "text/event-stream"}, Body: keepalive, Timestamp: tc.HTTPResp.Timestamp}
+					if carried == "json" {
+						carryAsJSON(t, tc)
+					} else {
+						keepAsYAML(t, tc)
+					}
+					h.replayer.hookImpl = newHooks(prLogger(), h.replayer.config, h.replayer.instrumentation, false)
+					_ = h.run(t)
+
+					var got *models.TestResult
+					for i := range h.report.results {
+						if h.report.results[i].TestCaseID == tc.Name {
+							got = &h.report.results[i]
+						}
+					}
+					if got == nil {
+						t.Fatalf("no result for the test; results: %+v", h.report.results)
+					}
+					if !on {
+						if got.Status != models.TestStatusPassed {
+							t.Fatalf("status %s, %+v (result body %q); want PASSED: the recorded keepalive came, and with the switch off the comparison stops at the last recorded frame", got.Status, got.FailureInfo, got.Res.Body)
+						}
+						return
+					}
+					if len(got.VerdictUnknown()) == 0 {
+						t.Fatalf("status %s, %+v; want no verdict: the app kept the stream open past its recording", got.Status, got.FailureInfo)
+					}
+					if !strings.Contains(got.FailureInfo.StreamHeldOpen, c.heldOpen) {
+						t.Fatalf("held open %q; want it to say %q", got.FailureInfo.StreamHeldOpen, c.heldOpen)
+					}
+				})
+			}
 		}
 	}
 }
