@@ -30,8 +30,9 @@ type pairedConn struct {
 	// closed: from then on its side receives nothing more.
 	done chan struct{}
 	// lost: bytes the application wrote to it were charged as never
-	// reaching the proxy, once.
-	lost atomic.Bool
+	// reaching the proxy, once, and counted (pairLost, under lossMu).
+	lost   atomic.Bool
+	lossMu sync.Mutex
 	// atClose is the proxy's side as the proxy closed it (closing), read
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
