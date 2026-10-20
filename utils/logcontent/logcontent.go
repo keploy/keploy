@@ -1,32 +1,76 @@
 // Package logcontent is the one switch that decides whether a log line may
 // carry what an application sent or received: a payload's bytes, a row, a
-// header's value, a bind value, a document, a mock.
+// header's value, a bind value, a document, a mock, a URL.
 //
 // The level a line is logged at is not consent. keploy's agent tees its Debug
 // log to agent-debug.log on every docker recording and replay, so a Debug line
 // is written to disk whether or not anyone asked to debug anything, and
 // whatever content a parser put in it lands there in the clear, where secret
-// protection, which covers mocks, never looks. So by default no line carries
-// content at any level. The field helpers here log a value as its length and
-// fingerprint (Fingerprint), next to the facts a line keeps that are not
-// content: a message's type, an op's name, ids, header names, counts. Setting
-// EnvVar to 1 or true is the explicit opt-in: each helper then logs the value
-// itself, as zap.ByteString, zap.Binary, zap.String and zap.Any do.
+// protection, which covers mocks, never looks. So by default, at any level, a
+// line that goes through the helpers here does not write a value out: it
+// names the value by its length, by its length and a fingerprint, which gives
+// away a value that can be guessed, or, for a URL, by a shape that keeps what
+// reads as a name (below). Setting EnvVar to 1 or true is the explicit
+// opt-in: each helper then logs the value itself, as zap.ByteString,
+// zap.Binary, zap.String and zap.Any do.
 //
-// A URL's query is content; its path is kept. Lines name a call by its
-// method and path, as the test case's name and keploy's report do. A path
-// can hold an application's value too (a token in /reset/<token>, an email
-// address in /users/<email>), and keploy cannot tell such a segment from a
-// route's by looking at it, so the lines a default run prints for a call
-// keploy could not answer name it by its shape (models.CallShape), which
-// writes a segment that does not read as a name as {}. The Debug lines that
-// trace a call keep its path whole: that is the trade this package makes.
+// With the switch off, the default, a line keeps the facts that are not
+// content (a message's type, an op's name, a protocol's or keploy's own ids,
+// header names, counts) and names a value by what the helper it goes through
+// logs instead:
+//
+//   - Bytes, Binary and String log its exact length and its fingerprint,
+//     {"len": 5, "fp": "2cf24dba5fb0"}. The fingerprint (Fingerprint) is the
+//     first 48 bits of the value's sha256, with no key and no salt, so it is
+//     no redaction: it hides a value only as well as the value is hard to
+//     guess. Whoever reads the line hashes guesses and compares, and 48 bits
+//     pick the one that matches out of billions, which one GPU hashes in a
+//     second. So a value from a small or a structured set is found from its
+//     fingerprint: an OTP or a PIN, a status, an enum or a boolean, a small
+//     id, a phone number, an SSN or a card number, an email address on a
+//     breach list, Basic auth's user:pass with a common password. And a value
+//     has the same fingerprint in every line, every run and every
+//     installation, so equal values are linked across runs, and across
+//     customers whose logs are read side by side. It hides only a value no
+//     one can guess: a random token, a body no one can predict.
+//   - StringLen and BytesLen log its exact length alone, {"len": 6}, whatever
+//     the field's key: for a credential, and for a short value from a small
+//     or a structured set, whose fingerprint would give it away. Bytes,
+//     Binary and String log a value by its length alone too, and Any by its
+//     type and length, when the field's key names a credential or a card's
+//     or an account's number (String says which); NamedString does when the
+//     name a sibling field gives the value does (a header's, a variable's).
+//     The length is still the value's: it says a PIN has four digits.
+//   - Any logs a value's Go type, which is not content, and for a string or
+//     a byte slice its length and its fingerprint too, as String and Bytes
+//     log them, with what they give away.
+//   - logurl logs a URL, a path or a call by its shape (models.URLShape):
+//     every path segment and query name that does not read as a name, and
+//     every query value, written {}, as the lines a default run prints for a
+//     call keploy could not answer write them (models.CallShape), and an
+//     absolute URL's scheme, host and port kept when they read as such; but
+//     for a URL with an '@' after its host, which may end credentials, whose
+//     host and whatever precedes that '@' are {} too, as they are for a path
+//     with an '@' after a "//" or a ':', as a URL it holds or a user:password
+//     has (/proxy/http://user:pw/x@db/x), and for a method that is none of
+//     HTTP's, which is {}. A URL's query is content, and so is a path segment
+//     that holds an application's value (a token in /reset/<token>, an email
+//     address in /users/<email>). A segment that reads as a name is kept, so
+//     a value that reads as one too (a user name in lower-case letters, a
+//     slug) is still logged: keploy cannot tell it from a route's by looking
+//     at it.
+//
+// The switch decides only what the lines that go through these helpers
+// carry: a line that logs a value through zap's own constructors carries it
+// whole, whatever the switch says.
 //
 // It depends on nothing of keploy's, so the parsers in keploy, integrations
-// and enterprise all import the same switch.
+// and enterprise all import the same switch. logurl, which shapes a URL as
+// pkg/models does, is a package of its own for that reason.
 package logcontent
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -88,66 +132,164 @@ func Set(v bool) (restore func()) {
 }
 
 // Bytes is zap.ByteString(key, b) with the switch on. With it off, the field
-// is b's length and fingerprint: {"len": 5, "fp": "2cf24dba5fb0"}.
+// is b's exact length and its fingerprint, {"len": 5, "fp": "2cf24dba5fb0"},
+// or its length alone when key names a credential (String says which). The
+// fingerprint is no redaction (Fingerprint): whoever reads the line finds b
+// from it when b is one of a set they can hash, as a short value from a
+// small or a structured set is, and an equal b is named alike in every line,
+// every run and every installation. Such a value goes to BytesLen instead.
 //
 // The fingerprint is computed when a core encodes the entry, not here: a call
 // site builds its fields before zap checks the level, and a Debug line on a
 // hot path whose level is off must not pay for a sha256. So the field holds b,
-// as zap.ByteString does, and reads it later. That is safe because every core
-// keploy builds (utils/log's console cores, the agent-debug.log one among
-// them, and enterprise's) is a zapcore.NewCore, which encodes the entry in the
-// logging goroutine before the log call returns; the debug file's
-// BufferedWriteSyncer buffers encoded bytes, never fields. A core that kept
-// fields to encode later would read a buffer its caller had since reused, and
-// would need this to hash b here instead.
+// as zap.ByteString does, and its key, and reads them later: a disabled line
+// allocates as often as with zap.ByteString, 24 bytes more on a 64-bit
+// machine, for the key. That is safe because every core keploy builds
+// (utils/log's console cores, the agent-debug.log one among them, and
+// enterprise's) is a zapcore.NewCore, which encodes the entry in the logging
+// goroutine before the log call returns; the debug file's BufferedWriteSyncer
+// buffers encoded bytes, never fields. A core that kept fields to encode
+// later would read a buffer its caller had since reused, and would need this
+// to hash b here instead.
 // TestTheAgentDebugLogCarriesContentOnlyWhenOptedIn holds the debug file to it.
 func Bytes(key string, b []byte) zap.Field {
 	if on.Load() {
 		return zap.ByteString(key, b)
 	}
-	return zap.Object(key, bytesDigest(b))
+	return zap.Object(key, bytesDigest{key, b})
 }
 
 // Binary is zap.Binary(key, b), b as base64, with the switch on, and with it
-// off what Bytes logs: the same payload logged by Bytes and Binary is named
-// by the same fingerprint, whichever way a line would have written it.
+// off what Bytes logs, with what Bytes says of it: the same payload logged by
+// Bytes and Binary is named by the same fingerprint, whichever way a line
+// would have written it.
 func Binary(key string, b []byte) zap.Field {
 	if on.Load() {
 		return zap.Binary(key, b)
 	}
-	return zap.Object(key, bytesDigest(b))
+	return zap.Object(key, bytesDigest{key, b})
 }
 
-// String is zap.String(key, s) with the switch on, and s's length and
-// fingerprint with it off, computed as Bytes computes them. Its off field
-// costs a disabled line one small allocation, for the string it holds, that
-// zap.String does not; content that is still a []byte should go to Bytes,
-// which costs what zap.ByteString does, rather than be converted for this.
+// String is zap.String(key, s) with the switch on. With it off, the field is
+// s's exact length and its fingerprint, computed as Bytes computes them and
+// no redaction for the same reasons (Fingerprint): whoever reads the line
+// finds s from it when s is one of a set they can hash, and an equal s is
+// named alike in every line, every run and every installation. A short value
+// from a small or a structured set, a status, a code or a phone number, goes
+// to StringLen instead.
+//
+// A field whose key names a credential is logged by its length alone, as
+// StringLen logs it: a password, a PIN or a token from a small set is found
+// from its fingerprint, and enterprise's secret protection, which redacts a
+// zap.String field by its key, never sees this field, which is an object. So
+// is a field whose key names a card's or an account's number, or a code that
+// verifies one. A key names one when, read as words (split at every ASCII
+// character that is not a letter or a digit, and between camelCase words),
+// one of them, with or without its trailing digits, is a credential's word
+// (credentialWords: pass, pwd, auth, pin, otp, cvv, csc, ssn, sid, csrf,
+// iban, ...), its words run together hold a credential's stem
+// (credentialStems: password, secret, token, cookie, session, authoriz,
+// authoris, apikey, authkey, sslkey, cardnum, accountnum, socialsecurity,
+// verificationcode, ...), or they spell one of the names secret protection
+// redacts by default that neither covers, or pan (credentialKeys: key,
+// connectionstring, authresponse, ...); credentialName says how a word may
+// also end in a credential's word (dbpass), be its plural (OTPs), or hold one
+// in a key written in capitals alone (DBPASS), and that a key whose last word
+// is key names one (x-functions-key, cache key, key2). So "Authorization",
+// "x-api-key", "db_password", "authResponse", "pin_code", "cvv2", "mysqlpwd",
+// "DBPASS", "JSESSIONID", "connect.sid", "cardNumber", "acct_no",
+// "authorisation" and "social_security_number" name one, and "author",
+// "mapping", "keyspace", "span_id", "status_code" and "userIDs" do not. A
+// name a user configures secret protection to redact is not among them: with
+// the switch off, a String field under it is fingerprinted where a zap.String
+// field was redacted, so a value logged under such a name goes to StringLen,
+// as does any other value from a small set under a key that names none (a
+// status, an email address). A value whose name is in a sibling field
+// ("name", then "value") goes to NamedString.
+//
+// Its off field costs a disabled line one small allocation, for the string
+// and the key it holds, that zap.String does not; content that is still a
+// []byte should go to Bytes, which allocates as often as zap.ByteString
+// does, rather than be converted for this.
 func String(key, s string) zap.Field {
 	if on.Load() {
 		return zap.String(key, s)
 	}
-	return zap.Object(key, stringDigest(s))
+	return zap.Object(key, stringDigest{key: key, s: s})
+}
+
+// NamedString is String for the value of what a sibling field names, a
+// header, a variable or a parameter called name, logged under a key of its
+// own: zap.String("name", h), NamedString("value", h, v). It is
+// zap.String(key, s) with the switch on, and with it off what String logs,
+// but by its length alone when name names a credential, as String logs a
+// field whose key does (String says which): a header called Authorization,
+// a variable called resetToken. It costs a disabled line what String does.
+// With the switch on, the field is what zap.String(key, s) logs, as a line
+// that logged the value under "value" did before: secret protection, which
+// redacts a zap.String field by its key, reads key, not name.
+func NamedString(key, name, s string) zap.Field {
+	if on.Load() {
+		return zap.String(key, s)
+	}
+	return zap.Object(key, stringDigest{key: key, name: name, s: s})
+}
+
+// StringLen is zap.String(key, s) with the switch on, and s's exact length
+// alone with it off, {"len": 6}, whatever its key: for a credential, and for
+// a short value from a small or a structured set (an OTP or a PIN, a status,
+// an enum, a boolean as text, a small id, a phone number, an SSN or a card
+// number, an email address), whose fingerprint would give it away. The
+// length is still the value's: it says a PIN has four digits. Its off field
+// costs a disabled line nothing zap.String does not for a value shorter than
+// 256 bytes, and one small allocation, for the length, for a longer one.
+func StringLen(key, s string) zap.Field {
+	if on.Load() {
+		return zap.String(key, s)
+	}
+	return zap.Object(key, lenOnly(len(s)))
+}
+
+// BytesLen is zap.ByteString(key, b) with the switch on, and b's exact length
+// alone with it off, as StringLen logs a string's. Its off field costs a
+// disabled line no allocation zap.ByteString's does not: none for a value
+// shorter than 256 bytes, and one of 8 bytes, for the length, for a longer
+// one, where zap.ByteString's is one of 24, for the slice.
+func BytesLen(key string, b []byte) zap.Field {
+	if on.Load() {
+		return zap.ByteString(key, b)
+	}
+	return zap.Object(key, lenOnly(len(b)))
 }
 
 // Any is zap.Any(key, v) with the switch on, for the dumps of mocks, requests
 // and protocol structs that carry content in their fields. With it off, the
 // field is v's Go type and nothing of its value: {"type": "*models.Mock"}.
-// A v whose kind is string or []byte also gets its length and fingerprint,
-// as String and Bytes log them, so a line can still say which value it was.
-// Like Bytes, it reads v when the entry is encoded, and like String's, its off
-// field costs a disabled line one small allocation that zap.Any's does not.
+// A v whose kind is string, or a slice of bytes, also gets its exact length
+// and its fingerprint, as String and Bytes log them and with what String
+// says of them: no redaction, since a value from a small set is found from
+// it and an equal value is named alike in every line, run and installation,
+// and a key that names a credential gets the length alone. So a line can
+// still say which value it was.
+//
+// Like Bytes, it reads v when the entry is encoded. Its off field costs a
+// disabled line one small allocation, for v and the key it holds, which
+// zap.Any's costs only for some kinds of v (a []byte, which it boxes again).
 func Any(key string, v any) zap.Field {
 	if on.Load() {
 		return zap.Any(key, v)
 	}
-	return zap.Object(key, typeOnly{v})
+	return zap.Object(key, typeOnly{key, v})
 }
 
-// Fingerprint names b without carrying it: the first 12 hex digits of its
-// sha256, so two lines, or two runs, name the same payload alike. It hides
-// what the payload is only as well as the payload is hard to guess: a short
-// value from a small set, a flag or a PIN, is found by hashing the guesses.
+// Fingerprint names b by a digest instead of its bytes: the first 12 hex
+// digits, 48 bits, of its sha256, with no key and no salt. Two lines, two
+// runs or two installations name the same payload alike, so it links equal
+// values across all of them. It hides what the payload is only as well as
+// the payload is hard to guess: whoever has a fingerprint hashes the guesses
+// and compares, and 48 bits pick the one that matches out of billions, so a
+// value from a small or a structured set (a flag, a PIN, an OTP, a card or a
+// phone number, a known email address) is found from it.
 func Fingerprint(b []byte) string {
 	sum := sum256(b)
 	return hex.EncodeToString(sum[:6])
@@ -163,26 +305,49 @@ func stringBytes(s string) []byte {
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-func addDigest(enc zapcore.ObjectEncoder, b []byte) {
+// addDigest names b under key: its length, and its fingerprint unless key
+// names a credential.
+func addDigest(enc zapcore.ObjectEncoder, key string, b []byte) {
 	enc.AddInt("len", len(b))
-	enc.AddString("fp", Fingerprint(b))
+	if !credentialName(key) {
+		enc.AddString("fp", Fingerprint(b))
+	}
 }
 
-type bytesDigest []byte
+type bytesDigest struct {
+	key string
+	b   []byte
+}
 
-func (b bytesDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
-	addDigest(enc, b)
+func (d bytesDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	addDigest(enc, d.key, d.b)
 	return nil
 }
 
-type stringDigest string
+// stringDigest is a string under key, and the name a sibling field gives it
+// (NamedString), if any.
+type stringDigest struct{ key, name, s string }
 
-func (s stringDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
-	addDigest(enc, stringBytes(string(s)))
+func (d stringDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	if d.name != "" && credentialName(d.name) {
+		enc.AddInt("len", len(d.s))
+		return nil
+	}
+	addDigest(enc, d.key, stringBytes(d.s))
 	return nil
 }
 
-type typeOnly struct{ v any }
+type lenOnly int
+
+func (n lenOnly) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddInt("len", int(n))
+	return nil
+}
+
+type typeOnly struct {
+	key string
+	v   any
+}
 
 func (t typeOnly) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	if t.v == nil {
@@ -193,9 +358,177 @@ func (t typeOnly) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("type", rv.Type().String())
 	switch {
 	case rv.Kind() == reflect.String:
-		addDigest(enc, stringBytes(rv.String()))
+		addDigest(enc, t.key, stringBytes(rv.String()))
 	case rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.Uint8:
-		addDigest(enc, rv.Bytes())
+		addDigest(enc, t.key, rv.Bytes())
 	}
 	return nil
 }
+
+// credentialWords, credentialStems and credentialKeys are what makes a key
+// name a credential (String), or a card's or an account's number, which is
+// as easily found from its fingerprint: a word of it, a stem its words run
+// together hold, or what they spell. Over-matching costs a line only a
+// fingerprint; the value is withheld either way.
+var (
+	credentialWords = map[string]bool{
+		"pass": true, "pw": true, "pwd": true, "auth": true, "oauth": true,
+		"cred": true, "creds": true, "pin": true, "otp": true, "totp": true,
+		"hotp": true, "mfa": true, "2fa": true, "cvv": true, "cvc": true,
+		"ccv": true, "csc": true, "cvn": true, "ssn": true, "sig": true,
+		"dsn": true, "sid": true, "csrf": true, "xsrf": true, "iban": true,
+	}
+	credentialStems = []string{
+		"password", "passwd", "passphrase", "passcode", "secret", "token",
+		"credential", "cookie", "session", "authoriz", "authoris", "authent",
+		"apikey", "authkey", "passkey", "privatekey", "privkey", "accesskey",
+		"signingkey", "encryptionkey", "masterkey", "sharedkey", "sslkey",
+		"tlskey", "aeskey", "rsakey", "hmac", "signature", "bearer", "jwt",
+		"pincode", "otpcode", "mfacode", "verificationcode", "securitycode",
+		"cardverification", "socialsecurity",
+		"cardnum", "cardno", "cardpan", "creditcard", "ccnum", "pannumber",
+		"accountnum", "accountno", "acctnum", "acctno", "routingnum",
+		"routingno",
+	}
+	credentialKeys = map[string]bool{
+		"key": true, "connectionstring": true, "pan": true,
+		"authresponse": true, "authplugindata": true,
+		"authmechanismproperties": true, "authmessage": true,
+		"serverkey": true, "storedkey": true, "clientkey": true,
+	}
+)
+
+// credentialWordList is credentialWords in a slice, for the scan
+// credentialWord makes of a word for one it ends in or holds.
+var credentialWordList = func() []string {
+	words := make([]string, 0, len(credentialWords))
+	for w := range credentialWords {
+		words = append(words, w)
+	}
+	return words
+}()
+
+// credentialName reports whether key names a credential (String). It runs
+// when an entry is encoded, never for a line whose level is off, and
+// allocates nothing for a key of up to 64 bytes.
+//
+// key is read as lower-case words: split at every byte that is not an ASCII
+// letter or digit (a byte of a multi-byte character is kept in its word),
+// before a capital that follows a lower-case letter (authResponse) or a
+// digit in a word that is not digits alone (OAuth2Token, but 2FA), and
+// before the last capital of a run that lower-case letters follow, unless
+// they are a plural's lone s (OTPCode is otp, code; OTPs is otps). A word
+// names a credential when it is a credential's word (credentialWords) as it
+// is, without its trailing digits (cvv2), or without a plural's s (pins), or
+// when it ends in one (dbpass, mysqlpwd); a word written in capitals alone
+// (DBPASSHASH), whose own words' boundaries are lost, does when it holds one
+// of three letters or more anywhere. The last word names one when it is key
+// or keys, with or without its trailing digits (x-functions-key, key2).
+func credentialName(key string) bool {
+	var stack [64]byte
+	joined := stack[:0]
+	if len(key) > len(stack) {
+		joined = make([]byte, 0, len(key))
+	}
+	start, last := -1, -1
+	caps, digits := false, false
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		upper := isUpperByte(c)
+		wordByte := upper || isLowerOrDigit(c) || c >= 0x80
+		split := !wordByte || (upper && start >= 0 && splitsBefore(key, i, digits))
+		if split && start >= 0 {
+			if credentialWord(joined[start:], caps) {
+				return true
+			}
+			last, start = start, -1
+		}
+		if !wordByte {
+			continue
+		}
+		if start < 0 {
+			start, caps, digits = len(joined), true, true
+		}
+		if c < '0' || c > '9' {
+			digits = false
+			if !upper {
+				caps = false
+			}
+		}
+		if upper {
+			c += 'a' - 'A'
+		}
+		joined = append(joined, c)
+	}
+	if start >= 0 {
+		if credentialWord(joined[start:], caps) {
+			return true
+		}
+		last = start
+	}
+	if last >= 0 {
+		if w := bytesString(bytes.TrimRight(joined[last:], "0123456789")); w == "key" || w == "keys" {
+			return true
+		}
+	}
+	if credentialKeys[string(joined)] {
+		return true
+	}
+	all := bytesString(joined)
+	for _, stem := range credentialStems {
+		if strings.Contains(all, stem) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitsBefore reports whether the capital at key[i], inside a word, starts a
+// new one (credentialName); digits says the word so far is digits alone, as
+// 2FA's 2 is.
+func splitsBefore(key string, i int, digits bool) bool {
+	prev := key[i-1]
+	switch {
+	case prev >= 'a' && prev <= 'z':
+		return true
+	case prev >= '0' && prev <= '9':
+		return !digits
+	case isUpperByte(prev) && i+1 < len(key) && key[i+1] >= 'a' && key[i+1] <= 'z':
+		// The last capital of a run starts the word its lower-case letters
+		// end, unless they are a plural's lone s.
+		plural := key[i+1] == 's' && (i+2 == len(key) || key[i+2] < 'a' || key[i+2] > 'z')
+		return !plural
+	}
+	return false
+}
+
+// credentialWord reports whether w, a lower-cased word of a key, names a
+// credential (credentialName); caps says the key wrote it in capitals alone.
+func credentialWord(w []byte, caps bool) bool {
+	if credentialWords[string(w)] {
+		return true
+	}
+	if t := bytes.TrimRight(w, "0123456789"); len(t) < len(w) && credentialWords[string(t)] {
+		return true
+	}
+	if n := len(w); n > 1 && w[n-1] == 's' && credentialWords[string(w[:n-1])] {
+		return true
+	}
+	word := bytesString(w)
+	for _, cw := range credentialWordList {
+		if strings.HasSuffix(word, cw) || (caps && len(cw) >= 3 && strings.Contains(word, cw)) {
+			return true
+		}
+	}
+	return false
+}
+
+// bytesString is b as a string without the copy string(b) makes, for a
+// search that only reads it while b is unchanged.
+func bytesString(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+func isUpperByte(c byte) bool { return c >= 'A' && c <= 'Z' }
+
+func isLowerOrDigit(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') }

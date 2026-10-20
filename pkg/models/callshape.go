@@ -408,17 +408,7 @@ func hostPort(h string) bool {
 	host, hasPort := h, false
 	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.HasSuffix(h, "]") {
 		host, hasPort = h[:i], true
-		port, n := h[i+1:], 0
-		if port == "" || len(port) > 5 {
-			return false
-		}
-		for j := 0; j < len(port); j++ {
-			if !isDigitByte(port[j]) {
-				return false
-			}
-			n = n*10 + int(port[j]-'0')
-		}
-		if n < 1 || n > 65535 {
+		if !portNumber(h[i+1:]) {
 			return false
 		}
 	}
