@@ -4,7 +4,8 @@ name: Proven set-end stop (Docker)
 # (the daemon's wait, an event), however long a starved Docker takes, and
 # kills only when the container made no progress on its way out for the stall
 # bound of the time both it and keploy could run (utils.ExitClock: a container
-# held off the CPU accrues no stall). Docker is starved of CPU (the daemon,
+# held off the CPU, or waiting on a disk that serves others, accrues no
+# stall). Docker is starved of CPU (the daemon,
 # containerd and its shims at 5%, the container at --cpus 0.05) while the
 # app's shutdown works 400 ms of CPU, some 8 s at that share: longer than the
 # 5 s grace keploy's stop used to give it, which then killed it and left the

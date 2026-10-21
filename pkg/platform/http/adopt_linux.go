@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/utils"
-	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -340,9 +339,11 @@ func heldPidfds() (map[int]bool, error) {
 // made none for stopStallChecks checks' worth of the time both they and keploy
 // could run (stopStall, utils.ExitClock): the count the CLI stops its agent by
 // (utils.TeardownStallChecks), never a fixed grace, and never the checks of a
-// daemon held off the CPU (a loaded host, its cgroup's quota spent), which
-// could not run to make progress. A press of Ctrl+C a whole stopOffer after
-// the stop's signal kills them at once. Variables for the tests.
+// daemon held off the CPU (a loaded host, its cgroup's quota spent), or held
+// in the kernel on a disk that serves others first, which could not run to
+// make progress; one held in a single wait in the kernel for that long is
+// taken for wedged. A press of Ctrl+C a whole stopOffer after the stop's
+// signal kills them at once. Variables for the tests.
 var (
 	stopCheck       = time.Second
 	stopStallChecks = uint64(utils.TeardownStallChecks)
@@ -394,7 +395,9 @@ type member struct {
 // thread of theirs ending, a file or socket closed, storage read or written;
 // being scheduled is not, a daemon that ignores the request runs on -- for
 // stopStall of the time both they and keploy could run (utils.ExitClock: a
-// daemon held off the CPU accrues no stall), and waited for until gone, so a
+// daemon held off the CPU accrues no stall, nor one in the kernel on storage
+// that serves until a single wait there outlasts the bound), and waited for
+// until gone, so a
 // daemon one test set started is never judged in the next and the
 // application started again can bind its ports. While it
 // waits, a drain does not give up on the run (utils.BeginDaemonStop): the
@@ -544,10 +547,8 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	for _, m := range ms {
 		procs = append(procs, utils.Reached{PID: m.pid, Start: m.start})
 	}
-	clock, release := utils.NewExitClock(procs)
-	defer release()
-	meter := stall.NewMeter(clock, stopStall())
-	defer meter.Stop()
+	clock, meter, stopMeter := utils.NewExitMeter(procs, stopStall())
+	defer stopMeter()
 	var mark utils.ExitRatchet
 	mark.Advance(markExit(ms))
 	killed, offering := false, false
@@ -608,7 +609,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 		stalled := describe(cut)
 		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
 		if len(cut) > 0 {
-			stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out for %s after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, utils.StallRanSaid(meter.Grace()))
+			stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out for %s after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, clock.Said(meter.Grace()))
 		} else {
 			logger.Info("the daemons keploy killed ignored SIGTERM when it asked them to stop with it: they had no way out of their own to cut, so the set's end is judged",
 				zap.String("killed", describe(uncut)),

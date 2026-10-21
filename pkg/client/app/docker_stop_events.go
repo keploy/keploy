@@ -99,7 +99,8 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	}()
 
 	var why string
-	switch utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load()) {
+	stop, bound := utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load())
+	switch stop {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:
@@ -110,7 +111,7 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	default:
 		switch {
 		case readable:
-			why = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", utils.StopStallRanSaid())
+			why = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		case seen:
 			why = fmt.Sprintf("keploy could not read its container's processes, and neither the docker daemon nor its docker client said it had stopped, for %s of keploy's runnable time after keploy interrupted it, so keploy killed it", utils.StopStallBudget)
 		default:
