@@ -11,6 +11,7 @@ import (
 
 	proxytls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -117,7 +118,7 @@ func handleConnectTunnel(
 	}
 
 	logger.Debug("CONNECT tunnel detected",
-		zap.String("target", targetAddr),
+		logurl.Field("target", targetAddr),
 		zap.Bool("testMode", isTestMode),
 	)
 
@@ -194,7 +195,7 @@ func handleConnectTunnel(
 		proxytls.SrcPortToDstURL.Store(tcpAddr.Port, host)
 		logger.Debug("Stored CONNECT target in SrcPortToDstURL",
 			zap.Int("srcPort", tcpAddr.Port),
-			zap.String("host", host),
+			logurl.Field("host", host),
 		)
 	}
 

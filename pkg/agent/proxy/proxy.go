@@ -47,6 +47,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -3140,7 +3141,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
-			zap.String("target", connectResult.TargetAddr),
+			logurl.Field("target", connectResult.TargetAddr),
 			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
 		)
 	}

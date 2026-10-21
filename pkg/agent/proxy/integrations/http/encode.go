@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -284,7 +285,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				if len(resp) == 0 {
 					resTimestampMock = reqTimestampMock
 					h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
-						zap.String("upstream", upstream),
+						logurl.Field("upstream", upstream),
 						logcontent.String("upstream_url", full),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err))
@@ -314,7 +315,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					// the synthesized error mock instead.
 					h.Logger.Error("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
 						zap.Int("partial_resp_len", len(resp)),
-						zap.String("upstream", upstream),
+						logurl.Field("upstream", upstream),
 						logcontent.String("upstream_url", full),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err),

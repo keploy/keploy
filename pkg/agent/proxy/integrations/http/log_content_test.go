@@ -408,8 +408,9 @@ func TestServeOnMiss_TheServedLineCarriesNoQuery(t *testing.T) {
 }
 
 // A dependency that fails a recorded call, before it answers or partway
-// through its answer's first read, is logged with the call's URL without its
-// query's values, unless KEPLOY_LOG_CONTENT is set.
+// through its answer's first read, is logged with the call's URL by its
+// shape, its path's values and its query's withheld, unless
+// KEPLOY_LOG_CONTENT is set: a path segment is content too (/users/<id>).
 func TestEncodeHTTP_AFailedUpstreamIsLoggedWithoutTheQuery(t *testing.T) {
 	// A first read's worth of an answer (pUtil.ReadBytes reads on while each
 	// read fills its 1 KiB), so the reset fails the read that holds it.
@@ -422,7 +423,8 @@ func TestEncodeHTTP_AFailedUpstreamIsLoggedWithoutTheQuery(t *testing.T) {
 		t.Run(want, func(t *testing.T) {
 			logtest.Each(t, func(t *testing.T, on bool) {
 				logger, logs := logtest.Observe()
-				app, done := encodeLogged(t, logger, canaryCall("GET"), func(up net.Conn) {
+				call := strings.Replace(canaryCall("GET"), "/profile?", "/profile/"+canary+"-path?", 1)
+				app, done := encodeLogged(t, logger, call, func(up net.Conn) {
 					_ = readUntil(up, canary+`-body"}`, 2*time.Second)
 					if partial == "" {
 						// A reset: the dependency fails the call before it
@@ -440,8 +442,12 @@ func TestEncodeHTTP_AFailedUpstreamIsLoggedWithoutTheQuery(t *testing.T) {
 				_ = app.Close()
 				logtest.Check(t, logs, canary, on, want)
 				e := logs.FilterMessage(want).All()
-				if got := e[0].ContextMap()["upstream"]; got != "http://api.test/profile" {
-					t.Fatalf("the line names the call %v, want its URL without the query", got)
+				wantUp := "http://api.test/profile/{}"
+				if on {
+					wantUp = "http://api.test/profile/" + canary + "-path"
+				}
+				if got := e[0].ContextMap()["upstream"]; got != wantUp {
+					t.Fatalf("the line names the call %v, want %v", got, wantUp)
 				}
 			})
 		})
