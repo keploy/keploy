@@ -97,6 +97,13 @@ type proxySide struct {
 	err error
 }
 
+// of is the paired connection conn is the proxy's side of, nil for none.
+func (s *pairedConns) of(conn net.Conn) *pairedConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.byConn[conn]
+}
+
 // holds says whether conn is a paired connection the proxy holds.
 func (s *pairedConns) holds(conn net.Conn) bool {
 	s.mu.Lock()

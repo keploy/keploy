@@ -447,6 +447,42 @@ func goneReset(pc *pairedConn) error {
 	return fmt.Errorf("%w: a connection from %s was reset, and the application's socket was gone when the wait began: whether bytes it had sent were still on their way cannot be told", models.ErrProxyConnsUnsupported, pc.app)
 }
 
+// appEndGone says why the application's end of tc, a connection the proxy
+// accepted, is gone, or "" while it may still send: its reset, or its FIN,
+// came to the proxy's socket; or, for one the kernel paired with an
+// application connection, sock_diag no longer finds the application's socket
+// where it finds the application's sockets (paired.visible). A reset whose
+// sequence the proxy's socket refused, outside a window shut while nothing
+// read it, leaves that socket open: only the lookup tells then.
+func (p *Proxy) appEndGone(tc *trackedConn) string {
+	raw, ok := tc.Conn.(*net.TCPConn)
+	if !ok {
+		return ""
+	}
+	ps := readProxySide(raw)
+	switch {
+	case ps.err != nil:
+		return ""
+	case ps.state == tcpClose:
+		return "it was reset"
+	case finIn(ps.state):
+		return "it closed"
+	}
+	pc := p.paired.of(raw)
+	if pc == nil || !p.paired.visible.Load() {
+		return ""
+	}
+	ds, err := openDiag()
+	if err != nil {
+		return ""
+	}
+	defer ds.close()
+	if _, _, err := appWritten(ds, pc.app, pc.proxy); errors.Is(err, errNoSocket) {
+		return "its socket is gone"
+	}
+	return ""
+}
+
 // finIn says whether a socket in state has taken its peer's FIN.
 func finIn(state uint8) bool {
 	return state == tcpCloseWait || state == tcpLastAck || state == tcpClosing || state == tcpTimeWait

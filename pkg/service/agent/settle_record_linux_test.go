@@ -418,3 +418,191 @@ func TestAReplaysTestKeployFailedForAnotherReasonIsNotOnlyUnsettled(t *testing.T
 	require.True(t, w.Evidence.Unread)
 	require.False(t, w.Evidence.Unsettled)
 }
+
+// A record's settle waiting on connections that hold bytes no reader will
+// take (coreAgent.InFlightStuckReader) looks at them only when its watchdog
+// wakes, and finds each once: marked, it is no work of the wait. While
+// another connection still holds work it waits on, and once that settles it
+// answers what it cannot tell, with the drops it read: the record charges
+// it, and does not wait for good on bytes nothing will read.
+func TestARecordsSettleAnswersBytesNoReaderWillTake(t *testing.T) {
+	wake := manualWake(t)
+	a, _, p := settleAgent()
+	a.config = &config.Config{}
+	a.config.Agent.Mode = models.MODE_RECORD
+	p.inWork, p.looked = make(chan struct{}), make(chan struct{}, 1)
+	p.smu.Lock()
+	p.drops = 3
+	p.smu.Unlock()
+	p.set(0, 1) // another connection's work
+	p.addStuck("10 byte(s) from 127.0.0.1:1 that keploy's proxy has not read")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	type answer struct {
+		drops uint64
+		err   error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		d, err := a.settle(ctx, false)
+		done <- answer{d, err}
+	}()
+	select {
+	case <-p.inWork:
+	case got := <-done:
+		t.Fatalf("settled before it looked at the calls in flight: %+v", got)
+	}
+	require.Zero(t, p.stuckLooks.Load(), "no look before a wake-up")
+	// The other connection still holds work: the look marks the stuck one,
+	// and the wait goes on. The next look finds nothing new.
+	for looks := 0; looks < 2; looks++ {
+		wake()
+		<-p.looked
+		select {
+		case got := <-done:
+			t.Fatalf("answered with another connection holding work: %+v", got)
+		default:
+		}
+	}
+	p.set(0, 0) // the other connection's work is done
+	got := <-done
+	var su stuckUnread
+	require.ErrorAs(t, got.err, &su)
+	require.Contains(t, got.err.Error(), "10 byte(s) from 127.0.0.1:1 that keploy's proxy has not read")
+	require.NotContains(t, got.err.Error(), "\n")
+	require.True(t, dropsRead(got.err))
+	require.Equal(t, uint64(3), got.drops)
+}
+
+// One whose handler takes its bytes after all ends its mark: it was work
+// again, and nothing is left that the settle cannot tell.
+func TestARecordsSettleTakesBytesReadAfterAllAsSettled(t *testing.T) {
+	wake := manualWake(t)
+	a, _, p := settleAgent()
+	a.config = &config.Config{}
+	a.config.Agent.Mode = models.MODE_RECORD
+	p.inWork, p.looked = make(chan struct{}), make(chan struct{}, 1)
+	p.set(0, 1)
+	c := p.addStuck("10 byte(s) from 127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.settle(ctx, false)
+		done <- err
+	}()
+	<-p.inWork
+	wake()
+	<-p.looked
+	p.readStuck(c)
+	p.set(0, 0)
+	require.NoError(t, <-done)
+}
+
+// A mark that ends after the settle read the connections' state is still
+// answered: the state skipped the marked connection, so the settle reads its
+// marks first. Here its handler takes part of its bytes as the settle reads
+// the listener's drops, after the state said nothing else holds work: the
+// mark ends, and the rest of its bytes are work again, which the settle
+// answers as what it could not tell, never as settled.
+func TestARecordsSettleAnswersAMarkThatEndsAfterItsLastLook(t *testing.T) {
+	wake := manualWake(t)
+	a, _, p := settleAgent()
+	a.config = &config.Config{}
+	a.config.Agent.Mode = models.MODE_RECORD
+	p.inWork, p.looked = make(chan struct{}), make(chan struct{}, 1)
+	p.set(0, 1)
+	c := p.addStuck("10 byte(s) from 127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.settle(ctx, false)
+		done <- err
+	}()
+	<-p.inWork
+	wake()
+	<-p.looked
+	p.smu.Lock()
+	p.onDrops = func() { p.readStuckPartly(c) }
+	p.smu.Unlock()
+	p.set(0, 0)
+	err := <-done
+	var su stuckUnread
+	require.ErrorAs(t, err, &su, "settled while the connection still held bytes its mark had kept out of the state")
+}
+
+// What else the wait could not tell (the bytes on the connections it could not
+// tell, pairedBytesUnknown, here two of them) comes in the same answer, on one
+// line.
+func TestARecordsSettleAnswersBytesNoReaderWillTakeBesideWhatElseItCouldNotTell(t *testing.T) {
+	wake := manualWake(t)
+	a, _, p := settleAgent()
+	a.config = &config.Config{}
+	a.config.Agent.Mode = models.MODE_RECORD
+	p.inWork = make(chan struct{})
+	errOther := errors.New("keploy cannot tell what the application had sent on another connection")
+	p.bytesWait = func(context.Context, uint64) error { return errors.Join(errBytesUnknown, errOther) }
+	p.addStuck("10 byte(s) from 127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.settle(ctx, false)
+		done <- err
+	}()
+	<-p.inWork
+	wake()
+	err := <-done
+	var su stuckUnread
+	var bu pairedBytesUnknown
+	require.ErrorAs(t, err, &su)
+	require.ErrorAs(t, err, &bu)
+	require.True(t, dropsRead(err))
+	require.Contains(t, err.Error(), errBytesUnknown.Error()+"; "+errOther.Error()+"; and keploy cannot tell whether a call of the test is among 10 byte(s) from 127.0.0.1:1")
+	require.NotContains(t, err.Error(), "\n")
+}
+
+// Only a record looks for them: a replay's proxy reads all the application
+// sends itself, and a replay's wait waits on such a connection as on any.
+func TestOnlyARecordLooksForBytesNoReaderWillTake(t *testing.T) {
+	for _, tc := range []struct {
+		mode  models.Mode
+		looks bool
+	}{{models.MODE_RECORD, true}, {models.MODE_TEST, false}, {models.MODE_OFF, false}} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			a, _, _ := settleAgent()
+			a.config = &config.Config{}
+			a.config.Agent.Mode = tc.mode
+			r, ok := a.stuckReader()
+			require.Equal(t, tc.looks, ok)
+			require.Equal(t, tc.looks, r != nil)
+		})
+	}
+	t.Run("a replay's settle", func(t *testing.T) {
+		wake := manualWake(t)
+		a, _, p := settleAgent()
+		a.config = &config.Config{}
+		a.config.Agent.Mode = models.MODE_TEST
+		p.inWork = make(chan struct{})
+		c := p.addStuck("10 byte(s) from 127.0.0.1:1")
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		done := make(chan error, 1)
+		go func() {
+			_, err := a.settle(ctx, true)
+			done <- err
+		}()
+		<-p.inWork
+		wake()
+		wake()
+		select {
+		case err := <-done:
+			t.Fatalf("a replay's settle answered with the connection's work left: %v", err)
+		default:
+		}
+		require.Zero(t, p.stuckLooks.Load())
+		p.readStuck(c)
+		require.NoError(t, <-done)
+	})
+}

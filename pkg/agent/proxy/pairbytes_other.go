@@ -37,3 +37,7 @@ func readUnread(*net.TCPConn) (int, error) {
 func readProxySide(*net.TCPConn) proxySide {
 	return proxySide{err: fmt.Errorf("%w: the proxy's sockets are read on Linux only", models.ErrProxyConnsUnsupported)}
 }
+
+// appEndGone cannot tell here: the proxy's sockets' state is read on Linux
+// only. "" (the application may still send).
+func (p *Proxy) appEndGone(*trackedConn) string { return "" }
