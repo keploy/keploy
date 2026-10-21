@@ -5714,6 +5714,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// that stopped part-way, PASSED or FAILED so far, learned on tests it
 	// never judged; an ignored test, or one the run did not select, verified
 	// nothing of what was learned while the set ran.
+	//
+	// This is the round's own half, decided before anything is written.
+	// keploy record's judging decides the set only later, on its confirming
+	// round too, and puts back what this round wrote onto the mocks of every
+	// set it does not decide (enterprise record_judge.go, recordedMocks): a
+	// set this round judged can still be one judging does not, when the
+	// confirming round did not complete or could not run, or judging was
+	// interrupted or failed.
 	if r.learning() && r.instrument {
 		if unchecked != "" {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",

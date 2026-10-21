@@ -854,6 +854,12 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
 		case learn.Exact:
+			// No made-elsewhere check here, on purpose: a request that is
+			// this scope's recording exactly (modulo keploy.yml's noise and
+			// what was learned) is that recording's, as in the matcher, and
+			// the worst that comes of it is red. A change that widens what
+			// Exact means (what a learn.Known excuses) asks
+			// elsewhereRecording first here too, as the Paired arm does.
 			m := sc.mocks[res.Index]
 			rec := sc.cands[res.Index].Shape
 			own := sc.own[res.Index]
@@ -921,6 +927,11 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			// the test recorded (a request one of its own answered
 			// recordings is: a miss, never Paired), which decodeHTTP relies
 			// on when it does not count such a miss as an extra call.
+			//
+			// So this check is the arm's first statement, before stuck,
+			// learnPlan, tracker.Answer and claimLearned: any learn outcome
+			// that learns, binds a variable or records a served exchange
+			// from a drifted pairing asks elsewhereRecording before it does.
 			if rec, notOwned := elsewhereRecording(ctx, input, mockDb, n.strict); rec != nil {
 				miss := &learnMiss{res: res, closest: m, pool: sc.http}
 				if notOwned {
