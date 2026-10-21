@@ -295,8 +295,8 @@ pkg/agent/proxy/dns_forward.go | field | zap.String(question.Name) | 2 | a DNS n
 pkg/agent/proxy/dns_forward.go | field | zap.String(s) | 1 | the host's resolver configuration: resolv.conf's servers, port and search domains
 pkg/agent/proxy/dns_forward.go | field | zap.Strings(p.dnsSearch) | 1 | the host's resolver configuration: resolv.conf's servers, port and search domains
 pkg/agent/proxy/dns_forward.go | field | zap.Strings(p.dnsUpstreamServers) | 1 | the host's resolver configuration: resolv.conf's servers, port and search domains
+pkg/agent/proxy/exact.go | field | serveExactTest(test) | 2 | a test case's name, which keploy gives it (test-N)
 pkg/agent/proxy/exact.go | field | set pkg/agent/proxy.exactView.poolKey(key) | 1 | the test window's key keploy keeps a test's mocks under: a test case's name and its set's, keploy's
-pkg/agent/proxy/exact.go | field | set pkg/agent/proxy.exactView.test(test) | 1 | the test window's key keploy keeps a test's mocks under: a test case's name and its set's, keploy's
 pkg/agent/proxy/exact.go | field | set pkg/models.MockState.Name(mk.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/exact.go | field | set pkg/models.MockState.Name(owned.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/exact.go | field | set pkg/models.MockState.ReqTimestampMock(models.FormatMockTimestamp(mk.Spec.ReqTimestampMock)) | 1 | a mock's own bookkeeping (its id, sort order, lifetime and flags), no request or response
@@ -305,7 +305,6 @@ pkg/agent/proxy/exact.go | field | set pkg/models.MockState.Type(mk.Spec.Metadat
 pkg/agent/proxy/exact.go | field | set pkg/models.MockState.Type(owned.Spec.Metadata["type"]) | 1 | a mock's own bookkeeping (its id, sort order, lifetime and flags), no request or response
 pkg/agent/proxy/exact.go | field | zap.String(a.owned.Name) | 2 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/exact.go | field | zap.String(name) | 1 | mocks' names, which keploy gives them (mock-N)
-pkg/agent/proxy/exact.go | field | zap.String(test) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/agent/proxy/handshake_hold.go | error | notHeld(err) <- (pkg/agent.HandshakeDestInfo).CheckHandshakeLookup | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/proxy/handshake_hold.go | error | notHeld(err) <- pkg/agent/proxy/synhold.Start | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/proxy/handshake_hold.go | error | zap.Error(err) <- (pkg/agent.HandshakeDestInfo).GetForHandshake | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
@@ -411,6 +410,7 @@ pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/int
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.reqView.method(request.Method) | 1 | an HTTP method: the request line's first token, the API's verb a route is dispatched by (GET, POST, or a custom one such as PURGE), not a value the request carries; a client may send any token there, as it may any route
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.reqView.method(string(r.Method)) | 1 | an HTTP method: the request line's first token, the API's verb a route is dispatched by (GET, POST, or a custom one such as PURGE), not a value the request carries; a client may send any token there, as it may any route
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varDecl.name(name) | 1 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
+pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varProblem.mock(hit.mock.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varProblem.mock(m.Name) | 5 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varProblem.mock(served.Name) | 5 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/matcher/learn.Leaf.Path(k) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
@@ -578,6 +578,7 @@ pkg/agent/proxy/proxy.go | error | zap.Error(err) <- pkg/agent/proxy/util.DialDe
 pkg/agent/proxy/proxy.go | error | zap.Error(err) <- pkg/agent/proxy/util.DialDestinationTLS | 1 | a TLS handshake's error: crypto/tls's alerts and verdicts (and keploy's own text), never the payload
 pkg/agent/proxy/proxy.go | errorf | fmt.Errorf(addr) | 5 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/proxy.go | errorf | fmt.Errorf(unreadCause) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/agent/proxy/proxy.go | field | OpenExactTest(test) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/agent/proxy/proxy.go | field | ServeExactPool(key) | 2 | the test window's key keploy keeps a test's mocks under: a test case's name and its set's, keploy's
 pkg/agent/proxy/proxy.go | field | ServeExactTest(test) | 1 | the test window's key keploy keeps a test's mocks under: a test case's name and its set's, keploy's
 pkg/agent/proxy/proxy.go | field | dialPostgresSSLUpstream(addr) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
@@ -840,9 +841,9 @@ pkg/matcher/http/match.go | print | newLogger.Printf(newLogger.Sprintf("Testrun 
 pkg/matcher/http/schema_match.go | field | NewSchemaDiffPrinter(tc.Name) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/matcher/http/schema_match.go | field | set pkg/models.Header.Key(k) | 2 | a header's name, not its value
 pkg/matcher/http/schema_match.go | field | zap.String(tc.Name) | 2 | a test case's name, which keploy gives it (test-N)
-pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Mock(e.Mock) | 1 | mocks' names, which keploy gives them (mock-N)
+pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Mock(e.Mock) | 2 | mocks' names, which keploy gives them (mock-N)
 pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Mock(x.Mock) | 2 | mocks' names, which keploy gives them (mock-N)
-pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Var(s.Place) | 1 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
+pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Var(s.Place) | 2 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
 pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Raw.Mock(m.Name) | 4 | mocks' names, which keploy gives them (mock-N)
 pkg/matcher/learn/json.go | field | excusedNode(path + "." + k) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
 pkg/matcher/learn/json.go | field | jsonLeaves(path + "." + k) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
@@ -1007,9 +1008,11 @@ pkg/platform/http/agent.go | errorf | fmt.Errorf(url, strings.TrimSpace(string(b
 pkg/platform/http/agent.go | field | AgentHealthTickerWithAnswer(a.conf.Agent.AgentURI) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent.go | field | BeforeTestSetCompose(testSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/platform/http/agent.go | field | NewApp(cmd) | 1 | the app's command as the user gave it (keploy record -c) and the flags keploy adds to it: the user's setup, not the app's traffic
+pkg/platform/http/agent.go | field | containerNamed(opts.KeployContainer) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent.go | field | copyPcapStream(url) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent.go | field | dockerAgentCancel(opts.KeployContainer) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent.go | field | logAgentContainerDiagnostics(opts.KeployContainer) | 2 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
+pkg/platform/http/agent.go | field | nameAgentContainer(opts.KeployContainer) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent.go | field | releaseSourceContainer(opts.FromContainer) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent.go | field | set a.conf.Agent.AgentURI(opts.AgentURI) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent.go | field | set a.conf.KeployContainer(opts.KeployContainer) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
@@ -1039,8 +1042,10 @@ pkg/platform/http/agent.go | field | zap.Strings(problems) | 2 | a container's, 
 pkg/platform/http/agent.go | message | set a.conf.Agent.AgentURI(opts.AgentURI) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent_boot_watch.go | errorf | fmt.Errorf(failure) | 2 | the text of keploy's own state file, which keploy wrote
 pkg/platform/http/agent_boot_watch.go | errorf | fmt.Errorf(uri, found) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
+pkg/platform/http/agent_boot_watch.go | field | set pkg/platform/http.namedContainer.name(name) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent_boot_watch.go | field | set pkg/platform/http.startJudgment.why(cur.p.Failure) | 1 | the agent's own start-up error (the OS's, docker's or keploy's words), redacted as the line that says it is: the agent's, not the app's traffic
 pkg/platform/http/agent_boot_watch.go | field | set pkg/platform/http.startJudgment.why(why) | 1 | the agent's own start-up error (the OS's, docker's or keploy's words), redacted as the line that says it is: the agent's, not the app's traffic
+pkg/platform/http/agent_boot_watch.go | field | zap.String(f[0]) | 1 | docker's own status word for a container (running, exited, dead, removing), not the app's traffic
 pkg/platform/http/agent_boot_watch.go | message | "still waiting for the keploy agent at " + uri + ": " + found | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent_boot_watch.go | message | a.conf.Agent.AgentURI | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent_instance.go | field | answered(instance) | 1 | an opaque token keploy makes for a connection or its process (ConnKey, ConnProc, a store key)
@@ -1329,6 +1334,7 @@ pkg/service/agent/app_listeners.go | errorf | fmt.Errorf(fields[1]) | 3 | an add
 pkg/service/agent/app_listeners.go | errorf | fmt.Errorf(table) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/service/agent/exact_proven.go | errorf | fmt.Errorf(ex.Test) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/agent/exact_proven.go | field | ServeExactTest(ex.Test) | 1 | the test window's key keploy keeps a test's mocks under: a test case's name and its set's, keploy's
+pkg/service/agent/exact_proven.go | field | openExactTest(ex.Test) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/agent/exact_proven.go | field | zap.String("record the test again, so its recording holds no call to " + label) | 1 | a value the user gave keploy (a flag, a config key, a path, the app's command), echoed back to them
 pkg/service/agent/exact_proven.go | field | zap.String(label) | 1 | a value the user gave keploy (a flag, a config key, a path, the app's command), echoed back to them
 pkg/service/agent/exact_proven.go | field | zap.String(m.Name) | 1 | mocks' names, which keploy gives them (mock-N)

@@ -262,7 +262,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		// One step: the scope begins as the test's mocks go live, so no
 		// call they answer binds before it.
 		if err := opener.OpenTestCase(r.Context(), updateParamsReq.FilterParams); err != nil {
-			utils.LogError(a.logger, err, "failed to open the test case")
+			utils.LogContentError(a.logger, err, "failed to open the test case")
 			respondAgent(w, r, http.StatusInternalServerError, err)
 			return
 		}

@@ -1862,7 +1862,7 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
 		if open != nil && opensInOneStep {
 			if err := opener.OpenTestWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime, open.given); err != nil {
-				utils.LogError(a.logger, err, "failed to stage the test case's window on the proxy and begin its variables")
+				utils.LogContentError(a.logger, err, "failed to stage the test case's window on the proxy and begin its variables")
 				return err
 			}
 			return nil
