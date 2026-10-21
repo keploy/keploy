@@ -1931,7 +1931,10 @@ func printMismatchReport(r *models.MockMismatchReport) (withheld bool) {
 		printFieldDiffTable(r.FieldDiffs, r.ContentWithheld)
 		withheld = r.ContentWithheld
 	case r.Diff != "":
+		// A parser's own words (MySQL's "actual: ... closest: ..."), with
+		// their values withheld when the report is (literals written "?").
 		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
+		withheld = r.ContentWithheld
 	}
 
 	if r.NextSteps != "" {
