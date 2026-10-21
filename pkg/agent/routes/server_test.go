@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,7 +16,10 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // grabPort binds an ephemeral port and returns the listener (still holding the
@@ -198,7 +202,7 @@ func TestStartAgentServer_ServesAfterTransientPortConflict(t *testing.T) {
 // Neither shows up in a test of a working flow: the streams are only cut after
 // the timeout, and the slow client only costs a goroutine.
 func TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams(t *testing.T) {
-	srv := newAgentHTTPServer(http.NotFoundHandler())
+	srv := newAgentHTTPServer(zap.NewNop(), http.NotFoundHandler())
 
 	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
 		t.Errorf("ReadTimeout=%v WriteTimeout=%v: either cuts the long-lived pcap and keylog streams mid-session",
@@ -209,6 +213,47 @@ func TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams(t *testing.T)
 	}
 	if srv.IdleTimeout <= 0 {
 		t.Error("no IdleTimeout: a keep-alive connection that goes quiet is held indefinitely")
+	}
+}
+
+// A handler's panic is logged as logcontent lets a panic's value be, not
+// printed whole to stderr as net/http prints one: a panic a request's content
+// raised would otherwise reach the terminal whatever KEPLOY_LOG_CONTENT says.
+// The request gets what net/http gives it on any panic, a dropped connection.
+func TestAHandlersPanicReachesNoStreamWhole(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	const canary = "a-request-body-4111111111111111"
+	var stderr strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&stderr)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	core, logs := observer.New(zapcore.DebugLevel)
+	srv := newAgentHTTPServer(zap.New(core), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(errors.New("cannot read the body: " + canary))
+	}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); <-done })
+	resp, err := http.Get("http://" + ln.Addr().String() + "/agent/health")
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("the request got a response (%s): net/http drops the connection on a handler's panic", resp.Status)
+	}
+	_ = srv.Close()
+	<-done
+	if strings.Contains(stderr.String(), canary) {
+		t.Errorf("the panic's value reaches stderr whole: %s", stderr.String())
+	}
+	entries := logs.FilterMessageSnippet("panicked").All()
+	if len(entries) != 1 {
+		t.Fatalf("%d lines say the handler panicked, want 1: %v", len(entries), logs.All())
+	}
+	if fmt.Sprint(entries[0].ContextMap()) == "" || strings.Contains(fmt.Sprint(entries[0].ContextMap()), canary) {
+		t.Errorf("the line carries the panic's value with the switch off: %v", entries[0].ContextMap())
 	}
 }
 

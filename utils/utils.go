@@ -568,6 +568,32 @@ func Recover(logger *zap.Logger) {
 	}
 }
 
+// RecoverHandler is h, with a panic in it logged as logcontent lets a panic's
+// value be (logcontent.Panic), at ERROR with the goroutine's stack, where
+// net/http would print it whole, its value and its stack, to the server's
+// ErrorLog or to stderr: a panic a request's content raised (panic(err) of an
+// error that quotes the body it read) would reach the user's terminal
+// whatever KEPLOY_LOG_CONTENT says. What the request gets is what net/http
+// gives it on any panic: the panic goes on as http.ErrAbortHandler, on which
+// net/http drops the connection and prints nothing.
+func RecoverHandler(logger *zap.Logger, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if v != http.ErrAbortHandler {
+				stackTrace := debug.Stack()
+				LogError(logger, nil, "a request to keploy's HTTP server panicked; its connection is dropped",
+					logcontent.Panic("panic", v), zap.String("stack trace", string(stackTrace)))
+			}
+			panic(http.ErrAbortHandler)
+		}()
+		h.ServeHTTP(w, r)
+	})
+}
+
 // GenerateGithubActions generates a GitHub Actions workflow file for Keploy
 func GenerateGithubActions(logger *zap.Logger, appCmd string) {
 	// Determine the path based on the alias "keploy"

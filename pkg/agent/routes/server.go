@@ -50,7 +50,7 @@ var bindRetryInterval = 500 * time.Millisecond
 func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocker bool, router http.Handler) {
 	addr := agentBindAddr(port, isDocker)
 	logger.Info("Starting Agent's HTTP server", zap.String("addr", addr))
-	srv := newAgentHTTPServer(router)
+	srv := newAgentHTTPServer(logger, router)
 
 	// Derive a context tied to both the parent context and the lifetime of this function,
 	// so the shutdown goroutine will always terminate when the server stops or fails to start.
@@ -98,10 +98,12 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 	logger.Info("HTTP server stopped")
 }
 
-// newAgentHTTPServer builds the control-plane HTTP server around router.
-func newAgentHTTPServer(router http.Handler) *http.Server {
+// newAgentHTTPServer builds the control-plane HTTP server around router,
+// whose panics it logs through logger as logcontent lets a panic's value be
+// (utils.RecoverHandler), not whole to stderr as net/http would.
+func newAgentHTTPServer(logger *zap.Logger, router http.Handler) *http.Server {
 	return &http.Server{
-		Handler: router,
+		Handler: utils.RecoverHandler(logger, router),
 		// A connection that is opened and then never finishes its request
 		// line, or that completes a request and then goes quiet, would
 		// otherwise hold a goroutine indefinitely - on a port any local

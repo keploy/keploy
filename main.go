@@ -95,7 +95,9 @@ func start(ctx context.Context) {
 		go func() {
 			addr := "localhost:" + pprofPort
 			logger.Info("pprof server starting", zap.String("addr", addr))
-			if err := http.ListenAndServe(addr, nil); err != nil {
+			// pprof's handlers, on http.DefaultServeMux, with a panic in
+			// them logged as logcontent lets it (utils.RecoverHandler).
+			if err := http.ListenAndServe(addr, utils.RecoverHandler(logger, http.DefaultServeMux)); err != nil {
 				logger.Error("pprof server failed; check that PPROF_PORT is a valid port and not already in use, or unset the env var to disable",
 					zap.String("port", pprofPort), zap.Error(err))
 			}

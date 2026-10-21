@@ -1045,3 +1045,42 @@ func Hosts(logger *zap.Logger, s string) {
 		logger.Error("no dial", zap.Error(err))
 	}
 }
+
+// Raises panics: a panic no recover stops is printed whole to stderr by the
+// Go runtime, so its value is judged as a print's, an error by its origin.
+func Raises(s string, n int, k Kind) {
+	switch n {
+	case 0:
+		panic("a constant")
+	case 1:
+		panic(fmt.Sprintf("a frame of %d bytes", n))
+	case 2:
+		panic(k)
+	case 3:
+		panic(opened())
+	case 4:
+		panic(s) // want: print
+	case 5:
+		panic("a value " + s) // want: print
+	case 6:
+		panic(fmt.Sprintf("a value %s", s)) // want: print
+	case 7:
+		panic(parse(s)) // want: error
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			panic(r) // want: print
+		}
+	}()
+}
+
+// Serves serves HTTP: net/http recovers a handler's panic and prints it whole,
+// its value and its stack, to stderr, unless the handler recovers its own.
+func Serves(logger *zap.Logger, l net.Listener, h http.Handler) {
+	_ = &http.Server{Handler: h} // want: print
+	_ = &http.Server{}           // want: print
+	_ = &http.Server{Handler: utils.RecoverHandler(logger, h)}
+	_ = http.Serve(l, h)               // want: print
+	_ = http.ListenAndServe(":0", nil) // want: print
+	_ = http.Serve(l, utils.RecoverHandler(logger, h))
+}

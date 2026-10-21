@@ -143,6 +143,8 @@ cli/update.go | field | zap.String(cmd.Name()) | 1 | a flag's or a command's nam
 config/config.go | errorf | fmt.Errorf(spec) <- range parts | 1 | a value the user gave keploy (a flag, a config key, a path, the app's command), echoed back to them
 config/config.go | field | set config.SelectedTests.TestSet(spec) <- range parts | 1 | a value the user gave keploy (a flag, a config key, a path, the app's command), echoed back to them
 config/config.go | field | set config.SelectedTests.TestSet(testSetName) <- range parts | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
+config/default.go | error | panic(err) <- config.Merge | 1 | an error of merging keploy's own default config, the YAML it embeds (defaultConfig, InternalConfig), at start: keploy's text, not an application's
+config/default.go | error | panic(err) <- gopkg.in/yaml.v3.Unmarshal | 1 | an error of reading keploy's own default config, the YAML it embeds (defaultConfig, InternalConfig), at start: keploy's text, not an application's
 config/loader/loader.go | errorf | fmt.Errorf(filepath.Base(p)) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 main.go | error | finalExitCode(err) <- (github.com/spf13/cobra.Command).Execute | 1 | the root command's error (cobra's Execute: what the command's RunE returned), which exitCodeForCmdErr prints to stderr only when utils.IsUsageError says it is a usage error: an ErrUsage a command tagged for the command line the user typed (an unknown verb, a flag it could not take, a wrong argument count), or cobra's unknown command; any other it only maps to an exit code
 main.go | error | zap.Error(err) <- net/http.ListenAndServe | 1 | a dial's error: net's OpError (the addresses and an errno), a timeout, or keploy's own text about the dial
@@ -495,6 +497,7 @@ pkg/agent/proxy/integrations/mysql/replayer/conn.go | field | zap.String(packetT
 pkg/agent/proxy/integrations/mysql/replayer/conn.go | field | zap.String(printable(hr41.Database)) | 1 | the name of the database the client asked for: the app's configuration, not a row
 pkg/agent/proxy/integrations/mysql/replayer/conn.go | field | zap.String(t) <- verdict.Header.Type | 1 | a protocol's name for a message kind, a command, a phase, an auth plugin or a packet type: a word from the protocol's closed set, or a Go type's name
 pkg/agent/proxy/integrations/mysql/replayer/conn.go | field | zap.String(why) <- packetType(&req[0].PacketBundle) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/agent/proxy/integrations/mysql/replayer/match.go | error | panic(err) <- github.com/hashicorp/golang-lru/v2.New2Q | 2 | golang-lru's error for a cache's size, which keploy's code sets as a constant: the library's own words
 pkg/agent/proxy/integrations/mysql/replayer/match.go | errorf | fmt.Errorf(exp.Filler, act.Filler) | 1 | a handshake's filler bytes, zeros by the protocol
 pkg/agent/proxy/integrations/mysql/replayer/match.go | errorf | fmt.Errorf(exp.Username, act.Username) | 1 | content: a credential's name (the database user), kept in the mismatch error its caller reports; every line that logs the error gates it
 pkg/agent/proxy/integrations/mysql/replayer/match.go | errorf | fmt.Errorf(expectedMessage.Filler, actualMessage.Filler) | 1 | a handshake's filler bytes, zeros by the protocol
@@ -528,6 +531,7 @@ pkg/agent/proxy/integrations/mysql/replayer/replay.go | field | newConnectionMis
 pkg/agent/proxy/integrations/mysql/replayer/replay.go | field | simulateCommandPhase(dst) <- destinationOf(dstCfg) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/proxy/integrations/mysql/replayer/report.go | errorf | fmt.Errorf(step, why) | 1 | content: a credential's name (the database user), kept in the mismatch error its caller reports; every line that logs the error gates it
 pkg/agent/proxy/integrations/mysql/replayer/report.go | field | set pkg/agent/proxy/integrations/mysql/replayer.mockMiss.closestMock(unknown[0].Name) | 1 | mocks' names, which keploy gives them (mock-N)
+pkg/agent/proxy/integrations/mysql/replayer/schema_noise.go | error | panic(err) <- github.com/hashicorp/golang-lru/v2.New2Q | 1 | golang-lru's error for a cache's size, which keploy's code sets as a constant: the library's own words
 pkg/agent/proxy/integrations/mysql/replayer/schema_noise.go | field | set g.closestMock(mock.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/mysql/replayer/schema_noise.go | field | zap.String(mock.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/mysql/replayer/schema_noise.go | field | zap.Strings(paths) <- make([]string, 0, len(v.drift)) & append(paths, p) | 1 | a body field's path (body.user.id): where a value sits, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)
@@ -1080,6 +1084,7 @@ pkg/platform/http/agent.go | field | zap.Strings(hostConfig.Links) | 1 | a conta
 pkg/platform/http/agent.go | field | zap.Strings(opts.AppNetworks) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent.go | field | zap.Strings(problems) <- a.restoreShortfall(ctx, name) | 2 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/platform/http/agent.go | message | set a.conf.Agent.AgentURI(opts.AgentURI) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
+pkg/platform/http/agent.go | print | panic(err) <- recover() | 1 | the panic a deferred restore of the app's container recovered, raised again as it was: what the runtime prints of it is what it would print with no restore there, and its value is judged where it is raised (each panic of keploy's is a site of its own)
 pkg/platform/http/agent_boot_watch.go | errorf | fmt.Errorf(failure) | 2 | the text of keploy's own state file, which keploy wrote
 pkg/platform/http/agent_boot_watch.go | errorf | fmt.Errorf(uri, found) <- param uri & lookAt(ctx, addr) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/platform/http/agent_boot_watch.go | field | set pkg/platform/http.namedContainer.name(name) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
@@ -2392,7 +2397,7 @@ utils/utils.go | field | zap.String(string(output)) <- cmd.CombinedOutput() | 2 
 utils/utils.go | field | zap.String(string(output)) <- forcedCmd.CombinedOutput() | 2 | a system command's output (keytool, certutil, update-ca-certificates, sudo, id, docker): keploy's setup, not the app's traffic
 utils/utils.go | field | zap.String(string(output)) <- listAllCmd.CombinedOutput() | 2 | a system command's output (keytool, certutil, update-ca-certificates, sudo, id, docker): keploy's setup, not the app's traffic
 utils/utils.go | field | zap.String(string(output)) <- verifyAllCmd.CombinedOutput() | 1 | a system command's output (keytool, certutil, update-ca-certificates, sudo, id, docker): keploy's setup, not the app's traffic
-utils/utils.go | field | zap.String(string(stackTrace)) <- debug.Stack() | 1 | a goroutine's stack trace: keploy's own code and addresses
+utils/utils.go | field | zap.String(string(stackTrace)) <- debug.Stack() | 2 | a goroutine's stack trace: keploy's own code and addresses
 utils/utils.go | field | zap.String(viperKey) <- param viperKeyPrefix & cmd.Name() & kebabToCamel(flag.Name) | 1 | a flag's or a command's name
 utils/utils.go | message | errMsg | 1 | the message a log helper is given: each of its callers passes one of keploy's literals
 utils/utils.go | message | executable <- range fields | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received

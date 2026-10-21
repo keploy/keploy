@@ -45,7 +45,11 @@
 //     k0kubun/pp's and fatih/color's prints; a cobra command's Print kin;
 //     and a tablewriter table's rows, headers and footers when it is made on
 //     a std stream. A command's own output, judged where it is printed (what
-//     it is made of is not followed to where it is written);
+//     it is made of is not followed to where it is written). And a panic's
+//     value (panic(v)), which the Go runtime prints whole to stderr when no
+//     recover stops it, and a handler net/http serves (an http.Server's,
+//     http.Serve's) unless it recovers its own panic (utils.RecoverHandler):
+//     net/http prints that panic whole, its value and its stack, to stderr;
 //   - url: a field's value, a message, a print, a sugar's argument or an
 //     error's text (an errorf's, an errors.New's) made from a request's URL,
 //     its path or its query (urlOf: net/url's URL fields and methods, a
@@ -1744,6 +1748,7 @@ func (fs *fileScan) walk(n ast.Node) {
 		case *ast.CompositeLit:
 			fs.fieldLiteral(x)
 			fs.structLiteral(x)
+			fs.serverLiteral(x)
 			if t := fs.info.TypeOf(x); t != nil {
 				if _, isMap := t.Underlying().(*types.Map); isMap {
 					for _, el := range x.Elts {
@@ -1858,6 +1863,15 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 	if f == nil {
 		if isBuiltin(fs.info, call.Fun, "panic") {
 			fs.keepPanicWords(call)
+			// A panic no recover stops is printed whole to stderr by the
+			// Go runtime ("panic: " and its value: a text as it is, an
+			// error's Error, a Stringer's String), which a user reads
+			// beside the log's lines. Whether one recovers it is not
+			// followed: a recover that logs it does so through
+			// logcontent.Panic or utils.HandleRecovery, and one that
+			// does not leaves it to the runtime.
+			fs.printArgs(kindPrint, "panic", call.Args, false)
+			return
 		}
 		if isBuiltin(fs.info, call.Fun, "print") || isBuiltin(fs.info, call.Fun, "println") {
 			// The builtins write to stderr.
@@ -2022,6 +2036,10 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		// (ctx.Value(models.ClientConnectionIDKey).(string)) is what each
 		// WithValue under its key puts there.
 		fs.fieldValue(call.Args[2], "context.WithValue", call.Args[2])
+	case pkg == "net/http" && recv == "":
+		if i, ok := serveHandler[f.Name()]; ok {
+			fs.served(call, "http."+f.Name(), arg(i))
+		}
 	case pkg == sentryPkg && sentrySinks[f.Name()]:
 		// What a crash report carries leaves the machine for Keploy's
 		// Sentry: each value it is given, a key's included.
@@ -3173,6 +3191,56 @@ func (fs *fileScan) errFieldWrite(v *types.Var, rhs ast.Expr, what string) {
 	fs.viaField++
 	defer func() { fs.via = prev; fs.viaField-- }()
 	fs.errValue(rhs, what, rhs)
+}
+
+// serveHandler are net/http's functions that serve a handler, by the index of
+// the handler (an http.Server's literal is read by serverLiteral): net/http
+// recovers a panic in the handler and prints it whole, its value and its
+// stack, to the server's ErrorLog or stderr, unless the handler recovers it
+// first.
+var serveHandler = map[string]int{"ListenAndServe": 1, "ListenAndServeTLS": 3, "Serve": 1, "ServeTLS": 1}
+
+// recovering: h is a handler whose panic is logged as logcontent lets a
+// panic's value be (utils.RecoverHandler), which net/http then does not
+// print.
+func (fs *fileScan) recovering(h ast.Expr) bool {
+	c, ok := ast.Unparen(h).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	f := calleeFunc(fs.info, c)
+	return f != nil && funcPkg(f) == module+"/utils" && f.Name() == "RecoverHandler"
+}
+
+// served: a handler, h (nil for http.DefaultServeMux), served by what: a
+// print site, of the panic net/http prints for it, unless h recovers its own
+// (recovering).
+func (fs *fileScan) served(at ast.Node, what string, h ast.Expr) {
+	if h != nil && fs.recovering(h) {
+		return
+	}
+	handler := "nil"
+	if h != nil {
+		handler = fs.text(h)
+	}
+	fs.report(at, kindPrint, what+"("+handler+") <- a handler's panic")
+}
+
+// serverLiteral: an http.Server's literal, whose Handler's panic net/http
+// prints whole (served).
+func (fs *fileScan) serverLiteral(lit *ast.CompositeLit) {
+	if t := fs.info.TypeOf(lit); t == nil || !isNamed(t, "net/http", "Server") {
+		return
+	}
+	var h ast.Expr
+	for _, el := range lit.Elts {
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Handler" {
+				h = kv.Value
+			}
+		}
+	}
+	fs.served(lit, "http.Server", h)
 }
 
 // structLiteral: the string fields a struct's literal writes (fieldVar), by
