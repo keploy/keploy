@@ -106,6 +106,7 @@ trap 'for fd in 3 4 5 6 7 8; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' INT
 // on its interrupt, and the stop says no kill. Counted in keploy's runnable
 // time alone, it was killed for want of progress it could not make.
 func TestAStopDoesNotJudgeAnAppHeldOffTheCPU(t *testing.T) {
+	starvetest.TakesACPU(t)
 	const bound = 300 * time.Millisecond
 	shortStall(t, bound)
 	var looks atomic.Uint64
@@ -113,7 +114,7 @@ func TestAStopDoesNotJudgeAnAppHeldOffTheCPU(t *testing.T) {
 	exitLooked.Store(&looked)
 	defer exitLooked.Store(nil)
 	dir := starvetest.MemDir(t)
-	pid, reaped := readyLeader(t, dir, `trap 'while [ ! -e released ]; do :; done; touch out; exit 0' INT; touch ready; while :; do :; done`)
+	pid, reaped := readyLeader(t, dir, `trap '`+starvetest.ShellSpin("[ ! -e released ]")+`; touch out; exit 0' INT; touch ready; `+starvetest.ShellSpin(""))
 	release := starvetest.Hold(t, pid)
 	ranBefore, _ := starvetest.Ran(pid)
 	type stopped struct {
@@ -167,6 +168,7 @@ func TestAStopDoesNotJudgeAnAppHeldOffTheCPU(t *testing.T) {
 // it, and had a fraction of the stall bound of CPU meanwhile, or the test
 // held nothing; let go, it ends, the app with it, and the stop says no kill.
 func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
+	starvetest.TakesACPU(t)
 	const bound = 300 * time.Millisecond
 	shortStall(t, bound)
 	var looks atomic.Uint64
@@ -185,7 +187,9 @@ func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer said.Close()
-	pid, reaped := readyLeader(t, dir, `trap 'sh -c "echo \$\$ > child; while [ ! -e release ]; do :; done"; exit 0' INT; touch ready; while :; do sleep 0.01; done`)
+	// Both its loops end with the test, however it ends (ShellSpin).
+	pid, reaped := readyLeader(t, dir, `trap 'sh -c "echo \$\$ > child; `+starvetest.ShellSpin("[ ! -e release ]")+`"; exit 0' INT; touch ready; `+
+		"while kill -0 "+strconv.Itoa(os.Getpid())+"; do sleep 0.01; done")
 	type stopped struct {
 		killed string
 		err    error
@@ -264,6 +268,8 @@ func TestKernelHoldHelper(t *testing.T) {
 	if dir == "" {
 		t.Skip("an app of the stop tests")
 	}
+	// Held in the kernel for good, it waits for the test: it ends with it.
+	starvetest.EndWithOwner()
 	// No collection: one would wait for ever on the thread held in the
 	// kernel, which does not stop for it.
 	debug.SetGCPercent(-1)
@@ -355,9 +361,11 @@ func vforkSleeping(d time.Duration) int {
 // uninterruptible sleep, until the child it starts there ends: it vforks
 // (clone with CLONE_VFORK and its memory copied, not shared), and the kernel
 // holds a vfork's parent, killable, until the child exits or execs. The child
-// blocks every signal it can and sleeps until it is killed. Raw calls only:
-// the child runs on a copy of this goroutine's stack, with no other thread,
-// so nothing here may grow the stack or reach the runtime.
+// blocks every signal it can and sleeps until it is killed, as it is once
+// its parent is gone (PR_SET_PDEATHSIG, and its parent looked for after:
+// one gone before it set that does not send it). Raw calls only: the child
+// runs on a copy of this goroutine's stack, with no other thread, so nothing
+// here may grow the stack or reach the runtime.
 //
 //go:nosplit
 //go:norace
@@ -365,9 +373,14 @@ func holdInTheKernel() {
 	const cloneVfork, sigSetmask = 0x4000, 2
 	var all, old [1]uint64
 	all[0] = ^uint64(0)
+	parent, _, _ := syscall.RawSyscall(syscall.SYS_GETPID, 0, 0, 0)
 	syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigSetmask, uintptr(unsafe.Pointer(&all)), uintptr(unsafe.Pointer(&old)), 8, 0, 0)
 	pid, _, errno := syscall.RawSyscall6(syscall.SYS_CLONE, cloneVfork|uintptr(syscall.SIGCHLD), 0, 0, 0, 0, 0)
 	if errno == 0 && pid == 0 {
+		syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0)
+		if now, _, _ := syscall.RawSyscall(syscall.SYS_GETPPID, 0, 0, 0); now != parent {
+			syscall.RawSyscall(syscall.SYS_EXIT_GROUP, 0, 0, 0)
+		}
 		for {
 			syscall.RawSyscall6(syscall.SYS_PPOLL, 0, 0, 0, uintptr(unsafe.Pointer(&all)), 8, 0)
 		}
@@ -385,7 +398,7 @@ func startKernelHolder(t *testing.T, dir string, turn time.Duration) (pid int, r
 	// A race-detector build sleeps a second on its way out (GORACE's
 	// atexit_sleep_ms), a way out the stop rightly judges at the tests'
 	// bound: it exits as it would without one.
-	cmd.Env = append(os.Environ(), kernelHoldEnv+"="+dir, "GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
+	cmd.Env = append(os.Environ(), kernelHoldEnv+"="+dir, "GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"), starvetest.Owner())
 	if turn > 0 {
 		cmd.Env = append(cmd.Env, kernelTurnsEnv+"="+turn.String())
 	}
