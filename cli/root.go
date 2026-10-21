@@ -119,8 +119,10 @@ func HardenUnknownSubcommands(root *cobra.Command) {
 // --delay 10` printed every flag record has, some 80 lines, under the one line
 // that said what was wrong, and that line scrolled away. Each main says the
 // error once, then where the command's help is (`Run 'keploy record --help'
-// for usage.`). An error a command returns while it runs is not touched:
-// cobra prints it, and its usage, as it did.
+// for usage.`). An error a command returns while it runs is not touched
+// here: cobra prints it, and its usage, as it did. A refusal of its PreRunE
+// (CmdConfigurator.Validate) is said with no usage text under it, which
+// Validate sees to.
 func TagUsageErrors(root *cobra.Command) {
 	flagErr := root.FlagErrorFunc()
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
