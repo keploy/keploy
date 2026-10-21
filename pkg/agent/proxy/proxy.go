@@ -4441,6 +4441,19 @@ func (p *Proxy) StartVariables(given []models.VariableBinding) bool {
 	return true
 }
 
+// BindGiven binds b, a value the open test's harness gave, as the test's given
+// variable (MockManager.BindGiven). It returns the binding in force of b's
+// name and whether it is b; ok is false when the proxy keeps no mock manager.
+// Satisfies the agent's optional GivenBinder extension interface.
+func (p *Proxy) BindGiven(b models.VariableBinding) (in models.VariableBinding, bound, ok bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return models.VariableBinding{}, false, false
+	}
+	in, bound = m.BindGiven(b)
+	return in, bound, true
+}
+
 // BoundVariables returns the test variables bound so far in the test, and
 // false when the proxy keeps no mock manager to hold them.
 func (p *Proxy) BoundVariables() ([]models.VariableBinding, bool) {

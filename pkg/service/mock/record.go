@@ -799,12 +799,16 @@ func (m *mockService) Record(ctx context.Context) error {
 			if provenswitch.On() {
 				stampBegins(byCase, windows)
 				stampReal(byCase, windows)
+				stampGiven(byCase, windows)
 			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
 				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, withoutRetries(recorded, retries), m.claims), suites)
+			}
+			if provenswitch.On() {
+				m.upsertKeyGiven(persistCtx, name, keyGiven(m.claims))
 			}
 		}
 	}
@@ -1234,6 +1238,61 @@ func stampReal(byCase map[string]models.MappedTestCase, windows []models.ScopeWi
 		tc.Real = mergeSorted(tc.Real, realDests(w.Real))
 		byCase[w.Name] = tc
 	}
+}
+
+// stampGiven writes into each test's mapping what its harness gave keploy
+// while it was open (models.GivenValue): its replay binds each, by name, as
+// the given variable recorded with that value. A test run more than once in
+// the record (a retry) keeps its last run's, as its mocks are its last run's.
+func stampGiven(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if len(w.Given) == 0 || w.Name == "" {
+			continue
+		}
+		tc := byCase[w.Name]
+		tc.Given = append([]models.GivenValue(nil), w.Given...)
+		byCase[w.Name] = tc
+	}
+}
+
+// keyGiven is, by claim key in the order the keys were first claimed, what
+// each key's harness gave while no test was open (the claims' Given): a key
+// claimed more than once in the record (a test process run again, which runs
+// its beforeAll again) keeps its last claim's that gave any.
+func keyGiven(claims []models.ScopeWindow) []models.KeyGiven {
+	var out []models.KeyGiven
+	at := map[string]int{}
+	for _, c := range claims {
+		if c.Claim == "" || len(c.Given) == 0 {
+			continue
+		}
+		k := models.KeyGiven{Key: c.Claim, Given: append([]models.GivenValue(nil), c.Given...)}
+		if i, ok := at[c.Claim]; ok {
+			out[i] = k
+			continue
+		}
+		at[c.Claim] = len(out)
+		out = append(out, k)
+	}
+	return out
+}
+
+// upsertKeyGiven writes what each claim key's harness gave outside every test
+// into the recording's mapping (KeyGivenMapper).
+func (m *mockService) upsertKeyGiven(ctx context.Context, name string, keys []models.KeyGiven) {
+	if len(keys) == 0 {
+		return
+	}
+	mapper, ok := m.mappingDB.(KeyGivenMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot keep what a claim key's harness gave outside every test; its replay will miss the calls that carry it", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertKeyGiven(ctx, name, keys); err != nil {
+		m.logger.Warn("failed to write what a claim key's harness gave outside every test", zap.Error(err))
+		return
+	}
+	m.logger.Info("wrote what each claim key's harness gave outside every test", zap.Int("keys", len(keys)), zap.String("mock-set", name))
 }
 
 func flowOf(windows []models.ScopeWindow, test string) string {

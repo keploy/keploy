@@ -1127,11 +1127,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			switch {
 			case !placeable:
 				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)"
-			case !own:
+			case !own && !(outside && g.Outside):
+				// A claim key's given value (its harness gave it outside every
+				// test: a group's beforeAll) is carried by the key's calls
+				// outside its tests too.
 				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables"
 			}
 			v := p.vars[g.Name]
-			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
+			v.Recorded, v.Use, v.Outside = g.Recorded, appendNew(v.Use, place), g.Outside
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
@@ -1493,7 +1496,9 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 		return nil
 	}
 	var out []variables.Binding
-	for _, b := range table.Snapshot() {
+	// The test's, then the claim key's (given by the harness while no test was
+	// open), which every test of the key and its calls outside them carry.
+	for _, b := range append(table.Snapshot(), table.OutsideSnapshot()...) {
 		if b.Given {
 			out = append(out, b)
 		}
@@ -1506,12 +1511,73 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 // not the key's (two counters both at 1 when recorded are two values).
 func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, bool) {
 	number := r.Type == learn.Number
+	var whole, within []variables.Binding
 	for _, g := range given {
 		if r.Value != "" && variables.SameValue(g.Recorded, r.Value, number) && variables.SameValue(g.Value, live.Value, number) {
-			return g, true
+			whole = append(whole, g)
 		}
 	}
+	if len(whole) > 0 {
+		return latestGiven(whole), true
+	}
+	// A given value inside a longer one (a session token the test installs,
+	// in the Cookie header with the run's other cookies): the recorded text
+	// holds its recorded value as a token, and the live text is that text
+	// with this run's value in its place, exactly (the variable pass then
+	// asserts it so in every replay: usedWithin).
+	if r.Type != learn.String {
+		return variables.Binding{}, false
+	}
+	for _, g := range given {
+		if len(g.Recorded) < minWithin || g.Recorded == r.Value || !learn.ContainsToken(r.Value, g.Recorded) {
+			continue
+		}
+		if with, _ := learn.ReplaceToken(r.Value, g.Recorded, g.Value); with == live.Value {
+			within = append(within, g)
+		}
+	}
+	if len(within) > 0 {
+		return latestGiven(within), true
+	}
 	return variables.Binding{}, false
+}
+
+// latestGiven is, of the given values a call carries, the one it carries: of
+// one name, the latest install. A harness names each value it gives by what
+// it is and the order the test installed it ("cookie-jwt-3"), and gives it as
+// it is installed, before any call carries it: a value a helper signs for
+// each call (a per-request header) is given right before that call, and a
+// cookie stays the latest one installed. Two installs a run made in one
+// second hold one value, recorded and live alike, and carry it to different
+// calls: the call's own is the latest installed so far, which a replay that
+// made them in two seconds tells apart. Of two names (a session's jwt and
+// refresh cookies, set to one token), the first by name: the call holds
+// both. given is in name order (variables.Table.Snapshot).
+func latestGiven(gs []variables.Binding) variables.Binding {
+	best := gs[0]
+	bestBase, bestN := installOrder(best.Name)
+	for _, g := range gs[1:] {
+		base, n := installOrder(g.Name)
+		if base == bestBase && n > bestN {
+			best, bestN = g, n
+		}
+	}
+	return best
+}
+
+// installOrder splits a given value's name into what it is and the order of
+// its install ("cookie-jwt", 3 of "cookie-jwt-3"); a name with no order is
+// its own, with order 0.
+func installOrder(name string) (string, int) {
+	i := strings.LastIndexByte(name, '-')
+	if i < 0 || i == len(name)-1 {
+		return name, 0
+	}
+	n, err := strconv.Atoi(name[i+1:])
+	if err != nil || n < 0 {
+		return name, 0
+	}
+	return name[:i], n
 }
 
 // respLeavesOf are the leaves of m's recorded answer.

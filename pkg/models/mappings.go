@@ -120,6 +120,10 @@ type Mapping struct {
 	// only keploy record wrote, in one keploy test wrote before it said so,
 	// and in one a cloud store handed back (which keeps no source).
 	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
+	// KeyGiven is, by claim key, what the key's harness gave while no test
+	// was open in the recording (KeyGiven): its replay binds each in the key's
+	// scope. Written only under the proven switch; omitted when none.
+	KeyGiven []KeyGiven `json:"keyGiven,omitempty" yaml:"key_given,omitempty" bson:"key_given,omitempty"`
 }
 
 type BootSpec struct {
@@ -170,6 +174,12 @@ type MappedTestCase struct {
 	// the verdict fails when CI never reaches one. Written and read only
 	// under the proven switch; empty in recordings made without it.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
+	// Given is what the test's harness gave keploy while the test was open in
+	// its recording (GivenValue): values the test made itself. Its replay
+	// binds each, by name, as the given variable recorded with that value,
+	// when the harness gives that run's value. Written and read only under
+	// the proven switch.
+	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -188,8 +198,9 @@ type persistedTestFormat struct {
 // persistedTestFormat, which also picks the shape an entry is read in.
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
-	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
-	Real                []string  `json:"real,omitempty" yaml:"real,omitempty"`
+	At                  time.Time    `json:"at,omitzero" yaml:"at,omitempty"`
+	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
+	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -204,11 +215,45 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given})
+}
+
+// errRecordedGiven is a test entry whose given: is not a list of named values.
+const errRecordedGiven = "the values a test's harness gave (given) are not a list of names and values: %w"
+
+// recordedGivenYAML is a test entry's given: under the proven switch. One that
+// is not a list of named values is an error, never a reason to read the entry
+// without it: its replay could not bind what the test makes. With the switch
+// off given: is not read.
+func recordedGivenYAML(node *yaml.Node) ([]GivenValue, error) {
+	if !provenswitch.On() || !nodeHasField(node, "given") {
+		return nil, nil
+	}
+	var g struct {
+		Given []GivenValue `yaml:"given"`
+	}
+	if err := node.Decode(&g); err != nil {
+		return nil, fmt.Errorf(errRecordedGiven, err)
+	}
+	return g.Given, nil
+}
+
+// recordedGivenJSON is recordedGivenYAML for a JSON entry.
+func recordedGivenJSON(data []byte) ([]GivenValue, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "given") {
+		return nil, nil
+	}
+	var g struct {
+		Given []GivenValue `json:"given"`
+	}
+	if err := json.Unmarshal(data, &g); err != nil {
+		return nil, fmt.Errorf(errRecordedGiven, err)
+	}
+	return g.Given, nil
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -306,10 +351,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	given, err := recordedGivenYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real = at, rl
+	tc.At, tc.Real, tc.Given = at, rl, given
 	return nil
 }
 
@@ -368,10 +417,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	given, err := recordedGivenJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real = at, rl
+	tc.At, tc.Real, tc.Given = at, rl, given
 	return nil
 }
 

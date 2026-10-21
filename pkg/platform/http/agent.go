@@ -4444,6 +4444,42 @@ func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time
 	return nil
 }
 
+// PushTestGiven hands the agent, by test, the values each test's harness gave
+// when it was recorded (models.TestGivenReq), so it binds the value the
+// harness gives in the replay as the given variable recorded with the
+// recording's. They are given again to a restarted agent, like the begins. An
+// agent that cannot take them is an error: every call carrying one would miss.
+func (a *AgentClient) PushTestGiven(ctx context.Context, given, keys map[string][]models.GivenValue) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded, recordedKeys := maps.Clone(given), maps.Clone(keys)
+			a.session().record(stepTestGiven, func(c context.Context) error { return a.PushTestGiven(c, recorded, recordedKeys) })
+		}
+	}()
+	body, err := json.Marshal(models.TestGivenReq{Given: given, Keys: keys})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the values the tests' harness gave: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/given", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send the agent the values the tests' harness gave: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("the agent did not take the values the tests' harness gave: status %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.

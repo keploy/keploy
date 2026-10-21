@@ -248,6 +248,9 @@ type ScopeWindow struct {
 	// used while it was open (design v14 §4): its REAL rows, and in a
 	// record, the REAL list its recording carries.
 	Real []RealUse `json:"real,omitempty"`
+	// Given is, under the proven wire, what the test's harness gave keploy
+	// while the test was open in a record (POST /agent/given), in order.
+	Given []GivenValue `json:"given,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
@@ -289,6 +292,43 @@ type ScopeTableReq struct {
 // (MappedTestCase.At), by test name. Under the proven switch the agent moves
 // the clock of the run's processes to a test's begin while the test is open,
 // and back to the run's start time after it (design v14 §3.4).
+// GivenValue is a value a test's harness gave keploy while the test was open:
+// one the test made itself and puts into its calls (a session token it
+// signs, a cookie it installs), named by the harness. Its name pairs the
+// value of a replay with the recording's, by the same test and name: the
+// harness names each in the order the test installs it, so the pairing is
+// declared, never guessed.
+type GivenValue struct {
+	Name  string `json:"name" yaml:"name" bson:"name"`
+	Value string `json:"value" yaml:"value" bson:"value"`
+}
+
+// GivenReq is the body of POST /agent/given: a value the open test made
+// (GivenValue). In a record it is kept with the test's recording; in a replay
+// it is bound as the test's given variable of that name, recorded as the
+// recording's value of it (TestGivenReq).
+type GivenReq struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// TestGivenReq is the body of POST /agent/replay/given: by test ID, the values
+// its harness gave when it was recorded (MappedTestCase.Given), and by claim
+// key, those it gave while no test was open (Mapping.KeyGiven).
+type TestGivenReq struct {
+	Given map[string][]GivenValue `json:"given"`
+	Keys  map[string][]GivenValue `json:"keys,omitempty"`
+}
+
+// KeyGiven is what a claim key's harness gave while no test was open (a
+// group's beforeAll that signs a session for its tests), in a record: the
+// key's, like the variables its calls outside every test bind
+// (MockVariable.Outside). Its replay binds each, by name, in the key's scope.
+type KeyGiven struct {
+	Key   string       `json:"key" yaml:"key" bson:"key"`
+	Given []GivenValue `json:"given" yaml:"given" bson:"given"`
+}
+
 type TestBeginsReq struct {
 	Begins map[string]time.Time `json:"begins"`
 	// Real is, by test, the mock.real destinations its recording lists: such

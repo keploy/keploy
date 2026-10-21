@@ -195,6 +195,11 @@ type Agent struct {
 	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
 	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
+	// replay: test name -> what its harness gave in its recording, and claim
+	// key -> what the key's harness gave outside every test (SetTestGiven).
+	// Cleared by resetScopeState.
+	testGiven map[string][]models.GivenValue
+	keyGiven  map[string][]models.GivenValue
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
 	gateRun    map[string]struct{}
@@ -647,6 +652,7 @@ func (a *Agent) resetScopeState() {
 	// the clock's holder is given back by releaseTestClock, before this.
 	a.testBegins = nil
 	a.testReal = nil
+	a.testGiven, a.keyGiven = nil, nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
 	a.testWorker, a.testBegun = nil, nil
