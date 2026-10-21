@@ -129,6 +129,7 @@ func (t *Tracker) Begin() {
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
 	t.drifts = NewDriftCache()
+	t.drifts.tracker, t.drifts.epoch = t, t.epoch
 	t.names, t.taken = nil, nil
 	t.open, t.began = true, true
 	t.mu.Unlock()
@@ -191,6 +192,23 @@ func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 	}
 	earlier := append(append(make([]Earlier, 0, len(t.run)+len(t.served)), t.run...), t.served...)
 	return t.epoch, earlier, append([]*models.Mock(nil), t.mocks...), before
+}
+
+// since are test number n's earlier exchanges (Test) from the k-th on: the
+// run's, then the test's, each list only ever added to while n runs. ok is
+// false once another test began or the set changed.
+func (t *Tracker) since(n uint64, k int) ([]Earlier, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.epoch != n || k > len(t.run)+len(t.served) {
+		return nil, false
+	}
+	out := make([]Earlier, 0, len(t.run)+len(t.served)-k)
+	if k < len(t.run) {
+		out = append(out, t.run[k:]...)
+		k = len(t.run)
+	}
+	return append(out, t.served[k-len(t.run):]...), true
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
