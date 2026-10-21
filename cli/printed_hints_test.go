@@ -112,8 +112,67 @@ func TestEveryHintARecordOrTestPrintsIsALineOfTheCommandRun(t *testing.T) {
 			checkHint(t, tc, line)
 			// A hint is printed for the user to read: not under cobra's whole
 			// usage text, which says nothing it does not (some 80 lines).
-			if tc.failure == noCommand && strings.Contains(cobraSaid, "Usage:") {
+			// Every failure here is a refusal of Validate's (PreRunE), which
+			// no usage text follows (TestWhatValidateRefusesIsSaidWithoutTheUsageText),
+			// and a run that goes on prints none.
+			if strings.Contains(cobraSaid, "Usage:") {
 				t.Errorf("`keploy %s` printed its usage text under the hint:\n%s", cmd.Name(), cobraSaid)
+			}
+		})
+	}
+}
+
+// What Validate refuses is said once, by keploy's log, and cobra's usage text
+// does not follow it. Validate runs as PreRunE, after cobra has parsed the
+// command line, so its refusal is never about how the command was typed: it is
+// about the values (--must-pass with no --test-sets), keploy.yml, or this
+// machine. AddFlags silences cobra's own error line on every command, so the
+// log is the only place the refusal is said. cobra still printed the command's
+// usage text under it: 75 lines for test, 46 for record in docker, which said
+// nothing about the refusal and scrolled the line that did out of view. The
+// log is read as keploy's console encoder prints it, so a refusal carried in a
+// line's error field ("failed to validate flags {"error": ...}") counts, as
+// it is on the terminal. A command Validate lets through is left as it was:
+// whatever its run returns gets cobra's usage text as before.
+func TestWhatValidateRefusesIsSaidWithoutTheUsageText(t *testing.T) {
+	for _, tc := range []struct {
+		hintCase
+		refusal string // the error Validate returns; empty: it lets the command through
+	}{
+		{hintCase: hintCase{name: "test --must-pass with no --test-sets", command: "test",
+			args: []string{"-c", nativeRunApp, "--must-pass"}, keployDir: true},
+			refusal: "--test-sets flag must be set to use --must-pass=true"},
+		{hintCase: hintCase{name: "compose with no --container-name, in docker", command: "record",
+			args: []string{"-c", composeRun}, inDocker: true, keployDir: true},
+			refusal: noContainer},
+		{hintCase: hintCase{name: "no -c", command: "record", keployDir: true},
+			refusal: noCommand},
+		{hintCase: hintCase{name: "let through", command: "test",
+			args: []string{"-c", nativeRunApp}, keployDir: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var printed bytes.Buffer
+			core := zapcore.NewCore(log.NewANSIConsoleEncoder(zap.NewDevelopmentEncoderConfig()), zapcore.AddSync(&printed), zapcore.InfoLevel)
+			cmd, cobraSaid, err := runUpToTheRun(t, core, t.TempDir(), tc.hintCase)
+			line := "`keploy " + strings.TrimSpace(tc.command+" "+strings.Join(tc.args, " ")) + "`"
+			if tc.refusal == "" {
+				if err != nil {
+					t.Fatalf("%s failed before the run: %v", line, err)
+				}
+				if cmd.SilenceUsage {
+					t.Errorf("%s: Validate let it through, and silenced cobra's usage text for whatever its run returns", line)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.refusal {
+				t.Fatalf("%s = %v, want %q", line, err, tc.refusal)
+			}
+			said := printed.String() + cobraSaid
+			if n := strings.Count(said, tc.refusal); n != 1 {
+				t.Errorf("%s: %q printed %d time(s), want once:\n%s", line, tc.refusal, n, said)
+			}
+			if strings.Contains(cobraSaid, "Usage:") {
+				t.Errorf("%s printed its usage text under the refusal:\n%s", line, cobraSaid)
 			}
 		})
 	}

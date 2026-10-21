@@ -707,7 +707,26 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	return pflag.NormalizedName(name)
 }
 
+// Validate is what every command checks in its PreRunE, before it runs: this
+// machine (isCompatible), keploy.yml and the flags (PreProcessFlags), then the
+// flags' values (ValidateFlags). Each refusal is said in keploy's log where it
+// is found, and no usage text follows it. cobra has parsed the command line by
+// then, and a line it could not parse never gets here: main says that error in
+// one line, with where the command's help is. A refusal is about the values
+// (--must-pass with no --test-sets), keploy.yml, or this machine, and its log
+// line says which. AddFlags silences cobra's own error line, but cobra still
+// printed the command's usage text under an error from PreRunE: 75 lines for
+// test, which said nothing about the refusal and scrolled the line that did
+// out of view. A command Validate lets through is left as it was.
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	err := c.validate(ctx, cmd)
+	if err != nil {
+		cmd.SilenceUsage = true
+	}
+	return err
+}
+
+func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) error {
 	err := isCompatible(c.logger)
 	if err != nil {
 		return err
@@ -721,17 +740,14 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	err = c.ValidateFlags(ctx, cmd)
 	if errors.Is(err, errNoCommand) {
 		// Said once, with a line of the user's own command to copy that
-		// starts an application the way keploy runs here: not again as
-		// "failed to validate flags", and not under the command's whole
-		// usage text, which cobra prints under an error from PreRunE and
-		// which says nothing about -c that the line does not.
+		// starts an application the way keploy runs here, and not again as
+		// "failed to validate flags".
 		utils.LogError(c.logger, nil, errNoCommand.Error())
 		example := NativeExample(cmd.Name())
 		if c.cfg.InDocker {
 			example = DockerExample(cmd.Name())
 		}
 		c.logger.Info(LogExample(example))
-		cmd.SilenceUsage = true
 		return err
 	}
 	if err != nil {
@@ -741,6 +757,8 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 
 	appName, err := utils.GetLastDirectory()
 	if err != nil {
+		// Said here, as every other refusal is: nothing else says it.
+		utils.LogError(c.logger, err, "failed to get the last directory for appName")
 		return fmt.Errorf("failed to get the last directory for appName: %v", err)
 	}
 
