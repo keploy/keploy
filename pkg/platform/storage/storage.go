@@ -171,7 +171,8 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	}
 
 	if !mockUploadResponse.IsSuccess {
-		utils.LogError(s.logger, fmt.Errorf("upload failed: %s", mockUploadResponse.Error), "failed to upload the mock")
+		// The server's error text can quote the mock it was sent.
+		utils.LogContentError(s.logger, fmt.Errorf("upload failed: %s", mockUploadResponse.Error), "failed to upload the mock")
 		return fmt.Errorf("upload failed: %s", mockUploadResponse.Error)
 	}
 

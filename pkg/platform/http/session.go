@@ -498,7 +498,8 @@ func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, n
 			// Cut as stale: an agent after it was set up meanwhile.
 			continue
 		}
-		utils.LogError(a.logger, err, "failed to reconnect a stream to keploy's restarted agent; it reconnects to the next one docker compose starts",
+		// reopenStream's error can quote what the agent answered.
+		utils.LogContentError(a.logger, err, "failed to reconnect a stream to keploy's restarted agent; it reconnects to the next one docker compose starts",
 			zap.String("stream", name))
 		stream.caughtUp(conn)
 	}

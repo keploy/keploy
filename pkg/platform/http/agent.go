@@ -3149,7 +3149,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
 		certPEM, caErr := a.fetchAgentCA(ctx)
 		if caErr != nil {
-			utils.LogError(a.logger, caErr, "failed to fetch the agent's CA certificate; the app would not trust keploy's MITM leaves",
+			// fetchAgentCA's error can quote what the agent answered.
+			utils.LogContentError(a.logger, caErr, "failed to fetch the agent's CA certificate; the app would not trust keploy's MITM leaves",
 				zap.String("next_step", "ensure the agent started cleanly (check the agent log for a SetupCA error) and retry"))
 			return caErr
 		}

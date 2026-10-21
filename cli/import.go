@@ -9,7 +9,6 @@ import (
 	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
-	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -55,9 +54,10 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			}
 			err = tools.Import(ctx, path, basePath)
 			if err != nil {
-				// A request the import sent can fail with net/http's
-				// error, which quotes the collection's URL whole.
-				utils.LogError(logger, logurl.Error(err), "failed to import Postman collection")
+				// The import's error is the tools service's, which another
+				// module may implement; keploy's quotes a collection
+				// request's URL (net/http's).
+				utils.LogContentError(logger, err, "failed to import Postman collection")
 			}
 			return nil
 		},

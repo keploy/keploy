@@ -14,9 +14,9 @@ import (
 
 // A collection's request that has no response is sent to capture one, and
 // one the app refuses fails the import with net/http's error, which quotes
-// the request's URL whole: the line that says the import failed names it
-// without its query, which holds the collection's api keys and tokens,
-// unless KEPLOY_LOG_CONTENT is set.
+// the request's URL whole: the line that says the import failed names the
+// error by its kind, without the URL's query, which holds the collection's
+// api keys and tokens, unless KEPLOY_LOG_CONTENT is set.
 func TestImportPostman_AFailedImportIsLoggedWithoutTheRequestsQuery(t *testing.T) {
 	const canary = "kp-canary-import-5b3e"
 	l, err := net.Listen("tcp", "127.0.0.1:0")

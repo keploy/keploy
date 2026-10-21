@@ -1403,7 +1403,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			if err := req.Write(upConn); err != nil {
 				logger.Error("Failed to forward upgrade request to upstream. Verify upstream supports the requested upgrade and is listening on the resolved address.",
 					zap.String("method", req.Method),
-					zap.String("upgrade", req.Header.Get("Upgrade")),
+					logcontent.String("upgrade", req.Header.Get("Upgrade")), // a header's value, whatever the client sent
 					zap.String("upstream", upstreamAddr),
 					zap.Error(err))
 				pm.appGone(clientConn)

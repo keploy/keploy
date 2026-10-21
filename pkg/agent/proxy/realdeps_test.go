@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -175,6 +176,30 @@ func TestAConnectionKeployCannotNameIsCaptureIncomplete(t *testing.T) {
 	require.NoError(t, app.Close())
 	require.True(t, (<-done).handled)
 	require.Len(t, p.RealRun().Incomplete, 1)
+}
+
+// A connection whose first line is HTTP keploy does not read is closed as
+// capture_incomplete, and ReadName's error quotes that line, the client's.
+// The line that says so names that error by its kind, and carries no
+// fingerprint of a why that quotes it, unless KEPLOY_LOG_CONTENT is set; the
+// run's why keeps it whole, for the report, whatever the switch says.
+func TestAnUnreadableFirstLineIsLoggedByItsKind(t *testing.T) {
+	const canary = "kp-canary-realdeps-7c1d"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		p := realProxy(t, []string{"db.test:3306"}, map[string]string{"db.test": "127.0.0.1"})
+		logger, logs := logtest.Observe()
+		p.logger = logger
+		app, accepted := realConnPair(t)
+		done := serveRealAsync(p, accepted, "127.0.0.1:3306")
+		_, err := app.Write([]byte("GET /reset/" + canary + " HTTP/9.9\r\n"))
+		require.NoError(t, err)
+		require.True(t, (<-done).handled)
+		run := p.RealRun()
+		require.Len(t, run.Incomplete, 1)
+		require.Contains(t, run.Incomplete[0].Why, canary, "the report keeps the client's line")
+		logtest.Check(t, logs, canary, on, "keploy closed a connection it could not name: capture_incomplete")
+		logtest.CheckNoFingerprint(t, logs, run.Incomplete[0].Why)
+	})
 }
 
 // A REAL destination that refuses fails the connection as it would without

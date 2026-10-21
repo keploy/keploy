@@ -38,6 +38,7 @@ import (
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -1730,10 +1731,12 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 
 // failUnsentTest reports a test that was not sent to the app as failed, with
 // why, and returns the error of writing that down. why names the test's URL,
-// which its report keeps whole and its line names as pkg.LoggedError does.
+// which its report keeps whole and its line names by its shape.
 func (r *Replayer) failUnsentTest(ctx context.Context, testRunID, testSetID string, testCase *models.TestCase, why error) error {
-	utils.LogError(r.logger, pkg.LoggedError(why, testCase.HTTPReq.URL), "failed the test without sending it",
-		zap.String("testcase", testCase.Name),
+	// why can quote the test's URL whole (requestAtBasePath's), which the
+	// line names by its shape beside it; the report keeps why whole.
+	utils.LogContentError(r.logger, why, "failed the test without sending it",
+		zap.String("testcase", testCase.Name), logurl.Field("url", testCase.HTTPReq.URL),
 		zap.String("next_step", "write the test case's request URL with its scheme and host, as in http://localhost:8080/orders: they are what the base path replaces"))
 	result := r.CreateFailedTestResult(testCase, testSetID, time.Now().UTC(), why)
 	if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, result); err != nil {

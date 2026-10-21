@@ -181,9 +181,14 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		// whatever earlier tests' ends charged it (Tracker.Pending).
 		switch {
 		case errors.Is(rerr, realdeps.ErrNoName):
-			why := realdeps.UnreadableWhy(dstAddr, dec.Candidates, rerr.Error())
-			done(why)
-			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr), logcontent.String("why", why))
+			// The tracker keeps the whole why, ReadName's error in it, for
+			// the run's report. The line says why in keploy's words, with
+			// that error by its kind: an unreadable one quotes the client's
+			// first line (ErrUnreadable), which a fingerprint of the why
+			// would give away to whoever hashes the lines it can be.
+			done(realdeps.UnreadableWhy(dstAddr, dec.Candidates, rerr.Error()))
+			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr),
+				zap.String("why", realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its first bytes carry no name keploy can read")), logcontent.Error(rerr))
 			return true, wrapped, nil
 		case rerr != nil:
 			if ctx.Err() == nil {

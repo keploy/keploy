@@ -1261,7 +1261,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)
 		if err != nil {
 			errMsg := "failed to extract port from base URL"
-			utils.LogError(c.logger, err, errMsg)
+			// ExtractPort's error quotes the URL it is given whole.
+			utils.LogContentError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		c.cfg.Port = port
