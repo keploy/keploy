@@ -22,6 +22,19 @@ func TestOnlyALiteralNonLoopbackIPIsTreatedAsPinned(t *testing.T) {
 		{"not a url at all %%", ""},                     // garbage
 		{"http://172.31.253.10/agent", "172.31.253.10"}, // pinned, no port
 		{"http://172.31.253.10:16789/agent", "172.31.253.10"},
+
+		// OUTSIDE InternalSubnet is not pinnable, however literal.
+		//
+		// The address is written into the generated compose file as
+		// `ipv4_address` on the keploy network, and Docker refuses one the
+		// network has no subnet for: "user specified IP address is supported
+		// only when connecting to networks with user configured subnets". So
+		// accepting these failed compose-up instead of falling back to the
+		// published-port path the caller was asking for.
+		{"http://10.0.0.5:16789/agent", ""},
+		{"http://0.0.0.0:16789/agent", ""},
+		{"http://192.168.1.20:16789/agent", ""},
+		{"http://172.31.254.10:16789/agent", ""}, // the neighbouring /24
 	} {
 		c := &config.Config{}
 		c.Agent.AgentURI = tc.uri
