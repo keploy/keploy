@@ -81,7 +81,8 @@ var pinned atomic.Int32
 // KEPLOY_PROVEN does not set it: on on Linux, which release 1 flips, and off
 // everywhere else. Windows and macOS stay out of the flip (P221): their
 // keploy judges as it did before, so a platform turns the proven model on by
-// default only once it is ruled on. WSL is Linux here.
+// default only once it is ruled on. WSL, and Lima on an Intel Mac, run the
+// Linux binary, so they are Linux here.
 func PlatformDefault(goos string) bool {
 	return goos == "linux"
 }
