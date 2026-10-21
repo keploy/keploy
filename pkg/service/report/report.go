@@ -72,7 +72,9 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 // getReport reads a test set's report file as every format of keploy report
 // prints or writes it: its unmatched calls as a report may carry them
 // (models.TestReport.ReportContent). A file written with logcontent's switch
-// on, or by an older keploy, is read with it off without their values.
+// on, or by an older keploy, is read with it off without their values. A
+// file named by --report-path is read by the same rule
+// (generateReportFromFile).
 func (r *Report) getReport(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
 	rep, err := r.reportDB.GetReport(ctx, runID, testSetID)
 	return rep.ReportContent(), err
@@ -687,8 +689,15 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 	var tr models.TestReport
 	err = dec.Decode(&tr)
 	if err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
+		// The file is read as every format of keploy report reads one
+		// (getReport): its unmatched calls as a report may carry them.
+		tr = *tr.ReportContent()
 		if r.config.JSONOutput {
-			return utils.NewJSONWriter(true).Write(tr)
+			// Through r.out, as the run's --json is.
+			if err := utils.NewJSONWriterOut(r.out, true).Write(tr); err != nil {
+				return err
+			}
+			return r.out.Flush()
 		}
 		// Summary-only
 		if r.config.Report.Summary {
@@ -743,8 +752,14 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 		return err
 	}
 
+	// Read as a file of the canonical format is (generateReportFromFile).
+	lg.Tests = (&models.TestReport{Tests: lg.Tests}).ReportContent().Tests
+
 	if r.config.JSONOutput {
-		return utils.NewJSONWriter(true).Write(lg)
+		if err := utils.NewJSONWriterOut(r.out, true).Write(lg); err != nil {
+			return err
+		}
+		return r.out.Flush()
 	}
 
 	// Handle summary request for legacy format
