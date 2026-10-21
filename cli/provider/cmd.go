@@ -213,6 +213,17 @@ func ComposeExample(command string) string {
 	return "keploy " + command + ` -c "docker compose up" --container-name myContainerName`
 }
 
+// DelayExample is the `keploy test` line, raising --delay, that keploy shows
+// when it runs in docker, where it starts the application as a container: a
+// compose line for an application docker compose starts, a docker run line
+// for any other.
+func DelayExample(cmdType utils.CmdType) string {
+	if cmdType == utils.DockerCompose {
+		return ComposeExample("test") + " --delay 6"
+	}
+	return TestDockerExample
+}
+
 // BuildDelayExample is the `keploy <command>` line (record or test) that
 // gives a compose build longer than the default to finish.
 func BuildDelayExample(command string) string {
@@ -2039,7 +2050,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if c.cfg.Test.Delay <= 5 {
 				c.logger.Info(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
-					c.logger.Info(LogExample(TestDockerExample))
+					c.logger.Info(LogExample(DelayExample(utils.CmdType(c.cfg.CommandType))))
 				} else {
 					c.logger.Info("Example usage: " + cmd.Example)
 				}

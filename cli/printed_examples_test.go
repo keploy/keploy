@@ -42,6 +42,7 @@ func TestEveryPrintedExampleIsACommandLineKeployAccepts(t *testing.T) {
 	}
 	for _, kind := range []utils.CmdType{utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.Empty} {
 		examples["provider.RecordExample("+string(kind)+")"] = provider.RecordExample(kind)
+		examples["provider.DelayExample("+string(kind)+")"] = provider.DelayExample(kind)
 	}
 	for _, command := range []string{"record", "test"} {
 		examples["provider.NativeExample("+command+")"] = provider.NativeExample(command)
@@ -85,6 +86,7 @@ func TestEveryPrintedExampleIsACommandLineKeployAccepts(t *testing.T) {
 	// `keploy ...` line, it changed shape and this test asserts nothing of it.
 	for _, source := range []string{
 		"provider.RecordExample(native)", "provider.RecordExample(docker-run)", "provider.RecordExample(docker-compose)",
+		"provider.DelayExample(docker-run)", "provider.DelayExample(docker-compose)",
 		"provider.NativeExample(record)", "provider.NativeExample(test)",
 		"provider.DockerExample(record)", "provider.DockerExample(test)",
 		"provider.ComposeExample(record)", "provider.ComposeExample(test)",
