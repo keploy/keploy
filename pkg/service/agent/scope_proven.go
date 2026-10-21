@@ -719,6 +719,9 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// Whether the test ran, as its harness said, before any failure of
+	// keploy's below overrides its outcome (Unsettled).
+	ran := outcome == models.ScopeOutcomePassed || outcome == models.ScopeOutcomeFailed
 	// The test's calls are settled before it is judged (settle_proven.go):
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
@@ -782,6 +785,12 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
 	if settleErr != nil {
+		// Unread for this alone (ScopeEvidence.Unsettled), or for what
+		// keploy could not read besides, or failed for another reason of
+		// keploy's (why: its process gone, another test's begin), or of a
+		// test that did not run (it skipped itself, or keploy's gate did):
+		// its line stays an unread one.
+		unreadBefore := ev != nil && ev.Unread || why != "" || !ran
 		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
 		if why == "" {
 			why = note
@@ -797,6 +806,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 			ev = &models.ScopeEvidence{}
 		}
 		ev.Unread = true
+		ev.Unsettled = !unreadBefore && a.replaying()
 	}
 	if why != "" {
 		if ev == nil {
@@ -1016,6 +1026,10 @@ func (a *Agent) failClosedWindow(id, why string) {
 			ev = &c
 		}
 		ev.Reason = strings.TrimSpace(ev.Reason + "\n" + why)
+		// keploy could not end the test: what it did is no longer its
+		// settle's alone (ScopeEvidence.Unsettled), the tests after it may
+		// have run on its mocks or its clock.
+		ev.Unsettled = false
 		w.Evidence = ev
 		return
 	}
