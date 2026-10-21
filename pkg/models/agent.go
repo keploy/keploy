@@ -461,7 +461,37 @@ type ExactServing struct {
 	// test case is open or not, after the open test case's own, at most one
 	// request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Concurrent is, on a call that opens a test case (Test), the
+	// recordings it may answer with beside Owned: those recorded while its
+	// request and other tests' requests were open together, which keploy
+	// record's full round shares between those tests (Mapping.Groups). Each
+	// answers at most once in the staging, for whichever of those tests
+	// makes its call first, and is never required of the test. Owned answer
+	// before them. Sent only to an agent that says it serves them
+	// (ExactConcurrentHeader); an agent that predates it ignores it.
+	Concurrent []string `json:"concurrent,omitempty"`
+	// NotLearnable names, of Concurrent, the recordings the learn step must
+	// not pair a call of this test with: each holds, at a place that tells
+	// its statement's recordings apart, a value of another of those tests'
+	// requests that this test's request does not hold.
+	NotLearnable []string `json:"notLearnable,omitempty"`
+	// Inputs are the whole leaf values of the test case's request (its path
+	// segments, query values, form and JSON scalars): a value the learn step
+	// finds drifted at a recording's place that the request holds whole is
+	// an input of this test, which cannot drift between a record and its
+	// replay on the same build. Request values: never logged.
+	Inputs []string `json:"inputs,omitempty"`
 }
+
+// ExactConcurrentHeader is the /storemocks response header in which an agent
+// with the proven switch on says it serves a test case the recordings it
+// shares with the tests that ran beside it (ExactServing.Concurrent).
+// ExactConcurrentServes is its value. An agent that does not send it is never
+// sent them.
+const (
+	ExactConcurrentHeader = "Keploy-Exact-Concurrent"
+	ExactConcurrentServes = "1"
+)
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
 // begins a test's variables as it applies this filter: a filter that opens a

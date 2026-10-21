@@ -30,6 +30,19 @@ type SetCallsHook interface {
 	SetCalls(testSetID string, calls []models.UnmatchedCall)
 }
 
+// SetSharesHook is an optional TestHooks extension, under the proven switch:
+// it is told, with each run of each test set's end (SetEndHook's moment),
+// what keploy record's full round settled of the recordings it shared between
+// the tests whose requests were open together while they were recorded
+// (models.SetShares): which test made each call, and where each recording it
+// could not give to one test goes. Only a replay that shares
+// (config.Test.ShareConcurrent) tells it; the hook writes it onto
+// mappings.yaml (keploy record's pin step). It is a notification: it changes
+// nothing the replayer does.
+type SetSharesHook interface {
+	SetShares(testSetID string, shares models.SetShares)
+}
+
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends
 // it, for tellSetEnd: each place RunTestSet writes one (the end of the set,
 // a set with no test case to run, a set ignored whole, a set refused when it
@@ -45,6 +58,11 @@ func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 // ended it first: one before any final report, or the failure to write the
 // one at the set's end, which ends the set INTERNAL_ERR whatever it said.
 func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err error) {
+	if h, ok := r.hookImpl.(SetSharesHook); ok {
+		if shares, sharing := r.exact.setShares(status); sharing {
+			h.SetShares(testSetID, shares)
+		}
+	}
 	if h, ok := r.hookImpl.(SetCallsHook); ok {
 		var calls []models.UnmatchedCall
 		if noted := r.setEnd; noted != nil && noted.Status == status {

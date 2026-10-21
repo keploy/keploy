@@ -295,6 +295,15 @@ type TestModeInfo struct {
 	// set's staging) is refused: it was of that set's pool, under that set's
 	// mock names. Runtime-only, like the fields above.
 	StagedSet uint64 `json:"-" bson:"-"`
+
+	// Concurrent is, on a copy exact serving serves an open test (KEPLOY_PROVEN,
+	// S12), set for a recording the test shares with the tests whose
+	// requests were open beside its own at record time
+	// (ExactServing.Concurrent): a candidate, answered at most once in the
+	// staging by whichever of them makes its call, never required of the
+	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
+	// like the fields above.
+	Concurrent bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -1068,6 +1077,11 @@ type MockState struct {
 	// mock, that are bound at an earlier mock of the same test (MockSpec.LearnedBinds),
 	// by that mock's name: the replay writes them onto that mock.
 	Binds map[string]MockVariables `json:"binds,omitempty"`
+	// Concurrent says the mock answered as one of the recordings the open
+	// test shares with the tests that ran beside it at record time
+	// (ExactServing.Concurrent), not as one of its own: whose call it was is
+	// settled at the set's end. An agent that predates it reports none.
+	Concurrent bool `json:"concurrent,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
