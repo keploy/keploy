@@ -155,13 +155,13 @@ func TestANotOwnedMissRendersNoRecordingByDefault(t *testing.T) {
 	m.Spec.HTTPReq.Body = `{"email":"kp-rec@example.com"}`
 	live := makeReq("GET", "/api/users")
 	r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /api/users", ContentWithheld: true}
-	markNotOwned(r, m, live, nil)
+	markNotOwned(r, m, live, nil, strictNoise{})
 	if r.ClosestMockReq != "" || r.ReceivedReq != "" || !r.NotOwned || r.ClosestMock != "other-test" {
 		t.Errorf("the not-owned report is %+v", r)
 	}
 	t.Cleanup(logcontent.Set(true))
 	r = &models.MockMismatchReport{Protocol: "HTTP"}
-	markNotOwned(r, m, live, nil)
+	markNotOwned(r, m, live, nil, strictNoise{})
 	if !strings.Contains(r.ClosestMockReq, "kp-rec@example.com") || r.ReceivedReq == "" || r.ContentWithheld {
 		t.Errorf("with the switch on the not-owned report renders %q", r.ClosestMockReq)
 	}
@@ -478,7 +478,7 @@ func TestANotOwnedMissSaysItsRequestsWereTheRecordingsWithTheSwitchOffAsOn(t *te
 		t.Run(tc.name, func(t *testing.T) {
 			req, body := sameCall()
 			off := sameCallMiss(t)
-			markNotOwned(off, tc.mock(), req, body)
+			markNotOwned(off, tc.mock(), req, body, strictNoise{})
 			if off.RequestsIdentical != tc.same || off.ClosestMockReq != "" || off.ReceivedReq != "" || !off.ContentWithheld || !off.NotOwned {
 				t.Errorf("by default: identical %v (want %v), requests %q %q, withheld %v, not owned %v",
 					off.RequestsIdentical, tc.same, off.ClosestMockReq, off.ReceivedReq, off.ContentWithheld, off.NotOwned)
@@ -488,7 +488,7 @@ func TestANotOwnedMissSaysItsRequestsWereTheRecordingsWithTheSwitchOffAsOn(t *te
 			}
 			restore := logcontent.Set(true)
 			on := sameCallMiss(t)
-			markNotOwned(on, tc.mock(), req, body)
+			markNotOwned(on, tc.mock(), req, body, strictNoise{})
 			restore()
 			if got := on.ClosestMockReq != "" && on.ClosestMockReq == on.ReceivedReq; got != tc.same || on.RequestsIdentical || on.ContentWithheld {
 				t.Errorf("with the switch on: renders the same %v (want %v), identical %v, withheld %v\nrecording: %s\ncall: %s",
@@ -518,5 +518,100 @@ func TestADefaultHTTPReportSaysItsRequestsWereTheSame(t *testing.T) {
 	r = sameCallMiss(t)
 	if r.RequestsIdentical || r.ClosestMockReq == "" || r.ClosestMockReq != r.ReceivedReq || r.ContentWithheld {
 		t.Errorf("with the switch on: identical %v, requests %q %q", r.RequestsIdentical, r.ClosestMockReq, r.ReceivedReq)
+	}
+}
+
+// pathNoiseCases are a recording's path segment keploy knows varies, the
+// two ways it knows: the recording learned it (url.path.<i>), or
+// keploy.yml's url noise masks it.
+var pathNoiseCases = []struct {
+	name     string
+	learned  map[string][]string
+	urlNoise []string
+}{
+	{name: "learned url.path.2", learned: map[string][]string{"url.path.2": {}}},
+	{name: "keploy.yml url noise", urlNoise: []string{`kp-[a-z]+-id`}},
+}
+
+// Under KEPLOY_PROVEN the strict comparison excuses a path segment that is
+// not its closest recording's at a place keploy knows varies, and names no
+// path diff for it. The call holds the application's value there (an id the
+// learn step saw change), so a default report writes it {}, in its summary
+// and in the miss's shape, as it writes a segment a path diff names; the
+// recording's is not named either. With the switch on the summary keeps it,
+// and the place is named, so the miss's shape, which carries no content
+// either way, writes it {} too.
+func TestAStrictMissHolesThePathSegmentItsNoiseExcused(t *testing.T) {
+	for _, tc := range pathNoiseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			miss := func(t *testing.T) *models.MockMismatchReport {
+				t.Helper()
+				rec := onHost("rec", "/api/users/kp-rec-id?v=1", "users.internal:8080")
+				rec.Spec.ReqBodyNoise = tc.learned
+				db := &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}
+				in := getTo("/api/users/kp-live-id", "users.internal:8080")
+				in.url.RawQuery = "v=2"
+				ok, _, d, err := newHTTP().match(context.Background(), in, db, nil, nil, tc.urlNoise, true, false, false, true, true)
+				if err != nil || ok || d == nil || d.closest != rec {
+					t.Fatalf("want a miss closest to the recording: ok %v err %v diag %+v", ok, err, d)
+				}
+				live := &http.Request{Method: "GET", URL: in.url, Host: "users.internal:8080", Header: in.header}
+				return newHTTP().buildHTTPMismatchReport(live, nil, db, nil, nil, nil, d)
+			}
+			shape := func(r *models.MockMismatchReport) string {
+				return models.MissShape(models.UnmatchedCall{Protocol: r.Protocol, ActualSummary: r.ActualSummary, FieldDiffs: r.FieldDiffs,
+					VariablePlaces: r.VariablePlaces, ContentWithheld: r.ContentWithheld}.ReportContent())
+			}
+			r := miss(t)
+			if r.ActualSummary != "GET /api/users/{}" || !r.ContentWithheld || !strings.Contains(r.Diff, "query.v") {
+				t.Errorf("by default the summary is %q (withheld %v), diff %q", r.ActualSummary, r.ContentWithheld, r.Diff)
+			}
+			if got := shape(r); got != "GET /api/users/{}" {
+				t.Errorf("by default the miss's shape is %q", got)
+			}
+			if text := reportText(t, r); strings.Contains(text, "kp-live-id") || strings.Contains(text, "kp-rec-id") {
+				t.Errorf("the default report names a segment the noise excused:\n%s", text)
+			}
+			restore := logcontent.Set(true)
+			defer restore()
+			r = miss(t)
+			if r.ActualSummary != "GET /api/users/kp-live-id" || !slices.Contains(r.VariablePlaces, "url.path[2]") || r.ContentWithheld {
+				t.Errorf("with the switch on the summary is %q, places %v", r.ActualSummary, r.VariablePlaces)
+			}
+			if got := shape(r); got != "GET /api/users/{}" {
+				t.Errorf("with the switch on the miss's shape is %q", got)
+			}
+		})
+	}
+}
+
+// A not-owned miss names the recording that is the call, which the strict
+// comparison may have found it is only outside a path segment keploy knows
+// varies: that segment of the call's is withheld as the strict miss's is,
+// though the recording the report was made against had the call's path.
+func TestANotOwnedMissHolesThePathSegmentItsNoiseExcused(t *testing.T) {
+	for _, tc := range pathNoiseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := onHost("other-test", "/api/users/kp-other-id", "users.internal:8080")
+			m.Spec.ReqBodyNoise = tc.learned
+			n := newHTTP().newStrictNoise(nil, nil, tc.urlNoise)
+			live := makeReq("GET", "/api/users/kp-live-id")
+			r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /api/users/kp-live-id", ContentWithheld: true}
+			markNotOwned(r, m, live, nil, n)
+			if r.ActualSummary != "GET /api/users/{}" || !slices.Contains(r.VariablePlaces, "url.path[2]") {
+				t.Errorf("by default the not-owned summary is %q, places %v", r.ActualSummary, r.VariablePlaces)
+			}
+			if text := reportText(t, r); strings.Contains(text, "kp-live-id") || strings.Contains(text, "kp-other-id") {
+				t.Errorf("the default report names a segment the noise excused:\n%s", text)
+			}
+			// Without the noise the recording is no other path's: nothing
+			// is excused, and the summary is as it was.
+			r = &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /api/users/kp-live-id", ContentWithheld: true}
+			markNotOwned(r, onHost("other-test", "/api/users/kp-other-id", "users.internal:8080"), live, nil, strictNoise{})
+			if r.ActualSummary != "GET /api/users/kp-live-id" || len(r.VariablePlaces) != 0 {
+				t.Errorf("with no noise the summary is %q, places %v", r.ActualSummary, r.VariablePlaces)
+			}
+		})
 	}
 }

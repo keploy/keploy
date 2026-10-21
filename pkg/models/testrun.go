@@ -434,7 +434,9 @@ type UnmatchedCall struct {
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
-	// places of a test variable on this call, under the proven switch only.
+	// places at which keploy knows this call holds the application's values
+	// (a test variable's, or a segment noise excused), under the proven
+	// switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
