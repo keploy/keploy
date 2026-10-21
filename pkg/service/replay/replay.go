@@ -4513,10 +4513,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							// Its recording saved nothing of its stream
 							// (a body over 1 MB): refused, its stream
 							// unread, never passed on nothing.
+							// The comparison's error can quote a frame
+							// it read: by its kind and its shape.
 							r.logger.Error("refusing this streaming test: its recording keeps nothing of its stream to compare the app's answer with; failing it",
 								zap.String("testcase", tc.Name),
 								zap.String("testset", testSetID),
-								zap.Error(streamErr))
+								logcontent.Error(streamErr))
 						} else {
 							r.logger.Error("failed to read streaming response", logcontent.Error(streamErr))
 						}

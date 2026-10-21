@@ -197,6 +197,7 @@ pkg/agent/hooks/linux/hooks.go | print | fmt.Printf(strings.Join(ve.Log, "\n")) 
 pkg/agent/hooks/linux/pidmaps.go | error | zap.Error(err) <- call read | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/hooks/linux/pidmaps.go | field | zap.String(comm) | 1 | a process's name (its comm), the OS's
 pkg/agent/hooks/linux/pidmaps.go | field | zap.String(unix.ErrnoName(unix.Errno(-f.LastErr))) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/agent/hooks/linux/readywatch.go | errorf | fmt.Errorf(m) | 2 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
 pkg/agent/hooks/linux/readywatch.go | field | set out.LastRestart(cString(r.Program[:])) | 1 | the kernel's: a process's name (its comm), the app's binary, not what it sends
 pkg/agent/hooks/linux/readywatch.go | field | zap.String(l.Addr) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/agent/hooks/linux/recording_start.go | error | zap.Error(err) <- call src.initStart | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
@@ -205,17 +206,26 @@ pkg/agent/hooks/linux/recording_start.go | error | zap.Error(err) <- call src.no
 pkg/agent/hooks/linux/recording_start.go | error | zap.Error(err) <- call src.pidNS | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/hooks/linux/recording_start.go | errorf | fmt.Errorf(path) | 5 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/agent/hooks/linux/recording_start.go | errorf | fmt.Errorf(path, b) | 1 | the text of keploy's own state file, which keploy wrote
+pkg/agent/hooks/linux/skipwatch.go | error | zap.Error(err) <- call programMisses | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
+pkg/agent/hooks/linux/skipwatch.go | error | zap.Error(err) <- call recursionMissesCounted | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
+pkg/agent/hooks/linux/skipwatch.go | error | zap.Error(err) <- call sweepPIDs | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
+pkg/agent/hooks/linux/skipwatch.go | errorf | fmt.Errorf(m.String()) | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
+pkg/agent/hooks/linux/skipwatch.go | field | set pkg/agent/hooks/linux.watchedProgram.name(n) | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
+pkg/agent/hooks/linux/skipwatch.go | field | zap.String(commOfHostTGID(f.LastTGID)) | 1 | the kernel's: a process's name (its comm), the app's binary, not what it sends
+pkg/agent/hooks/linux/skipwatch.go | field | zap.String(kernelName()) | 3 | the OS, architecture or kernel version keploy runs on
+pkg/agent/hooks/linux/skipwatch.go | field | zap.String(n) | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
+pkg/agent/hooks/linux/skipwatch.go | field | zap.String(unix.ErrnoName(unix.Errno(-f.LastErr))) | 1 | the kernel's: an errno's name
 pkg/agent/hooks/linux/stallwatch.go | field | zap.String(st) | 1 | the kernel's: a socket's inode, a process's id
 pkg/agent/hooks/linux/stallwatch.go | field | zap.String(strings.Join(frames, " < ")) | 1 | the kernel's: a socket's inode, a process's id
 pkg/agent/hooks/linux/stallwatch.go | field | zap.String(w) | 1 | the kernel's: a socket's inode, a process's id
 pkg/agent/hooks/linux/unixconn.go | error | set u.why(ferr.Error()) <- pkg/agent/hooks/linux.loadUnixConnWith | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
-pkg/agent/hooks/linux/unixconn.go | error | zap.Error(err) <- pkg/agent/hooks/linux.loadUnixConn | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
+pkg/agent/hooks/linux/unixconn.go | error | zap.Error(err) <- call loadUnixConnFn | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/hooks/linux/unixconn.go | errorf | fmt.Errorf(name) | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
 pkg/agent/hooks/linux/unixconn.go | errorf | fmt.Errorf(name, tp) | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
 pkg/agent/hooks/linux/unixconn.go | field | watchedCall("attach of fexit program " + name + " via link.AttachTracing") | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
 pkg/agent/hooks/linux/unixconn.go | field | watchedCall("perf_event_open (tracepoint syscalls/" + tp + ") via link.Tracepoint") | 1 | the name of one of keploy's own eBPF programs, maps, tracepoints, hooks or files
 pkg/agent/hooks/linux/unixconn.go | field | zap.String("the syscall tracepoints: this kernel (" + kernelName() + ") has no BPF trampoline") | 1 | the OS, architecture or kernel version keploy runs on
-pkg/agent/hooks/linux/unixconn.go | field | zap.String(kernelName()) | 1 | the OS, architecture or kernel version keploy runs on
+pkg/agent/hooks/linux/unixconn.go | field | zap.String(kernelName()) | 2 | the OS, architecture or kernel version keploy runs on
 pkg/agent/hooks/linux/unixconn.go | field | zap.String(unixWhat(e)) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/agent/memoryguard/memoryguard.go | error | zap.Error(err) <- pkg/agent/memoryguard.readWorkingSetBytes | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/agent/memoryguard/memoryguard.go | errorf | fmt.Errorf(candidate) | 1 | a cgroup's path or file, the kernel's
@@ -332,9 +342,9 @@ pkg/agent/proxy/integrations/http/learn.go | field | add("header." + k) | 1 | a 
 pkg/agent/proxy/integrations/http/learn.go | field | add("url.query." + k) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value
 pkg/agent/proxy/integrations/http/learn.go | field | set bv.Bind(from.Var) | 1 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value
 pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Earlier.Mock(m.Name) | 1 | mocks' names, which keploy gives them (mock-N)
-pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Leaf.Path("header." + lk) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
-pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Leaf.Path(name) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
-pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Leaf.Path(path) | 3 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
+pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Leaf.Path("header." + lk) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value
+pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Leaf.Path(name) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value
+pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Leaf.Path(path) | 3 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value
 pkg/agent/proxy/integrations/http/learn.go | field | set pkg/matcher/learn.Seen.Place(place) | 3 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value
 pkg/agent/proxy/integrations/http/learn.go | field | set pkg/models.Mock.Name(m.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/learn.go | field | set pkg/models.MockVariable.Bind(place) | 1 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value
@@ -383,10 +393,10 @@ pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/int
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varDecl.name(name) | 1 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varProblem.mock(m.Name) | 5 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varProblem.mock(served.Name) | 5 | mocks' names, which keploy gives them (mock-N)
-pkg/agent/proxy/integrations/http/variables.go | field | set pkg/matcher/learn.Leaf.Path(k) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
+pkg/agent/proxy/integrations/http/variables.go | field | set pkg/matcher/learn.Leaf.Path(k) | 1 | a request's place: a body field's path, a header's or a query parameter's name (body.user.id, header.X-Id): where a value sits, not the value
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/variables.Binding.Mock(m.Name) | 2 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | zap.String(b.Mock) | 1 | mocks' names, which keploy gives them (mock-N)
-pkg/agent/proxy/integrations/http/variables.go | field | zap.String(b.Name) | 1 | names keploy gives: a mock's, a test case's or a test set's
+pkg/agent/proxy/integrations/http/variables.go | field | zap.String(b.Name) | 1 | a template variable's name or its place (body.<path>, header.<name>): what keploy's templating calls a value and where it looks, not the value
 pkg/agent/proxy/integrations/http/variables.go | field | zap.String(b.Place) | 1 | a variable's place (body.<path>, header.<name>): where in a request keploy's templating looks, not a value
 pkg/agent/proxy/integrations/http/variables.go | field | zap.String(k) | 1 | a header's name, not its value
 pkg/agent/proxy/integrations/http/variables.go | field | zap.String(served.Name) | 1 | mocks' names, which keploy gives them (mock-N)
@@ -1527,15 +1537,20 @@ pkg/service/record/ca_reject_warn.go | field | zap.Strings(notChecked) | 3 | a t
 pkg/service/record/capture_loss.go | field | zap.String("if the client does not trust keploy's CA: " + abandonedLate.NotJudgedRemedy() + ", then re-record") | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(abandonedLate.NotJudgedText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(afterLast.Text()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/capture_loss.go | field | zap.String(l.Text()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(notJudged.NotJudgedRemedy() + ", then re-record these test cases") | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(notJudged.NotJudgedText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(relayedLate.NotJudgedRemedy() + ", then re-record") | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(relayedLate.NotJudgedText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(rep.First) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(rep.Next) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/capture_loss.go | field | zap.String(skippedLate.EvidenceText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(unmapped.NotJudgedRemedy() + ", then re-record") | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(unmapped.NotJudgedText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/capture_loss.go | field | zap.String(w.evidence.EvidenceText()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/capture_loss.go | field | zap.String(w.lost.Text()) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
+pkg/service/record/capture_loss.go | field | zap.Strings(l.FailingTestCases()) | 1 | a test case's name, which keploy gives it (test-N)
+pkg/service/record/capture_loss.go | field | zap.Strings(w.evidenced) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/record/capture_loss.go | field | zap.Strings(w.tainted) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/record/capture_loss.go | field | zap.Strings(w.uncapturable) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/service/record/capture_loss.go | field | zap.Strings(w.unverified) | 1 | a test case's name, which keploy gives it (test-N)
@@ -1563,7 +1578,7 @@ pkg/service/record/record.go | field | Setup(r.config.Command) | 1 | the app's c
 pkg/service/record/record.go | field | afterRecordingComplete(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/record.go | field | consumeMappingsFor(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/record.go | field | createConfigWithMetadata(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
-pkg/service/record/record.go | field | finish(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
+pkg/service/record/record.go | field | finishCapture(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/record.go | field | markStopKilled(*why) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
 pkg/service/record/record.go | field | markStopKilled(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/record/record.go | field | recordUIJoinAnnotation(newTestSetID) | 1 | a test set's or a run's id, which keploy gives it (test-set-N)
@@ -1781,10 +1796,10 @@ pkg/service/replay/replay.go | field | zap.String(r.config.Test.BasePath) | 2 | 
 pkg/service/replay/replay.go | field | zap.String(rep.First) | 1 | the kernel's: a socket's inode, a process's id
 pkg/service/replay/replay.go | field | zap.String(rep.Next) | 1 | the kernel's: a socket's inode, a process's id
 pkg/service/replay/replay.go | field | zap.String(stopKilled) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
-pkg/service/replay/replay.go | field | zap.String(tc.Name) | 14 | a test case's name, which keploy gives it (test-N)
+pkg/service/replay/replay.go | field | zap.String(tc.Name) | 15 | a test case's name, which keploy gives it (test-N)
 pkg/service/replay/replay.go | field | zap.String(testCase.Name) | 21 | a test case's name, which keploy gives it (test-N)
 pkg/service/replay/replay.go | field | zap.String(testSet) | 9 | a test set's or a run's id, which keploy gives it (test-set-N)
-pkg/service/replay/replay.go | field | zap.String(testSetID) | 77 | a test set's or a run's id, which keploy gives it (test-set-N)
+pkg/service/replay/replay.go | field | zap.String(testSetID) | 78 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/replay/replay.go | field | zap.String(testSets) | 2 | a test set's or a run's id, which keploy gives it (test-set-N)
 pkg/service/replay/replay.go | field | zap.String(unchecked) | 3 | an UncheckedHook's reason, the hook's own words, which its contract (set_end.go) says name no customer content
 pkg/service/replay/replay.go | field | zap.String(what) | 1 | keploy's own text: a reason, a step, a phase or a hint built from its literals, numbers and durations
@@ -2076,6 +2091,7 @@ pkg/util.go | error | zap.Error(err) <- (net/http.Client).Do | 1 | a dial's erro
 pkg/util.go | error | zap.Error(err) <- call setup | 1 | the system's or the agent's own error: the kernel's, eBPF's, nftables', a file's or a socket's (an errno, a path, an address), naming no traffic
 pkg/util.go | error | zap.Error(err) <- net/http.NewRequestWithContext | 2 | a header or a field of keploy's own API call (its CLI's or its agent's), not the app's
 pkg/util.go | errorf | fmt.Errorf(encoding) | 1 | a protocol's name for a message kind, a command, a phase, an auth plugin or a packet type: a word from the protocol's closed set, or a Go type's name
+pkg/util.go | errorf | fmt.Errorf(expectedBoundary) | 1 | a multipart body's boundary: the delimiter its recorded Content-Type names, not what its parts hold
 pkg/util.go | errorf | fmt.Errorf(host, port) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/util.go | errorf | fmt.Errorf(rawURL) | 1 | content: a test case's or a request's URL, kept in the error its caller reports; every line that logs the error gates it
 pkg/util.go | field | ReplaceHost(configHost) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
