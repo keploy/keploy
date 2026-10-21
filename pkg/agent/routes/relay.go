@@ -2,6 +2,7 @@
 package routes
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,22 +16,29 @@ import (
 	"go.uber.org/zap"
 )
 
-// podIPOnce caches the result of utils.GetContainerIPv4 so the network
-// interface scan runs at most once per process.
+// podIP caches a successful GetContainerIPv4 result. A transient failure
+// (e.g. the interface is not yet up) must not be cached for the process
+// lifetime — only a successful resolve is stored.
 var (
-	podIPOnce  sync.Once
+	podIPMu    sync.Mutex
 	podIPValue string
-	podIPErr   error
 )
 
 // resolvePodIP returns the pod's non-loopback IPv4 address, cached after the
-// first call. It is a var so unit tests can replace it without triggering a
-// real network-interface scan.
+// first successful call. It is a var so unit tests can replace it without
+// triggering a real network-interface scan.
 var resolvePodIP = func() (string, error) {
-	podIPOnce.Do(func() {
-		podIPValue, podIPErr = utils.GetContainerIPv4()
-	})
-	return podIPValue, podIPErr
+	podIPMu.Lock()
+	defer podIPMu.Unlock()
+	if podIPValue != "" {
+		return podIPValue, nil
+	}
+	ip, err := utils.GetContainerIPv4()
+	if err != nil {
+		return "", err
+	}
+	podIPValue = ip
+	return ip, nil
 }
 
 // HandleRelay is a reverse-proxy handler that forwards an incoming HTTP
@@ -67,11 +75,24 @@ func (a *Agent) HandleRelay(w http.ResponseWriter, r *http.Request) {
 	// Set both correctly so the reverse proxy sends the right path.
 	forwardPath := extractRelayForwardPath(r.URL.Path, portStr)
 
+	// The scheme defaults to http. The caller (rewriteForRelay) passes
+	// ?_relay_scheme=https when the recorded test URL was HTTPS, so the
+	// relay dials TLS to the app. The query param is consumed here and
+	// not forwarded to the app.
+	scheme := "http"
+	if s := r.URL.Query().Get("_relay_scheme"); s == "https" {
+		scheme = "https"
+	}
+	// Strip the relay-internal param before forwarding.
+	fwdQuery := r.URL.Query()
+	fwdQuery.Del("_relay_scheme")
+	rawQuery := fwdQuery.Encode()
+
 	target := &url.URL{
-		Scheme:   "http",
+		Scheme:   scheme,
 		Host:     net.JoinHostPort(podIP, portStr),
 		Path:     forwardPath,
-		RawQuery: r.URL.RawQuery,
+		RawQuery: rawQuery,
 	}
 	if r.URL.RawPath != "" {
 		target.RawPath = extractRelayForwardPath(r.URL.RawPath, portStr)
@@ -93,6 +114,14 @@ func (a *Agent) HandleRelay(w http.ResponseWriter, r *http.Request) {
 				zap.String("target", target.String()), zap.Error(err))
 			http.Error(w, fmt.Sprintf("relay: upstream dial failed: %v", err), http.StatusBadGateway)
 		},
+	}
+	// For HTTPS apps inside the pod: the relay runs in the same pod as the
+	// app, so the app's self-signed or TOFU cert is expected. Skip TLS
+	// verification scoped to this one proxy instance.
+	if scheme == "https" {
+		proxy.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // same-pod relay
+		}
 	}
 
 	proxy.ServeHTTP(w, r)

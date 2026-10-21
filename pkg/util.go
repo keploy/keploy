@@ -4896,7 +4896,22 @@ func rewriteForRelay(testURL, relayBaseURL string) (string, error) {
 	if u.RawPath != "" {
 		relay.RawPath = prefix + u.RawPath
 	}
-	relay.RawQuery = u.RawQuery
+	// Pass the original scheme to the relay so it dials TLS when the
+	// recorded test URL was HTTPS. The relay strips this param before
+	// forwarding to the app.
+	q := relay.Query()
+	if u.Scheme == "https" {
+		q.Set("_relay_scheme", "https")
+	}
+	if u.RawQuery != "" {
+		// Merge original query params
+		for k, vs := range u.Query() {
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
+	}
+	relay.RawQuery = q.Encode()
 	return relay.String(), nil
 }
 

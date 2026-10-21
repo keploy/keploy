@@ -2259,7 +2259,7 @@ func TestRewriteForRelay(t *testing.T) {
 			name:     "HTTPS URL with default port 443",
 			testURL:  "https://api.keploy.io/v1/data",
 			relayURL: "http://localhost:34567/agent/relay",
-			want:     "http://localhost:34567/agent/relay/443/v1/data",
+			want:     "http://localhost:34567/agent/relay/443/v1/data?_relay_scheme=https",
 		},
 		{
 			name:     "URL with no query string",
