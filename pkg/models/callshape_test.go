@@ -361,3 +361,62 @@ func TestSQLShapeMasksDigitsInNames(t *testing.T) {
 	require.Equal(t, "SELECT a `~ ? AND b ~` c", SQLShape("SELECT a `~ 999 AND b ~` c"))
 	require.Equal(t, "SELECT `t?` FROM x", SQLShape("SELECT `t1` FROM x"))
 }
+
+// A PostgreSQL statement is shaped by PostgreSQL's grammar: a double-quoted
+// token there is an identifier, a table's or a column's name, never a value,
+// and the ORMs quote every name they write. It is kept, as a MySQL backtick
+// identifier is; a MySQL statement's double-quoted token is a string and is
+// written "?". The rule is the protocol's grammar, not the token's look.
+func TestSQLShapeReadsAPostgresStatementByItsGrammar(t *testing.T) {
+	gorm := `SELECT "users"."id", "users"."email" FROM "users" WHERE "users"."email" = $1 AND "users"."deleted_at" IS NULL LIMIT $2`
+	prisma := `SELECT "public"."Post"."id", "public"."Post"."title" FROM "public"."Post" WHERE "public"."Post"."authorId" = $1 OFFSET $2`
+	for _, c := range []struct{ name, protocol, in, want string }{
+		{"GORM", "PostgreSQL", gorm, gorm},
+		{"Prisma", "PostgreSQL", prisma, prisma},
+		{"Sequelize, with literals", "PostgreSQL", `SELECT "id", "email" FROM "Users" AS "User" WHERE "User"."email" = 'kp-canary@example.com' LIMIT 1;`,
+			`SELECT "id", "email" FROM "Users" AS "User" WHERE "User"."email" = ? LIMIT ?;`},
+		{"a recorded mock's protocol", "PostgresV2", `SELECT "a" FROM "t" WHERE "b" = 'kp-canary'`, `SELECT "a" FROM "t" WHERE "b" = ?`},
+		{"digits in a name", "PostgreSQL", `SELECT "col1" FROM "t2"`, `SELECT "col?" FROM "t?"`},
+		{"a quote in a name", "PostgreSQL", `SELECT "it's" FROM "a""b" WHERE x = 'kp-canary'`, `SELECT ? FROM ? WHERE x = ?`},
+		{"a name never closed", "PostgreSQL", `SELECT "users"."em`, `SELECT "users". …`},
+		{"a name never closed after a literal", "PostgreSQL", `SELECT "a", 'kp-canary' AS "unclosed`, `SELECT "a", …`},
+		{"a literal never closed after names", "PostgreSQL", `SELECT "a" FROM "t" WHERE "b" = 'kp-canary`, `SELECT "a" FROM "t" WHERE "b" = ? …`},
+		{"a backslash in a name", "PostgreSQL", `SELECT "a\b" FROM t WHERE x = 'kp-canary'`, `SELECT …`},
+		{"a literal named by an identifier", "PostgreSQL", `SELECT 'kp-canary' AS "label"`, `SELECT ? AS "label"`},
+		{"a double quote in a literal", "PostgreSQL", `SELECT 'kp-"canary"' AS "label"`, `SELECT ? AS "label"`},
+		{"MySQL's double-quoted string", "MySQL", `COM_QUERY SELECT * FROM t WHERE a = "kp-canary"`, `COM_QUERY SELECT * FROM t WHERE a = ?`},
+		{"MySQL's backtick names", "MySQL", "COM_QUERY SELECT `users`.`email` FROM `users` WHERE `id` = \"kp-canary\"", "COM_QUERY SELECT `users`.`email` FROM `users` WHERE `id` = ?"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := SummaryWithoutContent(c.protocol, c.in, nil)
+			require.Equal(t, c.want, got)
+			require.NotContains(t, got, "kp-canary")
+			require.Equal(t, c.want, CallShape(c.protocol, c.in), "the proven evidence shapes it as the report does")
+			require.Equal(t, got, CallShape(c.protocol, got), "a shape is its own shape")
+		})
+	}
+	require.Equal(t, `SELECT * FROM t WHERE a = ?`, SQLShape(`SELECT * FROM t WHERE a = "kp-canary"`), "SQLShape reads MySQL's grammar")
+}
+
+// No literal survives a PostgreSQL statement's shape, whatever surrounds it:
+// every combination of a prefix, a literal form PostgreSQL has (a string,
+// with doubled or backslashed quotes, an escape, bit or Unicode string, a
+// dollar quote, a comment) and a suffix, around identifiers that hold no
+// literal, is shaped.
+func TestAPostgresShapeKeepsNoLiteral(t *testing.T) {
+	prefixes := []string{"", `SELECT * FROM "t" WHERE "a" = `, `UPDATE "x'y" SET "b" = `, `SELECT "a""b", `, "SELECT 1 -- ", "SELECT $q$ ", "INSERT INTO t VALUES (", "SELECT E", "SELECT U&", "SELECT B", "SELECT X", `SELECT "a" `}
+	literals := []string{"'SeCrEt'", "'Se''CrEt'", "'Se\\'CrEt'", "'SeCrEt", "$t$SeCrEt$t$", "$$SeCrEt$$", "/* SeCrEt */", "-- SeCrEt", "'a' 'SeCrEt'", `'Se"CrEt'`, `'Se"Cr"Et'`, `'S"' || 'eCrEt'`}
+	suffixes := []string{"", ")", ` AND "c" = 'SeCrEt'`, ` "z"`, ` AND "c" = $1`}
+	for _, p := range prefixes {
+		for _, l := range literals {
+			for _, sfx := range suffixes {
+				q := p + l + sfx
+				for _, got := range []string{SummaryWithoutContent("PostgreSQL", q, nil), CallShape("PostgresV2", q)} {
+					if strings.Contains(strings.ToLower(got), "secret") {
+						t.Errorf("the shape of PostgreSQL's %q is %q, which keeps the literal", q, got)
+					}
+				}
+			}
+		}
+	}
+}
