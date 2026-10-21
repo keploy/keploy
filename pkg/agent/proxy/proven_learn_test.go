@@ -790,6 +790,53 @@ func TestSeedRecordedWindowsOfASetWithNoneForgetsThePrevious(t *testing.T) {
 	}
 }
 
+// The learn step's recorded windows follow the set boundary as the release
+// rule's do: a set's seed is installed by its staging call, with the trees it
+// describes, and a replay session that seeds none (keploy mock replay, which
+// sends its scope table instead) places no recording by the last session's,
+// on the same agent; a session's parked seed whose staging never came is not
+// the next one's.
+func TestANewSessionPlacesNoRecordingByTheLastSessionsWindows(t *testing.T) {
+	now := time.Now()
+	in := now.Add(time.Millisecond)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	// keploy test: reset, seed, stage.
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: now, End: now.Add(time.Second)}})
+	if _, known := mm.InRecordedTestWindow(in); known {
+		t.Fatal("a set's windows placed recordings before its staging call")
+	}
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if inside, known := mm.InRecordedTestWindow(in); !inside || !known {
+		t.Fatalf("after the set's staging: inside %v known %v", inside, known)
+	}
+	// keploy mock replay on the same agent: reset, stage, no windows.
+	mm.ResetForReplaySession()
+	if inside, known := mm.InRecordedTestWindow(in); !inside || !known {
+		t.Fatal("before the next session's staging the manager no longer describes the last set")
+	}
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if _, known := mm.InRecordedTestWindow(in); known {
+		t.Fatal("the last session's windows place a recording of a session that sent none")
+	}
+	// A session whose staging never came leaves its seed to no one.
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-2", Start: now, End: now.Add(time.Second)}})
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if _, known := mm.InRecordedTestWindow(in); known {
+		t.Fatal("an aborted session's windows were installed for the next one")
+	}
+	// A session that seeds its own places by them.
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-9", Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if inside, known := mm.InRecordedTestWindow(in); inside || !known {
+		t.Fatalf("by the new session's windows: inside %v known %v", inside, known)
+	}
+}
+
 // Under exact serving (S12: keploy test's agent under the switch), what the
 // learn step learned as a variable rides the consumed mock's state, as on
 // every other door: persistLearned writes it onto the recording.
