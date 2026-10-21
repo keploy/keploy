@@ -1897,9 +1897,9 @@ func TestLearnMatchRefusesIdsOfAnEarlierAnswerInAnotherOrder(t *testing.T) {
 	}
 }
 
-// Two calls each carry a token minted for it (jti random, iat now): the
-// header and the claims' names they share did not change, and each token is
-// noise.
+// Two calls each carry a token minted for it (jti random, iat a constant
+// of the app's, one in both runs: no clock read): the header and the
+// claims' names they share did not change, and each token is noise.
 func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
@@ -1913,8 +1913,8 @@ func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 		learnRecorded("mock-1", time.Second, "GET", "/v1/b", "", map[string]string{"X-Svc-Token": tok("Hq6Ys0Bc5D", "1760436001", "bbb")}, `{}`),
 	}, observe: tr.ServedMock}
 	for i, in := range []*req{
-		live("GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("Lp4Zt7Vn1R", "1760436061", "ccc")}),
-		live("GET", "/v1/b", "", map[string]string{"X-Svc-Token": tok("Mw2Xr8Ue3F", "1760436062", "ddd")}),
+		live("GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("Lp4Zt7Vn1R", "1760436000", "ccc")}),
+		live("GET", "/v1/b", "", map[string]string{"X-Svc-Token": tok("Mw2Xr8Ue3F", "1760436001", "ddd")}),
 	} {
 		if served, miss, _ := h.learnMatch(ctx, in, db, n, opts); served == nil {
 			t.Fatalf("call %d refused: %+v", i, miss)
@@ -1924,6 +1924,42 @@ func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 		if _, ok := m.Spec.ReqBodyNoise["header.x-svc-token"]; !ok {
 			t.Fatalf("%s: noise %v", m.Name, m.Spec.ReqBodyNoise)
 		}
+	}
+}
+
+// A token minted for the call with the app's clock (jti random, iat now)
+// holds a clock read F's clock moved and more: noise would stop comparing
+// all of it (its subject, its other claims), where F's clock accounts only
+// for its iat. It is refused, and the refusal says which part of it the
+// clock does not account for, never its value.
+func TestLearnMatchRefusesATokenThatIsMoreThanItsClockRead(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	tok := func(jti, iat, sig string) string {
+		return "Bearer " + b64Of(`{"alg":"HS256","typ":"JWT"}`) + "." + b64Of(`{"sub":"svc-a","jti":"`+jti+`","iat":`+iat+`}`) + "." + b64Of("\x01\x02"+sig+"\xfe\xff")
+	}
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("k3J9xQ2mW8", "1760436000", "aaa")}, `{}`),
+	}, observe: tr.ServedMock}
+	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("Lp4Zt7Vn1R", "1760436061", "ccc")}), db, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if want := "header.x-svc-token changed, and keploy reads no clock read where it changed (it reads one in the text its encoded runs decode to); F's clock accounts only for the clock reads in it, and noise would stop comparing all of it"; miss.res.Why != want {
+		t.Fatalf("refused as %q, want %q", miss.res.Why, want)
+	}
+	for _, v := range []string{"svc-a", "k3J9xQ2mW8", "Lp4Zt7Vn1R", "1760436000", "1760436061"} {
+		if strings.Contains(miss.res.Why, v) {
+			t.Fatalf("refused as %q, which holds %q of the value", miss.res.Why, v)
+		}
+	}
+	if len(db.consumed) != 0 {
+		t.Fatalf("a refused call consumed %v", db.consumed)
 	}
 }
 

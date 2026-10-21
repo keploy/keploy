@@ -176,9 +176,22 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 			}
 		}
 		// Noise, or an echo, only where its readings account for all it
-		// changed: an echo is answered, never asserted against a source.
+		// changed, and only for what F saw: a fresh value, or nothing but
+		// a clock read. An echo is answered, never asserted against a
+		// source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
-			if why := unaccounted(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); why != "" {
+			v := dc.ofIn(r.Value, l.Value, w)
+			// An instant whose zone changed is said first: once no clock
+			// read, its zone's '+' reads as a run of base64 that does not
+			// decode (unparsed), which says nothing of what changed.
+			why := zoneChanged(v)
+			if why == "" {
+				why = unaccounted(dc, v, at, served, raw)
+			}
+			if why == "" {
+				why = beyondEvidence(v)
+			}
+			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
@@ -194,6 +207,155 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 		out = append(out, ln)
 	}
 	return out
+}
+
+// beyondEvidence says why drifted value v cannot be learned as noise, nor
+// answered as an echo, for what F saw of it, "" when it can: noise stops
+// comparing all of a value, so all of it must be what the two runs showed
+// changes by itself.
+//
+//   - A value that lost or gained no word, in any reading, holds nothing
+//     new: only the order of its words, a sign or separator between them
+//     (a '-' that regroups no word the other side lacks), or how many times
+//     it holds one, changed. F saw no fresh value there ("-5" and "5",
+//     "A7K B8L" and "B8L A7K").
+//   - A value in which F saw the clock read is learned for it only when it
+//     is nothing but its clock reads (clockBeyond).
+//
+// A value with a fresh word and no clock read keploy reads is a fresh
+// value, learned as ever: what stands beside a fresh word ("ORD-1 paid 100
+// nonce=<fresh>"), or beside an instant in a layout keploy does not read,
+// is not told apart from it here.
+//
+// It is a function of the two values alone (and the call's window), and
+// names what of the value is more than F saw, never its value.
+func beyondEvidence(v *valueDrift) string {
+	if !freshIn(v) {
+		return "no word in it is new: " + notNew(v.decRec, v.decLive) + ", so F saw no fresh value there, and " + allOfIt
+	}
+	if !v.clock.read {
+		return ""
+	}
+	return clockBeyond(v)
+}
+
+// allOfIt is why a value that is more than F saw cannot be noise.
+const allOfIt = "noise would stop comparing all of it"
+
+// zoneChanged says, of drifted value v, that an instant in it moved as a
+// read of the clock does but is written in another zone than when it was
+// recorded (clockSet.zoned), "" when none is.
+func zoneChanged(v *valueDrift) string {
+	if !v.clock.zoned {
+		return ""
+	}
+	return "an instant in it is a read of the clock written in another zone than when it was recorded, which F's clock does not account for, and " + allOfIt
+}
+
+// clockBeyond says what of drifted value v, in which a clock read moved, is
+// more than its clock reads, "" when nothing is: the value is nothing but
+// its clock reads (clockSet.alone; an instant whose zone changed stands
+// outside them as no read, and zoneChanged says so first), and every word
+// it lost, gained or holds in another order is a word of one of them,
+// itself (allClock: a token whose words the other side holds is no
+// exception here). What stands beside a read ("ORD-1 paid 100 at
+// <instant>"), or changed beside it ("seq=28" and "seq=29"), F's clock does
+// not account for, and noise would stop comparing it.
+func clockBeyond(v *valueDrift) string {
+	if !v.clock.alone {
+		return v.clock.beyond + "; F's clock accounts only for the clock reads in it, and " + allOfIt
+	}
+	for i := range readings {
+		for _, side := range []struct {
+			words    map[string]bool
+			recorded bool
+		}{{v.lost[i], true}, {v.gained[i], false}, {v.movedRec[i], true}, {v.movedLive[i], false}} {
+			for t := range side.words {
+				if !allClock(t, side.recorded, v.clock) {
+					return "a word of it that changed is no part of the instant of a clock read in it (as a time-ordered UUID's random or node groups are not); F's clock accounts only for the instant, and " + allOfIt
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ClockReadWhole reports whether a drifted value, recorded rec and seen
+// live in record's full round, is nothing but clock reads, by the rule
+// ClassifyIn learns noise for a clock read by, of the value alone (unparsed,
+// freshIn, clockBeyond; ClassifyIn also refuses a word of it that it finds
+// at an earlier place): the declared readings read all of it; a clock read
+// moved; in every declared form that drifted, what stands outside its clock
+// reads is the same, recorded and live, and holds no word; every word it
+// lost, gained or holds in another order is a word of one of them; and each
+// read pairs instants of one layout written in one zone (an instant whose
+// zone changed is no read) that moved by FullRoundLead (only when lead) or
+// are reads of each run's clock within w (the call's Window; nil: none).
+// Own and pool callers pass lead true, as ClassifyIn reads; a pass over
+// mocks no test owns passes false, which takes a read only within w. It is
+// a function of its arguments alone.
+func ClockReadWhole(rec, live string, w *Window, lead bool) bool {
+	if rec == live {
+		return false
+	}
+	v := NewDriftCache().ofInBy(rec, live, w, lead)
+	return v.clock.read && v.unparsed == "" && freshIn(v) && clockBeyond(v) == ""
+}
+
+// notNew says what changed of a value that lost and gained no word, read
+// decoded (recorded, live): the order of its words, a sign or separator
+// between them, or how many times it holds one.
+func notNew(recorded, live string) string {
+	r, l := wordsBy(recorded, wordByte), wordsBy(live, wordByte)
+	switch {
+	case sameStrings(r, l):
+		return "only a sign or separator between its words changed"
+	case sameStrings(sortedCopy(r), sortedCopy(l)):
+		return "only the order of its words changed"
+	}
+	return "only how many times it holds a word changed"
+}
+
+// freshIn reports whether drifted value v lost or gained a word in some
+// reading: a token one side holds whose words the other side does not all
+// hold, in any form (as clockWord reads it, of no clock: a token whose words
+// the other side all holds is only regrouped, "-5" of "5"). A value with
+// escapes is read decoded: an escape's remnant glued to a word ("2CB8L" of
+// "A7K%2CB8L", "nB8L" of "A7K\nB8L") is no word of the value.
+func freshIn(v *valueDrift) bool {
+	forms := v.forms
+	if v.decoded {
+		forms = forms[1:]
+	}
+	rec, live := map[string]bool{}, map[string]bool{}
+	for _, f := range forms {
+		for w := range tokensBy(f[0], isWord) {
+			rec[w] = true
+		}
+		for w := range tokensBy(f[1], isWord) {
+			live[w] = true
+		}
+	}
+	// regrouped: t has a word, and the other side holds each.
+	regrouped := func(t string, other map[string]bool) bool {
+		return allIn(tokensBy(t, isWord), other)
+	}
+	for _, word := range readings {
+		for _, f := range forms {
+			r, l := tokensBy(f[0], word), tokensBy(f[1], word)
+			for t := range r {
+				if !l[t] && !regrouped(t, live) {
+					return true
+				}
+			}
+			for t := range l {
+				if !r[t] && !regrouped(t, rec) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // echoedPart says where the call's recorded answer (resp) holds a word of
@@ -682,10 +844,12 @@ func (dc *DriftCache) rawExtra(text string) string {
 }
 
 // driftKey is a drifted value, with the window of the call it is read in
-// (Window.key).
+// (Window.key), and whether its clock reads are read within it alone, not by
+// the lead too (ofInBy).
 type driftKey struct {
 	run
-	w [4]int64
+	w        [4]int64
+	byWindow bool
 }
 
 func (dc *DriftCache) of(rec, live string) *valueDrift { return dc.ofIn(rec, live, nil) }
@@ -694,14 +858,20 @@ func (dc *DriftCache) of(rec, live string) *valueDrift { return dc.ofIn(rec, liv
 // by the lead and in w, the window of the call that carries it (nil: by the
 // lead alone).
 func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
-	k := driftKey{run{rec, live}, w.key()}
+	return dc.ofInBy(rec, live, w, true)
+}
+
+// ofInBy is ofIn with its clock reads read in w, and by the lead only when
+// lead (clockInBy).
+func (dc *DriftCache) ofInBy(rec, live string, w *Window, lead bool) *valueDrift {
+	k := driftKey{run{rec, live}, w.key(), !lead}
 	dc.mu.Lock()
 	d, ok := dc.m[k]
 	dc.mu.Unlock()
 	if ok {
 		return d
 	}
-	d = &valueDrift{rec: rec, live: live, clock: clockIn(rec, live, w)}
+	d = &valueDrift{rec: rec, live: live, clock: clockInBy(rec, live, w, lead)}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -715,17 +885,78 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 			d.clock.live[w] = true
 		}
 	}
-	var dclock clockSet
+	// Whether the value is nothing but its clock reads (clockSet.alone),
+	// read in each form that drifted: the decoded value (the raw one when it
+	// has no escapes), and its quoted-printable and encoded forms. A raw
+	// value with escapes is read decoded (its escapes are no words of the
+	// value: "%3A" of a clock read's colon), and a case-folded form is the
+	// form before it in lower case, which the clock layouts do not read.
+	// One form that is more than its reads is the value's: noise would stop
+	// comparing what it holds beside them. readIn is where a read was first
+	// read, failed the first form that drifted and is more than its reads.
+	read, judged, readIn := d.clock.read, false, ""
+	if d.clock.read {
+		readIn = "as it stands"
+	}
+	var failed struct {
+		name string
+		c    clockSet
+	}
+	judge := func(name string, f [2]string, c clockSet) {
+		read = read || c.read
+		d.clock.zoned = d.clock.zoned || c.zoned
+		if name == "" {
+			return
+		}
+		if c.read && readIn == "" {
+			readIn = name
+		}
+		if f[0] == f[1] || judged && !d.clock.alone {
+			return
+		}
+		judged = true
+		d.clock.alone = c.alone
+		failed.name, failed.c = name, c
+	}
+	dclock := d.clock
 	if d.decoded {
-		dclock = clockIn(d.decRec, d.decLive, w)
+		dclock = clockInBy(d.decRec, d.decLive, w, lead)
 		merge(dclock)
 	}
-	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	d.clock.alone, d.clock.beyond = false, ""
+	forms, names, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
+	if !d.decoded {
+		names[0] = "as it stands"
+	}
+	judge(names[0], forms[0], dclock)
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
-	for _, f := range forms[1:] {
-		merge(clockIn(f[0], f[1], w))
+	for i, f := range forms[1:] {
+		c := clockInBy(f[0], f[1], w, lead)
+		merge(c)
+		judge(names[i+1], f, c)
+	}
+	d.clock.read = read
+	switch {
+	case !read:
+		d.clock.alone = false
+	case !judged:
+		// No form that is read drifted: what drifted is the raw value's
+		// escapes alone, which no clock read accounts for.
+		d.clock.alone, d.clock.beyond = false, "keploy reads no clock read where it changed"
+	case !d.clock.alone:
+		why := failed.c.beyond
+		if !failed.c.read {
+			why = "keploy reads no clock read where it changed"
+			if readIn != failed.name {
+				why += " (it reads one " + readIn + ")"
+			}
+		}
+		if failed.name != "as it stands" {
+			why = "read " + failed.name + ", " + why
+		}
+		d.clock.beyond = why
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -1276,18 +1507,46 @@ func containsWholeClock(text, v string) bool {
 
 // escapeClock adds to set (clock words of a value) each raw word of s that
 // is an escape's remnant glued to one ("3A41Z" of "%3A41Z", "n2026" of
-// "\\n2026").
+// "\\n2026", "u003A41Z" of "\\u003A41Z", "253A41Z" of "%253A41Z"): a word
+// right after a '%' or a '\\' whose escapes, peeled as unescaped decodes
+// them, leave a clock word. An escape peels another after it only where it
+// stands for a '%' or a '\\' ("%25", "%5C", "\\u0025", "\\u005C"), up to
+// unescaped's levels.
 func escapeClock(s string, set map[string]bool) {
 	hexDigit := func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
 	i := 0
 	for _, seg := range segmentsBy(s, isWord) {
 		w := seg.text
-		if seg.word && i > 0 {
-			switch {
-			case s[i-1] == '%' && len(w) > 2 && hexDigit(w[0]) && hexDigit(w[1]) && set[w[2:]]:
-				set[w] = true
-			case s[i-1] == '\\' && len(w) > 1 && strings.IndexByte("nrtbf", w[0]) >= 0 && set[w[1:]]:
-				set[w] = true
+		if seg.word && i > 0 && (s[i-1] == '%' || s[i-1] == '\\') {
+			x, after := w, s[i-1]
+			for depth := 0; depth < 4 && after != 0 && !set[w]; depth++ {
+				var code, rest string
+				switch {
+				case after == '%' && len(x) > 2 && hexDigit(x[0]) && hexDigit(x[1]):
+					code, rest = strings.ToUpper(x[:2]), x[2:]
+				case after == '\\' && len(x) > 5 && x[0] == 'u' && hexDigit(x[1]) && hexDigit(x[2]) && hexDigit(x[3]) && hexDigit(x[4]):
+					code, rest = strings.ToUpper(x[1:5]), x[5:]
+				case after == '\\' && len(x) > 1 && strings.IndexByte("nrtbf", x[0]) >= 0:
+					code, rest = "", x[1:]
+				default:
+					rest = ""
+				}
+				if rest == "" {
+					break
+				}
+				if set[rest] {
+					set[w] = true
+				}
+				// What the escape stood for: a '%' or a '\\' peels the next.
+				switch code {
+				case "25", "0025":
+					after = '%'
+				case "5C", "005C":
+					after = '\\'
+				default:
+					after = 0
+				}
+				x = rest
 			}
 		}
 		i += len(w)
