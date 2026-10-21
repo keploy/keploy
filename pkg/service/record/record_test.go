@@ -2968,7 +2968,10 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Start(ctx) }()
 
-	ts := time.Unix(1700000000, 0)
+	// Inside the unnamed test case's window: its mappings name each mock's
+	// owner, so the mock it could not save charges its owner alone, never
+	// the test case recorded beside it (chargeUnsaved).
+	ts := unnamedAt
 	send := func(m *models.Mock) {
 		t.Helper()
 		select {
@@ -2983,6 +2986,9 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 	}
 	send(mock("mock-good"))
 	send(mock("mock-bad"))
+	// test-4's own: a mock one mapping resolves is not there for another
+	// (resolveMappingEntries), which would be a short pool.
+	send(mock("mock-good-4"))
 	droppedOnItsWay := models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: "a mock of its own was dropped on its way to keploy record, its queue full or closed"}}
 	for _, tc := range []*models.TestCase{
 		{Name: "test-1", Kind: models.HTTP},
@@ -2990,6 +2996,7 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 		{Name: "test-3", Kind: models.HTTP, CaptureLost: droppedOnItsWay},
 		{Name: "test-4", Kind: models.HTTP},
 		{Name: "test-5", Kind: models.HTTP},
+		{Name: "test-6", Kind: models.HTTP},
 		unnamed,
 	} {
 		select {
@@ -3000,7 +3007,10 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 	}
 	for _, m := range []models.TestMockMapping{
 		{TestName: "test-1", MockIDs: []string{"mock-good", "mock-bad"}},
-		{TestName: "test-4", MockIDs: []string{"mock-good"}},
+		{TestName: "test-4", MockIDs: []string{"mock-good-4"}},
+		// A mock its mapping names that never reaches keploy record: a
+		// short mock pool, charged as a mock it lacks.
+		{TestName: "test-6", MockIDs: []string{"mock-never"}},
 	} {
 		select {
 		case f.mappings <- m:
@@ -3041,6 +3051,7 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 		"test-1": mockNotSaved,
 		"test-2": mockDroppedAfterStreamed,
 		"test-3": "a mock of its own was dropped on its way to keploy record, its queue full or closed",
+		"test-6": mocksUncorrelated,
 	}
 	for name, what := range want {
 		lost := by[name]
@@ -3065,16 +3076,19 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 }
 
 // lateBlockingInstr is blockingInstr whose agent said, at the stream's end,
-// what test cases it streamed with nothing lost had lost after all.
+// what test cases it streamed with nothing lost had lost after all, and what
+// else its end markers said (ends).
 type lateBlockingInstr struct {
 	blockingInstr
 	late []models.LateLoss
+	ends models.StreamEndSummary
 }
 
-func (l *lateBlockingInstr) TakeLateTestCaseLosses() []models.LateLoss {
-	late := l.late
-	l.late = nil
-	return late
+func (l *lateBlockingInstr) TakeStreamEnds() models.StreamEndSummary {
+	s := l.ends
+	s.LateLosses = l.late
+	l.late, l.ends = nil, models.StreamEndSummary{}
+	return s
 }
 
 // Under the proven switch keploy record asks the agent to stream a test case
@@ -3105,6 +3119,167 @@ func TestUnderTheProvenSwitchARecordAsksTheAgentForTheTestCasesItsRecordingLostA
 			if got.ChargesLosses != c.charges || len(got.Filters) != 1 || got.Filters[0].Path != "/healthz" {
 				t.Fatalf("the record asks the agent for %+v, want its filters and ChargesLosses %v", got, c.charges)
 			}
+		})
+	}
+}
+
+// startRecording starts a recording against a fake agent (instr, wrapping
+// f) under the proven switch, whatever the test set, handing what the
+// recording lost to the pass that judges it (handed).
+func startRecording(t *testing.T, instr Instrumentation, f *fakeInstr, cfg *config.Config, mockDB *recMockDB) (testDB *recTestDB, handed func() []RecordedLosses, stop func()) {
+	t.Helper()
+	var got []RecordedLosses
+	var mu sync.Mutex
+	t.Cleanup(JudgeLossesLater(func(l RecordedLosses) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, l)
+	}))
+	testDB = &recTestDB{autoName: true}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          testDB,
+		mockDB:          mockDB,
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          cfg,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	stop = func() {
+		t.Helper()
+		cancel()
+		close(f.outgoing)
+		close(f.incoming)
+		close(f.mappings)
+		select {
+		case <-done:
+		case <-time.After(90 * time.Second):
+			t.Fatal("Start did not return")
+		}
+	}
+	handed = func() []RecordedLosses {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]RecordedLosses(nil), got...)
+	}
+	return testDB, handed, stop
+}
+
+// Under the proven switch, a recording made without --sync (the default T2
+// flow) names no mock's owner: no mapping comes from the agent, and its
+// mappings are derived from its test windows at the end. A mock keploy record
+// could not save (one that does not encode) then charges every test case
+// saved whose window overlaps it (mockNotSavedWhileItRan), an HTTP one or a
+// gRPC one, and no other; the pass that judges each test case is handed it.
+// Before, nothing was charged while the line said the owner carried it as
+// its evidence. With the switch off nothing is charged, and every test case
+// is saved, as before.
+//
+// Not parallel: it sets the switch and registers the judging pass.
+func TestStart_UnderTheProvenSwitchAMockItCouldNotSaveChargesTheTestCasesRecordedOverIt(t *testing.T) {
+	at := time.Date(2004, 5, 6, 7, 8, 9, 0, time.UTC)
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+			testDB, handed, stop := startRecording(t, &blockingInstr{f}, f, &config.Config{}, &recMockDB{unencodable: map[string]bool{"mock-bad": true}})
+			for _, m := range []*models.Mock{
+				{Version: models.GetVersion(), Name: "mock-bad", Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: at.Add(time.Millisecond), ResTimestampMock: at.Add(2 * time.Millisecond)}},
+				{Version: models.GetVersion(), Name: "mock-good", Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: at.Add(time.Second + time.Millisecond), ResTimestampMock: at.Add(time.Second + 2*time.Millisecond)}},
+			} {
+				select {
+				case f.outgoing <- m:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("mock %s not consumed", m.Name)
+				}
+			}
+			over := &models.TestCase{Kind: models.HTTP}
+			over.HTTPReq.Timestamp, over.HTTPResp.Timestamp = at, at.Add(5*time.Millisecond)
+			clear := &models.TestCase{Kind: models.HTTP}
+			clear.HTTPReq.Timestamp, clear.HTTPResp.Timestamp = at.Add(time.Second), at.Add(time.Second+5*time.Millisecond)
+			grpcOver := &models.TestCase{Kind: models.GRPC_EXPORT}
+			grpcOver.GrpcReq.Timestamp, grpcOver.GrpcResp.Timestamp = at.Add(2*time.Millisecond), at.Add(3*time.Millisecond)
+			for _, tc := range []*models.TestCase{over, clear, grpcOver} {
+				select {
+				case f.incoming <- tc:
+				case <-time.After(10 * time.Second):
+					t.Fatal("test case not consumed")
+				}
+			}
+			waitForPersistedTestCase(t, testDB, "auto-3")
+			stop()
+			testDB.mu.Lock()
+			deleted := append([]string(nil), testDB.deleted...)
+			testDB.mu.Unlock()
+			require.Empty(t, deleted, "a test case was deleted")
+			got := handed()
+			if !proven {
+				require.Empty(t, got, "with the switch off something was charged")
+				return
+			}
+			require.Len(t, got, 1, "what the recording lost was not handed to the pass that judges it")
+			want := models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: mockNotSavedWhileItRan}}
+			by := got[0].ByTestCase
+			assert.Equal(t, fmt.Sprint(want), fmt.Sprint(by["auto-1"]), "the HTTP test case recorded over the mock it could not save")
+			assert.Equal(t, fmt.Sprint(want), fmt.Sprint(by["auto-3"]), "the gRPC test case recorded over it")
+			assert.NotContains(t, by, "auto-2", "a test case recorded over no unsaved mock was charged")
+			assert.True(t, got[0].Failing(), "the charge fails a recording judged on its own")
+		})
+	}
+}
+
+// Under the proven switch, what the agent's end markers said it left out of
+// the recording unnamed (test cases it suppressed: an agent that does not
+// stream them with their loss; test cases left out in flight) is the set's
+// loss, which no test case holds (RecordedLosses.LeftOut): handed to the pass
+// that judges the set, which says it; with none, the recording fails naming
+// it. tcs_suppressed_total is never non-zero without a counted loss. With the
+// switch off it is only the agent's summary, as before.
+//
+// Not parallel: it sets the switch and registers the judging pass.
+func TestStart_UnderTheProvenSwitchTestCasesTheAgentLeftOutAreTheSetsLoss(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+			instr := &lateBlockingInstr{blockingInstr: blockingInstr{f}, ends: models.StreamEndSummary{TestCasesSent: 1, TestCasesSuppressed: 2, LeftOutInFlight: 3}}
+			testDB, handed, stop := startRecording(t, instr, f, &config.Config{}, &recMockDB{unencodable: map[string]bool{}})
+			tc := &models.TestCase{Kind: models.HTTP}
+			select {
+			case f.incoming <- tc:
+			case <-time.After(10 * time.Second):
+				t.Fatal("test case not consumed")
+			}
+			waitForPersistedTestCase(t, testDB, "auto-1")
+			stop()
+			got := handed()
+			if !proven {
+				require.Empty(t, got, "with the switch off the left-out test cases were handed over")
+				return
+			}
+			require.Len(t, got, 1)
+			l := got[0]
+			assert.True(t, l.Failing(), "test cases the agent left out fail a recording judged on its own")
+			for _, want := range []string{"left 2 test case(s) out of the recording, unnamed", "tcs_suppressed_total", "left 3 test case(s) out of the recording, unnamed: each stayed in flight", "tcs_left_out_in_flight"} {
+				assert.Contains(t, l.LeftOut, want)
+				assert.Contains(t, l.Text(), want)
+			}
+			assert.Empty(t, l.ByTestCase, "a test case was charged with what the agent left out unnamed")
 		})
 	}
 }

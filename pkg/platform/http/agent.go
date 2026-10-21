@@ -84,12 +84,13 @@ type AgentClient struct {
 	agentContainer   *namedContainer
 	agentContainerAt string
 
-	// lateLosses are what the incoming stream's end marker said test cases
-	// streamed with nothing lost had lost by the stream's end
-	// (models.StreamEndSummary.LateLosses), until a recording takes them
-	// (TakeLateTestCaseLosses). Under lateMu.
-	lateMu     sync.Mutex
-	lateLosses []models.LateLoss
+	// markers is what the incoming streams' end markers said
+	// (models.StreamEndSummary), added up, until a recording takes it
+	// (TakeStreamEnds): the test cases the agent left out, and what test
+	// cases streamed with nothing lost had lost by the stream's end. Under
+	// markersMu.
+	markersMu sync.Mutex
+	markers   models.StreamEndSummary
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
 	// under docker compose (the project starts it), nor for an agent another
@@ -424,28 +425,32 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 	}
 }
 
-// noteLateLosses keeps what a stream's end marker said test cases streamed
-// with nothing lost had lost by its end, for the recording to take.
-func (a *AgentClient) noteLateLosses(late []models.LateLoss) {
-	if len(late) == 0 {
-		return
-	}
-	a.lateMu.Lock()
-	defer a.lateMu.Unlock()
-	a.lateLosses = append(a.lateLosses, late...)
+// noteStreamEnd keeps what a stream's end marker said (s), added to what the
+// markers before it said, for the recording to take.
+func (a *AgentClient) noteStreamEnd(s models.StreamEndSummary) {
+	a.markersMu.Lock()
+	defer a.markersMu.Unlock()
+	e := &a.markers
+	e.TestCasesSent += s.TestCasesSent
+	e.TestCasesSuppressed += s.TestCasesSuppressed
+	e.LeftOutInFlight += s.LeftOutInFlight
+	e.Unsettled += s.Unsettled
+	e.MassSuppressed = e.MassSuppressed || s.MassSuppressed
+	e.KeptWithLoss += s.KeptWithLoss
+	e.LateLosses = append(e.LateLosses, s.LateLosses...)
 }
 
-// TakeLateTestCaseLosses is what the incoming streams' end markers said test
-// cases streamed with nothing lost had lost by their end, each named as the
-// agent streamed it (models.LateLoss), and forgets it: keploy record charges
-// it (models.StreamEndSummary.LateLosses). Read once the streams have
-// drained.
-func (a *AgentClient) TakeLateTestCaseLosses() []models.LateLoss {
-	a.lateMu.Lock()
-	defer a.lateMu.Unlock()
-	late := a.lateLosses
-	a.lateLosses = nil
-	return late
+// TakeStreamEnds is what the incoming streams' end markers said since it was
+// last taken, added up (models.StreamEndSummary), and forgets it: keploy
+// record charges the late losses (models.StreamEndSummary.LateLosses), each
+// named as the agent streamed it, and, under the proven switch, says what the
+// agent left out unnamed. Read once the streams have drained.
+func (a *AgentClient) TakeStreamEnds() models.StreamEndSummary {
+	a.markersMu.Lock()
+	defer a.markersMu.Unlock()
+	s := a.markers
+	a.markers = models.StreamEndSummary{}
+	return s
 }
 
 // readIncomingParts reads a multipart incoming stream; see readIncoming.
@@ -478,7 +483,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			// through compose or kubelet, and can be cut off as it stops.
 			var sum models.StreamEndSummary
 			if err := json.NewDecoder(part).Decode(&sum); err == nil {
-				a.noteLateLosses(sum.LateLosses)
+				a.noteStreamEnd(sum)
 				if !a.startedAgent.Load() {
 					a.sayAgentSummary(sum)
 				}

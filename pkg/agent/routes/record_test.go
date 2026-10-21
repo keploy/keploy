@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // redirectAgentReadyFile rewrites the package-level agentReadyFilePath
@@ -373,5 +374,104 @@ func TestATestCaseALateSpanOverlapsIsNamedAtTheStreamsEnd(t *testing.T) {
 				t.Fatalf("the marker names\n%s\nwant the late test cases alone, each by its window\n%s", strings.Join(got, "\n"), strings.Join(wantNamed, "\n"))
 			}
 		})
+	}
+}
+
+// Under the proven switch, to a client that charges it, a gRPC test case is
+// checked against the spans over its own window (GrpcReq, GrpcResp), as an
+// HTTP one is over its: one over an exchange keploy could not record is
+// streamed with it. With the switch off a gRPC test case is checked against
+// nothing, and streamed as it was: the byte-identical default.
+//
+// Not parallel: the spans are the package-global manager's, and it sets the
+// switch.
+func TestUnderTheProvenSwitchAGRPCTestCaseOverALossIsStreamedWithIt(t *testing.T) {
+	base := time.Date(2004, 5, 6, 7, 8, 9, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	t.Setenv(provenswitch.Env, "1")
+	syncmgr.Get().RecordOrphanWindowWhy(base, base.Add(time.Millisecond), "MySQL: under a gRPC call")
+	grpcTC := func() *models.TestCase {
+		t := &models.TestCase{Name: "grpc-1", Kind: models.GRPC_EXPORT}
+		t.GrpcReq.Timestamp = base
+		t.GrpcResp.Timestamp = base.Add(time.Millisecond)
+		return t
+	}
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if !proven {
+				t.Setenv(provenswitch.Env, "")
+			}
+			got, sum := streamIncoming(t, models.IncomingOptions{ChargesLosses: true}, grpcTC())
+			if len(got) != 1 || got[0].Name != "grpc-1" || sum.TestCasesSuppressed != 0 {
+				t.Fatalf("streamed %+v, summary %+v: the gRPC test case is to be streamed", got, sum)
+			}
+			want := models.CaptureLosses(nil)
+			if proven {
+				want = models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: under a gRPC call"}}
+			}
+			if fmt.Sprint(got[0].CaptureLost) != fmt.Sprint(want) || sum.KeptWithLoss != len(want) {
+				t.Fatalf("the gRPC test case carries %+v (kept with loss %d), want %+v", got[0].CaptureLost, sum.KeptWithLoss, want)
+			}
+		})
+	}
+}
+
+// Under the proven switch, a stream that ends other than at its marker (its
+// capture closed it) carries no account of what test cases streamed with
+// nothing lost turned out to have lost: the agent says how many at WARN, and
+// its summary counts them (tcs_late_unsent), rather than leave them saved
+// without that as their evidence unsaid.
+//
+// Not parallel: the spans are the package-global manager's, and it sets the
+// switch.
+func TestALateLossAStreamEndingWithoutItsMarkerCouldNotCarryIsSaid(t *testing.T) {
+	base := time.Date(2005, 6, 7, 8, 9, 10, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	t.Setenv(provenswitch.Env, "1")
+	syncmgr.Get().SetWatermark(nil)
+	core, logs := observer.New(zap.WarnLevel)
+	svc := streamsSvc{tc: make(chan *models.TestCase, 1), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+	a := &Agent{logger: zap.New(core), svc: svc}
+	resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{IncomingOptions: models.IncomingOptions{ChargesLosses: true}}, rand.Text())
+	defer done()
+	tc := &models.TestCase{Name: "clean-then-late"}
+	tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp = base, base.Add(time.Millisecond)
+	svc.tc <- tc
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := multipart.NewReader(resp.Body, params["boundary"])
+	part, err := mr.NextPart()
+	if err != nil || part.FormName() != "metadata" {
+		t.Fatalf("the test case was not streamed: %v", err)
+	}
+	// After it went: the span its parser reports behind the traffic.
+	syncmgr.Get().RecordOrphanWindowWhy(base, base, "MySQL: behind the traffic")
+	close(svc.tc) // the capture ends the stream: no marker
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if p.FormName() == models.StreamEndPart {
+			t.Fatal("a stream its capture ended carried a marker")
+		}
+	}
+	var said bool
+	for i := 0; i < 200 && !said; i++ {
+		for _, e := range logs.All() {
+			if strings.Contains(e.Message, "the stream ended before its end marker could say so") && e.ContextMap()["test_cases"] == int64(1) && e.ContextMap()["ended_by"] == "capture" {
+				said = true
+			}
+		}
+		if !said {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !said {
+		var msgs []string
+		for _, e := range logs.All() {
+			msgs = append(msgs, e.Message)
+		}
+		t.Fatalf("the late loss the stream could not carry was not said; WARNs: %q", msgs)
 	}
 }

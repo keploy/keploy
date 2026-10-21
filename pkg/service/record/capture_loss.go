@@ -103,6 +103,10 @@ type captureWatch struct {
 	// added up: the reason the recording names beside lost, which the
 	// agent's counts never hold.
 	chargedOwn models.CaptureLosses
+	// leftOut is, under the proven switch, what the agent said it left out
+	// of the recording that it could not name (leftOutOfSet): the set's
+	// loss, which no test case holds.
+	leftOut []string
 	// agent watches which agent process answers (models.AgentInstanceWatch):
 	// the counts are the process's, from when it started, and the test cases
 	// and mocks it captured are in its memory until it hands them over. An
@@ -222,7 +226,11 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		w.evidence = allEvidence
 	}
 	if len(judged) > 0 {
-		w.tainted = append(w.tainted, name)
+		// Charged already, as charge may have (its CaptureLost): named
+		// once.
+		if !slices.Contains(w.tainted, name) {
+			w.tainted = append(w.tainted, name)
+		}
 		w.lost = allJudged
 	}
 	if len(notJudged) > 0 {
@@ -253,28 +261,25 @@ func (w *captureWatch) charge(name string, lost models.CaptureLosses) {
 		if !slices.Contains(w.tainted, name) {
 			w.tainted = append(w.tainted, name)
 		}
-		w.chargedOwn = plusNamingEach(w.chargedOwn, judged)
+		// The recording's reason names every source of what its test
+		// cases lost (an exchange MySQL's recorder left out, an HTTP
+		// answer that did not decode).
+		w.chargedOwn = w.chargedOwn.PlusNaming(judged)
 	}
 }
 
-// plusNamingEach is l.Plus(o), but a kind's What names each distinct What it
-// was charged with, not the latest only: the recording's reason names every
-// source of what its test cases lost (an exchange MySQL's recorder left out,
-// an HTTP answer that did not decode).
-func plusNamingEach(l, o models.CaptureLosses) models.CaptureLosses {
-	whats := map[models.CaptureLossKind][]string{}
-	for _, c := range append(slices.Clone(l), o...) {
-		for _, w := range strings.Split(c.What, "; ") {
-			if w != "" && !slices.Contains(whats[c.Kind], w) {
-				whats[c.Kind] = append(whats[c.Kind], w)
-			}
-		}
+// leftOutOfSet notes, under the proven switch, why: what the agent said it
+// left out of the recording that it could not name (leftOutUnsaid), the
+// set's loss, which no test case holds. Named at the end, the recording
+// failing on it, or handed to the pass that judges each test case
+// (RecordedLosses.LeftOut). "" notes nothing.
+func (w *captureWatch) leftOutOfSet(why string) {
+	if w == nil || why == "" || !provenswitch.On() {
+		return
 	}
-	out := l.Plus(o)
-	for i := range out {
-		out[i].What = strings.Join(whats[out[i].Kind], "; ")
-	}
-	return out
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.leftOut = append(w.leftOut, why)
 }
 
 // saved notes a mock as it is saved: one whose stamp says the Docker daemon
@@ -326,13 +331,14 @@ func (w *captureWatch) mapped(test string, entries []models.MockEntry) {
 	}
 }
 
-// addEvidence adds lost to what test case name was charged with. Called
-// with w.mu held.
+// addEvidence adds lost to what test case name was charged with, each source
+// a kind was charged from named (models.CaptureLosses.PlusNaming: a stream's
+// charge and a late one, a revoke and a CaptureLost). Called with w.mu held.
 func (w *captureWatch) addEvidence(name string, lost models.CaptureLosses) {
 	if w.byTestCase == nil {
 		w.byTestCase = map[string]models.CaptureLosses{}
 	}
-	w.byTestCase[name] = w.byTestCase[name].Plus(lost)
+	w.byTestCase[name] = w.byTestCase[name].PlusNaming(lost)
 }
 
 // afterTestCases is the final read, once the app is stopped and before the
@@ -447,6 +453,13 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 			zap.Strings("testCases", w.tainted),
 			zap.String("reason", w.lost.Plus(w.chargedOwn).Text()),
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
+	}
+	if len(w.leftOut) > 0 && judge == nil {
+		failed = true
+		w.logger.Error("the recording is incomplete: keploy's agent left test cases out of it that it could not name ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", strings.Join(w.leftOut, "; ")),
+			zap.String("next_step", "run keploy record with an agent of the same version as keploy, and fix what the reason names; then re-record"))
 	}
 	if len(w.uncapturable) > 0 {
 		notJudged := w.notJudged.Plus(w.unreadLost)
@@ -611,6 +624,10 @@ type RecordedLosses struct {
 	// whether there were any, "" when it could.
 	RealUncaptured bool
 	RealUnread     string
+	// LeftOut is what the agent said it left out of the set's recording
+	// that it could not name: test cases it suppressed, or left out in
+	// flight (leftOutUnsaid); "" for none. No test case holds it: the set's.
+	LeftOut string
 }
 
 // Failing says l holds what fails a recording judged on its own (finish with
@@ -618,7 +635,7 @@ type RecordedLosses struct {
 // connections neither captured nor relayed. A pass that judges no test case
 // of the set is to fail the recording on it.
 func (l RecordedLosses) Failing() bool {
-	if l.RealUncaptured || l.RealUnread != "" || l.NotVerified != "" || len(l.Unverified) > 0 || len(l.Uncharged) > 0 {
+	if l.RealUncaptured || l.RealUnread != "" || l.NotVerified != "" || l.LeftOut != "" || len(l.Unverified) > 0 || len(l.Uncharged) > 0 {
 		return true
 	}
 	for _, lost := range l.ByTestCase {
@@ -705,6 +722,9 @@ func (l RecordedLosses) Text() string {
 	if l.RealUnread != "" {
 		parts = append(parts, l.RealUnread)
 	}
+	if l.LeftOut != "" {
+		parts = append(parts, l.LeftOut)
+	}
 	return strings.Join(parts, "; ")
 }
 
@@ -758,6 +778,7 @@ func (w *captureWatch) recordedLocked(testSetID string, realUncaptured bool, rea
 		why = append(why, restarted)
 	}
 	l.NotVerified = strings.Join(why, "; ")
+	l.LeftOut = strings.Join(w.leftOut, "; ")
 	return l
 }
 
@@ -776,12 +797,13 @@ func (w *captureWatch) chargedWith(name string, k models.CaptureLossKind) bool {
 	return false
 }
 
-// chargedAny says charge charged a test case with something. Called before
-// w.mu is taken.
+// chargedAny says charge charged a test case with something, or the agent
+// left test cases out unnamed (leftOutOfSet): what a watch that is off (an
+// agent that cannot count) still has to say. Called before w.mu is taken.
 func (w *captureWatch) chargedAny() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return len(w.byTestCase) > 0
+	return len(w.byTestCase) > 0 || len(w.leftOut) > 0
 }
 
 // String is a one-line account, for tests.

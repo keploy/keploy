@@ -3,6 +3,7 @@ package models
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -219,8 +220,10 @@ const (
 // record as a mock says, under the proven switch, of a test case recorded over
 // it, where the switch-off line says the test case is left out of the
 // recording: keploy record keeps it, charged with the exchange
-// (CaptureLossExchangeUnrecorded), and the auto-replay judges it.
-const KeptToBeJudged = "with that as what its recording lost, and the auto-replay judges it: kept if it replays, quarantined with that in its reason if it does not (" + provenswitch.Env + "=1)"
+// (CaptureLossExchangeUnrecorded). Where an auto-replay follows the record
+// (enterprise's), it judges the test case; without one (keploy's own record,
+// or the auto-replay turned off) the recording fails, naming it.
+const KeptToBeJudged = "with that as what its recording lost: where the auto-replay follows the record it judges the test case (kept if it replays, quarantined with that in its reason if it does not), and without one the recording fails, naming it (" + provenswitch.Env + "=1)"
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
 // with when the Docker daemon did not answer keploy's read of its
@@ -565,6 +568,27 @@ func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
+// PlusNaming is l.Plus(o), but each kind's What names every distinct What it
+// was added with, in the order first added, joined by "; " (each What may be
+// such a list itself), not the later one only: a test case charged over two
+// sources (an exchange MySQL's recorder left out, an HTTP answer that did not
+// decode) names both. Sorted by kind.
+func (l CaptureLosses) PlusNaming(o CaptureLosses) CaptureLosses {
+	whats := map[CaptureLossKind][]string{}
+	for _, c := range append(append(CaptureLosses(nil), l...), o...) {
+		for _, w := range strings.Split(c.What, "; ") {
+			if w != "" && !slices.Contains(whats[c.Kind], w) {
+				whats[c.Kind] = append(whats[c.Kind], w)
+			}
+		}
+	}
+	out := l.Plus(o)
+	for i := range out {
+		out[i].What = strings.Join(whats[out[i].Kind], "; ")
+	}
 	return out
 }
 

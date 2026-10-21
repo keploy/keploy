@@ -738,11 +738,12 @@ type LateLoss struct {
 	// keploy record named as it saved it.
 	Name string `json:"name,omitempty"`
 	// Request and Response are the test case's window as the agent streamed
-	// it: its HTTPReq.Timestamp and HTTPResp.Timestamp.
+	// it: its HTTPReq.Timestamp and HTTPResp.Timestamp, or a gRPC test
+	// case's GrpcReq.Timestamp and GrpcResp.Timestamp.
 	Request  time.Time `json:"req"`
 	Response time.Time `json:"resp"`
 	// Lost is what the test case lost: the spans its window overlaps that
-	// the agent learnt of after it went.
+	// were recorded after it went, each as it was recorded.
 	Lost CaptureLosses `json:"lost"`
 }
 

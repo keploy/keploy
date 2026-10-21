@@ -97,7 +97,7 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 		// Unnamed, as the agent streams a test case keploy record names.
 		{Request: at.Add(time.Second), Response: at.Add(time.Second + time.Nanosecond), Lost: lost},
 	}
-	sum := models.StreamEndSummary{TestCasesSent: 2, LateLosses: late}
+	sum := models.StreamEndSummary{TestCasesSent: 2, TestCasesSuppressed: 3, LeftOutInFlight: 4, LateLosses: late}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mw := multipart.NewWriter(w)
 		w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
@@ -132,7 +132,11 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 		for range tcs {
 		}
 		cancel()
-		got := client.TakeLateTestCaseLosses()
+		ends := client.TakeStreamEnds()
+		if ends.TestCasesSent != 2 || ends.TestCasesSuppressed != 3 || ends.LeftOutInFlight != 4 {
+			t.Fatalf("started %v: the client kept %+v, want the marker's counts", started, ends)
+		}
+		got := ends.LateLosses
 		if len(got) != len(late) {
 			t.Fatalf("started %v: the client kept %+v, want %+v", started, got, late)
 		}
@@ -142,7 +146,7 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 				t.Fatalf("started %v: the client kept %+v, want %+v", started, got, late)
 			}
 		}
-		if again := client.TakeLateTestCaseLosses(); len(again) != 0 {
+		if again := client.TakeStreamEnds(); len(again.LateLosses) != 0 || again.TestCasesSuppressed != 0 {
 			t.Fatalf("started %v: taken twice: %+v", started, again)
 		}
 	}

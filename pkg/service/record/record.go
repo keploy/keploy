@@ -1641,6 +1641,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// case it charges by it (chargeLateLosses). Guarded by insertedMu.
 	insertedByWindow := savedTestCases{}
 	var insertedMu sync.Mutex
+	// unsaved is, under the proven switch, the span of each mock keploy
+	// record could not save: a recording whose mocks no mapping names the
+	// owner of charges each test case saved over one (chargeUnsaved). Nil
+	// with the switch off.
+	unsaved := newUnsavedMocks()
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
@@ -1879,9 +1884,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 
-		// What the agent found, at the stream's end, that test cases it
-		// streamed with nothing lost had lost after all (proven switch).
-		r.chargeLateLosses(capWatch, func(l models.LateLoss) []string {
+		// What the agent's streams' end markers said (proven switch): test
+		// cases it left out unnamed, the set's loss, and what test cases it
+		// streamed with nothing lost had lost after all.
+		lateLosses := r.takeStreamEnds(capWatch)
+		chargeLateLosses(capWatch, lateLosses, func(l models.LateLoss) []string {
 			insertedMu.Lock()
 			defer insertedMu.Unlock()
 			return insertedByWindow.savedFor(l, func(name string) bool {
@@ -1935,6 +1942,19 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// (keepRevoked).
 			toDelete = r.keepRevoked(capWatch, newTestSetID, toDelete, whySnap)
 		}
+		if provenswitch.On() {
+			// A mock keploy record could not save, in a recording whose
+			// mocks no mapping names the owner of: each test case saved
+			// over it is charged with it (chargeUnsaved). Snapshotted under
+			// insertedMu, as the names above are.
+			insertedMu.Lock()
+			savedSnap := make(savedTestCases, len(insertedByWindow))
+			for win, names := range insertedByWindow {
+				savedSnap[win] = append([]string(nil), names...)
+			}
+			insertedMu.Unlock()
+			r.chargeUnsaved(capWatch, unsaved, savedSnap, r.mappingsStreamed.Load() > 0)
+		}
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
 			// TestDB interface (enterprise implements that interface; don't break it).
@@ -1967,6 +1987,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.Int("count", len(toDelete)))
 			}
 		}
+
+		// A test case whose mapping named mocks that never reached keploy
+		// record carries that, under the proven switch, beside the WARN
+		// that counts them below.
+		chargeShortPools(capWatch, &shortPoolByTest, deletedSet)
 
 		// The test cases the set keeps are final: map them (a no-op unless
 		// this recording derives its mappings from its test windows).
@@ -2747,6 +2772,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					droppedMockKinds[mock.GetKind()]++
 					mockCountMapMu.Unlock()
 					droppedMockIDs.add(tempID)
+					unsaved.add(mock)
 					utils.LogError(r.logger, err, "failed to record mock during shutdown",
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()),
@@ -2769,6 +2795,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					// Tell the mapping consumer so it revokes the owning test
 					// instead of spinning on an ID that will never arrive.
 					tracked := droppedMockIDs.add(tempID)
+					unsaved.add(mock)
 					// Loud on the first, then sampled: a recording that quietly
 					// grows holes is worse than one that dies, so this must stay
 					// visible without drowning the log on a systematic failure.
@@ -2797,6 +2824,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				dropped := droppedMockCount
 				mockCountMapMu.Unlock()
 				droppedMockIDs.add(tempID)
+				unsaved.add(mock)
 				if dropped == 1 || dropped%100 == 0 {
 					utils.LogError(r.logger, err, "failed to record mock (environmental); stopping the session",
 						zap.String("mockName", mock.Name),

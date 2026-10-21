@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -425,6 +426,41 @@ func TestARecordsOwnChargeFailsItsTestCase(t *testing.T) {
 	for _, k := range []CaptureLossKind{CaptureLossUnrecorded, CaptureLossUnread, CaptureLossTLSAbort} {
 		if k.recordCharged() {
 			t.Fatalf("%s is in the agent's counts, not charged by the record", k)
+		}
+	}
+}
+
+// PlusNaming adds counts as Plus does, but keeps every distinct What a kind
+// was added with, in the order first added, each once (a What may be such a
+// list itself); a kind with none keeps none.
+func TestPlusNamingKeepsEverySourceOnce(t *testing.T) {
+	l := CaptureLosses{{Kind: CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: a"}, {Kind: CaptureLossMockDropped, Count: 1}}
+	o := CaptureLosses{
+		{Kind: CaptureLossExchangeUnrecorded, Count: 2, What: "Http: b; MySQL: a"},
+		{Kind: CaptureLossMockDropped, Count: 1},
+		{Kind: CaptureLossTLSAbort, Count: 3, What: "tls"},
+	}
+	got := l.PlusNaming(o)
+	want := CaptureLosses{
+		{Kind: CaptureLossExchangeUnrecorded, Count: 3, What: "MySQL: a; Http: b"},
+		{Kind: CaptureLossMockDropped, Count: 2},
+		{Kind: CaptureLossTLSAbort, Count: 3, What: "tls"},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("PlusNaming = %+v, want %+v", got, want)
+	}
+	if plus := l.Plus(o); plus[0].What != "Http: b; MySQL: a" {
+		t.Fatalf("Plus keeps the later What: %+v", plus)
+	}
+}
+
+// What a line says of a test case kept with an exchange keploy could not
+// record holds for every record: the auto-replay judges it where one follows,
+// and without one the recording fails.
+func TestKeptToBeJudgedSaysWhatBecomesOfItWithoutAnAutoReplay(t *testing.T) {
+	for _, want := range []string{"where the auto-replay follows the record it judges the test case", "without one the recording fails, naming it"} {
+		if !strings.Contains(KeptToBeJudged, want) {
+			t.Fatalf("%q lacks %q", KeptToBeJudged, want)
 		}
 	}
 }

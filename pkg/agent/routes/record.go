@@ -45,35 +45,6 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
-// streamedTestCase is a test case the stream sent with nothing lost, by its
-// window and its name (empty for one the agent does not name), for the
-// stream's end to check again (lateLosses).
-type streamedTestCase struct {
-	name       string
-	start, end time.Time
-}
-
-// maxStreamedRechecked bounds the test cases a stream keeps to check again at
-// its end: about 20 MiB of them.
-const maxStreamedRechecked = 1 << 18
-
-// lateLosses is what each test case in streamed, sent with nothing lost, has
-// lost by now (syncMock.TestCaseLosses): a span a parser reported after it
-// went overlaps it. Each is named by its window, and by its name when it has
-// one (models.LateLoss): the agent streams most test cases unnamed, and keploy
-// record names each as it saves it. Nil for none.
-func lateLosses(streamed []streamedTestCase) []models.LateLoss {
-	var out []models.LateLoss
-	for _, s := range streamed {
-		lost := syncmgr.Get().TestCaseLosses(s.name, s.start, s.end)
-		if len(lost) == 0 {
-			continue
-		}
-		out = append(out, models.LateLoss{Name: s.name, Request: s.start, Response: s.end, Lost: lost})
-	}
-	return out
-}
-
 // massSuppressionPercent is the share of a session's test cases that must be
 // suppressed before the completion summary is raised from Info to Warn.
 //
@@ -585,14 +556,20 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// the recording unsaid. tcsKeptWithLoss counts them.
 	chargeLosses := provenswitch.On() && incomingReq.IncomingOptions.ChargesLosses
 	var tcsKeptWithLoss int
-	// streamed are, under chargeLosses, the test cases streamed with nothing
+	// late watches, under chargeLosses, the test cases streamed with nothing
 	// lost: a span a parser reports behind the traffic can overlap one after
 	// it went (streamed before its connection's parser got to the exchange,
-	// or let go by the hold's bound unsettled). The stream's end checks them
-	// again, and its marker carries what that finds (lateLosses); one past
-	// maxStreamedRechecked is not kept, and counted (streamedUnrechecked).
-	var streamed []streamedTestCase
-	var streamedUnrechecked, tcsChargedLate int
+	// or let go by the hold's bound unsettled). Each span recorded from then
+	// on charges the ones it overlaps, as it is recorded, and the stream's
+	// marker carries what that found (syncMock.LateWatch); one past its bound
+	// is not watched, and counted (tcs_not_rechecked). tcsChargedLate is how
+	// many the marker carried.
+	var late *syncmgr.LateWatch
+	if chargeLosses {
+		late = syncmgr.Get().WatchLate()
+		defer late.Close()
+	}
+	var tcsChargedLate int
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
 	send := func(t *models.TestCase) bool {
@@ -611,56 +588,62 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
 		tcRespTime := t.HTTPResp.Timestamp
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
-		// An exchange a connection carried but did not record as a mock
-		// strands its TC mock-less, whether or not a pressure range covers
-		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
-		// parser left out (a MySQL response it cannot frame), a mock the
-		// incomplete flag left out, a connection that can no longer be
-		// recorded. Each is reported as an orphan span
-		// (Session.RecordOrphanWindow lists them); suppress any TC whose
-		// window overlaps one, same as for pressure. A span its parser
-		// reports once it gets to the exchange, behind the traffic, reaches
-		// only the TCs checked after it: without a watermark (the hold
-		// below), a TC streamed before it is saved without the mock, as the
-		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
-		// A capacity drop (outChan overflow / already-closed channel)
-		// feeds nothing into pressureRanges, so the pressure-overlap check
-		// above cannot catch it. Suppress by EXACT owning test name so a
-		// TC whose mock was capacity-dropped is not streamed mock-less
-		// (replay: match_phase=no_mocks), without over-suppressing any
-		// concurrent TC that kept all its mocks.
-		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
+		if chargeLosses {
+			// Under the proven switch, to a client that charges it, what
+			// the checks below leave out for is the test case's evidence
+			// instead (syncMock.TestCaseLosses reads the same spans), over
+			// its own window, a gRPC call's included. Watched first: a span
+			// recorded from here is either one the check reads, or one the
+			// watch is told of (LateWatch.Watch).
+			from, to := testCaseWindow(t)
+			watched := late.Watch(t.Name, from, to)
+			if lost := syncmgr.Get().TestCaseLosses(t.Name, from, to); len(lost) > 0 {
+				late.Forget(watched)
+				t.CaptureLost = lost
+				tcsKeptWithLoss++
+				a.logger.Debug("agent: TC streamed with what its recording lost: memory pressure or an exchange a connection did not record overlapped its window, or a mock of its, or one recorded while it ran, was capacity-dropped",
+					zap.String("tc_name", t.Name),
+					zap.Int64("tc_req_ms", from.UnixMilli()),
+					zap.Int64("tc_resp_ms", to.UnixMilli()),
+					zap.String("lost", t.CaptureLost.Text()),
+					zap.Int("tcs_kept_with_loss_so_far", tcsKeptWithLoss),
+				)
+			}
+		} else {
+			hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+			// An exchange a connection carried but did not record as a mock
+			// strands its TC mock-less, whether or not a pressure range covers
+			// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
+			// parser left out (a MySQL response it cannot frame), a mock the
+			// incomplete flag left out, a connection that can no longer be
+			// recorded. Each is reported as an orphan span
+			// (Session.RecordOrphanWindow lists them); suppress any TC whose
+			// window overlaps one, same as for pressure. A span its parser
+			// reports once it gets to the exchange, behind the traffic, reaches
+			// only the TCs checked after it: without a watermark (the hold
+			// below), a TC streamed before it is saved without the mock, as the
+			// WARN that reports the exchange says.
+			hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+			// A capacity drop (outChan overflow / already-closed channel)
+			// feeds nothing into pressureRanges, so the pressure-overlap check
+			// above cannot catch it. Suppress by EXACT owning test name so a
+			// TC whose mock was capacity-dropped is not streamed mock-less
+			// (replay: match_phase=no_mocks), without over-suppressing any
+			// concurrent TC that kept all its mocks.
+			mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
 
-		if (hasPressure || hasOrphan || mockDropped) && chargeLosses {
-			t.CaptureLost = syncmgr.Get().TestCaseLosses(t.Name, t.HTTPReq.Timestamp, tcRespTime)
-			tcsKeptWithLoss++
-			a.logger.Debug("agent: TC streamed with what its recording lost: memory pressure or an exchange a connection did not record overlapped its window, or a mock of its was capacity-dropped",
-				zap.String("tc_name", t.Name),
-				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
-				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-				zap.String("lost", t.CaptureLost.Text()),
-				zap.Int("tcs_kept_with_loss_so_far", tcsKeptWithLoss),
-			)
-		} else if hasPressure || hasOrphan || mockDropped {
-			tcsSuppressedSoFar++
-			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
-				zap.String("tc_name", t.Name),
-				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
-				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-				zap.Int("pressure_overlaps", pressureOverlaps),
-				zap.Int("orphan_overlaps", orphanOverlaps),
-				zap.Bool("capacity_drop", mockDropped),
-				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
-			)
-			return true
-		}
-		if chargeLosses && len(t.CaptureLost) == 0 && !t.HTTPReq.Timestamp.IsZero() {
-			if len(streamed) < maxStreamedRechecked {
-				streamed = append(streamed, streamedTestCase{name: t.Name, start: t.HTTPReq.Timestamp, end: tcRespTime})
-			} else {
-				streamedUnrechecked++
+			if hasPressure || hasOrphan || mockDropped {
+				tcsSuppressedSoFar++
+				a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
+					zap.String("tc_name", t.Name),
+					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+					zap.Int("pressure_overlaps", pressureOverlaps),
+					zap.Int("orphan_overlaps", orphanOverlaps),
+					zap.Bool("capacity_drop", mockDropped),
+					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+				)
+				return true
 			}
 		}
 
@@ -856,7 +839,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		if tcsKeptWithLoss > 0 {
 			// Each is in the recording, its loss its evidence: keploy
 			// record names them, and the replay that judges them decides.
-			a.logger.Warn("agent: some test cases were recorded while an exchange a connection carried could not be recorded as a mock, or mocks were let go: each is streamed with what it may lack, for the replay that judges it ("+provenswitch.Env+"=1)",
+			a.logger.Warn("agent: some test cases were recorded while an exchange a connection carried could not be recorded as a mock, or mocks were let go: each is streamed with what it may lack, which keploy record charges it with: the auto-replay judges it where one follows the record, and without one the recording fails, naming it ("+provenswitch.Env+"=1)",
 				zap.Int("test_cases", tcsKeptWithLoss))
 		}
 		completeFields := []zap.Field{
@@ -920,11 +903,25 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// stays 0: what used to be left out unsaid is here, and what
 			// the stream's end found the test cases streamed with nothing
 			// lost had lost after all.
+			unwatched := late.Unwatched()
+			// What the watch found that no marker carried: a stream ended
+			// by its capture's close or under it, not by its client's
+			// request, carries none (endedBy).
+			var unsent int
+			if endedBy != "end" {
+				unsent = len(late.Late())
+			}
 			completeFields = append(completeFields, zap.Int("tcs_kept_with_loss", tcsKeptWithLoss),
-				zap.Int("tcs_charged_late", tcsChargedLate), zap.Int("tcs_not_rechecked", streamedUnrechecked))
-			if streamedUnrechecked > 0 {
-				a.logger.Warn("agent: some test cases were streamed past the most the agent checks again at the stream's end: one a span it learnt of later overlaps is saved without that as its evidence ("+provenswitch.Env+"=1)",
-					zap.Int("test_cases", streamedUnrechecked), zap.Int("rechecked_at_most", maxStreamedRechecked))
+				zap.Int("tcs_charged_late", tcsChargedLate), zap.Int("tcs_late_unsent", unsent),
+				zap.Int("tcs_not_rechecked", unwatched))
+			if unwatched > 0 {
+				a.logger.Warn("agent: some test cases were streamed past the most the agent watches for a span it learns of later: one such a span overlaps is saved without that as its evidence ("+provenswitch.Env+"=1)",
+					zap.Int("test_cases", unwatched), zap.Int("watched_at_most", syncmgr.MaxLateWatched))
+			}
+			if unsent > 0 {
+				a.logger.Warn("agent: some test cases streamed with nothing lost turned out to have lost a call after they went, and the stream ended before its end marker could say so: each is saved without that as its evidence ("+provenswitch.Env+"=1)",
+					zap.Int("test_cases", unsent), zap.String("ended_by", endedBy),
+					zap.String("next_step", "the stream ends at its marker when keploy record stops the recording and asks the agent to end its streams; a stream that ended otherwise (keploy record went away, or the capture closed) lost this account: re-record if these test cases fail their replay"))
 			}
 		}
 		logRecordingComplete("agent: recording complete", completeFields...)
@@ -977,8 +974,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// What the test cases streamed with nothing lost turn out to
 			// have lost, now every span from before the client's stop is
 			// known: the marker carries it, for the client to charge.
-			late := lateLosses(streamed)
-			tcsChargedLate = len(late)
+			lateLosses := late.Late()
+			tcsChargedLate = len(lateLosses)
 			// The marker carries what the session lost (the summary's
 			// warnings): a client tears an agent's compose stack down once
 			// its drains end at the markers, and compose can drop the
@@ -997,7 +994,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				Unsettled:           tcsUnsettled,
 				MassSuppressed:      massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
 				KeptWithLoss:        tcsKeptWithLoss,
-				LateLosses:          late,
+				LateLosses:          lateLosses,
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return

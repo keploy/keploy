@@ -831,16 +831,19 @@ func TestARecordChargesNothingWithTheSwitchOff(t *testing.T) {
 }
 
 // lateTaker is an Instrumentation whose agent said, at the stream's end,
-// what test cases it streamed with nothing lost had lost after all.
+// what test cases it streamed with nothing lost had lost after all, and what
+// it left out (ends).
 type lateTaker struct {
 	countingInstr
 	late []models.LateLoss
+	ends models.StreamEndSummary
 }
 
-func (l *lateTaker) TakeLateTestCaseLosses() []models.LateLoss {
-	late := l.late
-	l.late = nil
-	return late
+func (l *lateTaker) TakeStreamEnds() models.StreamEndSummary {
+	s := l.ends
+	s.LateLosses = l.late
+	l.late, l.ends = nil, models.StreamEndSummary{}
+	return s
 }
 
 // What the agent found at the stream's end that a test case streamed with
@@ -871,7 +874,7 @@ func TestARecordChargesWhatTheStreamsEndFoundATestCaseLost(t *testing.T) {
 		w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
 		byWindow := savedTestCases{}
 		byWindow.add(windowOf(saved), "get-late-1")
-		r.chargeLateLosses(w, func(l models.LateLoss) []string {
+		chargeLateLosses(w, r.takeStreamEnds(w), func(l models.LateLoss) []string {
 			return byWindow.savedFor(l, func(name string) bool { return name == "test-2" })
 		})
 		switch {
@@ -945,5 +948,38 @@ func TestARecordsReasonNamesEachSourceItCharged(t *testing.T) {
 	want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 3, What: "MySQL: mysql exchange not recorded; Http: http decode error"}}.Text()
 	if len(errs) != 1 || fmt.Sprint(errs[0].ContextMap()["reason"]) != want {
 		t.Fatalf("ERRORs %+v, want one whose reason is %q", errs, want)
+	}
+}
+
+// A test case charged by name (its CaptureLost) and by the agent's counts as
+// it is checked is named once in the recording's ERROR; charged twice with a
+// kind from two sources, its evidence names both.
+func TestATestCaseChargedTwiceIsNamedOnceWithEverySource(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zapcore.ErrorLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, pid(1)}})
+	w.charge("test-1", exchangeLost)
+	w.charge("test-1", models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "Http: http decode error"}})
+	w.afterTestCase(context.Background(), "test-1")
+	if !w.finish("test-set-0", false) {
+		t.Fatal("the charged test case did not fail the recording")
+	}
+	var named []any
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "could not capture every call while these test cases were recorded") {
+			named = append(named, e.ContextMap()["testCases"])
+		}
+	}
+	if fmt.Sprint(named) != "[[test-1]]" {
+		t.Fatalf("the ERROR named %v, want test-1 once", named)
+	}
+	var whats []string
+	for _, c := range w.byTestCase["test-1"] {
+		if c.Kind == models.CaptureLossExchangeUnrecorded {
+			whats = append(whats, c.What)
+		}
+	}
+	if fmt.Sprint(whats) != "[MySQL: mysql exchange not recorded; Http: http decode error]" {
+		t.Fatalf("test-1's evidence names %v, want both sources", whats)
 	}
 }
