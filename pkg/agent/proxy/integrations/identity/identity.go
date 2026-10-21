@@ -21,6 +21,16 @@
 // covered too: an IP dashed as in a pod's DNS A record (10-244-1-17), a UID
 // with underscores as in a cgroup path, hex compared without case.
 //
+// THE PRESENTED IDENTITY. An in-cluster auto-replay can give the copy's app
+// the recorded pod's identity at the source (env frozen to it, the hostname
+// set to it), so that what the app derives from its identity — a token, a
+// signature, a hash — comes out as recorded; the agent is told which
+// (Presented, KEPLOY_PRESENTED_*). One copy presents one pod, and replays the
+// sets of every pod of the deployment: for the presented pod's sets nothing
+// is rewritten, and for another pod's sets the presented values are aliased
+// to that pod's as the live ones are, and put back in a served response, as
+// the app compares with what it was given.
+//
 // WHAT IS NEVER ALIASED. A live value equal to the recorded one (same node,
 // a hostname the workload pins), an empty one, and the addresses that mean
 // "here" in any pod (0.0.0.0, 127.0.0.1, ::1, localhost): a bind address is
@@ -50,6 +60,46 @@ const (
 	NodeEnv    = "KEPLOY_NODE_NAME"
 	HostIPEnv  = "KEPLOY_HOST_IP"
 )
+
+// The identity the copy pod PRESENTS to its app, when the control plane gave
+// the app the recorded pod's identity at the source (its downward-API env
+// frozen to the recorded values, its hostname set to the recorded name:
+// k8s-proxy's presented pod), so that whatever the app derives from its
+// identity (a token, a signature, a hash) comes out as recorded. The agent
+// then aliases this identity to each set's recorded pod as it does its own:
+// for the set of the presented pod nothing differs and nothing is rewritten;
+// for a set another pod recorded, the app's calls carry the presented pod's
+// identity, and that is what must read as the recorded one.
+const (
+	PresentedPodNameEnv = "KEPLOY_PRESENTED_POD_NAME"
+	PresentedPodUIDEnv  = "KEPLOY_PRESENTED_POD_UID"
+	PresentedPodIPEnv   = "KEPLOY_PRESENTED_POD_IP"
+	PresentedNodeEnv    = "KEPLOY_PRESENTED_NODE_NAME"
+	PresentedHostIPEnv  = "KEPLOY_PRESENTED_HOST_IP"
+	PresentedHostEnv    = "KEPLOY_PRESENTED_HOSTNAME"
+)
+
+// Presented is the identity the copy pod presents to its app (the
+// KEPLOY_PRESENTED_* env), zero when it presents none, which is the usual
+// case outside an in-cluster auto-replay. The hostname defaults to the name,
+// as the kubelet's does.
+func Presented() models.PodIdentity {
+	p := models.PodIdentity{
+		Name:     os.Getenv(PresentedPodNameEnv),
+		UID:      os.Getenv(PresentedPodUIDEnv),
+		IP:       os.Getenv(PresentedPodIPEnv),
+		Node:     os.Getenv(PresentedNodeEnv),
+		HostIP:   os.Getenv(PresentedHostIPEnv),
+		Hostname: os.Getenv(PresentedHostEnv),
+	}
+	if p.Name == "" {
+		return models.PodIdentity{}
+	}
+	if p.Hostname == "" {
+		p.Hostname = p.Name
+	}
+	return p
+}
 
 // Live is the identity of the pod this process runs in, from the downward-API
 // env, with os.Hostname for the name and hostname when the env has none.
@@ -171,26 +221,50 @@ type Rewriter struct {
 // recorder's captures), each kind aliases to the first recorded value of it:
 // the live pod can be one pod at a time. A set recorded by several pods keeps
 // the calls that carried another pod's identity missing, as before.
-func New(recorded []models.PodIdentity, live models.PodIdentity) *Rewriter {
+//
+// presented is the identity the pod presents to its app besides its own
+// (Presented), when it presents one: its values are aliased to the recorded
+// pod's too, since the app's calls carry them, and a served response gets
+// the presented values put back rather than the live ones, since the app
+// compares with what it was given. A zero presented identity is ignored.
+func New(recorded []models.PodIdentity, live models.PodIdentity, presented ...models.PodIdentity) *Rewriter {
 	rec, ok := first(recorded)
 	if !ok {
 		return nil
 	}
 	var fwd, back []rule
-	add := func(k kind, from, to string) {
-		for _, r := range pairs(k, from, to) {
-			fwd = append(fwd, r)
-		}
-		for _, r := range pairs(k, to, from) {
-			back = append(back, r)
+	forward := func(from models.PodIdentity) {
+		for _, p := range [...][3]string{
+			{"n", from.Name, rec.Name}, {"n", from.Hostname, rec.Hostname}, {"n", from.Node, rec.Node},
+			{"u", from.UID, rec.UID}, {"4", from.IP, rec.IP}, {"4", from.HostIP, rec.HostIP},
+		} {
+			fwd = append(fwd, pairs(kindOf(p[0]), p[1], p[2])...)
 		}
 	}
-	add(kindName, live.Name, rec.Name)
-	add(kindName, live.Hostname, rec.Hostname)
-	add(kindName, live.Node, rec.Node)
-	add(kindUID, live.UID, rec.UID)
-	add(kindIPv4, live.IP, rec.IP)
-	add(kindIPv4, live.HostIP, rec.HostIP)
+	backward := func(to models.PodIdentity) {
+		for _, p := range [...][3]string{
+			{"n", rec.Name, to.Name}, {"n", rec.Hostname, to.Hostname}, {"n", rec.Node, to.Node},
+			{"u", rec.UID, to.UID}, {"4", rec.IP, to.IP}, {"4", rec.HostIP, to.HostIP},
+		} {
+			back = append(back, pairs(kindOf(p[0]), p[1], p[2])...)
+		}
+	}
+	// The app sees the presented identity where there is one, the live one
+	// elsewhere (its sockets, /proc): a call may carry either, a response goes
+	// back in the terms the app was given.
+	primary := live
+	forward(live)
+	for _, p := range presented {
+		if p.IsZero() {
+			continue
+		}
+		if strings.TrimSpace(p.Hostname) == "" {
+			p.Hostname = p.Name
+		}
+		forward(p)
+		primary = p
+	}
+	backward(primary)
 	fwd, back = dedupe(fwd), dedupe(back)
 	if len(fwd) == 0 {
 		return nil
@@ -198,6 +272,19 @@ func New(recorded []models.PodIdentity, live models.PodIdentity) *Rewriter {
 	r := &Rewriter{rules: fwd}
 	r.reverse = &Rewriter{rules: back, reverse: r}
 	return r
+}
+
+// kindOf is the kind a value of an identity field is aliased as: "n" a name
+// (pod name, hostname, node), "u" a UID, "4" an IPv4 address.
+func kindOf(code string) kind {
+	switch code {
+	case "u":
+		return kindUID
+	case "4":
+		return kindIPv4
+	default:
+		return kindName
+	}
 }
 
 // first is the recorded identity each kind aliases to: the first recorded
@@ -355,8 +442,9 @@ func (rule rule) apply(s string) string {
 }
 
 var (
-	liveOnce sync.Once
-	liveID   models.PodIdentity
+	liveOnce    sync.Once
+	liveID      models.PodIdentity
+	presentedID models.PodIdentity
 	// forCache memoizes the rewriter per recorded identity set: For runs once
 	// per proxied request, and a rewriter is a handful of string rules that
 	// never change for a replay session. Keyed on the recorded identities
@@ -378,8 +466,8 @@ func For(opts models.OutgoingOptions) *Rewriter {
 		r, _ := cached.(*Rewriter)
 		return r
 	}
-	liveOnce.Do(func() { liveID = Live() })
-	r := New(id.RecordedPods, liveID)
+	liveOnce.Do(func() { liveID, presentedID = Live(), Presented() })
+	r := New(id.RecordedPods, liveID, presentedID)
 	forCache.Store(key, r)
 	return r
 }

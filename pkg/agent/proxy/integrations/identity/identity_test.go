@@ -137,3 +137,63 @@ func TestLiveReadsTheDownwardAPIEnv(t *testing.T) {
 		t.Fatalf("without the env the hostname stands in for the name: %+v", got)
 	}
 }
+
+func TestRewriterAliasesThePresentedIdentityAndPutsItBack(t *testing.T) {
+	// The copy presents another recorded pod's identity to its app (its env
+	// frozen to it), and replays a set this pod recorded: the app's calls carry
+	// the presented values, its sockets the live ones; both must read as the
+	// recorded pod's, and a response goes back in the presented terms.
+	presented := models.PodIdentity{
+		Name: "api-55f5fd9659-qq1aa", UID: "11111111-2222-4333-8444-555555555555",
+		IP: "10.244.3.3", HostIP: "192.168.1.11", Node: "worker-3",
+	}
+	r := New([]models.PodIdentity{recorded}, live, presented)
+	if r == nil {
+		t.Fatal("a presented identity that differs must give a rewriter")
+	}
+	cases := map[string]string{
+		"/api/v1/pods/api-55f5fd9659-qq1aa": "/api/v1/pods/api-55f5fd9659-fzsfr", // presented name
+		"/api/v1/pods/api-rpl-1a2b3c":       "/api/v1/pods/api-55f5fd9659-fzsfr", // live name
+		"from=10.244.3.3&via=10.244.2.4":    "from=10.244.1.17&via=10.244.1.17",  // presented and live IPs
+		"node=worker-3":                     "node=worker-1",
+	}
+	for in, want := range cases {
+		if got := r.String(in); got != want {
+			t.Errorf("String(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := r.Reverse().String(`{"name":"api-55f5fd9659-fzsfr","ip":"10.244.1.17"}`); got != `{"name":"api-55f5fd9659-qq1aa","ip":"10.244.3.3"}` {
+		t.Errorf("a served response must carry the presented identity back, got %q", got)
+	}
+	// A zero presented identity changes nothing: the reverse is to the live pod.
+	if got := New([]models.PodIdentity{recorded}, live, models.PodIdentity{}).Reverse().String("api-55f5fd9659-fzsfr"); got != "api-rpl-1a2b3c" {
+		t.Errorf("without a presented identity the reverse is to the live name, got %q", got)
+	}
+	// The presented identity IS the recorded one (the set of the presented pod):
+	// only the live values are aliased, and the reverse has nothing to put back
+	// for the name.
+	same := New([]models.PodIdentity{recorded}, live, recorded)
+	if same == nil || same.String("/pods/api-rpl-1a2b3c") != "/pods/api-55f5fd9659-fzsfr" {
+		t.Fatal("the live identity is still aliased when the presented one equals the recorded one")
+	}
+	if got := same.Reverse().String("api-55f5fd9659-fzsfr"); got != "api-55f5fd9659-fzsfr" {
+		t.Errorf("nothing to put back when the app was given the recorded name, got %q", got)
+	}
+}
+
+func TestPresentedReadsTheEnvAndDefaultsTheHostname(t *testing.T) {
+	if !Presented().IsZero() {
+		t.Fatal("no KEPLOY_PRESENTED_* env must give a zero identity")
+	}
+	t.Setenv(PresentedPodNameEnv, "api-55f5fd9659-fzsfr")
+	t.Setenv(PresentedPodIPEnv, "10.244.1.17")
+	t.Setenv(PresentedNodeEnv, "worker-1")
+	p := Presented()
+	if p.Name != "api-55f5fd9659-fzsfr" || p.IP != "10.244.1.17" || p.Node != "worker-1" || p.Hostname != "api-55f5fd9659-fzsfr" {
+		t.Errorf("Presented() = %+v", p)
+	}
+	t.Setenv(PresentedHostEnv, "api")
+	if got := Presented().Hostname; got != "api" {
+		t.Errorf("an explicit presented hostname wins, got %q", got)
+	}
+}
