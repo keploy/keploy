@@ -222,7 +222,7 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		if !routeMatched {
 			phase = models.MatchPhaseSchema
 		}
-		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}
+		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs, noise: n}
 		if closest != nil && routeMatched {
 			diag.schemaMatched = []*models.Mock{closest}
 		}

@@ -224,6 +224,29 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	return []strictField{field(valueDiff(models.PathFieldDiff, rec, live))}
 }
 
+// excusedPathPlaces are, for a call to livePath that the strict comparison
+// compared with m, the places of summary's path (the call's report's
+// summary) at which the comparison excused a difference from m's recorded
+// path: livePath is not m's path, and pathDiffs names no difference, since
+// every segment that differs is one m learned (url.path.<i>) or keploy.yml's
+// url noise masks. Those segments hold the application's values, which keploy
+// knows vary, and no "path" field diff names them for the report's
+// withholding to find: the report carries them as places
+// (MockMismatchReport.VariablePlaces), counted on summary
+// (models.PathPlacesOtherThan). nil when the paths are the same, when the
+// comparison names their difference, or when m records no request.
+func excusedPathPlaces(summary string, m *models.Mock, livePath string, n strictNoise) []string {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return nil
+	}
+	rec, _ := recordedURL(m.Spec.HTTPReq)
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	if rec == livePath || len(k.pathDiffs(rec, livePath)) != 0 {
+		return nil
+	}
+	return models.PathPlacesOtherThan(summary, rec)
+}
+
 // queryDiffs compares two queries: the same parameters, each with the same
 // values (keploy.yml's url noise masked in both), a repeated parameter's in
 // any order, as the request matcher and the learn step read them (an app may

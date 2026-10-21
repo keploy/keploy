@@ -246,26 +246,39 @@ const PathFieldDiff = "path"
 // path that a PathFieldDiff of diffs finds are not the recorded path's. The
 // diff's live value is the summary's path, so with its values withheld those
 // segments would still name them: they are the values that differ, whatever
-// their look. Each segment is compared with the recorded path's at the same
-// place and kept only when it is that one; a segment past the recorded
-// path's end, or after a place where the two paths do not line up, is named,
-// so what cannot be compared is withheld. It reads the diff's recorded
-// value, so it is applied before the values are withheld.
+// their look. Each segment is compared with the recorded path's
+// (PathPlacesOtherThan). It reads the diff's recorded value, so it is
+// applied before the values are withheld.
 func pathDiffPlaces(summary string, diffs []MockFieldDiff) []string {
+	var places []string
+	for _, d := range diffs {
+		if d.Path == PathFieldDiff {
+			places = append(places, PathPlacesOtherThan(summary, d.Expected)...)
+		}
+	}
+	return places
+}
+
+// PathPlacesOtherThan are the places (url.path[<n>]) of the segments of
+// summary's path that are not recorded's, the path of the recording the call
+// was compared with: each segment is compared with recorded's at the same
+// place and kept only when it is that one; a segment past recorded's end is
+// named, so what cannot be compared is withheld. The call holds the
+// application's values there, whatever their look: a report names them as
+// places (MockMismatchReport.VariablePlaces) when the comparison found its
+// path differs from recorded at places keploy knows vary (the strict HTTP
+// comparison's learned or keploy.yml url noise), and a "path" field diff's
+// are found the same way (pathDiffPlaces).
+func PathPlacesOtherThan(summary, recorded string) []string {
 	segs, ok := shapePathSegments(summary)
 	if !ok {
 		return nil
 	}
+	rec := strings.Split(strings.TrimPrefix(recorded, "/"), "/")
 	var places []string
-	for _, d := range diffs {
-		if d.Path != PathFieldDiff {
-			continue
-		}
-		recorded := strings.Split(strings.TrimPrefix(d.Expected, "/"), "/")
-		for i, s := range segs {
-			if i >= len(recorded) || recorded[i] != s {
-				places = append(places, "url.path["+strconv.Itoa(i)+"]")
-			}
+	for i, s := range segs {
+		if i >= len(rec) || rec[i] != s {
+			places = append(places, "url.path["+strconv.Itoa(i)+"]")
 		}
 	}
 	return places

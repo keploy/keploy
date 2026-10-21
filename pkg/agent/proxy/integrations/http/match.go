@@ -91,8 +91,11 @@ type matchDiag struct {
 	// closest and differs are, under the proven switch, the recording the
 	// strict comparison found closest to the call and the fields in which
 	// it differs (strictServe): the report diffs against that, with those.
+	// noise is the noise it compared them with, which the report reads for
+	// the path segments it excused (excusedPathPlaces).
 	closest *models.Mock
 	differs []strictField
+	noise   strictNoise
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -2083,8 +2086,12 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	//  2. the lowest-Levenshtein "METHOD path" mock from the pool.
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
-		// and the fields it found differ.
+		// and the fields it found differ. A path segment that differs from
+		// the recording's where the comparison excused it is the
+		// application's value as well: a place of the report, as a test
+		// variable's is.
 		key, places := routeSummary(request, actualKey, diag.closest, comparedPool, variableTable(mockDb))
+		places = addPlaces(places, excusedPathPlaces(key, diag.closest, request.URL.Path, diag.noise))
 		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, key, diag, comparedDests, phase, candidateCount), places)
 	}
 	closestPool := httpMocks
