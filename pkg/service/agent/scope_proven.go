@@ -450,6 +450,15 @@ func (a *Agent) replaying() bool {
 	return a.config != nil && a.config.Agent.Mode == models.MODE_TEST
 }
 
+// recording reports whether the agent records (models.MODE_RECORD): the mode
+// whose settle takes what it cannot tell as the test's evidence
+// (unsettledIsEvidence), and goes on past bytes it cannot tell (settle), as
+// its proxy's wait for them does (WaitProxySettled passes the mode). An
+// agent in neither mode settles as a replay does.
+func (a *Agent) recording() bool {
+	return a.config != nil && a.config.Agent.Mode == models.MODE_RECORD
+}
+
 // ProvenBegin opens a test (design v14 §5.3). The run must be claimed; the
 // harness must say it can skip; a second test while one is open is refused;
 // in a replay a gated test is answered skip, and opens nothing.
@@ -520,15 +529,28 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// The calls the application made before this begin are settled first
 	// (settle_proven.go): they are the pool's, or the previous test's, never
 	// this test's.
-	// A connection whose held requests cannot be told does not stop the
-	// begin: the test's end finds it, and the test is not verified.
+	// A connection whose held requests cannot be told does not stop a
+	// replay's begin: the test's end finds it, and the test is not verified.
 	drops, err := a.settle(ctx, a.replaying())
-	if err != nil && !errors.Is(err, errHoldsUnknown) {
+	switch {
+	case err != nil && a.unsettledIsEvidence(ctx):
+		// A record never fails a test for what keploy could not tell: the
+		// test opens, and is charged it (chargeUnsettled), which the pass
+		// that judges each test decides. The drops its end compares are
+		// the ones this settle read, if it read them (dropsRead).
+		a.chargeUnsettled("before "+id+" began", err)
+		if dropsRead(err) {
+			a.markDrops(drops)
+		} else {
+			a.forgetDrops()
+		}
+	case err != nil && !errors.Is(err, errHoldsUnknown):
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
+	default:
+		// The test's end compares the listener's drops with these.
+		a.markDrops(drops)
 	}
-	// The test's end compares the listener's drops with these.
-	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)
 	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
 		a.abandonWindow(id)
@@ -700,8 +722,14 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	// The test's calls are settled before it is judged (settle_proven.go):
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
-	// unjudged, and failed.
+	// unjudged, and failed, in a replay; a record charges it to the test
+	// (chargeUnsettled) before its losses are read, as its evidence, and the
+	// pass that judges each test decides it.
 	settleErr := a.settledSince(ctx, a.replaying(), id)
+	if settleErr != nil && a.unsettledIsEvidence(ctx) {
+		a.chargeUnsettled(id, settleErr)
+		settleErr = nil
+	}
 	// The mock.real destinations the test used, and the connections keploy
 	// could neither capture nor relay as real while it was open: in a record
 	// as in a replay (design v14 §3.2, §4).
