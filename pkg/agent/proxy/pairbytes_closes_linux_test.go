@@ -44,7 +44,7 @@ func TestBytesTheProxysCloseRefusedAreNeverSettledSilently(t *testing.T) {
 		runtime.Gosched()
 	}
 	at := p.paired.byConn[proxySide].atClose.Load()
-	err := p.WaitPairedBytes(context.Background(), 1)
+	err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST)
 	l := lossesOf(p, models.CaptureLossAppBytesLost)
 	t.Logf("written %d, the proxy's side had received %d at its close; WaitPairedBytes = %v, app_bytes_lost = %d", n, at.received, err, l)
 	if err != nil || l != 1 {
@@ -69,7 +69,7 @@ func TestTheProxysBytesProgressMovesWithWhatTheWaitSees(t *testing.T) {
 	if _, err := io.ReadFull(reader, make([]byte, n)); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.waitPairTargets(context.Background(), targets); err != nil {
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.PairedBytesProgress() - before; got < 2 {
@@ -176,7 +176,7 @@ func TestTheProxysCloseThenTheApplicationsFINSettles(t *testing.T) {
 		}
 		runtime.Gosched()
 	}
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes: %v, want settled", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -242,7 +242,7 @@ func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T
 	if end := pc.end.Load(); end.kind != afterFIN {
 		t.Fatalf("the kept socket's read ended with %v (%v), want the application's FIN", end.kind, end.err)
 	}
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes: %v, want settled: every byte the application wrote, and its FIN, reached the proxy", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -623,7 +623,7 @@ func TestACloseTheKernelWouldDestroyAsAnOrphanSettlesOnTheFIN(t *testing.T) {
 		t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
 	}
 	_ = app.Close()
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes: %v, want settled: every byte the application wrote, and its FIN, reached the proxy", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -868,7 +868,7 @@ func TestAProxysCloseWithBytesUnreadIsALoss(t *testing.T) {
 				t.Fatalf("%d app_bytes_lost charged at the close, want 1: 10 bytes the application wrote were never read, and the close tossed them", l)
 			}
 			if waiting {
-				if err := p.waitPairTargets(context.Background(), targets); err != nil {
+				if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 					t.Fatalf("the wait: %v, want settled on the loss", err)
 				}
 			}
@@ -1030,7 +1030,7 @@ func TestAConnectionServedWithoutASessionAfterTheWaitTookItHoldsNothing(t *testi
 					t.Fatalf("pairTarget = %+v, %v; want nothing to wait for", target, err)
 				}
 			}
-			if err := p.waitPairTargets(context.Background(), targets); err != nil {
+			if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 				t.Fatalf("the wait: %v; want nothing held by a connection served without a session", err)
 			}
 			if l := p.losses.Snapshot(); len(l) != 0 {
@@ -1053,7 +1053,7 @@ func TestTheMarkOfAConnectionServedWithoutASessionReleasesAWaitOnIt(t *testing.T
 		t.Fatalf("pairTargets = %v, %v; want the connection", targets, err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+	go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
 	p.paired.mu.Lock()
 	var conn net.Conn
 	for c := range p.paired.byConn {
@@ -1075,7 +1075,7 @@ func TestTheMarkOfAConnectionServedWithoutASessionReleasesAWaitOnIt(t *testing.T
 // on the channel.
 func waitOn(p *Proxy, targets ...*pairTarget) <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+	go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
 	return done
 }
 
@@ -1172,7 +1172,7 @@ func TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor(t *testing.T) {
 		t.Fatalf("the kept socket's read ended (%v) while the filter held everything off", pc.end.Load().kind)
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.WaitPairedBytes(context.Background(), 1) }()
+	go func() { done <- p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST) }()
 	if err := unix.SetsockoptInt(dfd, unix.SOL_SOCKET, unix.SO_DETACH_FILTER, 0); err != nil {
 		t.Fatalf("detach the proxy's filter: %v", err)
 	}

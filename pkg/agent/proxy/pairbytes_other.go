@@ -12,7 +12,7 @@ import (
 
 // WaitPairedBytes cannot tell here: the kernel's count of the connections to
 // the proxy, and the sockets it reads, are Linux's.
-func (p *Proxy) WaitPairedBytes(context.Context, uint64) error {
+func (p *Proxy) WaitPairedBytes(context.Context, uint64, models.Mode) error {
 	return fmt.Errorf("%w: the bytes on the proxy's connections are counted on Linux only", models.ErrProxyConnsUnsupported)
 }
 

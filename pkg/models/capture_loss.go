@@ -187,6 +187,17 @@ const (
 	// it: each test it carries traffic in fails (judged), a test's own kind
 	// (PerTest). Only under the proven switch.
 	CaptureLossUnrecorded CaptureLossKind = "connection_unrecorded"
+	// CaptureLossUnsettled: in a record, keploy could not tell that every
+	// call a test made, or every call made before its begin, had reached its
+	// proxy (the settle at the test's begin or end could not tell, saying
+	// why: a connection whose bytes could not be told, a close whose end
+	// could not be read, packets dropped at the proxy's listener). A record
+	// keeps it as the test's evidence, never as the test's failure: the
+	// pass that judges each test replays the test, and keeps it if it
+	// replays, or quarantines it with this reason (judged, ReplayDecides), a
+	// test's own kind (PerTest). A replay's settle that cannot tell still
+	// fails its test, and is no count of this. Only under the proven switch.
+	CaptureLossUnsettled CaptureLossKind = "calls_unsettled"
 )
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
@@ -213,6 +224,27 @@ func (k CaptureLossKind) NotJudged() bool {
 // replay that judges them.
 func (k CaptureLossKind) Evidence() bool {
 	return k == CaptureLossKernelSkip || k == CaptureLossKernelSkipCall
+}
+
+// ReplayDecides reports whether a record's loss of kind k is evidence that a
+// strict replay of the test decides (the founder's rule, 2026-10-21): the
+// pass that judges each recorded test keeps one that replays, and
+// quarantines one that does not, with the loss in its reason. A strict
+// replay is a sound judge of every judged kind: each is of a call that, made
+// again in the replay, reaches keploy's proxy there (one the record lost, or
+// could not tell had reached it), so a call the record lost is a miss, one
+// of another test's that the record put in this test's window is a mock the
+// test leaves unconsumed, and a loss that happens again in the replay fails
+// it there; a test that replays made no call its recording does not hold.
+// So is it of the evidence-only kinds (Evidence: the kernel's count of runs
+// of keploy's programs it skipped during the recording): a connection or a
+// call such a run missed is a miss, or a mock left unconsumed, in the
+// replay, as one the record lost any other way is.
+// Not of one that leaves the tests it taints without a verdict (NotJudged):
+// a call keploy cannot capture, or cannot tell it lost, it cannot tell in the
+// replay either, so a replay that passes proves nothing of it.
+func (k CaptureLossKind) ReplayDecides() bool {
+	return !k.NotJudged()
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
@@ -423,7 +455,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossUnsettled
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -609,6 +641,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy's capture could not read %d piece(s) of what the application's connections carried (memory it could not read; the kernel's own pages: sendfile, splice, io_uring fixed buffers; a call of more than 16 MiB; bytes moved in calls the capture saw no end of; bytes the application discarded unread), so the calls they belong to were not recorded whole", c.Count)
 	case CaptureLossUnrecorded:
 		return fmt.Sprintf("keploy stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and %d piece(s) of its traffic, its stops included, were neither recorded nor mocked", c.Count)
+	case CaptureLossUnsettled:
+		return fmt.Sprintf("keploy could not tell %d time(s) that every call of this test, or every call made before it began, had reached its proxy, so it cannot prove they were all recorded", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
 	default:

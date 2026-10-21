@@ -253,7 +253,10 @@ type InFlightReader interface {
 // until the application's FIN, its reset or a byte of data. A proxy that
 // cannot tell answers an error wrapping models.ErrProxyConnsUnsupported.
 type PairedBytesWaiter interface {
-	WaitPairedBytes(ctx context.Context, appConns uint64) error
+	// mode is the agent's (models.MODE_RECORD, MODE_TEST): a record's wait
+	// goes on waiting for every other connection past one it cannot tell,
+	// and answers all it could not tell; a replay's ends at the first.
+	WaitPairedBytes(ctx context.Context, appConns uint64, mode models.Mode) error
 	// PairedBytesProgress counts the waits' progress (a waited-for
 	// connection received more, or was resolved), for a watchdog: it only
 	// ever grows.

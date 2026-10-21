@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"syscall"
 	"testing"
 
@@ -123,7 +124,7 @@ func TestThePairedBytesAreWaitedForUntilTheyArrive(t *testing.T) {
 		t.Run(tc.network, func(t *testing.T) {
 			p, app, proxySide, reader := heldPair(t, tc.network, tc.addr)
 			// Idle: nothing written, nothing to wait for.
-			if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+			if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 				t.Fatalf("WaitPairedBytes on an idle connection: %v", err)
 			}
 			n := queue(t, app)
@@ -131,7 +132,7 @@ func TestThePairedBytesAreWaitedForUntilTheyArrive(t *testing.T) {
 				t.Fatalf("the proxy's side received %d of %d at once: the fixture holds nothing back", got, n)
 			}
 			done := make(chan error, 1)
-			go func() { done <- p.WaitPairedBytes(context.Background(), 1) }()
+			go func() { done <- p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST) }()
 			buf := make([]byte, 64<<10)
 			var read uint64
 			for read < n {
@@ -172,7 +173,7 @@ func TestALaterConnectionsBytesAreNotWaitedFor(t *testing.T) {
 	}
 	p.paired.mu.Unlock()
 	queue(t, app)
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes for connection 1: %v", err)
 	}
 }
@@ -191,7 +192,7 @@ func TestBytesThatCanNoLongerArriveAreACaptureLoss(t *testing.T) {
 				t.Fatalf("pairTargets = %d, %v; want the connection", len(targets), err)
 			}
 			done := make(chan error, 1)
-			go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+			go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
 			_ = reader.Close()
 			p.paired.remove(proxySide)
 			if err := <-done; err != nil {
@@ -223,7 +224,7 @@ func TestAClosedConnectionWhoseBytesArrivedHoldsNothing(t *testing.T) {
 	if _, err := io.ReadAll(reader); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes: %v", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -237,7 +238,7 @@ func TestAClosedConnectionWhoseBytesArrivedHoldsNothing(t *testing.T) {
 func TestABytesWaitWithNoPairedConnectionNeedsNoCounts(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop()}
 	p.paired.fail(fmt.Errorf("%w: no tcp_diag", models.ErrProxyConnsUnsupported))
-	if err := p.WaitPairedBytes(context.Background(), 5); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 5, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes with no paired connection: %v, want nil", err)
 	}
 }
@@ -260,7 +261,7 @@ func TestAPairedConnectionProvesTheApplicationsSocketsSeen(t *testing.T) {
 func TestABytesWaitThatCannotBeToldIsUnknown(t *testing.T) {
 	p, _, _, _ := heldPair(t, "tcp4", "127.0.0.1:0")
 	p.paired.fail(errListenerClosed)
-	if err := p.WaitPairedBytes(context.Background(), 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("WaitPairedBytes after the listener closed: %v, want unknown", err)
 	}
 }
@@ -337,5 +338,185 @@ func TestTheCanaryProvesTheByteCountsReadable(t *testing.T) {
 	p.checkPairedBytes(c, s)
 	if err := p.paired.failure(); err != nil {
 		t.Fatalf("checkPairedBytes on a plain connection: %v", err)
+	}
+}
+
+// A record's wait for the paired bytes goes on past a connection it cannot
+// tell, until every other one has received what the application had written
+// to it, and then answers what it could not tell: a call on one of the others
+// is the test's, seen by its end, not left to land in the next test. A
+// replay's ends at the connection it cannot tell.
+func TestARecordsBytesWaitGoesOnPastAConnectionItCannotTell(t *testing.T) {
+	for _, record := range []bool{true, false} {
+		t.Run(fmt.Sprintf("record %v", record), func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app1, _, _ := heldPairOn(t, p, 1, "tcp4", "127.0.0.1:0")
+			app2, proxySide2, reader2 := heldPairOn(t, p, 2, "tcp4", "127.0.0.1:0")
+			queue(t, app1)
+			n := queue(t, app2)
+			targets, err := p.pairTargets(2)
+			if err != nil || len(targets) != 2 {
+				t.Fatalf("pairTargets = %d, %v; want both connections", len(targets), err)
+			}
+			// The first cannot be told: its application socket gone while
+			// its connection is alive at the proxy's side, and no
+			// application socket ever seen (pairEnded).
+			for _, tg := range targets {
+				tg.gone = tg.pc.appSeq == 1
+			}
+			p.paired.visible.Store(false)
+			done := make(chan error, 1)
+			go func() { done <- p.waitPairTargets(context.Background(), targets, record) }()
+			if !record {
+				if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) {
+					t.Fatalf("a replay's wait = %v, want the unknown", err)
+				}
+				return
+			}
+			buf := make([]byte, 64<<10)
+			var read uint64
+			for read < n {
+				select {
+				case err := <-done:
+					if got := received(t, proxySide2); got < n {
+						t.Fatalf("the record's wait returned %v with %d of %d bytes of the other connection received", err, got, n)
+					}
+					done <- err
+				default:
+				}
+				m, err := reader2.Read(buf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				read += uint64(m)
+			}
+			if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) {
+				t.Fatalf("the record's wait = %v, want the unknown once the other connection's bytes arrived", err)
+			}
+		})
+	}
+}
+
+// Only a record's wait (models.MODE_RECORD) goes on past a connection it
+// cannot tell (WaitPairedBytes): a replay's, or one in no mode, ends at it.
+// The one it cannot tell is a connection whose socket the proxy's side lost
+// before the wait could read it.
+func TestOnlyARecordsBytesWaitGoesOnPastWhatItCannotTell(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST, models.MODE_OFF} {
+		t.Run(string(mode), func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app1, proxySide1, _ := heldPairOn(t, p, 1, "tcp4", "127.0.0.1:0")
+			app2, proxySide2, reader2 := heldPairOn(t, p, 2, "tcp4", "127.0.0.1:0")
+			queue(t, app1)
+			n := queue(t, app2)
+			_ = proxySide1.Close() // no close of the proxy's: nothing read it
+			done := make(chan error, 1)
+			go func() { done <- p.WaitPairedBytes(context.Background(), 2, mode) }()
+			if mode != models.MODE_RECORD {
+				// Nothing reads the other connection: a wait that went on
+				// for it would never end (the run's hang guard).
+				if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) {
+					t.Fatalf("WaitPairedBytes = %v, want the unknown", err)
+				}
+				return
+			}
+			buf := make([]byte, 64<<10)
+			var read uint64
+			for read < n {
+				select {
+				case err := <-done:
+					if got := received(t, proxySide2); got < n {
+						t.Fatalf("the record's wait returned %v with %d of %d bytes of the other connection received", err, got, n)
+					}
+					done <- err
+				default:
+				}
+				m, err := reader2.Read(buf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				read += uint64(m)
+			}
+			if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) {
+				t.Fatalf("the record's wait = %v, want the unknown", err)
+			}
+		})
+	}
+}
+
+// A record's wait goes on past a connection whose application socket it
+// cannot read as the wait begins (a sock_diag lookup that fails), as past
+// one it cannot tell later: it waits for the other connection's bytes, then
+// answers the unknown. A replay's ends at it.
+func TestARecordsBytesWaitGoesOnPastAConnectionItCannotRead(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		t.Run(string(mode), func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app1, _, _ := heldPairOn(t, p, 1, "tcp4", "127.0.0.1:0")
+			app2, proxySide2, reader2 := heldPairOn(t, p, 2, "tcp4", "127.0.0.1:0")
+			queue(t, app1)
+			n := queue(t, app2)
+			// The first's lookup fails: an IPv6 end on an IPv4 connection.
+			p.paired.mu.Lock()
+			for _, pc := range p.paired.byConn {
+				if pc.appSeq == 1 {
+					pc.app = netip.MustParseAddrPort("[2001:db8::1]:1")
+				}
+			}
+			p.paired.mu.Unlock()
+			if _, err := p.pairTargets(2); err == nil {
+				t.Fatal("the fixture's lookup did not fail")
+			}
+			done := make(chan error, 1)
+			go func() { done <- p.WaitPairedBytes(context.Background(), 2, mode) }()
+			if mode != models.MODE_RECORD {
+				if err := <-done; err == nil {
+					t.Fatal("a replay's wait settled past a connection it could not read")
+				}
+				return
+			}
+			buf := make([]byte, 64<<10)
+			var read uint64
+			for read < n {
+				select {
+				case err := <-done:
+					if got := received(t, proxySide2); got < n {
+						t.Fatalf("the record's wait returned %v with %d of %d bytes of the other connection received", err, got, n)
+					}
+					done <- err
+				default:
+				}
+				m, err := reader2.Read(buf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				read += uint64(m)
+			}
+			if err := <-done; err == nil {
+				t.Fatal("the record's wait settled a connection it could not read")
+			}
+		})
+	}
+}
+
+// A connection a record's wait can no longer tell is resolved, as far as the
+// wait goes: it moves the wait's progress (PairedBytesProgress), which the
+// settle's watchdog reads, as one that is reached does.
+func TestAConnectionARecordCannotTellMovesTheWaitsProgress(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	app, _, _ := heldPairOn(t, p, 1, "tcp4", "127.0.0.1:0")
+	queue(t, app)
+	targets, err := p.pairTargets(1)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("pairTargets = %d, %v", len(targets), err)
+	}
+	targets[0].gone = true
+	p.paired.visible.Store(false)
+	was := p.PairedBytesProgress()
+	if err := p.waitPairTargets(context.Background(), targets, true); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("the record's wait = %v, want the unknown", err)
+	}
+	if got := p.PairedBytesProgress(); got != was+1 {
+		t.Fatalf("progress %d after the unknown, want %d", got, was+1)
 	}
 }

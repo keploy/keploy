@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"go.uber.org/zap"
+
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -85,7 +87,50 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr)})
 		}
 	}
+	if c, ok := a.unsettledLoss(); ok {
+		out = append(out, c)
+	}
 	return mergeKinds(out), nil
+}
+
+// chargeUnsettled counts, in a record, a settle that could not tell that
+// every call had reached the proxy (err, at what: a test's begin or end),
+// as the test's evidence (models.CaptureLossUnsettled): its window is
+// charged it at its end, and the pass that judges each test decides it.
+func (a *Agent) chargeUnsettled(what string, err error) {
+	a.unsettledMu.Lock()
+	a.unsettledN++
+	a.unsettledWhat = what + ": " + err.Error()
+	a.unsettledMu.Unlock()
+	if a.logger != nil {
+		a.logger.Warn("keploy could not tell that every call had reached it; the recording keeps this as the test's evidence, and the pass that judges each test decides it",
+			zap.String("at", what), zap.Error(err))
+	}
+}
+
+// unsettledIsEvidence reports whether a settle that could not tell, at a
+// test's begin or end, is the test's evidence (chargeUnsettled), not its
+// failure: in a record (recording) whose capture losses are counted, which
+// is how the test is charged it (chargeCaptureLosses), and not for a request
+// that has gone (ctx). A replay's, an agent's in no mode, or one's that
+// counts no capture loss, fails the test as before.
+func (a *Agent) unsettledIsEvidence(ctx context.Context) bool {
+	if !a.recording() || ctx.Err() != nil {
+		return false
+	}
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return !errors.Is(a.proven.losses.err, models.ErrCaptureLossesUnsupported)
+}
+
+// unsettledLoss is chargeUnsettled's count, when there is one.
+func (a *Agent) unsettledLoss() (models.CaptureLoss, bool) {
+	a.unsettledMu.Lock()
+	defer a.unsettledMu.Unlock()
+	if a.unsettledN == 0 {
+		return models.CaptureLoss{}, false
+	}
+	return models.CaptureLoss{Kind: models.CaptureLossUnsettled, Count: a.unsettledN, What: a.unsettledWhat}, true
 }
 
 // mergeKinds is l with one entry per kind, in the order each kind first comes:

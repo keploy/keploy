@@ -112,6 +112,10 @@ type settledProxy struct {
 	// connections' work: its wait for the counts (WaitProxySettled) is over.
 	inWork   chan struct{}
 	workOnce sync.Once
+	// looks, when set, hears each look at the connections' work after the
+	// first, without holding it up.
+	looks chan struct{}
+	first bool
 }
 
 func (s *settledProxy) InFlightState(answers bool) (int, []string) {
@@ -155,7 +159,7 @@ func (s *settledProxy) WaitAccepted(ctx context.Context, n uint64) error {
 
 // WaitPairedBytes: it holds no paired connection with bytes still on their
 // way, unless the test set bytesWait.
-func (s *settledProxy) WaitPairedBytes(ctx context.Context, n uint64) error {
+func (s *settledProxy) WaitPairedBytes(ctx context.Context, n uint64, _ models.Mode) error {
 	if s.bytesWait != nil {
 		return s.bytesWait(ctx, n)
 	}
@@ -171,6 +175,13 @@ func (s *settledProxy) InFlightPending(bool) int {
 	if s.inWork != nil {
 		s.workOnce.Do(func() { close(s.inWork) })
 	}
+	if s.looks != nil && s.first {
+		select {
+		case s.looks <- struct{}{}:
+		default:
+		}
+	}
+	s.first = true
 	return s.pending
 }
 
