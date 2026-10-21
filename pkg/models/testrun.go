@@ -403,6 +403,13 @@ type MatchedCall struct {
 	MockName string `json:"mock_name" yaml:"mock_name"`                   // internal mock reference for View Mock
 	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"` // Http, Mongo, Postgres, etc.
 	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
+	// ContentWithheld says Summary names the mock without the application's
+	// content: the report was made with KEPLOY_LOG_CONTENT unset
+	// (MockReportName), or a reader withheld it (WithoutContent). A reader
+	// keeps such a summary as it is: it is what is left of the mock's, not
+	// the mock's, and the rule for the mock's would name less by it (a Mongo
+	// mock's command, read as its request, names no command).
+	ContentWithheld bool `json:"content_withheld,omitempty" yaml:"content_withheld,omitempty"`
 }
 
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
@@ -837,6 +844,10 @@ type DepResult struct {
 	Name string          `json:"name" bson:"name" yaml:"name"`
 	Type string          `json:"type" bson:"type" yaml:"type"`
 	Meta []DepMetaResult `json:"meta" bson:"meta" yaml:"meta"`
+	// ContentWithheld says the target Name gives (DepRowName) names the mock
+	// without the application's content, as MatchedCall.ContentWithheld says
+	// of a summary: a reader keeps such a name as it is.
+	ContentWithheld bool `json:"content_withheld,omitempty" bson:"content_withheld,omitempty" yaml:"content_withheld,omitempty"`
 }
 
 type DepMetaResult struct {

@@ -22,10 +22,14 @@ import (
 // consumers must degrade rather than assume a hit.
 type mockDisplayInfo struct {
 	// summary and target name the mock by what it recorded, as a report may
-	// carry them (models.MockReportSummary, mockTargetFromSpec).
+	// carry them (models.MockReportSummary, mockTargetFromSpec), withheld
+	// when withheld says: KEPLOY_LOG_CONTENT unset, read once for both. The
+	// report records it with each name (MatchedCall.ContentWithheld,
+	// DepResult.ContentWithheld), so its reader keeps them as written.
 	summary  string
 	protocol string
 	target   string
+	withheld bool
 }
 
 // matchedCalls are a failed test's matched calls (FailureInfo.MatchedCalls):
@@ -42,7 +46,7 @@ func matchedCalls(consumed []models.MockState, lookup map[string]mockDisplayInfo
 		if protocol == "" {
 			protocol = string(m.Kind)
 		}
-		out = append(out, models.MatchedCall{MockName: m.Name, Protocol: protocol, Summary: info.summary})
+		out = append(out, models.MatchedCall{MockName: m.Name, Protocol: protocol, Summary: info.summary, ContentWithheld: info.withheld})
 	}
 	return out
 }
@@ -71,17 +75,17 @@ func matchedCalls(consumed []models.MockState, lookup map[string]mockDisplayInfo
 // Returns "" when none is available; DepRowName renders correctly without it.
 //
 // The target is what the mock recorded, and a report carries it as it may
-// (models.MockReportName): with KEPLOY_LOG_CONTENT unset, without what the
-// mock's kind has a rule for (an HTTP path segment the mock declares for a
-// test variable, a Mongo request's every value, a SQL literal). A target
-// left naming the bare kind that way (another kind's operation withheld) is
-// "", as a target that names nothing else is.
-func mockTargetFromSpec(mock *models.Mock) string {
+// (models.MockReportName): with withhold (KEPLOY_LOG_CONTENT unset), without
+// what the mock's kind has a rule for (an HTTP path segment the mock
+// declares for a test variable, a Mongo request's every value, a SQL
+// literal). A target left naming the bare kind that way (another kind's
+// operation withheld) is "", as a target that names nothing else is.
+func mockTargetFromSpec(mock *models.Mock, withhold bool) string {
 	if mock == nil {
 		return ""
 	}
 	recorded := mockTargetWithContent(mock)
-	t := models.MockReportName(mock, recorded)
+	t := models.MockReportName(mock, recorded, withhold)
 	if t != recorded && t == string(mock.Kind) {
 		return ""
 	}
@@ -391,6 +395,7 @@ func buildDepResults(
 				Expected: models.DepPresenceConsumed,
 				Actual:   models.DepPresenceMissing,
 			}},
+			ContentWithheld: lookup[m.Name].withheld,
 		})
 	}
 
