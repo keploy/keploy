@@ -207,6 +207,17 @@ func TestRunTestSet_ALearnRoundThatPinsNothingSharesNothing(t *testing.T) {
 	// required to make test-2's call, and test-2 has no recording of its own.
 	assertStatus(t, strict, "test-1", models.TestStatusFailed, "it lists test-2's call")
 	assertStatus(t, strict, "test-2", models.TestStatusFailed, "it lists no recording of its call")
+	// And says why, truly: time alone listed c2 under test-1, and a strict
+	// replay shares nothing. Never that the tests shared it and made none.
+	var c2 *models.UnconsumedMock
+	for _, u := range strict.result(t, "test-1").FailureInfo.UnconsumedMocks {
+		if u.Name == "c2" {
+			c2 = &u
+		}
+	}
+	if c2 == nil || c2.Concurrent != "test-2" || c2.WhyNot != models.ConcurrentNotSharedStrict {
+		t.Fatalf("test-1's unconsumed c2 is %+v; want with test-2, not shared by a strict replay", c2)
+	}
 	if _, sharing := learnOnly.r.exact.setShares(models.TestSetStatusFailed); sharing {
 		t.Fatal("a learn round that pins nothing has shares for its set's end")
 	}

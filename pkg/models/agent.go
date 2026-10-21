@@ -470,17 +470,6 @@ type ExactServing struct {
 	// before them. Sent only to an agent that says it serves them
 	// (ExactConcurrentHeader); an agent that predates it ignores it.
 	Concurrent []string `json:"concurrent,omitempty"`
-	// NotLearnable names, of Concurrent, the recordings the learn step must
-	// not pair a call of this test with: each holds, at a place that tells
-	// its statement's recordings apart, a value of another of those tests'
-	// requests that this test's request does not hold.
-	NotLearnable []string `json:"notLearnable,omitempty"`
-	// Inputs are the whole leaf values of the test case's request (its path
-	// segments, query values, form and JSON scalars): a value the learn step
-	// finds drifted at a recording's place that the request holds whole is
-	// an input of this test, which cannot drift between a record and its
-	// replay on the same build. Request values: never logged.
-	Inputs []string `json:"inputs,omitempty"`
 }
 
 // ExactConcurrentHeader is the /storemocks response header in which an agent

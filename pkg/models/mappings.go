@@ -50,17 +50,25 @@ type MockEntry struct {
 	// open, or none.
 	Group string `json:"group,omitempty" yaml:"group,omitempty" bson:"group,omitempty"`
 	// Unresolved says, under the proven switch, that keploy record's full
-	// round could not tell which test of its group made this mock's call
-	// (MockEntryUnresolvedAmbiguous): the test that lists it was quarantined
-	// for it, and every replay charges a test that lists it.
+	// round could not tell which test of its group made this mock's call,
+	// and charged the test that lists it now (it placed it there, not time):
+	// MockEntryUnresolvedAmbiguous, which every replay charges a test that
+	// lists it with, or MockEntryUnresolvedUnproven.
 	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
 }
 
-// MockEntryUnresolvedAmbiguous is MockEntry.Unresolved for a recording keploy
-// record's full round could not give to one of the tests of its group: its
-// recordings that keploy cannot tell apart got different answers, or the
-// learn step could not tell which of them a call drifted from.
-const MockEntryUnresolvedAmbiguous = "ambiguous"
+// The MockEntry.Unresolved of a recording keploy record's full round could not
+// give to the test of its group that made its call.
+const (
+	// MockEntryUnresolvedAmbiguous: its recordings that keploy cannot tell
+	// apart got different answers, so a replay that answers a test with it
+	// may answer with another test's.
+	MockEntryUnresolvedAmbiguous = "ambiguous"
+	// MockEntryUnresolvedUnproven: every other case keploy could not prove
+	// (no test made it, two pair with it, retries differed, a call drifted
+	// from it): it stays with a test the round charged for it.
+	MockEntryUnresolvedUnproven = "unproven"
+)
 
 // ConcurrencyGroup is one set of tests whose requests were open together
 // while a mock was recorded (Mapping.Groups): the windows that contained the

@@ -355,9 +355,9 @@ func (a *Agent) serveTestConcurrently(es coreAgent.ExactServer, ex *models.Exact
 	}
 	cands := testMocks(ex.Concurrent, mocks)
 	if open != nil {
-		return cs.OpenExactTestConcurrent(ex.Test, owned, cands, ex.Inputs, ex.NotLearnable, open.given)
+		return cs.OpenExactTestConcurrent(ex.Test, owned, cands, open.given)
 	}
-	return cs.ServeExactTestConcurrent(ex.Test, owned, cands, ex.Inputs, ex.NotLearnable)
+	return cs.ServeExactTestConcurrent(ex.Test, owned, cands)
 }
 
 // ServesExactConcurrent reports whether this agent serves a test the

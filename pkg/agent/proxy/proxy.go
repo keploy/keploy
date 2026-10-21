@@ -4507,17 +4507,15 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 var _ agent.AppClockSetter = (*Proxy)(nil)
 
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
-func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string) error {
-	c := ExactConcurrent{Cands: cands, Inputs: inputs, NotLearnable: notLearnable}
-	return p.openExact(func(m *MockManager) { m.ServeExactTestConcurrent(test, owned, c) })
+func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
+	return p.openExact(func(m *MockManager) { m.ServeExactTestConcurrent(test, owned, cands) })
 }
 
 // OpenExactTestConcurrent implements agent.ExactConcurrentServer:
 // ServeExactTestConcurrent, with the test's variables begun with given bound
 // in the same step (MockManager.OpenExactTestConcurrent).
-func (p *Proxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string, given []models.VariableBinding) error {
-	c := ExactConcurrent{Cands: cands, Inputs: inputs, NotLearnable: notLearnable}
-	return p.openExact(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, c, given) })
+func (p *Proxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error {
+	return p.openExact(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) })
 }
 
 var _ agent.ExactConcurrentServer = (*Proxy)(nil)

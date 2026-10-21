@@ -97,11 +97,7 @@ func newShareSet(t *testing.T, groups []models.ConcurrencyGroup, mappings map[st
 	conc := concurrencyOf(groups, mappings, shared)
 	p := newExactPlan(mappings, worker, mocks)
 	p.share = newSharePlan(conc, worker, mocks)
-	var cases []*models.TestCase
-	for _, test := range keysSorted(mappings) {
-		cases = append(cases, &models.TestCase{Name: test, Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: "http://app/companies", Body: `{"name":"` + test + `"}`}})
-	}
-	narrowed := p.shareConcurrent(mappings, cases)
+	narrowed := p.shareConcurrent(mappings)
 	return &shareSet{p: p, mappings: narrowed, cons: map[string][]string{}}
 }
 
@@ -188,38 +184,16 @@ func TestShareConcurrentSplitsDefiniteFromCandidates(t *testing.T) {
 	if !reflect.DeepEqual(s.p.owned["a"], []string{"own-a", "stated", "http-call"}) {
 		t.Fatalf("a owns %v", s.p.owned["a"])
 	}
-	cands, _, inputs := s.p.concurrentServing("a")
-	if !reflect.DeepEqual(cands, []string{"c1", "c2"}) {
+	if cands := s.p.concurrentServing("a"); !reflect.DeepEqual(cands, []string{"c1", "c2"}) {
 		t.Fatalf("a's candidates %v; want [c1 c2]", cands)
 	}
-	if cands, _, _ := s.p.concurrentServing("b"); !reflect.DeepEqual(cands, []string{"c1", "c2", "s1"}) {
+	if cands := s.p.concurrentServing("b"); !reflect.DeepEqual(cands, []string{"c1", "c2", "s1"}) {
 		t.Fatalf("b's candidates %v; want [c1 c2 s1]", cands)
-	}
-	if !reflect.DeepEqual(inputs, []string{"", "companies", "a"}[1:]) {
-		t.Fatalf("a's inputs %v; want its path segment and its body's name", inputs)
 	}
 	for _, n := range s.p.pool {
 		if n == "s1" {
 			t.Fatal("a shared recording is in the pool")
 		}
-	}
-}
-
-// A candidate holding, at a place that tells its statement's recordings apart,
-// a value another test of its group sent that this test did not, is never
-// paired by drift with a call of this test.
-func TestNotLearnableRefusesAnotherTestsInput(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	registerShareKeys(t)
-	ca := shMock("ca", 100, "INSERT", "bind.$1=a;bind.$2=t1", "ok")
-	cb := shMock("cb", 200, "INSERT", "bind.$1=b;bind.$2=t1", "ok")
-	groups := []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}
-	s := newShareSet(t, groups, map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(cb, "g1")}, "b": {}}, nil, nil, ca, cb)
-	if _, nl, _ := s.p.concurrentServing("a"); !reflect.DeepEqual(nl, []string{"cb"}) {
-		t.Fatalf("a may not pair with %v; want [cb], which holds b's name", nl)
-	}
-	if _, nl, _ := s.p.concurrentServing("b"); !reflect.DeepEqual(nl, []string{"ca"}) {
-		t.Fatalf("b may not pair with %v; want [ca]", nl)
 	}
 }
 
@@ -273,8 +247,13 @@ func TestSettleSharesLeftovers(t *testing.T) {
 			}
 		}
 		got, _ := s.p.setShares(models.TestSetStatusFailed)
-		if got.Pins["ca"] != "a" || got.Moves["left"].To != "a" {
-			t.Fatalf("shares %+v; want ca pinned and left staying with a, which is charged", got)
+		if got.Pins["ca"] != "a" || got.Moves["left"] != (models.ShareMove{To: "a", Marker: models.MockEntryUnresolvedUnproven}) {
+			t.Fatalf("shares %+v; want ca pinned and left staying with a, which is charged, marked unproven", got)
+		}
+		for _, test := range []string{"a", "b"} {
+			if u := s.resultOf(test).FailureInfo.UnconsumedMocks[0]; u.WhyNot != "" {
+				t.Fatalf("%s: a recording the round shared and none made says it was not shared (%q)", test, u.WhyNot)
+			}
 		}
 	})
 	t.Run("the test whose call came closest is named", func(t *testing.T) {
@@ -478,64 +457,90 @@ func TestSettleSharesChargesAConflictsClaimant(t *testing.T) {
 			t.Fatalf("order %v: b's charge %+v", order, c)
 		}
 		got, _ := s.p.setShares(models.TestSetStatusFailed)
-		if got.Moves["c"].To != "b" || got.Pins["c"] != "" {
-			t.Fatalf("order %v: shares %+v; want c moved to b, not pinned", order, got)
+		if got.Moves["c"] != (models.ShareMove{To: "b", Marker: models.MockEntryUnresolvedUnproven}) || got.Pins["c"] != "" {
+			t.Fatalf("order %v: shares %+v; want c moved to b, marked unproven, not pinned", order, got)
 		}
 	}
 }
 
-// A learned candidate pair pins only when another learned candidate pair of
-// its statement drifted at those places at least, or a pair of a test's own
-// recording did; otherwise its test is charged.
-func TestSettleSharesCorroboratesALearnedPair(t *testing.T) {
+// A candidate a call was answered with only once the learn step learned on it
+// (noise, a variable, a bind) is never pinned, however many others drifted
+// alike: another test open while it was recorded may have made it. Its
+// consumer is charged, concurrent_ambiguous naming it and the places, and it
+// stays with that test, marked unproven. What was learned on the test's own
+// recording is no reason.
+func TestSettleSharesNeverPinsACandidateTheLearnStepLearnedOn(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	registerShareKeys(t)
-	mk := func() (*shareSet, []*models.Mock) {
+	mk := func() *shareSet {
 		ca := shMock("ca", 100, "INSERT", "bind.$1=a;bind.$2=t1", "ok")
 		cb := shMock("cb", 200, "INSERT", "bind.$1=b;bind.$2=t2", "ok")
 		own := shMock("own", 50, "INSERT", "bind.$1=o;bind.$2=t0", "ok")
-		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+		return newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
 			map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(cb, "g1")}, "b": {}, "o": {shEntry(own, "")}}, nil, nil, ca, cb, own)
-		return s, nil
 	}
-	t.Run("two candidate pairs drifted alike", func(t *testing.T) {
-		s, _ := mk()
-		s.run("a", learned("ca", "bind.$2"))
-		s.run("b", learned("cb", "bind.$2"))
-		if charged := s.settle(t); len(charged) != 0 {
-			t.Fatalf("charged %v", charged)
+	check := func(t *testing.T, s *shareSet, test, mock string, places ...string) {
+		t.Helper()
+		cs := s.resultOf(test).FailureInfo.UnmatchedCalls
+		if len(cs) != 1 || cs[0].Reason != models.MissConcurrentAmbiguous || cs[0].ClosestMock != mock {
+			t.Fatalf("%s: charged %+v; want concurrent_ambiguous on %s", test, cs, mock)
 		}
-	})
-	t.Run("one candidate pair alone", func(t *testing.T) {
-		s, _ := mk()
-		s.run("a", learned("ca", "bind.$2"))
-		s.run("b", used("cb"))
-		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a"}) {
-			t.Fatalf("charged %v; want a, whose drift nothing corroborates", charged)
+		n := cs[0].Concurrent
+		if n.Case != models.ConcurrentCaseNotOwn || !reflect.DeepEqual(n.Class, []string{mock}) || !reflect.DeepEqual(n.Places, places) {
+			t.Fatalf("%s: the charge says %+v", test, n)
 		}
-		if n := s.resultOf("a").FailureInfo.UnmatchedCalls[0].Concurrent; n.Case != models.ConcurrentCaseCorroboration || !reflect.DeepEqual(n.Places, []string{"bind.$2"}) {
-			t.Fatalf("a's charge says %+v", n)
+		if !strings.Contains(cs[0].NextSteps, "keploy does not learn what changed against a recording another test may own") {
+			t.Fatalf("%s: next steps %q", test, cs[0].NextSteps)
 		}
 		got, _ := s.p.setShares(models.TestSetStatusFailed)
-		if got.Moves["ca"].To != "a" || got.Pins["ca"] != "" {
-			t.Fatalf("shares %+v; want ca with a, charged", got)
+		if got.Pins[mock] != "" || got.Moves[mock] != (models.ShareMove{To: test, Marker: models.MockEntryUnresolvedUnproven}) {
+			t.Fatalf("shares %+v; want %s with %s, charged, marked unproven", got, mock, test)
 		}
-	})
-	t.Run("corroborated by a test's own pair", func(t *testing.T) {
-		s, _ := mk()
+	}
+	t.Run("noise", func(t *testing.T) {
+		s := mk()
 		s.run("a", learned("ca", "bind.$2"))
 		s.run("b", used("cb"))
-		s.run("o", learned("own", "bind.$2"))
-		if charged := s.settle(t); len(charged) != 0 {
-			t.Fatalf("charged %v", charged)
-		}
-	})
-	t.Run("drifted wider than the other", func(t *testing.T) {
-		s, _ := mk()
-		s.run("a", learned("ca", "bind.$1", "bind.$2"))
-		s.run("b", learned("cb", "bind.$2"))
 		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a"}) {
 			t.Fatalf("charged %v; want a", charged)
+		}
+		check(t, s, "a", "ca", "bind.$2")
+	})
+	t.Run("two drifted alike, and a test's own too", func(t *testing.T) {
+		s := mk()
+		s.run("a", learned("ca", "bind.$2"))
+		s.run("b", learned("cb", "bind.$2"))
+		s.run("o", learned("own", "bind.$2"))
+		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a", "b"}) {
+			t.Fatalf("charged %v; want a and b (o's recording is its own)", charged)
+		}
+		check(t, s, "a", "ca", "bind.$2")
+		check(t, s, "b", "cb", "bind.$2")
+	})
+	t.Run("a variable", func(t *testing.T) {
+		s := mk()
+		st := used("ca")
+		st.Variables = models.MockVariables{"id": {Bind: "bind.$1", Echo: true}}
+		s.run("a", st)
+		s.run("b", used("cb"))
+		s.settle(t)
+		check(t, s, "a", "ca", "bind.$1")
+	})
+	t.Run("a value bound at an earlier recording", func(t *testing.T) {
+		s := mk()
+		st := used("ca")
+		st.Binds = map[string]models.MockVariables{"own": {"tok": {Bind: "bind.$2"}}}
+		s.run("a", st)
+		s.run("b", used("cb"))
+		s.settle(t)
+		check(t, s, "a", "ca", "bind.$2")
+	})
+	t.Run("nothing learned pins", func(t *testing.T) {
+		s := mk()
+		s.run("a", used("ca"))
+		s.run("b", used("cb"))
+		if charged := s.settle(t); len(charged) != 0 {
+			t.Fatalf("charged %v", charged)
 		}
 	})
 }
@@ -563,8 +568,8 @@ func TestSettleSharesARetryDisagreementChargesEveryCandidateTest(t *testing.T) {
 			}
 		}
 		got, _ := s.p.setShares(models.TestSetStatusFailed)
-		if got.Pins["c"] != "" || got.Moves["c"].To != "a" {
-			t.Fatalf("shares %+v; want c unpinned, staying with a, which is charged", got)
+		if got.Pins["c"] != "" || got.Moves["c"] != (models.ShareMove{To: "a", Marker: models.MockEntryUnresolvedUnproven}) {
+			t.Fatalf("shares %+v; want c unpinned, staying with a, which is charged, marked unproven", got)
 		}
 	}
 	t.Run("the retry did not make it", func(t *testing.T) {
@@ -663,12 +668,16 @@ func TestStripUnresolvedDropsWhatWasLearnedOnAnUnpinnedRecording(t *testing.T) {
 	cb := shMock("cb", 200, "INSERT", "bind.$1=b;bind.$2=t2", "ok")
 	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
 		map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(cb, "g1")}, "b": {}}, nil, nil, ca, cb)
-	s.run("a", learned("ca", "bind.$2"))
-	s.run("b", learned("cb", "bind.$1", "bind.$2"))
+	s.run("a", used("ca"))
+	cb2 := learned("cb", "bind.$1", "bind.$2")
+	cb2.Variables = models.MockVariables{"id": {Bind: "bind.$1", Echo: true}}
+	cb2.Binds = map[string]models.MockVariables{"ca": {"tok": {Bind: "bind.$2"}}}
+	s.run("b", cb2)
 	s.settle(t)
-	got := s.p.stripUnresolved(map[string]models.MockState{"ca": learned("ca", "bind.$2"), "cb": learned("cb", "bind.$1", "bind.$2")})
-	if len(got["ca"].ReqBodyNoise) != 1 || got["cb"].ReqBodyNoise != nil {
-		t.Fatalf("kept %+v; want ca's (pinned) and not cb's (uncorroborated)", got)
+	// ca is pinned: whatever its state holds is written (here, a stand-in).
+	got := s.p.stripUnresolved(map[string]models.MockState{"ca": learned("ca", "bind.$2"), "cb": cb2})
+	if len(got["ca"].ReqBodyNoise) != 1 || got["cb"].ReqBodyNoise != nil || got["cb"].Variables != nil || got["cb"].Binds != nil {
+		t.Fatalf("kept %+v; want ca's (pinned) and nothing of cb's (learned on, so not pinned)", got)
 	}
 }
 
@@ -720,10 +729,13 @@ func TestPlanSharesOnlyInTheFullRoundWithAnAgentThatServesThem(t *testing.T) {
 			r := &Replayer{logger: zap.New(core), config: &config.Config{Test: config.Test{Learn: tc.learn, ShareConcurrent: tc.share}}, instrumentation: servesConcurrent(tc.serves)}
 			r.exact = newExactPlan(mappings, nil, []*models.Mock{c})
 			r.exact.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{c})
-			got := r.planShares("test-set-0", mappings, nil)
+			got := r.planShares("test-set-0", mappings)
 			narrowed := len(got["a"]) == 0
 			if narrowed != tc.wants || r.exact.share.sharing != tc.wants {
 				t.Fatalf("narrowed=%v sharing=%v; want %v", narrowed, r.exact.share.sharing, tc.wants)
+			}
+			if unserved := tc.learn && tc.share && !tc.serves; r.exact.share.unserved != unserved {
+				t.Fatalf("unserved=%v; want %v: only the full round with an agent that does not serve them", r.exact.share.unserved, unserved)
 			}
 			warned := logs.FilterMessageSnippet("does not serve a test the recordings it shares").Len() > 0
 			if warned != (tc.learn && tc.share && !tc.serves) {
@@ -774,11 +786,21 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	if got := results[0].FailureInfo.UnmatchedCalls[1]; got.Reason != models.MissConcurrentAmbiguous || got.ClosestMock != "twin" {
 		t.Fatalf("b's charge %+v", got)
 	}
-	if got := results[1].FailureInfo.UnconsumedMocks[0].Concurrent; got != "b" {
-		t.Fatalf("a's unconsumed names %q; want b", got)
+	if got := results[1].FailureInfo.UnconsumedMocks[0]; got.Concurrent != "b" || got.WhyNot != models.ConcurrentNotSharedStrict {
+		t.Fatalf("a's unconsumed %+v; want b, not shared by this replay", got)
 	}
 	if results[2].FailureInfo.UnmatchedCalls[0].Concurrent != nil {
 		t.Fatal("a test recorded alone is said to have run beside others")
+	}
+	// A parser's note on a call its learn step refused among shared
+	// recordings names them and the case, not whom with: the replay says
+	// that, on a copy, and keeps the rest.
+	parsed := &models.ConcurrentNote{Class: []string{"c"}, Case: models.ConcurrentCaseNotOwn, Places: []string{"bind.$1"}}
+	refused := []models.TestResult{{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{Protocol: "PostgreSQL", Kind: models.MissInTest, ClosestMock: "c", Reason: models.MissConcurrentAmbiguous, Concurrent: parsed}}}}}
+	p.annotateConcurrent(refused, nil)
+	if n := refused[0].FailureInfo.UnmatchedCalls[0].Concurrent; !reflect.DeepEqual(n.With, []string{"a"}) || n.Case != models.ConcurrentCaseNotOwn || !reflect.DeepEqual(n.Class, []string{"c"}) || len(parsed.With) != 0 {
+		t.Fatalf("the parser's note became %+v (its own %+v); want with a, its case and class kept, the parser's left as it was", n, parsed)
 	}
 }
 
@@ -831,4 +853,172 @@ func TestLearnedByTestGroupsASharedRecordingByItsConsumer(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
+}
+
+// An unconsumed recording of a test recorded beside others says why this
+// replay did not share it, true in every shape a replay takes: a strict
+// replay (keploy test in CI, keploy test --judge's rounds) serves each
+// recording to the test time listed it under; keploy record's full round
+// shares none of a kind that registered no keys, none it does not key of one
+// that did, and none whose recording states what keploy does not share, and
+// with an agent that does not serve shared recordings it shares none; a
+// recording the full round left with a charged test says so (unproven). Only
+// a recording the full round shared and none of its tests made says nothing
+// here (settleShares says that). A miss whose closest recording is one of
+// these says the same, attributed to the test that lists it.
+func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	groups := []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}
+	annotate := func(p *exactPlan, mock string) (models.UnconsumedMock, *models.ConcurrentNote) {
+		t.Helper()
+		results := []models.TestResult{
+			{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: mock}}}},
+			{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL", Kind: models.MissInTest, ClosestMock: mock}}}},
+		}
+		if charged := p.annotateConcurrent(results, nil); len(charged) != 0 {
+			t.Fatalf("charged %v", charged)
+		}
+		return results[0].FailureInfo.UnconsumedMocks[0], results[1].FailureInfo.UnmatchedCalls[0].Concurrent
+	}
+	want := func(t *testing.T, u models.UnconsumedMock, n *models.ConcurrentNote, whyNot, stated string) {
+		t.Helper()
+		if u.Concurrent != "b" || u.WhyNot != whyNot || u.Stated != stated {
+			t.Fatalf("a's unconsumed %+v; want with b, why_not %q, stated %q", u, whyNot, stated)
+		}
+		if n == nil || n.WhyNot != whyNot || n.Stated != stated || n.AttributedTo != "a" {
+			t.Fatalf("b's miss says %+v; want why_not %q, stated %q, attributed to a", n, whyNot, stated)
+		}
+	}
+	strict := func(mocks []*models.Mock, entries ...models.MockEntry) *exactPlan {
+		mappings := map[string][]models.MockEntry{"a": entries, "b": {}}
+		p := newExactPlan(mappings, nil, mocks)
+		p.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, mocks)
+		return p
+	}
+	c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
+	t.Run("a strict replay: keploy test, and keploy test --judge", func(t *testing.T) {
+		u, n := annotate(strict([]*models.Mock{c}, shEntry(c, "g1")), "c")
+		want(t, u, n, models.ConcurrentNotSharedStrict, "")
+	})
+	t.Run("a strict replay of a recording the full round left unproven", func(t *testing.T) {
+		e := shEntry(c, "g1")
+		e.Unresolved = models.MockEntryUnresolvedUnproven
+		u, n := annotate(strict([]*models.Mock{c}, e), "c")
+		want(t, u, n, models.ConcurrentNotSharedUnproven, "")
+	})
+	t.Run("the full round, a kind that registered no keys", func(t *testing.T) {
+		h := &models.Mock{Name: "h", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+		s := newShareSet(t, groups, map[string][]models.MockEntry{"a": {{Name: "h", Kind: string(models.HTTP), Group: "g1"}}, "b": {}}, nil, nil, h)
+		u, n := annotate(s.p, "h")
+		want(t, u, n, models.ConcurrentNotSharedKind, "")
+		if n.Kind != string(models.HTTP) {
+			t.Fatalf("b's miss names kind %q", n.Kind)
+		}
+	})
+	t.Run("the full round, a recording its kind does not key", func(t *testing.T) {
+		unkeyed := shMock("u", 100, "", "bind.$1=v", "ok")
+		s := newShareSet(t, groups, map[string][]models.MockEntry{"a": {shEntry(unkeyed, "g1")}, "b": {}}, nil, nil, unkeyed)
+		u, n := annotate(s.p, "u")
+		want(t, u, n, models.ConcurrentNotSharedCall, "")
+		if n.Kind != string(shareKind) {
+			t.Fatalf("b's miss names kind %q", n.Kind)
+		}
+	})
+	t.Run("the full round, a recording that states noise", func(t *testing.T) {
+		noisy := shMock("n", 100, "INSERT", "bind.$1=v", "ok")
+		noisy.Spec.Metadata["share"] = "no"
+		s := newShareSet(t, groups, map[string][]models.MockEntry{"a": {shEntry(noisy, "g1")}, "b": {}}, nil, nil, noisy)
+		u, n := annotate(s.p, "n")
+		want(t, u, n, models.ConcurrentNotSharedStates, "noise")
+	})
+	t.Run("the full round, an agent that does not serve shared recordings", func(t *testing.T) {
+		mappings := map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {}}
+		r := &Replayer{logger: zap.NewNop(), config: &config.Config{Test: config.Test{Learn: true, ShareConcurrent: true}}, instrumentation: servesConcurrent(false)}
+		r.exact = newExactPlan(mappings, nil, []*models.Mock{c})
+		r.exact.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{c})
+		r.planShares("test-set-0", mappings)
+		u, n := annotate(r.exact, "c")
+		want(t, u, n, models.ConcurrentNotSharedAgent, "")
+	})
+}
+
+// A candidate both of an ambiguous class and of a conflict is marked
+// ambiguous wherever it goes: the test that holds it after the pin is charged
+// in every later replay (a strict keploy test --judge included), not only in
+// this round. Before, the conflict's move won and left it unmarked.
+func TestSettleSharesMarksAnAmbiguousConflictAmbiguous(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	t1 := shMock("t1", 100, "INSERT", "bind.$1=same", "201")
+	t2 := shMock("t2", 200, "INSERT", "bind.$1=same", "23505")
+	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+		map[string][]models.MockEntry{"a": {shEntry(t1, "g1"), shEntry(t2, "g1")}, "b": {}}, nil, nil, t1, t2)
+	s.run("a", used("t1"))
+	// b's call paired with t1, which a answered with: a conflict, claimant a.
+	s.run("b")
+	s.results[1].Status = models.TestStatusFailed
+	s.results[1].FailureInfo.UnmatchedCalls = []models.UnmatchedCall{{Protocol: "ShareTest", ClosestMock: "t1", Kind: models.MissInTest,
+		Reason: models.MissConcurrentConflict, Concurrent: &models.ConcurrentNote{Claimant: "a"}}}
+	s.settle(t)
+	got, _ := s.p.setShares(models.TestSetStatusFailed)
+	if got.Moves["t1"] != (models.ShareMove{To: "a", Marker: models.MockEntryUnresolvedAmbiguous}) {
+		t.Fatalf("t1 goes %+v; want to a, marked ambiguous", got.Moves["t1"])
+	}
+}
+
+// Guards against a false red, each pinned (round-2 review): none can pass a
+// test that should fail, but each without them quarantines a test that is
+// fine.
+func TestSettleSharesChargesOnlyWhatSharingCannotProve(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	t.Run("a class with no shared recording is today's", func(t *testing.T) {
+		// A polled SELECT a's own recordings answered twice, differently:
+		// equal requests, different answers, no recording shared between
+		// tests in the class. A candidate of the statement elsewhere links
+		// it into the component, which must not make it ambiguous.
+		p1 := shMock("p1", 100, "SELECT", "bind.$1=x", "0 rows")
+		p2 := shMock("p2", 200, "SELECT", "bind.$1=x", "1 row")
+		cand := shMock("cand", 300, "SELECT", "bind.$1=y", "1 row")
+		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+			map[string][]models.MockEntry{"a": {shEntry(p1, ""), shEntry(p2, ""), shEntry(cand, "g1")}, "b": {}}, nil, nil, p1, p2, cand)
+		s.run("a", used("p1"), used("p2"))
+		s.run("b", used("cand"))
+		if charged := s.settle(t); len(charged) != 0 {
+			t.Fatalf("charged %v for a test's own recordings no test shares", charged)
+		}
+	})
+	t.Run("answers alike but for an echoed value", func(t *testing.T) {
+		// The test's own recording learned $1 as an echo: the shared ones,
+		// equal once $1 is excused, answer alike once the echoed id is read
+		// as its place.
+		own := shMock("own", 50, "INSERT", "bind.$1=id-0;bind.$2=n", "row id-0")
+		c1 := shMock("c1", 100, "INSERT", "bind.$1=id-1;bind.$2=n", "row id-1")
+		c2 := shMock("c2", 200, "INSERT", "bind.$1=id-2;bind.$2=n", "row id-2")
+		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+			map[string][]models.MockEntry{"a": {shEntry(own, ""), shEntry(c1, "g1"), shEntry(c2, "g1")}, "b": {}}, nil, nil, own, c1, c2)
+		echo := used("own")
+		echo.Variables = models.MockVariables{"id": {Bind: "bind.$1", Echo: true}}
+		s.run("a", echo, used("c1"))
+		s.run("b", used("c2"))
+		if charged := s.settle(t); len(charged) != 0 {
+			t.Fatalf("charged %v for recordings that answer alike but for the id each echoes", charged)
+		}
+	})
+	t.Run("a consumption read, then a read that failed", func(t *testing.T) {
+		// What a test consumed is read in parts (a stream, then its drain):
+		// one part unread leaves its shares unknown, however much was read.
+		c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
+		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+			map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {}}, nil, nil, c)
+		s.p.begin("a")
+		s.p.noteShares("a", []models.MockState{used("c")}, nil)
+		s.p.noteShares("a", nil, errNotRead)
+		s.results = append(s.results, models.TestResult{TestCaseID: "a", Status: models.TestStatusPassed})
+		s.settle(t)
+		if got, _ := s.p.setShares(models.TestSetStatusPassed); got.State != models.SharesIncomplete {
+			t.Fatalf("a consumption read in part settled %+v", got)
+		}
+	})
 }
