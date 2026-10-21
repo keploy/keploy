@@ -288,7 +288,18 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare grpc-status trailer — this is the canonical gRPC status code.
 	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
 	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
-	expectedStatusText := expectedResp.Trailers.OrdinaryHeaders["grpc-status"]
+	//
+	// The recording's status is read as a gRPC client reads it, with the
+	// proven switch on or off: off its trailers when it has any, else off its
+	// one header block when that block carries grpc-status, a Trailers-Only
+	// answer (models.GrpcResp.TrailersAsRead). Read off the trailers alone, a
+	// Trailers-Only answer kept as its headers alone (enterprise's low-latency
+	// recorder before its fix) had no status, which reads as 0 with the switch
+	// off: its recording of NOT_FOUND passed against an app answering OK.
+	// The answer's status is as keploy's replay client, grpc-go, read it
+	// (pkg.SimulateGRPC), or the recording's own where the app sent none (a
+	// stream it held open).
+	expectedStatusText := expectedResp.TrailersAsRead().OrdinaryHeaders["grpc-status"]
 	actualStatusText := actualResp.Trailers.OrdinaryHeaders["grpc-status"]
 	expectedGrpcStatus := parseGrpcStatus(expectedStatusText)
 	actualGrpcStatus := parseGrpcStatus(actualStatusText)
@@ -299,14 +310,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	statusNormal := expectedGrpcStatus == actualGrpcStatus
 	if provenswitch.On() {
-		// Under the proven switch the recording's status is read as a gRPC
-		// client reads it, a Trailers-Only answer's from its one header
-		// block (models.GrpcResp.TrailersAsRead). The answer's is as keploy's
-		// replay client, grpc-go, read it (pkg.SimulateGRPC), or the
-		// recording's own where the app sent none (a stream it held open).
-		expectedStatusText = expectedResp.TrailersAsRead().OrdinaryHeaders["grpc-status"]
-		// And an answer with no grpc-status is not an OK answer
-		// (provenGrpcStatusMatch).
+		// Under the proven switch an answer with no grpc-status is not an OK
+		// answer (provenGrpcStatusMatch).
 		expectedGrpcStatus, actualGrpcStatus = provenGrpcStatusCode(expectedStatusText), provenGrpcStatusCode(actualStatusText)
 		statusNormal = provenGrpcStatusMatch(expectedStatusText, actualStatusText)
 		statusDiff.Expected, statusDiff.Actual = shownGrpcStatus(expectedStatusText), shownGrpcStatus(actualStatusText)
