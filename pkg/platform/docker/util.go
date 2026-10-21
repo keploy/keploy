@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -125,6 +126,19 @@ func AgentTokenEnv() []string {
 		return nil
 	}
 	return []string{token.Env + "=" + tok}
+}
+
+// logContentEnv is the agent container's KEPLOY_LOG_CONTENT, with its value:
+// the opt-in this CLI was started with, so the agent's lines, the ones
+// agent-debug.log keeps, carry content only when the user's do. "" with the
+// switch off, so the alias and the compose file are as they were. Its value
+// is no secret, unlike the token's, so it is passed whole rather than by
+// name, which the sudo the linux alias may run through would reset.
+func logContentEnv() string {
+	if !logcontent.On() {
+		return ""
+	}
+	return logcontent.EnvVar + "=1"
 }
 
 // linuxDockerClient is how the linux `docker run` alias invokes the docker
@@ -269,6 +283,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		envParts = append(envParts, "-e "+token.Env)
 	} else {
 		logger.Warn("no control-plane token to hand to the agent container; it will start without authentication")
+	}
+	if e := logContentEnv(); e != "" {
+		envParts = append(envParts, "-e "+e)
 	}
 	envs := strings.Join(envParts, " ")
 	if envs != "" {
