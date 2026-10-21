@@ -318,8 +318,9 @@ func TestRenderFieldDiffs(t *testing.T) {
 // byte the same as they were dropped, false when they differed or either was
 // not rendered. It is made where the requests are dropped, while the report
 // still has them; a report withheld before keeps it, unless a request was
-// written into it since (a not-owned miss's recording), when it says what the
-// report holds now. With the switch on nothing is dropped and nothing is set:
+// written into it since (a not-owned miss's recording and its call, both
+// rendered again), when it says what the report holds now: only one written
+// is not the same. With the switch on nothing is dropped and nothing is set:
 // the reader compares the two, as before.
 func TestAWithheldReportSaysWhetherItsRequestsWereTheSame(t *testing.T) {
 	for _, tc := range []struct {
@@ -335,7 +336,9 @@ func TestAWithheldReportSaysWhetherItsRequestsWereTheSame(t *testing.T) {
 		{name: "only the recording rendered", mock: "GET /a kp-canary-mock-req"},
 		{name: "withheld before, the same", withheldAfter: true, was: true, want: true},
 		{name: "withheld before, other", withheldAfter: true},
-		{name: "withheld before, a recording written since", mock: "GET /b kp-canary-mock-req", withheldAfter: true, was: true},
+		{name: "withheld before, only a recording written since", mock: "GET /b kp-canary-mock-req", withheldAfter: true, was: true},
+		{name: "withheld before, both written since, the same", mock: "GET /b kp-canary-mock-req", live: "GET /b kp-canary-mock-req", withheldAfter: true, want: true},
+		{name: "withheld before, both written since, other", mock: "GET /b kp-canary-mock-req", live: "GET /b kp-canary-live-req", withheldAfter: true, was: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /a", ClosestMock: "mock-1",

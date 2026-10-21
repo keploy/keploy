@@ -315,7 +315,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
 				}
 				if elsewhere != nil {
-					markNotOwned(report, elsewhere)
+					markNotOwned(report, elsewhere, request, input.body)
 				} else if lmiss != nil {
 					lmiss.explain(report)
 				}

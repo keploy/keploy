@@ -228,8 +228,9 @@ func withholdContent(protocol string, places []string, summary, diff *string, di
 	*diffs = fieldDiffsWithoutValues(*diffs)
 	if !*withheld || *mockReq != "" || *liveReq != "" {
 		// The requests the report holds now: those it was made with, or, in
-		// a report withheld before, one written into it since (a not-owned
-		// miss's recording), which the comparison made then was not of.
+		// a report withheld before, those written into it since (a not-owned
+		// miss's recording and its call, rendered again), which the
+		// comparison made then was not of.
 		*identical = *mockReq != "" && *mockReq == *liveReq
 	}
 	*mockReq, *liveReq = "", ""
