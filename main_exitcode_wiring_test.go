@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
@@ -28,20 +30,29 @@ func TestMain(m *testing.M) {
 // arguments, in a scratch working directory, and returns the exit code.
 func runCLI(t *testing.T, args ...string) int {
 	t.Helper()
+	code, _ := runCLIOutput(t, args...)
+	return code
+}
+
+// runCLIOutput is runCLI, with what the CLI wrote to stdout and stderr.
+func runCLIOutput(t *testing.T, args ...string) (int, string) {
+	t.Helper()
 
 	cmd := exec.Command(os.Args[0])
 	cmd.Args = append([]string{"keploy"}, args...)
 	cmd.Env = append(os.Environ(), subprocessEnv+"=1")
 	cmd.Dir = t.TempDir()
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
+			return exitErr.ExitCode(), out.String()
 		}
 		t.Fatalf("running %v: %v", args, err)
 	}
-	return 0
+	return 0, out.String()
 }
 
 func TestCLIExitCodes(t *testing.T) {
@@ -75,6 +86,49 @@ func TestCLIExitCodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := runCLI(t, tt.args...); got != tt.want {
 				t.Errorf("keploy %v exit code = %d, want %d", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// A usage error is said once, then where the help of the command that failed
+// is: the flag `keploy record --delay 10` got wrong is one of record's, which
+// `keploy record --help` lists, and the root's help lists only commands. No
+// usage text is printed under it (some 80 lines, which scrolled the error out
+// of view). start takes the failing command from ExecuteC and hands its path
+// to exitCodeForCmdErr, which prints whatever path it is given: only a run of
+// start tells the command that failed from the root.
+func TestCLIPointsAUsageErrorAtTheHelpOfTheCommandThatFailed(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+
+	for _, tc := range []struct {
+		args []string
+		said string // the error, said once
+		help string // the command whose --help it points at
+	}{
+		// The walkthrough's first command.
+		{args: []string{"record", "-c", "docker compose up", "--container-name", "api", "--delay", "10"},
+			said: "unknown flag: --delay", help: "keploy record"},
+		{args: []string{"test", "--nope"}, said: "unknown flag: --nope", help: "keploy test"},
+		{args: []string{"mock", "record", "--nope"}, said: "unknown flag: --nope", help: "keploy mock record"},
+		{args: []string{"diff", "a", "b", "c"}, said: "accepts at most 2 arg(s), received 3", help: "keploy diff"},
+		{args: []string{"bogus-cmd"}, said: `unknown command "bogus-cmd" for "keploy"`, help: "keploy"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			code, out := runCLIOutput(t, tc.args...)
+			if code != utils.ExitUsageError {
+				t.Errorf("exit code = %d, want %d", code, utils.ExitUsageError)
+			}
+			if n := strings.Count(out, tc.said); n != 1 {
+				t.Errorf("%q said %d times, want once:\n%s", tc.said, n, out)
+			}
+			if hint := "Run '" + tc.help + " --help' for usage."; strings.Count(out, "--help' for usage.") != 1 || !strings.Contains(out, hint) {
+				t.Errorf("want one help pointer, %q:\n%s", hint, out)
+			}
+			if strings.Contains(out, "Usage:") {
+				t.Errorf("the usage text was printed under the error:\n%s", out)
 			}
 		})
 	}
