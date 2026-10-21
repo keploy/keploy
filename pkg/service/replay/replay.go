@@ -5722,9 +5722,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// keploy record's judging decides the set only later, on its confirming
 	// round too, and puts back what this round wrote onto the recording (its
 	// mocks and its test cases) of every set it does not decide (enterprise
-	// record_judge.go, recordedFiles): a set this round did not judge, and
-	// one it judged that judging does not, when the confirming round did not
-	// complete or could not run, or judging was interrupted or failed.
+	// record_learned.go, recordedFiles, put back by record_judge.go's
+	// judgeKeployRecord): a set this round did not judge, and one it judged
+	// that judging does not, when the confirming round did not complete or
+	// could not run, or judging was interrupted or failed. A record that is
+	// killed before judging ends leaves each set staged on disk, which the
+	// next keploy record or keploy test puts back (recordedFiles.stage).
 	if r.learning() && r.instrument {
 		if unchecked != "" {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
