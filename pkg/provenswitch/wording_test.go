@@ -33,6 +33,47 @@ var unsaidSwitch = []struct {
 	{regexp.MustCompile(`\bstaging (switch|gate)\b`), "calls the switch a staging gate"},
 }
 
+// The guard catches each spelling it names, "under KEPLOY_PROVEN=1" among
+// them, which its first pattern let through ("=" ends it), and lets through
+// a message that says how to set the switch. Mutation: drop a pattern.
+func TestUnsaidSwitchCatchesEachSpelling(t *testing.T) {
+	caught := func(s string) bool {
+		for _, u := range unsaidSwitch {
+			if u.rx.MatchString(s) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range []string{
+		"application/stream+json under " + Env + "=1",
+		"a line (" + Env + "=1)",
+		"a line (" + Env + "=1; see the docs)",
+		"a line (" + Env + ")",
+		"this runs under " + Env,
+		"this runs with " + Env + ".",
+		"a run without " + Env + "=1 is off",
+		"unset " + Env + " to undo it",
+		Env + " is not set, so it is off",
+		"the staging switch",
+	} {
+		if !caught(s) {
+			t.Errorf("the guard lets %q through", s)
+		}
+	}
+	for _, s := range []string{
+		"under the proven model",
+		"set " + Env + "=0 to run without the proven model",
+		"run keploy mock judge with " + Env + "=1",
+		"the proven model is on, keploy's default on Linux; " + Env + "=0 runs without it",
+		"the agent ignores its " + Env + "=1",
+	} {
+		if caught(s) {
+			t.Errorf("the guard refuses %q, which says how to set the switch", s)
+		}
+	}
+}
+
 // TestNoMessageNamesTheSwitchItDoesNotSet reads every Go file of the module
 // but tests and testdata, and fails for each string it can render (a literal,
 // a + chain with provenswitch.Env in it, or a format whose arguments include
