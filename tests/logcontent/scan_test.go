@@ -8,19 +8,34 @@
 // logcontent or logurl:
 //
 //   - field: a zap field built from such a value (zap.String, zap.Any,
-//     zap.ByteString, zap.Strings, zap.Stringer, zap.Reflect, zap.Object of
-//     a marshaler that is not keploy's, ...), or a zapcore encoder's Add or
-//     Append of one inside a MarshalLogObject or MarshalLogArray;
+//     zap.ByteString, zap.Strings, zap.Reflect, zap.Object of a marshaler
+//     that is not keploy's, zap.Stringer of a value whose String is not a
+//     safe text of keploy's, ...), or a zapcore encoder's Add or Append of
+//     one inside a MarshalLogObject or MarshalLogArray; and the key of any
+//     field, which a line writes as it is;
 //   - error: an error logged whole (zap.Error, zap.NamedError, the error of
 //     utils.LogError, an error, or its text, as any other field or as a
-//     message), named by where it came from (origin);
-//   - message: a log line's message that is not a constant;
+//     message), named by where it came from (origin); and an error's text
+//     in a logcontent field that fingerprints what it is given
+//     (logcontent.String(k, err.Error())), whose fingerprint whoever hashes
+//     the texts the error's origin can make reads the text from;
+//   - message: a log line's message that is not a constant: a
+//     *zap.Logger's, one through an interface or a function value of a
+//     logger's shape (func(string, ...zap.Field)), and a logger's name
+//     (Named), which heads each of its lines;
 //   - errorf: fmt.Errorf of a value that formats as text (a string, a []byte,
 //     a struct, a map, a slice, an interface) that is not a constant, and an
 //     error's format that is not one;
 //   - errors.New: errors.New of a text that is not a constant;
 //   - sugar: an argument of a SugaredLogger's method, or of the standard
-//     library's log.Printf and its kin, that is not a constant.
+//     library's log.Printf and its kin, that is not a constant;
+//   - print: an argument fmt prints to the process's stdout or stderr
+//     (fmt.Println, fmt.Fprintf(os.Stderr, ...)), which a user reads beside
+//     the log's lines: a command's own output, judged where it is printed
+//     (what it is made of is not followed to where it is written);
+//   - telemetry: an argument of a crash report (sentry's CaptureException,
+//     CaptureMessage, a scope's SetExtra and SetTag), which leaves the
+//     machine for Keploy's Sentry.
 //
 // fmt.Sprintf, fmt.Sprint and string concatenation feeding a line are read
 // through: such a value is safe when each of its parts is, and a site when
@@ -54,37 +69,65 @@
 // So an allowlist entry that says an error's format is keploy's words never
 // stands for the errors formatted into it.
 //
-// A log helper of keploy's, an unexported function that hands a parameter of
-// its own, unchanged, to a line as its message, as an error it logs whole or
-// as a field's value (or to another such helper), is judged at each of its
-// calls, by what the call gives it, and not where it logs the parameter: the
-// scan reads every call of such a function (logHelpers), so what the
-// allowlist could only claim of its callers is checked. A function another
-// package, an interface or a function value may call is no helper, and its
-// parameter is a site where it logs it.
+// A parameter a function of keploy's logs, as a line's message, a field's
+// value or an error, there or through the functions it hands it to, is
+// judged at each call of the function the scan reads, by what the call gives
+// it (sinkParams), whether the function is exported or a method: a call
+// through an interface by what keploy's implementations of it log. So is a
+// string field of a struct a line logs (sinkFields): each write of it the
+// scan reads, an assignment or a literal's, is judged as the line would
+// judge the value. A function every call of which the scan reads (closed:
+// unexported, never used but as a callee), and a closure bound to a local
+// variable that is only ever called (boundLits), log their parameters at no
+// site of their own: what the allowlist could only claim of their callers is
+// checked at each call. Any other function's parameter is a site where it is
+// logged too, for the callers the scan does not read (enterprise's, a
+// function value's).
+//
+// An error logged by its kind (logcontent.Error, utils.LogContentError)
+// whose origin carries no content is reported as overgated, which no entry
+// excuses: the line withholds keploy's own words for nothing, so it logs
+// the error whole.
 //
 // A value is safe, and no site, when it is:
 //
-//   - a constant, or nil;
+//   - a constant, or nil; a package-level text initialized with one that
+//     nothing writes (utils.Emoji), and an index of an unexported table
+//     whose every element is a constant and which nothing writes
+//     (statusToString[b]);
 //   - of a kind that cannot hold an application's text: a number or a
 //     boolean of any type, time.Duration, time.Time, an IP address, a
 //     net.Addr (an address is the connection's, not what was sent over it),
 //     an os.FileMode, a signal, a reflect.Type;
 //   - of an enum type: a string type declared in keploy that has constants
 //     of its own (models.Kind, models.Mode, ...), which keploy names, not
-//     the application;
-//   - a conversion, a String() or a strconv formatting of a safe value, or a
-//     fmt.Sprint/Sprintf or a concatenation of safe values (an argument of
-//     %T is safe whatever it is: it is formatted as its type);
-//   - keploy's connection id (a field or a variable named ConnectionID,
-//     ClientConnID, connID, ...): the agent's own counter;
+//     the application; but a conversion into one is as safe as what it
+//     converts (models.Kind(payload) is the payload), and an error type of a
+//     string's kind is an error, judged by its origin, its constants
+//     notwithstanding;
+//   - a conversion, a String() or a strconv formatting of a safe value, a
+//     text strings', path's or filepath's functions make of safe values
+//     (strings.TrimPrefix, filepath.Join), or a fmt.Sprint/Sprintf or a
+//     concatenation of safe values (an argument of %T is safe whatever it
+//     is: it is formatted as its type); a text of keploy's whose returns are
+//     safe but where only the switch's opt-in returns its value (valueSaid:
+//     if logcontent.On() { return v });
+//   - keploy's connection id as a struct's field (ConnectionID,
+//     ClientConnID, ...), under its key in a map (metadata["connID"]) or a
+//     context (models.ClientConnectionIDKey): the agent's own counter, and
+//     each write of it the scan reads (an assignment, a literal's,
+//     context.WithValue's) is judged as the value a line logs. A local
+//     variable or a parameter so named is read as any other is;
 //   - a value of logcontent or logurl: the gate itself;
 //   - an error whose origin cannot hold content (safeOrigin): a sentinel
 //     declared as a constant text, errors.New of a constant, fmt.Errorf of
 //     safe values wrapping errors whose origins are safe, the context's
 //     error, and the error of a call into a package whose errors name only
 //     paths, addresses, errnos or the kernel's verdicts (os, syscall, net's
-//     sockets, io's readers and writers, os/exec, cilium/ebpf, ...).
+//     sockets, io's readers and writers, os/exec, cilium/ebpf, a print's
+//     writer, ...); not time's, whose Parse and ParseDuration quote the text
+//     they could not read, nor net's that parse a text (SplitHostPort,
+//     ResolveTCPAddr, a lookup), whose errors quote it.
 //
 // Everything else is a site. A site the code gates goes through logcontent
 // (Bytes, String, StringLen, Any, Error, ...) or logurl, and is no site any
@@ -121,9 +164,22 @@ const (
 	kindErrorf    = "errorf"
 	kindErrorsNew = "errors.New"
 	kindSugar     = "sugar"
+	// kindPrint is an argument fmt prints to the process's stdout or
+	// stderr (fmt.Println, fmt.Fprintf(os.Stderr, ...)), which a user reads
+	// beside the log's lines, and kindTelemetry one a crash report sends
+	// Keploy (sentry's CaptureException, a scope's SetExtra), which leaves
+	// the machine.
+	kindPrint     = "print"
+	kindTelemetry = "telemetry"
+	// kindOvergated is no site: an error logged by its kind (logcontent.Error,
+	// utils.LogContentError) whose origin carries no content, so the line
+	// withholds keploy's own words for nothing. The guard fails on one,
+	// which no allowlist entry excuses: log it whole (zap.Error,
+	// utils.LogError).
+	kindOvergated = "overgated"
 )
 
-var kinds = []string{kindField, kindError, kindMessage, kindErrorf, kindErrorsNew, kindSugar}
+var kinds = []string{kindField, kindError, kindMessage, kindErrorf, kindErrorsNew, kindSugar, kindPrint, kindTelemetry}
 
 // site is one place a value reaches a line or an error's text ungated.
 type site struct {
@@ -132,6 +188,7 @@ type site struct {
 	col  int
 	kind string
 	what string // the expression, as written, with its origin for an error
+	via  string // the sink it was judged for, for the scan's debugging: "" for a line's own value
 }
 
 func (s site) key() string { return s.file + " | " + s.kind + " | " + s.what }
@@ -148,6 +205,10 @@ type scanner struct {
 	decls map[*types.Func]funcDecl
 	named []*types.Named // keploy's named types, for an interface's implementations
 	safe  map[*types.Func]int8
+	// safeStrict is safe as an over-gated error is judged (strictIfaces):
+	// an exported interface's method's errors are another module's too.
+	safeStrict   map[*types.Func]int8
+	strictIfaces bool
 	// passes are the parameters a function returns, or wraps, as its error:
 	// its errors are as safe as the arguments it is given for them.
 	passes map[*types.Func]map[int]bool
@@ -157,21 +218,89 @@ type scanner struct {
 	// arguments for the parameters textPasses names, which it puts in it.
 	text       map[*types.Func]int8
 	textPasses map[*types.Func]map[int]bool
+	textFields map[*types.Func]map[*types.Var]bool // the fields a safe text reads, whose writes its users judge
 	// parents are each function body's nodes' parents (pathTo).
 	parents map[*ast.BlockStmt]map[ast.Node]ast.Node
 	// listed are the allowlist's error texts (errorf and errors.New sites)
 	// that carry no content: an error built by one is as safe as the
 	// errors it wraps.
 	listed map[string]bool
+	// constructed are the allowlist's sites whose value carries no content
+	// by how it is made, whatever it is made from (a match of keploy's
+	// placeholder grammar): what they are made from is not judged.
+	constructed map[string]bool
 	sites  map[string]site // by position and kind: the platforms' loads overlap
-	// msgParams and errParams are keploy's log helpers by their parameters:
-	// a string parameter a function logs as a line's message, and an error
-	// parameter it logs whole, as such, or passes on to a helper that does
-	// (logHelpers). Each call of one is judged by what it passes there, and
-	// the helper's own use of the parameter is no site.
-	msgParams   map[*types.Func]map[int]bool
-	errParams   map[*types.Func]map[int]bool
-	fieldParams map[*types.Func]map[int]bool // a parameter a function logs as a field's value
+	// errFormats and errTexts are the constant formats keploy's code makes
+	// errors with and the constant texts it makes them of, across the
+	// platforms' loads: the words logcontent keeps of an error's text
+	// (utils/logcontent/words_gen.go).
+	errFormats, errTexts map[string]bool
+	// sinks are the parameters each keploy function logs (sinkParams): one
+	// whose value reaches a line's message, a field's value or an error the
+	// line logs whole, or an error's text a logcontent field would
+	// fingerprint, through the function's own lines or the functions it
+	// passes it to. Each call of the function the scan reads is judged by
+	// what it gives them.
+	sinks map[*types.Func]map[int]sinkMask
+	addrTaken map[*types.Var]bool // fieldAddrs
+	// constTables are keploy's unexported package-level maps, slices and
+	// arrays whose initializer gives every element a constant and which
+	// nothing writes after (constTables): what an index of one reads is a
+	// constant.
+	constTables map[*types.Var]bool
+	// constVars are keploy's package-level string variables whose
+	// initializer is a constant and which nothing the scan reads writes
+	// (utils.Emoji): a text of keploy's.
+	constVars map[*types.Var]bool
+	// sinkVia is, for the scan's debugging, where each sink was first found
+	// logged and for which sink that was judged ("" for a line's own value).
+	sinkVia map[string]string
+	// litSinks are the same of the closures bound to a local variable that
+	// is only ever called (boundLits), by the variable: each call of it is
+	// judged by what it gives them.
+	litSinks map[*types.Var]map[int]sinkMask
+	// closed are the functions every call of which the scan reads
+	// (closedFuncs): a parameter of one is no site where it is logged.
+	closed map[*types.Func]bool
+	// sinkFields are the string fields of keploy's structs whose value a
+	// line logs: each write of one the scan reads is judged by what it
+	// writes.
+	sinkFields map[*types.Var]sinkMask
+	fieldAt    map[*types.Var]string // a line that logs each, for the scan's debugging
+	// The worklist (sinkParams): the declarations that call each function,
+	// or interface method, and that write each field, re-read when what
+	// they call or write turns out to be logged.
+	callers map[*types.Func]map[ast.Decl]declRef
+	writers map[*types.Var]map[ast.Decl]declRef
+	impls   map[*types.Func][]*types.Func // an interface's method: keploy's implementations of it
+	// ifaceCallers are the declarations that call an interface's method,
+	// by the method's name, and methodSinks the names of the methods that
+	// log a parameter: a call through an interface is judged by what its
+	// implementations log, and is read again when one of them turns out to
+	// log one.
+	ifaceCallers map[string]map[ast.Decl]declRef
+	methodSinks  map[string]bool
+	queue        []declRef
+	queued       map[ast.Decl]bool
+}
+
+// sinkMask is how a value reaches a line: as its message, as a field's value
+// (or an error it logs whole), or as an error's text in a logcontent field
+// that fingerprints the text it is given.
+type sinkMask uint8
+
+const (
+	sinkMsg sinkMask = 1 << iota
+	sinkField
+	sinkErrText
+)
+
+// declRef is a top-level declaration of a file the scan reads: what the
+// worklist re-reads.
+type declRef struct {
+	p    *packages.Package
+	file string
+	decl ast.Decl
 }
 
 // varInit is a package-level variable's initializer and where it is
@@ -190,7 +319,43 @@ type funcDecl struct {
 }
 
 func newScanner(root string) *scanner {
-	return &scanner{root: root, sites: map[string]site{}}
+	return &scanner{root: root, sites: map[string]site{}, errFormats: map[string]bool{}, errTexts: map[string]bool{}}
+}
+
+// keepWords keeps the constant format or text of an error call makes
+// (errFormats, errTexts): fmt.Errorf's format, errors.New's text, and the
+// format of a fmt.Sprintf errors.New is given. A printf wrapper's that makes
+// an error is kept where it is called (call).
+func (fs *fileScan) keepWords(call *ast.CallExpr, f *types.Func) {
+	if len(call.Args) == 0 {
+		return
+	}
+	constant := func(e ast.Expr) (string, bool) {
+		tv, ok := fs.info.Types[ast.Unparen(e)]
+		if !ok || tv.Value == nil {
+			return "", false
+		}
+		s, err := strconv.Unquote(tv.Value.ExactString())
+		return s, err == nil && s != ""
+	}
+	switch {
+	case funcPkg(f) == "fmt" && f.Name() == "Errorf":
+		if s, ok := constant(call.Args[0]); ok {
+			fs.s.errFormats[s] = true
+		}
+	case funcPkg(f) == "errors" && f.Name() == "New":
+		if s, ok := constant(call.Args[0]); ok {
+			fs.s.errTexts[s] = true
+			return
+		}
+		if c, ok := ast.Unparen(call.Args[0]).(*ast.CallExpr); ok && len(c.Args) > 0 {
+			if g := calleeFunc(fs.info, c); g != nil && funcPkg(g) == "fmt" && g.Name() == "Sprintf" {
+				if s, ok := constant(c.Args[0]); ok {
+					fs.s.errFormats[s] = true
+				}
+			}
+		}
+	}
 }
 
 // add scans pkgs, whose files under root but outside excluded are keploy's
@@ -202,11 +367,13 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 	s.decls = map[*types.Func]funcDecl{}
 	s.named = nil
 	s.safe = map[*types.Func]int8{}
+	s.safeStrict = map[*types.Func]int8{}
 	s.passes = map[*types.Func]map[int]bool{}
 	s.why = map[*types.Func]string{}
 	s.text = map[*types.Func]int8{}
 	s.parents = map[*ast.BlockStmt]map[ast.Node]ast.Node{}
 	s.textPasses = map[*types.Func]map[int]bool{}
+	s.textFields = map[*types.Func]map[*types.Var]bool{}
 	for _, p := range pkgs {
 		for _, f := range p.Syntax {
 			name := p.Fset.File(f.Pos()).Name()
@@ -240,7 +407,22 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 			}
 		}
 	}
-	s.logHelpers(pkgs)
+	s.closedFuncs(pkgs)
+	s.fieldAddrs(pkgs)
+	s.findConstTables(pkgs)
+	s.sinks = map[*types.Func]map[int]sinkMask{}
+	if s.sinkVia == nil {
+		s.sinkVia = map[string]string{}
+	}
+	s.litSinks = map[*types.Var]map[int]sinkMask{}
+	s.sinkFields = map[*types.Var]sinkMask{}
+	s.fieldAt = map[*types.Var]string{}
+	s.callers = map[*types.Func]map[ast.Decl]declRef{}
+	s.writers = map[*types.Var]map[ast.Decl]declRef{}
+	s.impls = map[*types.Func][]*types.Func{}
+	s.ifaceCallers = map[string]map[ast.Decl]declRef{}
+	s.methodSinks = map[string]bool{}
+	s.queue, s.queued = nil, map[ast.Decl]bool{}
 	for _, p := range pkgs {
 		for _, f := range p.Syntax {
 			name := p.Fset.File(f.Pos()).Name()
@@ -258,30 +440,52 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 			if skip {
 				continue
 			}
-			fs := &fileScan{s: s, p: p, info: p.TypesInfo, fset: p.Fset, file: rel}
-			fs.walk(f)
+			for _, d := range f.Decls {
+				s.walkDecl(declRef{p, rel, d})
+			}
+		}
+	}
+	// What a call gives a function, or a write gives a field, is judged
+	// by what the function or the field turned out to log, which a
+	// declaration read later can show: re-read each declaration whose
+	// callee or field did (sinkParams), until none does. A site found is
+	// kept, and a site can only be added, so the sites are those of the
+	// last reading.
+	for len(s.queue) > 0 {
+		ref := s.queue[0]
+		s.queue = s.queue[1:]
+		delete(s.queued, ref.decl)
+		s.walkDecl(ref)
+	}
+}
+
+// walkDecl scans one top-level declaration of a file the scan reads.
+func (s *scanner) walkDecl(ref declRef) {
+	fs := &fileScan{s: s, p: ref.p, info: ref.p.TypesInfo, fset: ref.p.Fset, file: ref.file, cur: ref}
+	fs.walk(ref.decl)
+}
+
+// enqueue has the worklist read refs again.
+func (s *scanner) enqueue(refs map[ast.Decl]declRef) {
+	for d, ref := range refs {
+		if !s.queued[d] {
+			s.queued[d] = true
+			s.queue = append(s.queue, ref)
 		}
 	}
 }
 
-// logHelpers finds keploy's log helpers (msgParams, errParams,
-// fieldParams): a function that hands one of its parameters, unchanged, to a
-// line as its message (a *zap.Logger's method, or a helper's message), as an
-// error it logs whole (zap.Error, zap.NamedError, utils.LogError's error, or
-// a helper's error), or as a field's value (zap.String's, zap.Any's, ..., or
-// a helper's). A helper that passes its parameter on to another helper is
-// one too, so the scan runs to a fixpoint. A helper's callers are then judged
-// by what they pass, which the allowlist could only have claimed.
-//
-// Only a function every call of which the scan reads is one: unexported
-// (no other package, enterprise's included, can call it), with no receiver
-// (no interface can call it), and never used but as the callee of a call (no
-// callback or function value calls it unseen). Any other's parameter stays a
-// site where it is logged.
-func (s *scanner) logHelpers(pkgs []*packages.Package) {
-	s.msgParams = map[*types.Func]map[int]bool{}
-	s.errParams = map[*types.Func]map[int]bool{}
-	s.fieldParams = map[*types.Func]map[int]bool{}
+// closedFuncs finds the keploy functions every call of which the scan reads
+// (closed): unexported, so no other package can call it, enterprise's
+// included, nor name it in an interface of its own, and never used but as
+// the callee of a call, so no callback, method value or method expression
+// calls it unseen. A method is one too: a call through an interface of its
+// package is judged by the implementations it may reach (calleeSinks). A
+// parameter of a closed function is no site where it is logged; each call is
+// judged by what it gives it. Any other function's parameter is a site where
+// it is logged, for the callers the scan does not read, and the calls the
+// scan reads are judged too.
+func (s *scanner) closedFuncs(pkgs []*packages.Package) {
 	escaped := map[*types.Func]bool{}
 	for _, p := range pkgs {
 		for _, file := range p.Syntax {
@@ -294,12 +498,18 @@ func (s *scanner) logHelpers(pkgs []*packages.Package) {
 					case *ast.SelectorExpr:
 						callees[fn.Sel] = true
 					case *ast.IndexExpr:
-						if id, ok := fn.X.(*ast.Ident); ok {
-							callees[id] = true
+						switch g := fn.X.(type) {
+						case *ast.Ident:
+							callees[g] = true
+						case *ast.SelectorExpr:
+							callees[g.Sel] = true
 						}
 					case *ast.IndexListExpr:
-						if id, ok := fn.X.(*ast.Ident); ok {
-							callees[id] = true
+						switch g := fn.X.(type) {
+						case *ast.Ident:
+							callees[g] = true
+						case *ast.SelectorExpr:
+							callees[g.Sel] = true
 						}
 					}
 				}
@@ -312,73 +522,40 @@ func (s *scanner) logHelpers(pkgs []*packages.Package) {
 			})
 		}
 	}
-	helper := func(f *types.Func) bool {
-		sig, _ := f.Type().(*types.Signature)
-		return sig != nil && sig.Recv() == nil && !f.Exported() && !escaped[f]
-	}
-	mark := func(m map[*types.Func]map[int]bool, f *types.Func, i int) bool {
-		if m[f][i] {
-			return false
+	s.closed = map[*types.Func]bool{}
+	for f := range s.decls {
+		if !f.Exported() && !escaped[f.Origin()] {
+			s.closed[f.Origin()] = true
 		}
-		if m[f] == nil {
-			m[f] = map[int]bool{}
-		}
-		m[f][i] = true
-		return true
 	}
-	for changed := true; changed; {
-		changed = false
-		for f, d := range s.decls {
-			if !helper(f) {
-				continue
-			}
-			sig := f.Type().(*types.Signature)
-			info := d.p.TypesInfo
-			param := func(e ast.Expr) (int, bool) {
-				id, ok := ast.Unparen(e).(*ast.Ident)
-				if !ok {
-					return 0, false
-				}
-				v, ok := info.Uses[id].(*types.Var)
-				if !ok {
-					return 0, false
-				}
-				for i := 0; i < sig.Params().Len(); i++ {
-					if sig.Params().At(i) == v && !(sig.Variadic() && i == sig.Params().Len()-1) {
-						return i, !reassigned(info, d.decl, v)
+}
+
+// fieldAddrs finds the string fields whose address keploy's code takes
+// (&x.f, or x.f as the receiver of a pointer method), through which a write
+// the scan does not read as one can be made (addrTaken).
+func (s *scanner) fieldAddrs(pkgs []*packages.Package) {
+	s.addrTaken = map[*types.Var]bool{}
+	for _, p := range pkgs {
+		for _, file := range p.Syntax {
+			ast.Inspect(file, func(n ast.Node) bool {
+				var target ast.Expr
+				switch x := n.(type) {
+				case *ast.UnaryExpr:
+					if x.Op == token.AND {
+						target = x.X
 					}
-				}
-				return 0, false
-			}
-			ast.Inspect(d.decl.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				callee := calleeFunc(info, call)
-				if callee == nil {
-					return true
-				}
-				msgs, errs, fields := s.helperArgs(callee)
-				for _, a := range fields {
-					if a < len(call.Args) {
-						if i, ok := param(call.Args[a]); ok && !safeType(sig.Params().At(i).Type()) && mark(s.fieldParams, f, i) {
-							changed = true
+				case *ast.SelectorExpr:
+					if sel, ok := p.TypesInfo.Selections[x]; ok && sel.Kind() == types.MethodVal {
+						if sig, ok := sel.Obj().Type().(*types.Signature); ok && sig.Recv() != nil {
+							if _, ptr := sig.Recv().Type().(*types.Pointer); ptr {
+								target = x.X
+							}
 						}
 					}
 				}
-				for _, a := range msgs {
-					if a < len(call.Args) {
-						if i, ok := param(call.Args[a]); ok && isString(sig.Params().At(i).Type()) && mark(s.msgParams, f, i) {
-							changed = true
-						}
-					}
-				}
-				for _, a := range errs {
-					if a < len(call.Args) {
-						if i, ok := param(call.Args[a]); ok && implementsError(sig.Params().At(i).Type()) && mark(s.errParams, f, i) {
-							changed = true
-						}
+				if sel, ok := ast.Unparen(target).(*ast.SelectorExpr); ok {
+					if v, ok := p.TypesInfo.Uses[sel.Sel].(*types.Var); ok && v.IsField() {
+						s.addrTaken[v.Origin()] = true
 					}
 				}
 				return true
@@ -387,40 +564,163 @@ func (s *scanner) logHelpers(pkgs []*packages.Package) {
 	}
 }
 
-// helperArgs are the indices of callee's arguments that a line logs as its
-// message, as an error it logs whole, and as a field's value.
-func (s *scanner) helperArgs(f *types.Func) (msgs, errs, fields []int) {
-	pkg, recv := funcPkg(f), recvName(f)
-	switch {
-	case pkg == "go.uber.org/zap" && recv == "go.uber.org/zap.Logger":
-		if i, ok := loggerMessage[f.Name()]; ok {
-			msgs = append(msgs, i)
+// findConstTables finds constTables: an unexported package-level variable of
+// a map, slice or array type, whose initializer is a composite literal every
+// element (and key) of which is a constant, and whose every use is an index
+// that is read (not assigned, its address not taken), a range over it or
+// len's argument. Unexported, so no other package writes it; read only so,
+// so no alias of it is written either.
+func (s *scanner) findConstTables(pkgs []*packages.Package) {
+	s.constTables = map[*types.Var]bool{}
+	s.constVars = map[*types.Var]bool{}
+	for v, in := range s.inits {
+		constant := func(e ast.Expr) bool {
+			tv, ok := in.p.TypesInfo.Types[ast.Unparen(e)]
+			return ok && tv.Value != nil
 		}
-	case pkg == "go.uber.org/zap" && recv == "":
-		if i, ok := zapErrorCtors[f.Name()]; ok {
-			errs = append(errs, i)
+		if isString(v.Type()) && constant(in.expr) {
+			// var Emoji = "\U0001F430 Keploy:": a text of keploy's, as
+			// long as nothing writes it.
+			s.constVars[v.Origin()] = true
+			continue
 		}
-		if i, ok := zapFieldCtors[f.Name()]; ok && i >= 0 {
-			fields = append(fields, i)
+		if v.Exported() {
+			continue
 		}
-	case pkg == module+"/utils" && recv == "":
-		if h, ok := helpers[f.Name()]; ok {
-			msgs = append(msgs, h.msg)
-			if h.err >= 0 {
-				errs = append(errs, h.err)
+		switch v.Type().Underlying().(type) {
+		case *types.Map, *types.Slice, *types.Array:
+		default:
+			continue
+		}
+		lit, ok := ast.Unparen(in.expr).(*ast.CompositeLit)
+		if !ok {
+			continue
+		}
+		all := true
+		for _, el := range lit.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if !constant(kv.Key) {
+					all = false
+				}
+				el = kv.Value
+			}
+			if !constant(el) {
+				all = false
+			}
+		}
+		if all {
+			s.constTables[v.Origin()] = true
+		}
+	}
+	for _, p := range pkgs {
+		for _, file := range p.Syntax {
+			var stack []ast.Node
+			ast.Inspect(file, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return false
+				}
+				stack = append(stack, n)
+				id, ok := n.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				v, ok := p.TypesInfo.Uses[id].(*types.Var)
+				if !ok {
+					return true
+				}
+				switch {
+				case s.constTables[v.Origin()]:
+					if !readOnlyUse(p.TypesInfo, stack) {
+						delete(s.constTables, v.Origin())
+					}
+				case s.constVars[v.Origin()]:
+					if !readUse(stack) {
+						delete(s.constVars, v.Origin())
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+// readUse: the identifier last on stack (its parents before it), a
+// variable's, or the selector pkg.Name that holds it, is read: not assigned,
+// not stepped (++), its address not taken.
+func readUse(stack []ast.Node) bool {
+	i := len(stack) - 1
+	use := stack[i]
+	if i >= 1 {
+		if sel, ok := stack[i-1].(*ast.SelectorExpr); ok && ast.Node(sel.Sel) == use {
+			i--
+			use = sel
+		}
+	}
+	if i < 1 {
+		return true
+	}
+	switch x := stack[i-1].(type) {
+	case *ast.AssignStmt:
+		for _, l := range x.Lhs {
+			if ast.Node(l) == use {
+				return false
+			}
+		}
+	case *ast.IncDecStmt:
+		return false
+	case *ast.UnaryExpr:
+		return x.Op != token.AND
+	case *ast.ValueSpec:
+		for _, n := range x.Names {
+			if ast.Node(n) == use {
+				return false
 			}
 		}
 	}
-	for i := range s.msgParams[f.Origin()] {
-		msgs = append(msgs, i)
+	return true
+}
+
+// readOnlyUse: the identifier last on stack (its parents before it) is the
+// table of an index that is read, the X of a range, or len's argument.
+func readOnlyUse(info *types.Info, stack []ast.Node) bool {
+	if len(stack) < 2 {
+		return false
 	}
-	for i := range s.errParams[f.Origin()] {
-		errs = append(errs, i)
+	id, parent := stack[len(stack)-1], stack[len(stack)-2]
+	switch x := parent.(type) {
+	case *ast.IndexExpr:
+		if x.X != id {
+			return true // the table's value as a key: not this use's table
+		}
+		if len(stack) >= 3 {
+			switch g := stack[len(stack)-3].(type) {
+			case *ast.AssignStmt:
+				for _, l := range g.Lhs {
+					if l == x {
+						return false
+					}
+				}
+			case *ast.IncDecStmt:
+				return false
+			case *ast.UnaryExpr:
+				return g.Op != token.AND
+			}
+		}
+		return true
+	case *ast.RangeStmt:
+		return x.X == id
+	case *ast.CallExpr:
+		return isBuiltin(info, x.Fun, "len") && len(x.Args) == 1 && x.Args[0] == id
 	}
-	for i := range s.fieldParams[f.Origin()] {
-		fields = append(fields, i)
-	}
-	return msgs, errs, fields
+	return false
+}
+
+// seenWrites: every write of v, a string field, is one the scan reads: it is
+// unexported, so only its package's code writes it and no decoder can, and
+// its address is never taken.
+func (s *scanner) seenWrites(v *types.Var) bool {
+	return !v.Exported() && !s.addrTaken[v]
 }
 
 // isString: t is a string, or a type whose underlying type is one.
@@ -429,34 +729,566 @@ func isString(t types.Type) bool {
 	return ok && b.Info()&types.IsString != 0
 }
 
-// helperParam: e is a parameter of a log helper the scan is in, which m
-// (msgParams or errParams) names: its callers are judged instead.
-func (fs *fileScan) helperParam(m map[*types.Func]map[int]bool, e ast.Expr) bool {
-	id, ok := ast.Unparen(e).(*ast.Ident)
-	if !ok {
-		return false
+// sinkParams records what e, a value a line logs as m says (a message, a
+// field's value, an error's text a logcontent field fingerprints), carries
+// (carried): each parameter of the function the scan is in that it carries
+// is one that function logs, whose callers are judged by what they give it;
+// each string field it reads is one a line logs, whose writes are judged by
+// what they write. What is recorded is new only when a declaration the scan
+// read before could now be judged by it, so the worklist reads those again:
+// the callers of the function, and those of any interface's method of its
+// name, or the writers of the field.
+func (fs *fileScan) sinkParams(m sinkMask, e ast.Expr) {
+	if fs.gated > 0 {
+		return // a branch only the switch's opt-in takes: what it logs is the switch's to allow
 	}
-	v, ok := fs.info.Uses[id].(*types.Var)
-	if !ok {
-		return false
-	}
-	for _, fn := range fs.funcs {
-		fd, ok := fn.(*ast.FuncDecl)
-		if !ok {
+	c := &carry{params: map[int]bool{}, lits: map[litSlot]bool{}, fields: map[*types.Var]bool{}}
+	fs.carried(e, map[ast.Expr]bool{}, c)
+	params, fields := c.params, c.fields
+	for sl := range c.lits {
+		if fs.s.litSinks[sl.v][sl.i]&m == m {
 			continue
 		}
-		f, ok := fs.info.Defs[fd.Name].(*types.Func)
-		if !ok {
-			continue
+		if fs.s.litSinks[sl.v] == nil {
+			fs.s.litSinks[sl.v] = map[int]sinkMask{}
 		}
-		sig := f.Type().(*types.Signature)
-		for i := range m[f] {
-			if sig.Params().At(i) == v {
-				return true
+		fs.noteSink("closure "+sl.v.Name()+"#"+strconv.Itoa(sl.i)+"@"+fs.file, m&^fs.s.litSinks[sl.v][sl.i], e)
+		fs.s.litSinks[sl.v][sl.i] |= m
+		// The calls are in this declaration: read it again.
+		if fs.cur.decl != nil {
+			fs.s.enqueue(map[ast.Decl]declRef{fs.cur.decl: fs.cur})
+		}
+	}
+	if f := fs.topFunc(); f != nil {
+		for i := range params {
+			if fs.s.sinks[f][i]&m == m {
+				continue
+			}
+			if fs.s.sinks[f] == nil {
+				fs.s.sinks[f] = map[int]sinkMask{}
+			}
+			fs.noteSink("param "+qualFunc(f)+"#"+strconv.Itoa(i), m&^fs.s.sinks[f][i], e)
+			fs.s.sinks[f][i] |= m
+			fs.s.enqueue(fs.s.callers[f])
+			if sig := f.Type().(*types.Signature); sig.Recv() != nil {
+				fs.s.methodSinks[f.Name()] = true
+				fs.s.enqueue(fs.s.ifaceCallers[f.Name()])
 			}
 		}
 	}
-	return false
+	for v := range fields {
+		fs.noteSink("field "+fs.fieldKey(v), m&^fs.s.sinkFields[v], e)
+		fs.s.markSinkField(v, m, fs.file+":"+strconv.Itoa(fs.fset.Position(e.Pos()).Line))
+	}
+}
+
+// enter has the scan judge a value a line logs as m says, until the
+// returned func is called (sinkDepth, mask).
+func (fs *fileScan) enter(m sinkMask) func() {
+	fs.sinkDepth++
+	prev := fs.mask
+	fs.mask = m
+	return func() {
+		fs.sinkDepth--
+		fs.mask = prev
+	}
+}
+
+// lowBit is the way of m a judge reads a value by first (judge).
+func lowBit(m sinkMask) sinkMask {
+	for _, bit := range []sinkMask{sinkMsg, sinkField, sinkErrText} {
+		if m&bit != 0 {
+			return bit
+		}
+	}
+	return 0
+}
+
+// noteSink records, for the scan's debugging, where the sink key was found
+// logged (at e) and for which sink (via).
+func (fs *fileScan) noteSink(key string, m sinkMask, e ast.Expr) {
+	for _, bit := range []sinkMask{sinkMsg, sinkField, sinkErrText} {
+		if m&bit == 0 {
+			continue
+		}
+		k := key + "/" + strconv.Itoa(int(bit))
+		if _, ok := fs.s.sinkVia[k]; !ok {
+			fs.s.sinkVia[k] = fs.file + ":" + strconv.Itoa(fs.fset.Position(e.Pos()).Line) + "\t" + fs.via + "\t" + fs.text(e)
+		}
+	}
+}
+
+// fieldKey names v, a field, by its struct's package, its name and where it
+// is declared.
+func (fs *fileScan) fieldKey(v *types.Var) string {
+	p := fs.fset.Position(v.Pos())
+	return qualVar(v) + "@" + filepath.Base(p.Filename) + ":" + strconv.Itoa(p.Line)
+}
+
+// markSinkField records that a line logs v, a string field, as m says: each
+// write of it the scan reads is judged by what it writes, and the
+// declarations read before that write it are read again.
+func (s *scanner) markSinkField(v *types.Var, m sinkMask, at string) {
+	if s.sinkFields[v]&m == m {
+		return
+	}
+	if s.sinkFields[v] == 0 && s.why != nil {
+		s.fieldAt[v] = at
+	}
+	s.sinkFields[v] |= m
+	s.enqueue(s.writers[v])
+}
+
+// topFunc is the function declaration the scan is in, or nil (a package
+// variable's initializer).
+func (fs *fileScan) topFunc() *types.Func {
+	if len(fs.funcs) == 0 {
+		return nil
+	}
+	fd, ok := fs.funcs[0].(*ast.FuncDecl)
+	if !ok {
+		return nil
+	}
+	f, _ := fs.info.Defs[fd.Name].(*types.Func)
+	if f == nil {
+		return nil
+	}
+	return f.Origin()
+}
+
+// identVar is the variable x names, and whether x declares it as a
+// parameter (the value a parameter enters its function with, varValues).
+func (fs *fileScan) identVar(x *ast.Ident) (*types.Var, bool) {
+	if v, ok := fs.info.Uses[x].(*types.Var); ok {
+		return v, false
+	}
+	v, ok := fs.info.Defs[x].(*types.Var)
+	return v, ok && v != nil
+}
+
+// paramOf is the function, of those the scan is in, whose parameter v is
+// (innermost first), and v's index among them; nil when v is none.
+func (fs *fileScan) paramOf(v *types.Var) (ast.Node, int) {
+	for k := len(fs.funcs) - 1; k >= 0; k-- {
+		var ft *ast.FuncType
+		switch f := fs.funcs[k].(type) {
+		case *ast.FuncDecl:
+			ft = f.Type
+		case *ast.FuncLit:
+			ft = f.Type
+		}
+		if ft == nil || ft.Params == nil {
+			continue
+		}
+		i := 0
+		for _, fl := range ft.Params.List {
+			if len(fl.Names) == 0 {
+				i++
+			}
+			for _, n := range fl.Names {
+				if fs.info.Defs[n] == v {
+					return fs.funcs[k], i
+				}
+				i++
+			}
+		}
+	}
+	return nil, -1
+}
+
+// asParam: x reads v as the value its function was given, a parameter's: x
+// declares it (the value it enters with), or the function never assigns it.
+// i is v's index among the parameters of the function the scan is in, -1
+// when it is a closure's or variadic's (a call the scan cannot read gives
+// it), or when v is no parameter at all (ok false).
+func (fs *fileScan) asParam(v *types.Var, x *ast.Ident) (i int, ok bool) {
+	fn, i := fs.paramOf(v)
+	if fn == nil {
+		return -1, false
+	}
+	if fs.info.Defs[x] != v && reassigned(fs.info, fn, v) {
+		return -1, false // what it holds is followed through its values (varValues)
+	}
+	top := fs.topFunc()
+	if fn != fs.funcs[0] || top == nil {
+		return -1, true // a closure's: a function value, whose calls are not read
+	}
+	if sig := top.Type().(*types.Signature); sig.Variadic() && i == sig.Params().Len()-1 {
+		return -1, true
+	}
+	return i, true
+}
+
+// closedParam: v, read at x, is a parameter of the closed function the scan
+// is in, as it was given (asParam), in a value a line logs (sinkDepth): the
+// callers are judged by what they give it (sinkParams), so it is safe here.
+func (fs *fileScan) closedParam(v *types.Var, x *ast.Ident) bool {
+	if fs.sinkDepth == 0 {
+		return false
+	}
+	i, ok := fs.asParam(v, x)
+	if !ok {
+		return false
+	}
+	if i >= 0 {
+		return fs.s.closed[fs.topFunc()]
+	}
+	_, ok = fs.litParam(v)
+	return ok
+}
+
+// litSlot is a parameter of a closure bound to a local variable (boundLits):
+// the variable, and the parameter's index.
+type litSlot struct {
+	v *types.Var
+	i int
+}
+
+// carry is what a value can carry (carried): parameters of the function the
+// scan is in, by index, of the closures bound to a local, and string fields.
+type carry struct {
+	params map[int]bool
+	lits   map[litSlot]bool
+	fields map[*types.Var]bool
+}
+
+// litParam: v is a parameter, not a variadic one, of a closure bound to a
+// local variable that is only ever called (boundLits), whose calls the scan
+// reads in the declaration it is in: the variable and v's index.
+func (fs *fileScan) litParam(v *types.Var) (litSlot, bool) {
+	fn, i := fs.paramOf(v)
+	lit, ok := fn.(*ast.FuncLit)
+	if !ok {
+		return litSlot{}, false
+	}
+	bound := fs.boundLits()[lit]
+	if bound == nil {
+		return litSlot{}, false
+	}
+	if sig, ok := fs.info.TypeOf(lit).(*types.Signature); !ok || (sig.Variadic() && i == sig.Params().Len()-1) {
+		return litSlot{}, false
+	}
+	return litSlot{bound, i}, true
+}
+
+// boundLits are the closures of the top-level declaration the scan is in
+// that are bound to a local variable, by the variable, when that variable is
+// only ever called: declared with the closure as its value (f := func(...)
+// {...}, var f = func...), never assigned again nor its address taken, and
+// every other use of it the callee of a call. Every call of such a closure
+// is in the declaration, where the scan reads it, so a parameter of one is
+// judged by what each call gives it (litSinks), as a closed function's is.
+func (fs *fileScan) boundLits() map[*ast.FuncLit]*types.Var {
+	if fs.lits != nil {
+		return fs.lits
+	}
+	fs.lits = map[*ast.FuncLit]*types.Var{}
+	if len(fs.funcs) == 0 {
+		return fs.lits
+	}
+	top := fs.funcs[0]
+	cand := map[*types.Var]*ast.FuncLit{}
+	defs := map[*types.Var]int{}
+	ast.Inspect(top, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for j, l := range x.Lhs {
+				id, ok := ast.Unparen(l).(*ast.Ident)
+				if !ok {
+					continue
+				}
+				v, ok := fs.info.Defs[id].(*types.Var)
+				if !ok || v == nil {
+					if u, ok := fs.info.Uses[id].(*types.Var); ok {
+						defs[u] += 2 // assigned again
+					}
+					continue
+				}
+				defs[v]++
+				if x.Tok == token.DEFINE && len(x.Rhs) == len(x.Lhs) {
+					if fl, ok := ast.Unparen(x.Rhs[j]).(*ast.FuncLit); ok {
+						cand[v] = fl
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for j, id := range x.Names {
+				v, ok := fs.info.Defs[id].(*types.Var)
+				if !ok {
+					continue
+				}
+				defs[v]++
+				if len(x.Values) == len(x.Names) {
+					if fl, ok := ast.Unparen(x.Values[j]).(*ast.FuncLit); ok {
+						cand[v] = fl
+					}
+				}
+			}
+		}
+		return true
+	})
+	if len(cand) == 0 {
+		return fs.lits
+	}
+	callees := map[*ast.Ident]bool{}
+	escaped := map[*types.Var]bool{}
+	ast.Inspect(top, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if id, ok := ast.Unparen(c.Fun).(*ast.Ident); ok {
+				callees[id] = true
+			}
+		}
+		if id, ok := n.(*ast.Ident); ok && !callees[id] {
+			if v, ok := fs.info.Uses[id].(*types.Var); ok && cand[v] != nil {
+				escaped[v] = true
+			}
+		}
+		return true
+	})
+	for v, fl := range cand {
+		if defs[v] == 1 && !escaped[v] {
+			fs.lits[fl] = v
+		}
+	}
+	return fs.lits
+}
+
+// carried collects what e's value can carry of the parameters of the
+// function the scan is in, and of the string fields of structs: through a
+// local variable's values that reach e (a reassigned parameter's own value
+// among them), concatenation, a conversion, fmt's, strings', strconv's and
+// errors' functions, an error's text, an error fmt.Errorf or keploy's own
+// functions make of it, a text keploy's own functions make of it (the
+// parameters textSummary says they put in it), and the elements of a
+// composite literal, an index, a slice or a type assertion of it. It is the
+// way safe and origin read a value, so a parameter they take as safe in a
+// closed function (closedParam) is one carried names, and each call is
+// judged for it.
+func (fs *fileScan) carried(e ast.Expr, seen map[ast.Expr]bool, c *carry) {
+	e = ast.Unparen(e)
+	if e == nil || seen[e] {
+		return
+	}
+	seen[e] = true
+	if tv, ok := fs.info.Types[e]; ok && tv.Value != nil {
+		return
+	}
+	switch x := e.(type) {
+	case *ast.Ident:
+		v, _ := fs.identVar(x)
+		if v == nil || v.IsField() {
+			return
+		}
+		if i, ok := fs.asParam(v, x); ok {
+			if i >= 0 {
+				c.params[i] = true
+			} else if sl, ok := fs.litParam(v); ok {
+				c.lits[sl] = true
+			}
+			return
+		}
+		if v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
+			return // a package's variable
+		}
+		lv := fs.varValues(v)
+		for _, a := range lv.set {
+			if a.rhs != nil && fs.reaches(lv, a, x, v) {
+				fs.carried(a.rhs, seen, c)
+			}
+		}
+	case *ast.BinaryExpr:
+		fs.carried(x.X, seen, c)
+		fs.carried(x.Y, seen, c)
+	case *ast.CallExpr:
+		if tv, ok := fs.info.Types[x.Fun]; ok && tv.IsType() {
+			for _, a := range x.Args {
+				fs.carried(a, seen, c)
+			}
+			return
+		}
+		f := calleeFunc(fs.info, x)
+		if f == nil {
+			return
+		}
+		if f.Name() == "Error" && len(x.Args) == 0 {
+			if sel, ok := ast.Unparen(x.Fun).(*ast.SelectorExpr); ok && implementsError(fs.info.TypeOf(sel.X)) {
+				fs.carried(sel.X, seen, c)
+				return
+			}
+		}
+		if isShape(f) {
+			return // a shape keeps nothing of what it is given
+		}
+		switch pkg := funcPkg(f); {
+		case pkg == "fmt" && (strings.HasPrefix(f.Name(), "Fprint") || strings.HasPrefix(f.Name(), "Print")):
+			// What it returns is a count and the writer's error, which
+			// holds nothing it was given to write.
+		case pkg == "fmt", pkg == "strings", pkg == "strconv", pkg == "errors", pkg == "bytes":
+			fs.carriedFormatted(x.Args, f, seen, c)
+		case strings.HasPrefix(pkg, module):
+			if i, ok := printfWrapper(f); ok && i < len(x.Args) {
+				fs.carriedFormatted(x.Args[i:], f, seen, c)
+			}
+			idx := map[int]bool{}
+			if ok, passes := fs.s.textSummary(f); ok {
+				for i := range passes {
+					idx[i] = true
+				}
+				for v := range fs.s.textFields[f.Origin()] {
+					c.fields[v] = true
+				}
+			}
+			sig, _ := f.Type().(*types.Signature)
+			if sig != nil && sig.Results().Len() > 0 && implementsError(sig.Results().At(sig.Results().Len()-1).Type()) && fs.s.returnsSafe(f) {
+				for i := range fs.s.passes[f.Origin()] {
+					idx[i] = true
+				}
+			}
+			for i := range idx {
+				if len(x.Args) == 1 && isTuple(fs.info.TypeOf(x.Args[0])) {
+					fs.carried(x.Args[0], seen, c)
+				} else if i < len(x.Args) {
+					fs.carried(x.Args[i], seen, c)
+				}
+			}
+		}
+	case *ast.CompositeLit:
+		for _, el := range x.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				el = kv.Value
+			}
+			fs.carried(el, seen, c)
+		}
+	case *ast.UnaryExpr:
+		fs.carried(x.X, seen, c)
+	case *ast.StarExpr:
+		fs.carried(x.X, seen, c)
+	case *ast.TypeAssertExpr:
+		fs.carried(x.X, seen, c)
+	case *ast.IndexExpr:
+		fs.carried(x.X, seen, c)
+	case *ast.SliceExpr:
+		fs.carried(x.X, seen, c)
+	case *ast.SelectorExpr:
+		if v := fs.fieldVar(x); v != nil {
+			c.fields[v] = true
+		}
+	}
+}
+
+// carriedFormatted is carried of each of args, the arguments of f, fmt's or
+// a printf wrapper's of keploy's (args[0] its format then): a value a format
+// writes by its %T is its type, and carries nothing of what it is.
+func (fs *fileScan) carriedFormatted(args []ast.Expr, f *types.Func, seen map[ast.Expr]bool, c *carry) {
+	var verbs []rune
+	if len(args) > 0 && formatting(f) {
+		verbs = formatVerbs(fs.info, args[0])
+	}
+	for i, a := range args {
+		if verbs != nil && i > 0 && i-1 < len(verbs) && verbs[i-1] == 'T' {
+			continue
+		}
+		fs.carried(a, seen, c)
+	}
+}
+
+// formatting: f formats its later arguments by its first, a format: fmt's
+// Sprintf and Errorf, or a printf wrapper of keploy's from its format on.
+func formatting(f *types.Func) bool {
+	if _, ok := printfWrapper(f); ok {
+		return true
+	}
+	return funcPkg(f) == "fmt" && (f.Name() == "Sprintf" || f.Name() == "Errorf")
+}
+
+// fieldVar is the string field of a struct that sel reads, or nil: one of a
+// type that cannot hold an application's text (an enum) is none.
+func (fs *fileScan) fieldVar(sel *ast.SelectorExpr) *types.Var {
+	v, ok := fs.info.Uses[sel.Sel].(*types.Var)
+	if !ok || !v.IsField() || !isString(v.Type()) || safeType(v.Type()) {
+		return nil
+	}
+	return v.Origin()
+}
+
+// implsOf are keploy's implementations of m, an interface's method, which a
+// call of it may reach (a test's stand-in is none).
+func (s *scanner) implsOf(m *types.Func) []*types.Func {
+	m = m.Origin()
+	if out, ok := s.impls[m]; ok {
+		return out
+	}
+	var out []*types.Func
+	sig, _ := m.Type().(*types.Signature)
+	var iface *types.Interface
+	if sig != nil && sig.Recv() != nil {
+		iface, _ = sig.Recv().Type().Underlying().(*types.Interface)
+	}
+	if iface != nil {
+		for _, n := range s.named {
+			if testDouble(n) {
+				continue
+			}
+			var impl types.Type
+			switch {
+			case types.Implements(n, iface):
+				impl = n
+			case types.Implements(types.NewPointer(n), iface):
+				impl = types.NewPointer(n)
+			default:
+				continue
+			}
+			obj, _, _ := types.LookupFieldOrMethod(impl, false, m.Pkg(), m.Name())
+			if f, ok := obj.(*types.Func); ok {
+				out = append(out, f.Origin())
+			}
+		}
+	}
+	s.impls[m] = out
+	return out
+}
+
+// isIfaceMethod: f is an interface's method.
+func isIfaceMethod(f *types.Func) bool {
+	sig, _ := f.Type().(*types.Signature)
+	return sig != nil && sig.Recv() != nil && types.IsInterface(sig.Recv().Type())
+}
+
+// calleeSinks are the parameters f logs (sinks), keploy's: an interface's
+// method logs what any of keploy's implementations of it does.
+func (s *scanner) calleeSinks(f *types.Func) map[int]sinkMask {
+	f = f.Origin()
+	if !isIfaceMethod(f) {
+		return s.sinks[f]
+	}
+	if !s.methodSinks[f.Name()] {
+		return nil // no method of that name logs a parameter
+	}
+	out := map[int]sinkMask{}
+	for _, im := range s.implsOf(f) {
+		for i, m := range s.sinks[im] {
+			out[i] |= m
+		}
+	}
+	return out
+}
+
+// judge is a value that reaches a line as m says, at at, by what (a call's
+// argument for a parameter its function logs, or a write of a field a line
+// logs).
+func (fs *fileScan) judge(m sinkMask, at ast.Node, what string, a ast.Expr) {
+	switch {
+	case m&sinkMsg != 0 && !fs.isError(a) && isString(fs.info.TypeOf(a)) && strings.HasPrefix(what, "set "):
+		// A write of a field a line's message holds: named as the write,
+		// so the allowlist can say how the value is made (constructed).
+		fs.messageAs(what, a)
+	case m&sinkMsg != 0 && !fs.isError(a) && isString(fs.info.TypeOf(a)):
+		fs.message(a)
+	case m&(sinkMsg|sinkField) != 0:
+		fs.fieldValue(at, what, a)
+	case m&sinkErrText != 0:
+		fs.errorText(what, a)
+	}
 }
 
 // explain is why each unsafe keploy function's errors are unsafe.
@@ -464,6 +1296,16 @@ func (s *scanner) explain() map[string]string {
 	out := map[string]string{}
 	for f, w := range s.why {
 		out[qualFunc(f)] = w
+	}
+	for k, v := range s.sinkVia {
+		out["sink "+k] = v
+	}
+	for v, at := range s.fieldAt {
+		name := v.Name()
+		if v.Pkg() != nil {
+			name = strings.TrimPrefix(v.Pkg().Path(), module+"/") + "." + name
+		}
+		out["field "+name] = "logged at " + at
 	}
 	return out
 }
@@ -514,6 +1356,21 @@ type fileScan struct {
 	// following the values safe is reading, against a cycle.
 	assigns   map[*types.Var]localValues
 	following map[ast.Expr]bool
+	// cur is the declaration the scan reads (walkDecl), and sinkDepth says
+	// it is judging a value a line logs, where a parameter of a closed
+	// function is its callers' to judge (closedParam).
+	cur       declRef
+	sinkDepth int
+	lits      map[*ast.FuncLit]*types.Var // boundLits, of the declaration the scan reads
+	// via is the sink a value is judged for (judge): a parameter of a
+	// function, or a field, which an earlier line logs; for the scan's
+	// debugging (sinkVia).
+	via string
+	// mask is how the value judged reaches its line (enter); readFields are
+	// the fields a text summarized (textSummary) is safe for only as their
+	// writes are judged, which its users mark (textFields).
+	mask       sinkMask
+	readFields map[*types.Var]bool
 }
 
 // localValues are the values assigned to a local variable, and whether they
@@ -533,11 +1390,15 @@ type localValues struct {
 // assigned is one value a local variable is given (rhs, nil for a zero
 // value) and the statement that gives it (at); multi: rhs is a call, one of
 // whose results it is; kills: it replaces what the variable held (not +=).
+// A parameter's own value, the one its function is given, is one too: at
+// the function's body, before its first statement, rhs the identifier that
+// declares the parameter (param).
 type assigned struct {
 	at    ast.Node
 	rhs   ast.Expr
 	multi bool
 	kills bool
+	param bool
 }
 
 func (fs *fileScan) walk(n ast.Node) {
@@ -577,9 +1438,41 @@ func (fs *fileScan) walk(n ast.Node) {
 			fs.call(x)
 		case *ast.CompositeLit:
 			fs.fieldLiteral(x)
+			fs.structLiteral(x)
+			if t := fs.info.TypeOf(x); t != nil {
+				if _, isMap := t.Underlying().(*types.Map); isMap {
+					for _, el := range x.Elts {
+						if kv, ok := el.(*ast.KeyValueExpr); ok && fs.connIDIndex(kv.Key) {
+							fs.fieldValue(kv.Value, "set "+fs.text(kv.Key), kv.Value)
+						}
+					}
+				}
+			}
+			if fs.isFieldList(x) {
+				fs.namedSiblings(x.Elts)
+			}
+		case *ast.AssignStmt:
+			fs.fieldWrites(x)
+			for j, l := range x.Lhs {
+				if ix, ok := ast.Unparen(l).(*ast.IndexExpr); ok && fs.connIDIndex(ix.Index) && len(x.Rhs) == len(x.Lhs) {
+					fs.fieldValue(x.Rhs[j], "set "+fs.text(l), x.Rhs[j])
+				}
+			}
 		}
 		return true
 	})
+}
+
+// connIDIndex: k is a constant that names keploy's connection id
+// (metadata["connID"]), which a line reads as safe: each value written
+// under it is judged as a line would judge it.
+func (fs *fileScan) connIDIndex(k ast.Expr) bool {
+	tv, ok := fs.info.Types[k]
+	if !ok || tv.Value == nil {
+		return false
+	}
+	name, err := strconv.Unquote(tv.Value.ExactString())
+	return err == nil && connIDName.MatchString(name)
 }
 
 // onGuard: cond is logcontent.On(), or a conjunction one of whose terms is.
@@ -605,7 +1498,7 @@ func (fs *fileScan) report(at ast.Node, kind, what string) {
 		return // in a branch only the switch's opt-in takes
 	}
 	pos := fs.fset.Position(at.Pos())
-	st := site{file: fs.file, line: pos.Line, col: pos.Column, kind: kind, what: what}
+	st := site{file: fs.file, line: pos.Line, col: pos.Column, kind: kind, what: what, via: fs.via}
 	fs.s.sites[fmt.Sprintf("%s:%d:%d:%s", st.file, st.line, st.col, kind)] = st
 }
 
@@ -649,11 +1542,23 @@ var encoderAdds = map[string]int{
 }
 
 func (fs *fileScan) call(call *ast.CallExpr) {
+	fs.namedSiblings(call.Args)
+	fs.fieldKeys(call)
 	f := calleeFunc(fs.info, call)
 	if f == nil {
+		fs.funcValueCall(call)
+		fs.boundLitCall(call)
 		return
 	}
 	pkg, recv := funcPkg(f), recvName(f)
+	if loggerShaped(f.Type()) && (isIfaceMethod(f) || !strings.HasPrefix(pkg, module)) && recv != "go.uber.org/zap.Logger" {
+		// A line through an interface (var d interface{ Debug(string,
+		// ...zap.Field) } = logger), or through a library's function of a
+		// logger's shape: its first argument is the line's message.
+		if len(call.Args) > 0 {
+			fs.message(call.Args[0])
+		}
+	}
 	if i, ok := printfWrapper(f); ok {
 		// A keploy function that formats its arguments into an error or a
 		// line (framingLost(format, args...)): each call is judged as
@@ -661,6 +1566,16 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		kind := kindMessage
 		if sig := f.Type().(*types.Signature); sig.Results().Len() == 1 && implementsError(sig.Results().At(0).Type()) {
 			kind = kindErrorf
+			// The words the error it makes formats its values with: its
+			// text's shape reads them (framingLost("the %s of the %s
+			// response ...")).
+			if i < len(call.Args) {
+				if tv, ok := fs.info.Types[ast.Unparen(call.Args[i])]; ok && tv.Value != nil {
+					if s, err := strconv.Unquote(tv.Value.ExactString()); err == nil && s != "" {
+						fs.s.errFormats[s] = true
+					}
+				}
+			}
 		}
 		if what, bad := fs.formatText(call.Args[i:], i < len(call.Args) && call.Ellipsis == token.NoPos); bad {
 			fs.report(call, kind, f.Name()+"("+what+")")
@@ -682,24 +1597,34 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		return nil
 	}
 	if strings.HasPrefix(pkg, module) && !(pkg == module+"/utils" && recv == "" && hasHelper(f.Name())) {
-		// A log helper of keploy's (logHelpers): what it is given is
-		// logged as it was given. Each argument is a site at its own
+		// A function of keploy's that logs a parameter (sinkParams): what
+		// it is given there is logged as it was given. The call is kept
+		// for the worklist, under its callee, or, through an interface,
+		// under the method's name. Each argument is a site at its own
 		// position: a site is kept by its position and kind, so two
 		// arguments of one call reported at the call would keep only the
 		// one the map's order gave last, a different one each run.
-		for i := range fs.s.msgParams[f.Origin()] {
-			if m := arg(i); m != nil {
-				fs.message(m)
+		ref := fs.cur
+		if ref.decl != nil {
+			callers := fs.s.callers
+			if isIfaceMethod(f) {
+				if fs.s.ifaceCallers[f.Name()] == nil {
+					fs.s.ifaceCallers[f.Name()] = map[ast.Decl]declRef{}
+				}
+				fs.s.ifaceCallers[f.Name()][ref.decl] = ref
+			} else {
+				if callers[f.Origin()] == nil {
+					callers[f.Origin()] = map[ast.Decl]declRef{}
+				}
+				callers[f.Origin()][ref.decl] = ref
 			}
 		}
-		for i := range fs.s.errParams[f.Origin()] {
-			if e := arg(i); e != nil {
-				fs.loggedError(e, f.Name(), e)
-			}
-		}
-		for i := range fs.s.fieldParams[f.Origin()] {
-			if v := arg(i); v != nil {
-				fs.fieldValue(v, f.Name(), v)
+		for i, m := range fs.s.calleeSinks(f) {
+			if a := arg(i); a != nil {
+				prev := fs.via
+				fs.via = "param " + qualFunc(f.Origin()) + "#" + strconv.Itoa(i) + "/" + strconv.Itoa(int(lowBit(m)))
+				fs.judge(m, a, f.Name(), a)
+				fs.via = prev
 			}
 		}
 	}
@@ -737,22 +1662,25 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		// a core's own line: its entry's message is the caller's
 	case pkg == "go.uber.org/zap" && recv == "go.uber.org/zap.SugaredLogger":
 		for _, a := range call.Args {
-			if !fs.safe(a) {
-				fs.report(a, kindSugar, "sugar."+f.Name()+"("+fs.text(a)+")")
-			}
+			fs.sugarArg("sugar."+f.Name(), a)
 		}
 	case pkg == "log" && (recv == "" || recv == "log.Logger") && stdLogLine(f.Name()):
 		// The standard library's logger: a line as a sugared logger's is,
 		// written to stderr, its arguments formatted into it.
 		for _, a := range call.Args {
-			if !fs.safe(a) {
-				fs.report(a, kindSugar, "log."+f.Name()+"("+fs.text(a)+")")
-			}
+			fs.sugarArg("log."+f.Name(), a)
 		}
+	case pkg == module+"/utils/logcontent" && (f.Name() == "Error" || f.Name() == "NamedError") && len(call.Args) > 0:
+		fs.overgated(call, "logcontent."+f.Name(), call.Args[len(call.Args)-1])
 	case pkg == module+"/utils" && recv == "":
 		h, ok := helpers[f.Name()]
 		if !ok {
 			return
+		}
+		if f.Name() == "LogContentError" {
+			if e := arg(1); e != nil {
+				fs.overgated(call, "utils.LogContentError", e)
+			}
 		}
 		if e := arg(h.err); e != nil {
 			fs.loggedError(call, "utils."+f.Name(), e)
@@ -760,15 +1688,231 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		if m := arg(h.msg); m != nil {
 			fs.message(m)
 		}
+	case pkg == module+"/utils/logcontent" && fingerprints[f.Name()] && len(call.Args) > 0:
+		// A field that writes a fingerprint of the text it is given, with
+		// the switch off: of an error's text, it gives the text away to
+		// whoever hashes the texts its parser can make (logcontent.Error).
+		if v := call.Args[len(call.Args)-1]; isString(fs.info.TypeOf(v)) || isBytes(fs.info.TypeOf(v)) {
+			fs.errorText("logcontent."+f.Name(), v)
+		}
+	case pkg == "context" && f.Name() == "WithValue" && len(call.Args) == 3 && connIDKey(call.Args[1]):
+		// The connection id a line reads from a context as safe
+		// (ctx.Value(models.ClientConnectionIDKey).(string)) is what each
+		// WithValue under its key puts there.
+		fs.fieldValue(call.Args[2], "context.WithValue", call.Args[2])
+	case pkg == "fmt" && (f.Name() == "Print" || f.Name() == "Printf" || f.Name() == "Println"):
+		fs.printArgs(kindPrint, "fmt."+f.Name(), call.Args, f.Name() == "Printf")
+	case pkg == "fmt" && strings.HasPrefix(f.Name(), "Fprint") && len(call.Args) > 0 && stdStream(fs.info, call.Args[0]):
+		fs.printArgs(kindPrint, "fmt."+f.Name(), call.Args[1:], f.Name() == "Fprintf")
+	case pkg == sentryPkg && sentrySinks[f.Name()]:
+		// What a crash report carries leaves the machine for Keploy's
+		// Sentry: each value it is given, a key's included.
+		fs.printArgs(kindTelemetry, "sentry."+f.Name(), call.Args, false)
 	case pkg == "fmt" && f.Name() == "Errorf":
+		fs.keepWords(call, f)
 		if what, bad := fs.errorfText(call); bad {
 			fs.report(call, kindErrorf, what)
 		}
 	case pkg == "errors" && f.Name() == "New":
+		fs.keepWords(call, f)
 		if what, bad := fs.errorsNewText(call); bad {
 			fs.report(call, kindErrorsNew, what)
 		}
 	}
+}
+
+// overgated: e, an error a line logs by its kind (logcontent.Error), has an
+// origin that carries no content: the line should log it whole, keploy's
+// own words with it. A parameter's error is its callers' (it is not safe
+// here: sinkDepth is 0), and a nil one is none.
+func (fs *fileScan) overgated(at ast.Node, ctor string, e ast.Expr) {
+	if tv, ok := fs.info.Types[ast.Unparen(e)]; ok && tv.IsNil() {
+		return
+	}
+	if !fs.isError(e) {
+		return
+	}
+	// An error a method of an exported interface returns may be another
+	// module's implementation's (enterprise's), which the scan does not
+	// read: the line keeps it by its kind.
+	prev := fs.s.strictIfaces
+	fs.s.strictIfaces = true
+	o, safe := fs.origin(e, 0)
+	fs.s.strictIfaces = prev
+	if safe {
+		fs.report(at, kindOvergated, ctor+"("+fs.text(e)+") <- "+o)
+	}
+}
+
+// sugarArg: a, an argument a sugared logger, or the standard library's,
+// formats into its line.
+func (fs *fileScan) sugarArg(what string, a ast.Expr) {
+	defer fs.enter(sinkField)()
+	fs.sinkParams(sinkField, a)
+	if !fs.safe(a) {
+		fs.report(a, kindSugar, what+"("+fs.text(a)+")")
+	}
+}
+
+// sentryPkg is the crash reporter's package, and sentrySinks its functions
+// and methods (a Scope's, a Hub's) whose arguments a report carries.
+const sentryPkg = "github.com/getsentry/sentry-go"
+
+var sentrySinks = map[string]bool{
+	"CaptureException": true, "CaptureMessage": true, "CaptureEvent": true, "AddBreadcrumb": true,
+	"SetExtra": true, "SetExtras": true, "SetTag": true, "SetTags": true, "SetContext": true, "SetContexts": true,
+	"SetUser": true, "SetFingerprint": true, "SetTransaction": true, "SetRequest": true, "SetRequestBody": true,
+}
+
+// stdStream: e is os.Stdout or os.Stderr.
+func stdStream(info *types.Info, e ast.Expr) bool {
+	v := tableVar(info, e)
+	return v != nil && v.Pkg().Path() == "os" && (v.Name() == "Stdout" || v.Name() == "Stderr")
+}
+
+// printArgs: args, the values a print to stdout or stderr, or a crash
+// report, carries (kind), formatted by args[0] when formatted: each is judged
+// as a field's value is, an error by its origin, a value a format writes by
+// its %T as safe.
+func (fs *fileScan) printArgs(kind, what string, args []ast.Expr, formatted bool) {
+	var verbs []rune
+	if formatted && len(args) > 0 {
+		verbs = formatVerbs(fs.info, args[0])
+	}
+	for i, a := range args {
+		if formatted && i > 0 && i-1 < len(verbs) && verbs[i-1] == 'T' {
+			continue
+		}
+		if t := fs.info.TypeOf(a); t != nil {
+			if _, isFunc := t.Underlying().(*types.Signature); isFunc {
+				continue // a callback, which is read where it is written
+			}
+		}
+		fs.printArg(kind, what, a)
+	}
+}
+
+func (fs *fileScan) printArg(kind, what string, a ast.Expr) {
+	// Judged where it is printed, and not where what it is made of is
+	// written: a print is a command's own output (a run's summary, the
+	// mock-mismatch report keploy prints after a run, whose content the
+	// report's gate decides where the report is built), which a site's
+	// reason vouches for as a line's own value. So a parameter it prints
+	// is a site at the print, whoever calls its function.
+	if fs.isError(a) {
+		fs.loggedError(a, what, a)
+		return
+	}
+	if fs.safe(a) {
+		return
+	}
+	if fs.reportErrorParts(what, a, nil) && fs.errSafe(a) {
+		return
+	}
+	fs.report(a, kind, what+"("+fs.text(a)+")")
+}
+
+// fingerprints are logcontent's fields that write, with the switch off, a
+// fingerprint of the text they are given (String's "fp"): the value is
+// their last argument.
+var fingerprints = map[string]bool{"String": true, "NamedString": true, "Bytes": true, "Binary": true, "Any": true}
+
+// isBytes: t is a []byte.
+func isBytes(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	sl, ok := t.Underlying().(*types.Slice)
+	return ok && textElem(sl.Elem())
+}
+
+// funcValueCall: a call of a function value whose type is a *zap.Logger
+// method's, func(msg string, fields ...zap.Field), as log := logger.Debug;
+// log(msg) is, or p.mismatchLog()(msg): its first argument is a line's
+// message. The fields are built where they are, as any field is.
+func (fs *fileScan) funcValueCall(call *ast.CallExpr) {
+	tv, ok := fs.info.Types[call.Fun]
+	if !ok || tv.IsType() || tv.IsBuiltin() || len(call.Args) == 0 {
+		return
+	}
+	if loggerShaped(tv.Type) {
+		fs.message(call.Args[0])
+	}
+}
+
+// fieldKeys: call builds a field, or writes one through an encoder, and its
+// key is a text the line writes as it is, whatever the switch says, as it
+// writes a message: zap's and logcontent's field constructors and a zapcore
+// encoder's methods, whose first parameter is the field's key, and a
+// logger's Named, whose name every line of the logger it makes carries. A key
+// that is not safe is a site of its own, as the field's value would be.
+func (fs *fileScan) fieldKeys(call *ast.CallExpr) {
+	f := calleeFunc(fs.info, call)
+	if f == nil || len(call.Args) == 0 {
+		return
+	}
+	pkg, recv := funcPkg(f), recvName(f)
+	switch {
+	case (pkg == "go.uber.org/zap" || pkg == module+"/utils/logcontent" || pkg == module+"/utils/logcontent/logurl") && recv == "":
+	case pkg == "go.uber.org/zap/zapcore" && strings.HasSuffix(recv, "Encoder"):
+	case (pkg == "go.uber.org/zap") && (recv == "go.uber.org/zap.Logger" || recv == "go.uber.org/zap.SugaredLogger") && f.Name() == "Named":
+		fs.message(call.Args[0]) // the name heads each of the logger's lines, as a message does
+		return
+	default:
+		return
+	}
+	sig, _ := f.Type().(*types.Signature)
+	if sig == nil || sig.Params().Len() == 0 || sig.Params().At(0).Name() != "key" || !isString(sig.Params().At(0).Type()) {
+		return
+	}
+	fs.keyValue(call.Args[0], strings.TrimPrefix(strings.TrimPrefix(pkg, module+"/utils/"), "go.uber.org/")+"."+f.Name())
+}
+
+// keyValue: k, a field's key or a logger's name, which a line writes as it
+// is.
+func (fs *fileScan) keyValue(k ast.Expr, ctor string) {
+	defer fs.enter(sinkField)()
+	fs.sinkParams(sinkField, k)
+	if fs.safe(k) {
+		return
+	}
+	if fs.reportErrorParts("key of "+ctor, k, nil) && fs.errSafe(k) {
+		return
+	}
+	fs.report(k, kindField, "key of "+ctor+"("+fs.text(k)+")")
+}
+
+// boundLitCall: a call of a closure bound to a local variable that is only
+// ever called (boundLits): each argument it gives a parameter the closure
+// logs (litSinks) is judged as the closure's line would judge it.
+func (fs *fileScan) boundLitCall(call *ast.CallExpr) {
+	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok {
+		return
+	}
+	v, ok := fs.info.Uses[id].(*types.Var)
+	if !ok {
+		return
+	}
+	for i, m := range fs.s.litSinks[v] {
+		if i < len(call.Args) && call.Ellipsis == token.NoPos {
+			prev := fs.via
+			fs.via = "closure " + v.Name() + "#" + strconv.Itoa(i) + "@" + fs.file + "/" + strconv.Itoa(int(lowBit(m)))
+			fs.judge(m, call.Args[i], id.Name, call.Args[i])
+			fs.via = prev
+		}
+	}
+}
+
+// loggerShaped: t is a *zap.Logger line's signature, func(msg string,
+// fields ...zap.Field).
+func loggerShaped(t types.Type) bool {
+	sig, ok := t.Underlying().(*types.Signature)
+	if !ok || !sig.Variadic() || sig.Params().Len() != 2 || !isString(sig.Params().At(0).Type()) {
+		return false
+	}
+	sl, ok := sig.Params().At(1).Type().(*types.Slice)
+	return ok && isNamed(sl.Elem(), "go.uber.org/zap/zapcore", "Field")
 }
 
 // stdLogLine: name is a method of the standard library's log package that
@@ -933,22 +2077,170 @@ func (fs *fileScan) fieldLiteral(lit *ast.CompositeLit) {
 		if !ok {
 			continue
 		}
-		if k, ok := kv.Key.(*ast.Ident); ok && (k.Name == "String" || k.Name == "Interface") && !fs.safe(kv.Value) {
-			fs.report(kv.Value, kindField, "zapcore.Field{"+k.Name+": "+fs.text(kv.Value)+"}")
+		if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Key" {
+			fs.keyValue(kv.Value, "zapcore.Field")
+			continue
 		}
+		if k, ok := kv.Key.(*ast.Ident); ok && (k.Name == "String" || k.Name == "Interface") {
+			leave := fs.enter(sinkField)
+			fs.sinkParams(sinkField, kv.Value)
+			if !fs.safe(kv.Value) {
+				fs.report(kv.Value, kindField, "zapcore.Field{"+k.Name+": "+fs.text(kv.Value)+"}")
+			}
+			leave()
+		}
+	}
+}
+
+// fieldWrites: the writes x makes of string fields (fieldVar), each a
+// fieldWrite.
+func (fs *fileScan) fieldWrites(x *ast.AssignStmt) {
+	for j, l := range x.Lhs {
+		sel, ok := ast.Unparen(l).(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		v := fs.fieldVar(sel)
+		if v == nil {
+			continue
+		}
+		switch {
+		case len(x.Rhs) == len(x.Lhs):
+			fs.fieldWrite(v, x.Rhs[j], "set "+fs.text(sel))
+		case len(x.Rhs) == 1: // d.Reason, ok = m[k]: the value the call gives it
+			fs.fieldWrite(v, x.Rhs[0], "set "+fs.text(sel))
+		}
+	}
+}
+
+// structLiteral: the string fields a struct's literal writes (fieldVar), by
+// key or by position, each a fieldWrite.
+func (fs *fileScan) structLiteral(lit *ast.CompositeLit) {
+	t := fs.info.TypeOf(lit)
+	if t == nil {
+		return
+	}
+	st, ok := t.Underlying().(*types.Struct)
+	if !ok {
+		return
+	}
+	name := types.TypeString(t, func(p *types.Package) string { return strings.TrimPrefix(p.Path(), module+"/") })
+	for i, el := range lit.Elts {
+		var v *types.Var
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			if id, ok := kv.Key.(*ast.Ident); ok {
+				v, _ = fs.info.Uses[id].(*types.Var)
+			}
+			el = kv.Value
+		} else if i < st.NumFields() {
+			v = st.Field(i)
+		}
+		if v == nil || !v.IsField() || !isString(v.Type()) || safeType(v.Type()) {
+			continue
+		}
+		fs.fieldWrite(v.Origin(), el, "set "+name+"."+v.Name())
+	}
+}
+
+// fieldWrite: rhs, written to the string field v by what. It is kept under
+// v, by the declaration it is in, for the worklist; and when a line logs v
+// (sinkFields), it is judged as that line would judge it.
+func (fs *fileScan) fieldWrite(v *types.Var, rhs ast.Expr, what string) {
+	if fs.cur.decl != nil {
+		if fs.s.writers[v] == nil {
+			fs.s.writers[v] = map[ast.Decl]declRef{}
+		}
+		fs.s.writers[v][fs.cur.decl] = fs.cur
+	}
+	if m := fs.s.sinkFields[v]; m != 0 {
+		prev := fs.via
+		fs.via = "field " + fs.fieldKey(v) + "/" + strconv.Itoa(int(lowBit(m)))
+		fs.judge(m, rhs, what, rhs)
+		fs.via = prev
+	}
+}
+
+// isFieldList: lit is a []zap.Field literal, the fields of one line.
+func (fs *fileScan) isFieldList(lit *ast.CompositeLit) bool {
+	t := fs.info.TypeOf(lit)
+	if t == nil {
+		return false
+	}
+	sl, ok := t.Underlying().(*types.Slice)
+	return ok && isNamed(sl.Elem(), "go.uber.org/zap/zapcore", "Field")
+}
+
+// namingKeys are the keys of a field that names the value another field of
+// its line holds: a variable's, a parameter's, a header's, a placeholder's.
+var namingKeys = map[string]bool{
+	"name": true, "key": true, "variable": true, "var": true, "param": true, "parameter": true,
+	"header": true, "placeholder": true, "field": true, "cookie": true, "query param": true,
+	"header name": true, "param name": true, "variable name": true, "field name": true, "key name": true,
+}
+
+// namedSiblings: among one line's fields (a call's arguments, a []zap.Field
+// literal's elements), a field whose key names another's value (namingKeys)
+// beside a logcontent field that fingerprints a value (fingerprints): the
+// value is the one that field names, and logcontent.NamedString logs it by
+// its length alone when the name is a credential's (a variable called
+// resetToken, a parameter called pin), where String, which reads only its
+// own key ("value"), fingerprints it, and a short secret is found from its
+// fingerprint. Each such value is a site.
+func (fs *fileScan) namedSiblings(args []ast.Expr) {
+	named := ""
+	var values []*ast.CallExpr
+	for _, a := range args {
+		c, ok := ast.Unparen(a).(*ast.CallExpr)
+		if !ok || len(c.Args) < 2 {
+			continue
+		}
+		f := calleeFunc(fs.info, c)
+		if f == nil || recvName(f) != "" {
+			continue
+		}
+		pkg := funcPkg(f)
+		if pkg != "go.uber.org/zap" && pkg != module+"/utils/logcontent" {
+			continue
+		}
+		if pkg == module+"/utils/logcontent" && fingerprints[f.Name()] && f.Name() != "NamedString" {
+			// Any fingerprints a string's or a []byte's value alone: of
+			// another, it logs the type.
+			t := fs.info.TypeOf(c.Args[len(c.Args)-1])
+			if f.Name() != "Any" || t == nil || isString(t) || isBytes(t) || types.IsInterface(t) {
+				values = append(values, c)
+			}
+			continue
+		}
+		if tv, ok := fs.info.Types[c.Args[0]]; ok && tv.Value != nil {
+			if k, err := strconv.Unquote(tv.Value.ExactString()); err == nil && namingKeys[strings.ToLower(k)] {
+				named = k
+			}
+		}
+	}
+	if named == "" {
+		return
+	}
+	for _, c := range values {
+		fs.report(c, kindField, fs.text(c.Fun)+"("+fs.text(c.Args[len(c.Args)-1])+") named by "+strconv.Quote(named))
 	}
 }
 
 // fieldValue: v, the value of a field ctor builds.
 func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
-	if fs.helperParam(fs.s.fieldParams, v) {
-		return // the helper's callers are judged by what they give it
+	if (marshalerCtors[ctor] && fs.ownMarshaler(v)) || (stringerCtors[ctor] && fs.stringerSafe(fs.info.TypeOf(v))) {
+		// What it writes is read where it writes it: its encoder's
+		// calls, or its String's returns.
+		return
+	}
+	defer fs.enter(sinkField)()
+	if !fs.s.constructed[fs.file+" | "+kindField+" | "+ctor+"("+fs.text(v)+")"] {
+		fs.sinkParams(sinkField, v)
 	}
 	if fs.isError(v) {
 		fs.loggedError(at, ctor, v)
 		return
 	}
-	if fs.safe(v) || fs.ownMarshaler(v) {
+	if fs.safe(v) {
 		return
 	}
 	// An error's text in the value is the error; the value is a site of
@@ -960,8 +2252,22 @@ func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
 }
 
 // message: a log line's message.
-func (fs *fileScan) message(m ast.Expr) {
-	if fs.safe(m) || fs.helperParam(fs.s.msgParams, m) {
+func (fs *fileScan) message(m ast.Expr) { fs.messageAs("", m) }
+
+// messageAs is message, of a value a write by label puts in a field a line's
+// message holds ("" for the line's own message): the site is named label(m),
+// and one the allowlist lists as constructed is not judged by what it is made
+// from.
+func (fs *fileScan) messageAs(label string, m ast.Expr) {
+	defer fs.enter(sinkMsg)()
+	what := fs.text(m)
+	if label != "" {
+		what = label + "(" + what + ")"
+	}
+	if !fs.s.constructed[fs.file+" | "+kindMessage+" | "+what] {
+		fs.sinkParams(sinkMsg, m)
+	}
+	if fs.safe(m) {
 		return
 	}
 	// A message that holds an error's text logs the error.
@@ -982,7 +2288,19 @@ func (fs *fileScan) message(m ast.Expr) {
 	if fs.reportErrorParts("message", m, errPart) && fs.errSafe(m) {
 		return
 	}
-	fs.report(m, kindMessage, fs.text(m))
+	fs.report(m, kindMessage, what)
+}
+
+// errorText: v, the value of a logcontent field that fingerprints what it is
+// given (fingerprints): the text of each error it is made of is logged as a
+// fingerprint, which whoever hashes the texts the error's origin can make
+// reads back, so it is logged whole as far as the guard is concerned, and
+// reported by its origin as such (reportErrorParts). What else it holds is
+// the gate's to write.
+func (fs *fileScan) errorText(what string, v ast.Expr) {
+	defer fs.enter(sinkErrText)()
+	fs.sinkParams(sinkErrText, v)
+	fs.reportErrorParts(what, v, nil)
 }
 
 // reportErrorParts reports each error whose text v is made of (taint) but
@@ -1128,6 +2446,16 @@ func (fs *fileScan) varValues(v *types.Var) localValues {
 	if lv.body == nil {
 		return lv
 	}
+	if ftype.Params != nil {
+		for _, fl := range ftype.Params.List {
+			for _, n := range fl.Names {
+				if fs.info.Defs[n] == v {
+					lv.declared = true
+					lv.set = append(lv.set, assigned{at: lv.body, rhs: n, kills: true, param: true})
+				}
+			}
+		}
+	}
 	if ftype.Results != nil {
 		for _, fl := range ftype.Results.List {
 			for _, n := range fl.Names {
@@ -1174,6 +2502,10 @@ func (fs *fileScan) varValues(v *types.Var) localValues {
 					lv.opaque = "assigned by " + st.Tok.String()
 				case len(st.Rhs) == len(st.Lhs):
 					lv.set = append(lv.set, assigned{at: st, rhs: st.Rhs[j], kills: st.Tok != token.ADD_ASSIGN})
+				case len(st.Rhs) == 1 && j == 0 && commaOK(st.Rhs[0]):
+					// v, ok := x.(T), m[k] or <-c: v is what the
+					// expression is, or its zero value
+					lv.set = append(lv.set, assigned{at: st, rhs: st.Rhs[0], kills: true})
 				case len(st.Rhs) == 1:
 					lv.set = append(lv.set, assigned{at: st, rhs: st.Rhs[0], multi: true, kills: true}) // v, err := f()
 				}
@@ -1189,6 +2521,8 @@ func (fs *fileScan) varValues(v *types.Var) localValues {
 					lv.set = append(lv.set, assigned{at: st, kills: true}) // its zero value
 				case len(st.Values) == len(st.Names):
 					lv.set = append(lv.set, assigned{at: st, rhs: st.Values[j], kills: true})
+				case j == 0 && commaOK(st.Values[0]):
+					lv.set = append(lv.set, assigned{at: st, rhs: st.Values[0], kills: true})
 				default:
 					lv.set = append(lv.set, assigned{at: st, rhs: st.Values[0], multi: true, kills: true})
 				}
@@ -1205,6 +2539,18 @@ func (fs *fileScan) varValues(v *types.Var) localValues {
 		return true
 	})
 	return lv
+}
+
+// commaOK: e is a type assertion, a map's index or a channel's receive, whose
+// first value in a comma-ok assignment is what e is.
+func commaOK(e ast.Expr) bool {
+	switch x := ast.Unparen(e).(type) {
+	case *ast.TypeAssertExpr, *ast.IndexExpr:
+		return true
+	case *ast.UnaryExpr:
+		return x.Op == token.ARROW
+	}
+	return false
 }
 
 // localAssigns are the values assigned to v, a local variable of a string
@@ -1582,9 +2928,11 @@ func (fs *fileScan) localSafe(v *types.Var, use *ast.Ident) bool {
 
 // loggedError: e, an error (or its text), logged whole by what at at.
 func (fs *fileScan) loggedError(at ast.Node, what string, e ast.Expr) {
-	if fs.gatedValue(e) || fs.helperParam(fs.s.errParams, e) {
+	if fs.gatedValue(e) {
 		return
 	}
+	defer fs.enter(sinkField)()
+	fs.sinkParams(sinkField, e)
 	if tv, ok := fs.info.Types[ast.Unparen(e)]; ok && tv.IsNil() {
 		return
 	}
@@ -1653,7 +3001,16 @@ func (fs *fileScan) isError(e ast.Expr) bool {
 		}
 	}
 	t := fs.info.TypeOf(e)
-	return t != nil && implementsError(t) && !safeType(t)
+	return t != nil && implementsError(t) && !numberType(t)
+}
+
+// numberType: t is a number or a boolean of any type (syscall.Errno), whose
+// value is no application's text, whatever its Error method writes of it.
+// An error type of a string's kind holds whatever text it is converted from,
+// its constants notwithstanding.
+func numberType(t types.Type) bool {
+	b, ok := t.Underlying().(*types.Basic)
+	return ok && b.Info()&(types.IsNumeric|types.IsBoolean) != 0
 }
 
 // gated: e is a value of logcontent or logurl.
@@ -1664,6 +3021,40 @@ func (fs *fileScan) gatedValue(e ast.Expr) bool {
 	}
 	f := calleeFunc(fs.info, c)
 	return f != nil && strings.HasPrefix(funcPkg(f), module+"/utils/logcontent")
+}
+
+// marshalerCtors are the fields that write a marshaler through its
+// MarshalLogObject or MarshalLogArray (ownMarshaler), where the scan reads
+// what it writes. zap.Reflect encodes a value as JSON and zap.Stringer calls
+// its String, neither of which is that: their value is judged as it is.
+var marshalerCtors = map[string]bool{
+	"zap.Object": true, "zap.Objects": true, "zap.ObjectValues": true, "zap.Array": true, "zap.Inline": true, "zap.Any": true,
+	"enc.AddObject": true, "enc.AddArray": true, "enc.AppendObject": true, "enc.AppendArray": true,
+}
+
+// stringerCtors are the fields that write a value by its String method.
+var stringerCtors = map[string]bool{"zap.Stringer": true, "zap.Stringers": true}
+
+// stringerSafe: a value of type t (or each element of a slice of them) is
+// written by a String method of keploy's that returns a safe text of its
+// receiver alone (textSummary), or t is safe itself.
+func (fs *fileScan) stringerSafe(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if sl, ok := t.Underlying().(*types.Slice); ok {
+		t = sl.Elem()
+	}
+	if safeType(t) {
+		return true
+	}
+	obj, _, _ := types.LookupFieldOrMethod(t, true, nil, "String")
+	m, ok := obj.(*types.Func)
+	if !ok || !strings.HasPrefix(funcPkg(m), module) || isIfaceMethod(m) {
+		return false
+	}
+	ok, passes := fs.s.textSummary(m)
+	return ok && len(passes) == 0
 }
 
 // ownMarshaler: v is a zap marshaler of keploy's, whose MarshalLogObject or
@@ -1702,6 +3093,21 @@ func (fs *fileScan) ownMarshaler(v ast.Expr) bool {
 // for a miss name a call by.
 var shapes = map[string]bool{"CallShape": true, "MissShape": true, "PathShape": true, "SQLShape": true, "URLShape": true}
 
+// isShape: f is one of the shapes keploy writes a value by, which keep no
+// value of an application's: pkg/models' (shapes), and templates.Shape and
+// KeyShape, a placeholder or a key of the grammar as it is and other template
+// text as {{.{}}} or {}.
+// Each holds its own test to it; what it is given is no line's to judge.
+func isShape(f *types.Func) bool {
+	switch funcPkg(f) {
+	case module + "/pkg/models":
+		return shapes[f.Name()] && recvName(f) == ""
+	case module + "/pkg/templates":
+		return (f.Name() == "Shape" || f.Name() == "KeyShape") && recvName(f) == ""
+	}
+	return false
+}
+
 // connIDName is the name of keploy's connection id, the agent's counter.
 var connIDName = regexp.MustCompile(`^(?i)(client|dest|src|server)?_?conn(ection)?_?id$`)
 
@@ -1709,7 +3115,18 @@ var connIDName = regexp.MustCompile(`^(?i)(client|dest|src|server)?_?conn(ection
 func (fs *fileScan) safe(e ast.Expr) bool {
 	e = ast.Unparen(e)
 	tv, ok := fs.info.Types[e]
-	if ok && (tv.Value != nil || tv.IsNil() || safeType(tv.Type)) {
+	if ok && (tv.Value != nil || tv.IsNil()) {
+		return true
+	}
+	if c, isCall := e.(*ast.CallExpr); isCall && len(c.Args) == 1 {
+		// A conversion is as safe as what it converts, whatever its type
+		// says: converted into an enum (models.Kind(payload)), a value
+		// is still what it was.
+		if ftv, ok := fs.info.Types[c.Fun]; ok && ftv.IsType() {
+			return fs.safe(c.Args[0])
+		}
+	}
+	if ok && safeType(tv.Type) {
 		return true
 	}
 	if fs.gatedValue(e) || fs.wrapperParam(e) {
@@ -1718,40 +3135,69 @@ func (fs *fileScan) safe(e ast.Expr) bool {
 	if fs.errOK > 0 && fs.isError(e) {
 		return true // judged by its origin, where taint found it
 	}
+	if v := tableVar(fs.info, e); v != nil && fs.s.constVars[v.Origin()] {
+		return true // a constant text of keploy's in a variable nothing writes
+	}
 	switch x := e.(type) {
 	case *ast.Ident:
-		if connIDName.MatchString(x.Name) {
-			return true
-		}
-		v, ok := fs.info.Uses[x].(*types.Var)
-		if !ok {
+		v, _ := fs.identVar(x)
+		if v == nil {
 			return false
 		}
-		if fs.summarizingText {
-			if i := fs.summarizedParam(v); i >= 0 && !reassigned(fs.info, fs.funcs[0], v) {
+		if i, ok := fs.asParam(v, x); ok {
+			if fs.summarizingText && i >= 0 && fs.summarizedParam(v) == i {
 				fs.passed[i] = true // its callers' to judge
 				return true
 			}
+			return fs.closedParam(v, x)
 		}
 		return fs.localSafe(v, x)
 	case *ast.SelectorExpr:
-		return connIDName.MatchString(x.Sel.Name)
-	case *ast.TypeAssertExpr: // ctx.Value(models.ClientConnectionIDKey).(string)
-		if c, ok := ast.Unparen(x.X).(*ast.CallExpr); ok && len(c.Args) == 1 {
-			if f := calleeFunc(fs.info, c); f != nil && f.Name() == "Value" && recvName(f) == "context.Context" {
-				return connIDKey(c.Args[0])
-			}
+		// A struct's connection id (conn.ConnectionID), and any
+		// unexported string field whose address is never taken: every
+		// write of it the scan reads is judged (sinkFields) as the value
+		// the line logs, so what keploy's code puts in it is the agent's
+		// counter, or safe, or a site where it is put. An unexported
+		// field's writes are all keploy's, and all in its package: no
+		// decoder sets one by reflection, nor another module's code.
+		v := fs.fieldVar(x)
+		if v == nil || !(connIDName.MatchString(x.Sel.Name) || fs.s.seenWrites(v)) {
+			return false
 		}
+		if fs.summarizingText || fs.summarizing != nil {
+			// A summary's: its users mark it, as they log the text.
+			if fs.readFields == nil {
+				fs.readFields = map[*types.Var]bool{}
+			}
+			fs.readFields[v] = true
+			return true
+		}
+		if fs.gated > 0 {
+			return true // read where only the switch's opt-in logs it
+		}
+		m := fs.mask
+		if m == 0 {
+			m = sinkField // an error's text, which a line may log whole
+		}
+		fs.noteSink("field "+fs.fieldKey(v), m&^fs.s.sinkFields[v], x)
+		fs.s.markSinkField(v, m, fs.file+":"+strconv.Itoa(fs.fset.Position(x.Pos()).Line))
+		return true
+	case *ast.TypeAssertExpr: // ctx.Value(models.ClientConnectionIDKey).(string)
+		return fs.ctxConnID(x.X, 0)
 	case *ast.IndexExpr:
 		// metadata["connID"]: the connection id under its name.
-		if tv, ok := fs.info.Types[x.Index]; ok && tv.Value != nil {
-			if k, err := strconv.Unquote(tv.Value.ExactString()); err == nil && connIDName.MatchString(k) {
-				return true
-			}
+		if fs.connIDIndex(x.Index) {
+			return true // each value written under it is judged (connIDIndex)
 		}
 		// dns.TypeToString[q.Qtype]: a library's table, by a safe key.
 		if v := tableVar(fs.info, x.X); v != nil && !strings.HasPrefix(v.Pkg().Path(), module) {
 			return fs.safe(x.Index)
+		}
+		// statusToString[status]: a table of keploy's whose every value
+		// is a constant, which nothing writes (constTables), whatever the
+		// key.
+		if v := tableVar(fs.info, x.X); v != nil && fs.s.constTables[v.Origin()] {
+			return true
 		}
 	case *ast.BinaryExpr:
 		return x.Op == token.ADD && fs.safe(x.X) && fs.safe(x.Y)
@@ -1770,7 +3216,11 @@ func (fs *fileScan) safe(e ast.Expr) bool {
 			}
 		}
 		switch {
-		case pkg == "strconv" && (strings.HasPrefix(f.Name(), "Format") || strings.HasPrefix(f.Name(), "Append") || f.Name() == "Itoa"):
+		case pkg == "strconv" && (strings.HasPrefix(f.Name(), "Format") || strings.HasPrefix(f.Name(), "Append") || strings.HasPrefix(f.Name(), "Quote") || f.Name() == "Itoa"):
+			return fs.allSafe(x.Args)
+		case (pkg == "strings" || pkg == "path" || pkg == "path/filepath") && recvName(f) == "" && textResult(f):
+			// strings.TrimPrefix(s, p), filepath.Join(dir, name): a text
+			// made of its arguments' and constants of its own.
 			return fs.allSafe(x.Args)
 		case pkg == "fmt" && (f.Name() == "Sprint" || f.Name() == "Sprintln"):
 			return fs.allSafe(x.Args)
@@ -1792,8 +3242,8 @@ func (fs *fileScan) safe(e ast.Expr) bool {
 			return true
 		case pkg == "net/http" && f.Name() == "StatusText":
 			return true // a status's standard text
-		case pkg == module+"/pkg/models" && shapes[f.Name()]:
-			return true // a call's, a path's or a statement's shape, which keeps no value
+		case isShape(f):
+			return true // a call's, a path's, a statement's or a placeholder's shape, which keeps no value
 		}
 		if strings.HasPrefix(pkg, module) && isString(fs.info.TypeOf(x)) {
 			return fs.textSafe(x, f)
@@ -1809,6 +3259,26 @@ func (fs *fileScan) textSafe(c *ast.CallExpr, f *types.Func) bool {
 	ok, passes := fs.s.textSummary(f)
 	if !ok {
 		return false
+	}
+	// The fields it reads are safe as their writes are judged: a summary
+	// hands them on to its users, anything else marks them now.
+	for v := range fs.s.textFields[f.Origin()] {
+		if fs.summarizingText || fs.summarizing != nil {
+			if fs.readFields == nil {
+				fs.readFields = map[*types.Var]bool{}
+			}
+			fs.readFields[v] = true
+			continue
+		}
+		if fs.gated > 0 {
+			continue
+		}
+		m := fs.mask
+		if m == 0 {
+			m = sinkField
+		}
+		fs.noteSink("field "+fs.fieldKey(v), m&^fs.s.sinkFields[v], c)
+		fs.s.markSinkField(v, m, fs.file+":"+strconv.Itoa(fs.fset.Position(c.Pos()).Line))
 	}
 	for i := range passes {
 		a := callArg(fs.info, c, f, i)
@@ -1877,13 +3347,27 @@ func (s *scanner) computeText(f *types.Func) bool {
 	fs := &fileScan{s: s, p: d.p, info: d.p.TypesInfo, fset: d.p.Fset, file: d.file, funcs: []ast.Node{d.decl},
 		summarizing: sig, passed: map[int]bool{}, summarizingText: true}
 	safe := true
-	ast.Inspect(d.decl.Body, func(n ast.Node) bool {
+	var walk func(n ast.Node) bool
+	walk = func(n ast.Node) bool {
 		if !safe {
 			return false
 		}
 		switch r := n.(type) {
 		case *ast.FuncLit:
 			return false // a closure's returns are its own
+		case *ast.IfStmt:
+			// if logcontent.On() { return v }: what the switch's opt-in
+			// returns is the switch's to allow (valueSaid); the rest of the
+			// statement is read as any other.
+			if onGuard(fs.info, r.Cond) {
+				if r.Init != nil {
+					ast.Inspect(r.Init, walk)
+				}
+				if r.Else != nil {
+					ast.Inspect(r.Else, walk)
+				}
+				return false
+			}
 		case *ast.ReturnStmt:
 			if len(r.Results) != 1 || !fs.errSafe(r.Results[0]) {
 				safe = false // a bare return of a named result, or a value that is not safe
@@ -1893,11 +3377,51 @@ func (s *scanner) computeText(f *types.Func) bool {
 			return false
 		}
 		return true
-	})
+	}
+	ast.Inspect(d.decl.Body, walk)
 	if safe && len(fs.passed) > 0 {
 		s.textPasses[f] = fs.passed
 	}
+	if safe && len(fs.readFields) > 0 {
+		s.textFields[f] = fs.readFields
+	}
 	return safe
+}
+
+// ctxConnID: e is a context's value under keploy's connection id's key
+// (ctx.Value(models.ClientConnectionIDKey)), which every WithValue under the
+// key the scan reads is judged for, or a local every value of which that
+// reaches e is one.
+func (fs *fileScan) ctxConnID(e ast.Expr, depth int) bool {
+	switch x := ast.Unparen(e).(type) {
+	case *ast.CallExpr:
+		if len(x.Args) == 1 {
+			if f := calleeFunc(fs.info, x); f != nil && f.Name() == "Value" && recvName(f) == "context.Context" {
+				return connIDKey(x.Args[0])
+			}
+		}
+	case *ast.Ident:
+		v, ok := fs.info.Uses[x].(*types.Var)
+		if !ok || depth > 4 {
+			return false
+		}
+		lv := fs.varValues(v)
+		if !lv.declared || lv.opaque != "" {
+			return false
+		}
+		n := 0
+		for _, a := range lv.set {
+			if !fs.reaches(lv, a, x, v) {
+				continue
+			}
+			if a.rhs == nil || a.multi || a.param || !fs.ctxConnID(a.rhs, depth+1) {
+				return false
+			}
+			n++
+		}
+		return n > 0
+	}
+	return false
 }
 
 // connIDKey: k names a context's connection id (models.ClientConnectionIDKey).
@@ -1980,7 +3504,7 @@ var safeOrigins = map[string]bool{
 	"os": true, "os/exec": true, "os/signal": true, "os/user": true, "io/fs": true, "path/filepath": true,
 	"syscall": true, "golang.org/x/sys/unix": true, "golang.org/x/sys/windows": true,
 	"net":     true, // sockets: *net.OpError names the op, the addresses and an errno
-	"context": true, "time": true, "runtime": true, "runtime/debug": true,
+	"context": true, "runtime": true, "runtime/debug": true,
 	"github.com/cilium/ebpf": true, "github.com/cilium/ebpf/link": true, "github.com/cilium/ebpf/ringbuf": true,
 	"github.com/cilium/ebpf/perf": true, "github.com/cilium/ebpf/rlimit": true, "github.com/cilium/ebpf/features": true,
 }
@@ -2012,6 +3536,19 @@ var safeOriginFuncs = map[string]bool{
 	"gopkg.in/yaml.v3.Node.Encode": true,
 	"net/http.Request.Write":       true, "net/http.Response.Write": true, "net/http.ResponseWriter.Write": true,
 	"net/http.Server.Shutdown": true, "net/http.Server.Close": true,
+	// A print's error is its writer's.
+	"fmt.Fprint": true, "fmt.Fprintf": true, "fmt.Fprintln": true, "fmt.Print": true, "fmt.Printf": true, "fmt.Println": true,
+}
+
+// netParses are net's functions that read a text they are given (a host and
+// a port, an address, a name to look up), whose errors quote it: unlike a
+// socket's, their errors are as safe as that text, which the scan does not
+// follow, so they are sites where they are logged.
+var netParses = map[string]bool{
+	"SplitHostPort": true, "ParseCIDR": true, "ParseMAC": true,
+	"ResolveTCPAddr": true, "ResolveUDPAddr": true, "ResolveIPAddr": true, "ResolveUnixAddr": true,
+	"LookupHost": true, "LookupIP": true, "LookupAddr": true, "LookupCNAME": true, "LookupMX": true,
+	"LookupNS": true, "LookupTXT": true, "LookupSRV": true, "LookupPort": true, "LookupNetIP": true,
 }
 
 // safeOriginTypes are the interfaces whose methods' errors are I/O's:
@@ -2032,6 +3569,9 @@ func (fs *fileScan) origin(e ast.Expr, depth int) (string, bool) {
 	if tv, ok := fs.info.Types[e]; ok && tv.IsNil() {
 		return "nil", true // err = nil: no error, and no text
 	}
+	if tv, ok := fs.info.Types[e]; ok && tv.Value != nil {
+		return "const " + fs.text(e), true // an error type's constant: its text is the constant
+	}
 	if depth > 4 {
 		return "?", false
 	}
@@ -2048,8 +3588,8 @@ func (fs *fileScan) origin(e ast.Expr, depth int) (string, bool) {
 		}
 		return fs.callOrigin(x, f, depth)
 	case *ast.Ident:
-		v, ok := fs.info.Uses[x].(*types.Var)
-		if !ok {
+		v, _ := fs.identVar(x)
+		if v == nil {
 			return "?", false
 		}
 		if o, safe, ok := fs.packageVar(v, depth); ok {
@@ -2187,6 +3727,11 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 	case pkg == "context" && (f.Name() == "Cause"):
 		return name, true
 	}
+	if pkg == "net" && (netParses[f.Name()] || recvName(f) == "net.Resolver") {
+		// net.SplitHostPort(s), net.ResolveTCPAddr("tcp", s): the error
+		// quotes the text it could not read, whatever it was given.
+		return name, false
+	}
 	if safeOriginFuncs[pkg+"."+f.Name()] && recvName(f) == "" {
 		return name, true
 	}
@@ -2245,20 +3790,48 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 // safe, so that its other returns decide.
 func (s *scanner) returnsSafe(f *types.Func) bool {
 	f = f.Origin()
-	if v, ok := s.safe[f]; ok {
+	cache := s.safe
+	if s.strictIfaces {
+		cache = s.safeStrict
+	}
+	if v, ok := cache[f]; ok {
 		return v >= 0
 	}
-	s.safe[f] = 0 // in progress
+	cache[f] = 0 // in progress
 	ok := s.computeSafe(f)
 	if !ok && s.why != nil && s.why[f] == "" {
 		s.why[f] = "?"
 	}
 	if ok {
-		s.safe[f] = 1
+		cache[f] = 1
 	} else {
-		s.safe[f] = -1
+		cache[f] = -1
 	}
 	return ok
+}
+
+// openIface: m is a method of an exported interface of keploy's whose
+// methods are all exported, which a module the scan does not read
+// (enterprise's) may implement, with errors of its own.
+func openIface(m *types.Func) bool {
+	sig, _ := m.Type().(*types.Signature)
+	if sig == nil || sig.Recv() == nil {
+		return false
+	}
+	n, ok := types.Unalias(sig.Recv().Type()).(*types.Named)
+	if !ok || !n.Obj().Exported() {
+		return false
+	}
+	it, ok := n.Underlying().(*types.Interface)
+	if !ok {
+		return false
+	}
+	for i := 0; i < it.NumMethods(); i++ {
+		if !it.Method(i).Exported() {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *scanner) computeSafe(f *types.Func) bool {
@@ -2267,6 +3840,10 @@ func (s *scanner) computeSafe(f *types.Func) bool {
 		return false
 	}
 	if recv := sig.Recv(); recv != nil && types.IsInterface(recv.Type()) {
+		if s.strictIfaces && openIface(f) {
+			s.why[f] = "an exported interface another module may implement"
+			return false
+		}
 		iface, _ := recv.Type().Underlying().(*types.Interface)
 		if iface == nil {
 			return false
@@ -2407,32 +3984,17 @@ func (fs *fileScan) namedResultOrigin(use *ast.Ident, v *types.Var) (string, boo
 
 // localOrigin follows v, a local variable or a parameter, to every value
 // assigned to it that can reach use (varValues, reaches): each must have a
-// safe origin, and the first that does not is named. A parameter is its
-// callers' to judge only while its function is summarized (returnsSafe).
+// safe origin, and the first that does not is named. A parameter, as its
+// function is given it (asParam), is its callers' to judge while its
+// function is summarized (returnsSafe), and in a value a line logs when its
+// function is closed (closedParam).
 func (fs *fileScan) localOrigin(use *ast.Ident, v *types.Var, depth int) (string, bool) {
-	for i := len(fs.funcs) - 1; i >= 0; i-- {
-		fn := fs.funcs[i]
-		var ftype *ast.FuncType
-		switch f := fn.(type) {
-		case *ast.FuncDecl:
-			ftype = f.Type
-		case *ast.FuncLit:
-			ftype = f.Type
+	if i, ok := fs.asParam(v, use); ok {
+		if i >= 0 && fs.summarizing != nil && fs.summarizedParam(v) == i {
+			fs.passed[i] = true
+			return "param " + v.Name(), true
 		}
-		if ftype.Params == nil {
-			continue
-		}
-		for _, fl := range ftype.Params.List {
-			for _, n := range fl.Names {
-				if fs.info.Defs[n] == v {
-					if i := fs.summarizedParam(v); i >= 0 && !reassigned(fs.info, fn, v) {
-						fs.passed[i] = true
-						return "param " + n.Name, true
-					}
-					return "param " + n.Name, false
-				}
-			}
-		}
+		return "param " + v.Name(), fs.closedParam(v, use)
 	}
 	lv := fs.varValues(v)
 	if !lv.declared {
@@ -2666,6 +4228,26 @@ func safeType(t types.Type) bool {
 		return hasConsts(n)
 	}
 	return false
+}
+
+// textResult: f's results are texts, a string or a []string, or a string and
+// a boolean (strings.CutPrefix's), and nothing else.
+func textResult(f *types.Func) bool {
+	sig, _ := f.Type().(*types.Signature)
+	if sig == nil || sig.Results().Len() == 0 {
+		return false
+	}
+	for i := 0; i < sig.Results().Len(); i++ {
+		t := sig.Results().At(i).Type()
+		if b, ok := t.Underlying().(*types.Basic); ok && b.Info()&(types.IsString|types.IsBoolean) != 0 {
+			continue
+		}
+		if sl, ok := t.Underlying().(*types.Slice); ok && isString(sl.Elem()) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // textElem: a slice or an array of t is text ([]byte, []rune).
