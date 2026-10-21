@@ -44,6 +44,7 @@ func TestEveryPrintedExampleIsACommandLineKeployAccepts(t *testing.T) {
 		examples["provider.RecordExample("+string(kind)+")"] = provider.RecordExample(kind)
 	}
 	for _, command := range []string{"record", "test"} {
+		examples["provider.NativeExample("+command+")"] = provider.NativeExample(command)
 		examples["provider.DockerExample("+command+")"] = provider.DockerExample(command)
 		examples["provider.ComposeExample("+command+")"] = provider.ComposeExample(command)
 		examples["provider.BuildDelayExample("+command+")"] = provider.BuildDelayExample(command)
@@ -84,6 +85,7 @@ func TestEveryPrintedExampleIsACommandLineKeployAccepts(t *testing.T) {
 	// `keploy ...` line, it changed shape and this test asserts nothing of it.
 	for _, source := range []string{
 		"provider.RecordExample(native)", "provider.RecordExample(docker-run)", "provider.RecordExample(docker-compose)",
+		"provider.NativeExample(record)", "provider.NativeExample(test)",
 		"provider.DockerExample(record)", "provider.DockerExample(test)",
 		"provider.ComposeExample(record)", "provider.ComposeExample(test)",
 		"provider.BuildDelayExample(record)", "provider.BuildDelayExample(test)",
@@ -147,6 +149,7 @@ func TestRecordExampleRecordsTheKindOfAppItIsShownFor(t *testing.T) {
 func TestAHintPrintedForRecordAndTestNamesTheCommandItIsFor(t *testing.T) {
 	for _, command := range []string{"record", "test"} {
 		for name, line := range map[string]string{
+			"NativeExample":     provider.NativeExample(command),
 			"DockerExample":     provider.DockerExample(command),
 			"ComposeExample":    provider.ComposeExample(command),
 			"BuildDelayExample": provider.BuildDelayExample(command),
