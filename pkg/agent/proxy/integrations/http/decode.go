@@ -320,23 +320,33 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				// A call that is a recording made elsewhere (another test's,
 				// or a worker-scope one not reached yet) is named as that
-				// recording: it did not change, so no learn-step reason
-				// explains it.
-				var elsewhere *models.Mock
+				// recording, fresh (not owned) or once more than it holds
+				// (again): it did not change, so no learn-step reason and no
+				// difference from the open test's recordings explains it,
+				// whatever the learn step or the matcher made of it. Read as
+				// the open test's call changed, its report would offer noise
+				// for what tells the two apart, which answers the other
+				// test's call with this test's recording on the next replay.
+				var elsewhere, again *models.Mock
 				switch {
 				case madeElsewhere:
 					// Looked up once, by the learn step: a recording is
-					// named for one miss at most (integrations.StagedFinder).
-					elsewhere = lmiss.elsewhere
+					// named for one miss at most (integrations.ElsewhereFinder).
+					elsewhere, again = lmiss.elsewhere, lmiss.again
 				case n == 0 && report != nil && provenswitch.On():
-					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+					rec, notOwned := elsewhereRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+					if notOwned {
+						elsewhere = rec
+					} else {
+						again = rec
+					}
 				}
 				switch {
 				case report == nil:
 				case elsewhere != nil:
 					markNotOwned(report, elsewhere)
-				case madeElsewhere:
-					markMadeAgain(report, lmiss.again)
+				case again != nil:
+					markMadeAgain(report, again)
 				case lmiss != nil:
 					lmiss.explain(report)
 				}

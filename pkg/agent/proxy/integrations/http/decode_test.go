@@ -186,7 +186,8 @@ func TestRequestNoiseKeepsOneURLNoiseOrderUnderTheSwitch(t *testing.T) {
 			t.Fatalf("call %d read the url noise as %q, call 0 as %q", i, rn.URL, order)
 		}
 		digestOf[requestDigestOf(h.newLearnNoise(opts, rn).strict)] = true
-		fits[notOwnedRecording(ctx, getTo("/v1/aab", host), db, h.newStrictNoise(rn.Header, rn.Body, rn.URL)) == rec]++
+		named, _ := elsewhereRecording(ctx, getTo("/v1/aab", host), db, h.newStrictNoise(rn.Header, rn.Body, rn.URL))
+		fits[named == rec]++
 	}
 	if len(digestOf) != 1 {
 		t.Fatalf("one keploy.yml named %d digest tables over 200 calls", len(digestOf))

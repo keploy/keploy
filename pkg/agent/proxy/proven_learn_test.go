@@ -1398,3 +1398,69 @@ func TestALearnStepLooksUpARecordingMadeElsewhereByEveryPartOfTheRequest(t *test
 		t.Fatalf("want the calls named other-poll-9 and other-config-7, not owned; misses %+v", misses)
 	}
 }
+
+// (LEARN-vs-NOTOWNED) A call made elsewhere once more than its recording
+// holds is that recording again whatever the learn step made of it, not only
+// when it would pair it: here A's poll, made in A, is made again in B's
+// window, where B recorded two polls of the operation that each differ from
+// it in another place, so the learn step pairs it with neither (a tie,
+// request_changed). The miss names mock-a with no reason and no field said
+// to differ: read as B's call changed (its cursor, c2 to c1), its next steps
+// offered keploy.yml noise for the cursor, which answers A's call with B's
+// recording on the next replay: a false pass.
+func TestALearnStepMissThatPairsNothingOnACallMadeElsewhereAgainNamesItsRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	a := r3Mock("mock-a", now, "GET", "/v1/jobs?cursor=c1&page=1", "", `{"jobs":["j1"]}`)
+	b1 := r3Mock("mock-b1", now.Add(time.Second), "GET", "/v1/jobs?cursor=c2&page=1", "", `{"jobs":[]}`)
+	b2 := r3Mock("mock-b2", now.Add(time.Second+time.Millisecond), "GET", "/v1/jobs?cursor=c1&page=2", "", `{"jobs":[]}`)
+	for _, m := range []*models.Mock{a, b1, b2} {
+		m.DeriveLifetime()
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+		{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, []*models.Mock{a, b1, b2}, models.BaseTime, now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	poll := func(query string) string {
+		return "GET /v1/jobs?" + query + " HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	}
+	mm.ServeExactTest("test-a", []*models.Mock{a})
+	p.ContinueTestErrorCapture()
+	if code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, poll("cursor=c1&page=1")); code != http.StatusOK || body != `{"jobs":["j1"]}` {
+		t.Fatalf("A's poll in A: %d %s", code, body)
+	}
+	if misses, err := p.GetMockErrors(context.Background()); err != nil || len(misses) != 0 {
+		t.Fatalf("A's poll in A missed: %+v, %v", misses, err)
+	}
+	mm.ServeExactTest("test-b", []*models.Mock{b1, b2})
+	p.ContinueTestErrorCapture()
+	if code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, poll("cursor=c1&page=1")); code == http.StatusOK {
+		t.Fatalf("A's poll again in B was answered: %s", body)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 1 || misses[0].ClosestMock != "mock-a" || misses[0].NotOwned || misses[0].Reason != "" || len(misses[0].FieldDiffs) != 0 || misses[0].Diff != "" || strings.Contains(misses[0].NextSteps, "noise") {
+		t.Fatalf("want A's poll again named mock-a, with no reason, nothing differing and no noise offered; misses %+v", misses)
+	}
+	st := r3States(mm)
+	for _, name := range []string{"mock-b1", "mock-b2"} {
+		if len(st[name].ReqBodyNoise) != 0 {
+			t.Fatalf("%s learned %v", name, st[name].ReqBodyNoise)
+		}
+	}
+	// B's own calls are still B's recordings'.
+	p.ContinueTestErrorCapture()
+	for _, q := range []string{"cursor=c2&page=1", "cursor=c1&page=2"} {
+		if code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, poll(q)); code != http.StatusOK || body != `{"jobs":[]}` {
+			t.Fatalf("test B's own call %s: %d %s", q, code, body)
+		}
+	}
+}

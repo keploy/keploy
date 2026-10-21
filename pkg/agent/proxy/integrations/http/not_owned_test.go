@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -35,28 +36,35 @@ func (d stagedDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) 
 }
 
 // A call no read answers that is a staged recording no read shows, by the
-// strict comparison, is named as that recording; one that differs from every
-// such recording is not, nor is any with a store that stages nothing more.
-func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
+// strict comparison, is named as that recording (not owned, from a store
+// that tells only of recordings no call consumed and no miss named); one
+// that differs from every such recording is not, nor is any with a store
+// that stages nothing more.
+func TestElsewhereRecordingIsTheCallMadeElsewhere(t *testing.T) {
 	const host = "localhost:50001"
 	elsewhere := onHost("other-test-delete", "/delete", host)
 	db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-get", "/get", host), elsewhere}}
 	n := newHTTP().newStrictNoise(nil, nil, nil)
 	ctx := context.Background()
-	if got := notOwnedRecording(ctx, getTo("/delete", host), db, n); got != elsewhere {
-		t.Fatalf("named %v, want the recording that is this call", got)
+	if got, notOwned := elsewhereRecording(ctx, getTo("/delete", host), db, n); got != elsewhere || !notOwned {
+		t.Fatalf("named %v (not owned: %v), want the recording that is this call, not owned", got, notOwned)
 	}
-	if got := notOwnedRecording(ctx, getTo("/changed", host), db, n); got != nil {
+	if got, _ := elsewhereRecording(ctx, getTo("/changed", host), db, n); got != nil {
 		t.Fatalf("a call no recording is was named as %s", got.Name)
 	}
-	if got := notOwnedRecording(ctx, getTo("/delete", host), &mockMemDb{mocks: []*models.Mock{elsewhere}}, n); got != nil {
+	if got, _ := elsewhereRecording(ctx, getTo("/delete", host), &mockMemDb{mocks: []*models.Mock{elsewhere}}, n); got != nil {
 		t.Fatalf("a store that stages nothing more named %s", got.Name)
 	}
 
-	r := &models.MockMismatchReport{ClosestMock: "visible", Differs: []string{"path"}, FieldDiffs: []models.MockFieldDiff{{Path: "path"}}}
+	r := &models.MockMismatchReport{ClosestMock: "visible", Diff: `path: recorded "/get", live "/delete"`, Differs: []string{"path"}, FieldDiffs: []models.MockFieldDiff{{Path: "path"}}}
 	markNotOwned(r, elsewhere)
-	if r.ClosestMock != elsewhere.Name || !r.NotOwned || r.Differs != nil || r.FieldDiffs != nil || r.ClosestMockReq == "" || r.NextSteps == "" {
+	if r.ClosestMock != elsewhere.Name || !r.NotOwned || r.Differs != nil || r.FieldDiffs != nil || r.Diff != "" || r.ClosestMockReq == "" || r.NextSteps == "" {
 		t.Fatalf("the report of a call made elsewhere is %+v", r)
+	}
+	r = &models.MockMismatchReport{ClosestMock: "visible", Diff: `path: recorded "/get", live "/delete"`, Differs: []string{"path"}, FieldDiffs: []models.MockFieldDiff{{Path: "path"}}, NotOwned: true}
+	markMadeAgain(r, elsewhere)
+	if r.ClosestMock != elsewhere.Name || r.NotOwned || r.Differs != nil || r.FieldDiffs != nil || r.Diff != "" || r.ClosestMockReq == "" || !strings.Contains(r.NextSteps, elsewhere.Name+" again") {
+		t.Fatalf("the report of a call made elsewhere again is %+v", r)
 	}
 }
 
@@ -203,7 +211,7 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 			}
 			var offered []string
 			db := keyedDb{mockMemDb: &mockMemDb{}, onDisk: append(others, tc.rec), offered: &offered}
-			got := notOwnedRecording(context.Background(), tc.live, db, n)
+			got, _ := elsewhereRecording(context.Background(), tc.live, db, n)
 			if named := got == tc.rec; named != tc.want {
 				t.Fatalf("named %v (offered %v); want the recording named: %v", got, offered, tc.want)
 			}
@@ -221,6 +229,13 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 // the app got and the report of the miss it was, nil for none.
 func learnStepMiss(t *testing.T, tr *learn.Tracker, db integrations.MockMemDb, request string) (int, *models.MockMismatchReport) {
 	t.Helper()
+	return switchedMiss(t, tr, db, models.OutgoingOptions{Learn: true}, request)
+}
+
+// switchedMiss is learnStepMiss in the round opts says: record's full round
+// with opts.Learn, a replay without.
+func switchedMiss(t *testing.T, tr *learn.Tracker, db integrations.MockMemDb, opts models.OutgoingOptions, request string) (int, *models.MockMismatchReport) {
+	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
 	var reported error
 	ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err }), tr)
@@ -228,7 +243,7 @@ func learnStepMiss(t *testing.T, tr *learn.Tracker, db integrations.MockMemDb, r
 	defer app.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: "127.0.0.1:50001"}, db, models.OutgoingOptions{Learn: true})
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: "127.0.0.1:50001"}, db, opts)
 	}()
 	if _, err := io.WriteString(app, request); err != nil {
 		t.Fatal(err)
@@ -370,5 +385,98 @@ func TestALearnStepMissOnACallMadeElsewhereIsNoExtraCall(t *testing.T) {
 				t.Fatalf("the miss names %q (not owned: %v, kind %q of %d), want other-test-poll (not owned: %v) and no extra call", r.ClosestMock, r.NotOwned, r.MissKind, r.Recorded, tc.notOwned)
 			}
 		})
+	}
+}
+
+// (LEARN-vs-NOTOWNED) A call that is a recording made elsewhere is that
+// recording, whatever the learn step made of it against the open test's own
+// recordings: not only when it would pair it (learnMatch's Paired arm), but
+// when it pairs nothing (two of the test's recordings tie with it in
+// different places, it differs from them in more than values, or its
+// closest one answered already). Its miss names that recording, fresh (not
+// owned) or once more than it holds (again), with no learn-step reason and
+// no field said to differ from the open test's recording: it did not change.
+// Read as the open test's own call changed (request_changed, its drift from
+// that recording as field diffs, and next steps that offer keploy.yml noise
+// for them), the report talks the user into the noise that answers the
+// other test's call with this test's recording on the next replay: a false
+// pass. So is a miss of a replay round under the switch (no learn step),
+// which the matcher diagnoses against the open test's recordings.
+func TestAMissOnACallMadeElsewhereNamesItsRecordingWhateverPairDecided(t *testing.T) {
+	const call = "GET /v1/jobs?cursor=c1&page=1 HTTP/1.1\r\nHost: api.test\r\nContent-Type: application/json\r\n\r\n"
+	elsewhere := func() *models.Mock {
+		return learnRecorded("other-test-poll", -time.Second, "GET", "/v1/jobs?cursor=c1&page=1", "", nil, `{"jobs":["j1"]}`)
+	}
+	tie := func() []*models.Mock {
+		return []*models.Mock{
+			learnRecorded("own-poll-1", 0, "GET", "/v1/jobs?cursor=c2&page=1", "", nil, `{"jobs":[]}`),
+			learnRecorded("own-poll-2", time.Millisecond, "GET", "/v1/jobs?cursor=c1&page=2", "", nil, `{"jobs":[]}`),
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		opts models.OutgoingOptions
+		own  func() []*models.Mock
+		// answered is the open test's recording the tracker holds as
+		// answered.
+		answered string
+		// reason is the learn step's reason for the miss with no recording
+		// elsewhere, "" for none (a replay round's).
+		reason string
+	}{
+		{name: "two recordings tie in different places", opts: models.OutgoingOptions{Learn: true}, own: tie, reason: models.MissRequestChanged},
+		{name: "it differs in more than values", opts: models.OutgoingOptions{Learn: true}, own: func() []*models.Mock {
+			return []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2&page=1&limit=5", "", nil, `{"jobs":[]}`)}
+		}, reason: models.MissRequestChanged},
+		{name: "its closest recording answered already", opts: models.OutgoingOptions{Learn: true}, own: func() []*models.Mock {
+			return []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2&page=1", "", nil, `{"jobs":[]}`)}
+		}, answered: "own-poll"},
+		{name: "a replay round", own: tie},
+	} {
+		for _, spent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, spent %v", tc.name, spent), func(t *testing.T) {
+				tracker := func(own []*models.Mock) *learn.Tracker {
+					tr := learn.NewTracker()
+					tr.Begin()
+					test, _, _, _ := tr.Test()
+					for _, m := range own {
+						if m.Name == tc.answered && !tr.Answer(test, m) {
+							t.Fatal("fixture: the tracker did not take the answered recording")
+						}
+					}
+					return tr
+				}
+				// The fixture: with no recording elsewhere the call is a
+				// miss the learn step gives its reason, naming the open
+				// test's recording, none of which is the call.
+				own := tc.own()
+				code, r := switchedMiss(t, tracker(own), &elsewhereDb{learnDb: &learnDb{perTest: own}}, tc.opts, call)
+				if code != http.StatusBadGateway || r == nil || r.NotOwned || r.ClosestMock == "other-test-poll" || r.Reason != tc.reason || r.MissKind != "" {
+					t.Fatalf("fixture: with nothing elsewhere the app got %d, report %+v; want a miss of reason %q", code, r, tc.reason)
+				}
+				var spentOf map[string]bool
+				if spent {
+					spentOf = map[string]bool{"other-test-poll": true}
+				}
+				own = tc.own()
+				db := &elsewhereDb{learnDb: &learnDb{perTest: own}, elsewhere: []*models.Mock{elsewhere()}, spent: spentOf}
+				code, r = switchedMiss(t, tracker(own), db, tc.opts, call)
+				if code != http.StatusBadGateway || r == nil {
+					t.Fatalf("the app got %d (report %+v) for a call made elsewhere, want the miss's 502", code, r)
+				}
+				if r.ClosestMock != "other-test-poll" || r.NotOwned == spent || r.Reason != "" || len(r.FieldDiffs) != 0 || len(r.Differs) != 0 || r.Diff != "" || r.MissKind != "" || r.Recorded != 0 {
+					t.Fatalf("the miss names %q (not owned: %v, reason %q, diffs %v %q, kind %q of %d), want other-test-poll (not owned: %v), with no reason and nothing differing", r.ClosestMock, r.NotOwned, r.Reason, r.FieldDiffs, r.Diff, r.MissKind, r.Recorded, !spent)
+				}
+				if spent && !strings.Contains(r.NextSteps, "other-test-poll again") || strings.Contains(r.NextSteps, "noise") {
+					t.Fatalf("the miss's next steps: %q", r.NextSteps)
+				}
+				if spent && len(db.named) != 0 || !spent && !db.named["other-test-poll"] {
+					t.Fatalf("named %v", db.named)
+				}
+				if len(db.consumed) != 0 {
+					t.Fatalf("consumed %v for a call made elsewhere", db.consumed)
+				}
+			})
+		}
 	}
 }

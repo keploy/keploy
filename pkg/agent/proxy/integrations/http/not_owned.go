@@ -11,34 +11,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// notOwnedRecording is, for a request no mock answered under exact serving
-// (the proven switch), the staged recording that is this very call (the
-// strict comparison, strictDiff) which the open view does not show: another
-// test's, any test's with no test open, or a worker-scope one whose place the
-// run has not reached (integrations.StagedFinder). The call was made where it
-// was not recorded: record's judging reads it to bake the recording into the
-// worker scope (design v14 S12, a2). nil when there is none, or the store
-// keeps no staged mocks to look in. ctx carries the request's destination as
-// it came (liveDestination).
-func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) *models.Mock {
-	live := liveDestination(ctx, input)
-	var found *models.Mock
-	match := func(m *models.Mock) bool {
-		if m.Spec.HTTPReq == nil || len(strictDiff(input, live, m, n)) != 0 {
-			return false
-		}
-		found = m
-		return true
-	}
-	switch f := mockDb.(type) {
-	case integrations.StagedKeyFinder:
-		f.FindStagedNotOwnedByKeys(models.HTTP, callRequestKeys(input, n), match)
-	case integrations.StagedFinder:
-		f.FindStagedNotOwned(models.HTTP, match)
-	}
-	return found
-}
-
 // callRequestKeys are the request keys a live call asks the agent's disk
 // store by (RequestKeysOf), under keploy.yml's noise n.
 func callRequestKeys(input *req, n strictNoise) []string {
@@ -50,16 +22,23 @@ func callRequestKeys(input *req, n strictNoise) []string {
 	return RequestKeysOf(input.method, path, target, n.loose())
 }
 
-// elsewhereRecording is, for a request record's full round would pair with a
-// recording of its scope it drifted from, the staged recording the open view
-// does not show that the request is, exactly (strictSame, under keploy.yml's
-// noise n): another test's, any test's with no test open, or a worker-scope
-// one whose place the run has not reached; whether or not a call of the set
-// consumed it or a miss named it (integrations.FindStagedElsewhere). notOwned:
-// no call consumed it and no miss named it, and it is named for this request
-// now (as notOwnedRecording names one). Otherwise the request is that
-// recording once more than it holds. nil for none. Only the recordings whose
-// digest may be the request's are compared (requestDigest).
+// elsewhereRecording is, under exact serving (the proven switch), the staged
+// recording the open view does not show that the request is, exactly
+// (strictSame, under keploy.yml's noise n): another test's, any test's with
+// no test open, or a worker-scope one whose place the run has not reached;
+// whether or not a call of the set consumed it or a miss named it
+// (integrations.FindStagedElsewhere). The request was made where it was not
+// recorded, and did not change. Record's full round asks it of a request it
+// would pair with a recording of its scope it drifted from, before pairing
+// it; a miss's report asks it of any other request no mock answered.
+//
+// notOwned: no call consumed it and no miss named it, and it is named for
+// this request now: record's judging reads the miss to bake the recording
+// into the worker scope (design v14 S12, a2). Otherwise the request is that
+// recording once more than it holds. nil for none, or when the store keeps
+// no staged mocks to look in. Only the recordings whose digest may be the
+// request's are compared (requestDigest). ctx carries the request's
+// destination as it came (liveDestination).
 func elsewhereRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) (rec *models.Mock, notOwned bool) {
 	live := liveDestination(ctx, input)
 	digest := liveRequestDigest(input, n)
@@ -184,11 +163,14 @@ func init() {
 }
 
 // markNotOwned makes report the miss of a call that is m, a recording the
-// open view does not show (notOwnedRecording): m is its closest mock, with no
-// field named as differing, since none does, and its rendered request is m's.
+// open view does not show that no call consumed and no miss named before
+// (elsewhereRecording, notOwned): m is its closest mock, with no field named
+// as differing, since none does (no field diff, nor the one-line diff the
+// report kept of the recording it was read against first), and its rendered
+// request is m's.
 func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 	report.ClosestMock, report.NotOwned = m.Name, true
-	report.FieldDiffs, report.Differs = nil, nil
+	report.FieldDiffs, report.Differs, report.Diff = nil, nil, ""
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
 }
@@ -196,12 +178,12 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 // markMadeAgain makes report the miss of a call that is m, a recording the
 // open view does not show, once more than m holds: a call of the set
 // consumed m, or an earlier miss was named as it (elsewhereRecording). m is
-// its closest mock, with no field named as differing, since none does, and
-// its rendered request is m's; it is not named as not owned, since m was
-// named, or answered, already.
+// its closest mock, with no field named as differing, since none does (as
+// markNotOwned), and its rendered request is m's; it is not named as not
+// owned, since m was named, or answered, already.
 func markMadeAgain(report *models.MockMismatchReport, m *models.Mock) {
 	report.ClosestMock, report.NotOwned = m.Name, false
-	report.FieldDiffs, report.Differs = nil, nil
+	report.FieldDiffs, report.Differs, report.Diff = nil, nil, ""
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = madeAgainNextSteps(m.Name)
 }
@@ -209,11 +191,11 @@ func markMadeAgain(report *models.MockMismatchReport, m *models.Mock) {
 // madeAgainNextSteps says what a miss on a call that is a recording the open
 // view does not show, made once more than it holds (markMadeAgain), means.
 func madeAgainNextSteps(name string) string {
-	return fmt.Sprintf("This request is %s again: keploy recorded %s once, outside this test (in another test's window, or between tests), and this replay has already made the call once, so no recording is left to answer it here. keploy's learn step learns nothing from it, nor onto this test's own recording of the same call. The application makes this call more times than it did when it was recorded; if that is expected, record the test set again.", name, name)
+	return fmt.Sprintf("This request is %s again: keploy recorded %s once, outside this test (in another test's window, or between tests), and this replay has already made that call, so no recording is left to answer it here. Nothing is learned from it, nor onto this test's own recordings of the same operation. Either the application makes this call more times than it did when it was recorded, or this test's own request now carries the values %s was recorded with; if that is expected, record the test set again.", name, name, name)
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open
-// view does not show (notOwnedRecording) likely means, and what to do.
+// view does not show (markNotOwned) likely means, and what to do.
 func notOwnedNextSteps(name string) string {
 	return fmt.Sprintf("This request is %s, which keploy recorded where this replay did not make it: in another test's window, or between tests after a test this replay had not reached. A call the application makes on its own (a queue consumer, a scheduler) falls in whichever window its timing puts it in. keploy record's judging reads this miss and moves %s to the test set's worker scope (mappings.yaml worker:), which answers it wherever the replay makes it from its place on; record again if this replay was not keploy record's.", name, name)
 }
