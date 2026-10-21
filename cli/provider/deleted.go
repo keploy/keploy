@@ -148,11 +148,12 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 // switch refuses from its --help: the flags of the deleted settings, which
 // checkDeletedSettings refuses as unknown, and, for keploy record and keploy
 // test, the passthrough flags mock.real replaced (refusePassthroughFlags) and
-// test's --health-poll-timeout (refuseHealthPollTimeout). --help must not
-// offer a flag the command then refuses with exit 8. keploy mock record and
-// replay keep their own --pass-through-ports, the app's ingress port. Without
-// the switch --help is as it was. AddFlags calls it once cmd has all its
-// flags.
+// test's --health-poll-timeout (refuseHealthPollTimeout), and, for keploy
+// mock replay, --strict and --run-only, which its replay refuses under the
+// switch. --help must not offer a flag the command then refuses. keploy mock
+// record and replay keep their own --pass-through-ports, the app's ingress
+// port. Without the switch --help is as it was. AddFlags calls it once cmd
+// has all its flags.
 func hideDeletedFlags(cmd *cobra.Command) {
 	if !provenswitch.On() {
 		return
@@ -168,6 +169,9 @@ func hideDeletedFlags(cmd *cobra.Command) {
 		hide(row.Flags...)
 	}
 	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		if cmd.Name() == "replay" {
+			hide("strict", "run-only")
+		}
 		return
 	}
 	switch cmd.Name() {

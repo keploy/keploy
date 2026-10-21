@@ -327,6 +327,40 @@ func TestUnderTheSwitchMockKeepsItsPassThroughPortsInHelp(t *testing.T) {
 	}
 }
 
+// keploy mock replay refuses --strict and --run-only under the switch (the
+// proven model's verdict fails a run on every call the recording did not
+// answer, and keploy skips only the tests verdicts.yaml quarantines), so its
+// --help does not list them either. Without the switch it lists both, and
+// keploy mock record, which refuses neither, lists what it has as before.
+// Mutation: hide neither, or hide them without the switch.
+func TestUnderTheSwitchMockReplayHelpListsNoFlagItRefuses(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		value := "0"
+		if on {
+			value = "1"
+		}
+		t.Run("KEPLOY_PROVEN="+value, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, value)
+			c := NewCmdConfigurator(zap.NewNop(), config.New())
+			parent := &cobra.Command{Use: "mock"}
+			cmd := &cobra.Command{Use: "replay"}
+			parent.AddCommand(cmd)
+			if err := c.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags(mock replay): %v", err)
+			}
+			for _, flag := range []string{"strict", "run-only"} {
+				f := cmd.Flags().Lookup(flag)
+				if f == nil {
+					t.Fatalf("keploy mock replay has no --%s", flag)
+				}
+				if f.Hidden != on {
+					t.Errorf("keploy mock replay --help lists --%s: %v, want %v", flag, !f.Hidden, !on)
+				}
+			}
+		})
+	}
+}
+
 func toStrings(v interface{}) []string {
 	switch vs := v.(type) {
 	case []string:
