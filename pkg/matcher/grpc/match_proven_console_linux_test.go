@@ -44,7 +44,7 @@ func TestMatch_ProvenSwitchPrintsTheGrpcStatusDifference(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tc := &models.TestCase{Name: "status", GrpcResp: *c.recorded}
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if off := consoleOf(t, func() { _, _ = Match(tc, c.live, nil, false, zap.NewNop(), true) }); strings.Contains(off, "grpc-status") {
 				t.Fatalf("switch off: the diff changed:\n%s", off)
 			}

@@ -502,7 +502,7 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 	t.Run("the earlier client's run's end", func(t *testing.T) {
 		fastLooks(t)
 		e := newStandInEngine(t)
-		t.Setenv("KEPLOY_PROVEN", "")
+		t.Setenv("KEPLOY_PROVEN", "0")
 		name := fmt.Sprintf("keploy-v3-same-end-%d", os.Getpid())
 		earlier := clientFor(standInComposeAgent(t, e, nil).URL)
 		t.Cleanup(earlier.forgetAgentContainer)
@@ -524,7 +524,7 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 	t.Run("the earlier client's run's begin", func(t *testing.T) {
 		fastLooks(t)
 		e := newStandInEngine(t)
-		t.Setenv("KEPLOY_PROVEN", "")
+		t.Setenv("KEPLOY_PROVEN", "0")
 		name := fmt.Sprintf("keploy-v3-same-begin-%d", os.Getpid())
 		earlier := clientFor(standInComposeAgent(t, e, nil).URL)
 		t.Cleanup(earlier.forgetAgentContainer)
@@ -562,7 +562,7 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 	t.Run("the earlier client's look at its own container", func(t *testing.T) {
 		fastLooks(t)
 		e := newStandInEngine(t)
-		t.Setenv("KEPLOY_PROVEN", "")
+		t.Setenv("KEPLOY_PROVEN", "0")
 		name := fmt.Sprintf("keploy-v3-same-look-%d", os.Getpid())
 		// The earlier client's agent answers nothing: only its watch's look
 		// makes its container known.
@@ -677,7 +677,7 @@ func TestTheReleaseEndsOnceTheRunEndedLeavingTheAgentsContainerNotRunning(t *tes
 			e := newStandInEngine(t)
 			e.set(t, tc.state)
 			srv := standInComposeAgent(t, e, nil)
-			t.Setenv("KEPLOY_PROVEN", "")
+			t.Setenv("KEPLOY_PROVEN", "0")
 			a := clientFor(srv.URL)
 			name := fmt.Sprintf("keploy-v3-left-%d", os.Getpid())
 			a.nameAgentContainer(name)

@@ -530,7 +530,7 @@ func TestARecordNoPassJudgesFailsOnItsLosses(t *testing.T) {
 // judged later or not: nothing fails, nothing is handed over, and the WARN
 // is said the same.
 func TestARecordWithTheSwitchOffIsAsBefore(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	got := judgeLater(t)
 	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{pid(1)}})
 	w.afterTestCase(context.Background(), "test-1")

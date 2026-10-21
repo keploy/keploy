@@ -65,7 +65,7 @@ func TestRunTestSetComparesAStreamTestCarriedAsJSONByItsBody(t *testing.T) {
 				if on {
 					t.Setenv(provenswitch.Env, "1")
 				} else {
-					t.Setenv(provenswitch.Env, "")
+					t.Setenv(provenswitch.Env, "0")
 				}
 				h := newPartialRunHarness(t, 2, 0)
 				stream := h.cases[1]
@@ -205,7 +205,7 @@ func TestRunTestSetComparesAResponseWithNoBodyByItsStatusAndHeaders(t *testing.T
 					if on {
 						t.Setenv(provenswitch.Env, "1")
 					} else {
-						t.Setenv(provenswitch.Env, "")
+						t.Setenv(provenswitch.Env, "0")
 					}
 					h := newPartialRunHarness(t, 2, 0)
 					tc := h.cases[1]
@@ -294,7 +294,7 @@ func TestRunTestSetEndsARecordedNoContentAnsweredByAnEndlessStream(t *testing.T)
 				if on {
 					t.Setenv(provenswitch.Env, "1")
 				} else {
-					t.Setenv(provenswitch.Env, "")
+					t.Setenv(provenswitch.Env, "0")
 				}
 				var readOn atomic.Bool
 				app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -396,7 +396,7 @@ func TestRunTestSetAKeepaliveRecordingTheAppHoldsOpen(t *testing.T) {
 					if on {
 						t.Setenv(provenswitch.Env, "1")
 					} else {
-						t.Setenv(provenswitch.Env, "")
+						t.Setenv(provenswitch.Env, "0")
 					}
 					h := newPartialRunHarness(t, 2, 0)
 					tc := h.cases[1]

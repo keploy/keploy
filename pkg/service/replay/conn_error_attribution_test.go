@@ -85,7 +85,7 @@ func TestCreateFailedTestResultReportsAGRPCTestWithNoAnswerAsNoStatus(t *testing
 	tc.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}}
 	noAnswer := errors.New("the app sent no answer")
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	off := failedWith(tc, noAnswer)
 	assert.Equal(t, models.IntResult{Normal: true, Expected: 0, Actual: 0}, off.Result.StatusCode, "switch off: unchanged")
 	assert.NotContains(t, off.FailureInfo.Category, models.StatusCodeChanged, "switch off: unchanged")

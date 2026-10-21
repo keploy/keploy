@@ -81,7 +81,7 @@ func TestMatch_ProvenSwitchAnAnswerWithNoGrpcStatusIsNotOK(t *testing.T) {
 			tc := &models.TestCase{Name: "status", GrpcResp: *withGrpcStatus(rec, c.recorded, c.recorded != none)}
 			live := withGrpcStatus(rec, c.live, c.live != none)
 
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if ok, _ := Match(tc, live, nil, false, zap.NewNop(), false); ok != c.wantOff {
 				t.Fatalf("switch off: matched %v, want %v (unchanged)", ok, c.wantOff)
 			}
@@ -128,7 +128,7 @@ func TestMatch_ProvenSwitchSaysARecordingHasNoGrpcStatus(t *testing.T) {
 		return logs.FilterMessageSnippet("no grpc-status").All()
 	}
 
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	if got := warned(true); len(got) != 0 {
 		t.Fatalf("switch off: said %v", got)
 	}
@@ -283,7 +283,7 @@ func TestMatch_ProvenSwitchReadsATrailersOnlyRecordingsStatusOffItsHeaders(t *te
 		t.Run(c.name, func(t *testing.T) {
 			tc := &models.TestCase{Name: "trailers-only", GrpcResp: c.recorded}
 
-			t.Setenv(provenswitch.Env, "")
+			t.Setenv(provenswitch.Env, "0")
 			if ok, _ := Match(tc, c.live, nil, false, zap.NewNop(), false); ok != c.wantOff {
 				t.Fatalf("switch off: matched %v, want %v", ok, c.wantOff)
 			}
@@ -332,7 +332,7 @@ func TestMatch_ProvenSwitchReadsTrailersThatLackTheStatusAsNone(t *testing.T) {
 // app answering NOT_FOUND as recorded. Trailers that carry anything are the
 // block a client reads, even when the headers beside them carry a status.
 func TestMatch_SwitchOffReadsARecordingsStatusAsAClientDoes(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.Env, "0")
 	lacking := trailersOnlyRecording("5", "no such thing")
 	lacking.Trailers.OrdinaryHeaders["x-done"] = "yes"
 	// As keploy's own recorder keeps a Trailers-Only answer: the one block
