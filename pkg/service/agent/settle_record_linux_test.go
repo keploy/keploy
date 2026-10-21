@@ -145,10 +145,51 @@ func TestAReplaysSettleThatCannotTellStillFailsTheTest(t *testing.T) {
 	w := liveWindow(t, a, "o::TestB")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.True(t, w.Evidence.Unread)
+	require.True(t, w.Evidence.Unsettled, "unread for its settle alone")
 	require.Contains(t, w.Evidence.Reason, "could not tell that every call of o::TestB reached it: "+errBytesUnknown.Error())
 	_, ok := unsettledOf(t, a, "o::TestB")
 	require.False(t, ok)
 	require.Zero(t, unsettledCount(t, a))
+}
+
+// A replayed test that did not run (it skipped itself, or keploy's gate
+// skipped it), whose settle keploy could not tell, is failed and unread, and
+// not only unsettled: its line stays an unread one, though keploy's failure
+// makes the window's outcome failed.
+func TestAReplaysTestThatDidNotRunIsNotOnlyUnsettled(t *testing.T) {
+	for _, outcome := range []string{models.ScopeOutcomeSkipped, models.ScopeOutcomeGated} {
+		t.Run(outcome, func(t *testing.T) {
+			a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+			ctx := context.Background()
+			unknownAt(&p.settledProxy, 2)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: outcome})
+			require.NotNil(t, serr)
+			w := liveWindow(t, a, "o::TestA")
+			require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+			require.True(t, w.Evidence.Unread)
+			require.Contains(t, w.Evidence.Reason, "could not tell that every call of o::TestA reached it")
+			require.False(t, w.Evidence.Unsettled, "a test that did not run")
+		})
+	}
+}
+
+// A replayed test keploy could not read besides its settle (here its
+// capture-loss count) is unread, and not only unsettled
+// (ScopeEvidence.Unsettled).
+func TestAReplaysTestUnreadBesidesItsSettleIsNotOnlyUnsettled(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	ctx := context.Background()
+	unknownAt(&p.settledProxy, 2)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	a.Hooks.(*countHooks).countingHooks.err = errors.New("the PID map cannot be read")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr)
+	w := liveWindow(t, a, "o::TestA")
+	require.True(t, w.Evidence.Unread)
+	require.False(t, w.Evidence.Unsettled, "unread for its capture-loss count too")
 }
 
 // A record's settle that could not count the calls read no drops: the test's
@@ -249,6 +290,7 @@ func TestARecordThatCountsNoCaptureLossFailsWhatItCannotSettle(t *testing.T) {
 	w := liveWindow(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.True(t, w.Evidence.Unread)
+	require.False(t, w.Evidence.Unsettled, "a record's is never a replay's settle unknown")
 }
 
 // A record's settle that could not tell the bytes on a connection goes on to
@@ -330,4 +372,49 @@ func TestOnlyARecordTakesWhatItCannotSettleAsEvidence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A replayed test keploy could not end (its pool could not be served again)
+// is not unread for its settle alone (ScopeEvidence.Unsettled): the tests
+// after it may have run on its mocks or its clock.
+func TestAReplaysTestKeployCouldNotEndIsNotOnlyUnsettled(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	p.served = map[string]uint64{}
+	claimSelf(t, a)
+	unknownAt(&p.settledProxy, 2)
+	_, serr := a.ProvenBegin(context.Background(), begin("TestA"))
+	require.Nil(t, serr)
+	p.mu.Lock()
+	p.served["mock-1"] = 1
+	p.setErr = errors.New("the proxy refused the pool")
+	p.mu.Unlock()
+	_, serr = a.ProvenEnd(context.Background(), models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.NotNil(t, serr)
+	p.mu.Lock()
+	p.setErr = nil
+	p.mu.Unlock()
+	w := liveWindow(t, a, "o::TestA")
+	require.Contains(t, w.Evidence.Reason, "could not end o::TestA")
+	require.True(t, w.Evidence.Unread)
+	require.False(t, w.Evidence.Unsettled, "keploy could not end it")
+}
+
+// A replayed test keploy failed for another reason of its own as it closed it
+// (another test's end found it open; its process gone) is not unread for its
+// settle alone (ScopeEvidence.Unsettled): that reason, not the settle, is
+// its.
+func TestAReplaysTestKeployFailedForAnotherReasonIsNotOnlyUnsettled(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}, "o::TestB": {}}, map[string][]string{})
+	ctx := context.Background()
+	unknownAt(&p.settledProxy, 2)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr, "TestB was never begun")
+	w := liveWindow(t, a, "o::TestA")
+	require.Contains(t, w.Evidence.Reason, "ended while o::TestA was the open test")
+	require.True(t, w.Evidence.Unread)
+	require.False(t, w.Evidence.Unsettled)
 }

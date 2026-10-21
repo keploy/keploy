@@ -150,6 +150,21 @@ type ScopeEvidence struct {
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
+	// Unsettled: the test is Unread only because, at its end in a replay,
+	// keploy could not tell that every call it made had reached keploy's
+	// proxy (its settle; Reason says why). What it could not see is a call of
+	// this test that landed late, in the pool or in the next test's window:
+	// a mock of this test left unconsumed, a miss of the next test's, or a
+	// call that consumes the next test's mock in its place. So a pass that
+	// judges each test may quarantine this test for it alone, and judge the
+	// rest, as long as nothing keeps this test, a later round of the same
+	// judging skips it, and CI reads it unread: those, not this round, are
+	// what keep a late call from passing the next test unseen. A reader that
+	// does not know it reads Unread, as before. False when keploy could not
+	// read something else the test did too, failed it for another reason of
+	// its own, or could not end it, and for a test that did not run (it
+	// skipped itself, or keploy's gate skipped it).
+	Unsettled bool `json:"unsettled,omitempty" yaml:"unsettled,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID

@@ -662,3 +662,31 @@ func TestOwnsTestMocks(t *testing.T) {
 	require.False(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}}, loaded))
 	require.False(t, ownsTestMocks(map[string][]string{}, loaded))
 }
+
+// A test keploy could not read only because its settle could not tell
+// (ScopeEvidence.Unsettled) says so on its line, through every attempt that
+// was unread so: one attempt unread for anything else leaves the line unread,
+// not only unsettled.
+func TestATestUnreadOnlyForItsSettleSaysSoOnItsLine(t *testing.T) {
+	unsettled := func(name string) *models.ScopeEvidence {
+		return &models.ScopeEvidence{Reason: "keploy: keploy could not tell that every call of " + name + " reached it: x", Unread: true, Unsettled: true}
+	}
+	got := withEvidence([]TestReceipt{{Name: "o::A", Outcome: "failed"}, {Name: "o::B", Outcome: "failed"}, {Name: "o::C", Outcome: "failed"}, {Name: "o::D", Outcome: "failed"}}, []models.ScopeWindow{
+		{Name: "o::A", Evidence: &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /a"}}}},
+		{Name: "o::A", Evidence: unsettled("o::A")},
+		{Name: "o::B", Evidence: unsettled("o::B")},
+		{Name: "o::B", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::B did: y", Unread: true}},
+		{Name: "o::C", Evidence: unsettled("o::C")},
+		{Name: "o::C", Evidence: unsettled("o::C")},
+		{Name: "o::D", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::D did: z", Unread: true}},
+		{Name: "o::D", Evidence: unsettled("o::D")},
+	})
+	require.True(t, got[0].Evidence.Unread)
+	require.True(t, got[0].Evidence.Unsettled, "a read attempt, then one unread only for its settle")
+	require.True(t, got[1].Evidence.Unread)
+	require.False(t, got[1].Evidence.Unsettled, "an attempt unread for something else")
+	require.Contains(t, got[1].Evidence.Reason, "could not tell what o::B did", "the line's reason is what else it was unread for")
+	require.True(t, got[2].Evidence.Unsettled, "every unread attempt so")
+	require.True(t, got[3].Evidence.Unread)
+	require.False(t, got[3].Evidence.Unsettled, "an attempt unread for something else, before one unread for its settle")
+}
