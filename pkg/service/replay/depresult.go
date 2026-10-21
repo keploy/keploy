@@ -912,7 +912,7 @@ func dependencyAssertionInertReason(instrument, useMappingBased, isMappingEnable
 // depInertStreamingReason is compared by identity in
 // dependencyAssertionInertMessage to pick the scope-accurate message, so it
 // lives as a constant rather than an inline string.
-const depInertStreamingReason = "this test set contains streaming test cases (server-sent events, NDJSON or multipart by their Content-Type, and application/stream+json under KEPLOY_PROVEN=1, or a text or binary body the recording kept as frames), which are replayed in a deferred pass that writes no dependency rows and runs no dependency assertion: those test cases cannot be failed by the flag, however healthy the mapping is"
+const depInertStreamingReason = "this test set contains streaming test cases (server-sent events, NDJSON or multipart by their Content-Type, and application/stream+json under the proven model, or a text or binary body the recording kept as frames), which are replayed in a deferred pass that writes no dependency rows and runs no dependency assertion: those test cases cannot be failed by the flag, however healthy the mapping is"
 
 // depInertConsumedFetchReason names the state where the assertion is fully
 // armed — instrument mode, mapping enabled, a usable mappings.yaml — and the

@@ -28,6 +28,7 @@ var unsaidSwitch = []struct {
 	{regexp.MustCompile(`\(` + Env + `\)`), "tags the line as the variable's"},
 	{regexp.MustCompile(`\b(under|with|without|unset) ` + Env + `([^=A-Z_]|$)`), `says "under/with/without/unset KEPLOY_PROVEN", which an unset variable no longer means on Linux`},
 	{regexp.MustCompile(`\bwithout ` + Env + `=1`), "says a run without KEPLOY_PROVEN=1 is off, which it is not on Linux"},
+	{regexp.MustCompile(`\bunder ` + Env + `=1\b`), `says a line happens "under KEPLOY_PROVEN=1", a value a user on Linux never set: say "under the proven model" (an instruction to set it, "run X with KEPLOY_PROVEN=1", names how to set it)`},
 	{regexp.MustCompile(Env + ` is not set`), "says the switch is off because the variable is not set, which on Linux it is not"},
 	{regexp.MustCompile(`\bstaging (switch|gate)\b`), "calls the switch a staging gate"},
 }
