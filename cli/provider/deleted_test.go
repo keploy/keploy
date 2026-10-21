@@ -4,13 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/mock"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -358,6 +361,158 @@ func TestUnderTheSwitchMockReplayHelpListsNoFlagItRefuses(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// mockVerb builds keploy mock <verb> as keploy does, its flags added, with
+// keploy.yml read from dir.
+func mockVerb(t *testing.T, c *CmdConfigurator, verb, dir string) *cobra.Command {
+	t.Helper()
+	root := &cobra.Command{Use: "keploy"}
+	root.PersistentFlags().String("config-path", dir, "")
+	parent := &cobra.Command{Use: "mock"}
+	cmd := &cobra.Command{Use: verb}
+	root.AddCommand(parent)
+	parent.AddCommand(cmd)
+	if err := c.AddFlags(cmd); err != nil {
+		t.Fatalf("AddFlags(mock %s): %v", verb, err)
+	}
+	return cmd
+}
+
+// mockFlagValues are every value keploy mock knows for its flags that take
+// one of a few: what the switch decides is which of them --help may offer.
+var mockFlagValues = map[string][]string{
+	"cmd-type": {"native", "docker-run", "docker-start", "docker-compose", "from-container"},
+	"on-miss":  {"fail", "passthrough", "record"},
+}
+
+// mockFlagValue is a value keploy mock's flag f takes on its own: a value
+// keploy's flag checks pass, so that what refuses it, if anything, is the
+// proven model.
+func mockFlagValue(t *testing.T, f *pflag.Flag, dir string) string {
+	t.Helper()
+	switch f.Name {
+	case "path":
+		return dir
+	case "command":
+		return "go test -p 1 -json ./..."
+	case "name":
+		return "orders"
+	case "coverage-report":
+		return "coverage.out"
+	}
+	switch f.Value.Type() {
+	case "bool":
+		if f.DefValue == "true" {
+			return "false"
+		}
+		return "true"
+	case "duration":
+		return "30s"
+	case "string", "stringArray", "stringSlice":
+		return "app"
+	case "uint", "uint32", "uint64", "int", "int64", "float64", "uintSlice":
+		return "1"
+	}
+	t.Fatalf("keploy mock's --%s is a %s: give the test a value it takes", f.Name, f.Value.Type())
+	return ""
+}
+
+// mockRefusal is what keploy mock <verb> under the switch makes of args:
+// keploy's flag checks' error, else the proven model's refusal of the
+// config they left (mock.ProvenRefusal), else nil.
+func mockRefusal(t *testing.T, verb string, args ...string) error {
+	t.Helper()
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	cfg := config.New()
+	c := NewCmdConfigurator(zap.NewNop(), cfg)
+	cmd := mockVerb(t, c, verb, t.TempDir())
+	if err := cmd.ParseFlags(args); err != nil {
+		return err
+	}
+	if err := c.PreProcessFlags(cmd); err != nil {
+		return err
+	}
+	if err := c.ValidateFlags(context.Background(), cmd); err != nil {
+		return err
+	}
+	return mock.ProvenRefusal(cfg, verb)
+}
+
+// Under the switch keploy mock record's and replay's --help offer nothing the
+// command refuses. Every flag --help lists, set to a value it takes, passes
+// keploy's flag checks and the proven model's refusals (mock.ProvenRefusal),
+// so a flag added later that the proven model refuses fails here until --help
+// hides it; and of the values --cmd-type and --on-miss know, --help names as
+// taken exactly those that are taken, and each refused one only with the
+// KEPLOY_PROVEN=0 it needs. Without the switch --help lists --strict,
+// --run-only and --from-container, and offers every value as before.
+// Mutation: list --strict, --run-only or --from-container under the switch;
+// offer passthrough, record or a docker type as taken.
+func TestUnderTheSwitchMockHelpOffersNothingTheCommandRefuses(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, verb := range []string{"record", "replay"} {
+		cmd := mockVerb(t, NewCmdConfigurator(zap.NewNop(), config.New()), verb, t.TempDir())
+		var listed []*pflag.Flag
+		cmd.Flags().VisitAll(func(f *pflag.Flag) {
+			if !f.Hidden && f.Deprecated == "" {
+				listed = append(listed, f)
+			}
+		})
+		if len(listed) < 10 {
+			t.Fatalf("keploy mock %s --help lists %d flags: the test reads the wrong command", verb, len(listed))
+		}
+		for _, f := range listed {
+			dir := t.TempDir()
+			values := mockFlagValues[f.Name]
+			if values == nil {
+				values = []string{mockFlagValue(t, f, dir)}
+			}
+			for _, value := range values {
+				args := []string{"-p", dir, "--" + f.Name + "=" + value}
+				// -c and --from-container are alternatives.
+				if f.Name != "command" && f.Name != "from-container" && !(f.Name == "cmd-type" && value == "from-container") {
+					args = append([]string{"-c", "go test -p 1 -json ./..."}, args...)
+				}
+				err := mockRefusal(t, verb, args...)
+				if mockFlagValues[f.Name] == nil {
+					if err != nil {
+						t.Errorf("under the switch keploy mock %s --help offers --%s, which the command refuses: %v", verb, f.Name, err)
+					}
+					continue
+				}
+				// An enum flag's help names what it takes, then in
+				// parentheses what needs the switch off.
+				offer, remedy, _ := strings.Cut(f.Usage, "(")
+				named := regexp.MustCompile(`\b` + regexp.QuoteMeta(value) + `\b`)
+				switch {
+				case err == nil && !named.MatchString(offer):
+					t.Errorf("under the switch keploy mock %s takes --%s %s, which its --help does not offer: %q", verb, f.Name, value, f.Usage)
+				case err != nil && named.MatchString(offer):
+					t.Errorf("under the switch keploy mock %s --help offers --%s %s, which the command refuses: %v (help %q)", verb, f.Name, value, err, f.Usage)
+				case err != nil && !(named.MatchString(remedy) && strings.Contains(remedy, provenswitch.Env+"=0")):
+					t.Errorf("under the switch keploy mock %s --help does not say --%s %s needs %s=0: %q", verb, f.Name, value, provenswitch.Env, f.Usage)
+				}
+			}
+		}
+	}
+	t.Setenv(provenswitch.Env, "0")
+	replay := mockVerb(t, NewCmdConfigurator(zap.NewNop(), config.New()), "replay", t.TempDir())
+	for _, name := range []string{"strict", "run-only", "from-container"} {
+		if f := replay.Flags().Lookup(name); f == nil || f.Hidden {
+			t.Errorf("without the switch keploy mock replay --help does not list --%s", name)
+		}
+	}
+	if got, want := replay.Flags().Lookup("on-miss").Usage, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record"; got != want {
+		t.Errorf("without the switch --on-miss's help is %q, want it as it was, %q", got, want)
+	}
+	if got, want := replay.Flags().Lookup("cmd-type").Usage, "Type of command (native/docker-run/docker-start/docker-compose/from-container)"; got != want {
+		t.Errorf("without the switch --cmd-type's help is %q, want it as it was, %q", got, want)
 	}
 }
 

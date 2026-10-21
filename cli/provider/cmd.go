@@ -2569,10 +2569,20 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 // `keploy mock replay`. The set is intentionally small: two verbs, --name,
 // --on-miss, plus the command/path/docker knobs record and test already use.
 func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
-	cmd.Flags().StringP("command", "c", c.cfg.Command, "Command that runs your test suite, e.g. \"pytest\" or \"go test ./...\"")
+	commandUsage := "Command that runs your test suite, e.g. \"pytest\" or \"go test ./...\""
+	cmdTypeUsage := "Type of command (native/docker-run/docker-start/docker-compose/from-container)"
+	onMissUsage := "What to do when an outgoing call matches no recorded mock: fail | passthrough | record"
+	if provenswitch.On() {
+		// What the proven model takes, and nothing it refuses
+		// (mock.ProvenRefusal): --help must not offer it.
+		commandUsage = "Command that runs your test suite, e.g. \"go test -p 1 -json ./...\""
+		cmdTypeUsage = "Type of command: native, the only one the proven model runs keploy mock with in this release (docker-run, docker-start, docker-compose and from-container need " + provenswitch.Env + "=0)"
+		onMissUsage = "What to do when an outgoing call matches no recorded mock: fail, the only value the proven model takes, which fails the test that made the call (passthrough and record need " + provenswitch.Env + "=0)"
+	}
+	cmd.Flags().StringP("command", "c", c.cfg.Command, commandUsage)
 	cmd.Flags().StringP("path", "p", ".", "Path to the local directory where the mock set is stored (keploy/<name>/)")
 	cmd.Flags().String("name", c.cfg.Mock.Name, "Name of the mock set to record into / replay from (default \"default\")")
-	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose/from-container)")
+	cmd.Flags().String("cmd-type", c.cfg.CommandType, cmdTypeUsage)
 	cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container (docker/compose runs)")
 	cmd.Flags().String("from-container", c.cfg.FromContainer, "Record against an already-running container: keploy re-creates it under its own namespaces. Replaces -c")
 	cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
@@ -2588,7 +2598,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
-		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
+		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, onMissUsage)
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")
 		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
@@ -2781,8 +2791,14 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return errors.New("-c and --from-container are alternatives: pass one, not both")
 	case c.cfg.Command == "" && c.cfg.FromContainer == "":
 		utils.LogError(c.logger, nil, "missing required -c flag or command in config file")
-		c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
-		c.logger.Info(`          or: keploy mock record --from-container my-app`)
+		if provenswitch.On() {
+			// The proven model runs the test command natively (no
+			// --from-container), and judges a Go suite's tests.
+			c.logger.Info(`Example usage: keploy mock ` + cmd.Name() + ` -c "go test -p 1 -json ./..."`)
+		} else {
+			c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
+			c.logger.Info(`          or: keploy mock record --from-container my-app`)
+		}
 		return errors.New("either a command (-c) or --from-container is required for keploy mock")
 	}
 

@@ -146,14 +146,16 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 
 // hideDeletedFlags hides, under the proven switch, every flag of cmd that the
 // switch refuses from its --help: the flags of the deleted settings, which
-// checkDeletedSettings refuses as unknown, and, for keploy record and keploy
-// test, the passthrough flags mock.real replaced (refusePassthroughFlags) and
-// test's --health-poll-timeout (refuseHealthPollTimeout), and, for keploy
-// mock replay, --strict and --run-only, which its replay refuses under the
-// switch. --help must not offer a flag the command then refuses. keploy mock
-// record and replay keep their own --pass-through-ports, the app's ingress
-// port. Without the switch --help is as it was. AddFlags calls it once cmd
-// has all its flags.
+// checkDeletedSettings refuses as unknown; for keploy record and keploy test,
+// the passthrough flags mock.real replaced (refusePassthroughFlags) and
+// test's --health-poll-timeout (refuseHealthPollTimeout); for keploy mock
+// record and replay, --from-container, a docker run (mock.ProvenRefusal), and
+// for keploy mock replay --strict and --run-only, which mock.ProvenRefusal
+// refuses too. --help must not offer a flag the command then refuses
+// (addMockFlags says which values of --cmd-type and --on-miss the proven
+// model takes). keploy mock record and replay keep their own
+// --pass-through-ports, the app's ingress port. Without the switch --help is
+// as it was. AddFlags calls it once cmd has all its flags.
 func hideDeletedFlags(cmd *cobra.Command) {
 	if !provenswitch.On() {
 		return
@@ -169,6 +171,7 @@ func hideDeletedFlags(cmd *cobra.Command) {
 		hide(row.Flags...)
 	}
 	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		hide("from-container")
 		if cmd.Name() == "replay" {
 			hide("strict", "run-only")
 		}
