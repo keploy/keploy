@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -6301,13 +6302,17 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 }
 
 // addMockDisplayInfo adds each mock's display info to the lookup, keyed by
-// name; a later mock of the same name replaces an earlier one.
+// name; a later mock of the same name replaces an earlier one. Whether the
+// names withhold content (KEPLOY_LOG_CONTENT unset) is read once, for every
+// name, and kept with them.
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
+	withheld := !logcontent.On()
 	for _, mock := range mocks {
 		lookup[mock.Name] = mockDisplayInfo{
-			summary:  models.MockReportSummary(mock),
+			summary:  models.MockReportSummary(mock, withheld),
 			protocol: string(mock.Kind),
-			target:   mockTargetFromSpec(mock),
+			target:   mockTargetFromSpec(mock, withheld),
+			withheld: withheld,
 		}
 	}
 }

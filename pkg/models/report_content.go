@@ -227,7 +227,10 @@ func ReportContent(calls []UnmatchedCall) []UnmatchedCall {
 // mock's URL its query, fragment and user info, a Mongo mock's request
 // everything but its command, a SQL operation its literals. The URL path
 // segments a mock declares for its test variables are the mock's, which a
-// file does not hold: a call written with the switch on keeps them.
+// file does not hold: a call written with the switch on keeps them. A call
+// or row written without content (ContentWithheld: a report made with the
+// switch off, or read so before) is kept as it was written: the rule is for
+// what a mock recorded, and what it left of that is not.
 func (r *TestReport) ReportContent() *TestReport {
 	if r == nil || logcontent.On() {
 		return r
@@ -258,42 +261,57 @@ func (r *TestReport) ReportContent() *TestReport {
 	return &out
 }
 
-// MockReportSummary is m's summary (MockSummaryFromSpec) as a report may
-// carry it (MockReportName): the summary a failed test's matched calls
-// (MatchedCall.Summary) name their mocks by.
-func MockReportSummary(m *Mock) string {
+// MockReportSummary is m's summary (MockSummaryFromSpec) as a report names a
+// failed test's matched call by it (MatchedCall.Summary): MockReportName's,
+// withheld when withhold says.
+func MockReportSummary(m *Mock, withhold bool) string {
 	if m == nil {
 		return ""
 	}
-	return MockReportName(m, MockSummaryFromSpec(m))
+	return MockReportName(m, MockSummaryFromSpec(m), withhold)
 }
 
 // MockReportName is name, what a report calls m by what m recorded (its
 // summary, MockSummaryFromSpec, or a dependency row's target: its method and
-// URL, or its destination and operation), as a report may carry it: whole
-// with logcontent's switch on, and with it off as MockSummaryWithoutContent
-// leaves it by m's kind, with every URL path segment m declares for a test
-// variable (DeclaredPathPlaces) written {} too.
-func MockReportName(m *Mock, name string) string {
-	if m == nil || logcontent.On() {
+// URL, or its destination and operation), as the report carries it: whole
+// unless withhold, and with withhold as MockSummaryWithoutContent leaves it
+// by m's kind, with every URL path segment m declares for a test variable
+// (DeclaredPathPlaces) written {} too.
+//
+// withhold is logcontent's switch off where the report is made. Its writer
+// reads the switch once for the names it writes of a mock and records the
+// answer with them (MatchedCall.ContentWithheld, DepResult.ContentWithheld),
+// so a reader of the report withholds only a name written whole: what this
+// leaves of a name is no longer what the mock recorded, and the rule for
+// that would name less by it (a Mongo mock's command, read as the request
+// its recorder writes, names no command).
+func MockReportName(m *Mock, name string, withhold bool) string {
+	if m == nil || !withhold {
 		return name
 	}
 	return MockSummaryWithoutContent(string(m.Kind), name, DeclaredPathPlaces(m))
 }
 
-// WithoutContent is c as a report without content carries it: its summary
-// as MockSummaryWithoutContent leaves it, by its protocol (the mock's kind).
+// WithoutContent is c as a report without content carries it: as it is when
+// it was written so (ContentWithheld), and otherwise with its summary as
+// MockSummaryWithoutContent leaves it, by its protocol (the mock's kind),
+// marked ContentWithheld.
 func (c MatchedCall) WithoutContent() MatchedCall {
+	if c.ContentWithheld {
+		return c
+	}
 	c.Summary = MockSummaryWithoutContent(c.Protocol, c.Summary, nil)
+	c.ContentWithheld = true
 	return c
 }
 
 // WithoutContent is d, a dependency row, as a report without content carries
-// it: the target its name gives (DepRowName) as MockSummaryWithoutContent
-// leaves it, by its type. A row whose name DepRowName did not write with its
-// type (the overflow row has none) is kept.
+// it: as it is when it was written so (ContentWithheld), and otherwise with
+// the target its name gives (DepRowName) as MockSummaryWithoutContent leaves
+// it, by its type, marked ContentWithheld. A row whose name DepRowName did
+// not write with its type (the overflow row has none) is kept.
 func (d DepResult) WithoutContent() DepResult {
-	if !strings.HasPrefix(d.Name, "deps[") {
+	if d.ContentWithheld || !strings.HasPrefix(d.Name, "deps[") {
 		return d
 	}
 	head, rest, ok := strings.Cut(d.Name, "] "+d.Type+" ")
@@ -302,6 +320,7 @@ func (d DepResult) WithoutContent() DepResult {
 		return d
 	}
 	d.Name = head + "] " + d.Type + " " + MockSummaryWithoutContent(d.Type, target, nil) + " " + DepNameSuffixPresence
+	d.ContentWithheld = true
 	return d
 }
 

@@ -735,7 +735,7 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("expected exactly one mockDisplayInfo literal in replay.go, found %d: %v", len(found), found)
 	}
-	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockReportSummary(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
+	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockReportSummary(mock, withheld), protocol: string(mock.Kind), target: mockTargetFromSpec(mock, withheld), withheld: withheld, }"
 	if found[0] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+
@@ -743,7 +743,8 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 			"consumed side) records one. Dropping it collapses five outgoing calls to the same "+
 			"service into rows that differ only by index. `summary` names a failed test's matched "+
 			"calls as a report may carry them: models.MockSummaryFromSpec is the mock as recorded, "+
-			"an HTTP mock's query and a Mongo mock's whole request, which a default report withholds.", found[0], want)
+			"an HTTP mock's query and a Mongo mock's whole request, which a default report withholds. `withheld` "+
+			"is recorded with both names, so keploy report keeps them as written.", found[0], want)
 	}
 }
 
