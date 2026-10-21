@@ -403,14 +403,15 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 			return
 		}
 	}()
-	switch utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()) {
+	end, bound := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load())
+	switch end {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 	default:
 		if w.readable {
-			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", utils.StopStallRanSaid())
+			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		} else {
 			killed = fmt.Sprintf("keploy could not read its container's processes, and the docker daemon did not say it had stopped, for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
 		}
@@ -426,7 +427,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// The kill ends it but in the kernel: wait for that at the same rule;
 	// a container still there after it is an error the next set's start
 	// would meet.
-	if utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()) != utils.StopExited {
+	if end, _ := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
 	return killed, nil

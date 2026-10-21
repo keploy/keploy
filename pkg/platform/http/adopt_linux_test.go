@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/internal/starvetest"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -254,8 +253,7 @@ func TestAdoptedDaemonsEndWithTheApplication(t *testing.T) {
 	}
 	defer func() { _ = own.Process.Kill(); _ = own.Wait() }()
 
-	// The slow daemon's last step out writes done: on no storage.
-	dir := starvetest.MemDir(t)
+	dir := t.TempDir()
 	done := filepath.Join(dir, "done")
 	ready := func(name string) string { return filepath.Join(dir, name+".ready") }
 	polite := daemonize(t, `: > "$1"; exec sleep 120`, ready("polite"))

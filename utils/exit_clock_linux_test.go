@@ -5,9 +5,11 @@ package utils
 import (
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,21 +21,52 @@ import (
 )
 
 // clockRig is an ExitClock on a wall clock and a keploy runnable clock the
-// test moves, reading thread accounts the test sets.
+// test moves, reading thread accounts and block devices the test sets.
 type clockRig struct {
-	wall  time.Time
-	own   *stall.ManualClock
-	tasks map[int]taskTime
-	ok    bool
-	c     *ExitClock
-	last  time.Duration
+	wall    time.Time
+	own     *stall.ManualClock
+	tasks   map[int]taskTime
+	ok      bool
+	disks   diskMark
+	disksOK bool
+	// below is, by device name, the devices directly below it; belowRead
+	// counts the reads of it.
+	below     map[string][]string
+	belowRead map[string]int
+	c         *ExitClock
+	last      time.Duration
 }
 
 func newClockRig(tasks map[int]taskTime) *clockRig {
-	r := &clockRig{wall: time.Unix(1000, 0), own: &stall.ManualClock{}, tasks: tasks, ok: true}
-	r.c = newExitClock(nil, r.own, func() time.Time { return r.wall },
-		func([]Reached) (map[int]taskTime, bool) { return maps.Clone(r.tasks), r.ok })
+	return newClockRigOf(tasks, time.Hour, diskMark{"259:0": {}})
+}
+
+// newClockRigOf is a clockRig of a stop that judges on bound, which takes a
+// thread standing in the kernel for that long for wedged, the host's block
+// devices first read as disks.
+func newClockRigOf(tasks map[int]taskTime, bound time.Duration, disks diskMark) *clockRig {
+	return newClockRigWedged(tasks, bound, bound, disks)
+}
+
+// newClockRigWedged is newClockRigOf, taking a thread standing in the kernel
+// for wedge for wedged.
+func newClockRigWedged(tasks map[int]taskTime, bound, wedge time.Duration, disks diskMark) *clockRig {
+	r := &clockRig{wall: time.Unix(1000, 0), own: &stall.ManualClock{}, tasks: tasks, ok: true,
+		disks: disks, disksOK: true, below: map[string][]string{}, belowRead: map[string]int{}}
+	r.c = newExitClock(nil, bound, wedge, r.own, func() time.Time { return r.wall },
+		func([]Reached) (map[int]taskTime, bool) { return maps.Clone(r.tasks), r.ok },
+		func() (diskMark, bool) { return maps.Clone(r.disks), r.disksOK },
+		func(name string) []string { r.belowRead[name]++; return r.below[name] })
 	return r
+}
+
+// serves makes the host's disk serve I/O for d of the next look: it
+// completes I/O, and has I/O in flight for d.
+func (r *clockRig) serves(d time.Duration) {
+	n := r.disks["259:0"]
+	n.done++
+	n.busy += d
+	r.disks["259:0"] = n
 }
 
 // look moves wall time by w and keploy's runnable time by own, lets step
@@ -309,13 +342,652 @@ func TestTheExitClockCountsOnlyTheTimeTheProcessesCouldRun(t *testing.T) {
 	})
 }
 
+// A thread held in the kernel (D) waits for no CPU, and the kernel does not
+// say on what it waits. While the host's storage serves I/O, the time it
+// served is taken for a wait on it (a disk a loaded host keeps busy serves
+// others first); the time storage served nothing counts, as a wait in the
+// kernel then is on no storage, and one held there for ever must still let
+// the stop go on. So does all of it where a device stood still with I/O in
+// flight (dead storage), or where the thread can reach storage the host's
+// disks do not show (a network filesystem).
+func TestTheExitClockTakesAWaitInTheKernelOnStorageThatServesForAWait(t *testing.T) {
+	const w = 100 * time.Millisecond
+	ms := time.Millisecond
+	held := taskTime{ran: ms, slices: 3, blocked: true, seen: true}
+	t.Run("held in the kernel while no storage serves, it could run all of it", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: held})
+		for i := range 5 {
+			if got := r.look(w, w, nil); got != w {
+				t.Fatalf("look %d added %v of a thread held in the kernel with storage serving nothing, want %v", i, got, w)
+			}
+		}
+	})
+	t.Run("held in the kernel while storage serves throughout, it waited all of it", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: held})
+		for i := range 5 {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != 0 {
+				t.Fatalf("look %d added %v of a thread held in the kernel while storage served throughout, want none", i, got)
+			}
+		}
+	})
+	t.Run("held in the kernel while storage serves part of it, it could run the rest", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: held})
+		r.serves(30 * ms)
+		if got := r.look(w, w, nil); got != 70*ms {
+			t.Fatalf("added %v with storage serving 30ms of it, want 70ms", got)
+		}
+	})
+	t.Run("of the time it neither ran nor waited for a CPU, what storage served is a wait", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: held})
+		// It waited 20 ms for a CPU, ran 10 and went into the kernel: of
+		// the 70 ms left, storage served all.
+		r.serves(w)
+		got := r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 10*ms, 20*ms, 1, false)(m)
+			th := m[1]
+			th.blocked, th.seen = true, true
+			m[1] = th
+		})
+		if got != 10*ms {
+			t.Fatalf("added %v, want the 10ms it ran", got)
+		}
+	})
+	t.Run("a thread new since the last look waited on storage no longer than it lived", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: {slices: 3}})
+		// Started 50 ms before the look, it waited 10 for a CPU, ran 10
+		// and went into the kernel: of the 30 left, storage served all.
+		r.serves(w)
+		if got := r.look(w, w, func(m map[int]taskTime) {
+			m[2] = taskTime{ran: 10 * ms, waited: 10 * ms, slices: 1, blocked: true, seen: true, age: 50 * ms}
+		}); got != 60*ms {
+			t.Fatalf("added %v, want the 50ms before it began and the 10ms it ran", got)
+		}
+	})
+	t.Run("storage that had I/O in flight longer than the look served no more than the look", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: held, 2: {slices: 1}})
+		r.serves(3 * w)
+		if got := r.look(w, w, nil); got != 0 {
+			t.Fatalf("added %v, want none", got)
+		}
+	})
+	// A device standing still: I/O in flight, none completed, its busy
+	// time not moved (a kernel that moves it only as requests start and
+	// end shows a device so whose requests outlast the look).
+	const bound = 3 * w
+	standing := func() *clockRig {
+		return newClockRigOf(map[int]taskTime{1: held}, bound, diskMark{"259:0": {}, "8:0": {done: 7, inFlight: 1}})
+	}
+	completes := func(r *clockRig, dev string) {
+		n := r.disks[dev]
+		n.done++
+		n.busy += w
+		r.disks[dev] = n
+	}
+	// turn is the held thread's turn on a CPU as its I/O completes, too
+	// short to count here: its stretch in the kernel ends, so a test of a
+	// device's stretch is not one of the thread's.
+	turn := adds(1, 0, 0, 1, false)
+	t.Run("a device standing still with I/O in flight serves, as a slow one does", func(t *testing.T) {
+		r := standing()
+		for i := range 2 {
+			if got := r.look(w, w, nil); got != 0 {
+				t.Fatalf("look %d added %v while a device stood still with I/O in flight, want none", i, got)
+			}
+		}
+	})
+	t.Run("one that stood still for the stall bound of the time at stake is dead, and serves none while it stands, whatever another serves", func(t *testing.T) {
+		r := standing()
+		for i, want := range []time.Duration{0, 0, w, w} {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d of a device standing still added %v, want %v", i, got, want)
+			}
+		}
+		completes(r, "8:0")
+		if got := r.look(w, w, nil); got != 0 {
+			t.Fatalf("the look in which it completed I/O added %v, want none", got)
+		}
+	})
+	t.Run("a stretch standing still ends as the device completes I/O", func(t *testing.T) {
+		r := standing()
+		for i := range 8 {
+			var step func(map[int]taskTime)
+			if i%3 == 2 {
+				completes(r, "8:0")
+				step = turn
+			}
+			if got := r.look(w, w, step); got != 0 {
+				t.Fatalf("look %d added %v of a device completing I/O every third look, want none", i, got)
+			}
+		}
+	})
+	t.Run("a stretch standing still is the device's own", func(t *testing.T) {
+		r := standing()
+		r.disks["8:16"] = diskCount{done: 3, inFlight: 1}
+		r.look(w, w, nil) // both stand: one look of each's stretch
+		for i := range 8 {
+			completes(r, []string{"8:0", "8:16"}[i%2])
+			if got := r.look(w, w, turn); got != 0 {
+				t.Fatalf("look %d added %v of two devices standing still in turn, want none", i, got)
+			}
+		}
+	})
+	t.Run("time no thread waits in the kernel is not at stake", func(t *testing.T) {
+		r := standing()
+		r.tasks[1] = taskTime{ran: ms, slices: 3, seen: true}
+		for range 5 {
+			r.look(w, w, nil)
+		}
+		r.tasks[1] = held
+		for i := range 2 {
+			if got := r.look(w, w, nil); got != 0 {
+				t.Fatalf("look %d in the kernel added %v, want none: the device's stretch began with it", i, got)
+			}
+		}
+	})
+	t.Run("the time at stake is no more than keploy could run", func(t *testing.T) {
+		r := standing()
+		for i := range 5 {
+			if got := r.look(w, w/4, nil); got != 0 {
+				t.Fatalf("look %d added %v, want none", i, got)
+			}
+		}
+	})
+	// An encrypted volume (dm-1) on an LVM volume (dm-0) on a partition of
+	// a disk, which another partition shares.
+	stacked := func() *clockRig {
+		r := newClockRigOf(map[int]taskTime{1: held}, bound, diskMark{
+			"253:1": {name: "dm-1", done: 2, inFlight: 1}, "253:0": {name: "dm-0", done: 5, inFlight: 1},
+			"259:3": {name: "nvme0n1p3", done: 10, inFlight: 1}, "259:1": {name: "nvme0n1p1"}, "259:0": {name: "nvme0n1", done: 40, inFlight: 1},
+		})
+		r.below = map[string][]string{"dm-1": {"dm-0"}, "dm-0": {"nvme0n1p3"}, "nvme0n1p3": {"nvme0n1"}, "nvme0n1p1": {"nvme0n1"}}
+		return r
+	}
+	t.Run("a volume standing still on a disk completing I/O serves, however long it stands", func(t *testing.T) {
+		r := stacked()
+		for i := range 12 {
+			completes(r, "259:0") // the disk, for another partition's I/O
+			if got := r.look(w, w, turn); got != 0 {
+				t.Fatalf("look %d added %v while the volumes stood still on a disk completing I/O, want none", i, got)
+			}
+		}
+		for name, n := range r.belowRead {
+			if n != 1 {
+				t.Errorf("the devices below %s were read %d times, want once", name, n)
+			}
+		}
+	})
+	t.Run("a volume standing still on a disk standing still too is dead once they stood still for the bound", func(t *testing.T) {
+		r := stacked()
+		for i, want := range []time.Duration{0, 0, w, w} {
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d of volumes and their disk standing still added %v, want %v", i, got, want)
+			}
+		}
+	})
+	// A thread held in the kernel at two looks, with no turn on a CPU between
+	// them (its slices unchanged), stood in the kernel throughout. What it
+	// waits on the kernel does not say: busy storage serves it at last, but a
+	// wait on no storage (a lock a wedged driver holds, a frozen cgroup) is
+	// waited on for ever while the host's storage serves others.
+	serving := func() *clockRig { return newClockRigOf(map[int]taskTime{1: held}, bound, diskMark{"259:0": {}}) }
+	t.Run("one that stood in the kernel for the stall bound of the time at stake is wedged, and counts while it stands, whatever storage serves", func(t *testing.T) {
+		r := serving()
+		for i, want := range []time.Duration{0, 0, 0, w, w} {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d of a thread standing in the kernel, storage serving, added %v, want %v", i, got, want)
+			}
+		}
+		// Its turn on a CPU ends the stretch: it ran 1 ms, and the rest of
+		// the look was a wait on storage that served.
+		r.serves(w)
+		if got := r.look(w, w, adds(1, ms, 0, 1, false)); got != ms {
+			t.Fatalf("the look in which it had a turn on a CPU added %v, want the %v it ran", got, ms)
+		}
+		r.serves(w)
+		if got := r.look(w, w, nil); got != 0 {
+			t.Fatalf("the look after its turn added %v, want none: its stretch began again", got)
+		}
+	})
+	t.Run("one is taken for wedged no sooner than the kernel reports a task hung, where that is longer than the bound", func(t *testing.T) {
+		r := newClockRigWedged(map[int]taskTime{1: held}, bound, 5*w, diskMark{"259:0": {}})
+		for i, want := range []time.Duration{0, 0, 0, 0, 0, w, w} {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d of a thread standing in the kernel, storage serving, added %v, want %v", i, got, want)
+			}
+		}
+	})
+	t.Run("a stretch in the kernel ends as the thread has a turn on a CPU", func(t *testing.T) {
+		r := serving()
+		for i := range 12 {
+			r.serves(w)
+			step := func(map[int]taskTime) {}
+			if i%3 == 2 {
+				step = adds(1, ms, 0, 1, false)
+			}
+			if got := r.look(w, w, step); got > ms {
+				t.Fatalf("look %d added %v of a thread whose waits in the kernel end every third look, want at most the %v it ran", i, got, ms)
+			}
+		}
+	})
+	t.Run("a stretch in the kernel is the thread's own", func(t *testing.T) {
+		// Each has a turn every fourth look, one a look after the other:
+		// each stands for three looks at most, short of a bound of four,
+		// and at two looks in a row both stand. Taken from the other's
+		// stretch, each would be taken for wedged there.
+		r := newClockRigOf(map[int]taskTime{1: held, 2: held}, 4*w, diskMark{"259:0": {}})
+		for i := range 12 {
+			r.serves(w)
+			step := func(map[int]taskTime) {}
+			if i%4 < 2 {
+				step = adds(1+i%4, ms, 0, 1, false)
+			}
+			if got := r.look(w, w, step); got > ms {
+				t.Fatalf("look %d added %v of two threads whose waits in the kernel end in turn, want at most the %v one ran", i, got, ms)
+			}
+		}
+	})
+	t.Run("a stretch in the kernel grows by no more than keploy could run", func(t *testing.T) {
+		r := serving()
+		for i := range 8 {
+			r.serves(w)
+			if got := r.look(w, w/4, nil); got != 0 {
+				t.Fatalf("look %d added %v of a thread standing in the kernel for %v of keploy's runnable time, want none", i, got, time.Duration(i+1)*w/4)
+			}
+		}
+	})
+	t.Run("a stretch in the kernel grows by none while a dead device takes all its time", func(t *testing.T) {
+		// Two looks served, two with the device under it dead (all of them
+		// counts already), then it serves again: up to the last look, the
+		// thread had the stall bound of credit only after the fifth.
+		r := standing()
+		for i, want := range []time.Duration{0, 0, w, w} {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d added %v, want %v", i, got, want)
+			}
+		}
+		completes(r, "8:0")
+		if got := r.look(w, w, nil); got != 0 {
+			t.Fatalf("the look in which the device completed I/O added %v, want none", got)
+		}
+		completes(r, "8:0")
+		if got := r.look(w, w, nil); got != w {
+			t.Fatalf("the look after it had the bound of credit added %v, want %v", got, w)
+		}
+	})
+	t.Run("a thread that went into the kernel on the turn it had at the last look starts its stretch at the next", func(t *testing.T) {
+		// On a CPU at the last look (runnable), it ran on into the kernel
+		// on that turn: its slices are unchanged, but it was not held
+		// there throughout the look. A bound of two and a half looks: the
+		// look it went in on, counted, would take it there a look sooner.
+		r := newClockRigOf(map[int]taskTime{1: {ran: ms, slices: 3, runnable: true}}, 5*w/2, diskMark{"259:0": {}})
+		r.serves(w)
+		r.look(w, w, func(m map[int]taskTime) {
+			th := m[1]
+			th.ran += 10 * ms
+			th.runnable, th.blocked, th.seen = false, true, true
+			m[1] = th
+		})
+		for i, want := range []time.Duration{0, 0, 0, w} {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d after it went into the kernel added %v, want %v", i, got, want)
+			}
+		}
+	})
+	t.Run("a thread new to a look starts no stretch in the kernel", func(t *testing.T) {
+		r := serving()
+		for i := range 2 {
+			r.serves(w)
+			r.look(w, w, nil)
+			_ = i
+		}
+		// Thread 1 has a turn and stands again; thread 2 is new, and held.
+		r.serves(w)
+		r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 0, 0, 1, false)(m)
+			m[2] = taskTime{slices: 1, blocked: true, seen: true, age: w}
+		})
+		for i := range 3 {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != 0 {
+				t.Fatalf("look %d added %v, want none: neither thread stood for the bound", i, got)
+			}
+		}
+	})
+	t.Run("one that can reach storage the host's disks do not show is taken to wait on none", func(t *testing.T) {
+		unseen := held
+		unseen.seen = false
+		r := newClockRig(map[int]taskTime{1: unseen})
+		r.serves(w)
+		if got := r.look(w, w, nil); got != w {
+			t.Fatalf("added %v of a thread that can reach a network filesystem, want %v", got, w)
+		}
+	})
+	t.Run("one asleep on its own (S) could run all of it, whatever storage serves", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: {ran: ms, slices: 3, seen: true}})
+		r.serves(w)
+		if got := r.look(w, w, nil); got != w {
+			t.Fatalf("added %v of a sleeping thread, want %v", got, w)
+		}
+	})
+	t.Run("a look between reads of the disks of which one read none has storage serving none", func(t *testing.T) {
+		r := newClockRig(map[int]taskTime{1: held})
+		r.disksOK = false
+		r.serves(w)
+		if got := r.look(w, w, nil); got != w {
+			t.Fatalf("the look that read no disks added %v, want %v", got, w)
+		}
+		r.disksOK = true
+		r.serves(w)
+		if got := r.look(w, w, nil); got != w {
+			t.Fatalf("the look after one that read no disks added %v, want %v", got, w)
+		}
+		r.serves(w)
+		if got := r.look(w, w, nil); got != 0 {
+			t.Fatalf("a look between two reads of the disks added %v, want none", got)
+		}
+	})
+}
+
+// The kernel reports a task hung once it has stood in an uninterruptible
+// sleep, given no CPU, for its hung_task_timeout_secs; where it keeps none,
+// or the detector is off (0), its default, two minutes.
+func TestTheKernelsHungTaskTimeIsReadAsItWritesIt(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, file string
+		want       time.Duration
+	}{
+		{"set", "30\n", 30 * time.Second},
+		{"the default", "120\n", 2 * time.Minute},
+		{"off", "0\n", hungTaskDefault},
+		{"not a number", "x\n", hungTaskDefault},
+		{"longer than a Duration holds", "18446744073709551615\n", time.Duration(math.MaxInt64)},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-"))
+		if err := os.WriteFile(path, []byte(tc.file), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := hungTaskTime(path); got != tc.want {
+			t.Errorf("%s (%q): %v, want %v", tc.name, tc.file, got, tc.want)
+		}
+	}
+	if got := hungTaskTime(filepath.Join(dir, "none")); got != hungTaskDefault {
+		t.Errorf("a kernel built without the detector: %v, want %v", got, hungTaskDefault)
+	}
+	if hungTaskDefault != 2*time.Minute {
+		t.Errorf("the kernel's default hung-task time is two minutes, not %v", hungTaskDefault)
+	}
+	const host = "/proc/sys/kernel/hung_task_timeout_secs"
+	if hostStorage.hung == nil {
+		t.Fatal("a stop reads no hung-task time of this kernel")
+	}
+	if got, want := hostStorage.hung(), hungTaskTime(host); got != want {
+		t.Errorf("a stop reads a hung-task time of %v, want this kernel's %v (%s)", got, want, host)
+	}
+}
+
+// A stop's clock takes a thread standing in the kernel for wedged once it has
+// stood there for the kernel's hung-task time, or for the stall bound where
+// that is longer.
+func TestAStopsClockTakesAThreadForWedgedAtTheKernelsHungTaskTime(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		hung         func() time.Duration
+		bound, wedge time.Duration
+	}{
+		{"hung-task time longer", func() time.Duration { return time.Minute }, time.Second, time.Minute},
+		{"bound longer", func() time.Duration { return time.Second }, time.Minute, time.Minute},
+		{"none read", nil, time.Second, time.Second},
+	} {
+		st := hostStorage
+		st.hung = tc.hung
+		testStorage.Store(&st)
+		c, release := NewExitClock(nil, tc.bound)
+		release()
+		testStorage.Store(nil)
+		if c.wedge != tc.wedge {
+			t.Errorf("%s: a thread is taken for wedged after %v, want %v", tc.name, c.wedge, tc.wedge)
+		}
+	}
+}
+
+// A kill names the bound it killed on as the clock measured it: of the time
+// both the processes and keploy could run where its last look read their
+// account; of keploy's runnable time where it did not.
+func TestTheExitClockSaysWhatItMeasured(t *testing.T) {
+	r := newClockRig(map[int]taskTime{1: {slices: 3}})
+	if got, want := r.c.Said(time.Minute), "1m0s of its and keploy's runnable time"; got != want {
+		t.Fatalf("read: said %q, want %q", got, want)
+	}
+	r.ok = false
+	r.look(time.Second, time.Second, nil)
+	if got, want := r.c.Said(time.Minute), "1m0s of keploy's runnable time"; got != want {
+		t.Fatalf("not read: said %q, want %q", got, want)
+	}
+}
+
+// Storage served, between two reads of the host's block devices, for the
+// longest that a device which completed I/O, or has I/O in flight, had I/O
+// in flight, at most the time between the reads; one with I/O in flight at
+// both that completed none had it throughout. Those with I/O in flight that
+// completed none stood still, but for one stacked on a device that completed
+// I/O (a volume, a partition): its I/O is served there.
+func TestStorageServedIsTheLongestADeviceServingWasBusy(t *testing.T) {
+	const w = 100 * time.Millisecond
+	ms := time.Millisecond
+	// Every device under each, by name: an encrypted volume (dm-1) on an
+	// LVM volume (dm-0) on a partition (nvme0n1p3) of a disk.
+	under := map[string][]string{
+		"dm-1":      {"dm-0", "nvme0n1p3", "nvme0n1"},
+		"dm-0":      {"nvme0n1p3", "nvme0n1"},
+		"nvme0n1p3": {"nvme0n1"},
+	}
+	for _, tc := range []struct {
+		name        string
+		before, now diskMark
+		want        time.Duration
+		still       []string
+	}{
+		{"none read", diskMark{}, diskMark{}, 0, nil},
+		{"idle", diskMark{"8:0": {done: 5}}, diskMark{"8:0": {done: 5}}, 0, nil},
+		{"given I/O since, completing none yet", diskMark{"8:0": {done: 5}}, diskMark{"8:0": {done: 5, inFlight: 2, busy: 40 * ms}}, 40 * ms, []string{"8:0"}},
+		{"completing I/O", diskMark{"8:0": {done: 5, busy: 10 * ms}}, diskMark{"8:0": {done: 9, busy: 70 * ms}}, 60 * ms, nil},
+		{"the longest of two", diskMark{"8:0": {done: 5}, "8:1": {done: 5}}, diskMark{"8:0": {done: 6, busy: 20 * ms}, "8:1": {done: 7, busy: 50 * ms}}, 50 * ms, nil},
+		{"no more than the time between", diskMark{"8:0": {done: 5}}, diskMark{"8:0": {done: 6, busy: 3 * w}}, w, nil},
+		{"a device new since", diskMark{}, diskMark{"8:0": {done: 6, busy: 50 * ms}}, 0, nil},
+		{"one standing still with I/O in flight, its busy time not moved", diskMark{"8:0": {done: 5}, "8:16": {done: 3, inFlight: 1, busy: ms}}, diskMark{"8:0": {done: 6, busy: 50 * ms}, "8:16": {done: 3, inFlight: 1, busy: ms}}, w, []string{"8:16"}},
+		{"one that drained its I/O", diskMark{"8:0": {done: 5}, "8:16": {done: 3, inFlight: 1}}, diskMark{"8:0": {done: 6, busy: 50 * ms}, "8:16": {done: 4, busy: 5 * ms}}, 50 * ms, nil},
+		{"one given I/O since, completing none yet, and another completing", diskMark{"8:0": {done: 5}, "8:16": {done: 3}}, diskMark{"8:0": {done: 6, busy: 50 * ms}, "8:16": {done: 3, inFlight: 1, busy: ms}}, 50 * ms, []string{"8:16"}},
+		{"two standing still", diskMark{"8:0": {done: 5, inFlight: 1}, "8:16": {done: 3, inFlight: 4}}, diskMark{"8:0": {done: 5, inFlight: 1}, "8:16": {done: 3, inFlight: 4}}, w, []string{"8:0", "8:16"}},
+		{"its counts gone back (another device)", diskMark{"8:0": {done: 9, busy: w}}, diskMark{"8:0": {done: 2, inFlight: 1, busy: ms}}, 0, nil},
+		{"its busy time gone back (another device)", diskMark{"8:0": {done: 2, busy: w}}, diskMark{"8:0": {done: 9, busy: ms}}, 0, nil},
+		{"a volume standing still while the partition under it completes I/O",
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10, inFlight: 1}},
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 12, inFlight: 1, busy: 15 * ms}}, w, nil},
+		{"volumes stacked on one another, and a partition, standing still while the disk under them all completes I/O",
+			diskMark{"253:1": {name: "dm-1", done: 2, inFlight: 1}, "253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10, inFlight: 1}, "259:0": {name: "nvme0n1", done: 40}},
+			diskMark{"253:1": {name: "dm-1", done: 2, inFlight: 1}, "253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10, inFlight: 1}, "259:0": {name: "nvme0n1", done: 41, busy: 2 * ms}}, w, nil},
+		{"a volume and the partition under it both standing still",
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10, inFlight: 1}},
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10, inFlight: 1}}, w, []string{"253:0", "259:3"}},
+		{"a volume standing still on a partition idle",
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10}},
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10}}, w, []string{"253:0"}},
+		{"a volume standing still on a partition whose counts went back (another device)",
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 10, busy: w}},
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 12, busy: ms}}, w, []string{"253:0"}},
+		{"a volume standing still on a partition new since",
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}},
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "259:3": {name: "nvme0n1p3", done: 12, busy: ms}}, w, []string{"253:0"}},
+		{"a volume standing still while a disk it is not on completes I/O",
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "8:0": {name: "sda", done: 10}},
+			diskMark{"253:0": {name: "dm-0", done: 5, inFlight: 3}, "8:0": {name: "sda", done: 11, busy: ms}}, w, []string{"253:0"}},
+	} {
+		served, still := storageServed(w, tc.before, tc.now, func(name string) []string { return under[name] })
+		if served != tc.want || !slices.Equal(still, tc.still) {
+			t.Errorf("%s: served %v, standing still %v; want %v, %v", tc.name, served, still, tc.want, tc.still)
+		}
+	}
+}
+
+// /proc/diskstats is read whatever the kernel's count of fields: discards
+// from Linux 4.18 and flushes from 5.5 are I/O completed too.
+func TestDiskstatsAreReadAsEachKernelWritesThem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diskstats")
+	stats := strings.Join([]string{
+		" 259       0 nvme0n1 100 1 800 50 200 2 1600 90 3 120 140 10 0 80 4 30 7",
+		" 259       1 nvme0n1p1 10 0 80 5 20 0 160 9 0 12 14 1 0 8 0",
+		"   8       0 sda 7 0 56 4 8 0 64 6 1 9 10",
+		"   7       0 loop0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		"garbage",
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(stats), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := readDiskstats(path)
+	if !ok {
+		t.Fatal("not read")
+	}
+	ms := time.Millisecond
+	want := diskMark{
+		"259:0": {name: "nvme0n1", done: 100 + 200 + 10 + 30, inFlight: 3, busy: 120 * ms},
+		"259:1": {name: "nvme0n1p1", done: 10 + 20 + 1, busy: 12 * ms},
+		"8:0":   {name: "sda", done: 7 + 8, inFlight: 1, busy: 9 * ms},
+		"7:0":   {name: "loop0"},
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("read %+v, want %+v", got, want)
+	}
+	if _, ok := readDiskstats(filepath.Join(t.TempDir(), "none")); ok {
+		t.Fatal("a missing file was read")
+	}
+	if got, ok := readDiskstats("/proc/diskstats"); ok && len(got) == 0 {
+		t.Fatal("this host's diskstats read as no device")
+	}
+}
+
+// A block device is stacked on the devices sysfs names its slaves (a
+// device-mapper, md or bcache device's), and a partition on its disk; one
+// sysfs cannot show is on none.
+func TestABlockDeviceIsOnItsSlavesAndAPartitionOnItsDisk(t *testing.T) {
+	sys := t.TempDir()
+	devices := filepath.Join(sys, "devices")
+	class := filepath.Join(sys, "class", "block")
+	for _, dir := range []string{
+		"devices/nvme0/nvme0n1/nvme0n1p3", "devices/nvme0/nvme0n1/nvme0n1p1",
+		"devices/virtual/dm-0/slaves", "devices/virtual/dm-1/slaves",
+		"devices/virtual/md0/slaves", "devices/cciss/cciss!c0d0/cciss!c0d0p1",
+		"devices/virtual/loop0", "class/block",
+	} {
+		if err := os.MkdirAll(filepath.Join(sys, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"nvme0/nvme0n1/nvme0n1p3", "nvme0/nvme0n1/nvme0n1p1", "cciss/cciss!c0d0/cciss!c0d0p1"} {
+		if err := os.WriteFile(filepath.Join(devices, f, "partition"), []byte("1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := func(target, name string) {
+		t.Helper()
+		if err := os.Symlink(target, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{
+		"nvme0n1": "nvme0/nvme0n1", "nvme0n1p3": "nvme0/nvme0n1/nvme0n1p3", "nvme0n1p1": "nvme0/nvme0n1/nvme0n1p1",
+		"dm-0": "virtual/dm-0", "dm-1": "virtual/dm-1", "md0": "virtual/md0",
+		"cciss!c0d0": "cciss/cciss!c0d0", "cciss!c0d0p1": "cciss/cciss!c0d0/cciss!c0d0p1", "loop0": "virtual/loop0",
+	} {
+		link(filepath.Join("..", "..", "devices", target), filepath.Join(class, name))
+	}
+	link(filepath.Join("..", "..", "..", "nvme0", "nvme0n1", "nvme0n1p3"), filepath.Join(devices, "virtual", "dm-0", "slaves", "nvme0n1p3"))
+	link(filepath.Join("..", "..", "dm-0"), filepath.Join(devices, "virtual", "dm-1", "slaves", "dm-0"))
+	link(filepath.Join("..", "..", "..", "nvme0", "nvme0n1", "nvme0n1p1"), filepath.Join(devices, "virtual", "md0", "slaves", "nvme0n1p1"))
+	link(filepath.Join("..", "..", "..", "cciss", "cciss!c0d0", "cciss!c0d0p1"), filepath.Join(devices, "virtual", "md0", "slaves", "cciss!c0d0p1"))
+	for name, want := range map[string][]string{
+		"dm-1":         {"dm-0"},
+		"dm-0":         {"nvme0n1p3"},
+		"nvme0n1p3":    {"nvme0n1"},
+		"nvme0n1":      nil,
+		"md0":          {"cciss/c0d0p1", "nvme0n1p1"},
+		"cciss/c0d0p1": {"cciss/c0d0"},
+		"loop0":        nil,
+		"sdz":          nil,
+	} {
+		got := storageBelow(class, name)
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s is on %q, want %q", name, got, want)
+		}
+	}
+	// This host's own, as a stop reads them: whatever it has, a partition
+	// is on its disk.
+	disks, _ := hostStorage.disks()
+	for _, n := range disks {
+		if _, err := os.Stat(filepath.Join("/sys/class/block", n.name, "partition")); err == nil {
+			if got := hostStorage.below(n.name); len(got) != 1 || !strings.HasPrefix(n.name, got[0]) {
+				t.Errorf("this host's partition %s is on %q, not its disk", n.name, got)
+			}
+		}
+	}
+}
+
+// A thread's filesystems are on storage the host's disks show only where each
+// mount of its namespace is on a block device, or on none: one served over a
+// network or by a process (or of a type not known) is not, nor are mounts
+// that cannot be read.
+func TestAThreadSeesItsStorageOnlyWhereEveryMountIsOnTheHostsDisks(t *testing.T) {
+	local := strings.Join([]string{
+		"45 1 0:37 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p6 rw,subvol=/root",
+		"47 45 0:41 / /usr/lib/firmware/vendor rw,relatime shared:2 - tmpfs vendorfw rw",
+		"60 45 0:22 / /proc rw,nosuid shared:13 - proc proc rw",
+		"61 60 0:50 / /proc/sys/fs/binfmt_misc rw,relatime shared:30 master:4 - autofs systemd-1 rw,fd=37",
+		"70 45 0:60 / /var/lib/docker/overlay2/x/merged rw,relatime - overlay overlay rw,lowerdir=/a,upperdir=/b",
+		"71 45 259:4 / /boot rw,relatime shared:3 - ext4 /dev/nvme0n1p4 rw",
+		"72 45 0:61 / /mnt/my\\040dir rw,relatime - xfs /dev/sdb1 rw",
+	}, "\n") + "\n"
+	for _, tc := range []struct {
+		name   string
+		mounts string
+		want   bool
+	}{
+		{"on disks and memory", local, true},
+		{"and an NFS mount", local + "80 45 0:70 / /mnt/nfs rw,relatime shared:40 - nfs4 server:/export rw,vers=4.2\n", false},
+		{"and a FUSE one", local + "81 45 0:71 / /run/user/1000/doc rw,nosuid shared:41 - fuse.portal portal rw\n", false},
+		{"and one of a type not known", local + "82 45 0:72 / /mnt/x rw - lustre 10.0.0.1@tcp:/fs rw\n", false},
+		{"a line without its separator", local + "83 45 0:73 / /mnt/y rw tmpfs\n", false},
+		{"none", "", false},
+	} {
+		task := t.TempDir()
+		if err := os.WriteFile(filepath.Join(task, "mountinfo"), []byte(tc.mounts), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := mountsSeen(task); got != tc.want {
+			t.Errorf("%s: seen %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if mountsSeen(filepath.Join(t.TempDir(), "gone")) {
+		t.Error("a thread whose mounts cannot be read sees its storage")
+	}
+}
+
 // fakeProc writes a /proc of processes under a temporary directory: each a
-// leader state and start time, and threads of it, each a state and an account.
+// leader state and start time, and threads of it, each a state, an account,
+// the processes it started, its mounts, and its mount namespace (ns/mnt;
+// none written where "").
 type fakeThread struct {
 	tid              int
 	state            byte
 	ran, wait, slice uint64
 	children         string
+	mounts, ns       string
 }
 
 func fakeProc(t *testing.T, procs map[int]struct {
@@ -350,6 +1022,17 @@ func fakeProc(t *testing.T, procs map[int]struct {
 			write(filepath.Join(tdir, "stat"), stat(th.tid, th.state, p.start))
 			write(filepath.Join(tdir, "schedstat"), fmt.Sprintf("%d %d %d\n", th.ran, th.wait, th.slice))
 			write(filepath.Join(tdir, "children"), th.children)
+			if th.mounts != "" {
+				write(filepath.Join(tdir, "mountinfo"), th.mounts)
+			}
+			if th.ns != "" {
+				if err := os.MkdirAll(filepath.Join(tdir, "ns"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(th.ns, filepath.Join(tdir, "ns", "mnt")); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	return root
@@ -360,23 +1043,30 @@ func fakeProc(t *testing.T, procs map[int]struct {
 // now: a Go process exiting has a zombie leader while its other threads,
 // killed, wait for a CPU to get out, and a shutdown may wait on a child it
 // started since the stop began. A pid that names another process now is not
-// read.
+// read. A thread held in the kernel (D) is neither runnable nor asleep on its
+// own, and whether it can reach only storage the host's disks show is read
+// of the mounts of its own namespace (once for threads that share one): a
+// zombie leader's show none, and a thread may have a namespace of its own.
 func TestTheExitClockReadsEveryThreadOfItsProcesses(t *testing.T) {
 	type proc = struct {
 		state   byte
 		start   uint64
 		threads []fakeThread
 	}
+	local := "45 1 0:37 / / rw shared:1 - xfs /dev/nvme0n1p3 rw\n46 45 0:22 / /proc rw - proc proc rw\n"
+	remote := local + "47 45 0:40 / /mnt/nfs rw - nfs4 server:/export rw\n"
 	root := fakeProc(t, map[int]proc{
-		100: {state: 'Z', start: 7, threads: []fakeThread{{100, 'Z', 5, 1, 2, ""}, {101, 'R', 6, 9, 3, "400 "}}},
-		200: {state: 'S', start: 9, threads: []fakeThread{{200, 'S', 1, 2, 3, ""}}},
-		400: {state: 'S', start: 11, threads: []fakeThread{{400, 'S', 4, 4, 4, "401"}}},
-		401: {state: 'R', start: 12, threads: []fakeThread{{401, 'R', 0, 0, 0, ""}}},
+		// 102 and 103 share a namespace, read once (103 shows no mounts of
+		// its own); 104 has one of its own, which reaches NFS.
+		100: {state: 'Z', start: 7, threads: []fakeThread{{100, 'Z', 5, 1, 2, "", "", ""}, {101, 'R', 6, 9, 3, "400 ", local, "mnt:[1]"}, {102, 'D', 2, 2, 2, "", local, "mnt:[1]"}, {103, 'D', 1, 1, 1, "", "", "mnt:[1]"}, {104, 'D', 1, 1, 1, "", remote, "mnt:[2]"}}},
+		200: {state: 'S', start: 9, threads: []fakeThread{{200, 'S', 1, 2, 3, "", "", ""}}},
+		400: {state: 'S', start: 11, threads: []fakeThread{{400, 'S', 4, 4, 4, "401", remote, ""}, {403, 'D', 1, 1, 1, "", remote, ""}}},
+		401: {state: 'R', start: 12, threads: []fakeThread{{401, 'R', 0, 0, 0, "", "", ""}, {402, 'D', 3, 3, 3, "", "", ""}}},
 	})
 	// Read 2 s after the system booted: a thread started at tick 7 (of
 	// 10ms) is 1.93 s old.
 	boot := func() time.Duration { return 2 * time.Second }
-	got, ok := readTaskTimesIn(root, []Reached{{PID: 100, Start: 7}, {PID: 200, Start: 8}, {PID: 300, Start: 1}}, boot)
+	got, ok := readTaskTimesIn(root, []Reached{{PID: 100, Start: 7}, {PID: 200, Start: 8}, {PID: 300, Start: 1}}, boot, mountsSeen)
 	if !ok {
 		t.Fatal("the zombie-led process was not read")
 	}
@@ -384,13 +1074,18 @@ func TestTheExitClockReadsEveryThreadOfItsProcesses(t *testing.T) {
 	want := map[int]taskTime{
 		100: {ran: 5, waited: 1, slices: 2, age: 1930 * ms},
 		101: {ran: 6, waited: 9, slices: 3, runnable: true, age: 1930 * ms},
+		102: {ran: 2, waited: 2, slices: 2, blocked: true, seen: true, age: 1930 * ms},
+		103: {ran: 1, waited: 1, slices: 1, blocked: true, seen: true, age: 1930 * ms},
+		104: {ran: 1, waited: 1, slices: 1, blocked: true, age: 1930 * ms},
 		400: {ran: 4, waited: 4, slices: 4, age: 1890 * ms},
+		403: {ran: 1, waited: 1, slices: 1, blocked: true, age: 1890 * ms},
 		401: {runnable: true, age: 1880 * ms},
+		402: {ran: 3, waited: 3, slices: 3, blocked: true, age: 1880 * ms},
 	}
 	if !maps.Equal(got, want) {
-		t.Fatalf("read %+v, want %+v (400 and 401 run under 100, pid 200 names another process now, 300 is gone)", got, want)
+		t.Fatalf("read %+v, want %+v (400 and 401 run under 100, pid 200 names another process now, 300 is gone; 102 and 103 can reach only local storage, 104 and 403 an NFS mount, and 402's mounts cannot be read)", got, want)
 	}
-	if _, ok := readTaskTimesIn(root, []Reached{{PID: 200, Start: 8}}, boot); ok {
+	if _, ok := readTaskTimesIn(root, []Reached{{PID: 200, Start: 8}}, boot, mountsSeen); ok {
 		t.Fatal("a process another now has the pid of was read")
 	}
 }
@@ -421,7 +1116,7 @@ type liveRig struct {
 func newLiveRig() *liveRig { return &liveRig{wall: time.Now(), own: &stall.ManualClock{}} }
 
 func (r *liveRig) clock(procs []Reached) *ExitClock {
-	return newExitClock(procs, r.own, func() time.Time { return r.wall }, readTaskTimes)
+	return newExitClock(procs, time.Hour, time.Hour, r.own, func() time.Time { return r.wall }, readTaskTimes, hostStorage.disks, hostStorage.below)
 }
 
 // looks looks at clocks n times, each after a pause, moving wall time and

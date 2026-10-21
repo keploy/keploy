@@ -36,7 +36,8 @@
 #
 #   8. An app that ignores SIGINT: keploy's stop at the set's end waits for
 #      its exit, and kills it once it has made no progress on its way out for
-#      the stall bound of keploy's runnable time (a minute), and the set is
+#      the stall bound (a minute) of the time both it and keploy could run
+#      (utils.ExitClock), and the set is
 #      not judged (what the app would have done as it stopped is not known):
 #      keploy test exits non-zero, and the report names the kill and the
 #      stall.

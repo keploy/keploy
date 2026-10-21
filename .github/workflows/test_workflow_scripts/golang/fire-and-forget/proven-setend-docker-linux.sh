@@ -2,8 +2,9 @@
 # e2e, under the proven switch: keploy's stop of a `docker run` app at a test
 # set's end waits for the app's container to stop (the daemon's wait, an
 # event), not for a number of seconds, and kills only when the container made
-# no progress on its way out for the stall bound of keploy's own runnable
-# time (P101-b-k).
+# no progress on its way out for the stall bound of the time both it and
+# keploy could run (utils.ExitClock: a container held off the CPU, or waiting
+# on a disk that serves others, accrues no stall) (P101-b-k).
 #
 #   0. Docker is starved of CPU throughout: the daemon, containerd and its
 #      shims at 5% of a CPU, and the app's container at --cpus 0.05. The app's
