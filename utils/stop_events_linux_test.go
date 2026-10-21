@@ -51,21 +51,27 @@ func readyLeader(t *testing.T, dir, command string) (pid int, reaped <-chan stru
 // sleeping 4 s on its way out, is no kill; nor is one that keeps closing what
 // it holds past the stall bound, as that is progress. One that makes no
 // progress (it ignores the interrupt) is killed once the stall bound of the
-// time both it and keploy could run has passed, and the stop says so.
+// time both it and keploy could run has passed, and the stop says so; it is
+// stopped once it has settled into the command it ends in (settles), asleep,
+// as a step it takes on its way there (its touch exiting, its exec) is one
+// the stop rightly takes for progress.
 func TestAStopWaitsForTheAppsExitAndKillsOnlyOnAStall(t *testing.T) {
 	for _, tc := range []struct {
-		name, command string
-		stall         time.Duration
-		killed        bool
+		name, command, settles string
+		stall                  time.Duration
+		killed                 bool
 	}{
-		{"a shutdown longer than the old grace", `trap 'sleep 4; exit 0' INT; touch ready; while :; do sleep 0.2; done`, StopStallBudget, false},
+		{"a shutdown longer than the old grace", `trap 'sleep 4; exit 0' INT; touch ready; while :; do sleep 0.2; done`, "", StopStallBudget, false},
 		{"a shutdown that keeps making progress past the stall bound", `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null 8</dev/null
-trap 'for fd in 3 4 5 6 7 8; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' INT; touch ready; while :; do sleep 0.1; done`, 500 * time.Millisecond, false},
-		{"one that ignores the interrupt", `trap "" INT; touch ready; exec sleep 600`, 300 * time.Millisecond, true},
+trap 'for fd in 3 4 5 6 7 8; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' INT; touch ready; while :; do sleep 0.1; done`, "", 500 * time.Millisecond, false},
+		{"one that ignores the interrupt", `trap "" INT; touch ready; exec sleep 600`, "sleep", 300 * time.Millisecond, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shortStall(t, tc.stall)
 			pid, reaped := readyLeader(t, t.TempDir(), tc.command)
+			if tc.settles != "" {
+				asleep(t, Reached{PID: pid}, tc.settles)
+			}
 			scope := &TeardownScope{}
 			killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, scope)
 			if err != nil {
