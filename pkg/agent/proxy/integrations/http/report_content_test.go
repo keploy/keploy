@@ -357,6 +357,45 @@ func TestASessionCallHintNamesThePathAsTheSummaryDoes(t *testing.T) {
 	}
 }
 
+// A miss whose report was made with the switch on (an agent opted in under a
+// CLI that is not, a report file written with it on) and is read with it off
+// names the call's path as its summary then does, in every field: the hint
+// that says how to serve the call to every test as well, on every door that
+// reads one (the CLI's read of the agent and keploy report, by the report
+// file's rule; the MOCK MISMATCH table, by the report's).
+func TestASwitchOnSessionCallHintIsReadWithoutTheSegmentItsSummaryWithholds(t *testing.T) {
+	restore := logcontent.Set(true)
+	r := lifetimeMiss(t)
+	restore()
+	t.Cleanup(logcontent.Set(false))
+	if r.ContentWithheld || !strings.Contains(r.NextSteps, `pathPrefix: "/api/users/kp-live-id"`) {
+		t.Fatalf("with the switch on the hint does not name the call's path:\n%s", r.NextSteps)
+	}
+	call := models.UnmatchedCall{Protocol: r.Protocol, ActualSummary: r.ActualSummary, Diff: r.Diff, NextSteps: r.NextSteps,
+		FieldDiffs: r.FieldDiffs, ClosestMockReq: r.ClosestMockReq, ReceivedReq: r.ReceivedReq, ContentWithheld: r.ContentWithheld,
+		VariablePlaces: r.VariablePlaces}
+	file := (&models.TestReport{Tests: []models.TestResult{{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{call}}}}}).ReportContent()
+	table := r.WithoutContent()
+	for door, got := range map[string]models.UnmatchedCall{
+		"the report file": file.Tests[0].FailureInfo.UnmatchedCalls[0],
+		"the table": {Protocol: table.Protocol, ActualSummary: table.ActualSummary, Diff: table.Diff, NextSteps: table.NextSteps,
+			FieldDiffs: table.FieldDiffs, ClosestMockReq: table.ClosestMockReq, ReceivedReq: table.ReceivedReq},
+	} {
+		if got.ActualSummary != "GET /api/users/{}" || !strings.Contains(got.NextSteps, `pathPrefix: "/api/users/{}"`) {
+			t.Errorf("%s: summary %q, hint does not name the path as the summary does:\n%s", door, got.ActualSummary, got.NextSteps)
+		}
+		b, err := yaml.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []string{"kp-live-id", "kp-rec-id"} {
+			if strings.Contains(string(b), v) {
+				t.Errorf("%s carries %q:\n%s", door, v, b)
+			}
+		}
+	}
+}
+
 // summaryPath reads the path of a summary: without its query, and "/" for a
 // summary that names none.
 func TestSummaryPath(t *testing.T) {

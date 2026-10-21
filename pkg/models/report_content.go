@@ -150,9 +150,11 @@ func DiffKindText(k MockFieldDiffKind) string {
 // withheld (mismatch.Build) keeps its Diff and its summary's SQL, the
 // parser's own words, and loses again any content written into it since. Any
 // other report's Diff is text nobody vetted, so it is rendered again from the
-// field diffs' paths and kinds.
+// field diffs' paths and kinds. Its NextSteps, and a Diff it keeps, are the
+// parser's words, and keep everything but their quotes of the summary, which
+// name the call as its summary now does (QuotesOfSummary).
 func (r MockMismatchReport) WithoutContent() MockMismatchReport {
-	withholdContent(r.Protocol, r.VariablePlaces, &r.ActualSummary, &r.Diff, &r.FieldDiffs, &r.ClosestMockReq, &r.ReceivedReq, &r.RequestsIdentical, &r.ContentWithheld)
+	withholdContent(r.Protocol, r.VariablePlaces, &r.ActualSummary, &r.Diff, &r.NextSteps, &r.FieldDiffs, &r.ClosestMockReq, &r.ReceivedReq, &r.RequestsIdentical, &r.ContentWithheld)
 	return r
 }
 
@@ -161,7 +163,7 @@ func (r MockMismatchReport) WithoutContent() MockMismatchReport {
 // printer of a report applies to a call it was handed, from an agent that may
 // not have withheld it or from a report file written with the switch on.
 func (c UnmatchedCall) WithoutContent() UnmatchedCall {
-	withholdContent(c.Protocol, c.VariablePlaces, &c.ActualSummary, &c.Diff, &c.FieldDiffs, &c.ClosestMockReq, &c.ReceivedReq, &c.RequestsIdentical, &c.ContentWithheld)
+	withholdContent(c.Protocol, c.VariablePlaces, &c.ActualSummary, &c.Diff, &c.NextSteps, &c.FieldDiffs, &c.ClosestMockReq, &c.ReceivedReq, &c.RequestsIdentical, &c.ContentWithheld)
 	return c
 }
 
@@ -192,8 +194,16 @@ func ReportContent(calls []UnmatchedCall) []UnmatchedCall {
 // keep it: the unmatched calls of each of its tests and of its set as
 // UnmatchedCall.ReportContent keeps them. A report file written with the
 // switch on, or by an older keploy, is read with this before anything of it
-// is printed or written again. r itself is not changed: the copy shares only
-// what it does not change.
+// is printed or written again: its calls lose what WithoutContent has a rule
+// for, the values of their field diffs, their rendered requests, the
+// summary's SQL literals, query and known path places, and every quote of
+// the summary in their words. A summary of any other protocol is kept as its
+// builder wrote it, which by the builder's contract names the command or
+// operation (SummaryWithoutContent): a file whose builder broke that contract
+// keeps what it wrote there (integrations' Mongo builder named a command's
+// first value before it named only a collection), as a reader cannot
+// withhold what it has no rule for. r itself is not changed: the copy shares
+// only what it does not change.
 func (r *TestReport) ReportContent() *TestReport {
 	if r == nil || logcontent.On() {
 		return r
@@ -210,14 +220,16 @@ func (r *TestReport) ReportContent() *TestReport {
 	return &out
 }
 
-func withholdContent(protocol string, places []string, summary, diff *string, diffs *[]MockFieldDiff, mockReq, liveReq *string, identical, withheld *bool) {
+func withholdContent(protocol string, places []string, summary, diff, next *string, diffs *[]MockFieldDiff, mockReq, liveReq *string, identical, withheld *bool) {
 	// The places a field diff names hold the application's values too.
 	known := append([]string(nil), places...)
 	for _, d := range *diffs {
 		known = append(known, d.Path)
 	}
+	was := *summary
 	if *withheld {
 		*summary = pathSummaryWithoutContent(protocol, *summary, known)
+		*diff = QuotesOfSummary(protocol, *diff, was, *summary)
 	} else {
 		// Before the diffs lose their values: a diff of the whole path is
 		// read by them.
@@ -225,6 +237,7 @@ func withholdContent(protocol string, places []string, summary, diff *string, di
 		*summary = SummaryWithoutContent(protocol, *summary, known)
 		*diff = RenderFieldDiffs(*diffs, true)
 	}
+	*next = QuotesOfSummary(protocol, *next, was, *summary)
 	*diffs = fieldDiffsWithoutValues(*diffs)
 	if !*withheld || *mockReq != "" || *liveReq != "" {
 		// The requests the report holds now: those it was made with, or, in
@@ -235,6 +248,37 @@ func withholdContent(protocol string, places []string, summary, diff *string, di
 	}
 	*mockReq, *liveReq = "", ""
 	*withheld = true
+}
+
+// QuotesOfSummary is text, words a parser wrote into a report (its
+// NextSteps, or a Diff the report keeps), with every quote of the call's
+// summary written as the summary is now that the report withholds content:
+// was is the summary before, now after. A parser's words name fields, mocks
+// and commands, never a value, and the one piece of the call they quote is
+// its summary, or, of a call with a path (IsPathProtocol), the summary's
+// path, as Go quotes a string (strconv.Quote, the session-call hint's
+// pathPrefix: the HTTP and HTTP/2 parsers name the call's path there as
+// their summary does). A reader that withholds the summary, from a report
+// made with logcontent's switch on, or a withheld one whose summary gained
+// holes since, withholds the same text wherever the words quote it: the
+// whole summary, quoted or not, and its path, quoted. Text that quotes
+// neither is returned as it was.
+func QuotesOfSummary(protocol, text, was, now string) string {
+	if text == "" || was == "" || was == now {
+		return text
+	}
+	quotes := [][2]string{{strconv.Quote(was), strconv.Quote(now)}, {was, now}}
+	if IsPathProtocol(protocol) {
+		if ws, we, ok := shapePath(was); ok {
+			if ns, ne, ok := shapePath(now); ok && was[ws:we] != now[ns:ne] {
+				quotes = append(quotes, [2]string{strconv.Quote(was[ws:we]), strconv.Quote(now[ns:ne])})
+			}
+		}
+	}
+	for _, q := range quotes {
+		text = strings.ReplaceAll(text, q[0], q[1])
+	}
+	return text
 }
 
 // PathFieldDiff is the path of the field diff that says a call's whole URL
