@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -219,6 +220,14 @@ func ReportContent(calls []UnmatchedCall) []UnmatchedCall {
 // first value before it named only a collection), as a reader cannot
 // withhold what it has no rule for. r itself is not changed: the copy shares
 // only what it does not change.
+//
+// Each test's matched calls (FailureInfo.MatchedCalls) and dependency rows
+// (Result.DepResult) name recorded mocks by what they recorded, and lose
+// what MockSummaryWithoutContent has a rule for, by the mock's kind: an HTTP
+// mock's URL its query, fragment and user info, a Mongo mock's request
+// everything but its command, a SQL operation its literals. The URL path
+// segments a mock declares for its test variables are the mock's, which a
+// file does not hold: a call written with the switch on keeps them.
 func (r *TestReport) ReportContent() *TestReport {
 	if r == nil || logcontent.On() {
 		return r
@@ -229,10 +238,214 @@ func (r *TestReport) ReportContent() *TestReport {
 		out.Tests = make([]TestResult, len(r.Tests))
 		for i, t := range r.Tests {
 			t.FailureInfo.UnmatchedCalls = ReportContent(t.FailureInfo.UnmatchedCalls)
+			if t.FailureInfo.MatchedCalls != nil {
+				matched := make([]MatchedCall, len(t.FailureInfo.MatchedCalls))
+				for j, c := range t.FailureInfo.MatchedCalls {
+					matched[j] = c.WithoutContent()
+				}
+				t.FailureInfo.MatchedCalls = matched
+			}
+			if t.Result.DepResult != nil {
+				deps := make([]DepResult, len(t.Result.DepResult))
+				for j, d := range t.Result.DepResult {
+					deps[j] = d.WithoutContent()
+				}
+				t.Result.DepResult = deps
+			}
 			out.Tests[i] = t
 		}
 	}
 	return &out
+}
+
+// MockReportSummary is m's summary (MockSummaryFromSpec) as a report may
+// carry it (MockReportName): the summary a failed test's matched calls
+// (MatchedCall.Summary) name their mocks by.
+func MockReportSummary(m *Mock) string {
+	if m == nil {
+		return ""
+	}
+	return MockReportName(m, MockSummaryFromSpec(m))
+}
+
+// MockReportName is name, what a report calls m by what m recorded (its
+// summary, MockSummaryFromSpec, or a dependency row's target: its method and
+// URL, or its destination and operation), as a report may carry it: whole
+// with logcontent's switch on, and with it off as MockSummaryWithoutContent
+// leaves it by m's kind, with every URL path segment m declares for a test
+// variable (DeclaredPathPlaces) written {} too.
+func MockReportName(m *Mock, name string) string {
+	if m == nil || logcontent.On() {
+		return name
+	}
+	return MockSummaryWithoutContent(string(m.Kind), name, DeclaredPathPlaces(m))
+}
+
+// WithoutContent is c as a report without content carries it: its summary
+// as MockSummaryWithoutContent leaves it, by its protocol (the mock's kind).
+func (c MatchedCall) WithoutContent() MatchedCall {
+	c.Summary = MockSummaryWithoutContent(c.Protocol, c.Summary, nil)
+	return c
+}
+
+// WithoutContent is d, a dependency row, as a report without content carries
+// it: the target its name gives (DepRowName) as MockSummaryWithoutContent
+// leaves it, by its type. A row whose name DepRowName did not write with its
+// type (the overflow row has none) is kept.
+func (d DepResult) WithoutContent() DepResult {
+	if !strings.HasPrefix(d.Name, "deps[") {
+		return d
+	}
+	head, rest, ok := strings.Cut(d.Name, "] "+d.Type+" ")
+	target, found := strings.CutSuffix(rest, " "+DepNameSuffixPresence)
+	if !ok || !found || strings.ContainsRune(head, ' ') {
+		return d
+	}
+	d.Name = head + "] " + d.Type + " " + MockSummaryWithoutContent(d.Type, target, nil) + " " + DepNameSuffixPresence
+	return d
+}
+
+// MockSummaryWithoutContent is name, what a report calls a recorded mock of
+// kind protocol by what it recorded (MockSummaryFromSpec's summary, or a
+// dependency row's target), as a report without content carries it. A
+// mock's recorder writes what it likes there, and some write the
+// application's content: an HTTP mock's URL holds its query, and the Mongo
+// recorder writes the whole request as the mock's operation.
+//
+//   - HTTP: the method and the URL without its query, fragment or user
+//     info, with every path segment at a place in places ("url.path[<n>]")
+//     written {}.
+//   - MongoDB: its first word and the command the request names
+//     (mongoCommand), never a value; its first word alone when the request
+//     names none.
+//   - SQL: its first word and the rest, a statement or an operation, shaped
+//     by its grammar (sqlShapeOf).
+//   - DNS and gRPC: kept, a host name, as a call's destination names it, and
+//     a service's method (gRPC: without a query).
+//   - Any other: its first word alone (the kind, or a destination): the
+//     operation a recorder writes for it is no contract.
+func MockSummaryWithoutContent(protocol, name string, places []string) string {
+	switch {
+	case isHTTPProtocol(protocol):
+		return urlNameWithoutContent(name, places)
+	case strings.EqualFold(protocol, "gRPC"):
+		return pathSummaryWithoutContent(protocol, name, places)
+	case strings.EqualFold(protocol, string(DNS)):
+		return name
+	}
+	word, rest, ok := strings.Cut(name, " ")
+	if !ok {
+		return name
+	}
+	switch {
+	case strings.EqualFold(protocol, string(Mongo)) || strings.EqualFold(protocol, "MongoDB"):
+		rest = mongoCommand(rest)
+	case isSQLCall(protocol):
+		rest = sqlShapeOf(protocol, rest)
+	default:
+		rest = ""
+	}
+	if rest == "" {
+		return word
+	}
+	return word + " " + rest
+}
+
+// urlNameWithoutContent is name, a method and a URL as a report names an
+// HTTP mock ("GET http://user:pw@svc:8080/v1/users/7?token=x", or a
+// dependency row's "GET svc:8080/v1/users/7"), without the URL's query and
+// fragment, the credentials of its authority, and with every path segment at
+// a place in places written {}. The path is what follows the authority
+// ("scheme://host:port"), or the first slash of a URL with none.
+func urlNameWithoutContent(name string, places []string) string {
+	if i := strings.IndexAny(name, "?#"); i >= 0 {
+		name = strings.TrimRight(name[:i], " ")
+	}
+	pathAt := strings.IndexByte(name, '/')
+	if i := strings.Index(name, "://"); i >= 0 {
+		authority := i + len("://")
+		end := len(name)
+		if j := strings.IndexByte(name[authority:], '/'); j >= 0 {
+			end = authority + j
+		}
+		if at := strings.LastIndexByte(name[authority:end], '@'); at >= 0 {
+			name = name[:authority] + name[authority+at+1:]
+			end -= at + 1
+		}
+		pathAt = -1
+		if end < len(name) {
+			pathAt = end
+		}
+	}
+	if pathAt < 0 {
+		return name
+	}
+	return name[:pathAt] + holePathPlaces(name[pathAt:], places)
+}
+
+// mongoBodySection is how the Mongo recorder writes an OP_MSG's body section,
+// the command document, before the document's JSON.
+const mongoBodySection = "{ SectionSingle msg: "
+
+// mongoCommand is the command a Mongo mock's request names, read from the
+// text its recorder wrote of the request as the mock's operation: the first
+// key of its command document, which MongoDB's wire protocol makes the
+// command's name (the body section of an OP_MSG, or the query of an OP_QUERY
+// to a database's $cmd collection), never one of its values. The recorder
+// writes the message as JSON (MongoOpMessage, MongoOpQuery), or, an older
+// one, as the message's own text ("{ OpMsg flags: 0, sections: [{
+// SectionSingle msg: <document> }, …], checksum: 0 }"). "" when the text
+// names no command: another kind of message, an older recorder's text whose
+// first section is not the body, or text that reads as neither.
+func mongoCommand(op string) string {
+	var doc string
+	var msg struct {
+		Sections       []string `json:"sections"`
+		CollectionName string   `json:"collection_name"`
+		Query          string   `json:"query"`
+	}
+	switch {
+	case json.Unmarshal([]byte(op), &msg) == nil:
+		for _, s := range msg.Sections {
+			if d, ok := strings.CutPrefix(s, mongoBodySection); ok {
+				doc = d
+				break
+			}
+		}
+		if len(msg.Sections) == 0 && strings.HasSuffix(msg.CollectionName, ".$cmd") {
+			doc = msg.Query
+		}
+	case strings.HasPrefix(op, "{ OpMsg "):
+		if _, sections, ok := strings.Cut(op, ", sections: ["); ok {
+			if d, ok := strings.CutPrefix(sections, mongoBodySection); ok {
+				doc = d
+			}
+		}
+	case strings.HasPrefix(op, "{ OpQuery "):
+		_, after, ok := strings.Cut(op, ", fullCollectionName: ")
+		collection, rest, ok2 := strings.Cut(after, ", numberToSkip: ")
+		if ok && ok2 && strings.HasSuffix(collection, ".$cmd") {
+			if _, q, ok := strings.Cut(rest, ", query: "); ok {
+				doc = q
+			}
+		}
+	}
+	return firstJSONKey(doc)
+}
+
+// firstJSONKey is the first key of the JSON object doc starts with, "" when
+// it starts with none. What follows the key is not read.
+func firstJSONKey(doc string) string {
+	dec := json.NewDecoder(strings.NewReader(doc))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return ""
+	}
+	t, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	key, _ := t.(string)
+	return key
 }
 
 func withholdContent(protocol string, places []string, summary, diff, next *string, diffs *[]MockFieldDiff, mockReq, liveReq *string, identical, withheld *bool) {

@@ -3946,20 +3946,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						// test. Skip if not — stale data would attribute the
 						// previous test's matched mocks to this one.
 						if perTestConsumedKnown {
-							for _, m := range perTestConsumed {
-								if m.Kind != models.DNS {
-									info := mockLookup[m.Name]
-									protocol := info.protocol
-									if protocol == "" {
-										protocol = string(m.Kind)
-									}
-									testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
-										MockName: m.Name,
-										Protocol: protocol,
-										Summary:  info.summary,
-									})
-								}
-							}
+							testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, matchedCalls(perTestConsumed, mockLookup)...)
 						}
 					}
 					// UnmatchedCalls is finalized for EVERY test, not just
@@ -6415,7 +6402,7 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
 	for _, mock := range mocks {
 		lookup[mock.Name] = mockDisplayInfo{
-			summary:  models.MockSummaryFromSpec(mock),
+			summary:  models.MockReportSummary(mock),
 			protocol: string(mock.Kind),
 			target:   mockTargetFromSpec(mock),
 		}

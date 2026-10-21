@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -723,11 +724,16 @@ func TestBuildDepResults_MissingRowsAgreeWithMockSubset(t *testing.T) {
 	}
 }
 
+// A dependency row names its mock by what it recorded: by default as a
+// report without content carries it (models.MockReportName), and with
+// KEPLOY_LOG_CONTENT set as the mock recorded it (wantContent, when it
+// differs).
 func TestMockTargetFromSpec(t *testing.T) {
 	tests := []struct {
-		name string
-		mock *models.Mock
-		want string
+		name        string
+		mock        *models.Mock
+		want        string
+		wantContent string
 	}{
 		{name: "nil mock", mock: nil, want: ""},
 		{
@@ -795,19 +801,45 @@ func TestMockTargetFromSpec(t *testing.T) {
 			want: "db:5432 INSERT",
 		},
 		{
+			// "find" is no request the Mongo recorder writes: by default the
+			// summary names no command it cannot read from one.
 			name: "the protocol-generic summary beats a bare operation token",
 			mock: &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{
 				Metadata:      map[string]string{"operation": "find"},
 				MongoRequests: []models.MongoRequest{{}},
 			}},
-			want: "MongoDB find",
+			want:        "MongoDB",
+			wantContent: "MongoDB find",
 		},
 		{
+			// The Mongo recorder writes the whole request as the operation:
+			// by default the row names its command, never a value.
+			name: "a Mongo request is named by its command",
+			mock: &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{
+				Metadata:      map[string]string{"operation": `{"flagBits":0,"sections":["{ SectionSingle msg: {\"createUser\":\"kp-canary-user\",\"pwd\":\"kp-canary-pwd\"} }"],"checksum":0}`},
+				MongoRequests: []models.MongoRequest{{}},
+			}},
+			want:        "MongoDB createUser",
+			wantContent: `MongoDB {"flagBits":0,"sections":["{ SectionSingle msg: {\"createUser\":\"kp-canary-user\",\"pwd\":\"kp-canary-pwd\"} }"],"checksum":0}`,
+		},
+		{
+			// Another kind's operation is no contract: by default the row
+			// names no target rather than the bare kind.
 			name: "operation is the last resort",
 			mock: &models.Mock{Kind: models.Kind("Redis"), Spec: models.MockSpec{
 				Metadata: map[string]string{"operation": "GET user:1"},
 			}},
-			want: "Redis GET user:1",
+			want:        "",
+			wantContent: "Redis GET user:1",
+		},
+		{
+			name: "http drops the query and holes a segment the mock declares for a variable",
+			mock: &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+				HTTPReq:   &models.HTTPReq{Method: "GET", URL: "http://api.internal:8080/users/kp-canary-id?token=kp-canary-token"},
+				Variables: models.MockVariables{"userId": {Use: []string{"url.path[1]"}}},
+			}},
+			want:        "GET api.internal:8080/users/{}",
+			wantContent: "GET api.internal:8080/users/kp-canary-id",
 		},
 		{
 			// No destAddr, no summary (requestOperation is invisible to
@@ -841,8 +873,75 @@ func TestMockTargetFromSpec(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			restore := logcontent.Set(false)
 			assert.Equal(t, tt.want, mockTargetFromSpec(tt.mock))
+			restore()
+			want := tt.wantContent
+			if want == "" {
+				want = tt.want
+			}
+			defer logcontent.Set(true)()
+			assert.Equal(t, want, mockTargetFromSpec(tt.mock), "with KEPLOY_LOG_CONTENT set")
 		})
+	}
+}
+
+// A failed test's matched calls and the rows of the dependencies it did not
+// consume name their mocks by what the mocks recorded, and by default carry
+// none of the application's content, in the report file as anywhere: not an
+// HTTP mock's query or the path segment it declares for a test variable, not
+// a Mongo mock's request (createUser's password), while each still names the
+// call. A DNS mock is no matched call. With KEPLOY_LOG_CONTENT set they name
+// the mocks as they recorded them.
+func TestAFailedTestNamesItsMocksWithoutContentByDefault(t *testing.T) {
+	createUser := `{"flagBits":0,"sections":["{ SectionSingle msg: {\"createUser\":\"kp-canary-user\",\"pwd\":\"kp-canary-pwd\",\"$db\":\"admin\"} }"],"checksum":0}`
+	mocks := []*models.Mock{
+		{Name: "mock-http", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:   &models.HTTPReq{Method: "GET", URL: "http://auth-svc:8080/v1/users/kp-canary-id/session?token=kp-canary-token&email=kp-canary@example.com"},
+			Variables: models.MockVariables{"userId": {Use: []string{"url.path[2]"}}},
+		}},
+		{Name: "mock-mongo", Kind: models.Mongo, Spec: models.MockSpec{MongoRequests: []models.MongoRequest{{}}, Metadata: map[string]string{"operation": createUser}}},
+		{Name: "mock-dns", Kind: models.DNS, Spec: models.MockSpec{DNSReq: &models.DNSReq{Name: "auth-svc."}}},
+	}
+	for _, content := range []bool{false, true} {
+		restore := logcontent.Set(content)
+		lookup := newMockLookup(mocks, nil)
+		var res models.TestResult
+		res.FailureInfo.MatchedCalls = matchedCalls([]models.MockState{consumed("mock-http", models.HTTP), consumed("mock-mongo", models.Mongo), consumed("mock-dns", models.DNS)}, lookup)
+		res.Result.DepResult = buildDepResults([]models.MockEntry{{Name: "mock-http", Kind: string(models.HTTP)}, {Name: "mock-mongo", Kind: string(models.Mongo)}}, nil, true, nil, nil, lookup).Rows
+		restore()
+		out, err := yaml.Marshal(res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(out)
+		var summaries, names []string
+		for _, c := range res.FailureInfo.MatchedCalls {
+			summaries = append(summaries, c.Protocol+" "+c.Summary)
+		}
+		for _, d := range res.Result.DepResult {
+			names = append(names, d.Name)
+		}
+		if !content {
+			if want := []string{"Http GET http://auth-svc:8080/v1/users/{}/session", "Mongo MongoDB createUser"}; !reflect.DeepEqual(summaries, want) {
+				t.Errorf("matched calls %q, want %q", summaries, want)
+			}
+			if want := []string{"deps[0] http GET auth-svc:8080/v1/users/{}/session (presence)", "deps[1] mongo MongoDB createUser (presence)"}; !reflect.DeepEqual(names, want) {
+				t.Errorf("dependency rows %q, want %q", names, want)
+			}
+			if strings.Contains(text, "kp-canary") {
+				t.Errorf("the default report carries the application's content:\n%s", text)
+			}
+			continue
+		}
+		if want := []string{"Http " + string(mocks[0].Spec.HTTPReq.Method) + " " + mocks[0].Spec.HTTPReq.URL, "Mongo MongoDB " + createUser}; !reflect.DeepEqual(summaries, want) {
+			t.Errorf("with the switch on, matched calls %q, want %q", summaries, want)
+		}
+		for _, v := range []string{"kp-canary-token", "kp-canary-pwd", "kp-canary-id"} {
+			if !strings.Contains(text, v) {
+				t.Errorf("with the switch on the report lost %q:\n%s", v, text)
+			}
+		}
 	}
 }
 

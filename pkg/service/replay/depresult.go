@@ -21,9 +21,30 @@ import (
 // swallow their errors at the build site, so a lookup miss is normal and
 // consumers must degrade rather than assume a hit.
 type mockDisplayInfo struct {
+	// summary and target name the mock by what it recorded, as a report may
+	// carry them (models.MockReportSummary, mockTargetFromSpec).
 	summary  string
 	protocol string
 	target   string
+}
+
+// matchedCalls are a failed test's matched calls (FailureInfo.MatchedCalls):
+// each mock it consumed but a DNS one, named by its summary as the report
+// carries it (lookup), its protocol the mock's kind.
+func matchedCalls(consumed []models.MockState, lookup map[string]mockDisplayInfo) []models.MatchedCall {
+	var out []models.MatchedCall
+	for _, m := range consumed {
+		if m.Kind == models.DNS {
+			continue
+		}
+		info := lookup[m.Name]
+		protocol := info.protocol
+		if protocol == "" {
+			protocol = string(m.Kind)
+		}
+		out = append(out, models.MatchedCall{MockName: m.Name, Protocol: protocol, Summary: info.summary})
+	}
+	return out
 }
 
 // mockTargetFromSpec derives a human-meaningful destination for a mock.
@@ -48,10 +69,28 @@ type mockDisplayInfo struct {
 //     mocks carry.
 //
 // Returns "" when none is available; DepRowName renders correctly without it.
+//
+// The target is what the mock recorded, and a report carries it as it may
+// (models.MockReportName): with KEPLOY_LOG_CONTENT unset, without what the
+// mock's kind has a rule for (an HTTP path segment the mock declares for a
+// test variable, a Mongo request's every value, a SQL literal). A target
+// left naming the bare kind that way (another kind's operation withheld) is
+// "", as a target that names nothing else is.
 func mockTargetFromSpec(mock *models.Mock) string {
 	if mock == nil {
 		return ""
 	}
+	recorded := mockTargetWithContent(mock)
+	t := models.MockReportName(mock, recorded)
+	if t != recorded && t == string(mock.Kind) {
+		return ""
+	}
+	return t
+}
+
+// mockTargetWithContent is mockTargetFromSpec's target as the mock recorded
+// it.
+func mockTargetWithContent(mock *models.Mock) string {
 	if t := httpTargetFromReq(mock.Spec.HTTPReq); t != "" {
 		return t
 	}
