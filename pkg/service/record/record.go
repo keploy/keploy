@@ -1636,6 +1636,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	revokedWhy := map[string]string{}
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
+	// insertedByWindow is, under the proven switch, the test cases saved by
+	// the window the agent streamed each with: a late loss names the test
+	// case it charges by it (chargeLateLosses). Guarded by insertedMu.
+	insertedByWindow := savedTestCases{}
 	var insertedMu sync.Mutex
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
@@ -1877,11 +1881,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 		// What the agent found, at the stream's end, that test cases it
 		// streamed with nothing lost had lost after all (proven switch).
-		r.chargeLateLosses(capWatch, func(name string) bool {
+		r.chargeLateLosses(capWatch, func(l models.LateLoss) []string {
 			insertedMu.Lock()
 			defer insertedMu.Unlock()
-			_, ok := insertedNames[name]
-			return ok
+			return insertedByWindow.savedFor(l, func(name string) bool {
+				_, ok := insertedNames[name]
+				return ok
+			})
 		})
 
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
@@ -2549,6 +2555,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
+			// The window the agent streamed it with, before anything here
+			// touches it: what a late loss names it by (chargeLateLosses).
+			streamedWin := windowOf(testCase)
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -2635,6 +2644,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedMu.Lock()
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
+				if provenswitch.On() {
+					insertedByWindow.add(streamedWin, testCase.Name)
+				}
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
 				capWatch.charge(testCase.Name, testCase.CaptureLost)

@@ -268,9 +268,13 @@ func TestATestCaseOverALossIsStreamedWithItToAClientThatChargesIt(t *testing.T) 
 // Under the proven switch, to a client that charges the loss, a test case
 // streamed with nothing lost that a span recorded after it went overlaps (a
 // parser reports what it could not record behind the traffic) is named at the
-// stream's end, in its marker, with what it lost; one streamed with its loss
-// is not named again, nor one the late span does not overlap. Without the
-// switch, or to a client that does not charge it, the marker names none.
+// stream's end, in its marker, with what it lost: by the window it was
+// streamed with, and by its name when it has one. The agent streams most test
+// cases unnamed (keploy record names each as it saves it), so an unnamed one
+// is named by its window alone, and two unnamed ones are told apart by it.
+// One streamed with its loss is not named again, nor one the late span does
+// not overlap. Without the switch, or to a client that does not charge it,
+// the marker names none.
 //
 // Not parallel: the spans are the package-global manager's, and it sets the
 // switch.
@@ -306,8 +310,16 @@ func TestATestCaseALateSpanOverlapsIsNamedAtTheStreamsEnd(t *testing.T) {
 			resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{IncomingOptions: models.IncomingOptions{ChargesLosses: c.charges}}, tok)
 			defer done()
 			lateTC := tc("late", late.Sub(base))
+			// Unnamed, as the agent streams a test case keploy record names:
+			// one before the late span's instant and one after it, both over it.
+			unnamedBefore := tc("", late.Sub(base)-time.Millisecond)
+			unnamedAfter := tc("", late.Sub(base))
+			unnamedAfter.HTTPReq.Timestamp = late.Add(-time.Microsecond)
+			unnamedAfter.HTTPResp.Timestamp = late.Add(2 * time.Millisecond)
 			svc.tc <- tc("early", 0) // streamed with its loss (the early span), or left out
 			svc.tc <- lateTC
+			svc.tc <- unnamedBefore
+			svc.tc <- unnamedAfter
 			svc.tc <- tc("clear", late.Sub(base)+time.Hour)
 			_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 			if err != nil {
@@ -350,8 +362,15 @@ func TestATestCaseALateSpanOverlapsIsNamedAtTheStreamsEnd(t *testing.T) {
 				return
 			}
 			want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}}
-			if len(sum.LateLosses) != 1 || fmt.Sprint(sum.LateLosses["late"]) != fmt.Sprint(want) {
-				t.Fatalf("the marker names %+v, want the late test case alone with %+v", sum.LateLosses, want)
+			named := func(t *models.TestCase) string {
+				return fmt.Sprintf("%q [%d,%d] %v", t.Name, t.HTTPReq.Timestamp.UnixNano(), t.HTTPResp.Timestamp.UnixNano(), want)
+			}
+			var got []string
+			for _, l := range sum.LateLosses {
+				got = append(got, fmt.Sprintf("%q [%d,%d] %v", l.Name, l.Request.UnixNano(), l.Response.UnixNano(), l.Lost))
+			}
+			if wantNamed := []string{named(lateTC), named(unnamedBefore), named(unnamedAfter)}; strings.Join(got, "\n") != strings.Join(wantNamed, "\n") {
+				t.Fatalf("the marker names\n%s\nwant the late test cases alone, each by its window\n%s", strings.Join(got, "\n"), strings.Join(wantNamed, "\n"))
 			}
 		})
 	}

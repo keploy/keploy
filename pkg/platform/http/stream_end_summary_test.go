@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -90,7 +91,13 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 // started the agent, and taken once.
 func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T) {
 	lost := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: mysql exchange not recorded"}}
-	sum := models.StreamEndSummary{TestCasesSent: 2, LateLosses: map[string]models.CaptureLosses{"test-2": lost}}
+	at := time.Date(2003, 4, 5, 6, 7, 8, 9, time.UTC)
+	late := []models.LateLoss{
+		{Name: "test-2", Request: at, Response: at.Add(time.Millisecond), Lost: lost},
+		// Unnamed, as the agent streams a test case keploy record names.
+		{Request: at.Add(time.Second), Response: at.Add(time.Second + time.Nanosecond), Lost: lost},
+	}
+	sum := models.StreamEndSummary{TestCasesSent: 2, LateLosses: late}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mw := multipart.NewWriter(w)
 		w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
@@ -126,8 +133,14 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 		}
 		cancel()
 		got := client.TakeLateTestCaseLosses()
-		if len(got) != 1 || len(got["test-2"]) != 1 || got["test-2"][0] != lost[0] {
-			t.Fatalf("started %v: the client kept %+v, want test-2's %+v", started, got, lost)
+		if len(got) != len(late) {
+			t.Fatalf("started %v: the client kept %+v, want %+v", started, got, late)
+		}
+		for i := range late {
+			g, w := got[i], late[i]
+			if g.Name != w.Name || !g.Request.Equal(w.Request) || !g.Response.Equal(w.Response) || fmt.Sprint(g.Lost) != fmt.Sprint(w.Lost) {
+				t.Fatalf("started %v: the client kept %+v, want %+v", started, got, late)
+			}
 		}
 		if again := client.TakeLateTestCaseLosses(); len(again) != 0 {
 			t.Fatalf("started %v: taken twice: %+v", started, again)

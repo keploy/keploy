@@ -1,6 +1,8 @@
 package record
 
 import (
+	"slices"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -51,22 +53,69 @@ func (r *Recorder) keepRevoked(w *captureWatch, testSetID string, names []string
 // streamed with nothing lost had lost by the stream's end
 // (models.StreamEndSummary.LateLosses): the keploy agent client.
 type lateLossTaker interface {
-	TakeLateTestCaseLosses() map[string]models.CaptureLosses
+	TakeLateTestCaseLosses() []models.LateLoss
+}
+
+// streamedWindow is a test case's window as the agent streamed it
+// (models.LateLoss.Request and Response), as keploy record received it.
+type streamedWindow struct{ req, resp int64 }
+
+// windowOf is tc's window as the agent streamed it; the zero window for a
+// test case with no request time (one the agent checks nothing for).
+func windowOf(tc *models.TestCase) streamedWindow {
+	if tc == nil || tc.HTTPReq.Timestamp.IsZero() {
+		return streamedWindow{}
+	}
+	return streamedWindow{req: tc.HTTPReq.Timestamp.UnixNano(), resp: tc.HTTPResp.Timestamp.UnixNano()}
+}
+
+// savedTestCases is, under the proven switch, the test cases keploy record
+// saved, by the window the agent streamed each with: the agent streams most
+// test cases unnamed, and the name each is saved under is keploy record's own
+// (InsertTestCase names it). A late loss finds its test case here
+// (savedFor). Not safe for concurrent use: record.go guards it with
+// insertedMu.
+type savedTestCases map[streamedWindow][]string
+
+// add notes test case name saved, streamed with window win.
+func (s savedTestCases) add(win streamedWindow, name string) {
+	if win == (streamedWindow{}) || name == "" {
+		return
+	}
+	s[win] = append(s[win], name)
+}
+
+// savedFor is the names of the test cases keploy record saved that late loss
+// l names: the ones streamed with its window, and the one by its name, when the
+// agent named it and that name was saved (inserted). Two test cases streamed
+// with the very same window are both charged: one of them is the one that
+// lost, and a charge is evidence, which the replay that judges each decides.
+func (s savedTestCases) savedFor(l models.LateLoss, inserted func(string) bool) []string {
+	var names []string
+	if !l.Request.IsZero() {
+		names = append(names, s[streamedWindow{req: l.Request.UnixNano(), resp: l.Response.UnixNano()}]...)
+	}
+	if l.Name != "" && inserted(l.Name) && !slices.Contains(names, l.Name) {
+		names = append(names, l.Name)
+	}
+	return names
 }
 
 // chargeLateLosses charges, under the proven switch, each test case keploy
-// record saved (inserted) with what the agent found at the stream's end it
-// had lost after all: a span a parser reported behind the traffic overlaps
-// it, after it was streamed with nothing lost. Without this it was saved
-// without that as its evidence. Called once the frame streams drained.
-func (r *Recorder) chargeLateLosses(w *captureWatch, inserted func(string) bool) {
+// record saved with what the agent found at the stream's end it had lost after
+// all: a span a parser reported behind the traffic overlaps it, after it was
+// streamed with nothing lost. saved names the test cases saved that a late
+// loss names (savedTestCases.savedFor); one keploy record did not save is
+// charged nothing. Without this such a test case was saved without that as
+// its evidence. Called once the frame streams drained.
+func (r *Recorder) chargeLateLosses(w *captureWatch, saved func(models.LateLoss) []string) {
 	t, ok := r.instrumentation.(lateLossTaker)
 	if !ok || !provenswitch.On() {
 		return
 	}
-	for name, lost := range t.TakeLateTestCaseLosses() {
-		if inserted(name) {
-			w.charge(name, lost)
+	for _, l := range t.TakeLateTestCaseLosses() {
+		for _, name := range saved(l) {
+			w.charge(name, l.Lost)
 		}
 	}
 }

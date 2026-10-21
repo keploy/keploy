@@ -721,10 +721,29 @@ type StreamEndSummary struct {
 	KeptWithLoss int `json:"tcs_kept_with_loss,omitempty"`
 	// LateLosses: test cases streamed with nothing lost that a span the
 	// agent learnt of after they went overlaps (a parser reports what it
-	// could not record behind the traffic), by name, with what they lost: the
-	// client charges them as it charges TestCase.CaptureLost. Under the proven
-	// switch only, to a client that charges losses.
-	LateLosses map[string]CaptureLosses `json:"tcs_late_losses,omitempty"`
+	// could not record behind the traffic), each with what it lost (LateLoss):
+	// the client charges them as it charges TestCase.CaptureLost. Under the
+	// proven switch only, to a client that charges losses.
+	LateLosses []LateLoss `json:"tcs_late_losses,omitempty"`
+}
+
+// LateLoss is what a test case the agent streamed with nothing lost had lost
+// by the stream's end (StreamEndSummary.LateLosses). It names the test case as
+// the agent streamed it: by its window, and by its name when the agent named
+// it. The agent streams most test cases unnamed: keploy record names each as
+// it saves it (only a --sync recording's are named by the agent). So keploy
+// record finds the test case it saved by the window it was streamed with.
+type LateLoss struct {
+	// Name is the test case's name as the agent streamed it; empty for one
+	// keploy record named as it saved it.
+	Name string `json:"name,omitempty"`
+	// Request and Response are the test case's window as the agent streamed
+	// it: its HTTPReq.Timestamp and HTTPResp.Timestamp.
+	Request  time.Time `json:"req"`
+	Response time.Time `json:"resp"`
+	// Lost is what the test case lost: the spans its window overlaps that
+	// the agent learnt of after it went.
+	Lost CaptureLosses `json:"lost"`
 }
 
 // FrameStream names one of an agent's frame streams to a recording's client.

@@ -491,6 +491,11 @@ type recTestDB struct {
 	// failNames fails only the named test cases, so a recording can
 	// persist some and lose others. Same construction-time rule.
 	failNames map[string]bool
+	// autoName names an unnamed test case as it is saved, "auto-N", as the
+	// YAML store does (testdb's claimName): the agent streams most test
+	// cases unnamed. Same construction-time rule.
+	autoName bool
+	named    int
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
@@ -503,6 +508,10 @@ func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ str
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.autoName && tc.Name == "" {
+		d.named++
+		tc.Name = fmt.Sprintf("auto-%d", d.named)
+	}
 	d.inserted = append(d.inserted, tc.Name)
 	return nil
 }
@@ -2910,9 +2919,12 @@ func TestStart_ARecordingThatEndsBeforeItCapturesDoesNotWaitForPortQuestions(t *
 // the agent revoked after it streamed it (test-2), and one the agent streamed
 // with the drop already charged and revoked as well (test-3: one drop,
 // charged once), and one the agent streamed with nothing lost and found at
-// the stream's end a late span overlaps (test-5: its marker's LateLosses).
+// the stream's end a late span overlaps (test-5: its marker's LateLosses), and
+// one the agent streamed unnamed, as it streams most, that the store named as
+// it saved it (auto-1), found by the window it was streamed with.
 // A test case that lost nothing (test-4) is charged nothing, and a late loss
-// for a test case keploy record did not save (ghost) charges none.
+// for a test case keploy record did not save (ghost, by name, and one by a
+// window no saved test case was streamed with) charges none.
 // With the switch off they are deleted (TestStart_UnencodableMockIsSkippedAndItsTestRevoked,
 // TestStart_AgentRevokedTestIsNotCountedAsShortPool).
 func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
@@ -2929,17 +2941,24 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 		incoming: make(chan *models.TestCase),
 		outgoing: make(chan *models.Mock),
 	}
-	testDB := &recTestDB{}
+	testDB := &recTestDB{autoName: true}
 	mappingDB := &recMappingDB{}
+	unnamedAt := time.Date(2003, 4, 5, 6, 7, 8, 9, time.UTC)
+	unnamed := &models.TestCase{Kind: models.HTTP}
+	unnamed.HTTPReq.Timestamp, unnamed.HTTPResp.Timestamp = unnamedAt, unnamedAt.Add(time.Millisecond)
 	r := &Recorder{
 		logger:    zap.NewNop(),
 		testDB:    testDB,
 		mockDB:    &recMockDB{unencodable: map[string]bool{"mock-bad": true}},
 		mappingDb: mappingDB,
 		telemetry: &recTelemetry{},
-		instrumentation: &lateBlockingInstr{blockingInstr: blockingInstr{f}, late: map[string]models.CaptureLosses{
-			"test-5": {{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}},
-			"ghost":  {{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}},
+		instrumentation: &lateBlockingInstr{blockingInstr: blockingInstr{f}, late: []models.LateLoss{
+			{Name: "test-5", Lost: models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}}},
+			{Name: "ghost", Lost: models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}}},
+			{Request: unnamedAt, Response: unnamedAt.Add(time.Millisecond),
+				Lost: models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "Http: late, unnamed"}}},
+			{Request: unnamedAt, Response: unnamedAt.Add(time.Second),
+				Lost: models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "Http: late, unsaved"}}},
 		}},
 		testSetConf: recTestSetConf{},
 		hooks:       BaseRecordHooks{},
@@ -2971,6 +2990,7 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 		{Name: "test-3", Kind: models.HTTP, CaptureLost: droppedOnItsWay},
 		{Name: "test-4", Kind: models.HTTP},
 		{Name: "test-5", Kind: models.HTTP},
+		unnamed,
 	} {
 		select {
 		case f.incoming <- tc:
@@ -2990,7 +3010,7 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 	}
 	send(&models.Mock{Version: models.GetVersion(), Name: "revoke-frame", Kind: models.RevokedTests,
 		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-2,test-3"}}})
-	waitForPersistedTestCase(t, testDB, "test-5")
+	waitForPersistedTestCase(t, testDB, "auto-1")
 	require.Eventually(t, func() bool {
 		mappingDB.mu.Lock()
 		defer mappingDB.mu.Unlock()
@@ -3034,16 +3054,24 @@ func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
 	if assert.Len(t, by["test-5"], 1, "test-5's late loss") {
 		assert.Equal(t, "MySQL: late", by["test-5"][0].What)
 	}
+	if assert.Len(t, by["auto-1"], 1, "the late loss of the test case streamed unnamed, found by its window") {
+		assert.Equal(t, "Http: late, unnamed", by["auto-1"][0].What)
+	}
+	for name, lost := range by {
+		for _, c := range lost {
+			assert.NotEqual(t, "Http: late, unsaved", c.What, "%s was charged a late loss over a window no saved test case was streamed with", name)
+		}
+	}
 }
 
 // lateBlockingInstr is blockingInstr whose agent said, at the stream's end,
 // what test cases it streamed with nothing lost had lost after all.
 type lateBlockingInstr struct {
 	blockingInstr
-	late map[string]models.CaptureLosses
+	late []models.LateLoss
 }
 
-func (l *lateBlockingInstr) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
+func (l *lateBlockingInstr) TakeLateTestCaseLosses() []models.LateLoss {
 	late := l.late
 	l.late = nil
 	return late

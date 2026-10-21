@@ -45,8 +45,9 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
-// streamedTestCase is a test case the stream sent with nothing lost, by name
-// and window, for the stream's end to check again (lateLosses).
+// streamedTestCase is a test case the stream sent with nothing lost, by its
+// window and its name (empty for one the agent does not name), for the
+// stream's end to check again (lateLosses).
 type streamedTestCase struct {
 	name       string
 	start, end time.Time
@@ -58,18 +59,17 @@ const maxStreamedRechecked = 1 << 18
 
 // lateLosses is what each test case in streamed, sent with nothing lost, has
 // lost by now (syncMock.TestCaseLosses): a span a parser reported after it
-// went overlaps it. By name; nil for none.
-func lateLosses(streamed []streamedTestCase) map[string]models.CaptureLosses {
-	var out map[string]models.CaptureLosses
+// went overlaps it. Each is named by its window, and by its name when it has
+// one (models.LateLoss): the agent streams most test cases unnamed, and keploy
+// record names each as it saves it. Nil for none.
+func lateLosses(streamed []streamedTestCase) []models.LateLoss {
+	var out []models.LateLoss
 	for _, s := range streamed {
 		lost := syncmgr.Get().TestCaseLosses(s.name, s.start, s.end)
 		if len(lost) == 0 {
 			continue
 		}
-		if out == nil {
-			out = make(map[string]models.CaptureLosses)
-		}
-		out[s.name] = lost
+		out = append(out, models.LateLoss{Name: s.name, Request: s.start, Response: s.end, Lost: lost})
 	}
 	return out
 }

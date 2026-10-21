@@ -89,7 +89,7 @@ type AgentClient struct {
 	// (models.StreamEndSummary.LateLosses), until a recording takes them
 	// (TakeLateTestCaseLosses). Under lateMu.
 	lateMu     sync.Mutex
-	lateLosses map[string]models.CaptureLosses
+	lateLosses []models.LateLoss
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
 	// under docker compose (the project starts it), nor for an agent another
@@ -426,25 +426,21 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 
 // noteLateLosses keeps what a stream's end marker said test cases streamed
 // with nothing lost had lost by its end, for the recording to take.
-func (a *AgentClient) noteLateLosses(late map[string]models.CaptureLosses) {
+func (a *AgentClient) noteLateLosses(late []models.LateLoss) {
 	if len(late) == 0 {
 		return
 	}
 	a.lateMu.Lock()
 	defer a.lateMu.Unlock()
-	if a.lateLosses == nil {
-		a.lateLosses = make(map[string]models.CaptureLosses, len(late))
-	}
-	for name, lost := range late {
-		a.lateLosses[name] = a.lateLosses[name].Plus(lost)
-	}
+	a.lateLosses = append(a.lateLosses, late...)
 }
 
 // TakeLateTestCaseLosses is what the incoming streams' end markers said test
-// cases streamed with nothing lost had lost by their end, by name, and
-// forgets it: keploy record charges it (models.StreamEndSummary.LateLosses).
-// Read once the streams have drained.
-func (a *AgentClient) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
+// cases streamed with nothing lost had lost by their end, each named as the
+// agent streamed it (models.LateLoss), and forgets it: keploy record charges
+// it (models.StreamEndSummary.LateLosses). Read once the streams have
+// drained.
+func (a *AgentClient) TakeLateTestCaseLosses() []models.LateLoss {
 	a.lateMu.Lock()
 	defer a.lateMu.Unlock()
 	late := a.lateLosses

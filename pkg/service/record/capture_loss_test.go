@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -833,10 +834,10 @@ func TestARecordChargesNothingWithTheSwitchOff(t *testing.T) {
 // what test cases it streamed with nothing lost had lost after all.
 type lateTaker struct {
 	countingInstr
-	late map[string]models.CaptureLosses
+	late []models.LateLoss
 }
 
-func (l *lateTaker) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
+func (l *lateTaker) TakeLateTestCaseLosses() []models.LateLoss {
 	late := l.late
 	l.late = nil
 	return late
@@ -844,8 +845,15 @@ func (l *lateTaker) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
 
 // What the agent found at the stream's end that a test case streamed with
 // nothing lost had lost is charged to it, if keploy record saved it, under
-// the proven switch only.
+// the proven switch only. The agent streams most test cases unnamed (keploy
+// record names each as it saves it), so one is found by the window it was
+// streamed with (get-late-1); one the agent named, by its name too (test-2).
+// One keploy record did not save is charged nothing (unsaved, and the unnamed
+// one over a window no saved test case was streamed with).
 func TestARecordChargesWhatTheStreamsEndFoundATestCaseLost(t *testing.T) {
+	at := time.Date(2003, 4, 5, 6, 7, 8, 9, time.UTC)
+	saved := &models.TestCase{}
+	saved.HTTPReq.Timestamp, saved.HTTPResp.Timestamp = at, at.Add(time.Millisecond)
 	for _, on := range []bool{true, false} {
 		if on {
 			t.Setenv(provenswitch.Env, "1")
@@ -853,16 +861,69 @@ func TestARecordChargesWhatTheStreamsEndFoundATestCaseLost(t *testing.T) {
 			t.Setenv(provenswitch.Env, "")
 		}
 		instr := &lateTaker{countingInstr: countingInstr{answers: []models.CaptureLosses{nil}},
-			late: map[string]models.CaptureLosses{"test-2": exchangeLost, "unsaved": exchangeLost}}
+			late: []models.LateLoss{
+				{Name: "test-2", Lost: exchangeLost},
+				{Name: "unsaved", Lost: exchangeLost},
+				{Request: at, Response: at.Add(time.Millisecond), Lost: exchangeLost},
+				{Request: at, Response: at.Add(2 * time.Millisecond), Lost: exchangeLost},
+			}}
 		r := &Recorder{logger: zap.NewNop(), instrumentation: instr}
 		w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
-		r.chargeLateLosses(w, func(name string) bool { return name != "unsaved" })
+		byWindow := savedTestCases{}
+		byWindow.add(windowOf(saved), "get-late-1")
+		r.chargeLateLosses(w, func(l models.LateLoss) []string {
+			return byWindow.savedFor(l, func(name string) bool { return name == "test-2" })
+		})
 		switch {
-		case on && (fmt.Sprint(w.byTestCase["test-2"]) != fmt.Sprint(exchangeLost) || len(w.byTestCase) != 1):
-			t.Fatalf("charged %+v, want test-2's late loss alone", w.byTestCase)
+		case on && (fmt.Sprint(w.byTestCase["test-2"]) != fmt.Sprint(exchangeLost) ||
+			fmt.Sprint(w.byTestCase["get-late-1"]) != fmt.Sprint(exchangeLost) || len(w.byTestCase) != 2):
+			t.Fatalf("charged %+v, want test-2's and get-late-1's late losses alone", w.byTestCase)
 		case !on && w.chargedAny():
 			t.Fatalf("charged %+v with the switch off", w.byTestCase)
 		}
+	}
+}
+
+// A late loss names the test cases saved that the agent streamed with its
+// window, and the one saved under its name; each once, and none for a window
+// no saved test case was streamed with, nor for a test case with no request
+// time (the agent checks nothing for one).
+func TestALateLossNamesTheTestCasesSavedWithItsWindow(t *testing.T) {
+	at := time.Date(2003, 4, 5, 6, 7, 8, 9, time.UTC)
+	tc := func(from time.Duration) *models.TestCase {
+		c := &models.TestCase{}
+		c.HTTPReq.Timestamp, c.HTTPResp.Timestamp = at.Add(from), at.Add(from+time.Millisecond)
+		return c
+	}
+	s := savedTestCases{}
+	s.add(windowOf(tc(0)), "get-a-1")
+	s.add(windowOf(tc(0)), "get-b-1") // the very same window
+	s.add(windowOf(tc(time.Second)), "test-3")
+	s.add(windowOf(&models.TestCase{}), "no-window")
+	s.add(windowOf(tc(2*time.Second)), "")
+	// Only what a late loss can name is kept: a test case with no window
+	// (the agent checks nothing for it, a gRPC one) is not, nor no name.
+	if len(s) != 2 {
+		t.Fatalf("kept %v, want the two windows saved test cases were streamed with", s)
+	}
+	inserted := func(name string) bool { return name == "test-3" || name == "get-a-1" }
+	for _, c := range []struct {
+		name string
+		l    models.LateLoss
+		want []string
+	}{
+		{"unnamed, by its window", models.LateLoss{Request: at, Response: at.Add(time.Millisecond)}, []string{"get-a-1", "get-b-1"}},
+		{"named, by its window and its name, once", models.LateLoss{Name: "test-3", Request: at.Add(time.Second), Response: at.Add(time.Second + time.Millisecond)}, []string{"test-3"}},
+		{"named, by its name alone", models.LateLoss{Name: "get-a-1"}, []string{"get-a-1"}},
+		{"named and not saved", models.LateLoss{Name: "ghost"}, nil},
+		{"a window no saved test case has", models.LateLoss{Request: at, Response: at.Add(2 * time.Millisecond)}, nil},
+		{"no window", models.LateLoss{}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := s.savedFor(c.l, inserted); fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Fatalf("names %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 
