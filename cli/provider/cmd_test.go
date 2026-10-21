@@ -2,12 +2,16 @@ package provider
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -560,5 +564,72 @@ func TestResolveCommandType_ConfigWarningOnlyWhenItWouldDiffer(t *testing.T) {
 	}
 	if logs2.FilterMessageSnippet("not honoured").Len() == 0 {
 		t.Error("config value was silently ignored where it would have changed the outcome")
+	}
+}
+
+// Every refusal Validate returns is said in the log, as it is found: with the
+// usage text silenced under it, and cobra's error line silenced by AddFlags,
+// one returned unsaid would leave the command to exit 1 saying nothing. The
+// one it returned unsaid was appName's, the last directory of the working
+// directory, which cannot be read once that directory is gone. (The binary
+// opens keploy-logs.txt in the working directory before any command runs, and
+// stops there when it is gone, so this is driven in-process.)
+func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Cleanup(log.TestOnlyResetSink)
+	found := IsConfigFileFound
+	t.Cleanup(func() { IsConfigFileFound = found })
+
+	// No keploy.yml in --config-path: PreProcessFlags reads the working
+	// directory only to merge an override of one.
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, "keploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(t.TempDir(), "app")
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("this system keeps a working directory from being removed: %v", err)
+	}
+	if _, err := os.Getwd(); err == nil {
+		t.Skip("this system still reads a working directory that was removed")
+	}
+
+	core, logs := observer.New(zapcore.InfoLevel)
+	c := NewCmdConfigurator(zap.New(core), config.New())
+	cmd := &cobra.Command{Use: "record"}
+	if err := c.AddFlags(cmd); err != nil {
+		t.Fatalf("AddFlags: %v", err)
+	}
+	if err := cmd.ParseFlags([]string{"-c", "./app", "--path", project, "--config-path", project}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	cmd.SetContext(context.Background())
+
+	const refusal = "failed to get the last directory for appName"
+	err := c.Validate(context.Background(), cmd)
+	if err == nil || !strings.HasPrefix(err.Error(), refusal) {
+		t.Fatalf("Validate = %v, want %q", err, refusal)
+	}
+	var said []string
+	n := 0
+	for _, e := range logs.All() {
+		said = append(said, e.Level.String()+" "+e.Message)
+		if e.Level >= zapcore.ErrorLevel && e.Message == refusal {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%q said as %d errors, want 1:\n%s", refusal, n, strings.Join(said, "\n"))
+	}
+	if !cmd.SilenceUsage {
+		t.Errorf("cobra is left to print `keploy record`'s usage text under %q", err)
 	}
 }
