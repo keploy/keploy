@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog" // want: unread
 	"net"
 	"net/http"
 	"os"
@@ -143,7 +144,18 @@ func Sites(logger *zap.Logger, body []byte, s string, n int, k Kind, c conn, d t
 	utils.LogError(logger, err, "parse")  // want: error
 	utils.LogContentError(logger, err, "parse")
 	logger.Error("parse", logcontent.Error(err))
-	logger.Error("a shaped error", zap.Error(logurl.Error(err, s)))
+	logger.Error("a shaped error", zap.Error(logurl.Error(err, s))) // want: error
+	_, herr := http.Get(s)
+	logger.Error("a request's error, shaped", zap.Error(logurl.Error(herr)))
+	logger.Error("a request's error, wrapped and shaped", zap.Error(logurl.Error(fmt.Errorf("get: %w", herr))))
+	logger.Error("a request's error, shaped by a helper", zap.Error(shapedErr(herr)))
+	sayShaped(logger, herr)
+	sayShaped(logger, err)                                                         // want: error
+	logger.Error("a parse's error, shaped by a helper", zap.Error(shapedErr(err))) // want: error
+	logger.Error("a parse's text, shaped: " + logurl.Error(err).Error())           // want: error
+	logger.Info("bytes as numbers", zap.Uint8s("b", body))                         // want: field
+	_ = logger.Core().Write(zapcore.Entry{Message: s}, nil)                        // want: message
+	slog.Info("a line the guard does not read", "v", s)
 	logger.Error("parse: " + err.Error()) // want: error
 	logger.Error("open", zap.Error(opened()))
 	logger.Error("a sentinel", zap.Error(errSentinel))
@@ -178,6 +190,92 @@ func Sites(logger *zap.Logger, body []byte, s string, n int, k Kind, c conn, d t
 // lost is a printf wrapper: the error it makes formats its values with %v.
 func lost(format string, args ...any) error {
 	return fmt.Errorf("lost: %s", fmt.Sprintf(format, args...))
+}
+
+// shapedErr is err as a line may carry it (logurl.Error): its *url.Error by
+// its shape, the rest of its text as it is.
+func shapedErr(err error) error { return logurl.Error(err) }
+
+// sayShaped logs err as logurl.Error writes it, in its message and as its
+// field: an argument for it is judged so, a request's error safe and a
+// parse's not.
+func sayShaped(logger *zap.Logger, err error) {
+	logger.Error("not judged: "+shapedErr(err).Error(), zap.Error(logurl.Error(err)))
+}
+
+// Wrappers logs a printf wrapper's error whole: as safe as what it formats,
+// as fmt.Errorf's is.
+func Wrappers(logger *zap.Logger, s string, n int) {
+	logger.Error("a wrapper's error of a value", zap.Error(lost("at %s", s))) // want: errorf, error
+	logger.Error("a wrapper's error of a number", zap.Error(lost("at %d", n)))
+}
+
+// stub is a value whose exported Name a line logs.
+type stub struct{ Name string }
+
+// Matched logs locals by what reaches them: a site of one is named by the
+// values assigned to it that are not safe, so a value from elsewhere
+// assigned to it is a site the allowlist does not list yet
+// (TestASiteIsNamedByWhatReachesIt).
+func Matched(logger *zap.Logger, st stub, r *http.Request) error {
+	matched := "none"
+	if st.Name != "" {
+		matched = st.Name
+	}
+	logger.Info("matched", zap.String("mock", matched)) // want: field
+	parts := strings.Split(r.Header.Get("X-Id"), ",")
+	logger.Info("an id", zap.String("id", parts[0])) // want: field
+	return fmt.Errorf("no mock %s", matched)         // want: errorf
+}
+
+// stall is an error of keploy's whose Error writes its fields: what its
+// literal holds is judged where the error is logged, and what is written to
+// one of them after it where it is written.
+type stall struct {
+	Came  string
+	Lines []string
+	n     int
+}
+
+func (e *stall) Error() string {
+	return fmt.Sprintf("stalled after %d bytes: %s (%s)", e.n, e.Came, strings.Join(e.Lines, ", "))
+}
+
+// Stalls logs stalls whole.
+func Stalls(logger *zap.Logger, s string) {
+	st := &stall{}
+	st.Came = s                    // want: errorf
+	st.Lines = append(st.Lines, s) // want: errorf
+	logger.Error("stalled", zap.Error(st))
+	logger.Error("stalled", zap.Error(&stall{Came: s})) // want: error
+	ok := &stall{n: 1}
+	ok.Came = "a constant"
+	ok.Lines = nil
+	logger.Error("stalled", zap.Error(ok))
+}
+
+// Commands logs a command's errors: its run's is what its RunE returned, any
+// error; a flag's names the flag.
+func Commands(logger *zap.Logger, cmd *cobra.Command) {
+	if err := cmd.Execute(); err != nil {
+		logger.Error("the command failed", zap.Error(err)) // want: error
+	}
+	if err := cmd.MarkFlagRequired("path"); err != nil {
+		logger.Error("a flag", zap.Error(err))
+	}
+}
+
+// readLine's error quotes the line it is given, which an allowlist that
+// lists its text as content says: a line that logs it whole is then a site
+// no reason excuses (TestAContentErrorIsGatedWhereverItIsLogged).
+func readLine(line string) error {
+	return fmt.Errorf("unreadable line %q", line) // want: errorf
+}
+
+// Lines logs readLine's error whole, and by its kind.
+func Lines(logger *zap.Logger, s string) {
+	logger.Error("unreadable", zap.Error(readLine(s))) // want: error
+	logger.Error("unreadable", logcontent.Error(readLine(s)))
 }
 
 // Locals logs what a local string variable holds, which is what is assigned
@@ -593,6 +691,9 @@ func Shapes(logger *zap.Logger, s string, h map[string][]string, k Kind, d time.
 	logger.Info("a key", logcontent.String(s, s))                           // want: field
 	logger.Info("a header's values", zap.Reflect("h", utils.SortedKeys(h))) // want: field
 	logger.Info("a header's names", zap.Array("h", utils.SortedKeys(h)))
+	for k := range h {
+		logger.Info("a header's name", zap.String("h", k)) // want: field
+	}
 	logger.Info("a payload by its String", zap.Stringer("p", shown{[]byte(s)})) // want: field
 	logger.Info("a payload by its marshaler", zap.Object("p", shown{[]byte(s)}))
 	logger.Info("a count by its String", zap.Stringer("c", counted{len(s)}))
@@ -886,6 +987,9 @@ func URLs(logger *zap.Logger, r *http.Request) {
 	logger.Info("a shaped path", logurl.Field("path", r.URL.Path))
 	fmt.Println("a path", r.URL.EscapedPath()) // want: url
 	logger.Info("a path: " + r.URL.Path)       // want: url
+	_ = fmt.Errorf("bad path %s", r.URL.Path)  // want: url
+	_ = errors.New(r.URL.RawQuery)             // want: url
+	_ = fmt.Errorf("bad host %s", r.Host)      // want: errorf
 }
 
 // targets is a request's URL and its URL without its query.

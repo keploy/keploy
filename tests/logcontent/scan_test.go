@@ -8,11 +8,11 @@
 // logcontent or logurl:
 //
 //   - field: a zap field built from such a value (zap.String, zap.Any,
-//     zap.ByteString, zap.Strings, zap.Reflect, zap.Object of a marshaler
-//     that is not keploy's, zap.Stringer of a value whose String is not a
-//     safe text of keploy's, ...), or a zapcore encoder's Add or Append of
-//     one inside a MarshalLogObject or MarshalLogArray; and the key of any
-//     field, which a line writes as it is;
+//     zap.ByteString, zap.Strings, zap.Uint8s, zap.Reflect, zap.Object of a
+//     marshaler that is not keploy's, zap.Stringer of a value whose String
+//     is not a safe text of keploy's, ...), or a zapcore encoder's Add or
+//     Append of one inside a MarshalLogObject or MarshalLogArray; and the key
+//     of any field, which a line writes as it is;
 //   - error: an error logged whole (zap.Error, zap.NamedError, the error of
 //     utils.LogError, an error, or its text, as any other field or as a
 //     message), named by where it came from (origin); and an error's text
@@ -21,11 +21,15 @@
 //     the texts the error's origin can make reads the text from;
 //   - message: a log line's message that is not a constant: a
 //     *zap.Logger's, one through an interface or a function value of a
-//     logger's shape (func(string, ...zap.Field)), and a logger's name
-//     (Named), which heads each of its lines;
+//     logger's shape (func(string, ...zap.Field)), a logger's name (Named),
+//     which heads each of its lines, and a zapcore.Entry's Message written
+//     out, which a core writes as it is;
 //   - errorf: fmt.Errorf of a value that formats as text (a string, a []byte,
 //     a struct, a map, a slice, an interface) that is not a constant, and an
-//     error's format that is not one;
+//     error's format that is not one; and a value written to a field a
+//     keploy error type's Error reads (findErrFields), once a line logs a
+//     value of that type whole (errSinks): the error's text, wherever the
+//     error goes, as fmt.Errorf's values are;
 //   - errors.New: errors.New of a text that is not a constant;
 //   - sugar: an argument of a SugaredLogger's method, or of the standard
 //     library's log.Printf and its kin, or of a function value of their
@@ -42,13 +46,15 @@
 //     and a tablewriter table's rows, headers and footers when it is made on
 //     a std stream. A command's own output, judged where it is printed (what
 //     it is made of is not followed to where it is written);
-//   - url: a field's value, a message, a print or a sugar's argument made
-//     from a request's URL, its path or its query (urlOf: net/url's URL
-//     fields and methods, a request's RequestURI, a recorded test's
-//     HTTPReq.URL, followed through locals and keploy's functions' returns),
-//     which only logurl gates, and an entry excuses only with a reason that
-//     says whose URL it is (urlReason): a path's segments are content as a
-//     query's values are;
+//   - url: a field's value, a message, a print, a sugar's argument or an
+//     error's text (an errorf's, an errors.New's) made from a request's URL,
+//     its path or its query (urlOf: net/url's URL fields and methods, a
+//     request's RequestURI, a recorded test's HTTPReq.URL, followed through
+//     locals and keploy's functions' returns), which only logurl gates, and
+//     an entry excuses only with a reason that says whose URL it is
+//     (urlReason), or, an error's text, that the error keeps it for its
+//     caller (contentReason): a path's segments are content as a query's
+//     values are;
 //   - telemetry: an argument of a crash report (sentry's CaptureException,
 //     CaptureMessage, a scope's SetExtra and SetTag), which leaves the
 //     machine for Keploy's Sentry.
@@ -58,11 +64,16 @@
 // one is not, with the whole expression named. A local string variable is
 // read through to what is assigned to it (localAssigns): it is safe when
 // every value assigned to it that can reach the line is, and a site at the
-// line, named as the variable, when one is not. A variable whose values
-// cannot all be seen (a parameter, a range's or a type switch's, one
-// assigned from a call's several results or whose address is taken) is a
-// site where it is logged. An error variable is followed the same way, to
-// every value that can reach the line, each unsafe origin named.
+// line when one is not. A variable whose values cannot all be seen (a
+// parameter, a range's or a type switch's, one assigned from a call's
+// several results or whose address is taken) is a site where it is logged.
+// A site whose value reads a local is named by the values that reach it
+// there that are not safe (sourced): zap.String(matched) <- stub.Name, a
+// range's variable by what it ranges over (range r.Header key), so a value
+// from elsewhere assigned to the local is a site the allowlist does not list
+// yet, not one more of a name it lists. An error variable is followed the
+// same way, to every value that can reach the line, each unsafe origin
+// named.
 //
 // What can reach a line is decided by its function's control flow, and
 // only ever overstated (reaches): an assignment every path to the line runs
@@ -103,7 +114,21 @@
 // An error logged by its kind (logcontent.Error, utils.LogContentError)
 // whose origin carries no content is reported as overgated, which no entry
 // excuses: the line withholds keploy's own words for nothing, so it logs
-// the error whole.
+// the error whole. And an error that reaches a line other than through a
+// field's writes (sinkDirect), logged whole or fingerprinted, whose origin
+// may make it of a text the allowlist itself lists as content
+// (contentReason: an errorf's, an errors.New's, a printf wrapper's, or a
+// write of a field an error's Error reads) is a content site, which no entry
+// excuses either: gate the line.
+//
+// logurl.Error(err, urls...) is err as a line may carry it, which with the
+// switch off rewrites only the *url.Errors in it, the urls it is given and
+// the URLs an error in it names of its own (logurl.URLNamer): it is judged
+// as err is, by its origin, with the errors of the calls whose every error
+// is a *url.Error (urlErrorFuncs: url.Parse, a client's Do) and the fields a
+// URLNamer's LoggedURLs returns taken as safe (shaping). And an import of a
+// logging package the scan does not read (unreadLoggers: log/slog, logrus,
+// ...) is a site no entry excuses (kindUnread).
 //
 // A value is safe, and no site, when it is:
 //
@@ -147,9 +172,14 @@
 //     error of a call into a package whose errors name only
 //     paths, addresses, errnos or the kernel's verdicts (os, syscall, net's
 //     sockets, io's readers and writers, os/exec, cilium/ebpf, a print's
-//     writer, ...); not time's, whose Parse and ParseDuration quote the text
-//     they could not read, nor net's that parse a text (SplitHostPort,
-//     ResolveTCPAddr, a lookup), whose errors quote it.
+//     writer, cobra's and pflag's flags and arguments, ...); not time's,
+//     whose Parse and ParseDuration quote the text they could not read, nor
+//     net's that parse a text (SplitHostPort, ResolveTCPAddr, a lookup),
+//     whose errors quote it, nor cobra's Execute (cobraRuns), whose error is
+//     whatever the command's RunE returned. An error value written out of a
+//     keploy error type is as safe as what its literal holds, what is
+//     written to a field its Error reads after it being judged where it is
+//     written (errValue).
 //
 // Everything else is a site. A site the code gates goes through logcontent
 // (Bytes, String, StringLen, Any, Error, ...) or logurl, and is no site any
@@ -207,7 +237,23 @@ const (
 	// which no allowlist entry excuses: log it whole (zap.Error,
 	// utils.LogError).
 	kindOvergated = "overgated"
+	// kindUnread is no site either: an import of a logging package the
+	// scan does not read (unreadLoggers), whose lines would carry what they
+	// are given past the guard. The guard fails on one, which no entry
+	// excuses: log through zap, or teach the scan the package first.
+	kindUnread = "unread"
 )
+
+// unreadLoggers are the logging packages the scan does not read the lines
+// of: the standard library's log/slog, and the logging modules another
+// line could be written with.
+var unreadLoggers = map[string]bool{
+	"log/slog": true, "log/syslog": true,
+	"github.com/sirupsen/logrus": true, "github.com/rs/zerolog": true, "github.com/rs/zerolog/log": true,
+	"k8s.io/klog": true, "k8s.io/klog/v2": true, "github.com/go-logr/logr": true, "github.com/go-logr/zapr": true,
+	"github.com/hashicorp/go-hclog": true, "github.com/charmbracelet/log": true, "github.com/apex/log": true,
+	"go.uber.org/zap/zapgrpc": true, "go.uber.org/zap/zapio": true,
+}
 
 var kinds = []string{kindField, kindError, kindMessage, kindErrorf, kindErrorsNew, kindSugar, kindPrint, kindTelemetry, kindURL}
 
@@ -219,6 +265,9 @@ type site struct {
 	kind string
 	what string // the expression, as written, with its origin for an error
 	via  string // the sink it was judged for, for the scan's debugging: "" for a line's own value
+	// content: an error logged whole whose origin may make it of a text
+	// the allowlist lists as content (contentMark), which no entry excuses.
+	content bool
 }
 
 func (s site) key() string { return s.file + " | " + s.kind + " | " + s.what }
@@ -237,8 +286,46 @@ type scanner struct {
 	safe  map[*types.Func]int8
 	// passes are the parameters a function returns, or wraps, as its error:
 	// its errors are as safe as the arguments it is given for them.
-	passes map[*types.Func]map[int]bool
-	why    map[*types.Func]string // the first unsafe return of each unsafe function (debugging the scan)
+	// shapedPasses are those it returns only as logurl.Error writes them
+	// (LoggedError(err) returns logurl.Error(err)): its errors are as safe
+	// as the arguments so written (shaping).
+	passes       map[*types.Func]map[int]bool
+	shapedPasses map[*types.Func]map[int]bool
+	why          map[*types.Func]string // the first unsafe return of each unsafe function (debugging the scan)
+	// content are the functions some error of which is made of a text the
+	// allowlist lists as content (contentOf): 1 one is, -1 none is, 0 while
+	// it is read.
+	content map[*types.Func]int8
+	// shaped says the scan reads errors as logurl.Error writes them (a
+	// *url.Error's text by its op, its URL's shape and its cause's kind:
+	// urlErrorFuncs are safe), and unshaped holds what it read in the other
+	// mode, which shaping swaps with the fields above.
+	shaped   int
+	unshaped errMemo
+	// contentTexts are the allowlist's error texts that carry content and
+	// keep it for their callers (contentReason): a line that logs an error
+	// made of one whole is a site no reason excuses. errTextKeys are the
+	// keys of the sites the scan found that are an error's text (an
+	// errorf's, an errors.New's), of the url kind too.
+	contentTexts map[string]bool
+	errTextKeys  map[string]bool
+	// errFields are the fields of keploy's error types that their Error
+	// methods read (findErrFields), by their type, and errFieldOf says that
+	// a field is one; errSinks are those of the types whose value an error
+	// logged whole is (origin): each write of one the scan reads, after the
+	// value is made, is judged as the error's text it becomes.
+	errFields  map[*types.Named][]*types.Var
+	errFieldOf map[*types.Var]bool
+	errSinks   map[*types.Var]bool
+	// urlNamed are the fields of keploy's errors that their LoggedURLs
+	// method returns (logurl.URLNamer), which logurl.Error writes by their
+	// shape: under shaping, what they hold is no content.
+	urlNamed map[*types.Var]bool
+	// contentErrFields are those a write of which the allowlist lists as
+	// content (contentTexts: the error keeps what it is given for its
+	// caller): a value of their type is an error made of a content text,
+	// which a line that logs it whole must gate (contentMark).
+	contentErrFields map[*types.Var]bool
 	// text and textPasses are keploy's functions that return a text
 	// (textSummary): whether what one returns is safe, given safe
 	// arguments for the parameters textPasses names, which it puts in it.
@@ -335,6 +422,27 @@ const (
 	sinkMsg sinkMask = 1 << iota
 	sinkField
 	sinkErrText
+	// sinkErrValue is a value written to a field an error's Error reads
+	// (errSinks): it is that error's text wherever a line logs the error,
+	// a site of the errorf kind, as fmt.Errorf's values are.
+	sinkErrValue
+	// sinkDirect says a parameter reaches a line other than through a
+	// field a line logs, whose writes the scan judges for every value of
+	// its struct's type, wherever it flows (sinkFields): through a local, a
+	// parameter or a line's own value. Only an error that reaches a line so
+	// is one the allowlist's own content listing makes a site no reason
+	// excuses (site.content); one written to a field a line logs is a site
+	// named by its origin, as any other error is.
+	sinkDirect
+	// sinkShaped is a parameter that reaches a line's message or field
+	// only as logurl.Error writes it (logurl.Error(err), a keploy function
+	// that returns it so: shapedPasses), which with the switch off writes a
+	// *url.Error by its op, its URL's shape and its cause's kind and the URLs
+	// an error names of its own (URLNamer) by their shape: an argument for it
+	// is judged as the line judges it, under shaping. It stands in for
+	// sinkMsg and sinkField on that route alone, so a parameter that reaches
+	// a line whole as well is judged whole (judge reads those first).
+	sinkShaped
 )
 
 // declRef is a top-level declaration of a file the scan reads: what the
@@ -361,7 +469,7 @@ type funcDecl struct {
 }
 
 func newScanner(root string) *scanner {
-	return &scanner{root: root, sites: map[string]site{}, errFormats: map[string]bool{}, errTexts: map[string]bool{}}
+	return &scanner{root: root, sites: map[string]site{}, errFormats: map[string]bool{}, errTexts: map[string]bool{}, errTextKeys: map[string]bool{}}
 }
 
 // keepWords keeps the constant format or text of an error call makes
@@ -439,7 +547,11 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 	s.named = nil
 	s.safe = map[*types.Func]int8{}
 	s.passes = map[*types.Func]map[int]bool{}
+	s.shapedPasses = map[*types.Func]map[int]bool{}
 	s.why = map[*types.Func]string{}
+	s.content = map[*types.Func]int8{}
+	s.shaped = 0
+	s.unshaped = newErrMemo()
 	s.text = map[*types.Func]int8{}
 	s.parents = map[*ast.BlockStmt]map[ast.Node]ast.Node{}
 	s.textPasses = map[*types.Func]map[int]bool{}
@@ -494,6 +606,8 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 	s.methodSinks = map[string]bool{}
 	s.findStdWriters(pkgs)
 	s.findOpenIfaces(pkgs)
+	s.findErrFields()
+	s.findContentErrFields(pkgs)
 	s.urlResults, s.urlLocals = map[urlResult]int8{}, map[*types.Var][]assigned1{}
 	s.queue, s.queued = nil, map[ast.Decl]bool{}
 	for _, p := range pkgs {
@@ -512,6 +626,12 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 			}
 			if skip {
 				continue
+			}
+			for _, imp := range f.Imports {
+				if path, err := strconv.Unquote(imp.Path.Value); err == nil && unreadLoggers[path] {
+					fs := &fileScan{s: s, p: p, info: p.TypesInfo, fset: p.Fset, file: rel}
+					fs.report(imp, kindUnread, path)
+				}
 			}
 			for _, d := range f.Decls {
 				s.walkDecl(declRef{p, rel, d})
@@ -815,9 +935,30 @@ func (fs *fileScan) sinkParams(m sinkMask, e ast.Expr) {
 	if fs.gated > 0 {
 		return // a branch only the switch's opt-in takes: what it logs is the switch's to allow
 	}
-	c := &carry{params: map[int]bool{}, lits: map[litSlot]bool{}, fields: map[*types.Var]bool{}}
+	if fs.viaField == 0 {
+		m |= sinkDirect
+	}
+	c := &carry{params: map[int]bool{}, lits: map[litSlot]bool{}, fields: map[*types.Var]bool{}, shaped: map[int]bool{}, shapedSeen: map[ast.Expr]bool{}}
+	if fs.s.shaped > 0 {
+		// A value judged as logurl.Error writes it (a sinkShaped
+		// parameter's argument): what it carries reaches the line so.
+		c.inShape = 1
+	}
 	fs.carried(e, map[ast.Expr]bool{}, c)
-	params, fields := c.params, c.fields
+	params, fields := map[int]sinkMask{}, c.fields
+	for i := range c.params {
+		params[i] = m
+	}
+	for i := range c.shaped {
+		if _, whole := params[i]; !whole {
+			// It reaches the line only as logurl.Error writes it.
+			sm := m
+			if sm&(sinkMsg|sinkField) != 0 {
+				sm = sm&^(sinkMsg|sinkField) | sinkShaped
+			}
+			params[i] = sm
+		}
+	}
 	for sl := range c.lits {
 		if fs.s.litSinks[sl.v][sl.i]&m == m {
 			continue
@@ -833,7 +974,7 @@ func (fs *fileScan) sinkParams(m sinkMask, e ast.Expr) {
 		}
 	}
 	if f := fs.topFunc(); f != nil {
-		for i := range params {
+		for i, m := range params {
 			if fs.s.sinks[f][i]&m == m {
 				continue
 			}
@@ -851,7 +992,7 @@ func (fs *fileScan) sinkParams(m sinkMask, e ast.Expr) {
 	}
 	for v := range fields {
 		fs.noteSink("field "+fs.fieldKey(v), m&^fs.s.sinkFields[v], e)
-		fs.s.markSinkField(v, m, fs.file+":"+strconv.Itoa(fs.fset.Position(e.Pos()).Line))
+		fs.s.markSinkField(v, m&^sinkDirect, fs.file+":"+strconv.Itoa(fs.fset.Position(e.Pos()).Line))
 	}
 }
 
@@ -869,7 +1010,7 @@ func (fs *fileScan) enter(m sinkMask) func() {
 
 // lowBit is the way of m a judge reads a value by first (judge).
 func lowBit(m sinkMask) sinkMask {
-	for _, bit := range []sinkMask{sinkMsg, sinkField, sinkErrText} {
+	for _, bit := range []sinkMask{sinkMsg, sinkField, sinkErrText, sinkErrValue, sinkShaped} {
 		if m&bit != 0 {
 			return bit
 		}
@@ -880,7 +1021,7 @@ func lowBit(m sinkMask) sinkMask {
 // noteSink records, for the scan's debugging, where the sink key was found
 // logged (at e) and for which sink (via).
 func (fs *fileScan) noteSink(key string, m sinkMask, e ast.Expr) {
-	for _, bit := range []sinkMask{sinkMsg, sinkField, sinkErrText} {
+	for _, bit := range []sinkMask{sinkMsg, sinkField, sinkErrText, sinkErrValue, sinkShaped} {
 		if m&bit == 0 {
 			continue
 		}
@@ -1023,6 +1164,14 @@ type carry struct {
 	params map[int]bool
 	lits   map[litSlot]bool
 	fields map[*types.Var]bool
+	// shaped are the parameters e carries only as logurl.Error writes
+	// them (sinkShaped): read inside a call of it, or of a function of
+	// keploy's that returns its argument so (shapedPasses), while inShape is
+	// above 0, with a seen of their own (shapedSeen), so a value read both
+	// ways is read both ways.
+	shaped     map[int]bool
+	inShape    int
+	shapedSeen map[ast.Expr]bool
 }
 
 // litParam: v is a parameter, not a variadic one, of a closure bound to a
@@ -1153,10 +1302,15 @@ func (fs *fileScan) carried(e ast.Expr, seen map[ast.Expr]bool, c *carry) {
 			return
 		}
 		if i, ok := fs.asParam(v, x); ok {
-			if i >= 0 {
+			switch {
+			case i >= 0 && c.inShape > 0:
+				c.shaped[i] = true
+			case i >= 0:
 				c.params[i] = true
-			} else if sl, ok := fs.litParam(v); ok {
-				c.lits[sl] = true
+			default:
+				if sl, ok := fs.litParam(v); ok {
+					c.lits[sl] = true // a closure's: judged whole, shaped or not
+				}
 			}
 			return
 		}
@@ -1211,18 +1365,37 @@ func (fs *fileScan) carried(e ast.Expr, seen map[ast.Expr]bool, c *carry) {
 					c.fields[v] = true
 				}
 			}
+			// shapedIdx are those it returns only as logurl.Error writes
+			// them: read so (carry.shaped).
+			shapedIdx := map[int]bool{}
 			sig, _ := f.Type().(*types.Signature)
 			if sig != nil && sig.Results().Len() > 0 && implementsError(sig.Results().At(sig.Results().Len()-1).Type()) && fs.s.returnsSafe(f) {
 				for i := range fs.s.passes[f.Origin()] {
 					idx[i] = true
 				}
+				for i := range fs.s.shapedPasses[f.Origin()] {
+					if !idx[i] {
+						shapedIdx[i] = true
+					}
+				}
 			}
-			for i := range idx {
+			if pkg == logurlPkg && f.Name() == "Error" {
+				shapedIdx[0] = true // the error it writes as a line may carry it
+			}
+			read := func(i int, seen map[ast.Expr]bool) {
 				if len(x.Args) == 1 && isTuple(fs.info.TypeOf(x.Args[0])) {
 					fs.carried(x.Args[0], seen, c)
 				} else if i < len(x.Args) {
 					fs.carried(x.Args[i], seen, c)
 				}
+			}
+			for i := range idx {
+				read(i, seen)
+			}
+			for i := range shapedIdx {
+				c.inShape++
+				read(i, c.shapedSeen)
+				c.inShape--
 			}
 		}
 	case *ast.CompositeLit:
@@ -1350,6 +1523,10 @@ func (s *scanner) calleeSinks(f *types.Func) map[int]sinkMask {
 // argument for a parameter its function logs, or a write of a field a line
 // logs).
 func (fs *fileScan) judge(m sinkMask, at ast.Node, what string, a ast.Expr) {
+	if m&sinkDirect == 0 {
+		fs.viaField++ // reached only through a field's writes
+		defer func() { fs.viaField-- }()
+	}
 	switch {
 	case m&sinkMsg != 0 && !fs.isError(a) && isString(fs.info.TypeOf(a)) && strings.HasPrefix(what, "set "):
 		// A write of a field a line's message holds: named as the write,
@@ -1359,16 +1536,58 @@ func (fs *fileScan) judge(m sinkMask, at ast.Node, what string, a ast.Expr) {
 		fs.message(a)
 	case m&(sinkMsg|sinkField) != 0:
 		fs.fieldValue(at, what, a)
+	case m&sinkShaped != 0:
+		// It reaches a line only as logurl.Error writes it: judged so,
+		// and for the other ways it reaches one as they say.
+		leave := fs.s.shaping()
+		fs.fieldValue(at, what, a)
+		leave()
+		if rest := m &^ (sinkShaped | sinkDirect); rest != 0 {
+			fs.judge(rest|m&sinkDirect, at, what, a)
+		}
 	case m&sinkErrText != 0:
 		fs.errorText(what, a)
+	case m&sinkErrValue != 0:
+		fs.errValue(at, what, a)
 	}
+}
+
+// errValue: v, written by what to a field an error's Error reads
+// (errSinks), or given to a parameter or a field that is written there: the
+// error's text, wherever a line logs the error, so a site of the errorf
+// kind (or the url kind, made from a request's URL), as fmt.Errorf's values
+// are, which a reason excuses as an error's text: one that carries no
+// content, or one the error keeps for its caller (contentReason). An error
+// written there is in the text too, judged by its origin.
+func (fs *fileScan) errValue(at ast.Node, what string, v ast.Expr) {
+	defer fs.enter(sinkErrValue)()
+	fs.sinkParams(sinkErrValue, v)
+	if fs.isError(v) {
+		fs.loggedError(at, what, v)
+		return
+	}
+	if fs.safe(v) {
+		return
+	}
+	if fs.reportErrorParts(what, v, nil) && fs.errSafe(v) {
+		return
+	}
+	kind := fs.urlKind(v, kindErrorf)
+	w := fs.sourced(what+"("+fs.text(v)+")", v)
+	fs.report(at, kind, w)
+	fs.s.errTextKeys[fs.file+" | "+kind+" | "+w] = true
 }
 
 // explain is why each unsafe keploy function's errors are unsafe.
 func (s *scanner) explain() map[string]string {
 	out := map[string]string{}
 	for f, w := range s.why {
-		out[qualFunc(f)] = w
+		out[qualFunc(f)] = strings.ReplaceAll(w, contentMark, "content ")
+	}
+	// What the scan read of them as logurl.Error writes their errors
+	// (shaping), which the other memo holds outside it.
+	for f, w := range s.unshaped.why {
+		out["shaped "+qualFunc(f)] = strings.ReplaceAll(w, contentMark, "content ")
 	}
 	for k, v := range s.sinkVia {
 		out["sink "+k] = v
@@ -1417,6 +1636,11 @@ type fileScan struct {
 	// parameters they come from.
 	summarizing *types.Signature
 	passed      map[int]bool
+	// shapedPassed are those of its parameters it returns only as
+	// logurl.Error writes them: read with shaping deeper than shapedAt,
+	// where the summary started (scanner.shapedPasses).
+	shapedPassed map[int]bool
+	shapedAt     int
 	// summarizingText: the function summarized returns a text
 	// (textSummary), and a string parameter it puts in it is passed, as an
 	// error parameter it returns is.
@@ -1444,6 +1668,14 @@ type fileScan struct {
 	// writes are judged, which its users mark (textFields).
 	mask       sinkMask
 	readFields map[*types.Var]bool
+	// naming: the scan names a site's value by what it is made of
+	// (sourced), which judges nothing: a field safe only as its writes
+	// are judged is safe only when they are already (sinkFields), and is
+	// named otherwise.
+	naming int
+	// viaField: the value judged reaches a line only through a field a
+	// line logs (sinkDirect).
+	viaField int
 }
 
 // localValues are the values assigned to a local variable, and whether they
@@ -1566,12 +1798,16 @@ func (fs *fileScan) at(n ast.Node) string {
 	return fmt.Sprintf("%s:%d: ", fs.file, p.Line)
 }
 
-func (fs *fileScan) report(at ast.Node, kind, what string) {
+func (fs *fileScan) report(at ast.Node, kind, what string) { fs.reportSite(at, kind, what, false) }
+
+// reportSite is report, of a site that carries a text the allowlist lists as
+// content when content is.
+func (fs *fileScan) reportSite(at ast.Node, kind, what string, content bool) {
 	if fs.gated > 0 {
 		return // in a branch only the switch's opt-in takes
 	}
 	pos := fs.fset.Position(at.Pos())
-	st := site{file: fs.file, line: pos.Line, col: pos.Column, kind: kind, what: what, via: fs.via}
+	st := site{file: fs.file, line: pos.Line, col: pos.Column, kind: kind, what: what, via: fs.via, content: content}
 	fs.s.sites[fmt.Sprintf("%s:%d:%d:%s", st.file, st.line, st.col, kind)] = st
 }
 
@@ -1587,6 +1823,7 @@ func (fs *fileScan) text(e ast.Node) string {
 // hold text, by the index of that value.
 var zapFieldCtors = map[string]int{
 	"String": 1, "Stringp": 1, "ByteString": 1, "ByteStrings": 1, "Binary": 1, "Strings": 1,
+	"Uint8s": 1, "Int32s": 1, // a []byte's and a []rune's values, a number each: the text they are
 	"Any": 1, "Reflect": 1, "Stringer": 1, "Stringers": 1,
 	"Object": 1, "Objects": 1, "ObjectValues": 1, "Array": 1, "Inline": 0, "Dict": -1,
 }
@@ -1659,8 +1896,11 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 				}
 			}
 		}
-		if what, bad := fs.formatText(call.Args[i:], i < len(call.Args) && call.Ellipsis == token.NoPos); bad {
-			fs.report(call, kind, f.Name()+"("+what+")")
+		if k, what, bad := fs.formatSite(f.Name(), kind, call.Args[i:]); bad {
+			fs.report(call, k, what)
+			if kind == kindErrorf {
+				fs.s.errTextKeys[fs.file+" | "+k+" | "+what] = true
+			}
 		}
 		if kind == kindMessage {
 			// A wrapper that writes a line: the errors it formats are
@@ -1788,13 +2028,15 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		fs.printArgs(kindTelemetry, "sentry."+f.Name(), call.Args, false)
 	case pkg == "fmt" && f.Name() == "Errorf":
 		fs.keepWords(call, f)
-		if what, bad := fs.errorfText(call); bad {
-			fs.report(call, kindErrorf, what)
+		if kind, what, bad := fs.errorfText(call); bad {
+			fs.report(call, kind, what)
+			fs.s.errTextKeys[fs.file+" | "+kind+" | "+what] = true
 		}
 	case pkg == "errors" && f.Name() == "New":
 		fs.keepWords(call, f)
-		if what, bad := fs.errorsNewText(call); bad {
-			fs.report(call, kindErrorsNew, what)
+		if kind, what, bad := fs.errorsNewText(call); bad {
+			fs.report(call, kind, what)
+			fs.s.errTextKeys[fs.file+" | "+kind+" | "+what] = true
 		}
 	}
 }
@@ -2097,7 +2339,7 @@ func (fs *fileScan) sugarArg(what string, a ast.Expr) {
 	defer fs.enter(sinkField)()
 	fs.sinkParams(sinkField, a)
 	if !fs.safe(a) {
-		fs.report(a, fs.urlKind(a, kindSugar), what+"("+fs.text(a)+")")
+		fs.report(a, fs.urlKind(a, kindSugar), fs.sourced(what+"("+fs.text(a)+")", a))
 	}
 }
 
@@ -2496,7 +2738,7 @@ func (fs *fileScan) printArg(kind, what string, a ast.Expr) {
 	if kind == kindPrint {
 		kind = fs.urlKind(a, kind)
 	}
-	fs.report(a, kind, what+"("+fs.text(a)+")")
+	fs.report(a, kind, fs.sourced(what+"("+fs.text(a)+")", a))
 }
 
 // fingerprints are logcontent's fields that write, with the switch off, a
@@ -2623,7 +2865,7 @@ func (fs *fileScan) keyValue(k ast.Expr, ctor string) {
 	if fs.reportErrorParts("key of "+ctor, k, nil) && fs.errSafe(k) {
 		return
 	}
-	fs.report(k, kindField, "key of "+ctor+"("+fs.text(k)+")")
+	fs.report(k, kindField, fs.sourced("key of "+ctor+"("+fs.text(k)+")", k))
 }
 
 // boundLitCall: a call of a closure bound to a local variable that is only
@@ -2677,27 +2919,46 @@ func hasHelper(name string) bool {
 	return ok
 }
 
-// errorfText is the site a fmt.Errorf call is, and whether it is one: the
-// values it formats that are not safe, and its format when that is not a
-// constant. The errors it wraps are judged where they are logged.
-func (fs *fileScan) errorfText(call *ast.CallExpr) (string, bool) {
-	what, bad := fs.formatText(call.Args, call.Ellipsis == token.NoPos)
-	return "fmt.Errorf(" + what + ")", bad
+// errorfText is the site a fmt.Errorf call is (formatSite), and whether it
+// is one: the values it formats that are not safe, and its format when that
+// is not a constant. The errors it wraps are judged where they are logged.
+func (fs *fileScan) errorfText(call *ast.CallExpr) (kind, what string, bad bool) {
+	return fs.formatSite("fmt.Errorf", kindErrorf, call.Args)
+}
+
+// formatSite is the site a call that formats args (args[0] its format)
+// into an error's text, or a line, is: kind, or kindURL when a value it
+// formats that is not safe is made from a request's URL (urlKind), which
+// only a reason that says whose URL it is, or that the error keeps it for its
+// caller (contentReason), excuses; label(what it formats that is not safe),
+// named by the values that reach it (sourced); and whether there is any.
+func (fs *fileScan) formatSite(label, kind string, args []ast.Expr) (string, string, bool) {
+	texts, parts := fs.formatText(args)
+	if len(parts) == 0 {
+		return kind, "", false
+	}
+	for _, p := range parts {
+		if fs.urlKind(p, kind) == kindURL {
+			kind = kindURL
+		}
+	}
+	return kind, fs.sourced(label+"("+strings.Join(texts, ", ")+")", parts...), true
 }
 
 // formatText is what a format and its arguments (args[0], args[1:]) put in
-// a text that is not safe, and whether there is any. spread is false for a
-// call that passes its arguments on with "args...": a wrapper's own call,
-// whose callers are judged instead.
-func (fs *fileScan) formatText(args []ast.Expr, spread bool) (string, bool) {
+// a text that is not safe, as written, and the values that are: none when
+// the text is safe.
+func (fs *fileScan) formatText(args []ast.Expr) ([]string, []ast.Expr) {
 	var bad []string
+	var parts []ast.Expr
 	if len(args) == 0 {
-		return "", false
+		return nil, nil
 	}
 	// The errors a format or a value holds the text of are judged where the
 	// error made is logged, as the errors it wraps are (callOrigin).
 	if !fs.errSafe(args[0]) {
 		bad = append(bad, "format "+fs.text(args[0]))
+		parts = append(parts, args[0])
 	}
 	verbs := formatVerbs(fs.info, args[0])
 	var check func(i int, a ast.Expr)
@@ -2722,12 +2983,12 @@ func (fs *fileScan) formatText(args []ast.Expr, spread bool) (string, bool) {
 			return
 		}
 		bad = append(bad, fs.text(a))
+		parts = append(parts, a)
 	}
 	for i, a := range args[1:] {
 		check(i, a)
 	}
-	_ = spread
-	return strings.Join(bad, ", "), len(bad) > 0
+	return bad, parts
 }
 
 // isBuiltin: fun names the builtin name.
@@ -2796,11 +3057,14 @@ func (fs *fileScan) wrapperParam(e ast.Expr) bool {
 	return false
 }
 
-func (fs *fileScan) errorsNewText(call *ast.CallExpr) (string, bool) {
+// errorsNewText is the site an errors.New call is, as formatSite says, and
+// whether it is one.
+func (fs *fileScan) errorsNewText(call *ast.CallExpr) (kind, what string, bad bool) {
 	if len(call.Args) != 1 || fs.errSafe(call.Args[0]) {
-		return "", false
+		return kindErrorsNew, "", false
 	}
-	return "errors.New(" + fs.text(call.Args[0]) + ")", true
+	a := call.Args[0]
+	return fs.urlKind(a, kindErrorsNew), fs.sourced("errors.New("+fs.text(a)+")", a), true
 }
 
 // listedText: the error text call builds is a site the allowlist says
@@ -2813,6 +3077,18 @@ func (fs *fileScan) listedText(kind, what string) bool {
 // value.
 func (fs *fileScan) fieldLiteral(lit *ast.CompositeLit) {
 	t := fs.info.TypeOf(lit)
+	if t != nil && isNamed(t, "go.uber.org/zap/zapcore", "Entry") {
+		// A line written out, which a core writes as it is: its message,
+		// and its logger's name, which heads it.
+		for _, el := range lit.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if k, ok := kv.Key.(*ast.Ident); ok && (k.Name == "Message" || k.Name == "LoggerName") {
+					fs.message(kv.Value)
+				}
+			}
+		}
+		return
+	}
 	if t == nil || !isNamed(t, "go.uber.org/zap/zapcore", "Field") {
 		return
 	}
@@ -2829,7 +3105,7 @@ func (fs *fileScan) fieldLiteral(lit *ast.CompositeLit) {
 			leave := fs.enter(sinkField)
 			fs.sinkParams(sinkField, kv.Value)
 			if !fs.safe(kv.Value) {
-				fs.report(kv.Value, kindField, "zapcore.Field{"+k.Name+": "+fs.text(kv.Value)+"}")
+				fs.report(kv.Value, kindField, fs.sourced("zapcore.Field{"+k.Name+": "+fs.text(kv.Value)+"}", kv.Value))
 			}
 			leave()
 		}
@@ -2837,24 +3113,66 @@ func (fs *fileScan) fieldLiteral(lit *ast.CompositeLit) {
 }
 
 // fieldWrites: the writes x makes of string fields (fieldVar), each a
-// fieldWrite.
+// fieldWrite, and of the fields keploy's errors' Error methods read
+// (errFieldOf), of any type, an element's of one too (st.Lines[i] = got),
+// each an errFieldWrite.
 func (fs *fileScan) fieldWrites(x *ast.AssignStmt) {
 	for j, l := range x.Lhs {
-		sel, ok := ast.Unparen(l).(*ast.SelectorExpr)
+		var rhs ast.Expr
+		switch {
+		case len(x.Rhs) == len(x.Lhs):
+			rhs = x.Rhs[j]
+		case len(x.Rhs) == 1: // d.Reason, ok = m[k]: the value the call gives it
+			rhs = x.Rhs[0]
+		default:
+			continue
+		}
+		target := ast.Unparen(l)
+		for {
+			if ix, ok := target.(*ast.IndexExpr); ok {
+				target = ast.Unparen(ix.X)
+				continue
+			}
+			break
+		}
+		sel, ok := target.(*ast.SelectorExpr)
 		if !ok {
 			continue
 		}
-		v := fs.fieldVar(sel)
-		if v == nil {
-			continue
+		if fv, ok := fs.info.Uses[sel.Sel].(*types.Var); ok && fv.IsField() && fs.s.errFieldOf[fv.Origin()] {
+			fs.errFieldWrite(fv.Origin(), rhs, "set "+fs.text(l))
 		}
-		switch {
-		case len(x.Rhs) == len(x.Lhs):
-			fs.fieldWrite(v, x.Rhs[j], "set "+fs.text(sel))
-		case len(x.Rhs) == 1: // d.Reason, ok = m[k]: the value the call gives it
-			fs.fieldWrite(v, x.Rhs[0], "set "+fs.text(sel))
+		if t := fs.info.TypeOf(sel.X); t != nil && isNamed(t, "go.uber.org/zap/zapcore", "Entry") && (sel.Sel.Name == "Message" || sel.Sel.Name == "LoggerName") && target == ast.Unparen(l) {
+			fs.message(rhs) // a line's message written out (ent.Message = s), which a core writes as it is
+		}
+		if target != ast.Unparen(l) {
+			continue // an element's write: the field holds more than it
+		}
+		if v := fs.fieldVar(sel); v != nil {
+			fs.fieldWrite(v, rhs, "set "+fs.text(sel))
 		}
 	}
+}
+
+// errFieldWrite: rhs, written to v, a field an error type's Error reads
+// (errFieldOf), by what. It is kept under v for the worklist; and once a line
+// logs a value of that type whole (errSinks), it is judged as the error's
+// text it becomes (errValue).
+func (fs *fileScan) errFieldWrite(v *types.Var, rhs ast.Expr, what string) {
+	if fs.cur.decl != nil {
+		if fs.s.writers[v] == nil {
+			fs.s.writers[v] = map[ast.Decl]declRef{}
+		}
+		fs.s.writers[v][fs.cur.decl] = fs.cur
+	}
+	if !fs.s.errSinks[v] || (isString(v.Type()) && fs.s.sinkFields[v]&(sinkMsg|sinkField) != 0) {
+		return // not logged, or judged as a line's own value already (fieldWrite)
+	}
+	prev := fs.via
+	fs.via = "error field " + fs.fieldKey(v)
+	fs.viaField++
+	defer func() { fs.via = prev; fs.viaField-- }()
+	fs.errValue(rhs, what, rhs)
 }
 
 // structLiteral: the string fields a struct's literal writes (fieldVar), by
@@ -2899,7 +3217,7 @@ func (fs *fileScan) fieldWrite(v *types.Var, rhs ast.Expr, what string) {
 	if m := fs.s.sinkFields[v]; m != 0 {
 		prev := fs.via
 		fs.via = "field " + fs.fieldKey(v) + "/" + strconv.Itoa(int(lowBit(m)))
-		fs.judge(m, rhs, what, rhs)
+		fs.judge(m&^sinkDirect, rhs, what, rhs)
 		fs.via = prev
 	}
 }
@@ -2965,7 +3283,7 @@ func (fs *fileScan) namedSiblings(args []ast.Expr) {
 		return
 	}
 	for _, c := range values {
-		fs.report(c, kindField, fs.text(c.Fun)+"("+fs.text(c.Args[len(c.Args)-1])+") named by "+strconv.Quote(named))
+		fs.report(c, kindField, fs.sourced(fs.text(c.Fun)+"("+fs.text(c.Args[len(c.Args)-1])+") named by "+strconv.Quote(named), c.Args[len(c.Args)-1]))
 	}
 }
 
@@ -2977,7 +3295,7 @@ func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
 		return
 	}
 	defer fs.enter(sinkField)()
-	if !fs.s.constructed[fs.file+" | "+kindField+" | "+ctor+"("+fs.text(v)+")"] {
+	if !fs.isConstructed(kindField, ctor+"("+fs.text(v)+")", v) {
 		fs.sinkParams(sinkField, v)
 	}
 	if fs.isError(v) {
@@ -2992,7 +3310,23 @@ func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
 	if fs.reportErrorParts(ctor, v, nil) && fs.errSafe(v) {
 		return
 	}
-	fs.report(at, fs.urlKind(v, kindField), ctor+"("+fs.text(v)+")")
+	fs.report(at, fs.urlKind(v, kindField), fs.sourced(ctor+"("+fs.text(v)+")", v))
+}
+
+// isConstructed: the site of kind whose value, base as written, is named by
+// the values that reach it through vs (sourced) is one the allowlist lists
+// as constructed (constructedReason), whose value is not judged by what it is
+// made from. A site is named by its sources only where one could be listed.
+func (fs *fileScan) isConstructed(kind, base string, vs ...ast.Expr) bool {
+	prefix := fs.file + " | " + kind + " | " + base
+	hit := false
+	for k := range fs.s.constructed {
+		if k == prefix || strings.HasPrefix(k, prefix+" <- ") {
+			hit = true
+			break
+		}
+	}
+	return hit && fs.s.constructed[fs.file+" | "+kind+" | "+fs.sourced(base, vs...)]
 }
 
 // message: a log line's message.
@@ -3008,7 +3342,7 @@ func (fs *fileScan) messageAs(label string, m ast.Expr) {
 	if label != "" {
 		what = label + "(" + what + ")"
 	}
-	if !fs.s.constructed[fs.file+" | "+kindMessage+" | "+what] {
+	if !fs.isConstructed(kindMessage, what, m) {
 		fs.sinkParams(sinkMsg, m)
 	}
 	if fs.safe(m) {
@@ -3032,7 +3366,7 @@ func (fs *fileScan) messageAs(label string, m ast.Expr) {
 	if fs.reportErrorParts("message", m, errPart) && fs.errSafe(m) {
 		return
 	}
-	fs.report(m, fs.urlKind(m, kindMessage), what)
+	fs.report(m, fs.urlKind(m, kindMessage), fs.sourced(what, m))
 }
 
 // errorText: v, the value of a logcontent field that fingerprints what it is
@@ -3670,6 +4004,235 @@ func (fs *fileScan) localSafe(v *types.Var, use *ast.Ident) bool {
 	return true
 }
 
+// sourced is what, a site's value as written, named by the values that
+// reach it through the local variables it reads (sources), as an error's
+// site is named by its origin: zap.String(matched) <- stub.Name. A value
+// from elsewhere assigned to the local is then a site of its own, which the
+// allowlist does not list yet, rather than one more of a name it lists. A
+// site whose value reads no local, or only locals whose values are what it
+// writes out, is what alone. An error's text in it is reported as the error,
+// by its origin, so it is no source here.
+func (fs *fileScan) sourced(what string, vs ...ast.Expr) string {
+	fs.errOK++
+	fs.naming++
+	defer func() { fs.errOK--; fs.naming-- }()
+	var out []string
+	via := false
+	seen := map[ast.Expr]bool{}
+	for _, v := range vs {
+		fs.sources(v, seen, &out, &via, 0)
+	}
+	if !via || len(out) == 0 {
+		return what
+	}
+	return what + " <- " + strings.Join(out, " & ")
+}
+
+// sources adds to out the values e is made of that are not safe, reading e
+// as safe does: through concatenation, a conversion, fmt's, strings', path's
+// and strconv's texts, a text of keploy's that puts its arguments in it
+// (textSummary), a composite literal's elements, and an index, a slice, a
+// dereference or a type assertion of a local, to every value assigned to
+// each local variable it reads that can reach it (varValues, reaches), which
+// sets via. A parameter is named as one ("param s"), a local whose values
+// cannot all be seen by why (a range's by what it ranges over), a call's
+// result among several by the call, and anything else as written. It is
+// true when e is not safe.
+func (fs *fileScan) sources(e ast.Expr, seen map[ast.Expr]bool, out *[]string, via *bool, depth int) bool {
+	e = ast.Unparen(e)
+	if e == nil {
+		return false
+	}
+	if seen[e] {
+		return true // named where it was first read
+	}
+	seen[e] = true
+	if fs.safe(e) {
+		return false
+	}
+	add := func(s string) bool {
+		if !slices.Contains(*out, s) {
+			*out = append(*out, s)
+		}
+		return true
+	}
+	if depth > 8 {
+		return add(fs.text(e))
+	}
+	each := func(args []ast.Expr) bool {
+		found := false
+		for _, a := range args {
+			if fs.sources(a, seen, out, via, depth+1) {
+				found = true
+			}
+		}
+		return found
+	}
+	switch x := e.(type) {
+	case *ast.Ident:
+		v, _ := fs.identVar(x)
+		if v == nil || v.IsField() || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
+			return add(fs.text(x))
+		}
+		if _, ok := fs.asParam(v, x); ok {
+			return add("param " + v.Name())
+		}
+		*via = true
+		lv := fs.varValues(v)
+		if !lv.declared || lv.opaque != "" {
+			return add(fs.opaqueLocal(lv, v))
+		}
+		found := false
+		for _, a := range lv.set {
+			if !fs.reaches(lv, a, x, v) {
+				continue
+			}
+			switch {
+			case a.rhs == nil: // its zero value
+			case a.param:
+				found = add("param " + v.Name())
+			case a.multi:
+				found = add(fs.text(a.rhs))
+			default:
+				if fs.sources(a.rhs, seen, out, via, depth+1) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			// What it holds is not what was assigned to it (a struct
+			// whose fields are written, a slice appended to in place).
+			return add("local " + v.Name())
+		}
+		return true
+	case *ast.BinaryExpr:
+		if x.Op == token.ADD {
+			l := fs.sources(x.X, seen, out, via, depth+1)
+			if r := fs.sources(x.Y, seen, out, via, depth+1); l || r {
+				return true
+			}
+		}
+		return add(fs.text(x))
+	case *ast.CallExpr:
+		if tv, ok := fs.info.Types[x.Fun]; ok && tv.IsType() && len(x.Args) == 1 {
+			return fs.sources(x.Args[0], seen, out, via, depth+1) || add(fs.text(x))
+		}
+		f := calleeFunc(fs.info, x)
+		if f == nil {
+			return add(fs.text(x))
+		}
+		pkg := funcPkg(f)
+		switch {
+		case pkg == "fmt" && (f.Name() == "Sprint" || f.Name() == "Sprintln"),
+			pkg == "strconv" && recvName(f) == "",
+			(pkg == "strings" || pkg == "path" || pkg == "path/filepath") && recvName(f) == "" && textResult(f):
+			if each(x.Args) {
+				return true
+			}
+		case pkg == "fmt" && f.Name() == "Sprintf" && len(x.Args) > 0:
+			verbs := formatVerbs(fs.info, x.Args[0])
+			args := []ast.Expr{x.Args[0]}
+			for i, a := range x.Args[1:] {
+				if i < len(verbs) && verbs[i] == 'T' {
+					continue
+				}
+				args = append(args, a)
+			}
+			if each(args) {
+				return true
+			}
+		case strings.HasPrefix(pkg, module):
+			if ok, passes := fs.s.textSummary(f); ok {
+				var args []ast.Expr
+				for i := range passes {
+					if a := callArg(fs.info, x, f, i); a != nil {
+						args = append(args, a)
+					}
+				}
+				if each(args) {
+					return true
+				}
+			}
+		}
+		return add(fs.text(x))
+	case *ast.CompositeLit:
+		var els []ast.Expr
+		for _, el := range x.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				el = kv.Value
+			}
+			els = append(els, el)
+		}
+		return each(els) || add(fs.text(x))
+	case *ast.IndexExpr:
+		if fs.localRoot(x.X) {
+			return fs.sources(x.X, seen, out, via, depth+1) || add(fs.text(x))
+		}
+	case *ast.SliceExpr:
+		if fs.localRoot(x.X) {
+			return fs.sources(x.X, seen, out, via, depth+1) || add(fs.text(x))
+		}
+	case *ast.StarExpr:
+		if fs.localRoot(x.X) {
+			return fs.sources(x.X, seen, out, via, depth+1) || add(fs.text(x))
+		}
+	case *ast.TypeAssertExpr:
+		if fs.localRoot(x.X) {
+			return fs.sources(x.X, seen, out, via, depth+1) || add(fs.text(x))
+		}
+	}
+	return add(fs.text(e))
+}
+
+// localRoot: e is a local variable, or an index, a slice or a dereference
+// of one: what sources follows to the values assigned to it.
+func (fs *fileScan) localRoot(e ast.Expr) bool {
+	switch x := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		v, ok := fs.info.Uses[x].(*types.Var)
+		return ok && !v.IsField() && v.Pkg() != nil && v.Parent() != v.Pkg().Scope()
+	case *ast.IndexExpr:
+		return fs.localRoot(x.X)
+	case *ast.SliceExpr:
+		return fs.localRoot(x.X)
+	case *ast.StarExpr:
+		return fs.localRoot(x.X)
+	}
+	return false
+}
+
+// opaqueLocal names v, a local whose values cannot all be seen (varValues):
+// a range's variable by what it ranges over, its key as such ("range h key"),
+// and any other by why.
+func (fs *fileScan) opaqueLocal(lv localValues, v *types.Var) string {
+	if lv.opaque == "range" && lv.body != nil {
+		name := ""
+		ast.Inspect(lv.body, func(n ast.Node) bool {
+			if name != "" {
+				return false
+			}
+			if r, ok := n.(*ast.RangeStmt); ok {
+				for i, k := range []ast.Expr{r.Key, r.Value} {
+					if id, ok := k.(*ast.Ident); ok && (fs.info.Defs[id] == v || fs.info.Uses[id] == v) {
+						name = "range " + fs.text(r.X)
+						if i == 0 {
+							name += " key" // a map's key, a slice's index
+						}
+					}
+				}
+			}
+			return true
+		})
+		if name != "" {
+			return name
+		}
+	}
+	if lv.opaque == "" {
+		return "unassigned " + v.Name()
+	}
+	return lv.opaque + " " + v.Name()
+}
+
 // loggedError: e, an error (or its text), logged whole by what at at.
 func (fs *fileScan) loggedError(at ast.Node, what string, e ast.Expr) {
 	if fs.gatedValue(e) {
@@ -3684,7 +4247,9 @@ func (fs *fileScan) loggedError(at ast.Node, what string, e ast.Expr) {
 	if safe {
 		return
 	}
-	fs.report(at, kindError, what+"("+fs.text(e)+") <- "+origin)
+	content := strings.Contains(origin, contentMark) && fs.viaField == 0
+	origin = strings.ReplaceAll(origin, contentMark, "content ")
+	fs.reportSite(at, kindError, what+"("+fs.text(e)+") <- "+origin, content)
 }
 
 // parts calls f for e and, through concatenation and fmt.Sprint*, each value
@@ -3757,14 +4322,20 @@ func numberType(t types.Type) bool {
 	return ok && b.Info()&(types.IsNumeric|types.IsBoolean) != 0
 }
 
-// gated: e is a value of logcontent or logurl.
+// gatedValue: e is a value of logcontent or logurl, which writes what it is
+// given as the switch says. Not logurl.Error's: with the switch off it
+// rewrites only a *url.Error and the URLs it is given, and the rest of the
+// error's text is the error's, which callOrigin judges as such.
 func (fs *fileScan) gatedValue(e ast.Expr) bool {
 	c, ok := ast.Unparen(e).(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	f := calleeFunc(fs.info, c)
-	return f != nil && strings.HasPrefix(funcPkg(f), module+"/utils/logcontent")
+	if f == nil || (funcPkg(f) == logurlPkg && f.Name() == "Error") {
+		return false
+	}
+	return strings.HasPrefix(funcPkg(f), module+"/utils/logcontent")
 }
 
 // marshalerCtors are the fields that write a marshaler through its
@@ -3935,6 +4506,9 @@ func (fs *fileScan) safe(e ast.Expr) bool {
 		if m == 0 {
 			m = sinkField // an error's text, which a line may log whole
 		}
+		if fs.naming > 0 {
+			return fs.s.sinkFields[v]&m == m
+		}
 		fs.noteSink("field "+fs.fieldKey(v), m&^fs.s.sinkFields[v], x)
 		fs.s.markSinkField(v, m, fs.file+":"+strconv.Itoa(fs.fset.Position(x.Pos()).Line))
 		return true
@@ -4032,6 +4606,12 @@ func (fs *fileScan) textSafe(c *ast.CallExpr, f *types.Func) bool {
 		m := fs.mask
 		if m == 0 {
 			m = sinkField
+		}
+		if fs.naming > 0 {
+			if fs.s.sinkFields[v]&m != m {
+				return false // named by the call (sourced judges nothing)
+			}
+			continue
 		}
 		fs.noteSink("field "+fs.fieldKey(v), m&^fs.s.sinkFields[v], c)
 		fs.s.markSinkField(v, m, fs.file+":"+strconv.Itoa(fs.fset.Position(c.Pos()).Line))
@@ -4271,7 +4851,7 @@ func init() {
 		"compress/gzip", "compress/flate", "compress/zlib", "github.com/andybalholm/brotli",
 		"github.com/klauspost/compress/zstd", "github.com/klauspost/compress/s2", "github.com/golang/snappy",
 		"crypto/tls", "crypto/x509", // a handshake's and a certificate's: names and verdicts, never the payload
-		"github.com/spf13/pflag", "github.com/spf13/cobra", // a flag's name and type
+		"github.com/spf13/pflag", "github.com/spf13/cobra", // a flag's name and type; not a command's run's (cobraRuns)
 		"github.com/docker/docker/client", // the daemon's: containers', images' and networks' names
 		"github.com/miekg/dns",            // a resolver's: a name, an address, a timeout
 		"encoding/gob",                    // a type's name
@@ -4374,11 +4954,31 @@ func (fs *fileScan) origin(e ast.Expr, depth int) (string, bool) {
 		// Err: err}): as safe as what it holds. The standard library's
 		// errors of an op on a file or a socket hold, besides the error
 		// they wrap, an op's name, a path and an address (opErrorType),
-		// which are no content.
+		// which are no content. What is written to a field its Error reads
+		// after it is made is judged where it is written (markErrFields).
 		opErr := opErrorType(fs.info.TypeOf(x))
-		for _, el := range x.Elts {
+		fs.s.markErrFields(fs.info.TypeOf(x))
+		if v := fs.s.contentErrField(fs.info.TypeOf(x)); v != nil {
+			// A field of its text is written content the error keeps
+			// for its caller, the allowlist says.
+			return contentMark + fs.text(x.Type) + "{" + v.Name() + "}", false
+		}
+		st, _ := fs.info.TypeOf(x).Underlying().(*types.Struct)
+		if p, ok := fs.info.TypeOf(x).(*types.Pointer); ok {
+			st, _ = p.Elem().Underlying().(*types.Struct)
+		}
+		for i, el := range x.Elts {
+			var field *types.Var
 			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if id, ok := kv.Key.(*ast.Ident); ok {
+					field, _ = fs.info.Uses[id].(*types.Var)
+				}
 				el = kv.Value
+			} else if st != nil && i < st.NumFields() {
+				field = st.Field(i)
+			}
+			if field != nil && fs.s.shaped > 0 && fs.s.urlNamed[field.Origin()] {
+				continue // a URL the error names, which logurl.Error shapes
 			}
 			if fs.isError(el) {
 				if o, safe := fs.origin(el, depth+1); !safe {
@@ -4427,12 +5027,51 @@ func (fs *fileScan) packageVar(v *types.Var, depth int) (string, bool, bool) {
 	return "var " + qualVar(v), false, true // keploy's, declared without a value
 }
 
+// contentMark marks, in an origin's name, an error text the allowlist lists
+// as content (contentReason), that the origin's errors may be made of: a
+// line that logs such an error whole is a site no reason excuses, since the
+// allowlist itself says what it carries (site.content). It is written as
+// "content " in the site's name.
+const contentMark = "\x00content\x00"
+
+// contentText: kind | what, an error's text the call makes at the scan's
+// file, is one the allowlist lists as content, and the origin's name it
+// gives (contentMark) when it is.
+func (fs *fileScan) contentText(kind, what string) bool {
+	return fs.s.contentTexts[fs.file+" | "+kind+" | "+what]
+}
+
+// logurlPkg is logurl's package, whose Error writes an error as a line may
+// carry it (shaping).
+const logurlPkg = module + "/utils/logcontent/logurl"
+
+// urlErrorFuncs are the calls whose every error is a *url.Error, which
+// logurl.Error writes as its op, its URL's shape and its cause's kind:
+// net/url's parses, and net/http's client calls, which build their request
+// with url.Parse and wrap what Do meets in a *url.Error.
+var urlErrorFuncs = map[string]bool{
+	"net/url.Parse": true, "net/url.ParseRequestURI": true, "net/url.URL.Parse": true, "net/url.JoinPath": true,
+	"net/http.Client.Do": true, "net/http.Client.Get": true, "net/http.Client.Post": true, "net/http.Client.PostForm": true,
+	"net/http.Client.Head": true, "net/http.Get": true, "net/http.Post": true, "net/http.PostForm": true, "net/http.Head": true,
+}
+
+// cobraRuns are cobra's methods whose error is whatever a command's own
+// callbacks returned (its RunE, PreRunE, Args or usage func), any error of
+// keploy's: not a flag's or an argument's, as cobra's others are.
+var cobraRuns = map[string]bool{
+	"Execute": true, "ExecuteC": true, "ExecuteContext": true, "ExecuteContextC": true,
+	"ValidateArgs": true, "Usage": true,
+}
+
 func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (string, bool) {
 	pkg, name := funcPkg(f), qualFunc(f)
 	switch {
 	case pkg == "errors" && f.Name() == "New":
-		what, bad := fs.errorsNewText(c)
-		safe := !bad || fs.listedText(kindErrorsNew, what)
+		kind, what, bad := fs.errorsNewText(c)
+		safe := !bad || fs.listedText(kind, what)
+		if bad && fs.contentText(kind, what) {
+			return contentMark + "errors.New", false
+		}
 		if safe && len(c.Args) == 1 {
 			// errors.New(err.Error()), errors.New(why): the errors whose
 			// text it is
@@ -4442,8 +5081,12 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 		}
 		return "errors.New", safe
 	case pkg == "fmt" && f.Name() == "Errorf":
-		what, bad := fs.errorfText(c)
-		safe := !bad || fs.listedText(kindErrorf, what)
+		kind, what, bad := fs.errorfText(c)
+		safe := !bad || fs.listedText(kind, what)
+		mark := ""
+		if bad && fs.contentText(kind, what) {
+			mark = contentMark
+		}
 		var wrapped []string
 		for _, a := range c.Args[1:] {
 			if fs.isError(a) {
@@ -4468,9 +5111,9 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 			}
 		}
 		if len(wrapped) == 0 {
-			return "fmt.Errorf", safe
+			return mark + "fmt.Errorf", safe
 		}
-		return "fmt.Errorf(" + strings.Join(wrapped, ", ") + ")", safe
+		return mark + "fmt.Errorf(" + strings.Join(wrapped, ", ") + ")", safe
 	case pkg == "errors" && f.Name() == "Join":
 		safe := true
 		var parts []string
@@ -4482,10 +5125,26 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 		return "errors.Join(" + strings.Join(parts, ", ") + ")", safe
 	case pkg == "context" && (f.Name() == "Cause"):
 		return name, true
+	case pkg == logurlPkg && f.Name() == "Error" && len(c.Args) > 0:
+		// logurl.Error(err, urls...) is err as a line may carry it: with
+		// the switch off it rewrites a *url.Error in it (its URL by its
+		// shape, its cause by its kind) and the urls it is given, and
+		// leaves the rest of err's text whole. So it is as safe as err,
+		// a *url.Error's taken as safe (shaping).
+		defer fs.s.shaping()()
+		o, safe := fs.origin(c.Args[0], depth+1)
+		return "logurl.Error(" + o + ")", safe
+	}
+	if fs.s.shaped > 0 && (urlErrorFuncs[pkg+"."+f.Name()] && recvName(f) == "" || urlErrorFuncs[recvName(f)+"."+f.Name()]) {
+		return name + " (a *url.Error, shaped)", true
 	}
 	if pkg == "net" && (netParses[f.Name()] || recvName(f) == "net.Resolver") {
 		// net.SplitHostPort(s), net.ResolveTCPAddr("tcp", s): the error
 		// quotes the text it could not read, whatever it was given.
+		return name, false
+	}
+	if pkg == cobraPkg && cobraRuns[f.Name()] {
+		// rootCmd.Execute(): the error a command's RunE returned.
 		return name, false
 	}
 	if safeOriginFuncs[pkg+"."+f.Name()] && recvName(f) == "" {
@@ -4499,14 +5158,26 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 	}
 	if strings.HasPrefix(pkg, module) {
 		if !fs.s.returnsSafe(f) {
+			if fs.s.contentOf(f) {
+				return contentMark + name, false
+			}
 			return name, false
 		}
 		if i, ok := printfWrapper(f); ok {
 			// framingLost(format, args...): the error it makes formats
 			// its values (with %v, which wraps nothing), so it is as
-			// safe as the errors among them and those whose text one
-			// holds. A call that passes its own args... on is its
-			// callers' to judge, as fmt.Errorf's is.
+			// safe as what it formats, as fmt.Errorf's is (the call's
+			// errorf site, listed or not), and as the errors among them
+			// and those whose text one holds. A call that passes its own
+			// args... on is its callers' to judge, as fmt.Errorf's is.
+			if kind, what, bad := fs.formatSite(f.Name(), kindErrorf, c.Args[i:]); bad {
+				if fs.contentText(kind, what) {
+					return contentMark + name, false
+				}
+				if !fs.listedText(kind, what) {
+					return name + "(" + what + ")", false
+				}
+			}
 			for _, a := range c.Args[i:] {
 				o, s := "", true
 				if fs.isError(a) {
@@ -4519,18 +5190,31 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 				}
 			}
 		}
-		// A parameter it returns is as safe as the argument it is given.
-		for i := range fs.s.passes[f.Origin()] {
-			arg := (ast.Expr)(nil)
+		// A parameter it returns is as safe as the argument it is given,
+		// and one it returns as logurl.Error writes it as safe as that
+		// argument so written (shaping).
+		check := func(i int) (string, bool) {
 			switch {
 			case len(c.Args) == 1 && isTuple(fs.info.TypeOf(c.Args[0])):
-				arg = c.Args[0] // f(g()): g's error is the one passed
+				return fs.origin(c.Args[0], depth+1) // f(g()): g's error is the one passed
 			case i < len(c.Args):
-				arg = c.Args[i]
-			default:
-				return name, false
+				return fs.origin(c.Args[i], depth+1)
 			}
-			if o, safe := fs.origin(arg, depth+1); !safe {
+			return "", false
+		}
+		for i := range fs.s.passes[f.Origin()] {
+			if o, safe := check(i); !safe {
+				return name + "(" + o + ")", false
+			}
+		}
+		for i := range fs.s.shapedPasses[f.Origin()] {
+			if fs.s.passes[f.Origin()][i] {
+				continue
+			}
+			leave := fs.s.shaping()
+			o, safe := check(i)
+			leave()
+			if !safe {
 				return name + "(" + o + ")", false
 			}
 		}
@@ -4566,6 +5250,301 @@ func (s *scanner) returnsSafe(f *types.Func) bool {
 		s.safe[f] = -1
 	}
 	return ok
+}
+
+// errMemo is what the scan has read of keploy's functions' errors in one
+// mode (shaping): the fields of scanner it swaps.
+type errMemo struct {
+	safe         map[*types.Func]int8
+	passes       map[*types.Func]map[int]bool
+	shapedPasses map[*types.Func]map[int]bool
+	why          map[*types.Func]string
+	content      map[*types.Func]int8
+}
+
+func newErrMemo() errMemo {
+	return errMemo{safe: map[*types.Func]int8{}, passes: map[*types.Func]map[int]bool{}, shapedPasses: map[*types.Func]map[int]bool{},
+		why: map[*types.Func]string{}, content: map[*types.Func]int8{}}
+}
+
+// shaping has the scan read errors as logurl.Error writes them, until the
+// func it returns is called: a *url.Error's text is its op, its URL's shape
+// and its cause's kind, so the errors of the calls whose every error is one
+// (urlErrorFuncs) are safe, and the rest of an error's text is what it is.
+// What keploy's functions return is read again so, in memos of its own.
+func (s *scanner) shaping() func() {
+	s.shaped++
+	if s.shaped == 1 {
+		s.swapMemo()
+	}
+	return func() {
+		if s.shaped == 1 {
+			s.swapMemo()
+		}
+		s.shaped--
+	}
+}
+
+func (s *scanner) swapMemo() {
+	u := &s.unshaped
+	s.safe, u.safe = u.safe, s.safe
+	s.passes, u.passes = u.passes, s.passes
+	s.shapedPasses, u.shapedPasses = u.shapedPasses, s.shapedPasses
+	s.why, u.why = u.why, s.why
+	s.content, u.content = u.content, s.content
+}
+
+// contentOf: some error f, keploy's, returns is made of a text the
+// allowlist lists as content (contentTexts): its origin carries contentMark.
+// An interface's method is when one of keploy's implementations is; an open
+// one's, whose implementations may be another module's, is not known to be.
+func (s *scanner) contentOf(f *types.Func) bool {
+	f = f.Origin()
+	if len(s.contentTexts) == 0 {
+		return false
+	}
+	if v, ok := s.content[f]; ok {
+		return v > 0
+	}
+	s.content[f] = 0 // in progress: not known to be
+	found := s.computeContent(f)
+	if found {
+		s.content[f] = 1
+	} else {
+		s.content[f] = -1
+	}
+	return found
+}
+
+func (s *scanner) computeContent(f *types.Func) bool {
+	sig, _ := f.Type().(*types.Signature)
+	if sig == nil {
+		return false
+	}
+	if isIfaceMethod(f) {
+		if s.openIface(f) {
+			return false
+		}
+		for _, m := range s.implsOf(f) {
+			if s.contentOf(m) {
+				return true
+			}
+		}
+		return false
+	}
+	d, ok := s.decls[f]
+	if !ok {
+		return false
+	}
+	fs := &fileScan{s: s, p: d.p, info: d.p.TypesInfo, fset: d.p.Fset, file: d.file, funcs: []ast.Node{d.decl},
+		summarizing: sig, passed: map[int]bool{}, shapedPassed: map[int]bool{}, shapedAt: s.shaped}
+	marked := func(o string, safe bool) bool { return !safe && strings.Contains(o, contentMark) }
+	found := false
+	ast.Inspect(d.decl.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch r := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			if len(r.Results) == 0 {
+				for i := 0; i < sig.Results().Len(); i++ {
+					if v := sig.Results().At(i); implementsError(v.Type()) {
+						at := ast.NewIdent(v.Name())
+						at.NamePos = r.Pos()
+						found = found || marked(fs.namedResultOrigin(at, v))
+					}
+				}
+				return false
+			}
+			if len(r.Results) == 1 && sig.Results().Len() > 1 {
+				found = marked(fs.origin(r.Results[0], 1))
+				return false
+			}
+			for i, e := range r.Results {
+				if i < sig.Results().Len() && implementsError(sig.Results().At(i).Type()) {
+					found = found || marked(fs.origin(e, 1))
+				}
+			}
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// findErrFields finds, for each error type of keploy's (a named type whose
+// Error method is declared in keploy), the fields its Error method reads,
+// and those of the methods and functions of keploy's it calls: of keploy's
+// structs, of any type that can hold text (an error's among them). An error
+// value written out (&AnswerStallError{Came: got}) is judged by what its
+// literal holds (origin); what is written to one of these fields after it
+// (st.Came = got) is judged where it is written, once a line logs such a
+// value whole (errSinks).
+func (s *scanner) findErrFields() {
+	s.errFields = map[*types.Named][]*types.Var{}
+	s.errFieldOf = map[*types.Var]bool{}
+	s.errSinks = map[*types.Var]bool{}
+	s.urlNamed = map[*types.Var]bool{}
+	for _, n := range s.named {
+		if obj, _, _ := types.LookupFieldOrMethod(types.NewPointer(n), false, n.Obj().Pkg(), "LoggedURLs"); obj != nil {
+			if m, ok := obj.(*types.Func); ok {
+				if d, ok := s.decls[m.Origin()]; ok {
+					ast.Inspect(d.decl.Body, func(x ast.Node) bool {
+						if sel, ok := x.(*ast.SelectorExpr); ok {
+							if v, ok := d.p.TypesInfo.Uses[sel.Sel].(*types.Var); ok && v.IsField() {
+								s.urlNamed[v.Origin()] = true
+							}
+						}
+						return true
+					})
+				}
+			}
+		}
+		obj, _, _ := types.LookupFieldOrMethod(types.NewPointer(n), false, n.Obj().Pkg(), "Error")
+		m, ok := obj.(*types.Func)
+		if !ok || !implementsError(types.NewPointer(n)) {
+			continue
+		}
+		seen := map[*types.Func]bool{}
+		var fields []*types.Var
+		have := map[*types.Var]bool{}
+		var read func(f *types.Func, depth int)
+		read = func(f *types.Func, depth int) {
+			f = f.Origin()
+			d, ok := s.decls[f]
+			if !ok || seen[f] || depth > 3 {
+				return
+			}
+			seen[f] = true
+			info := d.p.TypesInfo
+			ast.Inspect(d.decl.Body, func(x ast.Node) bool {
+				switch e := x.(type) {
+				case *ast.SelectorExpr:
+					v, ok := info.Uses[e.Sel].(*types.Var)
+					if ok && v.IsField() && v.Pkg() != nil && strings.HasPrefix(v.Pkg().Path(), module) && !safeType(v.Type()) && !have[v.Origin()] {
+						have[v.Origin()] = true
+						fields = append(fields, v.Origin())
+					}
+				case *ast.CallExpr:
+					if g := calleeFunc(info, e); g != nil && strings.HasPrefix(funcPkg(g), module) {
+						read(g, depth+1)
+					}
+				}
+				return true
+			})
+		}
+		read(m, 0)
+		if len(fields) > 0 {
+			s.errFields[n] = fields
+			for _, v := range fields {
+				s.errFieldOf[v] = true
+			}
+		}
+	}
+}
+
+// findContentErrFields finds the fields of keploy's errors' texts
+// (errFieldOf) a write of which the allowlist lists as content
+// (contentErrFields): its entry's key, as written, with or without the
+// values that reach it (sourced), of the errorf or the url kind.
+func (s *scanner) findContentErrFields(pkgs []*packages.Package) {
+	s.contentErrFields = map[*types.Var]bool{}
+	if len(s.contentTexts) == 0 {
+		return
+	}
+	bases := map[string]bool{}
+	for k := range s.contentTexts {
+		bases[strings.SplitN(k, " <- ", 2)[0]] = true
+	}
+	for _, p := range pkgs {
+		for _, f := range p.Syntax {
+			rel, err := filepath.Rel(s.root, p.Fset.File(f.Pos()).Name())
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			fs := &fileScan{s: s, p: p, info: p.TypesInfo, fset: p.Fset, file: filepath.ToSlash(rel)}
+			ast.Inspect(f, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for j, l := range as.Lhs {
+					var rhs ast.Expr
+					switch {
+					case len(as.Rhs) == len(as.Lhs):
+						rhs = as.Rhs[j]
+					case len(as.Rhs) == 1:
+						rhs = as.Rhs[0]
+					default:
+						continue
+					}
+					target := ast.Unparen(l)
+					for {
+						if ix, ok := target.(*ast.IndexExpr); ok {
+							target = ast.Unparen(ix.X)
+							continue
+						}
+						break
+					}
+					sel, ok := target.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					v, ok := p.TypesInfo.Uses[sel.Sel].(*types.Var)
+					if !ok || !v.IsField() || !s.errFieldOf[v.Origin()] {
+						continue
+					}
+					what := "set " + fs.text(l) + "(" + fs.text(rhs) + ")"
+					for _, kind := range []string{kindErrorf, kindURL} {
+						if bases[fs.file+" | "+kind+" | "+what] {
+							s.contentErrFields[v.Origin()] = true
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+// contentErrField is a field of t, an error type of keploy's, a write of
+// which the allowlist lists as content (contentErrFields), or nil.
+func (s *scanner) contentErrField(t types.Type) *types.Var {
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	n, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return nil
+	}
+	for _, v := range s.errFields[n.Origin()] {
+		if s.contentErrFields[v] && !(s.shaped > 0 && s.urlNamed[v]) {
+			return v
+		}
+	}
+	return nil
+}
+
+// markErrFields: a value of t, an error type of keploy's (findErrFields),
+// is an error a line may log whole: each write the scan reads of a field its
+// Error reads is judged as its text (errSinks), and the declarations read
+// before that write one are read again.
+func (s *scanner) markErrFields(t types.Type) {
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	n, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return
+	}
+	for _, v := range s.errFields[n.Origin()] {
+		if !s.errSinks[v] {
+			s.errSinks[v] = true
+			s.enqueue(s.writers[v])
+		}
+	}
 }
 
 // openIface: m is a method of an interface whose methods are all exported
@@ -4843,6 +5822,12 @@ func (s *scanner) computeSafe(f *types.Func) bool {
 				}
 				s.passes[f][i] = true
 			}
+			for i := range s.shapedPasses[m.Origin()] {
+				if s.shapedPasses[f] == nil {
+					s.shapedPasses[f] = map[int]bool{}
+				}
+				s.shapedPasses[f][i] = true
+			}
 		}
 		if impls == 0 {
 			s.why[f] = "no implementation in keploy"
@@ -4863,10 +5848,13 @@ func (s *scanner) computeSafe(f *types.Func) bool {
 		return true
 	}
 	fs := &fileScan{s: s, p: d.p, info: d.p.TypesInfo, fset: d.p.Fset, file: d.file, funcs: []ast.Node{d.decl},
-		summarizing: sig, passed: map[int]bool{}}
+		summarizing: sig, passed: map[int]bool{}, shapedPassed: map[int]bool{}, shapedAt: s.shaped}
 	defer func() {
 		if len(fs.passed) > 0 {
 			s.passes[f] = fs.passed
+		}
+		if len(fs.shapedPassed) > 0 {
+			s.shapedPasses[f] = fs.shapedPassed
 		}
 	}()
 	safe := true
@@ -4952,7 +5940,11 @@ func (fs *fileScan) namedResultOrigin(use *ast.Ident, v *types.Var) (string, boo
 func (fs *fileScan) localOrigin(use *ast.Ident, v *types.Var, depth int) (string, bool) {
 	if i, ok := fs.asParam(v, use); ok {
 		if i >= 0 && fs.summarizing != nil && fs.summarizedParam(v) == i {
-			fs.passed[i] = true
+			if fs.s.shaped > fs.shapedAt && fs.shapedPassed != nil {
+				fs.shapedPassed[i] = true // returned as logurl.Error writes it
+			} else {
+				fs.passed[i] = true
+			}
 			return "param " + v.Name(), true
 		}
 		return "param " + v.Name(), fs.closedParam(v, use)

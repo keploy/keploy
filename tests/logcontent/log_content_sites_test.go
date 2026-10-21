@@ -154,11 +154,12 @@ func load(t *testing.T, root, goos, goarch, tags string, patterns ...string) []*
 }
 
 // scanScope is every site in scope, across the platforms. listed are the
-// error texts the allowlist says carry no content (scanner.listed).
-func scanScope(t *testing.T, root string, listed, constructed map[string]bool) ([]site, *scanner) {
+// error texts the allowlist says carry no content (scanner.listed), content
+// those it says carry content (scanner.contentTexts).
+func scanScope(t *testing.T, root string, listed, content, constructed map[string]bool) ([]site, *scanner) {
 	t.Helper()
 	s := newScanner(root)
-	s.listed, s.constructed = listed, constructed
+	s.listed, s.contentTexts, s.constructed = listed, content, constructed
 	why := map[string]string{}
 	for _, p := range platforms {
 		s.add(load(t, root, p.goos, p.goarch, p.tags, scopePatterns...), excluded)
@@ -309,24 +310,41 @@ func TestNoLogLineCarriesContentUngated(t *testing.T) {
 	if _, err := os.Stat(allowFile); err == nil {
 		prev = readAllowlist(t, allowFile)
 	}
-	listed, constructed := map[string]bool{}, map[string]bool{}
+	listed, content, constructed := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for k, a := range prev {
-		if a.reason != "" && !strings.HasPrefix(a.reason, contentReason) &&
-			(strings.Contains(k, " | "+kindErrorf+" | ") || strings.Contains(k, " | "+kindErrorsNew+" | ")) {
+		// An error's text is of the errorf or the errors.New kind, or of
+		// the url kind when it formats a request's URL; a url entry that
+		// is no error's text is never looked up as one.
+		errText := strings.Contains(k, " | "+kindErrorf+" | ") || strings.Contains(k, " | "+kindErrorsNew+" | ") || strings.Contains(k, " | "+kindURL+" | ")
+		switch {
+		case !errText || a.reason == "":
+		case strings.HasPrefix(a.reason, contentReason):
+			content[k] = true
+		default:
 			listed[k] = true
 		}
 		if strings.HasPrefix(a.reason, constructedReason) {
 			constructed[k] = true
 		}
 	}
-	all, scan := scanScope(t, root, listed, constructed)
+	all, scan := scanScope(t, root, listed, content, constructed)
 	checkWords(t, root, scan)
 	var sites []site
 	for _, s := range all {
-		if s.kind == kindOvergated {
+		switch {
+		case s.kind == kindOvergated:
 			// No entry excuses one: the error carries no content, and the
 			// line withholds keploy's own words from a user for nothing.
 			t.Errorf("%s: an error whose origin carries no content is logged by its kind: log it whole (zap.Error, zap.NamedError, utils.LogError)", s)
+			continue
+		case s.kind == kindUnread:
+			t.Errorf("%s: a logging package the guard does not read: its lines carry what they are given past it; log through zap, or have the scan read the package's lines first", s)
+			continue
+		case s.content:
+			// No entry excuses one either: the allowlist itself lists a
+			// text the error may be made of as content, which the error
+			// keeps for its caller, and every line that logs it gates it.
+			t.Errorf("%s: an error made of a text %s lists as content (%s...) is logged whole: gate the line (logcontent.Error, utils.LogContentError)", s, allowlistPath, contentReason)
 			continue
 		}
 		sites = append(sites, s)
@@ -378,8 +396,12 @@ func TestNoLogLineCarriesContentUngated(t *testing.T) {
 			noReason++
 			t.Errorf("%q is listed with no reason: say why it carries no customer content", k)
 		}
-		if have > 0 && may.reason != "" && strings.Contains(k, " | "+kindURL+" | ") && !strings.HasPrefix(may.reason, urlReason) {
-			t.Errorf("%q is a URL's path or query, listed as %q: gate it with logurl, or say whose URL it is (%s ...)", k, may.reason, urlReason)
+		if have > 0 && strings.HasPrefix(may.reason, contentReason) && !scan.errTextKeys[k] {
+			t.Errorf("%q is listed as content (%s ...), which only an error's text may be, kept for the caller that handles the error: a line's own value that carries content is gated", k, contentReason)
+		}
+		if have > 0 && may.reason != "" && strings.Contains(k, " | "+kindURL+" | ") && !strings.HasPrefix(may.reason, urlReason) &&
+			!(scan.errTextKeys[k] && strings.HasPrefix(may.reason, contentReason)) {
+			t.Errorf("%q is a URL's path or query, listed as %q: gate it with logurl, or say whose URL it is (%s ...), or, for an error's text that keeps it for its caller, that it is content (%s ...)", k, may.reason, urlReason, contentReason)
 		}
 	}
 	if t.Failed() {
@@ -465,5 +487,103 @@ func TestAConstructedSiteStopsTheScanAtItsValue(t *testing.T) {
 	}
 	if after[call] {
 		t.Fatal("a call of the function that makes a constructed value is still judged")
+	}
+}
+
+// scanFixture is every site of testdata/fixture, the scan given what the
+// allowlist would list as content (scanner.contentTexts).
+func scanFixture(t *testing.T, content map[string]bool) []site {
+	t.Helper()
+	root := repoRoot(t)
+	const dir = "tests/logcontent/testdata/fixture"
+	s := newScanner(root)
+	s.contentTexts = content
+	s.add(load(t, root, runtime.GOOS, runtime.GOARCH, "", "./"+dir, "./"+dir+"/sentinel"), nil)
+	return s.list()
+}
+
+// fixtureLine is the line of fixture.go that holds text.
+func fixtureLine(t *testing.T, text string) int {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), "tests/logcontent/testdata/fixture/fixture.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, l := range strings.Split(string(src), "\n") {
+		if strings.Contains(l, text) {
+			return i + 1
+		}
+	}
+	t.Fatalf("no line of fixture.go holds %q", text)
+	return 0
+}
+
+// A site that logs a local is named by the values that reach it there, as an
+// error's is by its origin: zap.String(matched) <- st.Name. So a value from
+// elsewhere assigned to the local is a site the allowlist does not list yet,
+// not one more of a name it lists for what the local held. A parameter, and a
+// value written out, name themselves.
+func TestASiteIsNamedByWhatReachesIt(t *testing.T) {
+	const file = "tests/logcontent/testdata/fixture/fixture.go"
+	got := map[string]bool{}
+	for _, st := range scanFixture(t, nil) {
+		got[st.key()] = true
+	}
+	for _, want := range []string{
+		file + " | field | zap.String(matched) <- st.Name",
+		file + ` | field | zap.String(parts[0]) <- r.Header.Get("X-Id")`,
+		file + " | errorf | fmt.Errorf(matched) <- st.Name",
+		file + " | field | zap.String(item) <- range []string{s}",
+		file + " | field | zap.String(k) <- range h key",
+		file + " | field | zap.String(held) <- param s",
+		file + " | field | zap.String(reason)",
+		file + " | field | zap.String(s)",
+	} {
+		if !got[want] {
+			t.Errorf("no site %q", want)
+		}
+	}
+}
+
+// An error made of a text the allowlist lists as content (contentReason),
+// which it keeps for its caller, is a site no entry excuses wherever a line
+// logs it whole: the allowlist says itself what the error carries. Logged by
+// its kind, it is no site.
+func TestAContentErrorIsGatedWhereverItIsLogged(t *testing.T) {
+	const text = "tests/logcontent/testdata/fixture/fixture.go | errorf | fmt.Errorf(line)"
+	whole := fixtureLine(t, "zap.Error(readLine(s))")
+	byKind := fixtureLine(t, "logcontent.Error(readLine(s))")
+	at := func(sites []site, line int) []site {
+		var out []site
+		for _, st := range sites {
+			if st.line == line {
+				out = append(out, st)
+			}
+		}
+		return out
+	}
+	before := at(scanFixture(t, nil), whole)
+	if len(before) != 1 || before[0].kind != kindError || before[0].content {
+		t.Fatalf("precondition: the line that logs the error whole is one error site, not content: %v", before)
+	}
+	sites := scanFixture(t, map[string]bool{text: true})
+	after := at(sites, whole)
+	if len(after) != 1 || !after[0].content || !strings.Contains(after[0].what, "<- content ") {
+		t.Fatalf("the line that logs an error made of a content text whole is not a content site: %v", after)
+	}
+	if s := at(sites, byKind); len(s) != 0 {
+		t.Fatalf("the line that logs it by its kind is a site: %v", s)
+	}
+	// A write of a field an error's Error reads, listed as content, makes
+	// every value of the error's type one: a line that logs one whole is a
+	// content site, whatever its literal holds.
+	const write = "tests/logcontent/testdata/fixture/fixture.go | errorf | set st.Came(s)"
+	stalled := fixtureLine(t, "zap.Error(st))")
+	if s := at(scanFixture(t, nil), stalled); len(s) != 0 {
+		t.Fatalf("precondition: the line that logs the stall whole is no site: %v", s)
+	}
+	s := at(scanFixture(t, map[string]bool{write: true}), stalled)
+	if len(s) != 1 || !s[0].content {
+		t.Fatalf("the line that logs a stall whole, a field of whose text is written content, is not a content site: %v", s)
 	}
 }
