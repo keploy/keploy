@@ -654,42 +654,76 @@ func TestVariables_TwoMarkedClockReadsMayShareALiveValue(t *testing.T) {
 // race: the check and the bind disagree, and checking the call again would
 // disagree again, forever. The call is a miss with the bind's evidence. A
 // bind refused because of a binding made after the check (another
-// connection's, meanwhile) is checked again, which sees it.
+// connection's, meanwhile) is checked again, which sees it. The miss's
+// report says which two variables disagree and, by default, names neither
+// one's value: not in its Diff, which every door keeps as the parser's words
+// (mismatch.Withhold), nor at a door. With logcontent's switch on it names
+// both, quoted.
 func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	const shared = "kp-v-shared"
 	m := varMock("mock-2", "POST", "http://store/polls", `{"at":"r-2"}`, 200, `{}`, models.MockVariables{"polled": bindV("r-2", "body.at")})
 	for _, c := range []struct {
 		name  string
 		saw   map[string]string
 		retry bool
 	}{
-		{"a binding the check read", map[string]string{"created": "V"}, false},
+		{"a binding the check read", map[string]string{"created": shared}, false},
 		{"a binding made after the check", nil, true},
-		{"a binding the check read with another value", map[string]string{"created": "W"}, true},
+		{"a binding the check read with another value", map[string]string{"created": "kp-v-other"}, true},
 	} {
 		var tb variables.Table
 		tb.Reset()
-		if _, _, _, ok := tb.BindAll(tb.Gen(), []variables.Binding{{Name: "created", Value: "V", Recorded: "r-1", Mock: "mock-1", Place: "body.at"}}); !ok {
+		if _, _, _, ok := tb.BindAll(tb.Gen(), []variables.Binding{{Name: "created", Value: shared, Recorded: "r-1", Mock: "mock-1", Place: "body.at"}}); !ok {
 			t.Fatal("created could not bind")
 		}
-		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
+		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: shared, Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
 			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
-		consumed := false
-		served, problem, retry, err := newHTTP().serveVariablesBy(hit, func(*models.Mock) bool { consumed = true; return true })
-		if err != nil || served != nil || consumed {
-			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
-		}
-		if retry != c.retry {
-			t.Fatalf("%s: retry %v, want %v (problem %+v)", c.name, retry, c.retry, problem)
-		}
-		if c.retry {
-			if problem != nil {
-				t.Fatalf("%s: a retry with a problem %+v", c.name, problem)
+		for _, content := range []bool{false, true} {
+			restore := logcontent.Set(content)
+			consumed := false
+			served, problem, retry, err := newHTTP().serveVariablesBy(hit, func(*models.Mock) bool { consumed = true; return true })
+			if err != nil || served != nil || consumed {
+				restore()
+				t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
 			}
-			continue
-		}
-		if problem == nil || problem.name != "polled" || problem.actual != "V" || !strings.Contains(problem.why, "variable created") {
-			t.Fatalf("%s: problem %+v, want polled's bind refused beside created", c.name, problem)
+			if retry != c.retry {
+				restore()
+				t.Fatalf("%s: retry %v, want %v (problem %+v)", c.name, retry, c.retry, problem)
+			}
+			if c.retry {
+				restore()
+				if problem != nil {
+					t.Fatalf("%s: a retry with a problem %+v", c.name, problem)
+				}
+				continue
+			}
+			if problem == nil || problem.name != "polled" || problem.actual != shared || !strings.Contains(problem.why, "variable created") {
+				restore()
+				t.Fatalf("%s: problem %+v, want polled's bind refused beside created", c.name, problem)
+			}
+			live := []byte(`{"at":"` + shared + `"}`)
+			request, err := http.NewRequest("POST", "http://store/polls", strings.NewReader(string(live)))
+			if err != nil {
+				restore()
+				t.Fatal(err)
+			}
+			r := variableMismatchReport(request, live, "store:80", "POST /polls", &matchDiag{phase: models.MatchPhaseVariable, variable: problem}, []*models.Mock{m}, &tb)
+			door := models.UnmatchedCall{Protocol: r.Protocol, ActualSummary: r.ActualSummary, Diff: r.Diff, NextSteps: r.NextSteps,
+				FieldDiffs: r.FieldDiffs, ClosestMockReq: r.ClosestMockReq, ReceivedReq: r.ReceivedReq, ContentWithheld: r.ContentWithheld}.ReportContent()
+			restore()
+			for _, text := range []string{r.Diff, door.Diff} {
+				if !strings.Contains(text, "binds variable polled at body.at") || !strings.Contains(text, "beside variable created (bound at mock-1 body.at") {
+					t.Errorf("%s (content %v): the report does not say which variables disagree: %q", c.name, content, text)
+				}
+				quoted := strconv.Quote(shared)
+				switch {
+				case !content && (strings.Contains(text, shared) || !strings.Contains(text, "to "+models.WithheldValue+", which")):
+					t.Errorf("%s: the default report names the application's value: %q", c.name, text)
+				case content && strings.Count(text, quoted) != 2:
+					t.Errorf("%s: with the switch on the report does not quote both values: %q", c.name, text)
+				}
+			}
 		}
 	}
 }

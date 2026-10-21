@@ -786,7 +786,7 @@ func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (s
 			// again would pass and be refused again, forever.
 			return nil, &varProblem{
 				mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: "a value variable " + with.Name + " does not hold", actual: bad.Value,
-				why:  fmt.Sprintf("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, bad.Value, with.Name, with.Mock, with.Place, with.Value),
+				why:  fmt.Sprintf("this call binds variable %s at %s to %s, which the test's variables refuse beside variable %s (bound at %s %s to %s), though the check of the call let it", bad.Name, bad.Place, models.ReportQuote(bad.Value), with.Name, with.Mock, with.Place, models.ReportQuote(with.Value)),
 				next: "the check of the call and its bind disagree, which is a keploy bug: report it with this test set",
 			}, false, nil
 		}
