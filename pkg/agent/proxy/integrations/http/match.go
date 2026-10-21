@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -43,6 +44,9 @@ type req struct {
 	// (aliasIdentity) changed body: what a hash of the payload it sent
 	// (x-amz-content-sha256) is a hash of is the bytes before the rewrite.
 	sent []byte
+	// arrived is when keploy had read the whole request (zero: unknown):
+	// the app sent it, and read whatever clock it carries, no later.
+	arrived time.Time
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload

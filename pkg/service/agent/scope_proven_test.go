@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -49,10 +50,22 @@ type wireProxy struct {
 	lastNames []string
 	atServe   map[string]uint64
 	setErr    error
+	// poolNames are the names the agent last handed the proxy as the pool's
+	// (SetPoolNames), nil until it did.
+	poolNames []string
 	// failPools fails that many pool serves, then serves again.
 	failPools int
 	// staged counts the stagings (SetMocks).
 	staged int
+	// appClock is the app clock the agent last handed the proxy
+	// (SetAppClock), nil until it did.
+	appClock func(time.Time) (time.Time, bool)
+}
+
+func (p *wireProxy) SetAppClock(f func(time.Time) (time.Time, bool)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.appClock = f
 }
 
 func (p *wireProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
@@ -91,6 +104,14 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	for k, v := range p.served {
 		p.atServe[k] = v
 	}
+	return nil
+}
+
+func (p *wireProxy) SetPoolNames(names []string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.poolNames = append([]string{}, names...)
+	sort.Strings(p.poolNames)
 	return nil
 }
 
@@ -1103,6 +1124,20 @@ func TestBetweenTestsTheCurrentKeysPoolSliceIsServed(t *testing.T) {
 	require.Equal(t, []string{"mock-1"}, p.filteredNames(), "after the test: the key's slice again")
 }
 
+// The proxy is told every name the table's pool slices hold, of every key:
+// what the learn steps read as the pool's when the replay sends no recorded
+// windows. An empty table tells it no mock is the pool's.
+func TestTheScopePoolTellsTheProxyWhatIsThePools(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"), httpMock("mock-4", "GET", "http://h/c"))
+	ctx := context.Background()
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2"}, "users": {"mock-4"}}))
+	require.Equal(t, []string{"mock-1", "mock-2", "mock-4"}, p.poolNames)
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	require.NotNil(t, p.poolNames)
+	require.Empty(t, p.poolNames)
+}
+
 // Without the slices (a CLI that sent none) no data-plane pool mock answers
 // between tests: the whole pool is never armed.
 func TestWithoutPoolSlicesNoPoolMockIsServed(t *testing.T) {
@@ -1385,4 +1420,33 @@ func TestAConnectionThatSentNothingFailsNoTest(t *testing.T) {
 	all, err := a.GetMockErrors(ctx)
 	require.NoError(t, err)
 	require.Len(t, all, 1, "the run still reads it, for its next step")
+}
+
+// clockHook is the no-op hooks with an app clock that runs offset past the
+// real one (AppClockReader).
+type clockHook struct {
+	AgentHook
+	offset time.Duration
+}
+
+func (h *clockHook) AppClock(real time.Time) (time.Time, bool) { return real.Add(h.offset), true }
+
+// Once the mocks are stored, the proxy reads the app's clock as the hooks
+// move it; hooks that move none hand it nothing.
+func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	at := time.Date(2026, 10, 20, 15, 50, 35, 0, time.UTC)
+
+	ActiveHooks = &AgentHook{}
+	a, p := wireAgent(t, models.MODE_TEST)
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.appClock, "hooks with no app clock")
+
+	ActiveHooks = &clockHook{offset: 21 * time.Second}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.appClock)
+	got, ok := p.appClock(at)
+	require.True(t, ok)
+	require.Equal(t, at.Add(21*time.Second), got)
 }

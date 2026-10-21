@@ -183,10 +183,12 @@ func (h *Hooks) WaitAppConnsSettled(ctx context.Context, n uint64) error {
 // not capture, besides the PID-map refusals: its connections lost before the
 // proxy got them (appConnLosses), its AF_UNIX connects to sockets no member
 // of it owns (unixLosses) and, under the proven switch, replies its non-DNS
-// UDP got (udpLosses).
+// UDP got (udpLosses) and the runs of the hooks' programs the kernel skipped
+// that nothing else does the work of (skipLosses).
 func (h *Hooks) CaptureLosses() models.CaptureLosses {
 	out := append(h.appConnLosses(), h.unixLosses()...)
-	return append(out, h.udpLosses()...)
+	out = append(out, h.udpLosses()...)
+	return append(out, h.skipLosses()...)
 }
 
 // appConnLosses are the application connections lost before the proxy got

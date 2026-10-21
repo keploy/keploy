@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -1539,5 +1541,106 @@ func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
 	}
 	if got := named(); got != "" {
 		t.Fatalf("an identical second call in the gap named the next test's call in flight %q, which answered here already", got)
+	}
+}
+
+// The recordings before an instant are the trees' and the agent's on-disk
+// ones, by request time, each once (a tree's copy of an on-disk recording is
+// visited from the tree), until the visitor stops; a reader that fails says
+// so, and with none the trees' alone are visited. The worker's scoped view
+// forwards them, and is an error over a store that cannot read them; a new
+// replay session forgets the last set's reader.
+func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	pool := exactMock("pool-1", time.Second, models.LifetimeSession)
+	own := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
+	later := exactMock("pool-9", 9*time.Second, models.LifetimeSession)
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later}, models.BaseTime, time.Now())
+	at := exactT0.Add(5 * time.Second)
+	visit := func(db integrations.RecordedBeforeReader) (string, []*models.Mock, error) {
+		var names []string
+		var got []*models.Mock
+		err := db.RangeRecordedBefore(at, func(m *models.Mock) bool {
+			names = append(names, m.Name)
+			got = append(got, m)
+			return true
+		})
+		sort.Strings(names)
+		return strings.Join(names, ","), got, err
+	}
+	if names, _, err := visit(mm); err != nil || names != "own-2,pool-1" {
+		t.Fatalf("with no disk: %s %v; want own-2,pool-1", names, err)
+	}
+	onDisk := exactMock("other-test-3", 3*time.Second, models.LifetimePerTest)
+	ownCopy := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
+	mm.SetRecordedBefore(func(t2 time.Time, v func(*models.Mock) bool) error {
+		if !t2.Equal(at) {
+			t.Fatalf("the disk read before %v", t2)
+		}
+		for _, m := range []*models.Mock{ownCopy, onDisk} {
+			if !v(m) {
+				return nil
+			}
+		}
+		return nil
+	})
+	names, got, err := visit(mm)
+	treeCopy := false
+	for _, m := range got {
+		treeCopy = treeCopy || m == own
+	}
+	if err != nil || names != "other-test-3,own-2,pool-1" || !treeCopy {
+		t.Fatalf("with the disk: %s %v (own-2 the tree's: %v); want other-test-3, own-2 (the tree's), pool-1", names, err, treeCopy)
+	}
+	if names, _, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "other-test-3,own-2,pool-1" {
+		t.Fatalf("through the scoped view: %s %v", names, err)
+	}
+	type noReader struct{ integrations.MockMemDb }
+	if names, _, err := visit(&scopedMockDb{MockMemDb: noReader{mm}}); err == nil {
+		t.Fatalf("a scoped view over a store that cannot read its recordings visited %q as all of them", names)
+	}
+	stops := 0
+	_ = mm.RangeRecordedBefore(at, func(*models.Mock) bool { stops++; return false })
+	if stops != 1 {
+		t.Fatalf("a visitor that stops was called %d times", stops)
+	}
+	mm.SetRecordedBefore(func(time.Time, func(*models.Mock) bool) error { return fmt.Errorf("closed") })
+	if _, _, err := visit(mm); err == nil {
+		t.Fatal("a failing disk read was not told")
+	}
+	mm.ResetForReplaySession()
+	if names, _, err := visit(mm); err != nil || strings.Contains(names, "other-test-3") {
+		t.Fatalf("after a new replay session: %s %v; want the last set's reader forgotten", names, err)
+	}
+}
+
+// The pool names the agent hands over (the replay's scope table's pool
+// slices) say which mocks are the pool's, through a worker's view too; none is
+// known before a replay sent them, and an empty table says no mock is.
+func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	a, b := &models.Mock{Name: "boot-0"}, &models.Mock{Name: "test-0"}
+	if _, known := mm.InPool(a); known {
+		t.Fatal("the pool is known before any replay sent its table")
+	}
+	mm.SetPoolNames([]string{"boot-0", ""})
+	for _, db := range []integrations.MockMemDb{mm, &scopedMockDb{MockMemDb: mm}} {
+		if pool, known := integrations.InPool(db, a); !pool || !known {
+			t.Fatalf("%T: boot-0 pool=%v known=%v; want the pool's", db, pool, known)
+		}
+		if pool, known := integrations.InPool(db, b); pool || !known {
+			t.Fatalf("%T: test-0 pool=%v known=%v; want known, not the pool's", db, pool, known)
+		}
+	}
+	mm.SetPoolNames(nil)
+	if pool, known := mm.InPool(a); pool || !known {
+		t.Fatalf("an empty table: boot-0 pool=%v known=%v; want known, not the pool's", pool, known)
+	}
+	mm.SetPoolNames([]string{"boot-0"})
+	mm.ResetForReplaySession()
+	if _, known := mm.InPool(a); known {
+		t.Fatal("a new replay session reads the last session's pool names")
 	}
 }

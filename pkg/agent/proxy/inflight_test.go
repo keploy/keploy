@@ -7,6 +7,8 @@ import (
 	"net"
 	"runtime"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // acceptedPair is a loopback TCP connection: the app's end, and the proxy's
@@ -100,9 +102,20 @@ func TestAConnectionIsSettledWhenItsHandlerWaitsOnAnEmptySocket(t *testing.T) {
 // they cross loopback, which no event of the tracker reports.
 func waitUnread(t *testing.T, c *trackedConn) {
 	t.Helper()
-	for c.unread() == 0 {
+	for inq(c) == 0 {
 		runtime.Gosched()
 	}
+}
+
+// inq is how many bytes c's socket holds unread (SIOCINQ).
+func inq(c *trackedConn) int {
+	n := 0
+	_ = c.raw.Control(func(fd uintptr) {
+		if v, err := unix.IoctlGetInt(int(fd), unix.SIOCINQ); err == nil {
+			n = v
+		}
+	})
+	return n
 }
 
 // A closed connection holds the test's work, in a replay, until its handler

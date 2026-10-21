@@ -649,9 +649,11 @@ type Recorder struct {
 	mockWriteStopped atomic.Bool
 	// realUncaptured is set, under the proven switch with a mock.real list,
 	// when keploy could neither capture nor relay as real a connection of
-	// the recording, or could not read whether it did (reportRealRun): the
-	// recording is incomplete, and ends as failed, as for a capture loss.
+	// the recording, and realUnread when it could not read whether it did
+	// (reportRealRun): the recording is incomplete, and ends as failed, as
+	// for a capture loss, unless a later pass judges it (JudgeLossesLater).
 	realUncaptured atomic.Bool
+	realUnread     atomic.Pointer[string]
 	// heldFrames counts the test cases and mocks the frame drains handed on
 	// after the stop that may have been captured before it: what the agent's
 	// answer to a look (holdForBacklog) is about. Mappings, which it does not
@@ -2066,38 +2068,24 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// A drain that stopped waiting for what the agent still held from
 		// before the stop (holdForBacklog) left the recording incomplete:
 		// said once more here, where the run ends, and the run fails.
-		incomplete := r.captureLost.Load()
-		if incomplete {
+		agentHeldBack := r.captureLost.Load()
+		if agentHeldBack {
 			r.logger.Error("the recording may be incomplete: Keploy could not confirm it saved all the keploy agent captured before the stop",
 				zap.String("testSetID", newTestSetID),
 				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
 		// Under the proven switch: test cases recorded while the agent could
-		// not capture every call, or that could not be checked, fail the run.
-		if capWatch.finish(newTestSetID) {
+		// not capture every call, or that could not be checked, and
+		// connections to a mock.real destination neither captured nor
+		// relayed, fail the run, unless a later pass judges each test case
+		// (JudgeLossesLater).
+		fail, lossy := r.finishCapture(capWatch, newTestSetID)
+		if fail {
 			utils.SetExitCodeOnce(utils.ExitKeployError)
-			incomplete = true
-		}
-		if r.realUncaptured.Load() {
-			utils.SetExitCodeOnce(utils.ExitKeployError)
-			incomplete = true
 		}
 		if recordingStarted || stopReason != "" {
-			status := "completed"
-			reason := stopReason
-			switch {
-			case stopReason != "":
-				status = "aborted"
-			case incomplete:
-				status, reason = "incomplete", "the agent's captures from before the stop were not all handed over"
-				if !storeWrote {
-					reason = "mocks the recording captured were not written to the mock file"
-					if agentLost {
-						reason = "the agent's captures from before the stop were not all handed over, and mocks the recording captured were not written to the mock file"
-					}
-				}
-			}
+			status, reason := sessionEnd(stopReason, agentHeldBack, lossy, storeWrote, agentLost)
 			r.telemetry.RecordSessionCompleted(int64(testCountSnapshot), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, reason)
 		}
 		/*

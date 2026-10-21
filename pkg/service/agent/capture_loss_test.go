@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -186,6 +187,113 @@ func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 	a.Proxy = p
 	_, err = a.CaptureLosses(ctx)
 	require.ErrorIs(t, err, models.ErrCaptureLossesUnsupported)
+}
+
+// lossReporter is a downstream build's own capture-loss count
+// (coreAgent.RegisterCaptureLossReporter).
+type lossReporter struct{ losses *models.CaptureLosses }
+
+func (r lossReporter) CaptureLosses() models.CaptureLosses { return *r.losses }
+
+// A downstream build's own count is the agent's too: a read of the agent's
+// losses has it beside the proxy's and the hooks'. A kernel's count of skipped
+// runs (a call program's, a connection program's) is evidence only, never a
+// verdict (the founder's rule, 2026-10-21): every replayed test, during the
+// skips and after them, is judged as it would be without them, as on a kernel
+// without the count (5.10).
+func TestADownstreamBuildsLossesAreTheAgentsToo(t *testing.T) {
+	ctx := context.Background()
+	var own models.CaptureLosses
+	t.Cleanup(coreAgent.RegisterCaptureLossReporter(lossReporter{&own}))
+	a, _ := wireAgent(t, models.MODE_TEST)
+	a.Hooks = countingHooks{}
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestBefore").Action)
+	own = models.CaptureLosses{{Kind: models.CaptureLossKernelSkipCall, Count: 2, What: "keploy_tcp_recvmsg_exit"}}
+	got, err := a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, own, got)
+	require.Empty(t, endPassed(t, a, "TestDuring").Action, "a skip is never a failure")
+	require.Empty(t, endPassed(t, a, "TestAfter").Action)
+	own = append(own, models.CaptureLoss{Kind: models.CaptureLossKernelSkip, Count: 1, What: "keploy_tcp_connect"})
+	require.Empty(t, endPassed(t, a, "TestConnSkipped").Action)
+	require.Empty(t, endPassed(t, a, "TestLater").Action)
+	for _, name := range []string{"o::TestBefore", "o::TestDuring", "o::TestAfter", "o::TestConnSkipped", "o::TestLater"} {
+		require.Nil(t, windowOf(t, a, name).Evidence, "%s: a kernel's skip count is evidence, never a verdict: the test is judged as without it", name)
+	}
+}
+
+// blindReporter is a downstream build's count that could not be read.
+type blindReporter struct{ lossReporter }
+
+func (blindReporter) CaptureLossesErr() error {
+	return errors.New("the ring's drop count could not be read")
+}
+
+// Two sources that count one kind are one count: a mark is read by kind, so a
+// second entry of a kind would hide the first's growth, or charge a test
+// with a count that did not grow. And a downstream count that cannot be read
+// leaves the agent's losses unknown, never 0.
+func TestTwoSourcesOfOneKindAreOneCount(t *testing.T) {
+	ctx := context.Background()
+	own := models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 5, What: "keploy_tcp_recvmsg 5"}, {Kind: models.CaptureLossDropped, Count: 9}}
+	t.Cleanup(coreAgent.RegisterCaptureLossReporter(lossReporter{&own}))
+	a, p := wireAgent(t, models.MODE_TEST)
+	a.Proxy = lossProxy{wireProxy: p, losses: models.CaptureLosses{{Kind: models.CaptureLossDropped, Count: 3}}}
+	a.Hooks = unixHooks{losses: models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 2, What: "k_unix_stream_connect 2"}}}
+	got, err := a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossDropped, Count: 12},
+		{Kind: models.CaptureLossKernelSkip, Count: 7, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"},
+	}, got)
+	// Nothing grew: nothing is charged.
+	require.Empty(t, got.Charged(got, got, got))
+	own[0].Count++
+	again, err := a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 1, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"}}, again.Charged(got, got, got))
+
+	// With hooks and a proxy that count nothing, the reporter's count is
+	// the agent's: never "unsupported".
+	a.Proxy, a.Hooks = p, uncountedHooks{}
+	got, err = a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, own, got)
+
+	unregister := coreAgent.RegisterCaptureLossReporter(blindReporter{lossReporter{&own}})
+	t.Cleanup(unregister)
+	_, err = a.CaptureLosses(ctx)
+	require.ErrorContains(t, err, "could not be read")
+	unregister()
+	_, err = a.CaptureLosses(ctx)
+	require.NoError(t, err, "unregistered, it is read no more")
+}
+
+// failingReadReporter is a downstream count whose read fails, and which says
+// so only once it has read, as the hooks' skip watch does.
+type failingReadReporter struct{ read *bool }
+
+func (r failingReadReporter) CaptureLosses() models.CaptureLosses {
+	*r.read = true
+	return nil
+}
+
+func (r failingReadReporter) CaptureLossesErr() error {
+	if *r.read {
+		return errors.New("this read of the count failed")
+	}
+	return nil
+}
+
+// A downstream count's error is asked for after its read: the failure of the
+// read under way is this read's, never missed for an earlier one's state.
+func TestADownstreamCountsFailedReadIsThisReadsError(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	read := false
+	t.Cleanup(coreAgent.RegisterCaptureLossReporter(failingReadReporter{&read}))
+	_, err := a.CaptureLosses(context.Background())
+	require.ErrorContains(t, err, "this read of the count failed")
 }
 
 // A TLS client's handshake that failed against keploy's CA fails the
@@ -405,7 +513,7 @@ func TestTheAgentDrainsTheHooksReportsBeforeItReadsThem(t *testing.T) {
 // Unix sockets keploy cannot see leave every test not judged, never failed:
 // the replayed test's outcome stands, its window carries unix_unseen.
 func TestUnixSocketsKeployCannotSeeLeaveTestsNotJudged(t *testing.T) {
-	unseen := models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: "no trampoline"}}
+	unseen := models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: "keploy's report stopped: ring broken"}}
 	a, _ := wireAgent(t, models.MODE_TEST)
 	a.Hooks = unixHooks{losses: unseen}
 	claimSelf(t, a)

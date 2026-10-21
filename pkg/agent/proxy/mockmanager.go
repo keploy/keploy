@@ -170,7 +170,10 @@ type MockManager struct {
 
 	// vars holds the test variables this replay has bound (package
 	// variables): reset as each test case of keploy test and each test of
-	// keploy mock replay begins. Read only under the proven switch.
+	// keploy mock replay begins. Under the proven switch each test set
+	// begins it anew (NewVariableSet), and what the set's start-up binds
+	// before its first test is the run's, which each of its tests reads.
+	// Read only under the proven switch.
 	vars variables.Table
 	// aheadVars holds what the next test's calls in flight bind, answered in
 	// the gap before it (ServeExactPool's ahead, exact serving): the next
@@ -310,11 +313,17 @@ type MockManager struct {
 	// cutoff: parked in windowsSeeded until the set's staging call installs it.
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
-	// testWindows is the last set's recorded test windows as seeded, kept
+	// testWindows is the current set's recorded test windows as seeded, kept
 	// whether or not the release rule uses them: where a recorded mock falls
-	// among them (InRecordedTestWindow).
-	testWindows   atomic.Pointer[models.WindowSchedule]
-	windowsSeeded *models.WindowSchedule
+	// among them (InRecordedTestWindow). Like recordedWindows, a seed at a
+	// set boundary is parked (testWindowsSeeded) until that set's staging
+	// call installs it with the trees it describes, and a set (or a replay
+	// session) that seeds none has none there, not the previous one's: a
+	// keploy test session's windows would otherwise decide whose a later
+	// keploy mock replay's recordings are, over its scope table.
+	testWindows       atomic.Pointer[models.WindowSchedule]
+	testWindowsSeeded *models.WindowSchedule
+	windowsSeeded     *models.WindowSchedule
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -618,6 +627,10 @@ func (m *MockManager) ResetForReplaySession() {
 	// own.
 	m.exact.worker.Store(nil)
 	m.SetRecordingSource(nil)
+	m.SetRecordedBefore(nil)
+	// Nor its scope table's pool names (SetPoolNames): until the next
+	// session sends its own, whose mock is the pool's is not known.
+	m.exact.poolNames.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}
@@ -694,6 +707,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.cutoffSeeded = time.Time{}
 	// Same for a parked window seed: it belongs to the set that sent it.
 	m.windowsSeeded = nil
+	m.testWindowsSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1110,6 +1124,38 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // Also resets the per-test droppedOutOfWindow counter, and closes the channel
 // WindowChanged handed out once the new trees and window are visible.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.keepRunOnlyForAnExactStartUp(start)
+	m.setMocksWithWindow(filtered, unfiltered, start, end)
+}
+
+// keepRunOnlyForAnExactStartUp, under the proven switch, decides at a
+// staging from models.BaseTime whether the set's start-up binds the run's.
+// Without exact serving such a staging arms every test's recordings for the
+// start-up (setMocksWithWindowLocked): a start-up call one of them answers
+// binds a value of that test's, which cannot be told from the run's, and
+// kept as the run's, every later test of the set would read it. The set
+// keeps no run's then (variables.Table.KeepNoRun): what its start-up binds
+// is the first test's to forget, as before the run's were kept, and the set's
+// Mock coming again (NewVariableSet, a re-registration) keeps none either,
+// while those trees are staged. Exact serving serves the start-up the set's
+// pool alone, what no test owns (ServeExactPool): its staging lets the next
+// set keep the run's again (AllowRun). It never turns them on itself: only a
+// new set does, whose gen makes every call checked before it stale. Called
+// outside the variables' lock (OpenTestWithWindow), which a staging takes
+// after it.
+func (m *MockManager) keepRunOnlyForAnExactStartUp(start time.Time) {
+	if !provenswitch.On() || !start.Equal(models.BaseTime) {
+		return
+	}
+	if m.exactView() == nil {
+		m.vars.KeepNoRun()
+		return
+	}
+	m.vars.AllowRun()
+}
+
+// setMocksWithWindow is SetMocksWithWindow but for the run's (KeepNoRun).
+func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
 	// Signal once the new trees and window are visible: the deferred calls
 	// run last in, first out, so swapMu is released first.
 	defer m.signalWindowChange()
@@ -1384,6 +1430,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// did not seed must not inherit the previous set's.
 			m.recordedWindows.Store(m.windowsSeeded)
 			m.windowsSeeded = nil
+			// The learn step's too (InRecordedTestWindow): a set, or a replay
+			// session, that seeded none places no recording by the last one's.
+			m.testWindows.Store(m.testWindowsSeeded)
+			m.testWindowsSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -1826,6 +1876,7 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 // gRPC, Kafka, etc.) can pass nil for `startup` and get behaviour
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
+	m.keepRunOnlyForAnExactStartUp(start)
 	// Signal once everything below has landed, startup additions included.
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
@@ -2258,16 +2309,41 @@ func (m *MockManager) InAheadScope(mk *models.Mock) bool {
 // values its test case's request gave bound, and, under exact serving, the
 // bindings the answers of its calls in flight made in the gap before it
 // (exactView.carried, aheadVars), after the given ones: a given value wins.
+//
+// Begun after the test's mocks went live, a call one of them answers between
+// the two binds in no scope of the test's: a replay opens a test with its
+// variables in one step (OpenExactTest, OpenTestWithWindow).
 func (m *MockManager) StartVariables(given []models.VariableBinding) {
+	m.vars.StartCarrying(given, m.carriedInto(m.exactView()))
+	m.aheadVars.Reset()
+}
+
+// carriedInto is what the answers of test view v's calls in flight bound in
+// the gap before it (exactView.carried, aheadVars): the bindings its
+// variables begin carrying. None for a view that is not a test's.
+func (m *MockManager) carriedInto(v *exactView) []models.VariableBinding {
+	if v == nil || v.test == "" || len(v.carried) == 0 {
+		return nil
+	}
 	var carry []models.VariableBinding
-	if v := m.exactView(); v != nil && v.test != "" && len(v.carried) > 0 {
-		for _, b := range m.aheadVars.Snapshot() {
-			if v.carried[b.Mock] {
-				carry = append(carry, b)
-			}
+	for _, b := range m.aheadVars.Snapshot() {
+		if v.carried[b.Mock] {
+			carry = append(carry, b)
 		}
 	}
-	m.vars.StartCarrying(given, carry)
+	return carry
+}
+
+// OpenTestWithWindow stages a test's window as SetMocksWithWindow does, and
+// begins the test's variables (StartVariables) with given bound, in the same
+// step (variables.Table.StartOpening): no call the window's mocks answer
+// binds before them. Opened in two steps, a call of a set's first test
+// answered between them bound in the run's, which every later test of the
+// set reads (NewVariableSet).
+func (m *MockManager) OpenTestWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) {
+	m.keepRunOnlyForAnExactStartUp(start)
+	carry := m.carriedInto(m.exactView())
+	m.vars.StartOpening(func() { m.setMocksWithWindow(filtered, unfiltered, start, end) }, given, carry)
 	m.aheadVars.Reset()
 }
 
@@ -2279,9 +2355,26 @@ func (m *MockManager) BoundVariables() []models.VariableBinding {
 }
 
 // ResetVariables forgets every binding of the test's scope, and the gap's.
+// The run's stay (NewVariableSet).
 func (m *MockManager) ResetVariables() {
 	m.vars.Reset()
 	m.aheadVars.Reset()
+}
+
+// NewVariableSet begins a test set's variables, as the set's mocks are set
+// up (Proxy.Mock, under the proven switch, beside the learn step's
+// Tracker.NewSet): every binding of the previous set is forgotten, its run's
+// too, and what this set's start-up binds before its first test begins is
+// the run's (variables.Table.KeepRun) when the start-up is served exactly
+// (keepRunOnlyForAnExactStartUp), which every test of the set reads,
+// as does the scope the next test's calls in flight bind in before it
+// begins (AheadVariables). A test's own bindings stay its own: each test
+// begins with none of the test before it (StartVariables, ResetVariables).
+func (m *MockManager) NewVariableSet() {
+	m.vars.NewSet()
+	m.vars.KeepRun()
+	m.aheadVars.NewSet()
+	m.aheadVars.ReadRunOf(&m.vars)
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
@@ -3714,15 +3807,24 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 // would be read by nobody, so it is not built, the staging call's windows are
 // garbage once the call returns, and no schedule is left installed or parked.
 func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
+	// The learn step tells the pool's mocks from a test's by them, whatever
+	// the release rule does with them (InRecordedTestWindow): parked at a
+	// set boundary until the set's staging call, applied at once mid-set. A
+	// set with none: the learn step knows none, not the previous set's.
+	var tw *models.WindowSchedule
+	if len(ws) > 0 {
+		tw = models.NewWindowSchedule(ws)
+	}
+	m.swapMu.Lock()
+	if m.boundaryPending {
+		m.testWindowsSeeded = tw
+	} else {
+		m.testWindows.Store(tw)
+	}
+	m.swapMu.Unlock()
 	if len(ws) == 0 {
-		// A set with none: the learn step knows none, not the previous
-		// set's.
-		m.testWindows.Store(nil)
 		return
 	}
-	// The learn step tells the pool's mocks from a test's by them, whatever
-	// the release rule does with them (InRecordedTestWindow).
-	m.testWindows.Store(models.NewWindowSchedule(ws))
 	if !models.CarryOverRegistered() {
 		m.swapMu.Lock()
 		m.windowsSeeded = nil

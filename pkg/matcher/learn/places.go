@@ -117,7 +117,7 @@ func varName(place string) string {
 			base = p.Name
 		case variables.PartBody:
 			for i := len(p.Path) - 1; i >= 0 && base == ""; i-- {
-				if !p.Path[i].IsIndex {
+				if !p.Path[i].IsIndex && !strings.HasPrefix(p.Path[i].Key, "$") {
 					base = p.Path[i].Key
 				}
 			}

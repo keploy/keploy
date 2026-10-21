@@ -643,10 +643,15 @@ func TestClockOf(t *testing.T) {
 		{"no word changed", "a-b", "a_b", false},
 		{"an emoji", "🦊", "🐼", false},
 		{"ten digits outside the clock's years", "0000000041", "0000000102", false},
+		{"ten digits that did not move by the lead", "2025551234", "2025559876", false},
 	} {
 		c := clockOf(tc.rec, tc.live)
 		if c.whole != tc.whole {
 			t.Errorf("%s: whole %v, want %v (%q→%q, clock words %v %v)", tc.name, c.whole, tc.whole, tc.rec, tc.live, c.rec, c.live)
+		}
+		// ClockOf is that evidence, for an adapter.
+		if ClockOf(tc.rec, tc.live) != tc.whole {
+			t.Errorf("%s: ClockOf %v, want %v", tc.name, !tc.whole, tc.whole)
 		}
 	}
 	// A UUID v7's time groups moved with the clock; its random ones did not.
@@ -660,6 +665,52 @@ func TestClockOf(t *testing.T) {
 	c = clockOf("t="+strconv.FormatInt(at.Unix(), 10)+",v1=q3+/Zx9Lk2mN8pQ4=", "t="+strconv.FormatInt(f.Unix(), 10)+",v1=Zz9Yy/8Xx7+Ww6Vv5Uu4=")
 	if !c.rec[strconv.FormatInt(at.Unix(), 10)] || !c.live[strconv.FormatInt(f.Unix(), 10)] {
 		t.Fatalf("an expiry beside a fresh signature: clock words %v %v", c.rec, c.live)
+	}
+}
+
+// ClockReads is ClockOf's evidence as the learn step records it on a
+// variable: each read the recorded value holds that moved by the lead, the
+// instant and resolution its recorded text says, in the order the reads stand
+// in it, and none for a value that drifted otherwise (FD-3 compares them).
+func TestClockReads(t *testing.T) {
+	at := time.Date(2026, 10, 14, 23, 59, 41, 456e6, time.UTC)
+	f := at.Add(FullRoundLead)
+	sec, ms := at.Truncate(time.Second), at.Truncate(time.Millisecond)
+	day := time.Date(0, 1, 1, 23, 59, 41, 456e6, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		rec, live string
+		want      []models.ClockRead
+	}{
+		{"RFC 3339, to the second", at.Format(time.RFC3339), f.Format(time.RFC3339), []models.ClockRead{{At: sec, Res: time.Second}}},
+		{"RFC 3339, to the millisecond", at.Format(time.RFC3339Nano), f.Format(time.RFC3339Nano), []models.ClockRead{{At: ms, Res: time.Millisecond}}},
+		{"an offset zone, read in UTC", at.In(time.FixedZone("", 5*3600+1800)).Format(time.RFC3339), f.In(time.FixedZone("", 5*3600+1800)).Format(time.RFC3339), []models.ClockRead{{At: sec, Res: time.Second}}},
+		{"a SQL datetime with milliseconds", at.Format("2006-01-02 15:04:05.000"), f.Format("2006-01-02 15:04:05.000"), []models.ClockRead{{At: ms, Res: time.Millisecond}}},
+		{"an HTTP date", at.Format(time.RFC1123), f.Format(time.RFC1123), []models.ClockRead{{At: sec, Res: time.Second}}},
+		{"a minute", at.Format("2006-01-02T15:04Z07:00"), f.Format("2006-01-02T15:04Z07:00"), []models.ClockRead{{At: at.Truncate(time.Minute), Res: time.Minute}}},
+		{"epoch seconds", strconv.FormatInt(at.Unix(), 10), strconv.FormatInt(f.Unix(), 10), []models.ClockRead{{At: sec, Res: time.Second}}},
+		{"epoch milliseconds", strconv.FormatInt(at.UnixMilli(), 10), strconv.FormatInt(f.UnixMilli()+3, 10), []models.ClockRead{{At: ms, Res: time.Millisecond}}},
+		{"epoch microseconds", strconv.FormatInt(at.UnixMicro(), 10), strconv.FormatInt(f.UnixMicro(), 10), []models.ClockRead{{At: at.Truncate(time.Microsecond), Res: time.Microsecond}}},
+		{"epoch nanoseconds", strconv.FormatInt(at.UnixNano(), 10), strconv.FormatInt(f.UnixNano()+7e6, 10), []models.ClockRead{{At: at, Res: time.Nanosecond}}},
+		{"a float of epoch seconds", fmt.Sprintf("%d.456", at.Unix()), fmt.Sprintf("%d.956", f.Unix()), []models.ClockRead{{At: ms, Res: time.Millisecond}}},
+		{"a time of day", at.Format("15:04:05"), f.Format("15:04:05"), []models.ClockRead{{At: day.Truncate(time.Second), Res: time.Second, Day: true}}},
+		{"a time of day with milliseconds", at.Format("15:04:05.000"), f.Format("15:04:05.000"), []models.ClockRead{{At: day, Res: time.Millisecond, Day: true}}},
+		{"two reads, in the order they stand", "t=" + strconv.FormatInt(at.Unix(), 10) + " at=" + at.Format(time.RFC3339Nano), "t=" + strconv.FormatInt(f.Unix(), 10) + " at=" + f.Format(time.RFC3339Nano),
+			[]models.ClockRead{{At: sec, Res: time.Second}, {At: ms, Res: time.Millisecond}}},
+		{"moved by another amount", at.Format(time.RFC3339), at.Add(2 * time.Minute).Format(time.RFC3339), nil},
+		{"a clock read beside another word that changed", "created=" + at.Format(time.RFC3339) + ";v=1", "created=" + f.Format(time.RFC3339) + ";v=2", nil},
+		{"a counter is no clock", "41", "42", nil},
+	} {
+		got := ClockReads(tc.rec, tc.live)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: reads %v, want %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if !got[i].At.Equal(tc.want[i].At) || got[i].Res != tc.want[i].Res || got[i].Day != tc.want[i].Day {
+				t.Errorf("%s: read %d is %+v, want %+v", tc.name, i, got[i], tc.want[i])
+			}
+		}
 	}
 }
 

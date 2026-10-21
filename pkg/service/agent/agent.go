@@ -1145,6 +1145,19 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 				zap.Error(err), zap.Time("anchor", anchor))
 		}
 	}
+	a.wireAppClock()
+}
+
+// wireAppClock hands the proxy the hooks' reading of the app's clock, when
+// both have one (AppClockReader, coreAgent.AppClockSetter).
+func (a *Agent) wireAppClock() {
+	r, ok := ActiveHooks.(AppClockReader)
+	if !ok {
+		return
+	}
+	if s, ok := a.Proxy.(coreAgent.AppClockSetter); ok {
+		s.SetAppClock(r.AppClock)
+	}
 }
 
 // StoreMocksStream decodes the mock corpus one frame at a time from dec (header
@@ -1784,15 +1797,58 @@ func (a *Agent) TestVariables() ([]models.VariableBinding, bool) {
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	// keploy test's exact serving, under the proven switch (exact_proven.go).
 	if params.Exact != nil && provenswitch.On() {
-		return a.serveKeployTestExactly(ctx, params)
+		return a.serveKeployTestExactly(ctx, params, nil)
 	}
-	return a.stageMocks(ctx, params, nil)
+	return a.stageMocks(ctx, params, nil, nil)
+}
+
+// opening is a test's variables, begun as the mock filter that opens the test
+// applies (OpenTestCase): with given bound.
+type opening struct{ given []models.VariableBinding }
+
+// OpenTestCase applies a keploy test case's mock filter that opens a test
+// (models.MockFilterParams.BeginsTestVariables, under the proven switch) as
+// UpdateMockParams does, and begins the test's variables with the values its
+// request gave (the filter's Variables) bound, in the step that makes the
+// test's mocks live (coreAgent.ExactTestOpener, coreAgent.WindowedTestOpener).
+// No call the test's mocks answer binds before its variables begin: begun
+// after, one of a set's first test answered between the two bound in the
+// run's, which every later test of the set reads (a test answered with
+// another's value, a false pass). A proxy that cannot open a test so opens
+// one only when it keeps no variables, and none were given
+// (opensWithoutVariables).
+func (a *Agent) OpenTestCase(ctx context.Context, params models.MockFilterParams) error {
+	if !provenswitch.On() || !params.BeginsTestVariables() {
+		return errors.New("this mock filter opens no test case, and begins no test's variables")
+	}
+	open := &opening{given: params.Variables}
+	if params.Exact != nil {
+		// Refused before anything of the test case is served or settled.
+		if _, ok := a.Proxy.(coreAgent.ExactTestOpener); !ok {
+			if err := a.opensWithoutVariables(open.given); err != nil {
+				return err
+			}
+		}
+		return a.serveKeployTestExactly(ctx, params, open)
+	}
+	return a.stageMocks(ctx, params, nil, open)
 }
 
 // stageMocks stages on the proxy what UpdateMockParams stages for params, and
 // with it the per-test mocks named alsoLoad that the on-disk store holds,
-// whatever params' own load reads (mocksForParams).
-func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string) error {
+// whatever params' own load reads (mocksForParams). With open, the staging
+// opens a test, whose variables begin with it (OpenTestCase).
+func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string, open *opening) error {
+	// The window is opened in one step only through WindowedProxy's staging;
+	// a proxy staged by SetMocks never is.
+	_, windowed := a.Proxy.(coreAgent.WindowedProxy)
+	opener, opensInOneStep := a.Proxy.(coreAgent.WindowedTestOpener)
+	opensInOneStep = opensInOneStep && windowed
+	if open != nil && !opensInOneStep {
+		if err := a.opensWithoutVariables(open.given); err != nil {
+			return err
+		}
+	}
 	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params, alsoLoad...)
 	if err != nil {
 		return err
@@ -1803,6 +1859,13 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	// stable SetMocks contract — third-party proxies without window
 	// support keep working in legacy lax mode.
 	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+		if open != nil && opensInOneStep {
+			if err := opener.OpenTestWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime, open.given); err != nil {
+				utils.LogError(a.logger, err, "failed to stage the test case's window on the proxy and begin its variables")
+				return err
+			}
+			return nil
+		}
 		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
 			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
 			return err
@@ -1813,7 +1876,32 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 			return err
 		}
 	}
+	return nil
+}
 
+// errOpensApart refuses a test's opening on a proxy that keeps the test
+// variables a replay binds (coreAgent.VariableBinder,
+// coreAgent.VariableResetter) but cannot begin them as the test's mocks go
+// live (coreAgent.ExactTestOpener, coreAgent.WindowedTestOpener): begun
+// apart, a call one of its mocks answers between the two binds in no scope
+// of the test's, and before a set's first test in the run's, which every
+// later test of the set reads.
+var errOpensApart = errors.New("this keploy agent's proxy keeps test variables but cannot begin them as a test opens; run the keploy agent of this keploy version")
+
+// opensWithoutVariables says why a proxy that cannot open a test with its
+// variables in one step cannot open it, given given: one that keeps
+// variables would begin them apart (errOpensApart), and one that keeps none
+// cannot bind given. nil when it keeps none and none were given: the test
+// opens with nothing to begin.
+func (a *Agent) opensWithoutVariables(given []models.VariableBinding) error {
+	_, binds := a.Proxy.(coreAgent.VariableBinder)
+	_, resets := a.Proxy.(coreAgent.VariableResetter)
+	if binds || resets {
+		return errOpensApart
+	}
+	if len(given) > 0 {
+		return errors.New("this keploy agent's proxy keeps no test variables")
+	}
 	return nil
 }
 

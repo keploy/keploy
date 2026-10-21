@@ -843,6 +843,37 @@ func TestUnderTheSwitchARetryCycleDoesNotRunATaintedSetAgain(t *testing.T) {
 	}
 }
 
+// A kernel's count of skipped runs (5.12+) is evidence, never a verdict: a
+// --retry-passing-test cycle runs as it does on a kernel without the count
+// (5.10), the same reads and the same results, and no test is charged it.
+func TestUnderTheSwitchAKernelSkipDoesNotStopARetryCycle(t *testing.T) {
+	run := func(answers []models.CaptureLosses) (int, map[string]models.TestStatus) {
+		t.Setenv(provenswitch.Env, "1")
+		h := newPartialRunHarness(t, 3, 0)
+		h.replayer.config.Test.Mocking = true
+		h.replayer.config.RetryPassing = true
+		h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-3": true}}
+		instr := &prLossInstr{prInstr: h.instr, answers: answers}
+		h.replayer.instrumentation = instr
+		h.replayer.markPIDMaps(context.Background())
+		h.run(t)
+		out := map[string]models.TestStatus{}
+		for _, r := range h.report.report.Tests {
+			if len(r.FailureInfo.CaptureIncomplete) != 0 || len(r.FailureInfo.CannotCapture) != 0 {
+				t.Fatalf("%s charged %+v %+v: a kernel skip is no verdict", r.TestCaseID, r.FailureInfo.CaptureIncomplete, r.FailureInfo.CannotCapture)
+			}
+			out[r.TestCaseID] = r.Status
+		}
+		return instr.reads, out
+	}
+	skip := models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 3, What: "keploy_tcp_connect"}}
+	readsSkip, withSkip := run([]models.CaptureLosses{nil, nil, skip})
+	reads510, without := run([]models.CaptureLosses{nil})
+	if readsSkip != reads510 || fmt.Sprint(withSkip) != fmt.Sprint(without) {
+		t.Fatalf("with the count: %d reads, %v; without it (5.10): %d reads, %v; want the same", readsSkip, withSkip, reads510, without)
+	}
+}
+
 // Under the proven switch the result line of a test that lost a call says it
 // failed, on the request-response path and the streamed one alike. It said
 // passed: the capture loss failed the test only once the set's results were in.
