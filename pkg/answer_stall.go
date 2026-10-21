@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.keploy.io/server/v3/utils/stall"
 )
 
@@ -124,6 +125,17 @@ func (e *AnswerStallError) Error() string {
 		waited += " for " + e.Target
 	}
 	return what + "; " + waited
+}
+
+var _ logurl.URLNamer = (*AnswerStallError)(nil)
+
+// LoggedURLs is the request target the error names (Target), which
+// logurl.Error writes by its shape on a line, as the URL it is.
+func (e *AnswerStallError) LoggedURLs() []string {
+	if e.Target == "" {
+		return nil
+	}
+	return []string{e.Target}
 }
 
 // Is makes the error an ErrStreamHeldOpen for a stream the comparison read

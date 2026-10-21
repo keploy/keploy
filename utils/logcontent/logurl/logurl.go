@@ -92,12 +92,20 @@ func URL(u string) string {
 // result unwraps to err, so errors.Is and errors.As find what they find in
 // err, and it is err itself when its text names none of them.
 //
+// An error in err's chain that names URLs of its own (URLNamer: a stalled
+// answer names its request's target) has them written by their shape too, as
+// urls are.
+//
 // It is for a line only. An error a caller returns, or a report keeps, is
 // left whole: the switch decides what a log line carries, not what keploy
 // reports.
 func Error(err error, urls ...string) error {
 	if err == nil || logcontent.On() {
 		return err
+	}
+	var named URLNamer
+	if errors.As(err, &named) {
+		urls = append(urls[:len(urls):len(urls)], named.LoggedURLs()...)
 	}
 	text := err.Error()
 	logged := text
@@ -119,6 +127,13 @@ func Error(err error, urls ...string) error {
 		return err
 	}
 	return loggedError{text: logged, err: err}
+}
+
+// URLNamer is an error whose text names URLs of its own, in its own words:
+// Error writes each by its shape, as it does the urls it is given.
+type URLNamer interface {
+	error
+	LoggedURLs() []string
 }
 
 // loggedError is an error as a line may carry it (Error): its own text, and

@@ -1202,14 +1202,10 @@ func sentRequestFields(req *http.Request) []zap.Field {
 // LoggedError is err, a test request's error, as a log line may carry it
 // (logurl.Error): the URLs it names, client.Do's and url.Parse's
 // (*url.Error, whose cause is named by its kind), a stalled answer's request
-// (AnswerStallError.Target) and each of urls, by their shape unless
-// logcontent is on. err itself, which the test's report keeps, is left
-// whole.
+// (AnswerStallError.Target, a logurl.URLNamer) and each of urls, by their
+// shape unless logcontent is on. err itself, which the test's report keeps,
+// is left whole.
 func LoggedError(err error, urls ...string) error {
-	var st *AnswerStallError
-	if errors.As(err, &st) && st.Target != "" {
-		urls = append(urls, st.Target)
-	}
 	return logurl.Error(err, urls...)
 }
 

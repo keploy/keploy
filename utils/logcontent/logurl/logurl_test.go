@@ -155,10 +155,18 @@ func TestADisabledLineShapesNothing(t *testing.T) {
 	}
 }
 
-// An error that names a URL, client.Do's and url.Parse's however wrapped and
-// one that names it in its own words, is logged naming it by its shape and a
-// *url.Error's cause by its kind, and still reads as the error it stands
-// for; with the switch on, or naming no URL, it is the error itself.
+// namer is an error that names a URL of its own (URLNamer), as a stalled
+// answer names its request's.
+type namer struct{ target string }
+
+func (n namer) Error() string        { return "stalled for " + n.target }
+func (n namer) LoggedURLs() []string { return []string{n.target} }
+
+// An error that names a URL, client.Do's and url.Parse's however wrapped, one
+// that names it in its own words, and one that names URLs of its own
+// (URLNamer), is logged naming it by its shape and a *url.Error's cause by
+// its kind, and still reads as the error it stands for; with the switch on,
+// or naming no URL, it is the error itself.
 func TestErrorNamesTheURLByItsShape(t *testing.T) {
 	const token = "kq7Zt0x9resettoken"
 	refused := &url.Error{Op: "Get", URL: "http://app:8080/reset/" + token + "?code=123456",
@@ -181,6 +189,7 @@ func TestErrorNamesTheURLByItsShape(t *testing.T) {
 		"url.Parse's, which escapes":  {unparsed, nil, `parse "http://app:8080/reset/{}": *errors.errorString`},
 		"url.Parse's, which quotes":   {escaped, nil, `parse "http://app:8080/reset/{}": url.EscapeError`},
 		"one in its own words":        {fmt.Errorf("the test's URL %q has no host", own), []string{own}, `the test's URL "/reset/{}?next={}" has no host`},
+		"one an error names":          {fmt.Errorf("not judged: %w", namer{own}), nil, `not judged: stalled for /reset/{}?next={}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			func() {
