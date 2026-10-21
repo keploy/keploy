@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -367,7 +368,57 @@ func TestUnderTheSwitchTheSetFailsWhenItsWorkerScopeIsNotMade(t *testing.T) {
 			if want := map[models.TestSetStatus]int{models.TestSetStatusPassed: 0, models.TestSetStatusFailed: 1}[tc.want]; named != want {
 				t.Fatalf("named the missing worker call %d time(s), want %d", named, want)
 			}
+			// The report carries the call as data, the name failure_reason gives
+			// it, so a judging that reads the report needs no text to name it.
+			rep := h.report.report
+			if tc.want == models.TestSetStatusFailed {
+				if want := []string{"mock-boot"}; !reflect.DeepEqual(rep.WorkerUnmade, want) {
+					t.Fatalf("report carries %v, want %v", rep.WorkerUnmade, want)
+				}
+				if !strings.Contains(rep.FailureReason, "mock-boot") {
+					t.Fatalf("failure reason %q does not name the call the report carries", rep.FailureReason)
+				}
+				return
+			}
+			if rep.WorkerUnmade != nil {
+				t.Fatalf("report carries %v, want none: every worker-scope call was made", rep.WorkerUnmade)
+			}
 		})
+	}
+}
+
+// The report carries every unmade worker-scope call, in recorded order, where
+// its failure_reason names only the first workerWhyNames for reading: a
+// judging that reads the report names all of them as evidence, and the ones
+// past the reason's cap are still there to name.
+func TestTheReportCarriesEveryUnmadeWorkerCall(t *testing.T) {
+	setSwitch(t, true)
+	fastWorkerWait(t)
+	h := newPartialRunHarness(t, 1, 0)
+	pinWindows(h)
+	h.replayer.config.Command = "./app"
+	h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010)}
+	var want []string
+	for i := 1; i <= workerWhyNames+1; i++ {
+		name := fmt.Sprintf("mock-boot-%02d", i)
+		h.mocks.filtered = append(h.mocks.filtered, httpAt(name, 400+i))
+		want = append(want, name)
+	}
+	mappingFile(t, h, nil)
+	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})}
+	if got := h.run(t); got != models.TestSetStatusFailed {
+		t.Fatalf("set %s, want FAILED: its worker scope made none of its calls", got)
+	}
+	rep := h.report.report
+	if !reflect.DeepEqual(rep.WorkerUnmade, want) {
+		t.Fatalf("report carries %v, want %v", rep.WorkerUnmade, want)
+	}
+	named := strings.Join(want[:workerWhyNames], ", ")
+	if !strings.Contains(rep.FailureReason, named) {
+		t.Fatalf("failure reason %q does not name the first %d: %s", rep.FailureReason, workerWhyNames, named)
+	}
+	if strings.Contains(rep.FailureReason, want[workerWhyNames]) {
+		t.Fatalf("failure reason %q names past its cap: %s", rep.FailureReason, want[workerWhyNames])
 	}
 }
 
