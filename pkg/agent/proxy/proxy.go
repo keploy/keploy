@@ -4487,6 +4487,25 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 	return nil
 }
 
+// SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
+// membership (MockManager.SetPoolNames).
+func (p *Proxy) SetPoolNames(names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolNames(names)
+	return nil
+}
+
+// SetAppClock makes the learn step read the app's clock through f
+// (agent.AppClockSetter).
+func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
+	p.learnTracker.SetAppClock(f)
+}
+
+var _ agent.AppClockSetter = (*Proxy)(nil)
+
 // ServeExactPool implements agent.ExactServer (exact.go).
 func (p *Proxy) ServeExactPool(key string, names []string) error {
 	m := p.getMockManager()
@@ -4516,6 +4535,18 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	m.ServeExactWorker(names)
 	return nil
 }
+
+// SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
+func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordedBefore(src)
+	return nil
+}
+
+var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
 
 // SetRecordingSource implements agent.RecordingSourceSetter (exact.go).
 func (p *Proxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {

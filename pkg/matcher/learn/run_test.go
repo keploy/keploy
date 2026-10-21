@@ -168,6 +168,7 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 		t.Fatal("a test has begun in this set, and the tracker says none has")
 	}
 	last, _, _, _ := tr.Test()
+	drifts := tr.Drifts()
 	tr.NewSet()
 	if tr.Begun() {
 		t.Fatal("a new set begins with no test begun, and the tracker says one has")
@@ -184,7 +185,7 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 	if name, ok := tr.Name(last, "mock-2", "body.docs.msgs.0._id", nil); ok {
 		t.Fatalf("a request of the previous set named a variable %q in the new set", name)
 	}
-	if tr.Answer(next, &models.Mock{Name: "mock-7"}) || tr.Answered("mock-7") || len(tr.AnsweredMocks()) != 0 || tr.Drifts() != nil {
+	if tr.Answer(next, &models.Mock{Name: "mock-7"}) || tr.Answered("mock-7") || len(tr.AnsweredMocks()) != 0 || tr.Drifts() == drifts {
 		t.Fatal("with no test open, a request took a mock as a test's own, or the new set reads the previous set's answers or drifts")
 	}
 	boot := sent("mock-0", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")

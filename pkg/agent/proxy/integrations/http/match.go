@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -39,6 +40,9 @@ type req struct {
 	// encoded is the body as the client sent it, before its Content-Encoding
 	// was undone into body; nil when it had none.
 	encoded []byte
+	// arrived is when keploy had read the whole request (zero: unknown):
+	// the app sent it, and read whatever clock it carries, no later.
+	arrived time.Time
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload

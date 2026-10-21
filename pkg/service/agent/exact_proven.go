@@ -281,6 +281,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 				return fmt.Errorf("set the test set's recording source: %w", err)
 			}
 		}
+		// The learn step's earlier places of a pool recording are every
+		// recording made before it, a test's own on disk too.
+		if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
+			if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
+				return fmt.Errorf("set the test set's recordings before an instant: %w", err)
+			}
+		}
 		a.scopeMu.Lock()
 		a.testPool = append([]string(nil), ex.Pool...)
 		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
@@ -363,6 +370,24 @@ func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visi
 		return nil
 	}
 	return disk.RangeKeys
+}
+
+// diskRecordedBefore is the on-disk store's reader of the staged set's
+// recordings made before an instant (DiskMocks.RangeRecordedBefore), nil
+// when the set keeps none on disk.
+func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) bool) error {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	disk := s.diskMocks
+	s.mu.RUnlock()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeRecordedBefore
 }
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks

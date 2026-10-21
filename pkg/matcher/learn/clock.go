@@ -74,9 +74,78 @@ func ClockReads(recorded, live string) []models.ClockRead {
 	return c.reads
 }
 
-// clockOf finds in a drifted value the clock reads that moved by
-// FullRoundLead: the recorded and the live value are each searched for
-// instants in clockLayouts, at ASCII word boundaries (so one glued to text
+// Window is when one call's clock reads can have been made, in each run
+// (Tracker.CallWindow): in the recording (Rec) and in record's full round
+// (F), each on that run's app clock, after the run's previous data-plane call
+// reached keploy and no later than this call did. A value is in a request
+// only once the app read it, so a read of the clock is no later than the
+// call that carries it; one made after the previous call is no earlier than
+// that. An instant that falls in its run's span in both runs moved with the
+// clock between them by the call's own lead (the lead's difference to the
+// value's is how much longer the app took, in one run than in the other,
+// from the read to the call, each at least nothing), however far F's clock
+// ran ahead while the app booted: a constant does not move, nor does an
+// instant an answer the replay serves from its recording carries, so
+// neither falls in both. A read made before the previous call falls in
+// neither. It is no tolerance: the spans are what each run's calls show.
+type Window struct{ Rec, F Span }
+
+// Span is one run's part of a Window: From, when its previous data-plane
+// call reached keploy, and To, when the call itself did, on its app clock.
+type Span struct{ From, To time.Time }
+
+// holds reports whether t, an instant read at resolution res, is a read of
+// the clock within s: each bound is read at the instant's own resolution (a
+// value in seconds is the second its read was made in).
+func (s Span) holds(t time.Time, res time.Duration) bool {
+	if s.From.IsZero() || s.To.IsZero() {
+		return false
+	}
+	return !t.Before(s.From.Truncate(res)) && !t.After(s.To.Truncate(res))
+}
+
+// holds reports whether recorded and live, an instant in layout lay each,
+// are reads of their runs' clocks within w (Window). A time of day names no
+// day, so its instant falls in no span: only the lead reads it.
+func (w *Window) holds(lay clockLayout, recorded, live string) bool {
+	if w == nil {
+		return false
+	}
+	rt, rres, ok := lay.read(recorded)
+	if !ok {
+		return false
+	}
+	lt, lres, ok := lay.read(live)
+	if !ok {
+		return false
+	}
+	return w.Rec.holds(rt, rres) && w.F.holds(lt, lres)
+}
+
+// Holds reports whether rec and live, instants a value carried in the
+// recording and in this run, read at resolution res, are reads of their
+// runs' clocks within w (nil: none is).
+func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
+	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
+}
+
+// key is w as a map key, the zero key for none.
+func (w *Window) key() [4]int64 {
+	if w == nil {
+		return [4]int64{}
+	}
+	return [4]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano()}
+}
+
+// clockOf is clockIn with no call's window: the clock reads that moved by
+// FullRoundLead.
+func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, nil) }
+
+// clockIn finds in a drifted value the clock reads that moved by
+// FullRoundLead, or that are reads of each run's clock within the window w
+// of the call that carries the value (nil: none): the recorded and the live
+// value are each searched for instants in clockLayouts, at ASCII word
+// boundaries (so one glued to text
 // of another script, "创建于2026-10-14 10:00:41", is found), and the k-th
 // of a layout in one is read against the k-th in the other: where the live
 // one is the recorded one later by the lead, the words that changed between
@@ -86,7 +155,7 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // ones: F's clock is set to each recorded instant plus the lead when the
 // test begins, and how long the app then takes to read its clock is its own
 // (a millisecond read moves by the lead plus that).
-func clockOf(recorded, live string) clockSet {
+func clockIn(recorded, live string, w *Window) clockSet {
 	c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
 	var at []int
@@ -94,7 +163,7 @@ func clockOf(recorded, live string) clockSet {
 		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
 		for k := 0; k < len(rm) && k < len(lm); k++ {
 			rs, ls := recorded[rm[k][0]:rm[k][1]], live[lm[k][0]:lm[k][1]]
-			if rs == ls || !moved(lay, rs, ls) {
+			if rs == ls || !moved(lay, rs, ls) && !w.holds(lay, rs, ls) {
 				continue
 			}
 			rt, rres, _ := lay.read(rs)

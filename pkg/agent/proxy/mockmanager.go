@@ -313,11 +313,17 @@ type MockManager struct {
 	// cutoff: parked in windowsSeeded until the set's staging call installs it.
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
-	// testWindows is the last set's recorded test windows as seeded, kept
+	// testWindows is the current set's recorded test windows as seeded, kept
 	// whether or not the release rule uses them: where a recorded mock falls
-	// among them (InRecordedTestWindow).
-	testWindows   atomic.Pointer[models.WindowSchedule]
-	windowsSeeded *models.WindowSchedule
+	// among them (InRecordedTestWindow). Like recordedWindows, a seed at a
+	// set boundary is parked (testWindowsSeeded) until that set's staging
+	// call installs it with the trees it describes, and a set (or a replay
+	// session) that seeds none has none there, not the previous one's: a
+	// keploy test session's windows would otherwise decide whose a later
+	// keploy mock replay's recordings are, over its scope table.
+	testWindows       atomic.Pointer[models.WindowSchedule]
+	testWindowsSeeded *models.WindowSchedule
+	windowsSeeded     *models.WindowSchedule
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -621,6 +627,10 @@ func (m *MockManager) ResetForReplaySession() {
 	// own.
 	m.exact.worker.Store(nil)
 	m.SetRecordingSource(nil)
+	m.SetRecordedBefore(nil)
+	// Nor its scope table's pool names (SetPoolNames): until the next
+	// session sends its own, whose mock is the pool's is not known.
+	m.exact.poolNames.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}
@@ -697,6 +707,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.cutoffSeeded = time.Time{}
 	// Same for a parked window seed: it belongs to the set that sent it.
 	m.windowsSeeded = nil
+	m.testWindowsSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1419,6 +1430,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// did not seed must not inherit the previous set's.
 			m.recordedWindows.Store(m.windowsSeeded)
 			m.windowsSeeded = nil
+			// The learn step's too (InRecordedTestWindow): a set, or a replay
+			// session, that seeded none places no recording by the last one's.
+			m.testWindows.Store(m.testWindowsSeeded)
+			m.testWindowsSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -3792,15 +3807,24 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 // would be read by nobody, so it is not built, the staging call's windows are
 // garbage once the call returns, and no schedule is left installed or parked.
 func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
+	// The learn step tells the pool's mocks from a test's by them, whatever
+	// the release rule does with them (InRecordedTestWindow): parked at a
+	// set boundary until the set's staging call, applied at once mid-set. A
+	// set with none: the learn step knows none, not the previous set's.
+	var tw *models.WindowSchedule
+	if len(ws) > 0 {
+		tw = models.NewWindowSchedule(ws)
+	}
+	m.swapMu.Lock()
+	if m.boundaryPending {
+		m.testWindowsSeeded = tw
+	} else {
+		m.testWindows.Store(tw)
+	}
+	m.swapMu.Unlock()
 	if len(ws) == 0 {
-		// A set with none: the learn step knows none, not the previous
-		// set's.
-		m.testWindows.Store(nil)
 		return
 	}
-	// The learn step tells the pool's mocks from a test's by them, whatever
-	// the release rule does with them (InRecordedTestWindow).
-	m.testWindows.Store(models.NewWindowSchedule(ws))
 	if !models.CarryOverRegistered() {
 		m.swapMu.Lock()
 		m.windowsSeeded = nil

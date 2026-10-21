@@ -452,6 +452,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	}
 	windows, _ := mockDb.(integrations.TestWindows)
 	inFlight, _ := mockDb.(integrations.InFlightOwner)
+	pools, _ := mockDb.(integrations.PoolMembership)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -467,7 +468,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight)
+		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight, pools)
 		// A protocol-phase mock (a handshake, a token fetch) is never a
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
@@ -539,7 +540,11 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 //     (IsFiltered, set from the test's mapping when the replay stages it),
 //     and the session mocks recorded inside its window. With no recorded
 //     windows any other session mock is no one's to pair.
-func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner) (own, pool bool) {
+//   - A replay that sends no recorded windows (keploy mock replay) sends its
+//     scope table instead (pools): a mock one of its pool slices names was
+//     recorded while no test was open, and is the pool's as one recorded
+//     outside every window is.
+func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner, pools integrations.PoolMembership) (own, pool bool) {
 	if owner != nil {
 		// A view with no test open in it cannot say whose a mock is: none
 		// is paired.
@@ -547,11 +552,24 @@ func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnershi
 		return known && owned, known && !owned
 	}
 	at := m.Spec.ReqTimestampMock
+	placed := false
 	if windows != nil {
 		// Recorded outside every recorded test's window (the start-up,
 		// between tests): the pool's, whatever tier or mapping holds it (a
 		// replay arms the start-up's names with every test's mapping).
-		if inside, known := windows.InRecordedTestWindow(at); known && !inside {
+		inside, known := windows.InRecordedTestWindow(at)
+		placed = known
+		if known && !inside {
+			if inFlight != nil && inFlight.InFlightIntoOpenTest(m) {
+				return true, false
+			}
+			return false, true
+		}
+	}
+	if !placed && pools != nil {
+		// No recorded windows: the scope table's pool slices name the mocks
+		// recorded while no test was open.
+		if inPool, known := pools.InPool(m); known && inPool {
 			if inFlight != nil && inFlight.InFlightIntoOpenTest(m) {
 				return true, false
 			}
@@ -601,10 +619,18 @@ func earlierThan(earlier []learn.Earlier, paired *models.Mock) []learn.Earlier {
 // test. Another recorded test's mock is not: a late call of the previous
 // test finds its earlier places in its own test, and a call of this test is
 // not refused for a coincidence with another test's rows (in the same
-// second, a clock read of each). With no recorded windows every one is kept
-// (it errs to refusing).
-func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integrations.TestWindows) []*models.Mock {
-	if windows == nil {
+// second, a clock read of each). That is only so of the open test's own
+// mock (own) that the store places inside a recorded test's window. Any
+// other paired mock (the pool's, recorded at the start-up, between tests or
+// wherever a view says it is the pool's; a test's own in flight when it
+// began, outside every window) may carry a value from any mock recorded
+// before it, a test's too: every one is kept, as with no recorded windows
+// (it errs to refusing; earlierRaw reads those recorded before it).
+func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integrations.TestWindows, own bool) []*models.Mock {
+	if windows == nil || !own {
+		return mocks
+	}
+	if inside, known := windows.InRecordedTestWindow(paired.Spec.ReqTimestampMock); !known || !inside {
 		return mocks
 	}
 	out := mocks[:0:0]
@@ -623,6 +649,38 @@ func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integration
 	}
 	return out
 }
+
+// recordedBeforeOf visits, of a paired mock whose earlier places are every
+// recording made before it (ofPairedTest: the pool's, a test's own outside
+// every window, or one the store cannot place), every recording of the set
+// made before it, wherever the store keeps it
+// (integrations.RecordedBeforeReader), one at a time: such a value may have
+// flowed from any of them, a test's own too, which the store keeps on disk
+// until that test opens. nil for the open test's own mock (own) inside a
+// recorded test's window, whose earlier places are its own test's, and for a
+// store with no such reader.
+func recordedBeforeOf(mockDb integrations.MockMemDb, paired *models.Mock, windows integrations.TestWindows, own bool) func(visit func(*models.Mock) bool) error {
+	at := paired.Spec.ReqTimestampMock
+	if own && windows != nil {
+		if inside, known := windows.InRecordedTestWindow(at); known && inside {
+			return nil
+		}
+	}
+	rb, ok := mockDb.(integrations.RecordedBeforeReader)
+	if !ok {
+		return nil
+	}
+	return func(visit func(*models.Mock) bool) error { return rb.RangeRecordedBefore(at, visit) }
+}
+
+// recordedUnread is the store's failure to read the recordings before a pool
+// mock (recordedBeforeOf): what they held cannot be told.
+type recordedUnread struct{ err error }
+
+func (e recordedUnread) Error() string {
+	return "read the recordings before the call: " + e.err.Error()
+}
+func (e recordedUnread) Unwrap() error { return e.err }
 
 // stagedOf is every mock the store stages, served or not and whatever its
 // view shows (integrations.StagedReader); none for a store that keeps none.
@@ -645,7 +703,7 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
 // disk and that cannot be read back, and why; no mock is then returned, since
 // what it held cannot be told.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) (out []learn.Raw, err error) {
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -669,6 +727,7 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 		return nil
 	}
 	for _, m := range served {
+		prev.See(m)
 		if m != nil && !leafed[m.Name] && once(m) {
 			if err := add(m, true); err != nil {
 				return nil, err
@@ -681,6 +740,30 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 				return nil, err
 			}
 		}
+	}
+	if recorded == nil {
+		return out, nil
+	}
+	// Streamed, one at a time, and read without the cache (which keys by
+	// the mock and would keep every one): only its text stays.
+	var readErr error
+	if err := recorded(func(m *models.Mock) bool {
+		prev.See(m)
+		if m == nil || leafed[m.Name] || !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
+			return true
+		}
+		r, err := learn.ReadRaw(m, false)
+		if err != nil {
+			readErr = fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+			return false
+		}
+		out = append(out, r)
+		return true
+	}); err != nil {
+		return nil, recordedUnread{err}
+	}
+	if readErr != nil {
+		return nil, readErr
 	}
 	return out, nil
 }
@@ -716,10 +799,32 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
+	// unclaimed are the mocks this call's claim failed on, each with the
+	// store's revision read before the pass that failed read its scope. A
+	// claim fails when another call took the mock first, or when the store
+	// moved on between the scope and the claim (a test's begin closed the
+	// view the scope was read from): either changes the store, and the call
+	// looks again. One the store still shows, with no change at all since
+	// that pass read its scope, would fail the same way, and looking again
+	// would find it, and fail, forever (a session-lifetime mock in the
+	// per-test tier, whose claim updates the session tier): the call
+	// misses instead.
+	unclaimed := map[*models.Mock]uint64{}
+	stuck := func(m *models.Mock) bool {
+		at, ok := unclaimed[m]
+		return ok && storeRevision(mockDb) == at
+	}
+	refused := func(m *models.Mock, res learn.Result, sc scope) (*models.Mock, *learnMiss, error) {
+		h.Logger.Warn("keploy's mock store would not hand out the recording the learn step chose for this call; learning nothing from it",
+			zap.String("mock", m.Name))
+		res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy's mock store would not hand out "+m.Name+", which it still shows, so keploy cannot answer from it"
+		return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
+		rev := storeRevision(mockDb)
 		sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
@@ -754,6 +859,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				rp := recordedParts(picked)
 				rec = n.shape(rp, destOf(live, rp))
 			}
+			if stuck(picked) {
+				return refused(picked, res, sc)
+			}
 			if own && !tracker.Answer(test, picked) {
 				continue
 			}
@@ -769,6 +877,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				if err != nil {
 					return nil, nil, err
 				}
+				unclaimed[picked] = rev
 				continue
 			}
 			commit()
@@ -779,6 +888,16 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
+			if stuck(m) {
+				return refused(m, res, sc)
+			}
+			if !own && m.Spec.ReqTimestampMock.IsZero() {
+				// A pool mock's earlier places are every recording made
+				// before it: of one with no recorded time, none can be
+				// told, so where its value came from cannot be either.
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, "keploy cannot tell which recordings of the test set came before "+m.Name+", which has no recorded time, so it cannot tell whether what changed came from one"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
 			earlier := earlierThan(earlier, m)
 			// The paired mock with its answer: one the agent parked on disk
 			// (diskmocks.go) holds none until it is read back, and an echo
@@ -794,14 +913,37 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of "+m.Name+", so it cannot tell whether the answer echoes what changed"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows), ofPairedTest(sc.visible, m, windows)...), ofPairedTest(stagedOf(mockDb), m, windows)...), earlier)
+			staged := stagedOf(mockDb)
+			prev := learn.NewPreviousCall(m)
+			for _, s := range staged {
+				prev.See(s)
+			}
+			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(staged, m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
+			var unread recordedUnread
+			if errors.As(err, &unread) {
+				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
+					zap.String("mock", m.Name), zap.Error(err))
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read the recordings of the test set made before "+m.Name+", so it cannot tell whether what changed came from there"
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
 			if err != nil {
 				h.Logger.Warn("the learn step cannot read back an earlier recorded answer the agent parked on disk; learning nothing from this call",
 					zap.String("mock", m.Name), zap.Error(err))
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			learned := learn.Classify(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp))
+			// A pool mock's call need not run on the clock F set for a
+			// test (at the start-up and between tests none is set, and a
+			// call made in a test was recorded in none): its clock reads
+			// are read in its own window (learn.Tracker.CallWindowFrom),
+			// as well as by the lead. Its previous recorded call is found
+			// among every recording of the set, those on disk too, as the
+			// earlier places streamed them.
+			var w *learn.Window
+			if !own {
+				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
+			}
+			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
@@ -822,6 +964,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
+				unclaimed[m] = rev
 				continue
 			}
 			for _, l := range learned {
@@ -839,6 +982,16 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		}
 		return nil, miss, nil
 	}
+}
+
+// storeRevision is the mock store's revision (MockManager.Revision: it moves
+// with every change a parser can see, a consume, a staging, a view's open),
+// zero for a store that keeps none.
+func storeRevision(mockDb integrations.MockMemDb) uint64 {
+	if r, ok := mockDb.(interface{ Revision() uint64 }); ok {
+		return r.Revision()
+	}
+	return 0
 }
 
 // pairing is what the learn step learned on a paired mock: its noise, its

@@ -535,6 +535,16 @@ type RecordingSourceSetter interface {
 	SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }
 
+// RecordedBeforeSetter is implemented by a proxy whose learn step reads, as
+// the earlier places of a pool recording, every recording of the staged set
+// made before it (integrations.RecordedBeforeReader), the ones the agent keeps
+// on disk too: a test's own are staged only as it opens. SetRecordedBefore
+// sets where (src visits the on-disk mocks recorded before t, by request
+// time, decoding one at a time; nil for none). Nothing it reads is served.
+type RecordedBeforeSetter interface {
+	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
+}
+
 type ExactServer interface {
 	// ServeExactTest opens test, served exactly owned: its test mocks, in
 	// recorded order. A test opened again starts with none answered.
@@ -558,6 +568,24 @@ type ExactServer interface {
 // test of the set reads.
 type ExactTestOpener interface {
 	OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error
+}
+
+// AppClockSetter is an optional proxy capability: SetAppClock hands the
+// proxy how to read the app's clock at a real instant, as the agent's hooks
+// move it (a time-freeze; false where they cannot tell), so that the
+// parsers' learn steps read a call's clock reads in its own window
+// (learn.Tracker.CallWindow).
+type AppClockSetter interface {
+	SetAppClock(f func(real time.Time) (time.Time, bool))
+}
+
+// PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
+// proxy the names the replay's scope table puts in a pool slice, of every key,
+// so that the parsers' learn steps can tell the pool's mocks from a test's
+// where the replay sends no recorded test windows (keploy mock replay):
+// integrations.PoolMembership.
+type PoolNamesSetter interface {
+	SetPoolNames(names []string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
