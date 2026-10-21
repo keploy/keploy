@@ -22,6 +22,14 @@ const agentRoutePrefix = "/agent"
 // A switch rather than a package-level map, so the allow-list cannot be
 // appended to from somewhere else at run time — adding to it should require
 // editing this function.
+// isRelayPath returns true for paths like /agent/relay/8080/... — the relay
+// prefix followed by at least one more character (the port). Bare /agent/relay
+// or /agent/relay/ are not relay paths.
+func isRelayPath(path string) bool {
+	const prefix = agentRoutePrefix + "/relay/"
+	return len(path) > len(prefix) && strings.HasPrefix(path, prefix)
+}
+
 func isAuthExempt(path string) bool {
 	switch {
 	case path == "/agent/health":
@@ -31,7 +39,7 @@ func isAuthExempt(path string) bool {
 	// not the agent token. The kubectl port-forward that reaches it is
 	// already gated by the Kubernetes API — the same boundary the app
 	// port-forwards it replaces had. See k8s-proxy#1062.
-	case strings.HasPrefix(path, agentRoutePrefix+"/relay/"):
+	case isRelayPath(path):
 		return true
 	default:
 		return false
@@ -70,7 +78,7 @@ func Authenticate(logger *zap.Logger, sessionToken string) func(http.Handler) ht
 			// probing the API at all. The relay is the exception: it carries
 			// the app's recorded headers, which may include Origin from
 			// cross-origin browser calls recorded in prod. See k8s-proxy#1062.
-			if r.Header.Get("Origin") != "" && !strings.HasPrefix(r.URL.Path, agentRoutePrefix+"/relay/") {
+			if r.Header.Get("Origin") != "" && !isRelayPath(r.URL.Path) {
 				logger.Warn("rejecting agent API request carrying an Origin header; no keploy client sends one, so this is a browser",
 					zap.String("path", r.URL.Path), zap.String("origin", r.Header.Get("Origin")))
 				http.Error(w, "forbidden", http.StatusForbidden)

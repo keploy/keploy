@@ -144,9 +144,10 @@ func TestExtractRelayPort(t *testing.T) {
 
 // TestHandleRelay_ThroughAuthenticate drives the relay through the production
 // Authenticate middleware. The relay must pass even when:
-// - the request carries an Origin header (recorded from a browser call)
-// - the agent has a session token and the request carries the app's own
-//   Authorization, not the agent token
+//   - the request carries an Origin header (recorded from a browser call)
+//   - the agent has a session token and the request carries the app's own
+//     Authorization, not the agent token
+//
 // Without the auth exemption, these produce 403 and 401 respectively.
 func TestHandleRelay_ThroughAuthenticate(t *testing.T) {
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

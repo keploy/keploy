@@ -115,7 +115,7 @@ func TestAuthenticate_GuardsEveryRegisteredRoute(t *testing.T) {
 	for _, mr := range paths {
 		parts := strings.SplitN(mr, " ", 2)
 		method, route := parts[0], parts[1]
-		if route == "/agent/health" {
+		if route == "/agent/health" || strings.HasPrefix(route, "/agent/relay/") {
 			continue
 		}
 		t.Run(mr, func(t *testing.T) {
@@ -135,10 +135,12 @@ func TestAuthenticate_GuardsEveryRegisteredRoute(t *testing.T) {
 // that decision quietly.
 func TestIsAuthExempt(t *testing.T) {
 	require.True(t, isAuthExempt("/agent/health"))
+	require.True(t, isAuthExempt("/agent/relay/8080/data"))
+	require.True(t, isAuthExempt("/agent/relay/443/"))
 	for _, path := range []string{
 		"/agent/stop", "/agent/storemocks", "/agent/pcap/keylog",
 		"/agent/pcap/traffic", "/agent/scope/begin", "/agent/mock/served",
-		"/agent/ca",
+		"/agent/ca", "/agent/relay", "/agent/relay/",
 	} {
 		require.False(t, isAuthExempt(path), "%s must not be exempt", path)
 	}
