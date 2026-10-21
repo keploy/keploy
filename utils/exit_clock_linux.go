@@ -621,12 +621,12 @@ func readTaskTimesIn(proc string, procs []Reached, boot func() time.Duration, se
 				continue
 			}
 			ran, waited, slices, _ := parseSchedstat(b)
-			t := taskTime{ran: time.Duration(ran), waited: time.Duration(waited), slices: slices}
+			t := taskTime{ran: durationOf(ran, time.Nanosecond), waited: durationOf(waited, time.Nanosecond), slices: slices}
 			if b, err := os.ReadFile(task + "/stat"); err == nil {
 				if st, ok := ParseProcStat(b); ok {
 					t.runnable = st.State == 'R'
 					t.blocked = st.State == 'D'
-					born[tid] = time.Duration(st.StartTime) * startTick
+					born[tid] = durationOf(st.StartTime, startTick)
 				}
 			}
 			if t.blocked {
@@ -704,10 +704,16 @@ func hungTaskTime(path string) time.Duration {
 	if err != nil || secs == 0 {
 		return hungTaskDefault
 	}
-	if secs > uint64(math.MaxInt64/int64(time.Second)) {
+	return durationOf(secs, time.Second)
+}
+
+// durationOf is n units (unit > 0) as a Duration, the longest one when n units
+// would overflow it: what /proc and /sys say is parsed as unsigned 64-bit.
+func durationOf(n uint64, unit time.Duration) time.Duration {
+	if n > math.MaxInt64 || int64(n) > math.MaxInt64/int64(unit) {
 		return math.MaxInt64
 	}
-	return time.Duration(secs) * time.Second
+	return time.Duration(n) * unit
 }
 
 // testStorage, where a test sets it, is read in hostStorage's place by the
@@ -762,7 +768,7 @@ func readDiskstats(path string) (diskMark, bool) {
 			name:     string(f[2]),
 			done:     done,
 			inFlight: parseUint(f[11]),
-			busy:     time.Duration(parseUint(f[12])) * time.Millisecond,
+			busy:     durationOf(parseUint(f[12]), time.Millisecond),
 		}
 	}
 	return m, len(m) > 0
