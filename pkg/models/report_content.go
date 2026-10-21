@@ -25,6 +25,18 @@ const WithheldValue = "(withheld)"
 // how to see them.
 const ContentWithheldNote = "values are withheld; set " + logcontent.EnvVar + "=1 to include them"
 
+// ReportFileWithheldNote tells a reader of a report file (keploy report) whose
+// values are withheld how to see them. The values a file was written without
+// come back only from a replay with logcontent's switch set, not from setting
+// it where the file is read: with it set there, every call still withheld was
+// written so, and the note says to replay; without it, the note says both.
+func ReportFileWithheldNote() string {
+	if logcontent.On() {
+		return "values were withheld when this report was written; replay with " + logcontent.EnvVar + "=1 to include them"
+	}
+	return ContentWithheldNote + " (for a report written without them, set it for the replay)"
+}
+
 // ReportQuote is v as a report's text may quote it: strconv.Quote(v) with
 // logcontent's switch on, and WithheldValue with it off. A parser whose
 // report text names a value the application sent or keploy recorded passes it
