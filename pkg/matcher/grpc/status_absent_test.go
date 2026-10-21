@@ -261,7 +261,8 @@ func liveAnswer(code string, present bool) *models.GrpcResp {
 // matches the same status, OK or an error, and no other. Read as absent,
 // the empty stream an app answers OK, byte for byte as recorded, failed. It
 // is not a recording without a status, so nothing says to record it again.
-// With the switch off nothing changes: the status in its headers is not read.
+// With the switch off its status is read the same way; an answer with none
+// still reads as 0 there.
 func TestMatch_ProvenSwitchReadsATrailersOnlyRecordingsStatusOffItsHeaders(t *testing.T) {
 	for _, c := range []struct {
 		name             string
@@ -271,8 +272,8 @@ func TestMatch_ProvenSwitchReadsATrailersOnlyRecordingsStatusOffItsHeaders(t *te
 		wantExp, wantAct int
 	}{
 		{"OK, live OK", trailersOnlyRecording("0", ""), liveAnswer("0", true), true, true, 0, 0},
-		{"NOT_FOUND, live NOT_FOUND", trailersOnlyRecording("5", "no such thing"), liveAnswer("5", true), true, false, 5, 5},
-		{"NOT_FOUND, live OK", trailersOnlyRecording("5", "no such thing"), liveAnswer("0", true), false, true, 5, 0},
+		{"NOT_FOUND, live NOT_FOUND", trailersOnlyRecording("5", "no such thing"), liveAnswer("5", true), true, true, 5, 5},
+		{"NOT_FOUND, live OK", trailersOnlyRecording("5", "no such thing"), liveAnswer("0", true), false, false, 5, 0},
 		{"OK, live NOT_FOUND", trailersOnlyRecording("0", ""), liveAnswer("5", true), false, false, 0, 5},
 		{"OK, live none", trailersOnlyRecording("0", ""), liveAnswer("", false), false, true, 0, -1},
 		// The answer's status is the one grpc-go read: never off the
@@ -284,7 +285,7 @@ func TestMatch_ProvenSwitchReadsATrailersOnlyRecordingsStatusOffItsHeaders(t *te
 
 			t.Setenv(provenswitch.Env, "")
 			if ok, _ := Match(tc, c.live, nil, false, zap.NewNop(), false); ok != c.wantOff {
-				t.Fatalf("switch off: matched %v, want %v (unchanged)", ok, c.wantOff)
+				t.Fatalf("switch off: matched %v, want %v", ok, c.wantOff)
 			}
 
 			t.Setenv(provenswitch.Env, "1")
@@ -321,13 +322,60 @@ func TestMatch_ProvenSwitchReadsTrailersThatLackTheStatusAsNone(t *testing.T) {
 	}
 }
 
+// With the switch off a recording's status is read as it is under the
+// switch, as a gRPC client reads it (models.GrpcResp.TrailersAsRead): one
+// read on both paths. A Trailers-Only answer that enterprise's low-latency
+// recorder kept as its headers alone (before its fix) has its status in that
+// one block. Read off its empty trailers it was absent, which reads as 0
+// with the switch off: a recording of NOT_FOUND passed against an app now
+// answering OK, a false green on the default path, and failed against the
+// app answering NOT_FOUND as recorded. Trailers that carry anything are the
+// block a client reads, even when the headers beside them carry a status.
+func TestMatch_SwitchOffReadsARecordingsStatusAsAClientDoes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	lacking := trailersOnlyRecording("5", "no such thing")
+	lacking.Trailers.OrdinaryHeaders["x-done"] = "yes"
+	// As keploy's own recorder keeps a Trailers-Only answer: the one block
+	// as its headers and its trailers.
+	both := trailersOnlyRecording("5", "no such thing")
+	both.Trailers = both.Headers
+	for _, c := range []struct {
+		name             string
+		recorded         models.GrpcResp
+		live             *models.GrpcResp
+		want             bool
+		wantExp, wantAct int
+	}{
+		{"Trailers-Only NOT_FOUND, live OK", trailersOnlyRecording("5", "no such thing"), liveAnswer("0", true), false, 5, 0},
+		{"Trailers-Only NOT_FOUND, live NOT_FOUND", trailersOnlyRecording("5", "no such thing"), liveAnswer("5", true), true, 5, 5},
+		{"Trailers-Only OK, live NOT_FOUND", trailersOnlyRecording("0", ""), liveAnswer("5", true), false, 0, 5},
+		{"Trailers-Only OK, live OK", trailersOnlyRecording("0", ""), liveAnswer("0", true), true, 0, 0},
+		{"trailers lacking the status, NOT_FOUND in the headers, live OK", lacking, liveAnswer("0", true), true, 0, 0},
+		{"trailers lacking the status, NOT_FOUND in the headers, live NOT_FOUND", lacking, liveAnswer("5", true), false, 0, 5},
+		{"kept as headers and trailers, NOT_FOUND, live OK", both, liveAnswer("0", true), false, 5, 0},
+		{"kept as headers and trailers, NOT_FOUND, live NOT_FOUND", both, liveAnswer("5", true), true, 5, 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ok, res := Match(&models.TestCase{Name: "trailers-only", GrpcResp: c.recorded}, c.live, nil, false, zap.NewNop(), false)
+			if ok != c.want || res.StatusCode.Normal != c.want {
+				t.Fatalf("switch off: matched %v (status normal %v), want %v", ok, res.StatusCode.Normal, c.want)
+			}
+			if res.StatusCode.Expected != c.wantExp || res.StatusCode.Actual != c.wantAct {
+				t.Fatalf("switch off: StatusCode %d -> %d, want %d -> %d", res.StatusCode.Expected, res.StatusCode.Actual, c.wantExp, c.wantAct)
+			}
+			if !c.want && !hasCategory(res, models.StatusCodeChanged) {
+				t.Fatalf("switch off: a status difference not said as StatusCodeChanged: %v", res.FailureInfo.Category)
+			}
+		})
+	}
+}
+
 // The replay path end to end for Trailers-Only recordings (the low-latency
 // recorder before its fix): an app's server stream that returns no message,
 // and one that fails NOT_FOUND, each answering in one HEADERS frame. keploy's
 // replay client reads the app's answer (SimulateGRPC) and the comparison
-// judges it. Under the switch the app answering as recorded passes and the
-// app that now answers OK where it failed NOT_FOUND fails. With the switch
-// off nothing changes.
+// judges it. The app answering as recorded passes and the app that now
+// answers OK where it failed NOT_FOUND fails, with the switch on or off.
 func TestReplayOfATrailersOnlyRecordingIsJudgedOnItsStatus(t *testing.T) {
 	var missingNowOK atomic.Bool
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -361,8 +409,8 @@ func TestReplayOfATrailersOnlyRecordingIsJudgedOnItsStatus(t *testing.T) {
 		want, wantOff bool
 	}{
 		{"an empty stream, answered as recorded", testCase("/svc.Echo/Empty", trailersOnlyRecording("0", "")), false, true, true},
-		{"NOT_FOUND, answered as recorded", testCase("/svc.Echo/Missing", trailersOnlyRecording("5", "no such thing")), false, true, false},
-		{"NOT_FOUND, now answered OK", testCase("/svc.Echo/Missing", trailersOnlyRecording("5", "no such thing")), true, false, true},
+		{"NOT_FOUND, answered as recorded", testCase("/svc.Echo/Missing", trailersOnlyRecording("5", "no such thing")), false, true, true},
+		{"NOT_FOUND, now answered OK", testCase("/svc.Echo/Missing", trailersOnlyRecording("5", "no such thing")), true, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			missingNowOK.Store(c.missingNowOK)
