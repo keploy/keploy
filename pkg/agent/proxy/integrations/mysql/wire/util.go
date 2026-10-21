@@ -217,4 +217,3 @@ func IsNoResponseCommand(command string) bool {
 		return false
 	}
 }
-

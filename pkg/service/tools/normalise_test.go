@@ -224,7 +224,7 @@ func TestNormalizeTestCases_ADroppedCookieIsSaidWithoutTheValueTheAppAnswers(t *
 		tools := &Tools{logger: logger, testDB: db, testSetConf: &placementConfStore{}, config: &config.Config{}}
 		results := []models.TestResult{{
 			TestCaseID: "test-1", Status: models.TestStatusFailed,
-			Res: models.HTTPResp{StatusCode: 200, Header: map[string]string{"Set-Cookie": "sid=" + canary + "; Path=/"}, Body: `{"ok":true}`},
+			Res:    models.HTTPResp{StatusCode: 200, Header: map[string]string{"Set-Cookie": "sid=" + canary + "; Path=/"}, Body: `{"ok":true}`},
 			Result: models.Result{HeadersResult: []models.HeaderResult{{Expected: models.Header{Key: "Set-Cookie", Value: []string{"sid=resolved-elsewhere; Path=/"}}}}},
 		}}
 		require.NoError(t, tools.NormalizeTestCases(context.Background(), "test-run-0", "test-set-0", nil, results))
