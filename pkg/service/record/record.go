@@ -2942,6 +2942,24 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	return fmt.Errorf("%s: %w", stopReason, err)
 }
 
+// incomingOptions is what this recording asks of the agent's incoming stream:
+// its filters, and, under the proven switch with an agent that counts its
+// capture losses, that the capture watch charges a test case with what its
+// recording lost (captureWatch.charge, models.IncomingOptions.ChargesLosses),
+// so the agent streams such a test case with the loss rather than leave it
+// out: the replay that judges it decides. With the switch off, or an agent
+// that counts nothing (there is no watch to charge), the agent leaves it out,
+// as before.
+func (r *Recorder) incomingOptions() models.IncomingOptions {
+	opts := models.IncomingOptions{
+		Filters: r.config.Record.Filters,
+	}
+	if _, counts := r.instrumentation.(CaptureLossReader); counts && provenswitch.On() {
+		opts.ChargesLosses = true
+	}
+	return opts
+}
+
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// This recording's streams end by the agent's markers when it can
 	// (stream_end.go): its token names them to the agent.
@@ -2952,15 +2970,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	ctx = models.WithDrainsAfterStop(ctx)
 	ctx = models.WithStreamEndToken(ctx, ends.token)
 
-	incomingOpts := models.IncomingOptions{
-		Filters: r.config.Record.Filters,
-	}
-	// Under the proven switch the capture watch charges a test case with what
-	// its recording lost (captureWatch.charge), so the agent streams it with
-	// the loss rather than leave it out: the replay that judges it decides.
-	if _, counts := r.instrumentation.(CaptureLossReader); counts && provenswitch.On() {
-		incomingOpts.ChargesLosses = true
-	}
+	incomingOpts := r.incomingOptions()
 
 	// Create channels to receive incoming and outgoing data.
 	//

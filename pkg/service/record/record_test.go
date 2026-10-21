@@ -3048,3 +3048,35 @@ func (l *lateBlockingInstr) TakeLateTestCaseLosses() map[string]models.CaptureLo
 	l.late = nil
 	return late
 }
+
+// Under the proven switch keploy record asks the agent to stream a test case
+// whose recording lost a call with that loss (models.IncomingOptions.
+// ChargesLosses), for its capture watch to charge: without it the agent
+// leaves the test case out of the recording unsaid. It asks only of an agent
+// that counts its capture losses (there is a watch to charge them), and never
+// with the switch off. Its filters go as before.
+//
+// Not parallel: it sets the switch.
+func TestUnderTheProvenSwitchARecordAsksTheAgentForTheTestCasesItsRecordingLostACallOf(t *testing.T) {
+	filters := []models.Filter{{BypassRule: models.BypassRule{Path: "/healthz"}}}
+	cfg := &config.Config{}
+	cfg.Record.Filters = filters
+	for _, c := range []struct {
+		name    string
+		proven  bool
+		instr   Instrumentation
+		charges bool
+	}{
+		{"switch on, an agent that counts its losses", true, lossInstr{}, true},
+		{"switch on, an agent that counts nothing", true, &fakeInstr{}, false},
+		{"switch off, an agent that counts its losses", false, lossInstr{}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{true: "1", false: ""}[c.proven])
+			got := (&Recorder{config: cfg, instrumentation: c.instr}).incomingOptions()
+			if got.ChargesLosses != c.charges || len(got.Filters) != 1 || got.Filters[0].Path != "/healthz" {
+				t.Fatalf("the record asks the agent for %+v, want its filters and ChargesLosses %v", got, c.charges)
+			}
+		})
+	}
+}
