@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -66,18 +67,18 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 // off nothing is named so.
 func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:50001", "localhost:50001"
-	miss := func(t *testing.T) *models.MockMismatchReport {
+	missOn := func(t *testing.T, path string, staged *models.Mock, opts models.OutgoingOptions) *models.MockMismatchReport {
 		t.Helper()
-		db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-delete", "/delete", host)}}
+		db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{staged}}
 		var reported error
 		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
 		app, prox := net.Pipe()
 		defer app.Close()
 		done := make(chan error, 1)
 		go func() {
-			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, models.OutgoingOptions{})
+			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, opts)
 		}()
-		if _, err := io.WriteString(app, "GET /delete HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\n\r\n"); err != nil {
+		if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\n\r\n"); err != nil {
 			t.Fatal(err)
 		}
 		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
@@ -99,9 +100,25 @@ func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 		}
 		return withReport.MismatchReport()
 	}
+	miss := func(t *testing.T) *models.MockMismatchReport {
+		t.Helper()
+		return missOn(t, "/delete", onHost("other-test-delete", "/delete", host), models.OutgoingOptions{})
+	}
 	t.Setenv(provenswitch.Env, "1")
 	if r := miss(t); !r.NotOwned || r.ClosestMock != "other-test-delete" {
 		t.Fatalf("under the switch the miss names %q (not owned: %v), want other-test-delete", r.ClosestMock, r.NotOwned)
+	}
+	// By default the report drops the recording's request and the call's,
+	// and says they were the same: the call is that recording.
+	if r := miss(t); !r.RequestsIdentical || r.ClosestMockReq != "" || r.ReceivedReq != "" || !r.ContentWithheld {
+		t.Fatalf("by default the not-owned miss: identical %v, requests %q %q, withheld %v", r.RequestsIdentical, r.ClosestMockReq, r.ReceivedReq, r.ContentWithheld)
+	}
+	// A recording that is the call outside a path segment keploy.yml's url
+	// noise masks: the call's segment there is withheld.
+	urlNoise := models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{"url": {"kp-[a-z]+-id": {}}}}
+	if r := missOn(t, "/items/kp-live-id", onHost("other-test-item", "/items/kp-rec-id", host), urlNoise); !r.NotOwned || r.ClosestMock != "other-test-item" ||
+		r.ActualSummary != "GET /items/{}" || !slices.Contains(r.VariablePlaces, "url.path[1]") {
+		t.Fatalf("a not-owned miss outside url noise: closest %q (not owned %v), summary %q, places %v", r.ClosestMock, r.NotOwned, r.ActualSummary, r.VariablePlaces)
 	}
 	t.Setenv(provenswitch.Env, "")
 	if r := miss(t); r.NotOwned {
