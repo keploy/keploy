@@ -84,6 +84,12 @@ type AgentClient struct {
 	agentContainer   *namedContainer
 	agentContainerAt string
 
+	// lateLosses are what the incoming stream's end marker said test cases
+	// streamed with nothing lost had lost by the stream's end
+	// (models.StreamEndSummary.LateLosses), until a recording takes them
+	// (TakeLateTestCaseLosses). Under lateMu.
+	lateMu     sync.Mutex
+	lateLosses map[string]models.CaptureLosses
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
 	// under docker compose (the project starts it), nor for an agent another
@@ -418,6 +424,34 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 	}
 }
 
+// noteLateLosses keeps what a stream's end marker said test cases streamed
+// with nothing lost had lost by its end, for the recording to take.
+func (a *AgentClient) noteLateLosses(late map[string]models.CaptureLosses) {
+	if len(late) == 0 {
+		return
+	}
+	a.lateMu.Lock()
+	defer a.lateMu.Unlock()
+	if a.lateLosses == nil {
+		a.lateLosses = make(map[string]models.CaptureLosses, len(late))
+	}
+	for name, lost := range late {
+		a.lateLosses[name] = a.lateLosses[name].Plus(lost)
+	}
+}
+
+// TakeLateTestCaseLosses is what the incoming streams' end markers said test
+// cases streamed with nothing lost had lost by their end, by name, and
+// forgets it: keploy record charges it (models.StreamEndSummary.LateLosses).
+// Read once the streams have drained.
+func (a *AgentClient) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
+	a.lateMu.Lock()
+	defer a.lateMu.Unlock()
+	late := a.lateLosses
+	a.lateLosses = nil
+	return late
+}
+
 // readIncomingParts reads a multipart incoming stream; see readIncoming.
 func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	mr := multipart.NewReader(res.Body, boundary)
@@ -447,8 +481,11 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			// this client did not start, whose own log reaches the user
 			// through compose or kubelet, and can be cut off as it stops.
 			var sum models.StreamEndSummary
-			if err := json.NewDecoder(part).Decode(&sum); err == nil && !a.startedAgent.Load() {
-				a.sayAgentSummary(sum)
+			if err := json.NewDecoder(part).Decode(&sum); err == nil {
+				a.noteLateLosses(sum.LateLosses)
+				if !a.startedAgent.Load() {
+					a.sayAgentSummary(sum)
+				}
 			}
 			ended.Store(true)
 			return true

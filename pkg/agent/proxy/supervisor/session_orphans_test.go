@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -1217,4 +1218,98 @@ func TestAResetStreamIsLeftOutWithItsOwnNextStep(t *testing.T) {
 	if got := w[0].ContextMap()["next_step"]; got != next {
 		t.Errorf("the WARN's next_step is %v, want the reset's", got)
 	}
+}
+
+// Under the proven switch the test cases recorded over a mock a session left
+// out are charged with it, in place of being left out
+// (syncMock.SyncMockManager.TestCaseLosses), each by why: the mock's kind and
+// the cause its reason starts with, keploy's own words, never the text after
+// the cause, where a parser quotes what it read. One source each: the
+// incomplete-mock flag (a chunk the relay dropped), a parser's own (MySQL's
+// response it cannot frame), and the exchange a parser stops on (an HTTP
+// response that does not decode). A session whose spans go elsewhere (a
+// DaemonSet agent's Orphans) charges nothing on the manager.
+//
+// Not parallel: it sets the switch.
+func TestUnderTheProvenSwitchAMockLeftOutChargesItsTestCasesWithWhy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mgr := syncMock.New(nil)
+	s := &Session{Mgr: mgr, Mocks: make(chan *models.Mock, 1), Ctx: context.Background()}
+	base := time.Now().Add(-time.Hour)
+	window := func(ms int) (time.Time, time.Time) {
+		return base.Add(time.Duration(ms) * time.Millisecond), base.Add(time.Duration(ms+1) * time.Millisecond)
+	}
+
+	flagged := &models.Mock{Name: "flagged", Kind: models.MySQL}
+	flagged.Spec.ReqTimestampMock, flagged.Spec.ResTimestampMock = window(0)
+	s.MarkMockIncomplete("per_conn_cap: the relay dropped 4096 bytes of SELECT secret")
+	if err := s.EmitMock(flagged); err != nil {
+		t.Fatalf("EmitMock: %v", err)
+	}
+	unframed := &models.Mock{Kind: models.MySQL}
+	unframed.Spec.ReqTimestampMock, unframed.Spec.ResTimestampMock = window(100)
+	s.ReportLeftOut(unframed, "mysql exchange not recorded: its response cannot be framed (row 'secret')")
+	stoppedAt, _ := window(200)
+	s.ReportStoppedOn(models.HTTP, stoppedAt, "http decode error: response read failed: bad Content-Length \"secret\"")
+
+	for _, c := range []struct {
+		ms   int
+		what string
+	}{
+		{0, "MySQL: per_conn_cap"},
+		{100, "MySQL: mysql exchange not recorded"},
+		{200, "Http: http decode error"},
+	} {
+		from, to := window(c.ms)
+		got := mgr.TestCaseLosses("test-1", from, to)
+		if len(got) != 1 || got[0].Kind != models.CaptureLossExchangeUnrecorded || got[0].What != c.what {
+			t.Fatalf("the test case over the exchange at +%dms is charged %+v, want one exchange_unrecorded, %q", c.ms, got, c.what)
+		}
+		if strings.Contains(got[0].What, "secret") {
+			t.Fatalf("what names more than keploy's words: %q", got[0].What)
+		}
+	}
+
+	// A DaemonSet agent's spans, per pod: the span goes there, why with it
+	// nowhere, and the manager charges nothing.
+	spans := &syncMock.Spans{}
+	ds := &Session{Mgr: syncMock.New(nil), Orphans: spans}
+	from, to := window(300)
+	ds.RecordOrphanWindowWhy(from, to, "MySQL: x")
+	ds.OpenOrphanWindowWhy(from, "mysql: y")()
+	if c, _ := spans.Counts(); c == 0 {
+		t.Fatal("the session's Orphans got no span")
+	}
+	if got := ds.Mgr.TestCaseLosses("test-1", from, to); len(got) != 0 {
+		t.Fatalf("the manager of a session with Orphans charged %+v", got)
+	}
+
+	// Orphans that hand their spans to the recording's manager keep why
+	// (OrphanSpansWhy): a proxyless agent's, outside a DaemonSet.
+	toMgr := managerOrphans{syncMock.New(nil)}
+	px := &Session{Mgr: syncMock.New(nil), Orphans: toMgr}
+	unframed2 := &models.Mock{Kind: models.MySQL}
+	unframed2.Spec.ReqTimestampMock, unframed2.Spec.ResTimestampMock = window(400)
+	px.ReportLeftOut(unframed2, "mysql exchange not recorded: x")
+	from, to = window(400)
+	if got := toMgr.m.TestCaseLosses("test-1", from, to); len(got) != 1 || got[0].What != "MySQL: mysql exchange not recorded" {
+		t.Fatalf("Orphans that keep why charged %+v, want the exchange with its why", got)
+	}
+	opened, _ := window(500)
+	px.OpenOrphanWindowWhy(opened, "mysql: stopped")()
+	if got := toMgr.m.TestCaseLosses("test-1", opened, opened); len(got) != 1 || got[0].What != "mysql: stopped" {
+		t.Fatalf("Orphans that keep why charged %+v for the open span, want its why", got)
+	}
+}
+
+// managerOrphans hands a session's spans to a manager, with why.
+type managerOrphans struct{ m *syncMock.SyncMockManager }
+
+func (o managerOrphans) Record(start, end time.Time) { o.m.RecordOrphanWindow(start, end) }
+func (o managerOrphans) Open(start time.Time) func() { return o.m.OpenOrphanWindow(start) }
+func (o managerOrphans) RecordWhy(start, end time.Time, why string) {
+	o.m.RecordOrphanWindowWhy(start, end, why)
+}
+func (o managerOrphans) OpenWhy(start time.Time, why string) func() {
+	return o.m.OpenOrphanWindowWhy(start, why)
 }

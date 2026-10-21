@@ -395,3 +395,36 @@ func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
 		}
 	}
 }
+
+// What a record charges to the test case it happened over, itself (an
+// exchange keploy could not record, a mock it let go), fails that test case
+// (judged), and that test case only (PerTest); the text says which, and what
+// it names (What) where it came from.
+func TestARecordsOwnChargeFailsItsTestCase(t *testing.T) {
+	for _, tc := range []struct {
+		k    CaptureLossKind
+		text string
+	}{
+		{CaptureLossExchangeUnrecorded, "could not record as mocks 2 stretch(es) of what the application's connections carried while this test was recorded"},
+		{CaptureLossMockDropped, "let go of mocks 2 time(s) while this test was recorded"},
+	} {
+		if tc.k.NotJudged() || tc.k.Evidence() || !tc.k.PerTest() || tc.k.runScoped() || !tc.k.recordCharged() {
+			t.Fatalf("%s: a judged loss, the test case's own, charged by the record", tc.k)
+		}
+		l := CaptureLosses{{Kind: tc.k, Count: 2, What: "MySQL: mysql exchange not recorded"}}
+		if judged, notJudged := l.Split(); len(judged) != 1 || len(notJudged) != 0 {
+			t.Fatalf("%s: Split = %v, %v: judged", tc.k, judged, notJudged)
+		}
+		txt := l.Text()
+		for _, want := range []string{tc.text, "so a call of this test's may be missing from its mocks", "(MySQL: mysql exchange not recorded)"} {
+			if !strings.Contains(txt, want) {
+				t.Fatalf("%s: text %q lacks %q", tc.k, txt, want)
+			}
+		}
+	}
+	for _, k := range []CaptureLossKind{CaptureLossUnrecorded, CaptureLossUnread, CaptureLossTLSAbort} {
+		if k.recordCharged() {
+			t.Fatalf("%s is in the agent's counts, not charged by the record", k)
+		}
+	}
+}

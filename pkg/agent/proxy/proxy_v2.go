@@ -48,6 +48,14 @@ import (
 //
 // The caller remains responsible for closing srcConn/dstConn in its
 // deferred cleanup; this helper never closes them.
+// Why a connection's orphan spans were recorded (Session.RecordOrphanWindowWhy),
+// after its parser's type: what it carried once keploy stopped recording it,
+// and requests its parser returned without reading (parserReads).
+const (
+	unrecordedAfterStop = "what a connection carried once keploy stopped recording it"
+	unreadByParser      = "requests its parser returned without reading"
+)
+
 func (p *Proxy) recordViaSupervisor(
 	ctx context.Context,
 	srcConn, dstConn net.Conn,
@@ -210,7 +218,7 @@ func (p *Proxy) recordViaSupervisor(
 		if svSess.RecordingStopping() {
 			return func() {}
 		}
-		return svSess.OpenOrphanWindow(start)
+		return svSess.OpenOrphanWindowWhy(start, string(parserType)+": "+unrecordedAfterStop)
 	}
 	unrecorded := syncMock.NewUnrecordedConn(openSpan, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
 	defer unrecorded.End()
@@ -219,7 +227,9 @@ func (p *Proxy) recordViaSupervisor(
 	// recorded, whenever the relay gets to tell of it, and one it never read
 	// is not, whenever it was told of. Every stop goes through it,
 	// so the return knows whether one came first, and when.
-	reads := newParserReads(unrecorded, svSess.RecordOrphanWindow, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
+	reads := newParserReads(unrecorded, func(start, end time.Time) {
+		svSess.RecordOrphanWindowWhy(start, end, string(parserType)+": "+unreadByParser)
+	}, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
 	svSess.OnStop = reads.stop
 	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
 	defer stopRecordingStamp()

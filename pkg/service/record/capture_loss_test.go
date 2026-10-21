@@ -751,3 +751,138 @@ func TestARecordJudgedLaterHandsOverAKernelSkipAsEvidence(t *testing.T) {
 		t.Fatalf("Text() = %q, want the skip said, as no verdict", txt)
 	}
 }
+
+// exchangeLost is what the agent streams a test case with when an orphan span
+// overlapped its window (models.TestCase.CaptureLost).
+var exchangeLost = models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: mysql exchange not recorded"}}
+
+// A test case the agent streamed with what its recording lost, in place of
+// leaving it out, is charged with it by name, and with nothing it did not
+// lose: judged later, the loss is its evidence, handed over, and the
+// recording fails nothing; with no pass to judge it, the recording is
+// incomplete, names it and gives the loss as its reason, as for an
+// agent-life loss. The agent's counts never hold it.
+func TestARecordChargesATestCaseWithWhatTheAgentSaysItsRecordingLost(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	run := func(t *testing.T, instr Instrumentation) (*captureWatch, *observer.ObservedLogs) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+		for _, n := range []string{"test-1", "test-2", "test-3"} {
+			if n == "test-2" {
+				w.charge(n, exchangeLost)
+			}
+			w.afterTestCase(context.Background(), n)
+		}
+		w.afterTestCases(context.Background())
+		return w, logs
+	}
+	t.Run("judged later", func(t *testing.T) {
+		got := judgeLater(t)
+		w, logs := run(t, &countingInstr{answers: []models.CaptureLosses{nil}})
+		if w.finish("test-set-0", false) {
+			t.Fatal("the recording failed on a loss a later pass judges")
+		}
+		if n := len(logs.FilterLevelExact(zapcore.ErrorLevel).All()); n != 0 {
+			t.Fatalf("%d ERROR lines, want none: the loss is evidence", n)
+		}
+		l := (*got)[0]
+		if !l.Failing() || fmt.Sprint(l.TestCases()) != "[test-2]" || fmt.Sprint(l.FailingTestCases()) != "[test-2]" {
+			t.Fatalf("handed %+v, want test-2 alone, failing", l)
+		}
+		if fmt.Sprint(l.ByTestCase["test-2"]) != fmt.Sprint(exchangeLost) {
+			t.Fatalf("test-2's evidence %v, want %v", l.ByTestCase["test-2"], exchangeLost)
+		}
+		if !strings.Contains(l.Text(), "MySQL: mysql exchange not recorded") {
+			t.Fatalf("the set's text %q does not name where the loss came from", l.Text())
+		}
+	})
+	t.Run("judged by the record", func(t *testing.T) {
+		undo := JudgeLossesLater(func(RecordedLosses) { t.Fatal("handed over with the pass undone") })
+		undo()
+		w, logs := run(t, &countingInstr{answers: []models.CaptureLosses{nil}})
+		if !w.finish("test-set-0", false) || w.String() != "tainted=[test-2] unverified=[]" {
+			t.Fatalf("%s; want test-2 tainted and the recording failed", w)
+		}
+		errs := logs.FilterMessageSnippet("the recording is incomplete").All()
+		if len(errs) != 1 || fmt.Sprint(errs[0].ContextMap()["reason"]) != exchangeLost.Text() {
+			t.Fatalf("ERRORs %+v, want one whose reason is %q", errs, exchangeLost.Text())
+		}
+	})
+	t.Run("an agent that cannot count", func(t *testing.T) {
+		got := judgeLater(t)
+		unsupported := &countingInstr{errAt: map[int]error{1: models.ErrCaptureLossesUnsupported}, answers: []models.CaptureLosses{nil}}
+		w, _ := run(t, unsupported)
+		if w.finish("test-set-0", false) || len(*got) != 1 || fmt.Sprint((*got)[0].TestCases()) != "[test-2]" {
+			t.Fatalf("handed %+v, want test-2's charge handed over", *got)
+		}
+	})
+}
+
+// With the switch off nothing is charged: the agent streams no loss to a
+// client with the switch off, and a charge then is no account of one.
+func TestARecordChargesNothingWithTheSwitchOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
+	w.charge("test-1", exchangeLost)
+	if w.chargedAny() || w.finish("test-set-0", false) {
+		t.Fatal("a charge with the switch off was kept")
+	}
+}
+
+// lateTaker is an Instrumentation whose agent said, at the stream's end,
+// what test cases it streamed with nothing lost had lost after all.
+type lateTaker struct {
+	countingInstr
+	late map[string]models.CaptureLosses
+}
+
+func (l *lateTaker) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
+	late := l.late
+	l.late = nil
+	return late
+}
+
+// What the agent found at the stream's end that a test case streamed with
+// nothing lost had lost is charged to it, if keploy record saved it, under
+// the proven switch only.
+func TestARecordChargesWhatTheStreamsEndFoundATestCaseLost(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "")
+		}
+		instr := &lateTaker{countingInstr: countingInstr{answers: []models.CaptureLosses{nil}},
+			late: map[string]models.CaptureLosses{"test-2": exchangeLost, "unsaved": exchangeLost}}
+		r := &Recorder{logger: zap.NewNop(), instrumentation: instr}
+		w := watchCaptureLosses(context.Background(), zap.NewNop(), instr)
+		r.chargeLateLosses(w, func(name string) bool { return name != "unsaved" })
+		switch {
+		case on && (fmt.Sprint(w.byTestCase["test-2"]) != fmt.Sprint(exchangeLost) || len(w.byTestCase) != 1):
+			t.Fatalf("charged %+v, want test-2's late loss alone", w.byTestCase)
+		case !on && w.chargedAny():
+			t.Fatalf("charged %+v with the switch off", w.byTestCase)
+		}
+	}
+}
+
+// The recording's reason names every source its test cases were charged
+// with, not the latest only.
+func TestARecordsReasonNamesEachSourceItCharged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	undo := JudgeLossesLater(func(RecordedLosses) { t.Fatal("handed over with the pass undone") })
+	undo()
+	core, logs := observer.New(zapcore.ErrorLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil}})
+	w.charge("test-1", exchangeLost)
+	w.charge("test-2", models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "Http: http decode error"}})
+	w.charge("test-3", exchangeLost)
+	if !w.finish("test-set-0", false) {
+		t.Fatal("the recording did not fail on what its test cases lost")
+	}
+	errs := logs.FilterMessageSnippet("the recording is incomplete").All()
+	want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 3, What: "MySQL: mysql exchange not recorded; Http: http decode error"}}.Text()
+	if len(errs) != 1 || fmt.Sprint(errs[0].ContextMap()["reason"]) != want {
+		t.Fatalf("ERRORs %+v, want one whose reason is %q", errs, want)
+	}
+}

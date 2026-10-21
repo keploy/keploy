@@ -99,6 +99,10 @@ type captureWatch struct {
 	// daemon did not answer the read of (mapped): the evidence a later
 	// judging pass reads (RecordedLosses).
 	byTestCase map[string]models.CaptureLosses
+	// chargedOwn is what charge charged test cases with, judged kinds,
+	// added up: the reason the recording names beside lost, which the
+	// agent's counts never hold.
+	chargedOwn models.CaptureLosses
 	// agent watches which agent process answers (models.AgentInstanceWatch):
 	// the counts are the process's, from when it started, and the test cases
 	// and mocks it captured are in its memory until it hands them over. An
@@ -225,6 +229,52 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		w.uncapturable = append(w.uncapturable, name)
 		w.notJudged = allNotJudged
 	}
+}
+
+// charge charges test case name with lost: what the agent's recording of it
+// lost (models.TestCase.CaptureLost: an exchange keploy could not record over
+// its window, mocks let go while it ran), or what keploy record could not save
+// of it (a mock of its own). Under the proven switch only: the agent streams
+// such a test case, in place of leaving it out, only to a client that said it
+// charges it (models.IncomingOptions.ChargesLosses), and this is where it is
+// charged, by the test case's name, whenever it comes. Its judged kinds taint
+// the test case as an agent-life loss does (afterTestCase): named at the end,
+// the recording failing on it, or handed to the pass that judges each test
+// case (RecordedLosses), its evidence there.
+func (w *captureWatch) charge(name string, lost models.CaptureLosses) {
+	if w == nil || name == "" || len(lost) == 0 || !provenswitch.On() {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.addEvidence(name, lost)
+	// Every kind charged so is judged (models.CaptureLossKind.recordCharged).
+	if judged, _ := lost.Split(); len(judged) > 0 {
+		if !slices.Contains(w.tainted, name) {
+			w.tainted = append(w.tainted, name)
+		}
+		w.chargedOwn = plusNamingEach(w.chargedOwn, judged)
+	}
+}
+
+// plusNamingEach is l.Plus(o), but a kind's What names each distinct What it
+// was charged with, not the latest only: the recording's reason names every
+// source of what its test cases lost (an exchange MySQL's recorder left out,
+// an HTTP answer that did not decode).
+func plusNamingEach(l, o models.CaptureLosses) models.CaptureLosses {
+	whats := map[models.CaptureLossKind][]string{}
+	for _, c := range append(slices.Clone(l), o...) {
+		for _, w := range strings.Split(c.What, "; ") {
+			if w != "" && !slices.Contains(whats[c.Kind], w) {
+				whats[c.Kind] = append(whats[c.Kind], w)
+			}
+		}
+	}
+	out := l.Plus(o)
+	for i := range out {
+		out[i].What = strings.Join(whats[out[i].Kind], "; ")
+	}
+	return out
 }
 
 // saved notes a mock as it is saved: one whose stamp says the Docker daemon
@@ -368,7 +418,7 @@ func (w *captureWatch) finishRun(testSetID string, realUncaptured bool, realUnre
 // mock.real connections lost or unread.
 func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnread string) (fail, handed bool) {
 	judge := lossJudge.Load()
-	if w == nil || w.off {
+	if w == nil || w.off && !w.chargedAny() {
 		if w != nil {
 			w.ca.finish(testSetID) // said, never a failure
 		}
@@ -395,7 +445,7 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.tainted),
-			zap.String("reason", w.lost.Text()),
+			zap.String("reason", w.lost.Plus(w.chargedOwn).Text()),
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
 	}
 	if len(w.uncapturable) > 0 {
@@ -709,6 +759,29 @@ func (w *captureWatch) recordedLocked(testSetID string, realUncaptured bool, rea
 	}
 	l.NotVerified = strings.Join(why, "; ")
 	return l
+}
+
+// chargedWith says test case name was charged with a loss of kind k.
+func (w *captureWatch) chargedWith(name string, k models.CaptureLossKind) bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, c := range w.byTestCase[name] {
+		if c.Kind == k {
+			return true
+		}
+	}
+	return false
+}
+
+// chargedAny says charge charged a test case with something. Called before
+// w.mu is taken.
+func (w *captureWatch) chargedAny() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.byTestCase) > 0
 }
 
 // String is a one-line account, for tests.

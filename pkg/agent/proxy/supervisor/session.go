@@ -541,6 +541,53 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 	s.manager().RecordOrphanWindow(start, end)
 }
 
+// RecordOrphanWindowWhy is RecordOrphanWindow with why the span was recorded:
+// what the connection could not record over it, in keploy's own words (the
+// parser's kind and the cause it gave, never a value the application sent).
+// Under the proven switch the test cases recorded over the span are charged
+// with it, in place of being left out (SyncMockManager.TestCaseLosses). A
+// caller's Orphans takes it with why when it keeps why (OrphanSpansWhy: one
+// that hands its spans to the recording's manager), and without it otherwise
+// (a DaemonSet agent's spans, per pod). Nil-safe.
+func (s *Session) RecordOrphanWindowWhy(start, end time.Time, why string) {
+	if s == nil {
+		return
+	}
+	if s.Orphans != nil {
+		if o, ok := s.Orphans.(OrphanSpansWhy); ok {
+			o.RecordWhy(start, end, why)
+			return
+		}
+		s.Orphans.Record(start, end)
+		return
+	}
+	s.manager().RecordOrphanWindowWhy(start, end, why)
+}
+
+// OpenOrphanWindowWhy is OpenOrphanWindow with why the span was opened
+// (RecordOrphanWindowWhy). Nil-safe.
+func (s *Session) OpenOrphanWindowWhy(start time.Time, why string) func() {
+	if s == nil {
+		return func() {}
+	}
+	if s.Orphans != nil {
+		if o, ok := s.Orphans.(OrphanSpansWhy); ok {
+			return o.OpenWhy(start, why)
+		}
+		return s.Orphans.Open(start)
+	}
+	return s.manager().OpenOrphanWindowWhy(start, why)
+}
+
+// OrphanSpansWhy is an OrphanSpans that keeps why each span was recorded
+// (Session.RecordOrphanWindowWhy): one that hands its spans to the
+// recording's manager (syncMock.SyncMockManager.RecordOrphanWindowWhy) does.
+type OrphanSpansWhy interface {
+	OrphanSpans
+	RecordWhy(start, end time.Time, why string)
+	OpenWhy(start time.Time, why string) func()
+}
+
 // manager is the SyncMockManager this session's mocks, counts and spans go to:
 // Mgr, the per-app manager a multi-app caller sets, or the package-global one
 // (syncMock.Get) when Mgr is nil, the single-session default. It is the one
@@ -900,7 +947,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 		if end.Before(start) {
 			end = start
 		}
-		s.RecordOrphanWindow(start, end)
+		s.RecordOrphanWindowWhy(start, end, leftOutWhy(m.Kind, reason))
 	}
 	s.manager().NoteMockLeftOut()
 	if s.OnPendingCleared != nil {
@@ -1103,6 +1150,17 @@ func leftOutCause(reason string) string {
 		return leftOutOther
 	}
 	return reason
+}
+
+// leftOutWhy is why a mock of kind left out for reason left its span
+// (RecordOrphanWindowWhy): its kind and its cause (leftOutCause), keploy's
+// own words, never what the reason quotes after them.
+func leftOutWhy(kind models.Kind, reason string) string {
+	cause := leftOutCause(reason)
+	if kind == "" {
+		return cause
+	}
+	return string(kind) + ": " + cause
 }
 
 // The classes of cause a mock is left out for, each with its own next_step

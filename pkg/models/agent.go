@@ -715,6 +715,16 @@ type StreamEndSummary struct {
 	// MassSuppressed: a large share of the session's test cases was
 	// suppressed (the agent's summary says so at WARN).
 	MassSuppressed bool `json:"mass_suppressed"`
+	// KeptWithLoss: test cases streamed with what their recording lost
+	// (TestCase.CaptureLost) rather than left out, for a client that charges
+	// it (IncomingOptions.ChargesLosses). Under the proven switch only.
+	KeptWithLoss int `json:"tcs_kept_with_loss,omitempty"`
+	// LateLosses: test cases streamed with nothing lost that a span the
+	// agent learnt of after they went overlaps (a parser reports what it
+	// could not record behind the traffic), by name, with what they lost: the
+	// client charges them as it charges TestCase.CaptureLost. Under the proven
+	// switch only, to a client that charges losses.
+	LateLosses map[string]CaptureLosses `json:"tcs_late_losses,omitempty"`
 }
 
 // FrameStream names one of an agent's frame streams to a recording's client.

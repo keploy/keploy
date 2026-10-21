@@ -274,10 +274,13 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 	}
 }
 
-// A test case the finalize deletes (the agent revoked it: a mock it owned was
-// dropped) gets no entry, and the mocks recorded inside its window stay its
-// own: they are not handed to the test whose window overlapped it.
-func TestStart_ProvenWindowMappingsLeaveARevokedTestOut(t *testing.T) {
+// A test case the agent revoked (a mock it owned was dropped on its way to
+// keploy record) is kept under the proven switch, charged with the mock it
+// lacks, for the replay that judges it (keepRevoked): it is mapped as every
+// test case is, the mocks recorded inside its window its own, not handed to
+// the test whose window overlapped it. Before, it was deleted and got no
+// entry.
+func TestStart_ProvenWindowMappingsMapARevokedTestItKeeps(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	keepExitCode(t)
 	w := startWinRecording(t, &config.Config{}, nil, nil)
@@ -293,8 +296,8 @@ func TestStart_ProvenWindowMappingsLeaveARevokedTestOut(t *testing.T) {
 	w.testDB.mu.Lock()
 	deleted := append([]string(nil), w.testDB.deleted...)
 	w.testDB.mu.Unlock()
-	require.Equal(t, []string{"test-2"}, deleted, "precondition: the finalize deletes the revoked test")
-	want := []map[string][]string{{"test-1": {"rates-1"}, "test-3": {"rates-3"}}}
+	require.Empty(t, deleted, "the revoked test was deleted: under the switch it is kept, its loss its evidence")
+	want := []map[string][]string{{"test-1": {"rates-1"}, "test-2": {"rates-2"}, "test-3": {"rates-3"}}}
 	if got := w.batches(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("mappings written: %v; want %v", got, want)
 	}

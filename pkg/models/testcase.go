@@ -67,6 +67,16 @@ type TestCase struct {
 	// verdict asks that the run reach them. Written and read only under the
 	// proven switch.
 	Real []string `json:"real,omitempty" bson:"real,omitempty" yaml:"real,omitempty"`
+	// CaptureLost is what the agent's recording of the test case lost, under
+	// the proven switch: an exchange a connection carried over its window
+	// that keploy could not record as a mock, or mocks let go while it ran
+	// (CaptureLossExchangeUnrecorded, CaptureLossMockDropped). The agent
+	// streams such a test case with it, in place of leaving the test case
+	// out, to a client that takes it as the test case's evidence
+	// (IncomingOptions.ChargesLosses): keploy record charges it to the test
+	// case, and the replay that judges the test case decides it. Never
+	// stored: on the agent's stream only.
+	CaptureLost CaptureLosses `json:"capture_lost,omitempty" yaml:"-" bson:"-"`
 	// SourcePod is a transient, never-persisted routing tag: the name of the
 	// pod whose traffic produced this test case. Reentrancy seam for the
 	// enterprise DaemonSet agent's per-pod attribution — it stamps this from

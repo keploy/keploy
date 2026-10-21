@@ -573,6 +573,10 @@ type SyncMockManager struct {
 	// session-global for every TC whose window overlaps a span, so keeping a
 	// span narrow is the recorder's responsibility. Spans has its own lock.
 	orphans Spans
+	// orphanWhys keeps the orphan spans again by why they were recorded,
+	// under the proven switch only, for the test cases recorded over them
+	// (losses.go).
+	orphanWhys orphanWhys
 
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
@@ -3581,6 +3585,7 @@ func (m *SyncMockManager) CheckedBefore(t time.Time) {
 	}
 	m.pressure.CheckedBefore(t)
 	m.orphans.CheckedBefore(t)
+	m.orphanWhys.checkedBefore(t)
 }
 
 // pressureActiveAtLocked reports whether instant t fell inside any recorded

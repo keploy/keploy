@@ -2903,3 +2903,148 @@ func TestStart_ARecordingThatEndsBeforeItCapturesDoesNotWaitForPortQuestions(t *
 		t.Fatal("Start did not return after its setup was interrupted")
 	}
 }
+
+// Under the proven switch a test case a mock of which never reached the mock
+// file is kept, charged with what it lacks, for the replay that judges it,
+// never deleted: one whose mock keploy record could not save (test-1), one
+// the agent revoked after it streamed it (test-2), and one the agent streamed
+// with the drop already charged and revoked as well (test-3: one drop,
+// charged once), and one the agent streamed with nothing lost and found at
+// the stream's end a late span overlaps (test-5: its marker's LateLosses).
+// A test case that lost nothing (test-4) is charged nothing, and a late loss
+// for a test case keploy record did not save (ghost) charges none.
+// With the switch off they are deleted (TestStart_UnencodableMockIsSkippedAndItsTestRevoked,
+// TestStart_AgentRevokedTestIsNotCountedAsShortPool).
+func TestStart_UnderTheProvenSwitchARevokedTestIsKeptWithItsLoss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	var handed []RecordedLosses
+	var handedMu sync.Mutex
+	t.Cleanup(JudgeLossesLater(func(l RecordedLosses) {
+		handedMu.Lock()
+		defer handedMu.Unlock()
+		handed = append(handed, l)
+	}))
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	testDB := &recTestDB{}
+	mappingDB := &recMappingDB{}
+	r := &Recorder{
+		logger:    zap.NewNop(),
+		testDB:    testDB,
+		mockDB:    &recMockDB{unencodable: map[string]bool{"mock-bad": true}},
+		mappingDb: mappingDB,
+		telemetry: &recTelemetry{},
+		instrumentation: &lateBlockingInstr{blockingInstr: blockingInstr{f}, late: map[string]models.CaptureLosses{
+			"test-5": {{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}},
+			"ghost":  {{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}},
+		}},
+		testSetConf: recTestSetConf{},
+		hooks:       BaseRecordHooks{},
+		config:      &config.Config{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	ts := time.Unix(1700000000, 0)
+	send := func(m *models.Mock) {
+		t.Helper()
+		select {
+		case f.outgoing <- m:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("recorder never consumed mock %q", m.Name)
+		}
+	}
+	mock := func(name string) *models.Mock {
+		return &models.Mock{Version: models.GetVersion(), Name: name, Kind: models.HTTP,
+			Spec: models.MockSpec{ReqTimestampMock: ts, ResTimestampMock: ts}}
+	}
+	send(mock("mock-good"))
+	send(mock("mock-bad"))
+	droppedOnItsWay := models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: "a mock of its own was dropped on its way to keploy record, its queue full or closed"}}
+	for _, tc := range []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP},
+		{Name: "test-2", Kind: models.HTTP},
+		{Name: "test-3", Kind: models.HTTP, CaptureLost: droppedOnItsWay},
+		{Name: "test-4", Kind: models.HTTP},
+		{Name: "test-5", Kind: models.HTTP},
+	} {
+		select {
+		case f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("recorder never consumed %s", tc.Name)
+		}
+	}
+	for _, m := range []models.TestMockMapping{
+		{TestName: "test-1", MockIDs: []string{"mock-good", "mock-bad"}},
+		{TestName: "test-4", MockIDs: []string{"mock-good"}},
+	} {
+		select {
+		case f.mappings <- m:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("recorder never consumed %s's mapping", m.TestName)
+		}
+	}
+	send(&models.Mock{Version: models.GetVersion(), Name: "revoke-frame", Kind: models.RevokedTests,
+		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-2,test-3"}}})
+	waitForPersistedTestCase(t, testDB, "test-5")
+	require.Eventually(t, func() bool {
+		mappingDB.mu.Lock()
+		defer mappingDB.mu.Unlock()
+		return len(mappingDB.batches) > 0
+	}, 5*time.Second, 20*time.Millisecond, "no mapping batch was ever persisted")
+
+	cancel()
+	close(f.outgoing)
+	close(f.incoming)
+	close(f.mappings)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+
+	testDB.mu.Lock()
+	deleted := append([]string(nil), testDB.deleted...)
+	testDB.mu.Unlock()
+	require.Empty(t, deleted, "a test case was deleted under the proven switch: it is to be kept, its loss its evidence")
+
+	handedMu.Lock()
+	defer handedMu.Unlock()
+	require.Len(t, handed, 1, "what the recording lost was not handed to the pass that judges it")
+	by := handed[0].ByTestCase
+	want := map[string]string{
+		"test-1": mockNotSaved,
+		"test-2": mockDroppedAfterStreamed,
+		"test-3": "a mock of its own was dropped on its way to keploy record, its queue full or closed",
+	}
+	for name, what := range want {
+		lost := by[name]
+		require.Len(t, lost, 1, "%s's evidence: %v", name, lost)
+		assert.Equal(t, models.CaptureLossMockDropped, lost[0].Kind, name)
+		assert.Equal(t, uint64(1), lost[0].Count, "%s: one drop, charged once", name)
+		assert.Equal(t, what, lost[0].What, name)
+	}
+	assert.NotContains(t, by, "test-4", "test-4 lost nothing and is charged")
+	assert.NotContains(t, by, "ghost", "a test case keploy record did not save is charged")
+	if assert.Len(t, by["test-5"], 1, "test-5's late loss") {
+		assert.Equal(t, "MySQL: late", by["test-5"][0].What)
+	}
+}
+
+// lateBlockingInstr is blockingInstr whose agent said, at the stream's end,
+// what test cases it streamed with nothing lost had lost after all.
+type lateBlockingInstr struct {
+	blockingInstr
+	late map[string]models.CaptureLosses
+}
+
+func (l *lateBlockingInstr) TakeLateTestCaseLosses() map[string]models.CaptureLosses {
+	late := l.late
+	l.late = nil
+	return late
+}

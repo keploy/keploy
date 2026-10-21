@@ -15,6 +15,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -345,4 +347,48 @@ func TestRecordViaSupervisorWiresParserReads(t *testing.T) {
 	if returnedAt < 0 || pausedAt < 0 || returnedAt > pausedAt {
 		t.Errorf("reads.parserReturned() at statement %d, the teardown's r.PauseTees() at %d: the return must be seen before the tees are paused", returnedAt, pausedAt)
 	}
+}
+
+// Under the proven switch a connection's spans keep why (the parser's type,
+// and what was not recorded), so the test cases over them are charged with it
+// in place of being left out (syncMock.SyncMockManager.TestCaseLosses): what
+// it carries after its parser returns, and a request its parser returned
+// without reading.
+//
+// Not parallel: it sets the switch.
+func TestUnderTheProvenSwitchAConnectionsSpansSayWhyTheyWereRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	whyOver := func(mgr *syncMock.SyncMockManager, from, to time.Time) string {
+		got := mgr.TestCaseLosses("test-1", from, to)
+		if len(got) != 1 || got[0].Kind != models.CaptureLossExchangeUnrecorded {
+			return ""
+		}
+		return got[0].What
+	}
+	t.Run("what it carries after its parser returns", func(t *testing.T) {
+		mgr := syncMock.New(nil)
+		parser := returningParser{upTo: 1, returned: make(chan struct{})}
+		h := newDesyncFeedHarnessCtx(t, syncMock.NewContext(context.Background(), mgr), parser, newFeedProbe(), 1<<20)
+		h.writeApp(t, []byte("first"))
+		waitFor(t, parser.returned, "the parser never returned")
+		want := "test: " + unrecordedAfterStop
+		waitUntilT(t, 10*time.Second, "no span over the traffic after the parser returned says why it was recorded", func() bool {
+			h.writeApp(t, []byte("after"))
+			now := time.Now()
+			return whyOver(mgr, now.Add(-time.Millisecond), now) == want
+		})
+		waitForDest(t, h, "first")
+	})
+	t.Run("a request its parser returned without reading", func(t *testing.T) {
+		parser := peekingParser{stream: make(chan *fakeconn.FakeConn, 1), returned: make(chan struct{})}
+		h := newStopHarness(t, parser, zap.NewNop())
+		h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+		stream := <-parser.stream
+		two := h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+		waitFor(t, parser.returned, "the parser never returned")
+		waitFor(t, stream.Done(), "the dispatcher never closed the parser's streams")
+		waitUntilT(t, 10*time.Second, "no span over the request the parser returned without reading names why it was recorded", func() bool {
+			return strings.Contains(whyOver(h.mgr, two.sent, two.arrived), string(integrations.HTTP)+": "+unreadByParser)
+		})
+	})
 }

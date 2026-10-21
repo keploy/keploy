@@ -13,6 +13,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -524,5 +525,47 @@ func TestAsyncMySQLDecode_ExecuteOfADroppedPrepareIsDropped(t *testing.T) {
 				t.Fatal("the test cases over the execute are kept, and will fail at replay without its prepare")
 			}
 		})
+	}
+}
+
+// Under the proven switch the test cases over a response the legacy decoder
+// drops are charged with it, by why, in place of being left out
+// (syncMock.SyncMockManager.TestCaseLosses).
+//
+// Not parallel: it sets the switch.
+func TestUnderTheProvenSwitchAnUndecodableResponseChargesItsTestCases(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	var c undecodableCase
+	for _, cand := range undecodableCases() {
+		if !cand.valid {
+			c = cand
+			break
+		}
+	}
+	clientConn := newPipeConn()
+	decodeCtx := buildPostHandshakeDecodeCtx(clientConn)
+	decodeCtx.LastOp.Store(clientConn, wire.RESET)
+	decodeCtx.PreparedStatements[undecodableStmtID] = &mysql.StmtPrepareOkPacket{StatementID: undecodableStmtID, NumColumns: 2}
+	mocks := make(chan *models.Mock, 16)
+	mgr := syncMock.New(zaptest.NewLogger(t))
+	mgr.SetOutputChannel(mocks)
+	ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "undecodable-proven"), mgr)
+	base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	items := make(chan mysqlDecodeItem, 32)
+	tick := 0
+	send := func(fromClient bool, b []byte) {
+		tick++
+		items <- mysqlDecodeItem{fromClient: fromClient, data: b, ts: base.Add(time.Duration(tick) * time.Millisecond)}
+	}
+	send(true, c.command)
+	exchange := base.Add(time.Duration(tick) * time.Millisecond)
+	for _, p := range c.reply(t, decodeCtx.DeprecateEOF()) {
+		send(false, p)
+	}
+	close(items)
+	asyncMySQLDecode(ctx, zaptest.NewLogger(t), items, mocks, decodeCtx, clientConn, models.OutgoingOptions{})
+	got := mgr.TestCaseLosses("test-1", exchange, exchange)
+	if len(got) != 1 || got[0].Kind != models.CaptureLossExchangeUnrecorded || got[0].What != "MySQL: a response that could not be decoded" {
+		t.Fatalf("%s: the test case over the dropped exchange is charged %+v, want the MySQL response that could not be decoded", c.name, got)
 	}
 }

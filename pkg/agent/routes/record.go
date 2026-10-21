@@ -45,6 +45,35 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// streamedTestCase is a test case the stream sent with nothing lost, by name
+// and window, for the stream's end to check again (lateLosses).
+type streamedTestCase struct {
+	name       string
+	start, end time.Time
+}
+
+// maxStreamedRechecked bounds the test cases a stream keeps to check again at
+// its end: about 20 MiB of them.
+const maxStreamedRechecked = 1 << 18
+
+// lateLosses is what each test case in streamed, sent with nothing lost, has
+// lost by now (syncMock.TestCaseLosses): a span a parser reported after it
+// went overlaps it. By name; nil for none.
+func lateLosses(streamed []streamedTestCase) map[string]models.CaptureLosses {
+	var out map[string]models.CaptureLosses
+	for _, s := range streamed {
+		lost := syncmgr.Get().TestCaseLosses(s.name, s.start, s.end)
+		if len(lost) == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]models.CaptureLosses)
+		}
+		out[s.name] = lost
+	}
+	return out
+}
+
 // massSuppressionPercent is the share of a session's test cases that must be
 // suppressed before the completion summary is raised from Info to Warn.
 //
@@ -548,6 +577,22 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// Under the proven switch, to a client that charges what a test case's
+	// recording lost (keploy record's capture watch), a test case the checks
+	// below would leave out is streamed with the loss instead
+	// (syncMock.TestCaseLosses): a record-time loss is evidence, which the
+	// replay that judges the test case decides, never a test case gone from
+	// the recording unsaid. tcsKeptWithLoss counts them.
+	chargeLosses := provenswitch.On() && incomingReq.IncomingOptions.ChargesLosses
+	var tcsKeptWithLoss int
+	// streamed are, under chargeLosses, the test cases streamed with nothing
+	// lost: a span a parser reports behind the traffic can overlap one after
+	// it went (streamed before its connection's parser got to the exchange,
+	// or let go by the hold's bound unsettled). The stream's end checks them
+	// again, and its marker carries what that finds (lateLosses); one past
+	// maxStreamedRechecked is not kept, and counted (streamedUnrechecked).
+	var streamed []streamedTestCase
+	var streamedUnrechecked, tcsChargedLate int
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
 	send := func(t *models.TestCase) bool {
@@ -588,7 +633,17 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// concurrent TC that kept all its mocks.
 		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
 
-		if hasPressure || hasOrphan || mockDropped {
+		if (hasPressure || hasOrphan || mockDropped) && chargeLosses {
+			t.CaptureLost = syncmgr.Get().TestCaseLosses(t.Name, t.HTTPReq.Timestamp, tcRespTime)
+			tcsKeptWithLoss++
+			a.logger.Debug("agent: TC streamed with what its recording lost: memory pressure or an exchange a connection did not record overlapped its window, or a mock of its was capacity-dropped",
+				zap.String("tc_name", t.Name),
+				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+				zap.String("lost", t.CaptureLost.Text()),
+				zap.Int("tcs_kept_with_loss_so_far", tcsKeptWithLoss),
+			)
+		} else if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
 			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
@@ -600,6 +655,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 			)
 			return true
+		}
+		if chargeLosses && len(t.CaptureLost) == 0 && !t.HTTPReq.Timestamp.IsZero() {
+			if len(streamed) < maxStreamedRechecked {
+				streamed = append(streamed, streamedTestCase{name: t.Name, start: t.HTTPReq.Timestamp, end: tcRespTime})
+			} else {
+				streamedUnrechecked++
+			}
 		}
 
 		// Under the proven switch, the mock.real destinations its request
@@ -791,7 +853,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("test_cases", tcsUnsettled),
 				zap.Duration("held_without_progress_for", testCaseHoldMax))
 		}
-		logRecordingComplete("agent: recording complete",
+		if tcsKeptWithLoss > 0 {
+			// Each is in the recording, its loss its evidence: keploy
+			// record names them, and the replay that judges them decides.
+			a.logger.Warn("agent: some test cases were recorded while an exchange a connection carried could not be recorded as a mock, or mocks were let go: each is streamed with what it may lack, for the replay that judges it ("+provenswitch.Env+"=1)",
+				zap.Int("test_cases", tcsKeptWithLoss))
+		}
+		completeFields := []zap.Field{
 			// How the stream ended: "capture" (it closed its channel),
 			// "end" (its client asked the agent to end it, after it was
 			// told the agent held nothing more from before its stop), or
@@ -846,7 +914,20 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// before its stop unless its drain gave up, which it says: these
 			// are what the app served after the stop, or what that drain lost.
 			zap.Int("tcs_held_at_end", heldLen(hold)),
-		)
+		}
+		if chargeLosses {
+			// Under the switch, beside tcs_suppressed_total, which then
+			// stays 0: what used to be left out unsaid is here, and what
+			// the stream's end found the test cases streamed with nothing
+			// lost had lost after all.
+			completeFields = append(completeFields, zap.Int("tcs_kept_with_loss", tcsKeptWithLoss),
+				zap.Int("tcs_charged_late", tcsChargedLate), zap.Int("tcs_not_rechecked", streamedUnrechecked))
+			if streamedUnrechecked > 0 {
+				a.logger.Warn("agent: some test cases were streamed past the most the agent checks again at the stream's end: one a span it learnt of later overlaps is saved without that as its evidence ("+provenswitch.Env+"=1)",
+					zap.Int("test_cases", streamedUnrechecked), zap.Int("rechecked_at_most", maxStreamedRechecked))
+			}
+		}
+		logRecordingComplete("agent: recording complete", completeFields...)
 	}
 	// Before the hold's Drain (deferred earlier, so run later): what it still
 	// holds is counted first.
@@ -893,6 +974,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if hold != nil && !release() {
 				return
 			}
+			// What the test cases streamed with nothing lost turn out to
+			// have lost, now every span from before the client's stop is
+			// known: the marker carries it, for the client to charge.
+			late := lateLosses(streamed)
+			tcsChargedLate = len(late)
 			// The marker carries what the session lost (the summary's
 			// warnings): a client tears an agent's compose stack down once
 			// its drains end at the markers, and compose can drop the
@@ -910,6 +996,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				LeftOutInFlight:     leftOut.LeftOut(),
 				Unsettled:           tcsUnsettled,
 				MassSuppressed:      massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				KeptWithLoss:        tcsKeptWithLoss,
+				LateLosses:          late,
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return

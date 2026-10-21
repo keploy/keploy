@@ -1,15 +1,24 @@
 package routes
 
 import (
+	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -146,5 +155,204 @@ func TestMakeAgentReady_NoReadinessFileOn503(t *testing.T) {
 	}
 	if _, err := os.Stat(readyFile); err != nil {
 		t.Fatalf("after CA ready: expected agent.ready on disk: %v", err)
+	}
+}
+
+// streamIncoming streams tcs through HandleIncoming to a client that asked
+// with opts, and returns what the client got: each test case, and the
+// marker's summary of the session.
+func streamIncoming(t *testing.T, opts models.IncomingOptions, tcs ...*models.TestCase) ([]models.TestCase, models.StreamEndSummary) {
+	t.Helper()
+	syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
+	svc := streamsSvc{tc: make(chan *models.TestCase, len(tcs)), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	tok := rand.Text()
+	resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{IncomingOptions: opts}, tok)
+	defer done()
+	for _, tc := range tcs {
+		svc.tc <- tc
+	}
+	endRecordingStreams(tok)
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := multipart.NewReader(resp.Body, params["boundary"])
+	var got []models.TestCase
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			t.Fatalf("the stream ended without its marker, after %d test cases: %v", len(got), err)
+		}
+		switch part.FormName() {
+		case models.StreamEndPart:
+			var sum models.StreamEndSummary
+			if err := json.NewDecoder(part).Decode(&sum); err != nil {
+				t.Fatal(err)
+			}
+			return got, sum
+		case "metadata":
+			var tc models.TestCase
+			if err := json.NewDecoder(part).Decode(&tc); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, tc)
+		}
+	}
+}
+
+// Under the proven switch a test case whose recording lost a call (an orphan
+// span over its window: an exchange a connection carried that keploy could
+// not record; memory pressure; a mock of its own dropped) is never left out
+// unsaid: to a client that charges the loss (keploy record's capture watch,
+// IncomingOptions.ChargesLosses) it is streamed with it, the session's
+// summary counts it as kept with its loss, and tcs_suppressed_total stays 0.
+// A client that does not charge it (one that predates it), or the switch off,
+// gets it left out, as before: the byte-identical default.
+//
+// Not parallel: the spans are the package-global manager's, as
+// HandleIncoming's are, and it sets the switch.
+func TestATestCaseOverALossIsStreamedWithItToAClientThatChargesIt(t *testing.T) {
+	// Far from now, so no other test's test case overlaps the span.
+	base := time.Date(2002, 3, 4, 5, 6, 7, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	// Recorded under the switch: with it off, why is not kept.
+	t.Setenv(provenswitch.Env, "1")
+	syncmgr.Get().RecordOrphanWindowWhy(base, base.Add(time.Millisecond), "MySQL: mysql exchange not recorded")
+	tc := func(name string, from time.Duration) *models.TestCase {
+		t := &models.TestCase{Name: name}
+		t.HTTPReq.Timestamp = base.Add(from)
+		t.HTTPResp.Timestamp = base.Add(from + time.Millisecond)
+		return t
+	}
+	for _, c := range []struct {
+		proven, charges bool
+		kept            []string
+		suppressed      int
+		keptWithLoss    int
+	}{
+		{proven: true, charges: true, kept: []string{"over", "clear"}, keptWithLoss: 1},
+		{proven: true, charges: false, kept: []string{"clear"}, suppressed: 1},
+		{proven: false, charges: true, kept: []string{"clear"}, suppressed: 1},
+		{proven: false, charges: false, kept: []string{"clear"}, suppressed: 1},
+	} {
+		t.Run(fmt.Sprintf("proven=%v charges=%v", c.proven, c.charges), func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			got, sum := streamIncoming(t, models.IncomingOptions{ChargesLosses: c.charges}, tc("over", 0), tc("clear", time.Hour))
+			var names []string
+			for _, g := range got {
+				names = append(names, g.Name)
+				switch {
+				case g.Name == "over":
+					want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: mysql exchange not recorded"}}
+					if fmt.Sprint(g.CaptureLost) != fmt.Sprint(want) {
+						t.Fatalf("the test case over the span carries %+v, want %+v", g.CaptureLost, want)
+					}
+				case len(g.CaptureLost) != 0:
+					t.Fatalf("%s, over no span, carries %+v", g.Name, g.CaptureLost)
+				}
+			}
+			if strings.Join(names, ",") != strings.Join(c.kept, ",") {
+				t.Fatalf("streamed %v, want %v", names, c.kept)
+			}
+			if sum.TestCasesSuppressed != c.suppressed || sum.KeptWithLoss != c.keptWithLoss || sum.TestCasesSent != len(c.kept) {
+				t.Fatalf("the summary says %+v, want %d sent, %d suppressed, %d kept with their loss", sum, len(c.kept), c.suppressed, c.keptWithLoss)
+			}
+		})
+	}
+}
+
+// Under the proven switch, to a client that charges the loss, a test case
+// streamed with nothing lost that a span recorded after it went overlaps (a
+// parser reports what it could not record behind the traffic) is named at the
+// stream's end, in its marker, with what it lost; one streamed with its loss
+// is not named again, nor one the late span does not overlap. Without the
+// switch, or to a client that does not charge it, the marker names none.
+//
+// Not parallel: the spans are the package-global manager's, and it sets the
+// switch.
+func TestATestCaseALateSpanOverlapsIsNamedAtTheStreamsEnd(t *testing.T) {
+	base := time.Date(2003, 4, 5, 6, 7, 8, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	tc := func(name string, from time.Duration) *models.TestCase {
+		t := &models.TestCase{Name: name}
+		t.HTTPReq.Timestamp = base.Add(from)
+		t.HTTPResp.Timestamp = base.Add(from + time.Millisecond)
+		return t
+	}
+	t.Setenv(provenswitch.Env, "1")
+	syncmgr.Get().RecordOrphanWindowWhy(base, base.Add(time.Millisecond), "MySQL: early")
+	for _, c := range []struct {
+		proven, charges bool
+		late            bool
+	}{
+		{proven: true, charges: true, late: true},
+		{proven: true, charges: false},
+		{proven: false, charges: true},
+	} {
+		t.Run(fmt.Sprintf("proven=%v charges=%v", c.proven, c.charges), func(t *testing.T) {
+			if !c.proven {
+				t.Setenv(provenswitch.Env, "")
+			}
+			// Each run its own late span, recorded once its test case went.
+			at := time.Duration(time.Now().UnixNano()%1e6) * time.Hour / 1e6
+			late := base.Add(time.Hour + at)
+			syncmgr.Get().SetWatermark(nil)
+			svc := streamsSvc{tc: make(chan *models.TestCase, 4), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+			a := &Agent{logger: zap.NewNop(), svc: svc}
+			tok := rand.Text()
+			resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{IncomingOptions: models.IncomingOptions{ChargesLosses: c.charges}}, tok)
+			defer done()
+			lateTC := tc("late", late.Sub(base))
+			svc.tc <- tc("early", 0) // streamed with its loss (the early span), or left out
+			svc.tc <- lateTC
+			svc.tc <- tc("clear", late.Sub(base)+time.Hour)
+			_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mr := multipart.NewReader(resp.Body, params["boundary"])
+			// Read until "clear" went: every one is checked by then.
+			for seen := false; !seen; {
+				part, err := mr.NextPart()
+				if err != nil {
+					t.Fatalf("the stream ended before its test cases went: %v", err)
+				}
+				if part.FormName() == "metadata" {
+					var got models.TestCase
+					if err := json.NewDecoder(part).Decode(&got); err != nil {
+						t.Fatal(err)
+					}
+					seen = got.Name == "clear"
+				}
+			}
+			syncmgr.Get().RecordOrphanWindowWhy(late, late, "MySQL: late")
+			endRecordingStreams(tok)
+			var sum models.StreamEndSummary
+			for {
+				part, err := mr.NextPart()
+				if err != nil {
+					t.Fatalf("the stream ended without its marker: %v", err)
+				}
+				if part.FormName() == models.StreamEndPart {
+					if err := json.NewDecoder(part).Decode(&sum); err != nil {
+						t.Fatal(err)
+					}
+					break
+				}
+			}
+			if !c.late {
+				if len(sum.LateLosses) != 0 {
+					t.Fatalf("the marker names %+v", sum.LateLosses)
+				}
+				return
+			}
+			want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}}
+			if len(sum.LateLosses) != 1 || fmt.Sprint(sum.LateLosses["late"]) != fmt.Sprint(want) {
+				t.Fatalf("the marker names %+v, want the late test case alone with %+v", sum.LateLosses, want)
+			}
+		})
 	}
 }

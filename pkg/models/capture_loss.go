@@ -187,6 +187,30 @@ const (
 	// it: each test it carries traffic in fails (judged), a test's own kind
 	// (PerTest). Only under the proven switch.
 	CaptureLossUnrecorded CaptureLossKind = "connection_unrecorded"
+	// CaptureLossExchangeUnrecorded: in a record, the test case's window
+	// overlaps a span over which a connection of the application's carried
+	// an exchange keploy could not record as a mock (the agent's orphan
+	// spans): an exchange its parser left out (a response it cannot frame, a
+	// command that does not decode, a mock the incomplete-mock flag left
+	// out), a hole in a connection's capture, or what a connection carried
+	// once keploy stopped recording it. Which test case made the call cannot
+	// be told from the traffic, so each one recorded over the span carries it.
+	// What names where it came from. Never in the agent's counts: the agent
+	// charges it to the test case it streams (TestCase.CaptureLost) rather
+	// than leave that test case out, and the replay that judges the test case
+	// decides it: judged, a test's own (PerTest). Only under the proven
+	// switch.
+	CaptureLossExchangeUnrecorded CaptureLossKind = "exchange_unrecorded"
+	// CaptureLossMockDropped: in a record, keploy let go of mocks while the
+	// test case ran, so one of its calls may be missing from its mocks: the
+	// agent's memory guard paused its recording (it drops the mocks of the
+	// requests made under it), a mock of the test case's own was dropped on
+	// its way to keploy record (its queue was full or closed), or keploy
+	// record could not save one. What says which. Charged as
+	// CaptureLossExchangeUnrecorded is, by the agent to the test case it
+	// streams, or by keploy record to the test case it saved: judged, a
+	// test's own (PerTest). Only under the proven switch.
+	CaptureLossMockDropped CaptureLossKind = "mock_dropped"
 )
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
@@ -423,7 +447,15 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k.recordCharged()
+}
+
+// recordCharged says a loss of kind k is one a record charges to the test
+// case it happened over itself, never through the agent's counts: an exchange
+// keploy could not record (CaptureLossExchangeUnrecorded), and a mock it let
+// go (CaptureLossMockDropped). The test case's own (PerTest).
+func (k CaptureLossKind) recordCharged() bool {
+	return k == CaptureLossExchangeUnrecorded || k == CaptureLossMockDropped
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -609,6 +641,10 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy's capture could not read %d piece(s) of what the application's connections carried (memory it could not read; the kernel's own pages: sendfile, splice, io_uring fixed buffers; a call of more than 16 MiB; bytes moved in calls the capture saw no end of; bytes the application discarded unread), so the calls they belong to were not recorded whole", c.Count)
 	case CaptureLossUnrecorded:
 		return fmt.Sprintf("keploy stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and %d piece(s) of its traffic, its stops included, were neither recorded nor mocked", c.Count)
+	case CaptureLossExchangeUnrecorded:
+		return fmt.Sprintf("keploy could not record as mocks %d stretch(es) of what the application's connections carried while this test was recorded (an exchange its parser left out, a hole in a connection's capture, or a connection keploy had stopped recording), so a call of this test's may be missing from its mocks", c.Count)
+	case CaptureLossMockDropped:
+		return fmt.Sprintf("keploy let go of mocks %d time(s) while this test was recorded (memory pressure, a full queue on their way to keploy record, or a mock keploy record could not save), so a call of this test's may be missing from its mocks", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
 	default:

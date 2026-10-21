@@ -1630,6 +1630,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// AFTER those goroutines drain, but the mutexes are cheap insurance against
 	// a force-shutdown teardown racing an in-flight consumer.
 	revokedNames := map[string]struct{}{}
+	// revokedWhy is, under the proven switch, what each revoked test case
+	// lost (the first revoke's): there it is kept, charged with the loss
+	// (captureWatch.charge), not deleted. Guarded by revokedMu.
+	revokedWhy := map[string]string{}
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
 	var insertedMu sync.Mutex
@@ -1871,6 +1875,15 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 
+		// What the agent found, at the stream's end, that test cases it
+		// streamed with nothing lost had lost after all (proven switch).
+		r.chargeLateLosses(capWatch, func(name string) bool {
+			insertedMu.Lock()
+			defer insertedMu.Unlock()
+			_, ok := insertedNames[name]
+			return ok
+		})
+
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
 		// AFTER the TC streamed (the agent signalled them live via RevokedTests
 		// control frames). Applied here — after all inserts drained — so a revoke
@@ -1887,6 +1900,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		revokedSnap := make([]string, 0, len(revokedNames))
 		for n := range revokedNames {
 			revokedSnap = append(revokedSnap, n)
+		}
+		whySnap := make(map[string]string, len(revokedWhy))
+		for n, why := range revokedWhy {
+			whySnap[n] = why
 		}
 		revokedMu.Unlock()
 
@@ -1905,6 +1922,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 		insertedMu.Unlock()
+		if len(toDelete) > 0 && provenswitch.On() {
+			// Under the proven switch a record-time loss is evidence, never
+			// a test case gone from the recording: each is kept, charged
+			// with the mock it lacks, and the replay that judges it decides
+			// (keepRevoked).
+			toDelete = r.keepRevoked(capWatch, newTestSetID, toDelete, whySnap)
+		}
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
 			// TestDB interface (enterprise implements that interface; don't break it).
@@ -2029,7 +2053,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.String("next_step", "ensure the mapping store is enabled and reduce recording parallelism; re-record the test set if this count is non-trivial"))
 			}
 			if droppedSnapshot > 0 {
-				r.logger.Warn("recording finished with mocks dropped; the tests that owned them were revoked rather than recorded with a short mock pool",
+				r.logger.Warn(mocksDroppedMsg(),
 					zap.Int("mocksDropped", droppedSnapshot),
 					zap.Any("byKind", droppedKindSnapshot),
 					zap.String("testSetID", newTestSetID),
@@ -2613,6 +2637,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
+				capWatch.charge(testCase.Name, testCase.CaptureLost)
 				capWatch.afterTestCase(ctx, testCase.Name)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
@@ -2643,6 +2668,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 						if n = strings.TrimSpace(n); n != "" {
 							revokedMu.Lock()
 							revokedNames[n] = struct{}{}
+							if _, ok := revokedWhy[n]; !ok {
+								revokedWhy[n] = mockDroppedAfterStreamed
+							}
 							revokedMu.Unlock()
 						}
 					}
@@ -2733,7 +2761,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					// grows holes is worse than one that dies, so this must stay
 					// visible without drowning the log on a systematic failure.
 					if dropped == 1 || dropped%100 == 0 {
-						utils.LogError(r.logger, err, "dropping ONE unencodable mock and CONTINUING to record; the test that owns it is revoked, not recorded short",
+						utils.LogError(r.logger, err, unencodableMockMsg(),
 							zap.String("mockName", mock.Name),
 							zap.String("mockKind", mock.GetKind()),
 							zap.String("testSetID", newTestSetID),
@@ -2816,6 +2844,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				// of letting them reach replay without their mocks.
 				revokedMu.Lock()
 				revokedNames[testName] = struct{}{}
+				if _, ok := revokedWhy[testName]; !ok {
+					revokedWhy[testName] = mockNotSaved
+				}
 				revokedMu.Unlock()
 			}, &shortPoolByTest, capWatch.mapped)
 	})
@@ -2923,6 +2954,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
+	}
+	// Under the proven switch the capture watch charges a test case with what
+	// its recording lost (captureWatch.charge), so the agent streams it with
+	// the loss rather than leave it out: the replay that judges it decides.
+	if _, counts := r.instrumentation.(CaptureLossReader); counts && provenswitch.On() {
+		incomingOpts.ChargesLosses = true
 	}
 
 	// Create channels to receive incoming and outgoing data.

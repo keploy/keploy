@@ -634,7 +634,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 			// than save them without its mock (routes/record.go checks
 			// WasMockOrphanedInWindow).
 			if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
-				mgr.RecordOrphanWindow(reqTimestamp, resTimestamp)
+				mgr.RecordOrphanWindowWhy(reqTimestamp, resTimestamp, "MySQL: a response that could not be decoded")
 			}
 			if stmtPrepareOk != nil && pendingCommand.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
 				if lostStatements == nil {

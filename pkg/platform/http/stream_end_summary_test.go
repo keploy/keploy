@@ -84,3 +84,53 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		}
 	}
 }
+
+// The marker's late losses (what test cases streamed with nothing lost had
+// lost by the stream's end) are kept for the recording to take, whoever
+// started the agent, and taken once.
+func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T) {
+	lost := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: mysql exchange not recorded"}}
+	sum := models.StreamEndSummary{TestCasesSent: 2, LateLosses: map[string]models.CaptureLosses{"test-2": lost}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mw := multipart.NewWriter(w)
+		w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", `form-data; name="`+models.StreamEndPart+`"`)
+		p, _ := mw.CreatePart(h)
+		_ = json.NewEncoder(p).Encode(sum)
+		_ = mw.Close()
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	for _, started := range []bool{false, true} {
+		cfg := &config.Config{}
+		cfg.Agent.AgentURI = srv.URL
+		client := New(zap.NewNop(), nil, cfg)
+		client.startedAgent.Store(started)
+		ctx, cancel := context.WithCancel(context.Background())
+		grp, gctx := errgroup.WithContext(ctx)
+		gctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+		tcs, err := client.GetIncoming(gctx, models.IncomingOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-tcs:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("the stream did not end at its marker")
+		}
+		for range tcs {
+		}
+		cancel()
+		got := client.TakeLateTestCaseLosses()
+		if len(got) != 1 || len(got["test-2"]) != 1 || got["test-2"][0] != lost[0] {
+			t.Fatalf("started %v: the client kept %+v, want test-2's %+v", started, got, lost)
+		}
+		if again := client.TakeLateTestCaseLosses(); len(again) != 0 {
+			t.Fatalf("started %v: taken twice: %+v", started, again)
+		}
+	}
+}

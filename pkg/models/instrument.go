@@ -360,6 +360,14 @@ type ConditionalDstCfg struct {
 type IncomingOptions struct {
 	Filters  []Filter
 	BasePath string
+	// ChargesLosses says the client takes what the recording of a test case
+	// lost (TestCase.CaptureLost) as that test case's evidence: keploy
+	// record's capture watch, under the proven switch. The agent then streams
+	// a test case whose window a lost exchange or a let-go mock overlaps with
+	// the loss, rather than leave it out of the recording unsaid. A client
+	// that does not set it (one that predates it, or the switch off) gets
+	// such test cases left out, as before.
+	ChargesLosses bool `json:",omitempty"`
 }
 
 type SetupOptions struct {
