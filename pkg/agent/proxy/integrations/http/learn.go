@@ -799,10 +799,32 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
+	// unclaimed are the mocks this call's claim failed on, each with the
+	// store's revision read before the pass that failed read its scope. A
+	// claim fails when another call took the mock first, or when the store
+	// moved on between the scope and the claim (a test's begin closed the
+	// view the scope was read from): either changes the store, and the call
+	// looks again. One the store still shows, with no change at all since
+	// that pass read its scope, would fail the same way, and looking again
+	// would find it, and fail, forever (a session-lifetime mock in the
+	// per-test tier, whose claim updates the session tier): the call
+	// misses instead.
+	unclaimed := map[*models.Mock]uint64{}
+	stuck := func(m *models.Mock) bool {
+		at, ok := unclaimed[m]
+		return ok && storeRevision(mockDb) == at
+	}
+	refused := func(m *models.Mock, res learn.Result, sc scope) (*models.Mock, *learnMiss, error) {
+		h.Logger.Warn("keploy's mock store would not hand out the recording the learn step chose for this call; learning nothing from it",
+			zap.String("mock", m.Name))
+		res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy's mock store would not hand out "+m.Name+", which it still shows, so keploy cannot answer from it"
+		return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
+		rev := storeRevision(mockDb)
 		sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
@@ -837,6 +859,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				rp := recordedParts(picked)
 				rec = n.shape(rp, destOf(live, rp))
 			}
+			if stuck(picked) {
+				return refused(picked, res, sc)
+			}
 			if own && !tracker.Answer(test, picked) {
 				continue
 			}
@@ -852,6 +877,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				if err != nil {
 					return nil, nil, err
 				}
+				unclaimed[picked] = rev
 				continue
 			}
 			commit()
@@ -862,6 +888,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
+			if stuck(m) {
+				return refused(m, res, sc)
+			}
 			if !own && m.Spec.ReqTimestampMock.IsZero() {
 				// A pool mock's earlier places are every recording made
 				// before it: of one with no recorded time, none can be
@@ -935,6 +964,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
+				unclaimed[m] = rev
 				continue
 			}
 			for _, l := range learned {
@@ -952,6 +982,16 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		}
 		return nil, miss, nil
 	}
+}
+
+// storeRevision is the mock store's revision (MockManager.Revision: it moves
+// with every change a parser can see, a consume, a staging, a view's open),
+// zero for a store that keeps none.
+func storeRevision(mockDb integrations.MockMemDb) uint64 {
+	if r, ok := mockDb.(interface{ Revision() uint64 }); ok {
+		return r.Revision()
+	}
+	return 0
 }
 
 // pairing is what the learn step learned on a paired mock: its noise, its

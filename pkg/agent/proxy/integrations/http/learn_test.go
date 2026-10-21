@@ -2825,3 +2825,130 @@ func TestLearnMatchAPoolMockOfNoRecordedTimeIsRefused(t *testing.T) {
 		t.Fatalf("served %v miss %+v err %v; want refused, no recording is known to precede it", served, miss, err)
 	}
 }
+
+// A mock the store shows and will not hand out (a session-lifetime mock in
+// the per-test tier: its claim updates the session tier, which does not hold
+// it) ends the call as a miss: looking again finds it, as it was, and its
+// claim would fail forever. Exactly matched or paired, the call returns. The
+// harness bounds the wait and cancels the call's context, which the learn
+// step reads on each pass, so a call that spins is stopped.
+func TestLearnMatchAMockItsStoreWillNotHandOutIsAMissNotAHang(t *testing.T) {
+	for _, tc := range []struct{ name, live string }{
+		{"matched exactly", `{"id":"o-1"}`},
+		{"paired", `{"id":"o-2"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			own := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"id":"o-1"}`, nil, `{"ok":true}`)
+			own.TestModeInfo.Lifetime = models.LifetimeSession
+			db := &learnDb{perTest: []*models.Mock{own}}
+			ctx, cancel := context.WithCancel(learn.WithTracker(context.Background(), tr))
+			defer cancel()
+			type result struct {
+				served *models.Mock
+				miss   *learnMiss
+				err    error
+			}
+			done := make(chan result, 1)
+			go func() {
+				served, miss, err := h.learnMatch(ctx, live("POST", "/v1/orders", tc.live, nil), db, n, opts)
+				done <- result{served, miss, err}
+			}()
+			select {
+			case r := <-done:
+				if r.err != nil || r.served != nil || r.miss == nil || !strings.Contains(r.miss.res.Why, "would not hand out mock-0") {
+					t.Fatalf("served %v miss %+v err %v; want a miss: the store would not hand out mock-0", r.served, r.miss, r.err)
+				}
+			case <-time.After(10 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("the learn step kept looking again at a mock its store will not hand out")
+			}
+		})
+	}
+}
+
+// flakyClaimDb is learnDb whose first consume is lost to a change of the
+// store (another call took the mock and gave it back, or a test's begin
+// closed the view the scope was read from): the store's revision moves.
+type flakyClaimDb struct {
+	*learnDb
+	lost bool
+	rev  uint64
+}
+
+func (d *flakyClaimDb) Revision() uint64 { return d.rev }
+func (d *flakyClaimDb) DeleteFilteredMock(m models.Mock) bool {
+	if !d.lost {
+		d.lost = true
+		d.rev++
+		return false
+	}
+	return d.learnDb.DeleteFilteredMock(m)
+}
+
+// A claim lost while the store changed is looked at again, and the call
+// answered from what the store shows then, matched exactly or paired.
+func TestLearnMatchAClaimLostToAStoreChangeIsLookedAtAgain(t *testing.T) {
+	for _, tc := range []struct{ name, live string }{
+		{"matched exactly", `{"id":"o-1"}`},
+		{"paired", `{"id":"o-2"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			own := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"id":"o-1"}`, nil, `{"ok":true}`)
+			db := &flakyClaimDb{learnDb: &learnDb{perTest: []*models.Mock{own}}}
+			served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/orders", tc.live, nil), db, n, opts)
+			if err != nil || served == nil || !db.lost {
+				t.Fatalf("served %v miss %+v err %v lost %v; want answered on the second look", served, miss, err, db.lost)
+			}
+		})
+	}
+}
+
+// swapDuringScopeDb is learnDb whose view is swapped while the learn step's
+// first pass reads its scope (a test's begin landing between them): that
+// pass's claim, against the view it read, fails, and the next view shows the
+// same mock again, which a claim then takes.
+type swapDuringScopeDb struct {
+	*learnDb
+	reads int
+	rev   uint64
+	lost  bool
+}
+
+func (d *swapDuringScopeDb) Revision() uint64 { return d.rev }
+func (d *swapDuringScopeDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	d.reads++
+	if d.reads == 1 {
+		d.rev++
+	}
+	return d.learnDb.GetPerTestMocksInWindow()
+}
+func (d *swapDuringScopeDb) DeleteFilteredMock(m models.Mock) bool {
+	if !d.lost {
+		d.lost = true
+		return false
+	}
+	return d.learnDb.DeleteFilteredMock(m)
+}
+
+// The store's revision a failed claim is judged by is read before the pass
+// reads its scope: a view swapped while the scope was read is a change of the
+// store since that revision, so the call looks again, and is answered, rather
+// than missing at a test's boundary.
+func TestLearnMatchAViewSwappedWhileTheScopeWasReadIsLookedAtAgain(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	own := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"id":"o-1"}`, nil, `{"ok":true}`)
+	db := &swapDuringScopeDb{learnDb: &learnDb{perTest: []*models.Mock{own}}}
+	served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/orders", `{"id":"o-2"}`, nil), db, n, opts)
+	if err != nil || served == nil || !db.lost {
+		t.Fatalf("served %v miss %+v err %v lost %v; want answered on the second look", served, miss, err, db.lost)
+	}
+}
