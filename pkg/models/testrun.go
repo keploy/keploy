@@ -463,7 +463,8 @@ type UnmatchedCall struct {
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty
-	// everywhere else.
+	// everywhere else, and for a call of that round keploy could not judge
+	// because its own store could not read a recorded answer back.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
 

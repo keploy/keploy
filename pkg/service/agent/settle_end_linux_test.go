@@ -106,8 +106,8 @@ func TestAnEndWithAConnectionWhoseHeldRequestsAreUnknownIsNotVerified(t *testing
 	_, err := a.GetMockErrors(ctx)
 	require.ErrorIs(t, err, models.ErrUnmatchedCallsUnread)
 
-	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}), "a test case opens")
-	err = a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}})
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil), "a test case opens")
+	err = a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil)
 	require.ErrorIs(t, err, errHoldsUnknown, "a test case's end is told it is not verified")
 }
 
@@ -140,11 +140,11 @@ func TestATestDuringWhichTheListenerDroppedPacketsIsNotVerified(t *testing.T) {
 	require.Contains(t, w.Evidence.Reason, "the kernel dropped 1 packet(s) at keploy's proxy listener while o::TestB ran")
 	require.True(t, w.Evidence.Unread, "not verified")
 
-	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}))
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil))
 	p.smu.Lock()
 	p.drops = 7
 	p.smu.Unlock()
-	err := a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}})
+	err := a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil)
 	require.ErrorIs(t, err, errDropped)
 }
 
@@ -170,7 +170,7 @@ func TestABeginWaitsForTheCallsMadeBefore(t *testing.T) {
 			return nil
 		}},
 		{"keploy test's open", func() error {
-			return a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}})
+			return a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil)
 		}},
 	} {
 		t.Run(open.name, func(t *testing.T) {

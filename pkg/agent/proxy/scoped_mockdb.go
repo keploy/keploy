@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -367,6 +368,25 @@ func (s *scopedMockDb) StagedMocks() []*models.Mock {
 
 var _ integrations.StagedReader = (*scopedMockDb)(nil)
 
+// RangeRecordedBefore forwards the store's recordings before t
+// (integrations.RecordedBeforeReader), whatever this view's allowlist shows:
+// the learn step's earlier places are the recording's. Over a store that
+// keeps no such reader it is an error, not what the view holds: the view
+// cannot visit every recording made before t, and a caller that took what it
+// holds for all of them would miss the ones kept on disk.
+func (s *scopedMockDb) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
+	if rb, ok := s.MockMemDb.(integrations.RecordedBeforeReader); ok {
+		return rb.RangeRecordedBefore(t, visit)
+	}
+	return errNoRecordedBefore
+}
+
+// errNoRecordedBefore is a scoped view's answer over a store that cannot read
+// every recording made before an instant.
+var errNoRecordedBefore = errors.New("the mock store cannot read every recording made before an instant")
+
+var _ integrations.RecordedBeforeReader = (*scopedMockDb)(nil)
+
 // OwnedByTest implements integrations.TestOwnership: a mock is the open
 // test's own when its worker's current allowlist (the test's mapping) names
 // it.
@@ -551,6 +571,12 @@ func (s *scopedMockDb) InRecordedTestWindow(t time.Time) (bool, bool) {
 		return w.InRecordedTestWindow(t)
 	}
 	return false, false
+}
+
+// InPool forwards integrations.PoolMembership: whose a mock is by the
+// replay's scope table is the store's, whatever view a worker reads.
+func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
+	return integrations.InPool(s.MockMemDb, m)
 }
 
 // SameRecordedTestWindow forwards integrations.TestWindows.

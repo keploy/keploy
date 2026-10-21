@@ -387,8 +387,10 @@ type member struct {
 //
 // It returns why it had to kill a daemon that made no progress on its way
 // out, "" when it did not, or when the kill was the user's (Ctrl+C): a
-// shutdown that kill cut is not known.
-func stopAdopted(logger *zap.Logger, reached []utils.Reached) string {
+// shutdown that kill cut is not known. Each step the daemons take on their
+// way out is a movement of moved, the teardown scope of the run whose app
+// left them (nil: none).
+func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) string {
 	if !adopting.Load() {
 		return ""
 	}
@@ -404,7 +406,7 @@ func stopAdopted(logger *zap.Logger, reached []utils.Reached) string {
 			closePidfd(m.fd)
 		}
 	}()
-	return stopMembers(logger, ms, actingOn(reached))
+	return stopMembers(logger, ms, actingOn(reached), moved)
 }
 
 // actingOn is whether a member is acting on keploy's interrupt: reached by
@@ -496,7 +498,7 @@ func members(pids []int) []member {
 // once, at the press of Ctrl+C the stop offers), and waits until each has
 // exited, or is held by the kernel without progress. stallKill says why it
 // killed for want of progress; "" when it did not.
-func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (stallKill string) {
+func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string) {
 	pids := make([]int, 0, len(ms))
 	var stopping []int
 	for _, m := range ms {
@@ -549,6 +551,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (sta
 		}
 		if mark.Advance(markExit(ms)) {
 			quiet = 0
+			moved.Note()
 			continue
 		}
 		if quiet++; quiet < stopStallChecks {

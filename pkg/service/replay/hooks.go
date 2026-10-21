@@ -147,6 +147,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			RelayBaseURL:    h.cfg.Test.RelayBaseURL,
 
 			AppPortReachability: h.appPortReachability(),
+			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		}
 		if h.appAt != nil {
 			cfg.SentTo = h.noteWhereSent
@@ -213,6 +214,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			PortMappings:    portMappings,
 
 			AppPortReachability: h.appPortReachability(),
+			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {

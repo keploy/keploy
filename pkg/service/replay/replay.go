@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -436,6 +437,10 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// drainClock is the clock the teardown's drains measure a stall on
+	// (teardownDrain): nil, keploy's own runnable time; a test drives its
+	// own.
+	drainClock stall.Clock
 	// unattributedSets are, with the proven switch off, the test sets of this
 	// run with a test whose misses keploy could not all read
 	// (MissesUnattributed): nothing may learn noise from them, which the
@@ -644,6 +649,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
 
+	// The run's own teardown scope: what keploy sees its stops do (the
+	// agent's, the app's, the daemons', a compose project's down) moves it,
+	// and the run's drains below wait while it moves.
+	ctx, teardown := utils.NewTeardownScope(ctx)
+
 	// The exit code, recorded on EVERY way out of this function.
 	//
 	// There are nine returns and exactly one of them used to record the run:
@@ -757,13 +767,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// Bounded drain: a setup/run goroutine that wedges under contention and does
 		// not observe cancel() must not be able to block this teardown forever, or
 		// SIGINT (which runs through this same defer) is swallowed and the process
-		// hangs until an external SIGKILL. See utils.DrainErrGroup.
-		if err := utils.DrainErrGroup(r.logger, "replay", g, 30*time.Second); err != nil {
+		// hangs until an external SIGKILL. Bounded by the run's teardown making
+		// no progress, not by a time: a stop of the agent that keeps reporting
+		// its steps, past any number of seconds, is never cut (teardownDrain).
+		if err := r.teardownDrain("replay", g, teardownDrainStall, teardown); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 
 		setupCtxCancel()
-		if err := utils.DrainErrGroup(r.logger, "replay-setup", setupErrGrp, 30*time.Second); err != nil {
+		if err := r.teardownDrain("replay-setup", setupErrGrp, teardownDrainStall, teardown); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 	}()
@@ -1647,15 +1659,35 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 	r.firstRun = false
 }
 
-// testSetDrainTimeout bounds the drain of a test set's goroutines (the
-// application and its watcher) once the set is over. A var, not a const, so a
-// test can shrink it rather than wait it out.
-var testSetDrainTimeout = 30 * time.Second
+// testSetDrainStall bounds the drain of a test set's goroutines (the
+// application and its watcher) once the set is over: how long, in time keploy
+// could run, the set's teardown may make no progress (teardownDrain). A var,
+// not a const, so a test can shrink it rather than wait it out.
+var testSetDrainStall = 30 * time.Second
+
+// teardownDrainStall is the same bound for the drains of a run's teardown.
+const teardownDrainStall = 30 * time.Second
+
+// teardownDrain waits for g, a group of the teardown of scope's run (or test
+// set), for as long as that teardown moves (utils.TeardownScope: the agent's
+// stop reporting its steps, the app or the daemons it left taking theirs on
+// their way out, a compose project's down), and gives it up only once the
+// teardown has made no progress for bound of keploy's runnable time. A fixed
+// 30 s of wall time forced the shutdown of a stop still under way on a loaded
+// host. A group that gives up still returns nil: a timeout never fails the
+// teardown (utils.DrainErrGroup).
+func (r *Replayer) teardownDrain(name string, g *errgroup.Group, bound time.Duration, scope *utils.TeardownScope) error {
+	err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, name, g, bound, scope.Moves)
+	return err
+}
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
 	// Whether this run of the set is judged is this run's to say: a mark left
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
+	// Where the app's ports are published is this run's to say too: the
+	// agent container an attempt starts may publish them on other host ports.
+	publishedPortsOf(r.logger, r.instrumentation).newRun(testSetID)
 
 	// Under the proven switch the set is judged only if one agent process
 	// answered for all of it (watchAgent): the watch begins before anything
@@ -1665,6 +1697,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if agentWatch != nil {
 		defer agentWatch.Stop()
 	}
+
+	// The set's own teardown scope, part of its run's: what keploy sees the
+	// stop of the set's app (and the daemons it left) do moves it, and the
+	// set's drain waits while it moves.
+	ctx, setTeardown := utils.NewTeardownScope(ctx)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -1696,8 +1733,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			notifyCancel()
 		}
 		runTestSetCtxCancel()
-		// Bounded drain so a wedged per-test-set goroutine can't hang teardown/SIGINT.
-		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, testSetDrainTimeout); err != nil {
+		// Bounded drain so a wedged per-test-set goroutine can't hang
+		// teardown/SIGINT; by the set's teardown making no progress, not
+		// by a time (teardownDrain).
+		if err := r.teardownDrain("replay-testset", runTestSetErrGrp, testSetDrainStall, setTeardown); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
 	}()
@@ -4062,7 +4101,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// off it writes no DepResult (see the NOTE further down), so
 		// --assert-dependencies cannot promote anything here. (Under the
 		// switch it judges its tests on their test mocks itself.) Without this call a CI run that points the flag at a
-		// set of SSE/chunked tests exits 0 for an assertion that never
+		// set of streaming tests exits 0 for an assertion that never
 		// executed — the flag would be silently inert, which is exactly the
 		// failure mode the flag exists to remove. deferredStreaming is true
 		// unconditionally: reaching this block means len(streamingTests) > 0.
@@ -4311,7 +4350,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						received = &bytes.Buffer{}
 						streamReader = io.TeeReader(streamResp.Reader, received)
 					}
-					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(expectedStream.HTTPResp, streamReader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					// An answer that is not a stream (a JSON error to a recorded
+					// stream, say) has no frames to compare: it is read whole and
+					// compared below as a normal response is, so its result carries
+					// what the app answered. It is read through streamReader so a
+					// recorded frame's use is still asserted against it.
+					notAStream := streamResp.StreamConfig.Mode == pkg.HTTPStreamModeNone
+					var streamMatched bool
+					var capturedBody string
+					var streamMismatchInfo *pkg.StreamMismatchInfo
+					var streamErr error
+					if notAStream {
+						var body []byte
+						body, streamErr = io.ReadAll(streamReader)
+						capturedBody = string(body)
+					} else {
+						streamMatched, capturedBody, streamMismatchInfo, streamErr = pkg.CompareHTTPStream(expectedStream.HTTPResp, streamReader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					}
 					if closeErr := streamResp.Reader.Close(); closeErr != nil {
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
 					}
@@ -4357,6 +4412,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							// it open (the stall rule, or its keepalives):
 							// not judged, failing closed (ruling a).
 							sayNoAnswer(r.logger, tc.Name, streamErr, "failed to read streaming response")
+						} else if errors.Is(streamErr, pkg.ErrStreamNotRecorded) {
+							// Its recording saved nothing of its stream
+							// (a body over 1 MB): refused, its stream
+							// unread, never passed on nothing.
+							r.logger.Error("refusing this streaming test: its recording keeps nothing of its stream to compare the app's answer with; failing it",
+								zap.String("testcase", tc.Name),
+								zap.String("testset", testSetID),
+								zap.Error(streamErr))
 						} else {
 							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
 						}
@@ -4375,7 +4438,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						continue
 					}
 
-					if !streamMatched {
+					if notAStream {
+						httpResp = &models.HTTPResp{
+							StatusCode:    streamResp.StatusCode,
+							StatusMessage: streamResp.StatusMessage,
+							Body:          capturedBody,
+							Header:        streamResp.Header,
+						}
+					} else if !streamMatched {
 						r.logger.Error("streaming response mismatch detected", zap.String("testcase", tc.Name))
 						hadStreamingMismatch = true
 						streamMismatch = streamMismatchInfo
@@ -6521,7 +6591,9 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // setup used (BeforeTestSetCompose -> MockOutgoing -> StoreMocks ->
 // SendMockFilterParamsToAgent -> MakeAgentReadyForDockerCompose) and the result
 // is confirmed via stats; when the re-registration does not take, the test set
-// fails loudly instead of proceeding mockless.
+// fails loudly instead of proceeding mockless. When it fails and the app's
+// container is no longer running, the failure names the app's exit rather than
+// a replaced agent (appExitFailure).
 //
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
@@ -6565,8 +6637,21 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		return nil
 	}
 
-	r.logger.Warn("keploy-agent no longer holds this test set's stored mocks (it was replaced during the docker compose bring-up); re-registering the session's mocks with the replacement before any test fires",
-		zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Int("agentLoaded", stats.Loaded))
+	// An agent that does not answer at all may have gone with the app rather
+	// than been replaced (see appExitFailure), so say which before concluding.
+	// The re-registration below runs either way, exactly as before: only what
+	// is reported changes.
+	var appExit error
+	if err != nil {
+		appExit = r.appContainerExit(ctx)
+	}
+	if appExit != nil {
+		r.logger.Warn("keploy-agent does not answer and the application's container is no longer running; re-registering the session's mocks before any test fires all the same",
+			zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Error(appExit))
+	} else {
+		r.logger.Warn("keploy-agent no longer holds this test set's stored mocks (it was replaced during the docker compose bring-up); re-registering the session's mocks with the replacement before any test fires",
+			zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Int("agentLoaded", stats.Loaded))
+	}
 
 	// Latch here, at the moment we conclude the agent was replaced, so EVERY
 	// later send carries the CLI's consumption map — not just the one below.
@@ -6597,12 +6682,21 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	}
 	r.realPushed.Store(true)
 	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at MockOutgoing: %w", testSetID, err)
 	}
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
 	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases)); err != nil {
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
@@ -6628,6 +6722,9 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 				zap.String("testSetID", testSetID))
 			return nil
 		}
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks could not be confirmed: %w", testSetID, err)
 	}
 	if !agentHoldsStoredCorpus(stored, confirmed.Loaded) {
@@ -6637,6 +6734,40 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	r.logger.Info("re-registered the session's mocks with the replacement keploy-agent",
 		zap.String("testSetID", testSetID), zap.Int("mocks", stored))
 	return nil
+}
+
+// appContainerExit is the application's container no longer running, as the
+// instrumentation reports it (AppContainerExitReader), and nil while it runs,
+// when the instrumentation cannot tell, or once ctx has ended: an interrupted
+// or timed-out run is reported as it always was.
+func (r *Replayer) appContainerExit(ctx context.Context) error {
+	reader, ok := r.instrumentation.(AppContainerExitReader)
+	if !ok || ctx.Err() != nil {
+		return nil
+	}
+	return reader.AppContainerExit(ctx)
+}
+
+// appExitFailure is ensureAgentHoldsStoredMocks' failure when setting
+// keploy-agent up again failed (agentErr) and the application's container is
+// no longer running, and nil when it runs or that cannot be told; the caller
+// then reports the agent as replaced, as before.
+//
+// Under docker compose the agent is a service in the app's project, and
+// compose stops every service the moment the app's container exits. The agent
+// that does not answer is then not a replaced one, and "replaced" sends
+// whoever reads it after the wrong thing: what failed is the app, and its own
+// output says why, so its recent logs are logged with the failure.
+func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentErr error) error {
+	exit := r.appContainerExit(ctx)
+	if exit == nil {
+		return nil
+	}
+	r.logger.Error("the application's container is no longer running, and keploy-agent could not be set up for this test set during the docker compose bring-up; no test of this set was run",
+		zap.String("testSetID", testSetID), zap.Error(exit),
+		zap.String("appLogs", r.instrumentation.GetRecentAppLogs(ctx)),
+		zap.String("next_step", "fix why the application exited: its last log lines are in appLogs"))
+	return fmt.Errorf("%w during the docker compose bring-up, before test set %q ran any test; setting keploy-agent up for it failed as well: %w", exit, testSetID, agentErr)
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
@@ -7963,7 +8094,7 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
 	defer cancel()
 
-	if scheme, host, port, ok := resolveProbeTarget(r.config.Test, testCase, testSetID, r.logger); ok {
+	if scheme, host, port, ok := resolveProbeTarget(wctx, r.config.Test, testCase, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID)); ok {
 		if err := waitForHTTPServing(wctx, scheme, host, port); err != nil {
 			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
 				zap.String("host", host), zap.String("port", port), zap.Error(err))

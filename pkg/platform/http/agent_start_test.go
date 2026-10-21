@@ -457,6 +457,38 @@ func TestDockerModeWithoutItsCapabilitiesChangesNothingAndSaysWhy(t *testing.T) 
 	}
 }
 
+// A Setup sets up a new agent: the container its client named for the last
+// one is not this one's, whether the Setup goes on to name its own, sets up a
+// native agent that has none, or is refused. Kept, a native agent's watches
+// would watch that container instead of its process, and its runs would be
+// noted on it. The refused docker run Setup is the one that gets to the
+// forgetting without starting anything.
+func TestASetupForgetsTheContainerItsClientNamedForTheLastAgent(t *testing.T) {
+	if utils.CheckRequiredPermissions() == nil {
+		t.Skip("this process has the capabilities the check asks for, so a docker run Setup would go on to start the agent container")
+	}
+	a := deadAgentClient(t, false)
+	t.Cleanup(a.forgetAgentContainer)
+	a.nameAgentContainer(fmt.Sprintf("keploy-v3-last-%d", os.Getpid()))
+	at := agentHost(a.conf.Agent.AgentURI)
+	if _, ok := containerAt.Load(at); !ok {
+		t.Fatal("setup: the last agent's address does not name its container")
+	}
+	err, _, _ := setupRefused(t, a, "docker run --rm --name app alpine true", models.SetupOptions{CommandType: string(utils.DockerRun)})
+	if !errors.Is(err, utils.ErrPrivilegeRequired) {
+		t.Fatalf("got %v, want the Setup refused, carrying %q", err, utils.ErrPrivilegeRequired)
+	}
+	a.mu.Lock()
+	kept := a.agentContainer
+	a.mu.Unlock()
+	if kept != nil {
+		t.Fatalf("a Setup left its client with the container %q it named for the last agent", kept.name)
+	}
+	if _, ok := containerAt.Load(at); ok {
+		t.Fatal("a Setup left the last agent's address naming its container")
+	}
+}
+
 // docker compose starts the agent as a service of the user's own project and
 // has never been held to the capability check, so the first thing it can be
 // refused is the perf_event_paranoid write -- and that is a privilege failure,
@@ -686,5 +718,49 @@ func TestComposeReadsWithNothingReadFromTheStoppedAgent(t *testing.T) {
 	}
 	if err := a.ComposeAgentFailure(); err != nil {
 		t.Fatalf("ComposeAgentFailure with nothing read returned %v", err)
+	}
+}
+
+// AppContainerExit names the app's container and how it ended once it no
+// longer runs, as docker reports it -- the replay's agent-replacement guard
+// reports that instead of a replaced agent -- and is nil while it runs.
+func TestAppContainerExitNamesTheAppsContainerAndItsExit(t *testing.T) {
+	const at, later = "2026-10-09T11:06:52Z", "2026-10-09T11:06:53Z"
+	for _, tc := range []struct {
+		name  string
+		state container.State
+		want  string // "" while the app runs
+	}{
+		{"exited", container.State{Status: "exited", ExitCode: 1, StartedAt: at, FinishedAt: later},
+			"the application container app exited with code 1"},
+		{"restarting", container.State{Status: "restarting", Running: true, Restarting: true, ExitCode: 1, StartedAt: at, FinishedAt: later},
+			"the application container app exited with code 1 and is restarting"},
+		{"dead", container.State{Status: "dead", ExitCode: 137, StartedAt: at, FinishedAt: later},
+			"the application container app is dead (exit code 137)"},
+		{"out of memory", container.State{Status: "exited", ExitCode: 137, OOMKilled: true, StartedAt: at, FinishedAt: later},
+			"the application container app exited with code 137, killed for running out of memory"},
+		{"running", container.State{Status: "running", Running: true, StartedAt: at}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := tc.state
+			d := inspectOnly{resp: container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: &st}}}
+			a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
+			a.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "docker compose up", d, models.SetupOptions{CommandType: string(utils.DockerCompose), Container: "app"}))
+
+			err := a.AppContainerExit(context.Background())
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("got %v while the app runs", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	if err := (&AgentClient{logger: zap.NewNop()}).AppContainerExit(context.Background()); err != nil {
+		t.Fatalf("with no app, got %v", err)
 	}
 }

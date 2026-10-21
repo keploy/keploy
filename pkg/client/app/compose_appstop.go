@@ -402,7 +402,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 			return
 		}
 	}()
-	switch utils.WaitExitByEvents(a.logger, stopped, w.procs) {
+	switch utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()) {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:
@@ -425,7 +425,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// The kill ends it but in the kernel: wait for that at the same rule;
 	// a container still there after it is an error the next set's start
 	// would meet.
-	if utils.WaitExitByEvents(a.logger, stopped, w.procs) != utils.StopExited {
+	if utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()) != utils.StopExited {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
 	return killed, nil

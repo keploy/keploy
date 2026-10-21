@@ -31,10 +31,12 @@ const (
 	bpfMapOrigDstByCookie             = "orig_dst_by_cookie"
 	bpfMapPendingBinds                = "pending_binds"
 	bpfMapPidMapInsertFailures        = "pid_map_insert_failures"
+	bpfMapPidStartTimes               = "pid_start_times"
 	bpfMapProxyConnsEstablished       = "proxy_conns_established"
 	bpfMapProxyListenerMark           = "proxy_listener_mark"
 	bpfMapReadyAgentMntns             = "ready_agent_mntns"
 	bpfMapReadyCfg                    = "ready_cfg"
+	bpfMapReadyHolders                = "ready_holders"
 	bpfMapReadyIdentBuf               = "ready_ident_buf"
 	bpfMapReadyLastRestart            = "ready_last_restart"
 	bpfMapReadyListenEvents           = "ready_listen_events"
@@ -45,6 +47,7 @@ const (
 	bpfMapReadySeen                   = "ready_seen"
 	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
+	bpfMapSocketClassifyFailures      = "socket_classify_failures"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
 	bpfMapUdpMemberAddrs              = "udp_member_addrs"
 	bpfMapUdpMemberSocks              = "udp_member_socks"
@@ -69,6 +72,7 @@ const (
 	bpfProgK_readyExec                = "k_ready_exec"
 	bpfProgK_readyExit                = "k_ready_exit"
 	bpfProgK_readyFork                = "k_ready_fork"
+	bpfProgK_sockCreate               = "k_sock_create"
 	bpfProgK_sockops                  = "k_sockops"
 	bpfProgK_udp4Recvmsg              = "k_udp4_recvmsg"
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
@@ -140,6 +144,7 @@ type bpfProgramSpecs struct {
 	K_readyExec             *ebpf.ProgramSpec `ebpf:"k_ready_exec"`
 	K_readyExit             *ebpf.ProgramSpec `ebpf:"k_ready_exit"`
 	K_readyFork             *ebpf.ProgramSpec `ebpf:"k_ready_fork"`
+	K_sockCreate            *ebpf.ProgramSpec `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
@@ -172,10 +177,12 @@ type bpfMapSpecs struct {
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
+	PidStartTimes               *ebpf.MapSpec `ebpf:"pid_start_times"`
 	ProxyConnsEstablished       *ebpf.MapSpec `ebpf:"proxy_conns_established"`
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	ReadyAgentMntns             *ebpf.MapSpec `ebpf:"ready_agent_mntns"`
 	ReadyCfg                    *ebpf.MapSpec `ebpf:"ready_cfg"`
+	ReadyHolders                *ebpf.MapSpec `ebpf:"ready_holders"`
 	ReadyIdentBuf               *ebpf.MapSpec `ebpf:"ready_ident_buf"`
 	ReadyLastRestart            *ebpf.MapSpec `ebpf:"ready_last_restart"`
 	ReadyListenEvents           *ebpf.MapSpec `ebpf:"ready_listen_events"`
@@ -186,6 +193,7 @@ type bpfMapSpecs struct {
 	ReadySeen                   *ebpf.MapSpec `ebpf:"ready_seen"`
 	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.MapSpec `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.MapSpec `ebpf:"udp_member_socks"`
@@ -237,10 +245,12 @@ type bpfMaps struct {
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
+	PidStartTimes               *ebpf.Map `ebpf:"pid_start_times"`
 	ProxyConnsEstablished       *ebpf.Map `ebpf:"proxy_conns_established"`
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	ReadyAgentMntns             *ebpf.Map `ebpf:"ready_agent_mntns"`
 	ReadyCfg                    *ebpf.Map `ebpf:"ready_cfg"`
+	ReadyHolders                *ebpf.Map `ebpf:"ready_holders"`
 	ReadyIdentBuf               *ebpf.Map `ebpf:"ready_ident_buf"`
 	ReadyLastRestart            *ebpf.Map `ebpf:"ready_last_restart"`
 	ReadyListenEvents           *ebpf.Map `ebpf:"ready_listen_events"`
@@ -251,6 +261,7 @@ type bpfMaps struct {
 	ReadySeen                   *ebpf.Map `ebpf:"ready_seen"`
 	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
+	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.Map `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.Map `ebpf:"udp_member_socks"`
@@ -278,10 +289,12 @@ func (m *bpfMaps) Close() error {
 		m.OrigDstByCookie,
 		m.PendingBinds,
 		m.PidMapInsertFailures,
+		m.PidStartTimes,
 		m.ProxyConnsEstablished,
 		m.ProxyListenerMark,
 		m.ReadyAgentMntns,
 		m.ReadyCfg,
+		m.ReadyHolders,
 		m.ReadyIdentBuf,
 		m.ReadyLastRestart,
 		m.ReadyListenEvents,
@@ -292,6 +305,7 @@ func (m *bpfMaps) Close() error {
 		m.ReadySeen,
 		m.ReadySocks,
 		m.RedirectProxyMap,
+		m.SocketClassifyFailures,
 		m.TargetNamespacePids,
 		m.UdpMemberAddrs,
 		m.UdpMemberSocks,
@@ -329,6 +343,7 @@ type bpfPrograms struct {
 	K_readyExec             *ebpf.Program `ebpf:"k_ready_exec"`
 	K_readyExit             *ebpf.Program `ebpf:"k_ready_exit"`
 	K_readyFork             *ebpf.Program `ebpf:"k_ready_fork"`
+	K_sockCreate            *ebpf.Program `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
@@ -360,6 +375,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_readyExec,
 		p.K_readyExit,
 		p.K_readyFork,
+		p.K_sockCreate,
 		p.K_sockops,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -255,8 +257,10 @@ func TestHTTPResp_YAML_NonUTF8BodyRoundTrips(t *testing.T) {
 
 // TestHTTPResp_YAML_TextStreamsStillChunk guards the other direction: the UTF-8
 // guard must not disable streaming for ordinary text bodies, which is the whole
-// point of the chunk encoder.
+// point of the chunk encoder. An octet stream is kept as a frame with the
+// proven switch off (recordedFramesOf), and whole under it.
 func TestHTTPResp_YAML_TextStreamsStillChunk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
 	in := HTTPResp{
 		StatusCode: 200,
 		Header:     map[string]string{"Content-Type": "application/octet-stream"},
@@ -478,4 +482,171 @@ func TestHTTPResp_MarshalYAML_BodyABlockScalarCannotCarry(t *testing.T) {
 	require.Len(t, back["list"][0].StreamBody, 1)
 	v, _ := back["list"][0].StreamBody[0].ValueByKey("data")
 	assert.Equal(t, chunk, v)
+}
+
+// A recording keeps a body as frames only when the response is a stream by
+// keploy's one rule (HTTPStreamOf): a stream's Content-Type. Go's JSON written
+// with no Content-Type goes out as text/plain, chunked and with no
+// Content-Length, and used to be written as a list of frames for that alone;
+// the replay then took the frames for evidence of a stream. It is one
+// document, and is kept as one.
+func TestHTTPResp_MarshalYAML_ChunkedTextPlainJSONStaysFlat(t *testing.T) {
+	json := `[{"id":"cluster-1","name":"one"},{"id":"cluster-2","name":"two"}]`
+	for _, header := range []map[string]string{
+		{"Content-Type": "text/plain; charset=utf-8"},
+		{"Content-Type": "text/plain; charset=utf-8", "Transfer-Encoding": "chunked"},
+		{"Content-Type": "text/plain"},
+	} {
+		in := HTTPResp{StatusCode: 200, Header: header, Body: json + "\n", Timestamp: time.Unix(1700000000, 0).UTC()}
+		out, err := yamlLib.Marshal(in)
+		require.NoError(t, err)
+		assert.NotContains(t, string(out), "- ts:", "a chunked text/plain JSON body (header %v) was written as frames:\n%s", header, out)
+		assert.NotContains(t, string(out), "raw:", "a chunked text/plain JSON body (header %v) was written as frames:\n%s", header, out)
+
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		assert.Empty(t, got.StreamBody, "a chunked text/plain JSON body (header %v) was read back as frames", header)
+		assert.Equal(t, in.Body, got.Body, "a chunked text/plain JSON body (header %v) did not round-trip whole", header)
+	}
+
+	// A dependency's chunked text/plain answer, kept as a mock, is served
+	// back byte for byte: as frames its line endings and its last newline
+	// were lost.
+	text := "line one\r\nline two\r\n"
+	out, err := yamlLib.Marshal(HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/plain"}, Body: text})
+	require.NoError(t, err)
+	var got HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &got))
+	assert.Equal(t, text, got.Body, "a chunked text/plain body did not round-trip byte for byte:\n%s", out)
+}
+
+// A stream's Content-Type still has its body kept as frames, whatever its
+// length framing: SSE by events, NDJSON by lines.
+func TestHTTPResp_MarshalYAML_StreamContentTypesStillFrame(t *testing.T) {
+	for _, c := range []struct {
+		header map[string]string
+		body   string
+		frames int
+	}{
+		{map[string]string{"Content-Type": "text/event-stream", "Content-Length": "30"}, "data: one\n\ndata: two\n\n", 2},
+		{map[string]string{"Content-Type": "application/x-ndjson; charset=utf-8"}, "{\"n\":1}\n\n{\"n\":2}\n", 2},
+		{map[string]string{"Content-Type": "application/ndjson", "Content-Length": "16"}, "{\"n\":1}\n{\"n\":2}\n", 2},
+	} {
+		out, err := yamlLib.Marshal(HTTPResp{StatusCode: 200, Header: c.header, Body: c.body, Timestamp: time.Unix(1700000000, 0).UTC()})
+		require.NoError(t, err)
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		assert.Len(t, got.StreamBody, c.frames, "a %v body was not kept as its frames:\n%s", c.header, out)
+	}
+}
+
+// framesData is the fields of each frame, what a stream is compared by (a
+// frame's TS is when it came).
+func framesData(chunks []HTTPStreamChunk) [][]HTTPStreamDataField {
+	out := make([][]HTTPStreamDataField, 0, len(chunks))
+	for _, c := range chunks {
+		out = append(out, c.Data)
+	}
+	return out
+}
+
+// throughYAML is resp written as YAML and read back, as a recording keeps it.
+func throughYAML(t *testing.T, resp HTTPResp) HTTPResp {
+	t.Helper()
+	out, err := yamlLib.Marshal(resp)
+	require.NoError(t, err)
+	var back HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &back))
+	return back
+}
+
+// carriedAsJSON is resp, recorded as frames and read back from YAML, after a
+// trip through JSON: its body, the one form of the stream JSON carries.
+func carriedAsJSON(t *testing.T, resp HTTPResp) HTTPResp {
+	t.Helper()
+	recorded := throughYAML(t, resp)
+	require.Equal(t, framesData(resp.StreamBody), framesData(recorded.StreamBody), "YAML keeps the frames")
+
+	j, err := json.Marshal(recorded)
+	require.NoError(t, err)
+	var carried HTTPResp
+	require.NoError(t, json.Unmarshal(j, &carried))
+	require.Empty(t, carried.StreamBody, "JSON carries the body alone: one form of the stream, which an edit of the body (api-server's golden body) cannot leave stale")
+	require.Equal(t, recorded.Body, carried.Body)
+	return carried
+}
+
+// The flat body a recording's SSE frames read back as is the SSE wire of
+// those frames: a test case carried as JSON, which carries that body alone,
+// is recorded again (a cloud test case written to YAML) with the frames its
+// recording kept. An event's data lines, a blank one among them, a value that
+// starts with a space, and a comment are no other event, or field, read back
+// from it.
+func TestAnSSEStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
+	frames := []HTTPStreamChunk{
+		{Data: []HTTPStreamDataField{{Key: "id", Value: "1"}, {Key: "event", Value: "log"}, {Key: "data", Value: "line one\nline two"}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: " indented"}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: "before\n\nafter"}}},
+		{Data: []HTTPStreamDataField{{Key: "comment", Value: " keepalive"}}},
+		{Data: []HTTPStreamDataField{{Key: "event", Value: "tick"}, {Key: "data", Value: ""}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: "  two spaces\n one"}}},
+	}
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "text/event-stream"},
+		StreamBody: frames,
+	}
+	carried := carriedAsJSON(t, resp)
+	assert.Equal(t, strings.Join([]string{
+		"id:1\nevent:log\ndata:line one\ndata:line two",
+		"data:  indented",
+		"data:before\ndata:\ndata:after",
+		": keepalive",
+		"event:tick\ndata:",
+		"data:   two spaces\ndata:  one",
+	}, "\n\n"), carried.Body, "a data line each, a comment as a comment")
+	assert.Equal(t, framesData(frames), framesData(throughYAML(t, carried).StreamBody), "body: %q", carried.Body)
+}
+
+// The same for a stream of lines: NDJSON, whose blank lines are keepalives,
+// and a text stream, whose blank lines are lines, a last one too. A recording
+// keeps a text/plain body whole (recordedFramesOf): its frames are an older
+// keploy's, and carried as JSON it is no stream (HTTPStreamOf, not framed),
+// compared whole by this body. So the body read as lines is those frames, and
+// is the wire they were read from, a blank last line ending in its newline.
+func TestALineStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
+	raw := func(vs ...string) []HTTPStreamChunk {
+		out := make([]HTTPStreamChunk, 0, len(vs))
+		for _, v := range vs {
+			out = append(out, HTTPStreamChunk{Data: []HTTPStreamDataField{{Key: "raw", Value: v}}})
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name, contentType, wire string
+		frames                  []HTTPStreamChunk
+	}{
+		{"ndjson", "application/x-ndjson", "{\"a\":1}\n{\"b\":\"x y\"}", raw(`{"a":1}`, `{"b":"x y"}`)},
+		{"text", "text/plain", "first\n\nthird", raw("first", "", "third")},
+		{"text ending in a blank line", "text/plain", "first\n\nlast\n\n", raw("first", "", "last", "")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			resp := HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": c.contentType},
+				StreamBody: c.frames,
+			}
+			carried := carriedAsJSON(t, resp)
+			assert.Equal(t, c.wire, carried.Body)
+			format := httpStreamFormatOf(c.contentType)
+			assert.Equal(t, framesData(c.frames), framesData(SplitStreamBody(format, carried.Body)), "body: %q", carried.Body)
+			again := throughYAML(t, carried)
+			if recordedFramesOf(c.contentType) == HTTPStreamNone {
+				assert.Empty(t, again.StreamBody, "a recording keeps a %s body whole", c.contentType)
+				assert.Equal(t, carried.Body, again.Body)
+				return
+			}
+			assert.Equal(t, framesData(c.frames), framesData(again.StreamBody), "body: %q", carried.Body)
+		})
+	}
 }

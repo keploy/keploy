@@ -109,6 +109,12 @@ type App struct {
 	// made once those containers are gone (the stale-agent probe before the
 	// next up).
 	composeProjectSeen atomic.Pointer[string]
+	// teardown is the teardown scope of the run that set the app up or ran
+	// it last (utils.TeardownScopeOf of Setup's or Run's context): each step
+	// keploy sees its stop take -- the app's processes or container on
+	// their way out, the compose project's down -- is a movement of it,
+	// which that run's drains wait on (utils.DrainErrGroupProgress).
+	teardown atomic.Pointer[utils.TeardownScope]
 	// composeAPI is the Engine API client the compose library drives the
 	// stack through (docker.NewComposeAPIClient). Built with the first runner
 	// and kept for the App's life, as the docker client is: the runner is
@@ -142,6 +148,7 @@ type App struct {
 }
 
 func (a *App) Setup(ctx context.Context) error {
+	a.noteTeardownScope(ctx)
 
 	// isDetachMode scans the command for -d/--detach; --from-container has no
 	// command, so there is nothing to scan and nothing to refuse.
@@ -492,7 +499,16 @@ func (a *App) Kind(_ context.Context) utils.CmdType {
 }
 
 func (a *App) Run(ctx context.Context) models.AppError {
+	a.noteTeardownScope(ctx)
 	return a.run(ctx)
+}
+
+// noteTeardownScope keeps the teardown scope ctx carries, if any, as the
+// app's (App.teardown).
+func (a *App) noteTeardownScope(ctx context.Context) {
+	if s := utils.TeardownScopeOf(ctx); s != nil {
+		a.teardown.Store(s)
+	}
 }
 
 func (a *App) RecentLogs(ctx context.Context) string {
@@ -706,7 +722,7 @@ func (a *App) ComposeDown() {
 	// network), for the next `up` to trip over. It was cut at 8 s, with the
 	// agent and the app's dependencies still stopping.
 	//
-	// The teardown's drains (utils.DrainErrGroup) wait for it: the down stops
+	// The teardown's drains (utils.DrainErrGroupProgress) wait for it: the down stops
 	// keploy's agent with the stack, an agent's stop in progress
 	// (utils.BeginAgentStop), which ends on its own.
 	if !a.useComposeLibrary() && len(a.composeContent) == 0 && a.composeFile == "" {
@@ -1068,6 +1084,7 @@ func (a *App) composeDownContext(project string) (context.Context, context.Cance
 			if n := moved.Load(); n != last {
 				last = n
 				meter.Reset()
+				a.teardown.Load().Note()
 				continue
 			}
 			if meter.Expired() {
@@ -1268,9 +1285,11 @@ func (a *App) forceRemoveContainers(ids []string) {
 }
 
 // Teardown budgets. The record/replay teardown drains the app-runner goroutine
-// under utils.DrainErrGroup's 30s budget (pkg/service/record/record.go,
-// pkg/service/replay/replay.go). The compose down is not under it: it holds
-// the drains while it runs (utils.BeginAgentStop, ComposeDown), and ends on
+// while the run's teardown makes progress, and gives it up after 30 s of
+// keploy's runnable time without any (utils.DrainErrGroupProgress, in
+// pkg/service/record/record.go and pkg/service/replay/replay.go). The
+// compose down is not under that bound: it holds the drains while it runs
+// (utils.BeginAgentStop, ComposeDown), and ends on
 // its own, at the down's end or at keploy's cut of a down that made no
 // progress (composeDownStall). The docker calls around it are each bounded,
 // so the rest of a compose teardown (run()'s cmdCancel) returns well inside
@@ -1835,7 +1854,7 @@ func isCrashedDependency(appService string, s composeServiceState) bool {
 //
 // It waits for the removals, so that `up` does not meet a container still
 // being removed, up to preRunRemoveBudget in all. It runs on the app-runner
-// goroutine, which record and replay drain under DrainErrGroup's budget, so it
+// goroutine, which record and replay drain under a bound (DrainErrGroupProgress), so it
 // stops as soon as the run is cancelled: there is no retry to clean up for.
 func (a *App) removeCrashedDependencies(ctx context.Context, states []composeServiceState) {
 	ctx, cancel := context.WithTimeout(ctx, preRunRemoveBudget)
@@ -2209,7 +2228,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// stopped, and os/exec's WaitDelay then blocks the teardown for ~25s
 				// waiting on it. When the app is kept alive on the outer replay
 				// errgroup (compose + mocking), that teardown runs under
-				// utils.DrainErrGroup's 30s budget, so the overrun trips a spurious
+				// a drain's 30s bound (utils.DrainErrGroupProgress), so the overrun trips a spurious
 				// "teardown drain timed out … a goroutine is ignoring context
 				// cancellation" error and fails an otherwise-green run.
 				//
@@ -2270,7 +2289,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 					// (setend_stop.go); the drains wait for it.
 					killed, reached, err = func() (string, []utils.Reached, error) {
 						defer utils.BeginAppStop()()
-						return utils.InterruptProcessTreeStop(a.logger, cmd.Process.Pid, syscall.SIGINT)
+						return utils.InterruptProcessTreeStop(a.logger, cmd.Process.Pid, syscall.SIGINT, a.teardown.Load())
 					}()
 				} else {
 					killed, reached, err = utils.InterruptProcessTreeReached(a.logger, cmd.Process.Pid, syscall.SIGINT)

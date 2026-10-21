@@ -35,7 +35,11 @@ import (
 //
 // Each step waits on an event: an accept, a read beginning or returning, a
 // request held or released, an idle wait marked or released, a connection
-// closing. No clock decides. A test
+// closing; and, for a connection the proxy closed whose orphaned socket the
+// application's FIN has not reached yet, which no event tells, the orphan's
+// state, looked at again until it takes the FIN or is gone
+// (proxy.WaitPairedBytes). No wall clock decides: only a hang budget measured
+// in time the agent could run ends that look as unknown. A test
 // whose calls keploy cannot count (models.ErrProxyConnsUnsupported, or hooks
 // not loaded) is not settled: "unknown" is never "none in flight". Nor is one
 // with a connection whose parser reads ahead and does not say what it holds,

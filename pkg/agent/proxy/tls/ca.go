@@ -1508,7 +1508,19 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 	return nil
 }
 
-// SrcPortToDstURL map is used to store the mapping between source port and DstURL for the TLS connection
+// SrcPortToDstURL holds, under a client's source port, the name the client
+// asked for on its latest connection through keploy's MITM: the target of
+// its CONNECT request once it made one, then, from its handshake, the SNI of
+// its ClientHello, else that target ("" for neither).
+//
+// A source port is not a connection: another client with the same port (a pod
+// of the same node reaching the DaemonSet agent, or a connection that took a
+// port before the previous one's entry went) reads or overwrites this one's
+// entry. So nothing in this module reads it. A connection's names are read off
+// the connection: its SNI from the TLS connection keploy served it
+// (util.ClientServerName), its CONNECT target from its context
+// (ConnectTargetFrom). It is still filed for the readers outside this module
+// (keploy/integrations' Postgres v3 recorder).
 var SrcPortToDstURL = sync.Map{}
 
 // srcPortOwner tracks which live connection currently owns a source port,
@@ -1598,6 +1610,20 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 }
 
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
+	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
+}
+
+// certForClient is CertForClient with what the connection itself says of its
+// destination: the host its CONNECT request named ("" when it made none) and
+// the IP it dialled (nil when unknown). The leaf is named from the SNI, else
+// the CONNECT target; with neither, it is named for dstIP, because a client
+// that dialled an IP literal sends no SNI and checks the leaf's IP SANs.
+//
+// Nothing else names it. The name used to fall back to the one filed under
+// the client's source port (SrcPortToDstURL), and a port is not a connection:
+// another client on the same port (a pod of the same node, or a connection
+// whose port was reused) had its host put on this client's leaf.
+func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -1619,20 +1645,32 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Generate a new server certificate and private key for the given hostname.
 	// When the client omits SNI (common after CONNECT tunnel setup where the
 	// client already knows the target from the CONNECT request), fall back to
-	// the hostname stored by handleConnectTunnel in SrcPortToDstURL.
+	// the host its CONNECT request named.
 	dstURL := clientHello.ServerName
-	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
-	sourcePort := remoteAddr.Port
-
 	if dstURL == "" {
-		if stored, ok := SrcPortToDstURL.Load(sourcePort); ok {
-			if s, ok := stored.(string); ok && s != "" {
-				dstURL = s
-			}
-		}
+		dstURL = connectTarget
+	}
+	// The client's source port names nothing here. It is the key the
+	// channel-binding shim pairs this leaf under (publishMITM) and
+	// SrcPortToDstURL files the name under, which a connection that is not
+	// TCP has none of (0: neither is done).
+	sourcePort := 0
+	if remoteAddr, ok := clientHello.Conn.RemoteAddr().(*net.TCPAddr); ok {
+		sourcePort = remoteAddr.Port
+	}
+	if sourcePort != 0 {
+		// Filed as it always was, for the map's readers outside this module:
+		// what this handshake was asked for, "" included.
+		SrcPortToDstURL.Store(sourcePort, dstURL)
 	}
 
-	SrcPortToDstURL.Store(sourcePort, dstURL)
+	// The name the leaf is minted for. With no SNI and no CONNECT target the
+	// client dialled an IP literal, and it verifies the leaf against an IP SAN,
+	// which cfssl makes of an IP host.
+	certHost := dstURL
+	if certHost == "" && dstIP != nil {
+		certHost = dstIP.String()
+	}
 
 	// Cache key = host + backdate bucket + CA identity. Keying on the hostname
 	// alone was wrong twice over: (1) it ignored backdate, so a frozen-time
@@ -1641,13 +1679,13 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// ignored which CA signed the leaf, so a regenerated CA could serve a stale
 	// leaf. A zero backdate — the live record path — buckets to one "live" key so
 	// repeated connections to the same host still hit the cache.
-	cacheKey := certCacheKey(dstURL, backdate, caCertParsed)
+	cacheKey := certCacheKey(certHost, backdate, caCertParsed)
 
 	// Check the cert cache before generating a new certificate.
-	if dstURL != "" {
+	if certHost != "" {
 		if cached, ok := getCertCache().Get(cacheKey); ok {
 			probeCert(logger, "cache-hit", dstURL, 0)
-			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
+			logger.Debug("reusing cached certificate", zap.String("hostname", certHost))
 			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
@@ -1659,9 +1697,9 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	}()
 
 	serverReq := &csr.CertificateRequest{
-		CN: dstURL,
+		CN: certHost,
 		Hosts: []string{
-			dstURL,
+			certHost,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -1729,7 +1767,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Cache the generated certificate for reuse by subsequent connections to the
 	// same host, under the composite key (host + backdate bucket + CA identity)
 	// computed above — so a frozen-time replay and a live run never share a leaf.
-	if dstURL != "" {
+	if certHost != "" {
 		getCertCache().Add(cacheKey, &serverTLSCert)
 	}
 

@@ -114,9 +114,10 @@ func (a *Agent) restartKey(key string) error {
 }
 
 // serveTestExactly opens test id under exact serving: its test mocks, the
-// data-plane mocks of its mapping, in recorded order. A mapping that names a
-// mock the loaded recording does not have refuses: what the test owns cannot
-// be told.
+// data-plane mocks of its mapping, in recorded order, and its variables, with
+// none bound, in the same step (openExactTest). A mapping that names a mock
+// the loaded recording does not have refuses: what the test owns cannot be
+// told.
 func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	es, err := a.exactServer()
 	if err != nil {
@@ -150,13 +151,30 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	a.provenMu.Lock()
 	a.proven.unservable = unservable
 	a.provenMu.Unlock()
-	if err := es.ServeExactTest(id, owned); err != nil {
+	// A test is the scope of the variables keploy mock replay binds: it
+	// begins with none bound, as it opens.
+	if err := a.openExactTest(es, id, owned, nil); err != nil {
 		return err
 	}
 	a.provenMu.Lock()
 	a.proven.servedSince = time.Now()
 	a.provenMu.Unlock()
 	return nil
+}
+
+// openExactTest opens test under exact serving, served exactly owned, and
+// begins its variables with given bound, in one step (coreAgent.
+// ExactTestOpener): no call the test's mocks answer binds before its
+// variables begin. A proxy that cannot opens it only when it keeps no
+// variables, and none were given (opensWithoutVariables).
+func (a *Agent) openExactTest(es coreAgent.ExactServer, test string, owned []*models.Mock, given []models.VariableBinding) error {
+	if o, ok := es.(coreAgent.ExactTestOpener); ok {
+		return o.OpenExactTest(test, owned, given)
+	}
+	if err := a.opensWithoutVariables(given); err != nil {
+		return err
+	}
+	return es.ServeExactTest(test, owned)
 }
 
 // testMocks is the test mocks among a test's mapped names: the data-plane
@@ -186,10 +204,11 @@ func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
 
 // serveKeployTestExactly is a keploy test filter under the proven switch
 // (models.ExactServing): the set's staging call stages every mock once and
-// serves the set's pool; a test case's call serves it exactly its own mocks;
-// any other call serves the pool again, between test cases. A keploy test
-// run has one key, models.PoolKeyNone.
-func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFilterParams) error {
+// serves the set's pool; a test case's call serves it exactly its own mocks,
+// and with open begins its variables as it opens (OpenTestCase); any other
+// call serves the pool again, between test cases. A keploy test run has one
+// key, models.PoolKeyNone.
+func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFilterParams, open *opening) error {
 	es, err := a.exactServer()
 	if err != nil {
 		return err
@@ -251,7 +270,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		//
 		// The set's worker scope (models.Mapping.Worker) is staged by name
 		// with the pool: its mocks answer from their places on.
-		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...)); err != nil {
+		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...), nil); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
 		}
 		// A miss on a call that is the recording of a test not begun yet
@@ -260,6 +279,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
 			if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
 				return fmt.Errorf("set the test set's recording source: %w", err)
+			}
+		}
+		// The learn step's earlier places of a pool recording are every
+		// recording made before it, a test's own on disk too.
+		if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
+			if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
+				return fmt.Errorf("set the test set's recordings before an instant: %w", err)
 			}
 		}
 		a.scopeMu.Lock()
@@ -288,6 +314,9 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.scopeMu.Unlock()
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err
+		}
+		if open != nil {
+			return a.openExactTest(es, ex.Test, owned, open.given)
 		}
 		return es.ServeExactTest(ex.Test, owned)
 	default:
@@ -341,6 +370,24 @@ func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visi
 		return nil
 	}
 	return disk.RangeKeys
+}
+
+// diskRecordedBefore is the on-disk store's reader of the staged set's
+// recordings made before an instant (DiskMocks.RangeRecordedBefore), nil
+// when the set keeps none on disk.
+func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) bool) error {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	disk := s.diskMocks
+	s.mu.RUnlock()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeRecordedBefore
 }
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks

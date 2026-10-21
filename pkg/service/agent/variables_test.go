@@ -76,14 +76,14 @@ func TestEveryTestBeginsWithNoVariableBound(t *testing.T) {
 		if err := a.BeginScopeAt(ctx, test, 0, models.BaseTime); err != nil {
 			t.Fatalf("begin %s: %v", test, err)
 		}
-		resets := 0
+		opens := 0
 		for _, e := range p.events {
-			if e == "reset" {
-				resets++
+			if strings.HasPrefix(e, "open ") {
+				opens++
 			}
 		}
-		if resets != i+1 {
-			t.Fatalf("after %s began the variables were forgotten %d times, want %d", test, resets, i+1)
+		if opens != i+1 {
+			t.Fatalf("after %s began a test opened with its variables %d times, want %d", test, opens, i+1)
 		}
 		_ = a.EndScopeAt(ctx, test, 0, models.BaseTime)
 	}

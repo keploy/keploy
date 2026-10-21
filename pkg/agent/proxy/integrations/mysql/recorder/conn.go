@@ -215,21 +215,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		clientConn = upgradedConn
 		if isTLS {
 			// Upgrade destination side via TLSUpgrader.
-			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
-			sourcePort := remoteAddr.Port
-
-			url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
-			if !ok {
-				return res, fmt.Errorf("failed to fetch destination url for source port %d", sourcePort)
-			}
-			dstURL, ok := url.(string)
-			if !ok {
-				return res, fmt.Errorf("failed to type cast destination url for source port %d", sourcePort)
-			}
-
-			// dstURL is the client's own SNI and is empty for every
+			//
+			// dstURL is the client's own SNI, read off the handshake it
+			// just made with keploy, and is empty for every
 			// IP-dialled MySQL — see resolveDestServerName for why that
 			// blocks verification and what it falls back to.
+			dstURL := pUtils.ClientServerName(clientConn)
 			serverName := resolveDestServerName(dstURL, destConn, opts.UpstreamTLSVerify)
 
 			tlsConfig := &tls.Config{
@@ -446,13 +437,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 // resolveDestServerName decides the ServerName keploy puts on its own TLS
 // dial to the real MySQL server.
 //
-// capturedSNI is the SNI CertForClient recovered from the client's
-// ClientHello (pTls.SrcPortToDstURL). SrcPortToDstURL stores it
-// unconditionally — the empty string included — and MySQL clients
-// overwhelmingly dial by IP (keploy's own e2e uses tcp(127.0.0.1:3306)),
-// while RFC 6066 forbids IP literals in SNI so the client sends none. Empty
-// is therefore the NORMAL case here, not an edge case, and this site has
-// never had any fallback at all.
+// capturedSNI is the SNI of the client's ClientHello, as its completed
+// handshake with keploy reports it (pUtils.ClientServerName), the empty
+// string included. MySQL clients overwhelmingly dial by IP (keploy's own
+// e2e uses tcp(127.0.0.1:3306)), while RFC 6066 forbids IP literals in SNI
+// so the client sends none. Empty is therefore the NORMAL case here, not an
+// edge case, and this site has never had any fallback at all.
 //
 // That is fatal the moment verification is on: crypto/tls rejects a config
 // with an empty ServerName and InsecureSkipVerify=false outright ("either

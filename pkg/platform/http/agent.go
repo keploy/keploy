@@ -74,9 +74,15 @@ type AgentClient struct {
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 
 	// agentContainer is the container Setup set the agent up to run in, in a
-	// docker mode (docker run, or as a service docker compose starts); ""
-	// natively. Under mu. WatchAgentStart watches its start.
-	agentContainer string
+	// docker mode (docker run, or as a service docker compose starts): the
+	// entry its naming made (nameAgentContainer), on which Run and the
+	// watches note what they see of it, its name with it; nil natively.
+	// agentContainerAt is the agent address it is mapped at in containerAt.
+	// Both are what the client forgets, and only that, when it sets up
+	// another agent (forgetAgentContainer). Under mu. WatchAgentStart
+	// watches its start.
+	agentContainer   *namedContainer
+	agentContainerAt string
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
@@ -136,7 +142,11 @@ type AgentClient struct {
 // (startAgent): the stop of an earlier start, which a setup retry waits for,
 // reads its own.
 type agentRun struct {
-	ready    atomic.Bool
+	ready atomic.Bool
+	// scope is the teardown scope of the run that started the agent
+	// (utils.TeardownScopeOf of the start's context): its stop's reports
+	// that move tick it (stopWatch.moved). Set before the run is shared.
+	scope    *utils.TeardownScope
 	gone     chan struct{} // closed once the agent process (or its container's client) has exited
 	goneOnce sync.Once
 	// letGo is closed once its stop killed it at once at the user's Ctrl+C,
@@ -1743,6 +1753,18 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 }
 
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+	// The agent's container this run is to create, under docker compose: a
+	// release that waits for it ends once the run is over without it
+	// (containerExited). Its end is noted last, once Run returns, whichever
+	// way it ends: after the app's run has returned (and with it compose's up
+	// and the down after it), or before the app's run began. Both are noted
+	// on this client's entry of the container, not by its name, which
+	// another client's Setup may have drawn too.
+	a.mu.Lock()
+	container := a.agentContainer
+	a.mu.Unlock()
+	container.noteRun(false)
+	defer container.noteRun(true)
 	app, err := a.getApp()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
@@ -1779,7 +1801,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		// stopping, and is not asked again when it acts on the interrupt.
 		// When the stop at a set's end had to kill one that made no
 		// progress on its way out, the run says so, as for the app.
-		if why := stopAdopted(a.logger, app.TakeStopReached()); why != "" && stopKilled == "" {
+		if why := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx)); why != "" && stopKilled == "" {
 			switch {
 			case errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd):
 				stopKilled = "keploy interrupted the application at the set's end, and " + why
@@ -2407,7 +2429,7 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	// one before may be a copy of the stop itself (stopWatch).
 	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
 		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach,
-		settled: sudoAgentSettled(pid)}
+		settled: sudoAgentSettled(pid), moved: run.scope}
 
 	err := ask()
 	switch {
@@ -2464,6 +2486,7 @@ func (a *AgentClient) beginRun(ctx context.Context) (context.Context, context.Ca
 	}
 	agentCtx, cancel := context.WithCancel(ctx)
 	run := newAgentRun()
+	run.scope = utils.TeardownScopeOf(ctx)
 	a.mu.Lock()
 	a.agentCancel = cancel
 	a.run = run
@@ -2694,7 +2717,9 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	read, running := readBootFile(""), alwaysRunning
 	switch {
 	case isDockerCmd:
-		read, running = containerBootLook(a.logger, opts.KeployContainer)
+		// The container this Setup named: what its looks see is noted on
+		// the client's entry of it.
+		read, running = containerBootLook(a.logger, a.containerNamed(opts.KeployContainer))
 	case run != nil:
 		read = readBootFile(run.bootReport)
 		if run.bootPrompt {
@@ -2931,6 +2956,11 @@ func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
+	// A Setup sets up a new agent: the container the client named for the
+	// last one is not this one's. A docker Setup names its own below; a
+	// native one has none, and its watches watch its process, not that
+	// container.
+	a.forgetAgentContainer()
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
@@ -2989,9 +3019,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
-		a.mu.Lock()
-		a.agentContainer = opts.KeployContainer
-		a.mu.Unlock()
+		a.nameAgentContainer(opts.KeployContainer)
 		// The agent container maps host.docker.internal to the Docker host
 		// (host-gateway) where the daemon resolves it (extra_hosts.go). A
 		// daemon that does not answer its version would not start the agent
@@ -3330,6 +3358,49 @@ func composeEndAfterReady(stopped app.StoppedAgent, appExit int) error {
 	return nil
 }
 
+// appContainerExit is the app's container no longer running, as docker
+// reports it.
+type appContainerExit struct {
+	container string
+	status    string
+	code      int
+	oomKilled bool
+	// restarting says its restart policy is starting it again.
+	restarting bool
+}
+
+func (e *appContainerExit) Error() string {
+	var msg string
+	switch {
+	case e.restarting:
+		msg = fmt.Sprintf("the application container %s exited with code %d and is restarting", e.container, e.code)
+	case e.status == "dead":
+		msg = fmt.Sprintf("the application container %s is dead (exit code %d)", e.container, e.code)
+	default:
+		msg = fmt.Sprintf("the application container %s exited with code %d", e.container, e.code)
+	}
+	if e.oomKilled {
+		msg += ", killed for running out of memory"
+	}
+	return msg
+}
+
+// AppContainerExit implements replay.AppContainerExitReader: the app's
+// container no longer running -- exited, dead, or restarting after an exit --
+// as an error naming it and how it ended, and nil while it runs or when keploy
+// cannot tell.
+func (a *AgentClient) AppContainerExit(ctx context.Context) error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	name, state, exited := ap.ExitedState(ctx)
+	if !exited {
+		return nil
+	}
+	return &appContainerExit{container: name, status: state.Status, code: state.ExitCode, oomKilled: state.OOMKilled, restarting: state.Restarting}
+}
+
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
 // retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
 // not hit a "container name already in use" conflict from the dependency
@@ -3410,7 +3481,7 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 // (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
 	logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
-	if stopAgentContainer(logger, name, !run.ready.Load()) {
+	if stopAgentContainer(logger, name, !run.ready.Load(), run.scope) {
 		run.stoppedAtOnce()
 	}
 }
@@ -3509,7 +3580,7 @@ var dockerStopPoll = time.Second
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent
 // reports its teardown (resendSIGTERM).
-func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (killedAtOnce bool) {
+func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
 	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
@@ -3517,7 +3588,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		return
 	}
-	return awaitAgentContainer(logger, cli, name, unanswered)
+	return awaitAgentContainer(logger, cli, name, unanswered, moved)
 }
 
 // awaitAgentContainer waits for an agent's container that has been told to
@@ -3526,7 +3597,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 // stopped making any, or has detached everything and not exited, or at the
 // user's Ctrl+C, as stopAgentContainer says. It returns once the container
 // has exited, or once it killed it at once (killedAtOnce).
-func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool) (killedAtOnce bool) {
+func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	// kill(false) sends the agent the escalation signal, on which it dies
 	// once no teardown work in progress is making progress
 	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
@@ -3569,7 +3640,7 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
 	// one before may be a copy of the stop itself (stopWatch).
 	killedAtOnce = stopWatch{logger: logger, gone: gone, read: readContainerProgress(cli, name),
-		kill: kill, poll: dockerStopPoll, reported: reported}.run()
+		kill: kill, poll: dockerStopPoll, reported: reported, moved: moved}.run()
 	stopWaiting()
 	<-gone
 	<-resent
@@ -3604,7 +3675,10 @@ func (a *AgentClient) EndComposeAgent(release bool) {
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
 	}
-	awaitAgentContainer(logger, cli, name, false)
+	// No teardown scope: a compose agent is compose's (this client began no
+	// run of it, beginRun), and this wait runs before the stop's drains begin
+	// (drainComposeAgent), so none of them could wait on its movements.
+	awaitAgentContainer(logger, cli, name, false, nil)
 }
 
 // sigtermResendFirst is how long stopAgentContainer's resendSIGTERM waits

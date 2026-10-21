@@ -37,7 +37,8 @@ func GetSelfInodeNumber() (uint64, uint64, error) {
 // Except from the verifier, which rejects a program with the same EACCES
 // (an invalid context access, a misaligned read). A load is only verified
 // once the kernel has allowed it, and the verifier always leaves its reasons
-// in the log keploy asks for, while a load refused for want of privileges is
+// in the log cilium/ebpf asks for when it retries a failed load
+// (hookLoadOptions), while a load refused for want of privileges is
 // refused before that log is written; cilium/ebpf tells its MEMLOCK hint
 // apart the same way. A rejected program is keploy's to fix, not something
 // any privilege can.

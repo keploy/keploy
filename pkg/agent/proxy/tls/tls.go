@@ -205,8 +205,57 @@ func clientEventsFrom(ctx context.Context) ClientEvents {
 	return ev
 }
 
+// dstIPCtxKey carries the IP the client dialled into HandleTLSConnection, the
+// same way preferH2CtxKey carries the h2 hint.
+type dstIPCtxKey struct{}
+
+// WithDstIP marks ctx with the connection's original destination IP, so the
+// MITM leaf names it when the client sends no SNI. A client dialling an IP
+// literal sends none (RFC 6066) and verifies the leaf against an IP SAN, e.g. a
+// Go client-go app reaching the Kubernetes API at https://10.96.0.1.
+func WithDstIP(ctx context.Context, ip net.IP) context.Context {
+	if ip == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, dstIPCtxKey{}, ip)
+}
+
+func dstIPFrom(ctx context.Context) net.IP {
+	if ctx == nil {
+		return nil
+	}
+	ip, _ := ctx.Value(dstIPCtxKey{}).(net.IP)
+	return ip
+}
+
+// connectTargetCtxKey carries the host a connection's CONNECT request named
+// into HandleTLSConnection, the same way dstIPCtxKey carries the IP it dialled.
+type connectTargetCtxKey struct{}
+
+// WithConnectTarget marks ctx with the host the connection's CONNECT request
+// named, so the MITM leaf names it when the client's ClientHello carries no
+// SNI: a client already told the proxy where it is going. "" leaves ctx as it
+// is.
+func WithConnectTarget(ctx context.Context, host string) context.Context {
+	if host == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, connectTargetCtxKey{}, host)
+}
+
+// ConnectTargetFrom is the host WithConnectTarget put on ctx, or "".
+func ConnectTargetFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	host, _ := ctx.Value(connectTargetCtxKey{}).(string)
+	return host
+}
+
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
+	dstIP := dstIPFrom(ctx)
+	connectTarget := ConnectTargetFrom(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
 	// by SetupCAForApp before the proxy serves; getActiveCA lazily mints an
 	// ephemeral one for callers that reach here without SetupCAForApp.
@@ -236,7 +285,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					cert, err := CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+					cert, err := certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, connectTarget, dstIP)
 					if err == nil {
 						// crypto/tls sends it next, in the server's
 						// first flight.

@@ -634,9 +634,10 @@ jobs:
       # on its way out is counted twice in tcpi_bytes_sent, once in the target
       # (pairbytes_localdrop_linux_test.go), in a network namespace of its own,
       # a netfilter rule dropping every 20th segment (deterministic).
-      # And the clean close whose FIN the wait finds unacknowledged
-      # (pairbytes_closes_linux_test.go), which needs a socket filter.
-      - name: Run the bytes wait's root tests (local drops, an unacknowledged FIN)
+      # And the clean close whose FIN the wait finds unacknowledged, and the
+      # orphan whose FIN is held unacknowledged, then let through
+      # (pairbytes_closes_linux_test.go), which need a socket filter.
+      - name: Run the bytes wait's root tests (local drops, unacknowledged FINs)
         run: |
           set -o pipefail
           go test -c -tags viper_bind_struct -o /tmp/proxy.test ./pkg/agent/proxy/
@@ -648,6 +649,12 @@ jobs:
           sudo /tmp/proxy.test -test.run "^TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss$" -test.count=5 -test.v | tee /tmp/lastack.out
           grep -q -- "--- PASS: TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss" /tmp/lastack.out
           if grep -q -- "--- SKIP" /tmp/lastack.out; then echo "::error::the LAST_ACK test skipped"; exit 1; fi
+          # The bytes wait on a closed connection whose orphan the filter
+          # holds from the application's FIN, or from the ACK of its own.
+          sudo /tmp/proxy.test -test.run "^(TestAnOrphansMoveRestartsTheBytesWaitsBudget|TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor)$" -test.count=5 -test.v | tee /tmp/orphanfin.out
+          grep -q -- "--- PASS: TestAnOrphansMoveRestartsTheBytesWaitsBudget" /tmp/orphanfin.out
+          grep -q -- "--- PASS: TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor" /tmp/orphanfin.out
+          if grep -q -- "--- SKIP" /tmp/orphanfin.out; then echo "::error::an orphan-FIN test skipped"; exit 1; fi
 
       - name: Run proven fire-and-forget e2e
         env:
@@ -719,9 +726,9 @@ jobs:
           # Both binaries run, whichever fails: one's failure does not hide
           # the other's results.
           rc=0
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff|TestUnderTheSwitchTheAgentSeesTheApplicationListen|TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime|TestUnderTheSwitchTheAgentCountsARestartAndNamesIt' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff|TestUnderTheSwitchTheAgentSeesTheApplicationListen|TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime|TestUnderTheSwitchTheAgentCountsARestartAndNamesIt|TestARunTheMarkClearsAroundIsLetGoOfAtItsExit|TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday|TestClearingAMapItsKeysChurnInGoesOn|TestTheSweepDeletesTheEntriesOfProcessesThatAreGone|TestTheSweepKeepsAZombiesEntriesUntilItIsReaped|TestTheKernelSaysWhetherItCountsSkippedRuns' -test.v | tee /tmp/pidmap.out || rc=1
           sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
-          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestUnderTheSwitchTheAgentSeesTheApplicationListen TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime TestUnderTheSwitchTheAgentCountsARestartAndNamesIt TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
+          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestUnderTheSwitchTheAgentSeesTheApplicationListen TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime TestUnderTheSwitchTheAgentCountsARestartAndNamesIt TestARunTheMarkClearsAroundIsLetGoOfAtItsExit TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday TestClearingAMapItsKeysChurnInGoesOn TestTheSweepDeletesTheEntriesOfProcessesThatAreGone TestTheSweepKeepsAZombiesEntriesUntilItIsReaped TestTheKernelSaysWhetherItCountsSkippedRuns TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
           done
           exit $rc

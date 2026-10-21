@@ -32,6 +32,11 @@ const (
 	// member's TCP listen, and count its listens, connects, process forks and
 	// execs, the evidence keploy test waits on before its first test.
 	FlagProvenReady uint32 = 1 << 3
+	// FlagClassifies (bit 4), set where the agent attaches sys_enter_socket
+	// and k_sock_create, which classify processes into target_namespace_pids
+	// and excluded_pids: k_sock_create runs only then. Never where something
+	// else owns those maps (DaemonSet, per-container targeting).
+	FlagClassifies uint32 = 1 << 4
 )
 
 type BpfSpinLock struct{ Val uint32 }

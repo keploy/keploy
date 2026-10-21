@@ -480,6 +480,39 @@ func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
+// RangeRecordedBefore visits the mocks recorded strictly before t, by
+// request time (wherever they are placed: one placed at its answer may sit
+// past t), in recorded order, until visit returns false, for the learn
+// step's earlier places (MockManager.RangeRecordedBefore). Each is decoded
+// for visit alone, one at a time, and kept by no one: what the store keeps
+// on disk is never in memory at once.
+func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) bool) error {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	cut := t.UnixNano()
+	var sel []diskEntry
+	for _, e := range d.entries {
+		if e.reqTsNano < cut {
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	sort.SliceStable(sel, func(i, j int) bool { return sel[i].reqTsNano < sel[j].reqTsNano })
+	for _, e := range sel {
+		m, err := d.readAt(e)
+		if err != nil {
+			return err
+		}
+		if !visit(m) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // LoadStatements returns the statement catalog: for each statement the mocks
 // on disk record (models.StatementKey), the first one recorded, in recorded
 // order. A client may prepare a statement at app start that its recordings hold
