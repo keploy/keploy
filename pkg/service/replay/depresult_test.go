@@ -3,6 +3,7 @@ package replay
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -873,15 +874,12 @@ func TestMockTargetFromSpec(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			restore := logcontent.Set(false)
-			assert.Equal(t, tt.want, mockTargetFromSpec(tt.mock))
-			restore()
+			assert.Equal(t, tt.want, mockTargetFromSpec(tt.mock, true))
 			want := tt.wantContent
 			if want == "" {
 				want = tt.want
 			}
-			defer logcontent.Set(true)()
-			assert.Equal(t, want, mockTargetFromSpec(tt.mock), "with KEPLOY_LOG_CONTENT set")
+			assert.Equal(t, want, mockTargetFromSpec(tt.mock, false), "with KEPLOY_LOG_CONTENT set")
 		})
 	}
 }
@@ -942,6 +940,129 @@ func TestAFailedTestNamesItsMocksWithoutContentByDefault(t *testing.T) {
 				t.Errorf("with the switch on the report lost %q:\n%s", v, text)
 			}
 		}
+	}
+}
+
+// A report the replay writes is read by keploy report (every format reads a
+// file through models.TestReport.ReportContent). What a default writer named
+// a failed test's matched calls and dependency rows by is read back as it was
+// written, for every kind: the reader withholds a name written whole, and a
+// name already written without content is not one (a Mongo mock's command,
+// read again as its request, names none). A report written with
+// KEPLOY_LOG_CONTENT set is read by default without the content it holds.
+func TestAReportTheReplayWritesIsReadAsItWasWritten(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	op := func(m map[string]string) models.MockSpec { return models.MockSpec{Metadata: m} }
+	createUser := `{"flagBits":0,"sections":["{ SectionSingle msg: {\"createUser\":\"kp-canary-user\",\"pwd\":\"kp-canary-pwd\",\"$db\":\"admin\"} }"],"checksum":0}`
+	find := `{"flagBits":0,"sections":["{ SectionSingle msg: {\"find\":\"orders\",\"filter\":{\"email\":\"kp-canary@example.com\"},\"$db\":\"shop\"} }"],"checksum":0}`
+	mongo := func(name, operation string, md map[string]string) *models.Mock {
+		spec := op(map[string]string{"operation": operation})
+		for k, v := range md {
+			spec.Metadata[k] = v
+		}
+		spec.MongoRequests = []models.MongoRequest{{}}
+		return &models.Mock{Name: name, Kind: models.Mongo, Spec: spec}
+	}
+	mocks := []*models.Mock{
+		{Name: "mock-http", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:   &models.HTTPReq{Method: "GET", URL: "http://auth-svc:8080/v1/users/u-7/session?token=kp-canary-token"},
+			Variables: models.MockVariables{"userId": {Use: []string{"url.path[2]"}}},
+		}},
+		mongo("mock-mongo", createUser, nil),
+		mongo("mock-mongo-dest", find, map[string]string{"destAddr": "mongo:27017"}),
+		{Name: "mock-mysql", Kind: models.MySQL, Spec: op(map[string]string{"operation": "SELECT * FROM t WHERE a = 'kp-canary-literal'"})},
+		{Name: "mock-pg", Kind: models.PostgresV2, Spec: op(map[string]string{"destAddr": "db:5432", "operation": `SELECT "id" FROM "users" WHERE "email" = 'kp-canary-pg'`})},
+		{Name: "mock-redis", Kind: models.REDIS, Spec: op(map[string]string{"operation": "GET session:kp-canary-key"})},
+		{Name: "mock-grpc", Kind: models.GRPC_EXPORT, Spec: op(map[string]string{"operation": "/pkg.Users/Get"})},
+		{Name: "mock-http2", Kind: models.HTTP2, Spec: op(map[string]string{"operation": "POST"})},
+		{Name: "mock-generic", Kind: models.GENERIC, Spec: op(map[string]string{"destAddr": "svc:9000", "operation": "kp-canary-generic"})},
+	}
+	var states []models.MockState
+	var expected []models.MockEntry
+	for _, m := range mocks {
+		states = append(states, consumed(m.Name, m.Kind))
+		expected = append(expected, models.MockEntry{Name: m.Name, Kind: string(m.Kind)})
+	}
+	// write is the failed test as the replay writes it to its report file,
+	// with the switch as content says, and read the test as keploy report
+	// reads that file by default.
+	write := func(content bool) (written, read models.TestResult) {
+		restore := logcontent.Set(content)
+		lookup := newMockLookup(mocks, nil)
+		var res models.TestResult
+		res.FailureInfo.MatchedCalls = matchedCalls(states, lookup)
+		res.Result.DepResult = buildDepResults(expected, nil, true, nil, nil, lookup).Rows
+		restore()
+		file, err := yaml.Marshal(models.TestReport{Tests: []models.TestResult{res}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var onDisk models.TestReport
+		if err := yaml.Unmarshal(file, &onDisk); err != nil {
+			t.Fatal(err)
+		}
+		return onDisk.Tests[0], onDisk.ReportContent().Tests[0]
+	}
+	names := func(r models.TestResult) (summaries, rows []string) {
+		for _, c := range r.FailureInfo.MatchedCalls {
+			summaries = append(summaries, c.Protocol+" "+c.Summary)
+		}
+		for _, d := range r.Result.DepResult {
+			rows = append(rows, d.Name)
+		}
+		return summaries, rows
+	}
+
+	written, read := write(false)
+	wroteSummaries, wroteRows := names(written)
+	if want := []string{"Http GET http://auth-svc:8080/v1/users/{}/session", "Mongo MongoDB createUser", "Mongo MongoDB find", "MySQL MySQL SELECT * FROM t WHERE a = ?",
+		`PostgresV2 PostgresV2 SELECT "id" FROM "users" WHERE "email" = ?`, "Redis Redis", "gRPC gRPC /pkg.Users/Get", "Http2 Http2 POST", "Generic Generic"}; !reflect.DeepEqual(wroteSummaries, want) {
+		t.Errorf("by default the replay writes the matched calls %q, want %q", wroteSummaries, want)
+	}
+	if want := []string{"deps[0] http GET auth-svc:8080/v1/users/{}/session (presence)", "deps[1] mongo MongoDB createUser (presence)", "deps[2] mongo mongo:27017 find (presence)",
+		"deps[3] mysql MySQL SELECT * FROM t WHERE a = ? (presence)", `deps[4] postgres db:5432 SELECT "id" FROM "users" WHERE "email" = ? (presence)`,
+		"deps[5] redis (presence)", "deps[6] grpc gRPC /pkg.Users/Get (presence)", "deps[7] http Http2 POST (presence)", "deps[8] generic svc:9000 (presence)"}; !reflect.DeepEqual(wroteRows, want) {
+		t.Errorf("by default the replay writes the dependency rows %q, want %q", wroteRows, want)
+	}
+	readSummaries, readRows := names(read)
+	if !reflect.DeepEqual(readSummaries, wroteSummaries) {
+		t.Errorf("keploy report reads the default-written matched calls %q as %q", wroteSummaries, readSummaries)
+	}
+	if !reflect.DeepEqual(readRows, wroteRows) {
+		t.Errorf("keploy report reads the default-written dependency rows %q as %q", wroteRows, readRows)
+	}
+	if again := (&models.TestReport{Tests: []models.TestResult{read}}).ReportContent().Tests[0]; !reflect.DeepEqual(again, read) {
+		t.Errorf("a report keploy report read is read again as %+v, was %+v", again.FailureInfo, read.FailureInfo)
+	}
+
+	// Written with the switch on, the file holds the content; read by
+	// default it carries none of it, and names every call.
+	written, read = write(true)
+	if text, _ := yaml.Marshal(written); !strings.Contains(string(text), "kp-canary-pwd") {
+		t.Fatalf("with the switch on the replay did not write the content:\n%s", text)
+	}
+	text, err := yaml.Marshal(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(text), "kp-canary") {
+		t.Errorf("keploy report reads a report written with the switch on with its content by default:\n%s", text)
+	}
+	readSummaries, readRows = names(read)
+	for _, want := range []string{"Mongo MongoDB createUser", "Mongo MongoDB find"} {
+		if !slices.Contains(readSummaries, want) {
+			t.Errorf("read by default, the matched calls %q do not name %q", readSummaries, want)
+		}
+	}
+	for _, want := range []string{"deps[1] mongo MongoDB createUser (presence)", "deps[2] mongo mongo:27017 find (presence)"} {
+		if !slices.Contains(readRows, want) {
+			t.Errorf("read by default, the dependency rows %q do not name %q", readRows, want)
+		}
+	}
+	// What keploy report made of it is read again as it was made (its
+	// --json, read back).
+	if again := (&models.TestReport{Tests: []models.TestResult{read}}).ReportContent().Tests[0]; !reflect.DeepEqual(again, read) {
+		t.Errorf("a report keploy report read is read again as %+v, was %+v", again.FailureInfo, read.FailureInfo)
 	}
 }
 
