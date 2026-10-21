@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -385,5 +386,127 @@ func TestPathPlacesOtherThanAreTheSegmentsNotRecorded(t *testing.T) {
 		if got := PathPlacesOtherThan(tc.summary, tc.recorded); !slices.Equal(got, tc.want) {
 			t.Errorf("PathPlacesOtherThan(%q, %q) = %v, want %v", tc.summary, tc.recorded, got, tc.want)
 		}
+	}
+}
+
+// A report's next steps are its parser's words, and the one piece of the
+// call they quote is its summary, or the summary's path (the session-call
+// hint's pathPrefix, quoted as Go quotes a string). A report read without
+// content quotes them there as its summary now names them, whoever withheld
+// it and whenever the summary gained its holes: from a report made with the
+// switch on (an agent opted in under a CLI that is not, a report file written
+// with it on), and in a report withheld before whose summary gained places
+// since. Words that quote nothing of the call are kept as they were.
+func TestTheWordsAReportKeepsQuoteItsSummaryAsItIsWithheld(t *testing.T) {
+	hint := func(path string) string {
+		return "declare it (sessionCalls: [{host: \"users.internal:8080\", method: \"GET\", pathPrefix: " + strconv.Quote(path) + "}]), or record again."
+	}
+	for _, tc := range []struct {
+		name               string
+		call               UnmatchedCall
+		wantSummary        string
+		wantNext, wantDiff string
+		gone               []string
+	}{
+		{
+			name: "a path diff's segment, in the hint and in the summary quoted whole",
+			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/users/kp-live-id?token=kp-q",
+				NextSteps:  "The call GET /api/users/kp-live-id?token=kp-q missed. " + hint("/api/users/kp-live-id"),
+				FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/api/users/kp-rec-id", Actual: "/api/users/kp-live-id"}}},
+			wantSummary: "GET /api/users/{}",
+			wantNext:    "The call GET /api/users/{} missed. " + hint("/api/users/{}"),
+			gone:        []string{"kp-live-id", "kp-rec-id", "kp-q"},
+		},
+		{
+			name: "a segment Go quotes with escapes",
+			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/users/kp\"live\\id",
+				NextSteps:  "The call " + strconv.Quote("GET /api/users/kp\"live\\id") + " missed. " + hint("/api/users/kp\"live\\id"),
+				FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/api/users/kp-rec-id", Actual: "/api/users/kp\"live\\id"}}},
+			wantSummary: "GET /api/users/{}",
+			wantNext:    "The call \"GET /api/users/{}\" missed. " + hint("/api/users/{}"),
+			gone:        []string{"live", "kp-rec-id"},
+		},
+		{
+			name: "the root path: its quote, not every slash of the words",
+			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /",
+				NextSteps:  "Serve it to every test and/or record again. " + hint("/"),
+				FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/kp-rec-id", Actual: "/"}}},
+			wantSummary: "GET /{}",
+			wantNext:    "Serve it to every test and/or record again. " + hint("/{}"),
+			gone:        []string{"kp-rec-id"},
+		},
+		{
+			name: "a variable's place, in a report withheld before",
+			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/kp-live-order/items", ContentWithheld: true,
+				VariablePlaces: []string{"url.path[1]"},
+				Diff:           "the call GET /orders/kp-live-order/items: header.X: value changed",
+				NextSteps:      hint("/orders/kp-live-order/items")},
+			wantSummary: "GET /orders/{}/items",
+			wantDiff:    "the call GET /orders/{}/items: header.X: value changed",
+			wantNext:    hint("/orders/{}/items"),
+			gone:        []string{"kp-live-order"},
+		},
+		{
+			name: "a SQL statement's literals",
+			call: UnmatchedCall{Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM t WHERE email = 'kp-canary-sql-literal'",
+				NextSteps: "No recording answers \"COM_QUERY SELECT * FROM t WHERE email = 'kp-canary-sql-literal'\"."},
+			wantSummary: "COM_QUERY SELECT * FROM t WHERE email = ?",
+			wantNext:    "No recording answers \"COM_QUERY SELECT * FROM t WHERE email = ?\".",
+			gone:        []string{"kp-canary-sql-literal"},
+		},
+		{
+			name: "a miss named by its error",
+			call: UnmatchedCall{Protocol: ProtocolUnknown, ActualSummary: "dial kp-canary-host: refused",
+				NextSteps: "keploy failed: dial kp-canary-host: refused; check the agent's log."},
+			wantSummary: WithheldValue,
+			wantNext:    "keploy failed: " + WithheldValue + "; check the agent's log.",
+			gone:        []string{"kp-canary-host"},
+		},
+		{
+			name: "words that quote nothing of the call",
+			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/users/kp-live-id",
+				NextSteps:  "Request structure changed since recording. Re-record the test set with 'keploy record'.",
+				FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/api/users/kp-rec-id", Actual: "/api/users/kp-live-id"}}},
+			wantSummary: "GET /api/users/{}",
+			wantNext:    "Request structure changed since recording. Re-record the test set with 'keploy record'.",
+			gone:        []string{"kp-live-id"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := MockMismatchReport{Protocol: tc.call.Protocol, ActualSummary: tc.call.ActualSummary, Diff: tc.call.Diff,
+				NextSteps: tc.call.NextSteps, FieldDiffs: tc.call.FieldDiffs, VariablePlaces: tc.call.VariablePlaces,
+				ContentWithheld: tc.call.ContentWithheld}.WithoutContent()
+			read := (&TestReport{Tests: []TestResult{{FailureInfo: FailureInfo{UnmatchedCalls: []UnmatchedCall{tc.call}}}}}).ReportContent()
+			for door, got := range map[string]UnmatchedCall{
+				"a call":        tc.call.WithoutContent(),
+				"a report file": read.Tests[0].FailureInfo.UnmatchedCalls[0],
+				"a report": {Protocol: report.Protocol, ActualSummary: report.ActualSummary, Diff: report.Diff, NextSteps: report.NextSteps,
+					FieldDiffs: report.FieldDiffs, ContentWithheld: report.ContentWithheld},
+			} {
+				if got.ActualSummary != tc.wantSummary || got.NextSteps != tc.wantNext {
+					t.Errorf("%s: summary %q, next steps %q; want %q, %q", door, got.ActualSummary, got.NextSteps, tc.wantSummary, tc.wantNext)
+				}
+				if tc.wantDiff != "" && got.Diff != tc.wantDiff {
+					t.Errorf("%s: diff %q, want %q", door, got.Diff, tc.wantDiff)
+				}
+				enc := encodedCall(t, got)
+				for _, v := range tc.gone {
+					if strings.Contains(enc, v) {
+						t.Errorf("%s carries %q:\n%s", door, v, enc)
+					}
+				}
+				// Withholding twice is withholding once.
+				if again := got.WithoutContent(); again.NextSteps != got.NextSteps || again.ActualSummary != got.ActualSummary || again.Diff != got.Diff {
+					t.Errorf("%s withheld again: %+v", door, again)
+				}
+			}
+		})
+	}
+	// With the switch on a writer keeps the words whole, as it did.
+	t.Cleanup(logcontent.Set(true))
+	on := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/users/kp-live-id", NextSteps: hint("/api/users/kp-live-id"),
+		FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/api/users/kp-rec-id", Actual: "/api/users/kp-live-id"}}}
+	if got := on.ReportContent(); got.NextSteps != on.NextSteps || got.ActualSummary != on.ActualSummary {
+		t.Errorf("with the switch on the call is %+v", got)
 	}
 }

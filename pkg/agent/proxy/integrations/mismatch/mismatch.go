@@ -256,16 +256,18 @@ func (b *Builder) Build() *models.MockMismatchReport {
 // summary loses a SQL statement's literals, an HTTP target's query and every
 // path segment keploy knows holds a value (a test variable's place, or one a
 // field diff names), and it says so (ContentWithheld). Its Diff and NextSteps
-// are the parser's own words, and kept. Build applies it; a parser that
-// builds a report without the builder, or writes content or places into one
-// after Build, applies it before it reports the miss.
+// are the parser's own words, and kept, but for their quotes of the summary,
+// which name the call as the summary now does (models.QuotesOfSummary).
+// Build applies it; a parser that builds a report without the builder, or
+// writes content or places into one after Build, applies it before it
+// reports the miss.
 func Withhold(r *models.MockMismatchReport) *models.MockMismatchReport {
 	if r == nil || logcontent.On() {
 		return r
 	}
-	diff := r.Diff
+	diff, was := r.Diff, r.ActualSummary
 	*r = r.WithoutContent()
-	r.Diff = diff
+	r.Diff = models.QuotesOfSummary(r.Protocol, diff, was, r.ActualSummary)
 	return r
 }
 
