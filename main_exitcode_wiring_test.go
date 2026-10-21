@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,8 +19,24 @@ import (
 // never being assigned to utils.ErrCode, which a pure unit test cannot see.
 const subprocessEnv = "KEPLOY_EXITCODE_TEST_SUBPROCESS"
 
+// childWouldSudo is the exit status of a child refused because start() would
+// re-execute it through sudo. No code in the exit-code contract is 99.
+const childWouldSudo = 99
+
 func TestMain(m *testing.M) {
 	if os.Getenv(subprocessEnv) == "1" {
+		// start() re-executes keploy through sudo before cobra parses
+		// anything when the -c is a docker command and the user is not root
+		// (utils.ShouldReexecWithSudo). Here that would run this test binary
+		// as root, with the caller's environment, where sudo needs no
+		// password; ask for a password where it does, and block the test;
+		// and fail where there is no sudo. The result would depend on the
+		// machine's sudo, not on keploy, so a case that would do it is
+		// refused, the same way everywhere: give it a native -c.
+		if utils.ShouldReexecWithSudo() {
+			fmt.Fprintf(os.Stderr, "refused: keploy %s would re-execute this test binary through sudo; give the case a native -c\n", strings.Join(os.Args[1:], " "))
+			os.Exit(childWouldSudo)
+		}
 		setVersion()
 		start(utils.NewCtx())
 		os.Exit(utils.ErrCode)
@@ -108,8 +126,12 @@ func TestCLIPointsAUsageErrorAtTheHelpOfTheCommandThatFailed(t *testing.T) {
 		said string // the error, said once
 		help string // the command whose --help it points at
 	}{
-		// The walkthrough's first command.
-		{args: []string{"record", "-c", "docker compose up", "--container-name", "api", "--delay", "10"},
+		// The walkthrough's first command, with a native -c: its docker one,
+		// `-c "docker compose up"`, would re-execute the child through sudo
+		// (TestMain refuses that). The docker line itself is run in-process,
+		// where nothing re-executes, by cli's
+		// TestRecordGivenAnUnknownFlagSaysSoWithoutItsUsage.
+		{args: []string{"record", "-c", "./app", "--container-name", "api", "--delay", "10"},
 			said: "unknown flag: --delay", help: "keploy record"},
 		{args: []string{"test", "--nope"}, said: "unknown flag: --nope", help: "keploy test"},
 		{args: []string{"mock", "record", "--nope"}, said: "unknown flag: --nope", help: "keploy mock record"},
@@ -131,6 +153,23 @@ func TestCLIPointsAUsageErrorAtTheHelpOfTheCommandThatFailed(t *testing.T) {
 				t.Errorf("the usage text was printed under the error:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestMain's refusal is what keeps every case above off sudo, the same way on
+// every machine: a child given a docker -c, run by a user who is not root, is
+// refused before start() runs, and so before anything re-executes. The line is
+// the walkthrough's. Were the refusal gone, start() would re-execute the child
+// through sudo first, since its sudo check runs before cobra parses the line;
+// only the re-executed child would stop at --delay, which record has no flag
+// for. It would never start the application, but it would go through sudo.
+func TestCLIChildThatWouldReexecThroughSudoIsRefused(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("start() re-executes through sudo only on Linux, for a user who is not root")
+	}
+	code, out := runCLIOutput(t, "record", "-c", "docker compose up", "--container-name", "api", "--delay", "10")
+	if code != childWouldSudo || !strings.Contains(out, "would re-execute this test binary through sudo") {
+		t.Errorf("exit code = %d, want %d (refused), and the refusal said:\n%s", code, childWouldSudo, out)
 	}
 }
 
