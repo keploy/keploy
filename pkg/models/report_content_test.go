@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.keploy.io/server/v3/utils/logcontent"
 	"gopkg.in/yaml.v3"
 )
@@ -519,5 +521,145 @@ func TestTheWordsAReportKeepsQuoteItsSummaryAsItIsWithheld(t *testing.T) {
 		FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/api/users/kp-rec-id", Actual: "/api/users/kp-live-id"}}}
 	if got := on.ReportContent(); got.NextSteps != on.NextSteps || got.ActualSummary != on.ActualSummary {
 		t.Errorf("with the switch on the call is %+v", got)
+	}
+}
+
+// mongoOp is a Mongo mock's operation as the recorder writes it today: the
+// request's message as JSON (MongoOpMessage), its body section first.
+func mongoOp(t *testing.T, sections ...string) string {
+	t.Helper()
+	b, err := json.Marshal(MongoOpMessage{Sections: sections})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// A report names a recorded mock by what it recorded (a failed test's
+// matched calls, a dependency row): by default without what the mock's kind
+// holds of the application's content, and naming the call all the same. An
+// HTTP mock keeps its method, host and path, without the query, fragment or
+// credentials, and with every segment it declares for a test variable
+// written {}; a Mongo mock keeps its command, which the recorder writes
+// inside the whole request; a SQL one its operation without literals. With
+// the switch on the name is the mock's summary, whole.
+func TestAMockIsNamedWithoutItsContentByDefault(t *testing.T) {
+	createUser := `{"createUser":"kp-canary-user","pwd":"kp-canary-pwd","roles":[],"$db":"admin"}`
+	declared := &Mock{Kind: HTTP, Spec: MockSpec{
+		HTTPReq:   &HTTPReq{Method: "GET", URL: "http://kp-user:kp-canary-secret@users.internal:8080/v1/users/kp-canary-id/orders?token=kp-canary-token#kp-canary-frag"},
+		Variables: MockVariables{"userId": {Use: []string{"url.path[2]"}}},
+	}}
+	for _, c := range []struct {
+		name string
+		mock *Mock
+		want string
+	}{
+		{"an HTTP mock", declared, "GET http://users.internal:8080/v1/users/{}/orders"},
+		{"an HTTP mock with a query", &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://auth-svc:8080/v1/session?token=kp-canary-token&email=kp-canary@example.com"}}},
+			"GET http://auth-svc:8080/v1/session"},
+		{"an HTTP mock with a fragment", &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://svc:8080/docs#kp-canary-frag"}}}, "GET http://svc:8080/docs"},
+		{"an HTTP mock with no path", &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "POST", URL: "http://svc:8080?kp-canary"}}}, "POST http://svc:8080"},
+		{"a relative HTTP URL", &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "/v1/items?q=kp-canary"}}}, "GET /v1/items"},
+		{"a Mongo request", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{"operation": mongoOp(t, "{ SectionSingle msg: "+createUser+" }")}}},
+			"MongoDB createUser"},
+		{"a Mongo request whose body follows a sequence", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{"operation": mongoOp(t,
+			`{ SectionSingle identifier: documents , msgs: [ {"email":"kp-canary@example.com"} ] }`, `{ SectionSingle msg: {"insert":"users","$db":"kp-canary-db"} }`)}}},
+			"MongoDB insert"},
+		{"a Mongo command query", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{"operation": func() string {
+			b, _ := json.Marshal(MongoOpQuery{FullCollectionName: "admin.$cmd", Query: `{"isMaster":1,"client":{"application":"kp-canary-app"}}`})
+			return string(b)
+		}()}}}, "MongoDB isMaster"},
+		{"a Mongo query of a collection", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{"operation": func() string {
+			b, _ := json.Marshal(MongoOpQuery{FullCollectionName: "shop.users", Query: `{"kp-canary-field":"kp-canary-value"}`})
+			return string(b)
+		}()}}}, "MongoDB"},
+		{"an older recorder's Mongo text", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{
+			"operation": `{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"update":"url-shortener","$db":"keploy"} }, { SectionSingle identifier: updates , msgs: [ {"q":{"_id":"kp-canary-id"}} ] }], checksum: 0 }`}}},
+			"MongoDB update"},
+		{"an older recorder's Mongo text, its body second", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{
+			"operation": `{ OpMsg flags: 0, sections: [{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":"kp-canary-id"}} ] }, { SectionSingle msg: {"update":"t"} }], checksum: 0 }`}}},
+			"MongoDB"},
+		{"an older recorder's Mongo command query", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{
+			"operation": `{ OpQuery flags: [SecondaryOK], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"client": {"application": "kp-canary-app"}}, returnFieldsSelector:  }`}}},
+			"MongoDB isMaster"},
+		{"an older recorder's Mongo collection query", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{
+			"operation": `{ OpQuery flags: [], fullCollectionName: shop.users, numberToSkip: 0, numberToReturn: -1, query: {"kp-canary-field": 1}, returnFieldsSelector:  }`}}},
+			"MongoDB"},
+		{"Mongo text that reads as neither", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}, Metadata: map[string]string{"operation": `kp-canary {"find":"x"}`}}}, "MongoDB"},
+		{"a Mongo mock with no operation", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{}}}}, "MongoDB"},
+		{"a MySQL operation", &Mock{Kind: MySQL, Spec: MockSpec{MySQLRequests: []mysql.Request{{}}, Metadata: map[string]string{"operation": "SELECT * FROM t WHERE a = 'kp-canary'"}}}, "MySQL SELECT * FROM t WHERE a = ?"},
+		{"a PostgreSQL operation", &Mock{Kind: PostgresV2, Spec: MockSpec{PostgresRequestsV2: []postgres.Request{{}}, Metadata: map[string]string{"operation": `SELECT "email" FROM "users" WHERE "id" = 'kp-canary'`}}},
+			`PostgreSQL SELECT "email" FROM "users" WHERE "id" = ?`},
+		{"a DNS name", &Mock{Kind: DNS, Spec: MockSpec{DNSReq: &DNSReq{Name: "users.internal."}}}, "DNS users.internal."},
+		{"an HTTP/2 stream", &Mock{Kind: HTTP2, Spec: MockSpec{Metadata: map[string]string{"operation": "POST"}}}, "Http2 POST"},
+		{"another kind's operation", &Mock{Kind: REDIS, Spec: MockSpec{Metadata: map[string]string{"operation": "GET session:kp-canary"}}}, "Redis"},
+		{"another kind with none", &Mock{Kind: GENERIC}, "Generic"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			restore := logcontent.Set(false)
+			got := MockReportSummary(c.mock)
+			restore()
+			if got != c.want || strings.Contains(got, "kp-canary") || strings.Contains(got, "kp-user") {
+				t.Errorf("by default the mock is named %q, want %q", got, c.want)
+			}
+			restore = logcontent.Set(true)
+			defer restore()
+			if got, whole := MockReportSummary(c.mock), MockSummaryFromSpec(c.mock); got != whole {
+				t.Errorf("with the switch on the mock is named %q, want its summary %q", got, whole)
+			}
+		})
+	}
+}
+
+// A report file written with the switch on, or by an older keploy, is read
+// with its tests' matched calls and dependency rows named as a report
+// without content names them: no query, no Mongo request but its command, no
+// SQL literal, by each call's protocol and each row's type; each still names
+// the call. A row DepRowName did not write, and the overflow row, are kept.
+// The file's own report is not changed, and with the switch on it is read as
+// written.
+func TestAReportFileNamesItsMatchedCallsAndDependenciesWithoutContent(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	mongo := "MongoDB " + mongoOp(t, `{ SectionSingle msg: {"createUser":"kp-canary-user","pwd":"kp-canary-pwd"} }`)
+	file := func() *TestReport {
+		return &TestReport{Tests: []TestResult{{
+			FailureInfo: FailureInfo{MatchedCalls: []MatchedCall{
+				{MockName: "mock-1", Protocol: "Http", Summary: "GET http://kp-user:kp-canary-pw@auth-svc:8080/v1/session?token=kp-canary-token"},
+				{MockName: "mock-2", Protocol: "Mongo", Summary: mongo},
+				{MockName: "mock-3", Protocol: "MySQL", Summary: "MySQL SELECT 'kp-canary-literal'"},
+				{MockName: "mock-4", Protocol: "gRPC", Summary: "gRPC"},
+			}},
+			Result: Result{DepResult: []DepResult{
+				{Name: DepRowName(0, "mongo", mongo), Type: "mongo"},
+				{Name: DepRowName(1, "http", "GET auth-svc:8080/v1/session"), Type: "http"},
+				{Name: DepRowName(2, "mysql", "mysql:3306 COM_QUERY"), Type: "mysql"},
+				{Name: "deps[3] mongo hand-written kp-canary-row", Type: "mongo"},
+				DepMissingOverflowRow(7),
+			}},
+		}}}
+	}
+	f := file()
+	got := f.ReportContent().Tests[0]
+	var summaries []string
+	for _, c := range got.FailureInfo.MatchedCalls {
+		summaries = append(summaries, c.Summary)
+	}
+	if want := []string{"GET http://auth-svc:8080/v1/session", "MongoDB createUser", "MySQL SELECT ?", "gRPC"}; !reflect.DeepEqual(summaries, want) {
+		t.Errorf("matched calls read as %q, want %q", summaries, want)
+	}
+	var names []string
+	for _, d := range got.Result.DepResult {
+		names = append(names, d.Name)
+	}
+	if want := []string{"deps[0] mongo MongoDB createUser (presence)", "deps[1] http GET auth-svc:8080/v1/session (presence)", "deps[2] mysql mysql:3306 COM_QUERY (presence)",
+		"deps[3] mongo hand-written kp-canary-row", DepMissingOverflowRow(7).Name}; !reflect.DeepEqual(names, want) {
+		t.Errorf("dependency rows read as %q, want %q", names, want)
+	}
+	if !reflect.DeepEqual(f, file()) {
+		t.Errorf("reading the file changed it: %+v", f.Tests[0])
+	}
+	logcontent.Set(true)
+	if got := file().ReportContent(); !reflect.DeepEqual(got, file()) {
+		t.Errorf("with the switch on the file is read as %+v", got.Tests[0])
 	}
 }
