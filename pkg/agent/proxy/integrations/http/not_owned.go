@@ -143,18 +143,26 @@ func init() {
 }
 
 // markNotOwned makes report the miss of request (its body liveBody), a call
-// that is m, a recording the open view does not show (notOwnedRecording): m
-// is its closest mock, with no field named as differing, since none does.
-// Its rendered requests are m's and the call's, each rendered with m's
-// noise, as the builder renders a report's closest mock and call, so a
-// reader that compares the two compares the call with m; they are content,
-// withheld as Build withholds it (mismatch.Withhold), which says, as it
-// drops them, whether they were the same (RequestsIdentical).
-func markNotOwned(report *models.MockMismatchReport, m *models.Mock, request *http.Request, liveBody []byte) {
+// that is m, a recording the open view does not show (notOwnedRecording, by
+// the strict comparison with noise n): m is its closest mock, with no field
+// named as differing, since none does. Its rendered requests are m's and the
+// call's, each rendered with m's noise, as the builder renders a report's
+// closest mock and call, so a reader that compares the two compares the
+// call with m; they are content, withheld as Build withholds it
+// (mismatch.Withhold), which says, as it drops them, whether they were the
+// same (RequestsIdentical). A path segment of the call that is not m's, at a
+// place the comparison excused, holds the application's value: a place of
+// the report (excusedPathPlaces).
+func markNotOwned(report *models.MockMismatchReport, m *models.Mock, request *http.Request, liveBody []byte, n strictNoise) {
 	report.ClosestMock, report.NotOwned = m.Name, true
 	report.FieldDiffs, report.Differs = nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.ReceivedReq = renderLiveRequest(request, liveBody, m.Noise)
+	livePath := ""
+	if request != nil && request.URL != nil {
+		livePath = request.URL.Path
+	}
+	report.VariablePlaces = addPlaces(report.VariablePlaces, excusedPathPlaces(report.ActualSummary, m, livePath, n))
 	report.NextSteps = notOwnedNextSteps(m.Name)
 	mismatch.Withhold(report)
 }
