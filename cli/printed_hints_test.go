@@ -31,8 +31,9 @@ import (
 // way the user's starts. Each of these went wrong once: the no-test-sets hint
 // told every docker and compose user `keploy record -c "docker run ..."
 // --delay 6`, which record refuses; the missing -c hint showed native users
-// docker run lines; and the buildDelay and missing --container-name hints
-// showed a user of `keploy test` a `keploy record` line.
+// docker run lines; the buildDelay and missing --container-name hints
+// showed a user of `keploy test` a `keploy record` line; and the delay hint of
+// keploy in docker showed a compose user a docker run line.
 
 // hintCase is one run of `keploy <command> <args>` and the hint it has to
 // print, under the message that says why.
@@ -76,11 +77,14 @@ func TestEveryHintARecordOrTestPrintsIsALineOfTheCommandRun(t *testing.T) {
 	}
 	// ValidateFlags: delay <= 5. Natively the hint is test's own Example.
 	cases = append(cases,
-		// In docker its line runs docker run, whatever the application:
-		// keploy in a container starts the application as a container, and
-		// the line is there for --delay. A user of keploy in docker is not
-		// shown the native Example (`keploy test -c "/path/to/user/app"`).
-		hintCase{name: "default delay, in docker", command: "test", args: compose, inDocker: true, keployDir: true,
+		// In docker its line starts the application as a container, the way
+		// the user's starts: a compose line for a compose application, a
+		// docker run line for a docker run one (a compose user was shown
+		// docker run). A user of keploy in docker is not shown the native
+		// Example (`keploy test -c "/path/to/user/app"`).
+		hintCase{name: "default delay, compose, in docker", command: "test", args: compose, inDocker: true, keployDir: true,
+			reason: "Delay is set to", kind: utils.DockerCompose, raises: "delay", above: 5},
+		hintCase{name: "default delay, docker run, in docker", command: "test", args: []string{"-c", dockerRunApp}, inDocker: true, keployDir: true,
 			reason: "Delay is set to", kind: utils.DockerRun, raises: "delay", above: 5},
 		hintCase{name: "default delay", command: "test", args: []string{"-c", nativeRunApp}, keployDir: true,
 			reason: "Delay is set to", kind: utils.Native, raises: "delay", above: 5},
