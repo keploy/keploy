@@ -2,11 +2,14 @@ package provider
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -560,5 +563,66 @@ func TestResolveCommandType_ConfigWarningOnlyWhenItWouldDiffer(t *testing.T) {
 	}
 	if logs2.FilterMessageSnippet("not honoured").Len() == 0 {
 		t.Error("config value was silently ignored where it would have changed the outcome")
+	}
+}
+
+// missingCommandExamples runs keploy mock <verb> with neither -c nor
+// --from-container, as keploy does (its flags added, no keploy.yml), and
+// returns the refusal and the example lines keploy logged with it.
+func missingCommandExamples(t *testing.T, verb string) (error, []string) {
+	t.Helper()
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	core, logs := observer.New(zapcore.InfoLevel)
+	c := NewCmdConfigurator(zap.New(core), config.New())
+	dir := t.TempDir()
+	cmd := mockVerb(t, c, verb, dir)
+	if err := cmd.ParseFlags([]string{"-p", dir}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if err := c.PreProcessFlags(cmd); err != nil {
+		t.Fatalf("PreProcessFlags: %v", err)
+	}
+	err := c.ValidateFlags(context.Background(), cmd)
+	var examples []string
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "keploy mock ") {
+			examples = append(examples, e.Message)
+		}
+	}
+	return err, examples
+}
+
+// keploy mock record or replay with neither -c nor --from-container is
+// refused with an example of what to run. The proven model runs the test
+// command natively and judges a Go suite, and refuses --from-container, so
+// under it the example is the Go suite's command, for the verb that was run,
+// and never --from-container; with it off, the examples are the ones of
+// before. Mutation: under the switch give the switch-off examples.
+func TestAMockRunWithNoCommandIsShownTheExampleItsModelRuns(t *testing.T) {
+	for _, verb := range []string{"record", "replay"} {
+		t.Run(verb, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			err, examples := missingCommandExamples(t, verb)
+			if err == nil || !strings.Contains(err.Error(), "either a command (-c) or --from-container is required") {
+				t.Fatalf("under the switch: ValidateFlags = %v, want the missing-command refusal", err)
+			}
+			want := `Example usage: keploy mock ` + verb + ` -c "go test -p 1 -json ./..."`
+			if len(examples) != 1 || examples[0] != want {
+				t.Fatalf("under the switch the examples are %q, want only %q", examples, want)
+			}
+
+			t.Setenv(provenswitch.Env, "0")
+			err, examples = missingCommandExamples(t, verb)
+			if err == nil || !strings.Contains(err.Error(), "either a command (-c) or --from-container is required") {
+				t.Fatalf("switch off: ValidateFlags = %v, want the missing-command refusal", err)
+			}
+			if want := []string{`Example usage: keploy mock record -c "pytest"`, `          or: keploy mock record --from-container my-app`}; !reflect.DeepEqual(examples, want) {
+				t.Fatalf("switch off: the examples are %q, want those of before, %q", examples, want)
+			}
+		})
 	}
 }
