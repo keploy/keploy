@@ -11,9 +11,13 @@ import (
 	"go.keploy.io/server/v3/utils"
 )
 
-func (c *CmdConfigurator) noCommandError() error {
-	return errors.New("missing required -c flag or appCmd in config file")
-}
+// errNoCommand is ValidateFlags' error for a `keploy record` or `keploy test`
+// given no application command (no -c, no appCmd in keploy.yml). One value,
+// so Validate can tell it from the rest and show the user a command line:
+// it used to be built anew on each call (noCommandError), so Validate's
+// `err == c.noCommandError()` compared two different values, was never true,
+// and the hint under it was never printed.
+var errNoCommand = errors.New("missing required -c flag or appCmd in config file")
 
 // alreadyRunning checks that during test mode, if user provides the basePath, then it implies that the application is already running somewhere.
 func alreadyRunning(cmd, basePath string) bool {
