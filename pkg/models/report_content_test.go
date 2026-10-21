@@ -201,6 +201,8 @@ func TestAPathDiffHolesTheSegmentsItFindsDiffer(t *testing.T) {
 		{"shorter than the recording", "GET /api/kp-live-id", "/api/users/kp-rec-id", "GET /api/{}"},
 		{"shifted: what cannot be lined up", "GET /v2/api/users/kp-live-id", "/api/users/kp-rec-id", "GET /{}/{}/{}/{}"},
 		{"no recorded path", "GET /api/kp-live-id", "", "GET /{}/{}"},
+		{"the root path", "GET /", "/kp-rec-id", "GET /"},
+		{"a trailing slash", "GET /api/users/", "/api/users/kp-rec-id", "GET /api/users/"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			call := UnmatchedCall{Protocol: "HTTP", ActualSummary: c.summary,
@@ -427,12 +429,21 @@ func TestTheWordsAReportKeepsQuoteItsSummaryAsItIsWithheld(t *testing.T) {
 			gone:        []string{"live", "kp-rec-id"},
 		},
 		{
-			name: "the root path: its quote, not every slash of the words",
+			name: "a path of one segment: its quote, not every slash of the words",
+			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /kp-live-id",
+				NextSteps:  "Serve it to every test and/or record again. " + hint("/kp-live-id"),
+				FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/kp-rec-id", Actual: "/kp-live-id"}}},
+			wantSummary: "GET /{}",
+			wantNext:    "Serve it to every test and/or record again. " + hint("/{}"),
+			gone:        []string{"kp-live-id", "kp-rec-id"},
+		},
+		{
+			name: "the root path: no segment, so nothing withheld",
 			call: UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /",
 				NextSteps:  "Serve it to every test and/or record again. " + hint("/"),
 				FieldDiffs: []MockFieldDiff{{Path: PathFieldDiff, Kind: DiffKindValueChanged, Expected: "/kp-rec-id", Actual: "/"}}},
-			wantSummary: "GET /{}",
-			wantNext:    "Serve it to every test and/or record again. " + hint("/{}"),
+			wantSummary: "GET /",
+			wantNext:    "Serve it to every test and/or record again. " + hint("/"),
 			gone:        []string{"kp-rec-id"},
 		},
 		{

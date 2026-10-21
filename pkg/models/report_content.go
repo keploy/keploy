@@ -327,7 +327,8 @@ func pathDiffPlaces(summary string, diffs []MockFieldDiff) []string {
 // places (MockMismatchReport.VariablePlaces) when the comparison found its
 // path differs from recorded at places keploy knows vary (the strict HTTP
 // comparison's learned or keploy.yml url noise), and a "path" field diff's
-// are found the same way (pathDiffPlaces).
+// are found the same way (pathDiffPlaces). An empty segment (a root path's,
+// a trailing slash's) holds no value and is never named: GET / stays GET /.
 func PathPlacesOtherThan(summary, recorded string) []string {
 	segs, ok := shapePathSegments(summary)
 	if !ok {
@@ -336,6 +337,9 @@ func PathPlacesOtherThan(summary, recorded string) []string {
 	rec := strings.Split(strings.TrimPrefix(recorded, "/"), "/")
 	var places []string
 	for i, s := range segs {
+		if s == "" {
+			continue
+		}
 		if i >= len(rec) || rec[i] != s {
 			places = append(places, "url.path["+strconv.Itoa(i)+"]")
 		}
