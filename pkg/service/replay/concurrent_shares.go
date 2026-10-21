@@ -2,12 +2,10 @@ package replay
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -25,14 +23,17 @@ import (
 //     test of its group, and required of none: each test's own (definite)
 //     recordings are what it lists less those. A candidate answers at most
 //     once in the staging, for whichever of its tests makes its call first
-//     (the agent's claims); the test's own answer before it.
+//     (the agent's claims), only a call it matches exactly; the test's own
+//     answer before it. keploy never learns against a candidate (what changed
+//     may be another test's call): a call closest to one is refused.
 //   - Settlement, at the set's end, before the per-test evidence passes and
 //     every hook: the call each candidate answered pins it to the test that
 //     made it (models.SetShares.Pins), and every case sharing cannot prove
 //     charges the tests it may be (a data-plane miss with the reason
 //     models.MissConcurrentAmbiguous or MissConcurrentConflict, or an
 //     unconsumed mock), each charged test FAILED. Every recording a test
-//     lists ends pinned or owned by a charged test; one the mapping lists as
+//     lists ends pinned, or owned by a charged test and marked
+//     (models.MockEntry.Unresolved: not time's choice); one the mapping lists as
 //     shared (models.Mapping.Shared: attributed to a test the recording did
 //     not keep) ends pinned, or stays shared, owned by no test, as keploy
 //     record leaves the recordings of a test it did not keep.
@@ -72,17 +73,18 @@ func (r *Replayer) agentServesConcurrent() bool {
 // to make them. Any other replay, a set that states no concurrency, or an
 // agent that does not say it serves them (said once, with why) keeps the
 // recorded ownership whole: mappings as they are.
-func (r *Replayer) planShares(testSetID string, mappings map[string][]models.MockEntry, cases []*models.TestCase) map[string][]models.MockEntry {
+func (r *Replayer) planShares(testSetID string, mappings map[string][]models.MockEntry) map[string][]models.MockEntry {
 	if r.exact == nil || r.exact.share == nil || !r.sharing() {
 		return mappings
 	}
 	if !r.agentServesConcurrent() {
+		r.exact.share.unserved = true
 		r.logger.Warn("keploy's agent does not serve a test the recordings it shares with the tests recorded beside it: each recording made while several tests' requests were open stays the test whose request came first",
 			zap.String("testSetID", testSetID),
 			zap.String("next_step", "run keploy record with a keploy agent of the same version"))
 		return mappings
 	}
-	return r.exact.shareConcurrent(mappings, cases)
+	return r.exact.shareConcurrent(mappings)
 }
 
 // setConcurrency is what a set's mapping says of its concurrency.
@@ -216,9 +218,12 @@ type sharePlan struct {
 	definite map[string][]string
 	// worker are the worker-scope recordings the kinds key.
 	worker []string
-	// inputs and notLearnable are what the learn step reads of each test.
-	inputs       map[string][]string
-	notLearnable map[string][]string
+	// unkeyed are the held recordings of a kind that registered its keys
+	// which it does not key (for SQL: not a query it compares by value).
+	unkeyed map[string]bool
+	// unserved: keploy record's full round, with an agent that did not say
+	// it serves shared recordings (planShares): the plan shares nothing.
+	unserved bool
 
 	// runs counts the times each test was opened in the set's run.
 	runs map[string]int
@@ -241,7 +246,7 @@ func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*
 	if conc == nil {
 		return nil
 	}
-	sp := &sharePlan{conc: conc, info: map[string]*shareInfo{}, runs: map[string]int{}, served: map[string]bool{}, unread: map[string]bool{}, read: map[string]int{}, uses: map[string][]shareUse{}}
+	sp := &sharePlan{conc: conc, info: map[string]*shareInfo{}, unkeyed: map[string]bool{}, runs: map[string]int{}, served: map[string]bool{}, unread: map[string]bool{}, read: map[string]int{}, uses: map[string][]shareUse{}}
 	for _, list := range stored {
 		for _, mk := range list {
 			if mk == nil || mk.Name == "" || sp.info[mk.Name] != nil || mk.IsProtocolPhase() {
@@ -253,6 +258,7 @@ func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*
 			}
 			st, ok := keys.Statement(mk)
 			if !ok {
+				sp.unkeyed[mk.Name] = true
 				continue
 			}
 			in := &shareInfo{mock: mk, keys: keys, statement: st, positions: keys.Positions(mk)}
@@ -291,9 +297,8 @@ func (sp *sharePlan) candidate(name string) bool {
 // serves them): each test owns its definite recordings only, and is served
 // its candidates after them; a shared recording (models.Mapping.Shared) is
 // in no pool. It returns mappings with each test's definite entries only,
-// which is what each test is required to make. cases are the set's test
-// cases, whose requests give the learn step their inputs.
-func (p *exactPlan) shareConcurrent(mappings map[string][]models.MockEntry, cases []*models.TestCase) map[string][]models.MockEntry {
+// which is what each test is required to make.
+func (p *exactPlan) shareConcurrent(mappings map[string][]models.MockEntry) map[string][]models.MockEntry {
 	sp := p.share
 	if sp == nil {
 		return mappings
@@ -365,191 +370,16 @@ func (p *exactPlan) shareConcurrent(mappings map[string][]models.MockEntry, case
 		p.pool = pool
 	}
 	p.ownsTestMocks = p.ownsTestMocks || len(names) > 0
-	sp.inputs = map[string][]string{}
-	for _, tc := range cases {
-		if tc != nil && len(sp.cands[tc.Name]) > 0 {
-			sp.inputs[tc.Name] = requestInputs(tc)
-		}
-	}
-	sp.notLearnable = sp.notLearnableOf()
 	return narrowed
 }
 
-// notLearnableOf is, by test, its candidates the learn step may never pair a
-// call of it with: those holding, at a place that tells their statement's
-// recordings apart (a place where another recording of the statement holds
-// another value), a whole value another test of their group sent in its
-// request that this test's request does not hold.
-func (sp *sharePlan) notLearnableOf() map[string][]string {
-	// values: by statement and place, the distinct values its recordings
-	// hold there.
-	values := map[string]map[string]map[string]bool{}
-	for _, in := range sp.info {
-		byPlace := values[in.statement]
-		if byPlace == nil {
-			byPlace = map[string]map[string]bool{}
-			values[in.statement] = byPlace
-		}
-		for k, v := range in.positions {
-			if byPlace[k] == nil {
-				byPlace[k] = map[string]bool{}
-			}
-			byPlace[k][v] = true
-		}
-	}
-	inputSet := map[string]map[string]bool{}
-	for t, vs := range sp.inputs {
-		set := map[string]bool{}
-		for _, v := range vs {
-			set[v] = true
-		}
-		inputSet[t] = set
-	}
-	out := map[string][]string{}
-	for test, cands := range sp.cands {
-		own := inputSet[test]
-		for _, name := range cands {
-			in := sp.info[name]
-			refused := false
-			for _, k := range keysSorted(in.positions) {
-				v := in.positions[k]
-				if v == "" || len(values[in.statement][k]) < 2 || own[v] {
-					continue
-				}
-				for _, y := range sp.candOf[name] {
-					if y != test && inputSet[y][v] {
-						refused = true
-						break
-					}
-				}
-				if refused {
-					break
-				}
-			}
-			if refused {
-				out[test] = append(out[test], name)
-			}
-		}
-	}
-	return out
-}
-
-// requestInputs are the whole leaf values of a test case's request, as the
-// HTTP learn step reads leaves: its URL path segments, its query values, its
-// form values and its JSON body's scalars; for gRPC, the scalars of its
-// messages. Request values: compared, never logged.
-func requestInputs(tc *models.TestCase) []string {
-	if tc == nil {
+// concurrentServing is what test name is served of the shares: its
+// candidates, in recorded order; none when the plan does not share.
+func (p *exactPlan) concurrentServing(name string) []string {
+	if p == nil || p.share == nil || !p.share.sharing {
 		return nil
 	}
-	seen := map[string]bool{}
-	var out []string
-	add := func(v string) {
-		if v != "" && !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	switch tc.Kind {
-	case models.HTTP:
-		req := tc.HTTPReq
-		path, query := req.URL, ""
-		if i := strings.IndexByte(path, '?'); i >= 0 {
-			path, query = path[:i], path[i+1:]
-		}
-		if i := strings.Index(path, "://"); i >= 0 {
-			path = path[i+3:]
-			if j := strings.IndexByte(path, '/'); j >= 0 {
-				path = path[j:]
-			} else {
-				path = ""
-			}
-		}
-		for _, seg := range strings.Split(path, "/") {
-			add(unescapeLoose(seg))
-		}
-		for _, kv := range strings.Split(query, "&") {
-			if i := strings.IndexByte(kv, '='); i >= 0 {
-				add(unescapeLoose(kv[i+1:]))
-			}
-		}
-		for _, v := range req.URLParams {
-			add(v)
-		}
-		for _, f := range req.Form {
-			for _, v := range f.Values {
-				add(v)
-			}
-		}
-		if v, ok := learn.DecodeJSON([]byte(req.Body)); ok {
-			leaves := map[string]learn.Leaf{}
-			learn.JSONLeaves("body", v, leaves)
-			for _, k := range keysSorted(leaves) {
-				add(leaves[k].Value)
-			}
-		}
-	case models.GRPC_EXPORT:
-		for _, msg := range append([]models.GrpcLengthPrefixedMessage{tc.GrpcReq.Body}, tc.GrpcReq.AdditionalMessages...) {
-			for _, m := range grpcScalar.FindAllStringSubmatch(msg.DecodedData, -1) {
-				if m[1] != "" {
-					add(m[1])
-				} else {
-					add(m[2])
-				}
-			}
-		}
-	}
-	return out
-}
-
-// grpcScalar is a quoted string, or a bare value after a field's colon, of a
-// gRPC message as keploy writes it decoded.
-var grpcScalar = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"|:\s*([^\s{}"\[\],]+)`)
-
-// unescapeLoose is s with its percent escapes undone, s itself when it has
-// one that is not.
-func unescapeLoose(s string) string {
-	if !strings.ContainsRune(s, '%') && !strings.ContainsRune(s, '+') {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '+':
-			b.WriteByte(' ')
-		case c == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
-			b.WriteByte(unhex(s[i+1])<<4 | unhex(s[i+2]))
-			i += 2
-		default:
-			b.WriteByte(c)
-		}
-	}
-	return b.String()
-}
-
-func isHex(c byte) bool {
-	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
-}
-
-func unhex(c byte) byte {
-	switch {
-	case '0' <= c && c <= '9':
-		return c - '0'
-	case 'a' <= c && c <= 'f':
-		return c - 'a' + 10
-	}
-	return c - 'A' + 10
-}
-
-// concurrentServing is what test name is served of the shares: its
-// candidates, those the learn step may not pair a call of it with, and its
-// request's inputs; none when the plan does not share.
-func (p *exactPlan) concurrentServing(name string) (cands, notLearnable, inputs []string) {
-	if p == nil || p.share == nil || !p.share.sharing {
-		return nil, nil, nil
-	}
-	sp := p.share
-	return append([]string(nil), sp.cands[name]...), append([]string(nil), sp.notLearnable[name]...), append([]string(nil), sp.inputs[name]...)
+	return append([]string(nil), p.share.cands[name]...)
 }
 
 // noteRun notes that test name was opened again: its run number, which
@@ -597,6 +427,37 @@ func learnedAt(st models.MockState) []string {
 	for _, v := range st.Variables {
 		if v.Echo && v.Bind != "" {
 			set[v.Bind] = true
+		}
+	}
+	return keysSorted(set)
+}
+
+// learnedOn reports whether the learn step learned anything on a consumed
+// recording: noise, a variable, or a value bound at an earlier recording. A
+// shared recording states none of these (models.ConcurrentKeys.Shareable), so
+// any is what the learn step paired a call with it by.
+func learnedOn(st models.MockState) bool {
+	return len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0
+}
+
+// learnedPlaces is every place the learn step learned on a consumed
+// recording: its noise, and the bound places of its variables and of what it
+// binds at earlier recordings, sorted.
+func learnedPlaces(st models.MockState) []string {
+	set := map[string]bool{}
+	for k := range st.ReqBodyNoise {
+		set[k] = true
+	}
+	for _, v := range st.Variables {
+		if v.Bind != "" {
+			set[v.Bind] = true
+		}
+	}
+	for _, vars := range st.Binds {
+		for _, v := range vars {
+			if v.Bind != "" {
+				set[v.Bind] = true
+			}
 		}
 	}
 	return keysSorted(set)
@@ -983,55 +844,28 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 		}
 	}
 
-	// Corroboration: a learned candidate pair pins only when every other
-	// learned candidate pair of its statement in its component drifted at
-	// the places it did at least, or a learned pair of any test's own
-	// recording of the statement, anywhere in the set, drifted there: the
-	// statement drifts there for a call whose attribution is not in doubt.
-	// A worker-scope recording any test may answer with is no test's own.
-	definite := map[string]bool{}
-	for _, names := range sp.definite {
-		for _, n := range names {
-			definite[n] = true
-		}
-	}
-	definiteDrift := map[string][][]string{}
-	for name, l := range learned {
-		if definite[name] && !isCand(name) {
-			in := sp.info[name]
-			definiteDrift[in.statement] = append(definiteDrift[in.statement], l)
-		}
-	}
-	uncorroborated := map[string]bool{}
+	// Learned on: a candidate a call was answered with only once the learn
+	// step learned what changed (noise, an echo) is never pinned: another of
+	// the tests open while it was recorded may have made it, so what changed
+	// may be that test's call, not a drift of this one's. Its consumer is
+	// charged. A parser's learn step refuses such a pairing itself (it learns
+	// nothing against a shared recording); this holds whatever a parser does.
+	notOwn := map[string]bool{}
 	for _, n := range cands {
 		t, ok := consumer[n]
-		d := learned[n]
-		if !ok || len(d) == 0 || s.ambiguous[n] || conflictTo[n] != "" {
+		if !ok || s.ambiguous[n] || !learnedOn(state[n]) {
 			continue
 		}
-		in := sp.info[n]
-		others, superset := 0, true
-		for _, m := range members[componentOf[n]] {
-			if m == n || !isCand(m) || len(learned[m]) == 0 || sp.info[m].statement != in.statement {
-				continue
-			}
-			if _, consumed := consumer[m]; !consumed {
-				continue
-			}
-			others++
-			superset = superset && subset(d, learned[m])
+		notOwn[n] = true
+		d := learnedPlaces(state[n])
+		at := strings.Join(d, ", ")
+		if at == "" {
+			at = "a place"
 		}
-		ok = others >= 1 && superset
-		for _, dd := range definiteDrift[in.statement] {
-			ok = ok || subset(d, dd)
-		}
-		if !ok {
-			uncorroborated[n] = true
-			why := "its call drifted from its recording at " + strings.Join(d, ", ") + ", where no other call of this statement did"
-			note := s.note(t, n)
-			note.Case, note.Places = models.ConcurrentCaseCorroboration, append([]string(nil), d...)
-			s.charge(t, s.call(n, models.MissConcurrentAmbiguous, note, why))
-		}
+		why := "its call differs from " + n + " at " + at + ", a recording another of the tests open while it was recorded may have made: keploy does not learn what changed against a recording another test may own"
+		note := s.note(t, n)
+		note.Case, note.Class, note.Places = models.ConcurrentCaseNotOwn, []string{n}, append([]string(nil), d...)
+		s.charge(t, s.call(n, models.MissConcurrentAmbiguous, note, why))
 	}
 
 	// Leftovers: a candidate no test consumed, outside an ambiguous class.
@@ -1079,24 +913,27 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 	}
 
 	// Where each candidate goes. Pinned: its consumer. Every other case to a
-	// charged test; an unconsumed shared one stays in Mapping.Shared.
+	// charged test, marked (MockEntry.Unresolved): an ambiguous one, whose
+	// recordings keploy cannot tell apart, first, whatever else holds of it,
+	// so every later replay charges the test that lists it; the others
+	// unproven. An unconsumed shared one stays in Mapping.Shared.
 	for _, n := range cands {
 		t, consumed := consumer[n]
 		switch {
-		case conflictTo[n] != "":
-			s.move(n, conflictTo[n], "")
 		case s.ambiguous[n] && consumed:
 			s.move(n, t, models.MockEntryUnresolvedAmbiguous)
 		case s.ambiguous[n]:
 			if o := s.owner(n); o != "" {
 				s.move(n, o, models.MockEntryUnresolvedAmbiguous)
 			}
+		case conflictTo[n] != "":
+			s.move(n, conflictTo[n], models.MockEntryUnresolvedUnproven)
 		case retried[n]:
 			if o := s.owner(n); o != "" {
-				s.move(n, o, "")
+				s.move(n, o, models.MockEntryUnresolvedUnproven)
 			}
-		case uncorroborated[n]:
-			s.move(n, t, "")
+		case notOwn[n]:
+			s.move(n, t, models.MockEntryUnresolvedUnproven)
 		case consumed:
 			if s.shares.Pins == nil {
 				s.shares.Pins = map[string]string{}
@@ -1109,7 +946,7 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 				continue
 			}
 			if o := s.owner(n); o != "" {
-				s.move(n, o, "")
+				s.move(n, o, models.MockEntryUnresolvedUnproven)
 			}
 		}
 	}
@@ -1222,13 +1059,16 @@ func (p *exactPlan) consumerOf() map[string]string {
 // annotateConcurrent says, under the proven switch, on each miss and each
 // unconsumed recording of a test recorded while other tests' requests were
 // open, what keploy knows of that: the tests open beside it, the test its
-// recordings were attributed to, and why they were not shared (their kind,
-// what their recording states, or that only keploy record's full round shares
-// them), instead of a bare "had no recorded answer". A test that lists a
-// recording a full round could not give to one test
-// (models.MockEntryUnresolvedAmbiguous) is charged concurrent_ambiguous in
-// every replay that does not share, so no replay can admit it. It returns
-// the tests it charged so.
+// recordings were attributed to, and why this replay did not share them
+// (notShared: time alone listed it under that test and the replay does not
+// share it, or keploy record's full round left it there unproven), instead of
+// a bare "had no recorded answer" or "never called". A test that lists a
+// recording a full round could not give to one test because its recordings
+// cannot be told apart (models.MockEntryUnresolvedAmbiguous) is charged
+// concurrent_ambiguous in every replay that does not share, so no replay can
+// admit it. It returns the tests it charged so. The recordings settleShares
+// charged as made by none of the tests it shared them between say so
+// already, and are left as they are.
 func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[string]mockDisplayInfo) []string {
 	if !provenswitch.On() || p == nil || p.share == nil {
 		return nil
@@ -1241,7 +1081,19 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 		with, unkept := sp.conc.with(test)
 		for j := range r.FailureInfo.UnmatchedCalls {
 			c := &r.FailureInfo.UnmatchedCalls[j]
-			if c.Concurrent != nil || !c.CountsAgainstTest() || len(with) == 0 {
+			if !c.CountsAgainstTest() || len(with) == 0 {
+				continue
+			}
+			if c.Concurrent != nil {
+				// A parser's note (its learn step refused the call among
+				// the recordings shared with the tests open beside it)
+				// names the recordings and the case; with whom is the
+				// replay's to say, which only it knows.
+				if len(c.Concurrent.With) == 0 {
+					n := c.Concurrent.Clone()
+					n.With, n.Unkept = with, unkept
+					c.Concurrent = n
+				}
 				continue
 			}
 			n := &models.ConcurrentNote{With: with, Unkept: unkept}
@@ -1253,15 +1105,23 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 			if u.Concurrent != "" {
 				continue
 			}
-			if g, ok := sp.conc.group(u.Name); ok {
-				var with []string
-				for _, t := range g.Tests {
-					if t != test {
-						with = append(with, t)
-					}
-				}
-				u.Concurrent, u.Unkept = strings.Join(with, ", "), g.Unkept
+			g, ok := sp.conc.group(u.Name)
+			if !ok {
+				continue
 			}
+			var with []string
+			for _, t := range g.Tests {
+				if t != test {
+					with = append(with, t)
+				}
+			}
+			whyNot, _, stated := sp.notShared(u.Name)
+			if whyNot == "" {
+				// A recording this replay shares is required of no test:
+				// only settleShares charges one, and says so.
+				continue
+			}
+			u.Concurrent, u.Unkept, u.WhyNot, u.Stated = strings.Join(with, ", "), g.Unkept, whyNot, stated
 		}
 		if sp.sharing || r.Status == models.TestStatusIgnored {
 			continue
@@ -1284,28 +1144,62 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 	return charged
 }
 
+// notShared is why this replay did not share the grouped recording name
+// between the tests of its group (models.ConcurrentNotShared*), with the kind
+// it names (keploy shares none of that kind yet, or not this one of it) or
+// what its recording states that keploy does not share. "" for a recording
+// this replay shares (a candidate of keploy record's full round).
+//
+//   - unproven: keploy record's full round shared it and could not tell which
+//     test made its call, and its judging left it with the test that lists
+//     it now (MockEntry.Unresolved), which it charged: not time's choice;
+//   - unkept: no kept test lists it (Mapping.Shared);
+//   - otherwise time alone listed it under its test, and this replay does not
+//     share it: an agent that does not serve shared recordings (agent), a
+//     replay other than keploy record's full round (strict), a kind that
+//     registered no keys (kind) or one of its recordings it does not key
+//     (call), or a recording that states what keploy does not share
+//     (states).
+func (sp *sharePlan) notShared(name string) (whyNot, kind, stated string) {
+	e, listed := sp.conc.entries[name]
+	switch {
+	case listed && e.entry.Unresolved != "":
+		return models.ConcurrentNotSharedUnproven, "", ""
+	case listed && e.listedBy == "":
+		return models.ConcurrentNotSharedUnkept, "", ""
+	case sp.unserved:
+		return models.ConcurrentNotSharedAgent, "", ""
+	case !sp.sharing:
+		return models.ConcurrentNotSharedStrict, "", ""
+	}
+	in := sp.info[name]
+	switch {
+	case in == nil && sp.keyedKind(name):
+		return models.ConcurrentNotSharedCall, kindOf(sp, name), ""
+	case in == nil:
+		return models.ConcurrentNotSharedKind, kindOf(sp, name), ""
+	case !in.shareable:
+		return models.ConcurrentNotSharedStates, "", in.whyNot
+	}
+	return "", "", ""
+}
+
+// keyedKind reports whether the grouped entry name is of a kind that
+// registered its keys (models.ConcurrentKeysOf).
+func (sp *sharePlan) keyedKind(name string) bool {
+	if sp.unkeyed[name] {
+		return true
+	}
+	_, ok := models.ConcurrentKeysOf(models.Kind(kindOf(sp, name)))
+	return ok
+}
+
 // attribution is, for a miss of test whose closest recording is closest ("" for
 // none), the test the call's recordings were attributed to, and why they were
-// not shared with test (models.ConcurrentNotShared*), with the kind keploy
-// shares none of, or what the recording states that keploy does not share.
+// not shared with test (notShared).
 func (sp *sharePlan) attribution(test, closest string) (attributedTo, whyNot, kind, stated string) {
-	reason := func(name string) (string, string, string) {
-		in := sp.info[name]
-		switch {
-		case !sp.sharing:
-			return models.ConcurrentNotSharedStrict, "", ""
-		case in == nil:
-			return models.ConcurrentNotSharedKind, kindOf(sp, name), ""
-		case !in.shareable:
-			return models.ConcurrentNotSharedStates, "", in.whyNot
-		}
-		return "", "", ""
-	}
 	if e, ok := sp.conc.entries[closest]; ok && closest != "" {
-		if e.listedBy == "" {
-			return "", models.ConcurrentNotSharedUnkept, "", ""
-		}
-		w, k, st := reason(closest)
+		w, k, st := sp.notShared(closest)
 		if e.listedBy != test {
 			return e.listedBy, w, k, st
 		}
@@ -1322,7 +1216,7 @@ func (sp *sharePlan) attribution(test, closest string) (attributedTo, whyNot, ki
 		if e.listedBy == "" || e.listedBy == test || !groups[e.entry.Group] {
 			continue
 		}
-		if w, k, st := reason(name); w != "" {
+		if w, k, st := sp.notShared(name); w != "" {
 			return e.listedBy, w, k, st
 		}
 	}

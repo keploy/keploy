@@ -272,11 +272,11 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		zap.Int("concurrencyGroups", len(conc.groups)),
 		zap.Int("sharedMocks", len(conc.shared)))
 	if n := len(concurrent); n > 0 {
-		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while several tests were open is listed under the test whose request came first, and keploy record's full round works out which of them made each call",
+		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while several tests were open is listed under the test whose request came first, which time alone cannot tell made it",
 			zap.String("testSetID", testSetID),
 			zap.Int("count", n),
 			zap.Strings("tests", concurrent[:min(n, 20)]),
-			zap.String("next_step", "a test whose call keploy cannot tell apart from another's is quarantined with the reason; record those tests one request at a time"))
+			zap.String("next_step", "only plain keploy record's full round (KEPLOY_PROVEN=1) gives such a call to the test that made it, when it can tell; every other replay, keploy record sandbox's too, serves it to the test it is listed under. A test whose call keploy cannot settle fails with the reason: record those tests one request at a time"))
 	}
 }
 

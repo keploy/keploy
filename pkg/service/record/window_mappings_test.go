@@ -813,8 +813,13 @@ func TestWindowMappingsWriteTheConcurrencyGroupsAndTheSharedCalls(t *testing.T) 
 		t.Fatalf("groups written %d times; want once", db.writes)
 	}
 	warned := logs.FilterMessageSnippet("recorded while another test's request was still open").All()
-	if len(warned) != 1 || !strings.Contains(warned[0].Message, "keploy record's full round works out which of them made each call") {
-		t.Fatalf("want the warning to say the full round works out who made each call, got %+v", logs.All())
+	if len(warned) != 1 || !strings.Contains(warned[0].Message, "which time alone cannot tell made it") {
+		t.Fatalf("want the warning to say time alone cannot tell who made each call, got %+v", logs.All())
+	}
+	// True of every recording: only plain keploy record's full round shares
+	// such calls, never keploy record sandbox's.
+	if next := warned[0].ContextMap()["next_step"]; !strings.Contains(fmt.Sprint(next), "only plain keploy record's full round") || !strings.Contains(fmt.Sprint(next), "keploy record sandbox's too, serves it to the test it is listed under") {
+		t.Fatalf("next_step %q", next)
 	}
 }
 

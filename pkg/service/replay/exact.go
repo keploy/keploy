@@ -445,7 +445,7 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 	ex := &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)}
 	// keploy record's full round: the recordings it shares with the tests
 	// that ran beside it, after its own.
-	ex.Concurrent, ex.NotLearnable, ex.Inputs = plan.concurrentServing(name)
+	ex.Concurrent = plan.concurrentServing(name)
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
 		Variables: vars,
 		Exact:     ex,

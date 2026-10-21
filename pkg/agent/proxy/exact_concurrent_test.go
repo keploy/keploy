@@ -1,12 +1,13 @@
 package proxy
 
 import (
-	"reflect"
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // Shared recordings (ServeExactTestConcurrent, keploy record's full round):
@@ -25,7 +26,7 @@ func TestASharedRecordingIsReadAfterTheTestsOwn(t *testing.T) {
 	later := exactMock("own-later", 2*time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{shared, own, later}, nil)
 	mm.ServeExactPool("-", nil)
-	mm.ServeExactTestConcurrent("T", []*models.Mock{own, later}, ExactConcurrent{Cands: []*models.Mock{shared, own}})
+	mm.ServeExactTestConcurrent("T", []*models.Mock{own, later}, []*models.Mock{shared, own})
 	pt, _ := mm.GetPerTestMocksInWindow()
 	equalNames(t, "per-test", pt, "own", "own-later", "shared")
 	for _, m := range pt {
@@ -44,7 +45,7 @@ func TestASharedRecordingAnswersOnceForWhicheverTestCallsFirst(t *testing.T) {
 	c2 := exactMock("c2", time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{c1, c2}, nil)
 	mm.ServeExactPool("-", nil)
-	mm.ServeExactTestConcurrent("A", nil, ExactConcurrent{Cands: []*models.Mock{c1, c2}})
+	mm.ServeExactTestConcurrent("A", nil, []*models.Mock{c1, c2})
 	pt, _ := mm.GetPerTestMocksInWindow()
 	equalNames(t, "A's view", pt, "c1", "c2")
 	if !mm.DeleteFilteredMock(*pt[1]) {
@@ -59,7 +60,7 @@ func TestASharedRecordingAnswersOnceForWhicheverTestCallsFirst(t *testing.T) {
 	}
 	stale := pt[1]
 	mm.ServeExactPool("-", nil)
-	mm.ServeExactTestConcurrent("B", nil, ExactConcurrent{Cands: []*models.Mock{c1, c2}})
+	mm.ServeExactTestConcurrent("B", nil, []*models.Mock{c1, c2})
 	pt, _ = mm.GetPerTestMocksInWindow()
 	equalNames(t, "B's view", pt, "c1")
 	equalNames(t, "B's taken", mm.ExactTakenCandidates(models.HTTP), "c2")
@@ -88,7 +89,7 @@ func TestAReopenedTestGivesBackOnlyItsOwnClaims(t *testing.T) {
 	c2 := exactMock("c2", time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{c1, c2}, nil)
 	mm.ServeExactPool("-", nil)
-	cands := ExactConcurrent{Cands: []*models.Mock{c1, c2}}
+	cands := []*models.Mock{c1, c2}
 	mm.ServeExactTestConcurrent("A", nil, cands)
 	pt, _ := mm.GetPerTestMocksInWindow()
 	mm.DeleteFilteredMock(*pt[0]) // A takes c1
@@ -110,21 +111,17 @@ func TestAReopenedTestGivesBackOnlyItsOwnClaims(t *testing.T) {
 
 // A shared recording is never required of the test: the outcome lists only
 // its own, answered or not, and the mocks of the tests begun hold only its
-// own; a call the learn step reads its inputs and what it may not pair with
-// for, through ExactConcurrentReader.
+// own.
 func TestASharedRecordingIsNeverRequiredOfTheTest(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	c1 := exactMock("c1", time.Second, models.LifetimePerTest)
 	c2 := exactMock("c2", 2*time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{own, c1, c2}, nil)
 	mm.ServeExactPool("-", nil)
-	mm.ServeExactTestConcurrent("T", []*models.Mock{own}, ExactConcurrent{Cands: []*models.Mock{c1, c2}, Inputs: []string{"acme"}, NotLearnable: []string{"c2"}})
+	mm.ServeExactTestConcurrent("T", []*models.Mock{own}, []*models.Mock{c1, c2})
 	pt, _ := mm.GetPerTestMocksInWindow()
 	if !mm.DeleteFilteredMock(*pt[1]) {
 		t.Fatal("c1 was refused")
-	}
-	if !reflect.DeepEqual(mm.ExactTestInputs(), []string{"acme"}) || !mm.ExactTestNotLearnable("c2") || mm.ExactTestNotLearnable("c1") {
-		t.Fatalf("inputs %v, not learnable c1=%v c2=%v", mm.ExactTestInputs(), mm.ExactTestNotLearnable("c1"), mm.ExactTestNotLearnable("c2"))
 	}
 	mm.ServeExactPool("-", nil)
 	test, consumed, unconsumed, ok := mm.ExactTestOutcome()
@@ -133,9 +130,6 @@ func TestASharedRecordingIsNeverRequiredOfTheTest(t *testing.T) {
 	}
 	if !mm.StagedOwnerBegun("own") || mm.StagedOwnerBegun("c1") || mm.StagedOwnerBegun("c2") {
 		t.Fatal("the tests begun hold a shared recording")
-	}
-	if mm.ExactTestInputs() != nil || mm.ExactTestNotLearnable("c2") {
-		t.Fatal("a pool view says what the ended test's request held")
 	}
 }
 
@@ -155,5 +149,101 @@ func TestServeExactTestSharesNothing(t *testing.T) {
 	}
 	if states := mm.GetConsumedMocks(); len(states) != 1 || states[0].Concurrent {
 		t.Fatalf("consumed %+v", states)
+	}
+}
+
+// The agent's proxy hands the manager what the agent was sent, both ways it
+// opens a test (Proxy.ServeExactTestConcurrent, OpenExactTestConcurrent): the
+// test's own, then its shared recordings, each copy saying it is shared, which
+// is what a parser's learn step reads to never learn against one. A proxy that
+// dropped them would serve the test less than its plan, or, dropping only the
+// mark, have its shared recordings learned against as its own.
+func TestTheProxyServesATestTheRecordingsItShares(t *testing.T) {
+	for _, open := range []struct {
+		name string
+		do   func(p *Proxy, owned, cands []*models.Mock) error
+	}{
+		{"serve", func(p *Proxy, owned, cands []*models.Mock) error {
+			return p.ServeExactTestConcurrent("T", owned, cands)
+		}},
+		{"open", func(p *Proxy, owned, cands []*models.Mock) error {
+			return p.OpenExactTestConcurrent("T", owned, cands, nil)
+		}},
+	} {
+		t.Run(open.name, func(t *testing.T) {
+			own := exactMock("own", 0, models.LifetimePerTest)
+			c1 := exactMock("c1", time.Second, models.LifetimePerTest)
+			c2 := exactMock("c2", 2*time.Second, models.LifetimePerTest)
+			mm := stagedManager(t, []*models.Mock{own, c1, c2}, nil)
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+			p.setMockManager(mm)
+			mm.ServeExactPool("-", nil)
+			if err := open.do(p, []*models.Mock{own}, []*models.Mock{c1, c2}); err != nil {
+				t.Fatal(err)
+			}
+			pt, _ := mm.GetPerTestMocksInWindow()
+			equalNames(t, "T's view", pt, "own", "c1", "c2")
+			for _, m := range pt {
+				if want := m.Name != "own"; m.TestModeInfo.Concurrent != want {
+					t.Fatalf("%s: shared = %v, want %v", m.Name, m.TestModeInfo.Concurrent, want)
+				}
+			}
+			if test, _, _, ok := mm.ExactTestOutcome(); !ok || test != "T" {
+				t.Fatalf("the open test is %q (%v); want T", test, ok)
+			}
+		})
+	}
+}
+
+// A miss the learn step refused among the recordings a test shares with the
+// tests recorded beside it reaches the replay with what the parser knows of
+// them (models.MockMismatchReport.Concurrent): its reason's case, the recording
+// it names and the places, the words the judging's reason is made of. Without
+// it the reason would say only that keploy could not tell who made the call.
+func TestAMissCarriesWhatTheLearnStepKnowsOfTheSharedRecordings(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	p.setMockManager(mm)
+	mm.ServeExactTest("T", nil)
+	p.BeginTestErrorCapture()
+	note := &models.ConcurrentNote{Class: []string{"mock-b"}, Case: models.ConcurrentCaseNotOwn, Places: []string{"bind.$2"}}
+	p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{
+		Protocol: "PostgreSQL", ActualSummary: "INSERT", ClosestMock: "mock-b", Reason: models.MissConcurrentAmbiguous, Concurrent: note}))
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("want the one miss, got %+v (%v)", got, err)
+	}
+	if got[0].Reason != models.MissConcurrentAmbiguous || got[0].Concurrent == nil || got[0].Concurrent.Case != models.ConcurrentCaseNotOwn || strings.Join(got[0].Concurrent.Class, ",") != "mock-b" {
+		t.Fatalf("filed %+v; want concurrent_ambiguous with its note", got[0])
+	}
+}
+
+// The claims are one staging's: a set staged again (its mock names repeat in
+// the next set, or the same set's next run) starts with every shared recording
+// unclaimed. Without it a recording another set's test answered with would be
+// hidden from this set's tests, and their calls refused.
+func TestClaimsAreTheStagingsOwn(t *testing.T) {
+	c1 := exactMock("c1", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{c1}, nil)
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTestConcurrent("A", nil, []*models.Mock{c1})
+	pt, _ := mm.GetPerTestMocksInWindow()
+	if !mm.DeleteFilteredMock(*pt[0]) {
+		t.Fatal("A's call of c1 was refused")
+	}
+	mm.SetMocksWithWindow([]*models.Mock{c1}, nil, models.BaseTime, time.Now())
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTestConcurrent("B", nil, []*models.Mock{c1})
+	pt, _ = mm.GetPerTestMocksInWindow()
+	equalNames(t, "B's view in the next staging", pt, "c1")
+	if _, ok := mm.ClaimantOf("c1"); ok {
+		t.Fatal("a claim outlived its staging")
+	}
+	if !mm.DeleteFilteredMock(*pt[0]) {
+		t.Fatal("B's call of c1 was refused for A's claim of the staging before")
+	}
+	if who, _ := mm.ClaimantOf("c1"); who != "B" {
+		t.Fatalf("ClaimantOf(c1) = %q; want B", who)
 	}
 }

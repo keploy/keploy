@@ -10,22 +10,21 @@ import (
 
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
-	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // ServeExactTestConcurrent implements coreAgent.ExactConcurrentServer on the
 // test proxy: the real mock manager's shared serving.
-func (p *servingProxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string) error {
-	p.mm.ServeExactTestConcurrent(test, owned, proxyPkg.ExactConcurrent{Cands: cands, Inputs: inputs, NotLearnable: notLearnable})
+func (p *servingProxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
+	p.mm.ServeExactTestConcurrent(test, owned, cands)
 	return nil
 }
 
 // OpenExactTestConcurrent implements coreAgent.ExactConcurrentServer on the
 // test proxy: the real mock manager's shared serving, its variables begun in
 // the same step.
-func (p *servingProxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string, given []models.VariableBinding) error {
-	p.mm.OpenExactTestConcurrent(test, owned, proxyPkg.ExactConcurrent{Cands: cands, Inputs: inputs, NotLearnable: notLearnable}, given)
+func (p *servingProxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error {
+	p.mm.OpenExactTestConcurrent(test, owned, cands, given)
 	return nil
 }
 
@@ -38,14 +37,14 @@ type concurrentOpeningProxy struct {
 	servedShared, openedShared int
 }
 
-func (p *concurrentOpeningProxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string) error {
+func (p *concurrentOpeningProxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
 	p.servedShared++
-	return p.servingProxy.ServeExactTestConcurrent(test, owned, cands, inputs, notLearnable)
+	return p.servingProxy.ServeExactTestConcurrent(test, owned, cands)
 }
 
-func (p *concurrentOpeningProxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string, given []models.VariableBinding) error {
+func (p *concurrentOpeningProxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error {
 	p.openedShared++
-	return p.servingProxy.OpenExactTestConcurrent(test, owned, cands, inputs, notLearnable, given)
+	return p.servingProxy.OpenExactTestConcurrent(test, owned, cands, given)
 }
 
 // A test case of keploy record's full round that shares recordings with the

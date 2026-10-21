@@ -2205,7 +2205,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// to make only its own (definite) recordings. Any other replay,
 			// or an agent that does not say it serves them, keeps the
 			// recorded ownership whole.
-			expectedTestMockMappings = r.planShares(testSetID, expectedTestMockMappings, testCases)
+			expectedTestMockMappings = r.planShares(testSetID, expectedTestMockMappings)
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
 			// set, or one keploy does not start, booted before this set.

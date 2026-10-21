@@ -53,10 +53,11 @@ func ConsumeRefused(db MockMemDb, name string) bool {
 // the tests whose requests were open beside its own at record time
 // (models.ExactServing.Concurrent, models.Mock.TestModeInfo.Concurrent on the
 // copies it shows). Those recordings answer at most once in the staging, for
-// whichever of the tests makes its call first; a parser that pairs a call
-// with one of them (the learn step) asks here before it does. Only keploy
-// record's full round shares recordings; every other view has none, and every
-// answer here is empty.
+// whichever of the tests makes its call first, and a parser's learn step never
+// learns against one (another of those tests may have made it): it reads here
+// which of them another test took, so a call closest to one is a conflict.
+// Only keploy record's full round shares recordings; every other view has
+// none, and every answer here is empty.
 type ExactConcurrentReader interface {
 	// ClaimantOf is the test that answered a call with the shared recording
 	// name in the current staging, if one did.
@@ -66,16 +67,4 @@ type ExactConcurrentReader interface {
 	// shows them no longer, and a parser only compares a call with them. The
 	// manager's copies, in recorded order; read-only.
 	ExactTakenCandidates(kind models.Kind) []*models.Mock
-	// ExactTestInputs are the whole leaf values of the open test's request
-	// (models.ExactServing.Inputs): a value that drifted at a recording's
-	// place that the request holds whole is an input of the test, which does
-	// not drift between a record and its same-build replay. Request values:
-	// a parser compares with them and never logs them.
-	ExactTestInputs() []string
-	// ExactTestNotLearnable reports whether the open test's shared recording
-	// name holds, at a place that tells its statement's recordings apart, a
-	// value of another of the tests' requests that this test's request does
-	// not (models.ExactServing.NotLearnable): a call of this test is never
-	// paired with it by drift.
-	ExactTestNotLearnable(name string) bool
 }

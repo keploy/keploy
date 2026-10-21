@@ -601,15 +601,15 @@ type ExactAheadServer interface {
 // that shares recordings with the tests whose requests were open beside its
 // own at record time (models.ExactServing.Concurrent, keploy record's full
 // round): after owned, cands answer, each at most once in the staging, for
-// whichever of those tests makes its call first, never required of the test.
-// inputs and notLearnable are what the learn step reads of the test
-// (models.ExactServing.Inputs, NotLearnable). OpenExactTestConcurrent opens it
-// so and begins its variables with given bound in the same step, as
+// whichever of those tests makes its call first, never required of the test,
+// and never learned against (a parser's learn step refuses a call closest to
+// one: another of those tests may have made it). OpenExactTestConcurrent opens
+// it so and begins its variables with given bound in the same step, as
 // ExactTestOpener does. An agent whose proxy has it says so on /storemocks
 // (models.ExactConcurrentHeader).
 type ExactConcurrentServer interface {
-	ServeExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string) error
-	OpenExactTestConcurrent(test string, owned, cands []*models.Mock, inputs, notLearnable []string, given []models.VariableBinding) error
+	ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error
+	OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error
 }
 
 // ExactKeyRestarter is an optional ExactServer capability: it starts a claim

@@ -356,8 +356,7 @@ var (
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
 )
 
-// ClaimantOf, ExactTakenCandidates, ExactTestInputs and ExactTestNotLearnable
-// forward what the store's open test's view says of the recordings it shares
+// ClaimantOf and ExactTakenCandidates forward what the store's open test's view says of the recordings it shares
 // with the tests recorded beside it (integrations.ExactConcurrentReader),
 // nothing from a store that says none: a parser's learn step on a view made
 // before exact serving began reads them as it does on the bare manager.
@@ -373,20 +372,6 @@ func (s *scopedMockDb) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 		return cr.ExactTakenCandidates(kind)
 	}
 	return nil
-}
-
-func (s *scopedMockDb) ExactTestInputs() []string {
-	if cr, ok := s.MockMemDb.(integrations.ExactConcurrentReader); ok {
-		return cr.ExactTestInputs()
-	}
-	return nil
-}
-
-func (s *scopedMockDb) ExactTestNotLearnable(name string) bool {
-	if cr, ok := s.MockMemDb.(integrations.ExactConcurrentReader); ok {
-		return cr.ExactTestNotLearnable(name)
-	}
-	return false
 }
 
 var _ integrations.ExactConcurrentReader = (*scopedMockDb)(nil)
