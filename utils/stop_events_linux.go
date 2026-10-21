@@ -33,7 +33,8 @@ import (
 // siblings spent) or one whose way out waits on a disk the host keeps busy:
 // the stall accrues only as fast as it gets to run. A shutdown that only
 // computes, with no process, thread or file of it ending while it has had the
-// bound to run, is killed.
+// bound to run, is killed; so is one that only waits in the kernel, once its
+// waits there since its last progress outlast the kernel's hung-task time.
 
 // StopStallBudget is how long, in the time both it and keploy could run
 // (ExitClock), an app keploy stopped may make no progress on its way out
@@ -175,8 +176,7 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 	notice := NewStopNowNotice(StopOffer)
 	defer notice.Withdraw()
 	offering := false
-	var mark ExitRatchet
-	mark.Advance(MarkExit(procs))
+	meter.Advance(MarkExit(procs))
 	for {
 		select {
 		case <-exited:
@@ -196,8 +196,7 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 		if len(procs) > 0 && m.Running == 0 {
 			return StopExited, clock.Said(StopStallBudget)
 		}
-		if mark.Advance(m) {
-			meter.Reset()
+		if meter.Advance(m) {
 			moved.Note()
 			continue
 		}

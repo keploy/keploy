@@ -341,9 +341,10 @@ func heldPidfds() (map[int]bool, error) {
 // (utils.TeardownStallChecks), never a fixed grace, and never the checks of a
 // daemon held off the CPU (a loaded host, its cgroup's quota spent), or held
 // in the kernel on a disk that serves others first, which could not run to
-// make progress; one held in a single wait in the kernel for that long is
-// taken for wedged. A press of Ctrl+C a whole stopOffer after the stop's
-// signal kills them at once. Variables for the tests.
+// make progress; their waits in the kernel are taken for waits, since their
+// last progress, for no longer in all than the kernel lets one task stand
+// there before it reports it hung. A press of Ctrl+C a whole stopOffer after
+// the stop's signal kills them at once. Variables for the tests.
 var (
 	stopCheck       = time.Second
 	stopStallChecks = uint64(utils.TeardownStallChecks)
@@ -396,10 +397,10 @@ type member struct {
 // being scheduled is not, a daemon that ignores the request runs on -- for
 // stopStall of the time both they and keploy could run (utils.ExitClock: a
 // daemon held off the CPU accrues no stall, nor one in the kernel on storage
-// that serves until a single wait there outlasts the bound), and waited for
-// until gone, so a
-// daemon one test set started is never judged in the next and the
-// application started again can bind its ports. While it
+// that serves until its waits there, since their last progress, outlast the
+// kernel's hung-task time), and waited for until gone, so a daemon one test
+// set started is never judged in the next and the application started again
+// can bind its ports. While it
 // waits, a drain does not give up on the run (utils.BeginDaemonStop): the
 // next test set starts once it is over. What the kernel holds after the kill
 // without progress is left to it, and said. The application served across
@@ -549,8 +550,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	}
 	clock, meter, stopMeter := utils.NewExitMeter(procs, stopStall())
 	defer stopMeter()
-	var mark utils.ExitRatchet
-	mark.Advance(markExit(ms))
+	meter.Advance(markExit(ms))
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
@@ -582,8 +582,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
-		if mark.Advance(markExit(ms)) {
-			meter.Reset()
+		if meter.Advance(markExit(ms)) {
 			moved.Note()
 			continue
 		}

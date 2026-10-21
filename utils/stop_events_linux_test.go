@@ -256,8 +256,9 @@ const kernelTurnsEnv = "KEPLOY_TEST_KERNEL_TURNS"
 // its pid, once its interrupt is set up, and "held" as it goes into the
 // kernel. With kernelTurnsEnv set to d, it goes into the kernel again and
 // again, for d at a time, until the file "released" exists
-// (holdInTheKernelInTurns), and writes how many times it went in ("turns")
-// before "out".
+// (holdInTheKernelInTurns), making progress once, between two of them,
+// once the file "progress" exists (it closes a file it opened as it
+// started), and writes how many times it went in ("turns") before "out".
 func TestKernelHoldHelper(t *testing.T) {
 	dir := os.Getenv(kernelHoldEnv)
 	if dir == "" {
@@ -274,19 +275,23 @@ func TestKernelHoldHelper(t *testing.T) {
 		}
 	}
 	var turn time.Duration
+	var spare *os.File
 	if v := os.Getenv(kernelTurnsEnv); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			os.Exit(4)
 		}
 		turn = d
+		if spare, err = os.Open(os.DevNull); err != nil {
+			os.Exit(3)
+		}
 	}
 	note("ready")
 	<-ints
 	runtime.LockOSThread()
 	note("held")
 	if turn > 0 {
-		n := holdInTheKernelInTurns(filepath.Join(dir, "released"), turn)
+		n := holdInTheKernelInTurns(dir, turn, spare)
 		if err := os.WriteFile(filepath.Join(dir, "turns"), []byte(strconv.Itoa(n)), 0o644); err != nil {
 			os.Exit(3)
 		}
@@ -299,13 +304,20 @@ func TestKernelHoldHelper(t *testing.T) {
 
 // holdInTheKernelInTurns holds the calling thread in the kernel, in an
 // uninterruptible sleep, for d at a time (a vfork whose child sleeps d and
-// exits), and has it run between, until released exists: a thread whose
+// exits), and has it run between, until dir/released exists: a thread whose
 // waits in the kernel each end, as one waiting on storage that serves it
-// does. It returns how many times it went into the kernel.
-func holdInTheKernelInTurns(released string, d time.Duration) (turns int) {
+// does. Once dir/progress exists it closes spare, between two waits: its
+// one step out. It returns how many times it went into the kernel.
+func holdInTheKernelInTurns(dir string, d time.Duration, spare *os.File) (turns int) {
 	for {
-		if _, err := os.Stat(released); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "released")); err == nil {
 			return turns
+		}
+		if spare != nil {
+			if _, err := os.Stat(filepath.Join(dir, "progress")); err == nil {
+				_ = spare.Close()
+				spare = nil
+			}
 		}
 		if pid := vforkSleeping(d); pid > 0 {
 			turns++
@@ -446,10 +458,11 @@ const (
 )
 
 // storageFor has the stops of the test read storage that does as mode says;
-// every thread can reach only storage on that disk. It reads no hung-task
-// time: a thread standing in the kernel for the stall bound is taken for
-// wedged, as the kernel's two minutes would hold a test for that long.
-func storageFor(t *testing.T, mode storageMode) {
+// every thread can reach only storage on that disk. The kernel's hung-task
+// time is hung, as the test sets it: where it is 0, none is read, and a stop
+// takes the stall bound for it (the kernel's two minutes would hold a test
+// for that long).
+func storageFor(t *testing.T, mode storageMode, hung time.Duration) {
 	t.Helper()
 	var reads atomic.Uint64
 	st := &storageReader{
@@ -477,6 +490,9 @@ func storageFor(t *testing.T, mode storageMode) {
 			return nil
 		},
 		seen: func(string) bool { return true },
+	}
+	if hung > 0 {
+		st.hung = func() time.Duration { return hung }
 	}
 	testStorage.Store(st)
 	t.Cleanup(func() { testStorage.Store(nil) })
@@ -513,7 +529,9 @@ func TestAStopDoesNotJudgeAnAppHeldInTheKernelWhileItsStorageServes(t *testing.T
 func stopOfAnAppHeldInTheKernel(t *testing.T, mode storageMode) {
 	const bound = 300 * time.Millisecond
 	shortStall(t, bound)
-	storageFor(t, mode)
+	// A hung-task time far beyond the test's window: the stop credits the
+	// app's waits in the kernel, since its last progress, for no longer.
+	storageFor(t, mode, 100*bound)
 	var looks atomic.Uint64
 	looked := func() { looks.Add(1) }
 	exitLooked.Store(&looked)
@@ -586,7 +604,7 @@ func cpuExitClock(t *testing.T, pid int) (*ExitClock, func()) {
 		return readTaskTimesSeen(procs, func(string) bool { return false })
 	}
 	noDisks := func() (diskMark, bool) { return nil, false }
-	return newExitClock([]Reached{proc}, StopStallBudget, StopStallBudget, own, time.Now, read, noDisks, nil), release
+	return newExitClock([]Reached{proc}, StopStallBudget, StopStallBudget, StopStallBudget, own, time.Now, read, noDisks, nil), release
 }
 
 // An app held in the kernel while no storage serves I/O is held on no I/O
@@ -597,41 +615,149 @@ func cpuExitClock(t *testing.T, pid int) (*ExitClock, func()) {
 // host far more of the stop's looks than the bound is of them. So with a dead
 // disk, one that stands still with I/O in flight: it is taken for slow for
 // the bound, then for dead, and the stop kills the app on the bound after
-// that, by four times it. So too while the host's storage serves, but serves
-// the app nothing: held in one wait in the kernel, given no CPU, it is taken
-// to wait on storage for the bound, then for wedged, and the stop kills it
-// on the bound after that, by three times it. The app says it went into the
-// kernel ("held"), as the stop may judge it before the test would see it
-// there. Taken for a wait, the stop would wait on it for ever.
+// that, by four times it; the kernel's hung-task time is far beyond that, so
+// only the rule of a dead disk judges it in time. So too while the host's
+// storage serves, but serves the app nothing: held in one wait in the
+// kernel, given no CPU, it is taken to wait on storage for the bound (the
+// hung-task time the test's storage reads none of), then for wedged, and the
+// stop kills it on the bound after that, by three times it. The app says it
+// went into the kernel ("held"), as the stop may judge it before the test
+// would see it there. Taken for a wait, the stop would wait on it for ever.
 func TestAStopJudgesAnAppHeldInTheKernelWhileNoStorageServesIt(t *testing.T) {
+	const bound = 300 * time.Millisecond
 	for _, tc := range []struct {
 		name   string
 		mode   storageMode
+		hung   time.Duration
 		bounds time.Duration
 	}{
-		{"idle", storageIdle, 3},
-		{"dead", storageDead, 4},
-		{"a volume on a dead disk", storageStackedDead, 4},
-		{"serving others", storageServing, 3},
+		{"idle", storageIdle, 0, 3},
+		{"dead", storageDead, 100 * bound, 4},
+		{"a volume on a dead disk", storageStackedDead, 100 * bound, 4},
+		{"serving others", storageServing, 0, 3},
 	} {
-		t.Run(tc.name, func(t *testing.T) { stopJudgingAnAppHeldInTheKernel(t, tc.mode, tc.bounds) })
+		t.Run(tc.name, func(t *testing.T) {
+			stopJudgingAnAppHeldInTheKernel(t, tc.mode, bound, tc.hung, 0, tc.bounds*bound)
+		})
 	}
 }
 
-// stopJudgingAnAppHeldInTheKernel runs the stop of an app held in the kernel
-// on storage that does as mode says and serves it nothing, which must kill it
-// by bounds times the stall bound (TestAStopJudgesAnAppHeldInTheKernelWhile
-// NoStorageServesIt).
-func stopJudgingAnAppHeldInTheKernel(t *testing.T, mode storageMode, bounds time.Duration) {
+// An app whose way out goes into the kernel again and again, each wait
+// ending as one on storage that serves it does, and which makes no progress
+// between them (a driver's loop of short sleeps in the kernel, a cgroup's
+// memory.high throttling it, a sync loop while others dirty pages) may wait
+// there for ever while the host's disks serve others: the stop credits its
+// waits there, since its last progress, for no longer in all than the kernel
+// lets a task stand in the kernel before it reports it hung, and counts them
+// after. Here its storage serves throughout, each wait lasts a sixth of the
+// stall bound, and the hung-task time is three times the bound: the stop
+// kills it, and says so, by twice that and the bound of the time it and
+// keploy could run from the stop's first look on. Credited for as long as
+// the host's disks served others, each turn on a CPU ending its stretch in
+// the kernel, its stall accrued only at the rate it ran between its waits:
+// on .189 it was killed after 72 times the bound.
+func TestAStopJudgesAnAppInTheKernelInTurnsThatMakesNoProgress(t *testing.T) {
 	const bound = 300 * time.Millisecond
+	const hung = 3 * bound
+	stopJudgingAnAppHeldInTheKernel(t, storageServing, bound, hung, bound/6, 2*(hung+bound))
+}
+
+// The credit of an app's waits in the kernel starts again at its progress.
+// Its way out goes into the kernel in turns, each wait a sixth of the stall
+// bound and ending as one on storage that serves it does, its storage
+// serving throughout. It waits there until it and keploy could run for
+// seven tenths of the kernel's hung-task time (ten times the bound) since
+// the stop's first look, makes progress once (it closes a file), waits
+// there for as long again, and is let go: it exits, and the stop says no
+// kill, as its waits since its progress never outlasted the hung-task time.
+// Credited from the stop's start, they outlasted it in its second stretch,
+// and it was killed on the bound after, a step out it made forgotten.
+func TestAStopCreditsAnAppsWaitsInTheKernelAgainOnceItMakesProgress(t *testing.T) {
+	const bound = 300 * time.Millisecond
+	const hung = 10 * bound
 	shortStall(t, bound)
-	storageFor(t, mode)
+	storageFor(t, storageServing, hung)
 	var looks atomic.Uint64
 	looked := func() { looks.Add(1) }
 	exitLooked.Store(&looked)
 	defer exitLooked.Store(nil)
 	dir := starvetest.MemDir(t)
-	pid, reaped := startKernelHolder(t, dir, 0)
+	pid, reaped := startKernelHolder(t, dir, bound/6)
+	could, releaseClock := cpuExitClock(t, pid)
+	defer releaseClock()
+	scope := &TeardownScope{}
+	type stopped struct {
+		killed string
+		err    error
+	}
+	done := make(chan stopped, 1)
+	go func() {
+		killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, scope)
+		done <- stopped{killed, err}
+	}()
+	// ended fails the test where the stop has ended, which it must not
+	// before the app is let go; else it waits a little.
+	ended := func(when string) {
+		select {
+		case end := <-done:
+			t.Fatalf("the stop ended %s, the app in the kernel in turns, its storage serving: it said %q (%v)", when, end.killed, end.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	for looks.Load() == 0 {
+		ended("before its first look")
+	}
+	// Each stretch is counted from the stop's last sight of the app's
+	// progress (its moves of the teardown): one it saw early on (a file
+	// the app wrote as it went into the kernel, closed) starts it again.
+	moves, from := scope.Moves(), could.Runnable()
+	inTheKernel := func(when string) {
+		for could.Runnable()-from < 7*hung/10 {
+			if m := scope.Moves(); m != moves {
+				moves, from = m, could.Runnable()
+			}
+			ended(when)
+		}
+	}
+	inTheKernel("before the app made progress")
+	if err := os.WriteFile(filepath.Join(dir, "progress"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for scope.Moves() == moves {
+		ended("before it saw the app's progress")
+	}
+	moves, from = scope.Moves(), could.Runnable()
+	inTheKernel("after the app made progress")
+	if err := os.WriteFile(filepath.Join(dir, "released"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	end := <-done
+	if end.err != nil {
+		t.Fatal(end.err)
+	}
+	if end.killed != "" {
+		t.Fatalf("the stop killed: %q", end.killed)
+	}
+	awaitReaped(t, "the app", reaped)
+	if _, err := os.Stat(filepath.Join(dir, "out")); err != nil {
+		t.Fatal("the app did not get out on its own once let go")
+	}
+}
+
+// stopJudgingAnAppHeldInTheKernel runs the stop, at stall bound, of an app
+// held in the kernel (in turns of turn, or in one wait for good where turn is
+// 0) on storage that does as mode says and serves it nothing, the kernel's
+// hung-task time hung (storageFor), which must kill it by the time it and
+// keploy could run for limit.
+func stopJudgingAnAppHeldInTheKernel(t *testing.T, mode storageMode, bound, hung, turn, limit time.Duration) {
+	shortStall(t, bound)
+	storageFor(t, mode, hung)
+	var looks atomic.Uint64
+	looked := func() { looks.Add(1) }
+	exitLooked.Store(&looked)
+	defer exitLooked.Store(nil)
+	dir := starvetest.MemDir(t)
+	pid, reaped := startKernelHolder(t, dir, turn)
 	could, releaseClock := cpuExitClock(t, pid)
 	defer releaseClock()
 	type stopped struct {
@@ -656,8 +782,8 @@ func stopJudgingAnAppHeldInTheKernel(t *testing.T, mode storageMode, bounds time
 	}
 	from := could.Runnable()
 	for !ended {
-		if stalled := could.Runnable() - from; stalled >= bounds*bound {
-			t.Fatalf("the stop did not judge an app held in the kernel with no storage serving it, though it and keploy could run for %v, %d times the stall bound: it would wait on it for ever", stalled, bounds)
+		if stalled := could.Runnable() - from; stalled >= limit {
+			t.Fatalf("the stop did not judge an app held in the kernel with no storage serving it, though it and keploy could run for %v, %.1f times the stall bound: it would wait on it for ever", stalled, float64(stalled)/float64(bound))
 		}
 		select {
 		case end = <-done:
