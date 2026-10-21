@@ -142,6 +142,126 @@ func TestEveryReportFormatReadsAFileWithoutItsContentByDefault(t *testing.T) {
 	}
 }
 
+// fileWrittenByDefault is a failed test as the replay writes it to its report
+// file with KEPLOY_LOG_CONTENT unset: a matched Mongo call and the row of a
+// Mongo dependency it did not consume, each named by the mock's command, and
+// marked written without content.
+const fileWrittenByDefault = `
+kind: Http
+name: test-1
+status: FAILED
+test_case_id: test-1
+failure_info:
+  matched_calls:
+    - mock_name: mock-4
+      protocol: Mongo
+      summary: MongoDB find
+      content_withheld: true
+result:
+  status_code: {normal: true, expected: 200, actual: 200}
+  headers_result: []
+  body_result: []
+  dep_result:
+    - name: deps[0] mongo mongo:27017 find (presence)
+      type: mongo
+      meta:
+        - {normal: false, key: presence, expected: consumed, actual: missing}
+      content_withheld: true
+  deps_checked: true
+`
+
+// defaultWrittenMatched and defaultWrittenRow are what fileWrittenByDefault
+// names its matched call and its dependency row by.
+const (
+	defaultWrittenMatched = "MongoDB find"
+	defaultWrittenRow     = "deps[0] mongo mongo:27017 find (presence)"
+)
+
+// Every format of keploy report, from a run's report and from a file named by
+// --report-path (read as a report or by its tests alone), prints a file the
+// replay wrote by default as the file names its calls: a Mongo dependency
+// row by its command, as its YAML and the NDJSON effects' stable name do.
+// What the writer withheld is not withheld again: its command, read as the
+// request a Mongo mock records, would name none.
+func TestEveryReportFormatPrintsADefaultWrittenFileAsWritten(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	var f models.TestResult
+	if err := yaml.Unmarshal([]byte(fileWrittenByDefault), &f); err != nil {
+		t.Fatal(err)
+	}
+	report := func() *models.TestReport {
+		return &models.TestReport{Name: "test-run-0", TestSet: "test-set-0", Status: string(models.TestSetStatusFailed), Total: 1, Failure: 1, Tests: []models.TestResult{f}}
+	}
+	run := func(t *testing.T, db *fakeReportDB, cfg config.Config) string {
+		t.Helper()
+		r := New(zap.NewNop(), &cfg, db, &fakeTestDB{testSets: []string{"test-set-0"}})
+		var buf bytes.Buffer
+		r.out = bufio.NewWriter(&buf)
+		if err := r.GenerateReport(context.Background()); err != nil {
+			t.Errorf("GenerateReport: %v", err)
+		}
+		_ = r.out.Flush()
+		return buf.String()
+	}
+	check := func(t *testing.T, name, out string, wants ...string) {
+		t.Helper()
+		for _, want := range wants {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s does not print the file's %q:\n%s", name, want, out)
+			}
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		cfg   config.Config
+		wants []string
+	}{
+		{"text", config.Config{}, []string{defaultWrittenRow}},
+		{"--json", config.Config{JSONOutput: true}, []string{defaultWrittenRow, defaultWrittenMatched}},
+		{"--format json", config.Config{Report: config.Report{Format: config.ReportFormatJSON}}, []string{defaultWrittenRow}},
+		{"--format junit", config.Config{Report: config.Report{Format: config.ReportFormatJUnit}}, []string{defaultWrittenRow}},
+		{"--test-case", config.Config{Report: config.Report{TestCaseIDs: []string{"test-1"}}}, []string{defaultWrittenRow}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := &fakeReportDB{runIDs: []string{"test-run-0"}, reports: map[string]*models.TestReport{"test-set-0": report()}}
+			check(t, c.name, run(t, db, c.cfg), c.wants...)
+		})
+	}
+
+	canonical, err := yaml.Marshal(report())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests, err := yaml.Marshal(struct {
+		Tests []models.TestResult `yaml:"tests"`
+	}{[]models.TestResult{f}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	files := map[string][]byte{"report": canonical, "legacy": append([]byte("name: {not: a name}\n"), tests...)}
+	for _, file := range []string{"report", "legacy"} {
+		path := filepath.Join(dir, file+"-report.yaml")
+		if err := os.WriteFile(path, files[file], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []struct {
+			name  string
+			cfg   config.Config
+			wants []string
+		}{
+			{"text", config.Config{}, []string{defaultWrittenRow}},
+			{"--json", config.Config{JSONOutput: true}, []string{defaultWrittenRow, defaultWrittenMatched}},
+			{"--test-case", config.Config{Report: config.Report{TestCaseIDs: []string{"test-1"}}}, []string{defaultWrittenRow}},
+		} {
+			t.Run("--report-path "+file+" "+c.name, func(t *testing.T) {
+				c.cfg.Report.ReportPath = path
+				check(t, c.name, run(t, &fakeReportDB{}, c.cfg), c.wants...)
+			})
+		}
+	}
+}
+
 // A report file written without content is printed as such when keploy
 // report is opted in: each field by its path and kind, and the note, never a
 // recorded or live value that reads as empty.

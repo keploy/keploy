@@ -596,16 +596,31 @@ func TestAMockIsNamedWithoutItsContentByDefault(t *testing.T) {
 		{"another kind with none", &Mock{Kind: GENERIC}, "Generic"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			restore := logcontent.Set(false)
-			got := MockReportSummary(c.mock)
-			restore()
+			got := MockReportSummary(c.mock, true)
 			if got != c.want || strings.Contains(got, "kp-canary") || strings.Contains(got, "kp-user") {
 				t.Errorf("by default the mock is named %q, want %q", got, c.want)
 			}
-			restore = logcontent.Set(true)
-			defer restore()
-			if got, whole := MockReportSummary(c.mock), MockSummaryFromSpec(c.mock); got != whole {
-				t.Errorf("with the switch on the mock is named %q, want its summary %q", got, whole)
+			// The report the name is written to is read by keploy report
+			// (TestReport.ReportContent) as it was written: a matched call
+			// and a dependency row, marked withheld as their writer marks
+			// them.
+			kind := string(c.mock.Kind)
+			depType := DepTypeForKind(c.mock.Kind)
+			file := func() *TestReport {
+				return &TestReport{Tests: []TestResult{{
+					FailureInfo: FailureInfo{MatchedCalls: []MatchedCall{{MockName: "mock-1", Protocol: kind, Summary: got, ContentWithheld: true}}},
+					Result: Result{DepResult: []DepResult{{Name: DepRowName(0, depType, MockReportName(c.mock, MockSummaryFromSpec(c.mock), true)), Type: depType,
+						Meta: []DepMetaResult{{Key: DepKeyPresence, Expected: DepPresenceConsumed, Actual: DepPresenceMissing}}, ContentWithheld: true}}},
+				}}}
+			}
+			restore := logcontent.Set(false)
+			read := file().ReportContent()
+			restore()
+			if !reflect.DeepEqual(read, file()) {
+				t.Errorf("a report naming the mock %q is read by default as %+v, was written %+v", got, read.Tests[0], file().Tests[0])
+			}
+			if whole := MockReportSummary(c.mock, false); whole != MockSummaryFromSpec(c.mock) {
+				t.Errorf("with the switch on the mock is named %q, want its summary %q", whole, MockSummaryFromSpec(c.mock))
 			}
 		})
 	}
