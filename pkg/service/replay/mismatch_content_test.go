@@ -97,3 +97,27 @@ func TestTheMismatchTableSaysACallTheAgentWithheldIsWithheld(t *testing.T) {
 		t.Errorf("a withheld call printed with the switch on:\n%s", out)
 	}
 }
+
+// A miss shown by its Diff alone, a parser's own words with their values
+// withheld (MySQL's statement with its literals written "?"), says how to see
+// them, as one shown by its fields does; one that withheld nothing does not.
+func TestTheMismatchTableSaysADiffOnlyMissIsWithheld(t *testing.T) {
+	tfs := NewTestFailureStore()
+	tfs.AddUnmatchedCallForTest("test-set-0", "test-1", models.UnmatchedCall{
+		Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM users WHERE id = ?", ClosestMock: "mock-1", MatchPhase: models.MatchPhaseBody, ContentWithheld: true,
+		Diff: "actual: SELECT * FROM users WHERE id = ?; closest: SELECT * FROM users WHERE id = ?",
+	})
+	out := captureStdout(t, tfs.PrintFailuresTable)
+	if !strings.Contains(out, "Diff: actual: SELECT * FROM users WHERE id = ?") || strings.Count(out, models.ContentWithheldNote) != 1 {
+		t.Errorf("a withheld Diff-only miss printed:\n%s", out)
+	}
+	t.Cleanup(logcontent.Set(true))
+	tfs = NewTestFailureStore()
+	tfs.AddUnmatchedCallForTest("test-set-0", "test-1", models.UnmatchedCall{
+		Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM users WHERE id = 7", ClosestMock: "mock-1", MatchPhase: models.MatchPhaseBody,
+		Diff: "actual: SELECT * FROM users WHERE id = 7; closest: SELECT * FROM users WHERE id = 8",
+	})
+	if out := captureStdout(t, tfs.PrintFailuresTable); strings.Contains(out, models.ContentWithheldNote) {
+		t.Errorf("a Diff-only miss that withheld nothing says it did:\n%s", out)
+	}
+}
