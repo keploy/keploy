@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -491,7 +493,7 @@ func (t *tee) drop(reason string) {
 			// Also for a parser that re-aligns: when it re-aligns is known
 			// only once it gets there, and it can be a full queue behind.
 			msg := "relay: capture dropped a chunk; this direction is no longer fed to the parser, so the connection records no further mocks"
-			next := "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
+			next := dropNextStep()
 			if t.parserCanResync {
 				msg = "relay: capture dropped a chunk; the parser re-aligns on the next message it can frame, and the exchanges the hole cut are not recorded"
 			}
@@ -768,3 +770,15 @@ func (t *tee) waitDone() { <-t.done }
 // [Config.EndAtHole]): its parser asked for it and cannot re-align, so it is
 // fed nothing after the hole.
 func (t *tee) endsAtHole() bool { return t.endAtHole != nil && !t.parserCanResync }
+
+// dropNextStep is the next_step of the WARN for a chunk the capture dropped on
+// a connection whose parser stops there: what becomes of the test cases
+// recorded while it carries traffic. With the proven switch off they are left
+// out; under it keploy record keeps each, with that as what its recording
+// lost, for the auto-replay to judge.
+func dropNextStep() string {
+	if provenswitch.On() {
+		return "the app's traffic is unaffected. From here on, keploy record keeps every test case recorded while this connection carries traffic, not only the ones that used it (on a busy pooled connection, every later test case), " + models.KeptToBeJudged
+	}
+	return "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
+}

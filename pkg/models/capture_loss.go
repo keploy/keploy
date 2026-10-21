@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // CaptureLossKind names one way a run's capture can be incomplete: a call the
@@ -212,6 +214,13 @@ const (
 	// test's own (PerTest). Only under the proven switch.
 	CaptureLossMockDropped CaptureLossKind = "mock_dropped"
 )
+
+// KeptToBeJudged ends what a line that reports an exchange keploy could not
+// record as a mock says, under the proven switch, of a test case recorded over
+// it, where the switch-off line says the test case is left out of the
+// recording: keploy record keeps it, charged with the exchange
+// (CaptureLossExchangeUnrecorded), and the auto-replay judges it.
+const KeptToBeJudged = "with that as what its recording lost, and the auto-replay judges it: kept if it replays, quarantined with that in its reason if it does not (" + provenswitch.Env + "=1)"
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
 // with when the Docker daemon did not answer keploy's read of its

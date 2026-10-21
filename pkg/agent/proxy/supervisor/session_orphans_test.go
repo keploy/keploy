@@ -1313,3 +1313,53 @@ func (o managerOrphans) RecordWhy(start, end time.Time, why string) {
 func (o managerOrphans) OpenWhy(start time.Time, why string) func() {
 	return o.m.OpenOrphanWindowWhy(start, why)
 }
+
+// Under the proven switch the WARN for a mock left out says what becomes of
+// the test cases recorded over its exchange: keploy record keeps each, with
+// that as what its recording lost, for the auto-replay to judge (the agent
+// streams it with the loss), not that they are left out of the recording,
+// which with the switch on is no longer so. The advice for the cause is the
+// same either way. With the switch off the words are as before; and a mock
+// with no span, which charges no test case, is said the same either way.
+//
+// Not parallel: it sets the switch, and the WARN limit is process-wide.
+func TestUnderTheProvenSwitchALeftOutMocksWarnSaysItsTestCasesAreKept(t *testing.T) {
+	const offHead = "the app's traffic is unaffected. Test cases recorded over this exchange that were not saved yet when the agent " +
+		"parsed it are left out of the recording; one saved before then (this connection's parser was behind the " +
+		"traffic) lacks this mock, and its replay fails with no_mocks. "
+	onHead := "the app's traffic is unaffected. keploy record keeps each test case recorded over this exchange, " + models.KeptToBeJudged + ". "
+	for _, class := range []string{leftOutOther, leftOutMemoryPressure, leftOutPerConnCap, leftOutDesynced, leftOutUnansweredCause, leftOutReset} {
+		t.Setenv(provenswitch.Env, "")
+		off, offNoSpan := leftOutNextStep(class, true), leftOutNextStep(class, false)
+		t.Setenv(provenswitch.Env, "1")
+		on, onNoSpan := leftOutNextStep(class, true), leftOutNextStep(class, false)
+		if !strings.HasPrefix(off, offHead) {
+			t.Fatalf("with the switch off, %s's next_step is %q, want it as before", class, off)
+		}
+		if !strings.HasPrefix(on, onHead) || strings.Contains(on, "left out of the recording") {
+			t.Fatalf("under the switch, %s's next_step is %q, want that keploy record keeps the test cases over it, for the auto-replay to judge", class, on)
+		}
+		if strings.TrimPrefix(on, onHead) != strings.TrimPrefix(off, offHead) {
+			t.Fatalf("under the switch, %s's advice is %q, want the same as with it off: %q", class, strings.TrimPrefix(on, onHead), strings.TrimPrefix(off, offHead))
+		}
+		if onNoSpan != offNoSpan {
+			t.Fatalf("a %s mock with no span is said %q under the switch, want as with it off: %q", class, onNoSpan, offNoSpan)
+		}
+	}
+
+	// And the WARN says it.
+	t.Setenv(provenswitch.Env, "1")
+	prev := leftOutWarns
+	leftOutWarns = &WarnLimiters{every: leftOutWarnEvery, now: time.Now}
+	t.Cleanup(func() { leftOutWarns = prev })
+	core, logs := observer.New(zapcore.WarnLevel)
+	s := &Session{Mgr: syncMock.New(nil), Orphans: &syncMock.Spans{}, Logger: zap.New(core), ClientConnID: "conn-9", Ctx: context.Background()}
+	m := &models.Mock{Name: "left-out", Kind: models.MySQL}
+	m.Spec.ReqTimestampMock = time.Now().Add(-time.Minute)
+	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
+	s.ReportLeftOut(m, "mysql exchange not recorded: the COM_QUERY response holds more than one result")
+	w := logs.FilterMessage(LeftOutWarnMsg).All()
+	if len(w) != 1 || w[0].ContextMap()["next_step"] != leftOutNextStep(leftOutOther, true) {
+		t.Fatalf("under the switch the mock left out is said %v, want once, with next_step %q", w, leftOutNextStep(leftOutOther, true))
+	}
+}

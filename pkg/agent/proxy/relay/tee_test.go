@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -1071,5 +1074,26 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 	if !on.teeC2D.parserCanResync || !on.teeD2C.parserCanResync {
 		t.Fatalf("with ParserCanResyncAfterGap=true, got (c2d=%v, d2c=%v), want both true",
 			on.teeC2D.parserCanResync, on.teeD2C.parserCanResync)
+	}
+}
+
+// Under the proven switch the WARN for a chunk the capture dropped on a
+// connection whose parser stops there says that keploy record keeps every test
+// case recorded while the connection carries traffic, with that as what its
+// recording lost, for the auto-replay to judge (the agent streams it with the
+// loss), not that they are left out of the recording, which with the switch on
+// is no longer so. With the switch off it says what it said before.
+//
+// Not parallel: it sets the switch.
+func TestUnderTheProvenSwitchADroppedChunksWarnSaysItsTestCasesAreKept(t *testing.T) {
+	const off = "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
+	t.Setenv(provenswitch.Env, "")
+	if got := dropNextStep(); got != off {
+		t.Fatalf("with the switch off the dropped chunk's next_step is %q, want it as before: %q", got, off)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	if got := dropNextStep(); !strings.Contains(got, "keploy record keeps every test case recorded while this connection carries traffic") ||
+		!strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
+		t.Fatalf("under the switch the dropped chunk's next_step is %q, want that keploy record keeps the test cases, for the auto-replay to judge", got)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -1217,6 +1218,12 @@ func leftOutNextStep(class string, spanned bool) string {
 	next := "the app's traffic is unaffected. Test cases recorded over this exchange that were not saved yet when the agent " +
 		"parsed it are left out of the recording; one saved before then (this connection's parser was behind the " +
 		"traffic) lacks this mock, and its replay fails with no_mocks. "
+	if provenswitch.On() {
+		// Under the switch none is left out (routes/record.go streams it
+		// with the loss, and the stream's end names one saved before).
+		next = "the app's traffic is unaffected. keploy record keeps each test case recorded over this exchange, " +
+			models.KeptToBeJudged + ". "
+	}
 	if !spanned {
 		next = "the app's traffic is unaffected. This mock carries no request time, so no span was recorded for it and no " +
 			"test case is left out for it: each test case recorded over this exchange lacks this mock, and its replay " +

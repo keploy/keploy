@@ -19,6 +19,7 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -467,7 +468,7 @@ func (p *Proxy) recordViaSupervisor(
 				zap.String("parser", string(parserType)),
 				zap.String("status", result.Status.String()),
 				zap.String("clientConnID", svSess.ClientConnID),
-				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"),
+				zap.String("next_step", retiredNextStep()),
 			)
 		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
@@ -902,4 +903,16 @@ func applyEndAtHole(cfg *relay.Config, sess *supervisor.Session, parser integrat
 func parserCanEndAtHole(parser integrations.Integrations) bool {
 	ep, ok := parser.(integrations.EndAtHoleCapable)
 	return ok && ep.CanEndAtHole()
+}
+
+// retiredNextStep is the next_step of the WARN a parser retired mid-recording
+// logs: what becomes of the test cases recorded while its connection carries
+// traffic. With the proven switch off they are left out; under it keploy
+// record keeps each, with that as what its recording lost, for the auto-replay
+// to judge.
+func retiredNextStep() string {
+	if provenswitch.On() {
+		return "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, keploy record keeps every test case recorded while this connection carries traffic, not only the ones that used it, " + models.KeptToBeJudged + ". Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
+	}
+	return "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
 }

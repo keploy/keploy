@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -218,5 +219,48 @@ func TestRecordV2_AResponseLeftOutAloneIsCountedAndStampsNoStop(t *testing.T) {
 	}
 	if strings.Contains(reason, ErrFramingLost.Error()) {
 		t.Fatalf("the left-out WARN's reason says the connection's framing is lost: %q; the exchange alone is left out", reason)
+	}
+}
+
+// Under the proven switch the MySQL recorder's lines for an exchange it could
+// not record say what becomes of the test cases recorded over it: keploy
+// record keeps each, with that as what its recording lost, for the
+// auto-replay to judge (the agent streams it with the loss), not that they are
+// left out of the recording, which with the switch on is no longer so. That
+// holds of an exchange left out alone (leftOutAloneNextStep), of a connection
+// whose framing is lost (framingLostNextStep, the WARN warnFramingLost logs),
+// and of the legacy recorder's response it could not decode
+// (undecodableDropMsg). With the switch off each says what it said before.
+//
+// Not parallel: it sets the switch, and the WARN limit is process-wide.
+func TestUnderTheProvenSwitchTheRecordersLinesSayTheTestCasesOverALostExchangeAreKept(t *testing.T) {
+	off := map[string]string{
+		"left out alone": "user traffic is unaffected. The test cases recorded while this exchange ran are left out of the recording rather than saved without its mock; the connection's later queries are recorded",
+		"framing lost":   "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and every test case recorded while it carries traffic is left out of the recording rather than saved without its mocks. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)",
+		"legacy":         "dropping a MySQL response that could not be decoded: its mock is not recorded, and the test cases recorded over it are left out",
+	}
+	lines := func() map[string]string {
+		return map[string]string{"left out alone": leftOutAloneNextStep(), "framing lost": framingLostNextStep(), "legacy": undecodableDropMsg()}
+	}
+	t.Setenv(provenswitch.Env, "")
+	for k, got := range lines() {
+		if got != off[k] {
+			t.Fatalf("with the switch off the %s line is %q, want it as before: %q", k, got, off[k])
+		}
+	}
+	t.Setenv(provenswitch.Env, "1")
+	for k, got := range lines() {
+		if !strings.Contains(got, "keploy record keeps") || !strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
+			t.Fatalf("under the switch the %s line is %q, want that keploy record keeps the test cases over it, for the auto-replay to judge", k, got)
+		}
+	}
+
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.WarnLevel)
+	sess := &supervisor.Session{ClientConnID: "1"}
+	warnFramingLost(zap.New(core), sess, "V2: mysql framing lost (TestUnderTheProvenSwitchTheRecordersLinesSayTheTestCasesOverALostExchangeAreKept)", ErrFramingLost)
+	w := logs.All()
+	if len(w) != 1 || w[0].ContextMap()["next_step"] != framingLostNextStep() {
+		t.Fatalf("under the switch the framing loss is said %v, want once, with next_step %q", w, framingLostNextStep())
 	}
 }

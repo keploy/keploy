@@ -392,3 +392,24 @@ func TestUnderTheProvenSwitchAConnectionsSpansSayWhyTheyWereRecorded(t *testing.
 		})
 	})
 }
+
+// Under the proven switch the WARN for a parser retired mid-recording says
+// that keploy record keeps every test case recorded while its connection
+// carries traffic, with that as what its recording lost, for the auto-replay
+// to judge (the agent streams it with the loss), not that they are left out of
+// the recording, which with the switch on is no longer so. With the switch off
+// it says what it said before.
+//
+// Not parallel: it sets the switch.
+func TestUnderTheProvenSwitchARetiredParsersWarnSaysItsTestCasesAreKept(t *testing.T) {
+	const off = "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
+	t.Setenv(provenswitch.Env, "")
+	if got := retiredNextStep(); got != off {
+		t.Fatalf("with the switch off the retired parser's next_step is %q, want it as before: %q", got, off)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	if got := retiredNextStep(); !strings.Contains(got, "keploy record keeps every test case recorded while this connection carries traffic") ||
+		!strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
+		t.Fatalf("under the switch the retired parser's next_step is %q, want that keploy record keeps the test cases, for the auto-replay to judge", got)
+	}
+}
