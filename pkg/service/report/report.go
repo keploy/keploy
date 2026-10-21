@@ -1296,7 +1296,7 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 		sb.WriteString("\n")
 	}
 	if withheld {
-		sb.WriteString("  (" + models.ContentWithheldNote + ")\n")
+		sb.WriteString("  (" + models.ReportFileWithheldNote() + ")\n")
 	}
 	sb.WriteString("\n")
 }

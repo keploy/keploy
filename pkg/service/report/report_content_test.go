@@ -42,7 +42,8 @@ func TestKeployReportPrintsNoContentFromAFileByDefault(t *testing.T) {
 			t.Errorf("keploy report printed %q:\n%s", c, out)
 		}
 	}
-	for _, want := range []string{"COM_QUERY SELECT * FROM users WHERE email = ?", "body.email: value changed", "body.gone: absent in live call", models.ContentWithheldNote} {
+	for _, want := range []string{"COM_QUERY SELECT * FROM users WHERE email = ?", "body.email: value changed", "body.gone: absent in live call",
+		models.ContentWithheldNote + " (for a report written without them, set it for the replay)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("keploy report does not print %q:\n%s", want, out)
 		}
@@ -133,10 +134,16 @@ func TestKeployReportSaysAWithheldFileIsWithheld(t *testing.T) {
 		FieldDiffs: []models.MockFieldDiff{{Path: "body.email", Kind: models.DiffKindValueChanged}, {Path: "body.gone", Kind: models.DiffKindMissingInLive}},
 	}}}})
 	out := sb.String()
-	for _, want := range []string{"body.email: value changed", "body.gone: absent in live call", models.ContentWithheldNote} {
+	// Setting the switch here brings back nothing the file was written
+	// without: the note says the replay must run with it.
+	for _, want := range []string{"body.email: value changed", "body.gone: absent in live call",
+		"values were withheld when this report was written; replay with KEPLOY_LOG_CONTENT=1 to include them"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("keploy report does not print %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, models.ContentWithheldNote) {
+		t.Errorf("opted in, keploy report says setting the switch shows a file's withheld values:\n%s", out)
 	}
 	if strings.Contains(out, `recorded ""`) || strings.Contains(out, `live ""`) {
 		t.Errorf("keploy report prints a withheld value as empty:\n%s", out)
