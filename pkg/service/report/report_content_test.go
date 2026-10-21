@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 // fileWithContent is a test result as a report file written with the switch
@@ -137,5 +140,78 @@ func TestKeployReportSaysAWithheldFileIsWithheld(t *testing.T) {
 	}
 	if strings.Contains(out, `recorded ""`) || strings.Contains(out, `live ""`) {
 		t.Errorf("keploy report prints a withheld value as empty:\n%s", out)
+	}
+}
+
+// A file named by --report-path is read by the same rule as a run's, in
+// every format keploy report prints one in (text, --json, --test-case),
+// whether keploy reads it as a report or, as an older file, by its tests
+// alone: by default none of them prints a value the file holds, and each
+// still names the call.
+func TestKeployReportReadsAReportPathWithoutItsContentByDefault(t *testing.T) {
+	f := fileWithContent()
+	f.Kind, f.TestCaseID, f.Status = models.HTTP, "test-1", models.TestStatusFailed
+	canonical, err := yaml.Marshal(models.TestReport{Name: "test-run-0", TestSet: "test-set-0", Status: string(models.TestSetStatusFailed), Total: 1, Failure: 1, Tests: []models.TestResult{f}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests, err := yaml.Marshal(struct {
+		Tests []models.TestResult `yaml:"tests"`
+	}{[]models.TestResult{f}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A name keploy cannot read as a report's: the file is read by its
+	// tests alone (parseAndProcessLegacyReportFormat).
+	legacy := append([]byte("name: {not: a name}\n"), tests...)
+	dir := t.TempDir()
+	files := map[string]string{"report": filepath.Join(dir, "test-set-0-report.yaml"), "legacy": filepath.Join(dir, "legacy-report.yaml")}
+	if err := os.WriteFile(files["report"], canonical, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files["legacy"], legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canaries := []string{"kp-file-literal", "kp-file-diff", "kp-file-rec", "kp-file-live", "kp-file-gone", "kp-file-mock-req", "kp-file-live-req"}
+	run := func(t *testing.T, path string, cfg config.Config) string {
+		t.Helper()
+		cfg.Report.ReportPath = path
+		r := New(zap.NewNop(), &cfg, &fakeReportDB{}, &fakeTestDB{})
+		var buf bytes.Buffer
+		r.out = bufio.NewWriter(&buf)
+		if err := r.GenerateReport(context.Background()); err != nil {
+			t.Errorf("GenerateReport: %v", err)
+		}
+		_ = r.out.Flush()
+		return buf.String()
+	}
+	for _, file := range []string{"report", "legacy"} {
+		for _, f := range []struct {
+			name string
+			cfg  config.Config
+		}{
+			{"text", config.Config{}},
+			{"--json", config.Config{JSONOutput: true}},
+			{"--test-case", config.Config{Report: config.Report{TestCaseIDs: []string{"test-1"}}}},
+		} {
+			t.Run(file+" "+f.name, func(t *testing.T) {
+				out := run(t, files[file], f.cfg)
+				for _, c := range canaries {
+					if strings.Contains(out, c) {
+						t.Errorf("%s printed %q:\n%s", f.name, c, out)
+					}
+				}
+				if !strings.Contains(out, "users WHERE email = ?") {
+					t.Errorf("%s does not name the call:\n%s", f.name, out)
+				}
+			})
+		}
+	}
+	// With the switch on the file is read as written.
+	t.Cleanup(logcontent.Set(true))
+	for _, file := range []string{"report", "legacy"} {
+		if out := run(t, files[file], config.Config{JSONOutput: true}); !strings.Contains(out, "kp-file-rec") || !strings.Contains(out, "kp-file-live-req") {
+			t.Errorf("with the switch on --json of the %s file lost its content:\n%s", file, out)
+		}
 	}
 }
