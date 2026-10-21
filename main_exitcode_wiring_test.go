@@ -117,8 +117,10 @@ func TestCLIExitCodes(t *testing.T) {
 // to exitCodeForCmdErr, which prints whatever path it is given: only a run of
 // start tells the command that failed from the root.
 func TestCLIPointsAUsageErrorAtTheHelpOfTheCommandThatFailed(t *testing.T) {
-	if code := runCLI(t, "--help"); code != 0 {
-		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	// A CLI that cannot even print its help is broken, and that is a failure
+	// of this test, not a reason to skip it: skipped, it would go green.
+	if code, out := runCLIOutput(t, "--help"); code != 0 {
+		t.Fatalf("keploy --help exited %d, want 0; the CLI does not start:\n%s", code, out)
 	}
 
 	for _, tc := range []struct {
