@@ -55,6 +55,32 @@ func errorShape(err error, text string) (shape string) {
 	return shape
 }
 
+// textShape is text's shape, a text no error carries (a panic's string), or
+// "" when keploy's words make none of it.
+func textShape(text string) (shape string) {
+	defer func() {
+		if recover() != nil {
+			shape = ""
+		}
+	}()
+	sh := shaper{w: loadWords(), budget: shapeBudget}
+	if s, ok := sh.of(nil, text, 0); ok {
+		return s
+	}
+	return ""
+}
+
+// panicErrorShape is err's shape (errorShape), its text read once here: an
+// Error that panics as it is read has none.
+func panicErrorShape(err error) (shape string) {
+	defer func() {
+		if recover() != nil {
+			shape = ""
+		}
+	}()
+	return errorShape(err, err.Error())
+}
+
 // shaper reads one error's shape: keploy's words, and what is left of the
 // texts it may read against them.
 type shaper struct {

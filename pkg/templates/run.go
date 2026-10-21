@@ -178,9 +178,11 @@ func (r *Run) set(key, value string) {
 
 // warnOnce logs a warning once per run for each distinct message, fields and
 // value. The value is a placeholder's, the application's or a secret's, so
-// the line carries it only as logcontent allows; the warning is said once per
-// value either way.
-func (r *Run) warnOnce(msg, value string, fields ...zap.Field) {
+// the line carries it only as logcontent allows, named by name, its
+// placeholder's key: a credential's (a pin, a token) by its length alone, as
+// logcontent.NamedString says. The warning is said once per value either
+// way.
+func (r *Run) warnOnce(msg, name, value string, fields ...zap.Field) {
 	key := msg + "\x00value=" + value
 	for _, f := range fields {
 		key += "\x00" + f.Key + "=" + f.String
@@ -190,7 +192,7 @@ func (r *Run) warnOnce(msg, value string, fields ...zap.Field) {
 	r.warned[key] = true
 	r.mu.Unlock()
 	if !seen {
-		r.logger.Warn(msg, append(fields, logcontent.String("value", value))...)
+		r.logger.Warn(msg, append(fields, logcontent.NamedString("value", name, value))...)
 	}
 }
 

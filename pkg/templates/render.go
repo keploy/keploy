@@ -164,7 +164,7 @@ func valueFor(p Placeholder, look lookupFunc, r *Run) (string, bool) {
 	}
 	if p.Type == TypeInt || p.Type == TypeFloat {
 		if _, fits := typed(p.Type, v); !fits {
-			r.warnOnce("a placeholder's value is not a number of its type; it is left as written", v,
+			r.warnOnce("a placeholder's value is not a number of its type; it is left as written", p.Key, v,
 				zap.String("placeholder", Shape(p.Text)))
 			return "", false
 		}
@@ -338,7 +338,7 @@ func renderLeaf(doc string, l Leaf, look lookupFunc, r *Run) (string, bool) {
 		}
 		out, fits := typed(ps[0].Type, v)
 		if !fits {
-			r.warnOnce("a placeholder's value is not a number of its type; it is left as written", v,
+			r.warnOnce("a placeholder's value is not a number of its type; it is left as written", ps[0].Key, v,
 				zap.String("placeholder", Shape(ps[0].Text)))
 			return "", false
 		}

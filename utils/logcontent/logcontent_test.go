@@ -846,6 +846,29 @@ func TestPanicTextCarriesNoContentWhateverTheSwitch(t *testing.T) {
 	}
 }
 
+// A crash report keeps keploy's own words of a panic it raised, so Sentry
+// groups and reads it: a text keploy's code makes whole, and a format's
+// words with {} for each value, the values' content withheld; the runtime's
+// error whole, as before. An error's chain is read as Error's shape reads
+// it.
+func TestPanicTextKeepsKeploysOwnWords(t *testing.T) {
+	for _, sw := range []bool{false, true} {
+		restore := Set(sw)
+		const text = "BindEvents map is nil"
+		for v, want := range map[any]string{
+			text:             "a panic of string: " + text,
+			errors.New(text): "a panic of *errors.errorString: " + text,
+			fmt.Sprintf("invalid port in URL: %s", canary):                   "a panic of string: invalid port in URL: {}",
+			fmt.Errorf("failed to read %s of %s: %w", "hdr", canary, io.EOF): "a panic of io.EOF: failed to read {} of {}: EOF",
+		} {
+			if got := PanicText(v); got != want {
+				t.Errorf("switch %v: PanicText(%q) = %q, want %q", sw, fmt.Sprint(v), got, want)
+			}
+		}
+		restore()
+	}
+}
+
 // Withheld names the fields the switch withheld a value from, which a logger
 // adds its Hint to a line for, and none other.
 func TestWithheldNamesTheFieldsThatWithholdAValue(t *testing.T) {

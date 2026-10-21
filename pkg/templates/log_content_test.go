@@ -31,6 +31,11 @@ func TestRequest_AValueThatIsNoNumberIsLoggedWithoutIt(t *testing.T) {
 				if n := logs.FilterMessage(msg).Len(); n != 1 {
 					t.Fatalf("the value was said %d times, want once", n)
 				}
+				// A credential's value (a pin) is said by its length alone:
+				// a fingerprint of a short one gives it away.
+				if v, ok := logs.FilterMessage(msg).All()[0].ContextMap()["value"].(map[string]interface{}); !on && (!ok || v["fp"] != nil || v["len"] == nil) {
+					t.Fatalf("a pin's value is logged as %v, want its length alone", logs.FilterMessage(msg).All()[0].ContextMap()["value"])
+				}
 				other := NewRun(logger, map[string]interface{}{"pin": canary + "-2"}, map[string]interface{}{"pin": canary + "-2"})
 				other.warned = r.warned
 				other.Request(req)

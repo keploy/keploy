@@ -382,12 +382,27 @@ func Panic(key string, v any) zap.Field {
 // PanicText is v, a recovered panic's value, as a text that carries no
 // content whatever the switch says, for what is no log line and leaves the
 // machine, a crash report: the Go runtime's own error whole, as Panic logs
-// it, and any other value by its type and its text's length, "a panic of
-// string (31 bytes)", or for an error by its kind, "a panic of
-// *strconv.NumError (40 bytes)".
+// it; a text or an error keploy's own words make, by its shape, as Error
+// writes an error's (the words of the constant texts and formats keploy's
+// code panics with and makes errors with, and {} for each value they
+// format), "a panic of string: failed to read {} of {}: {}", so a crash
+// report of keploy's own panic is grouped and read by what it says; and any
+// other value by its type and its text's length, "a panic of string (31
+// bytes)", or for an error by its kind, "a panic of *strconv.NumError (40
+// bytes)".
 func PanicText(v any) string {
 	if s, ok := runtimeText(v); ok {
 		return s
+	}
+	switch x := v.(type) {
+	case string:
+		if shape := textShape(x); shape != "" {
+			return "a panic of string: " + shape
+		}
+	case error:
+		if shape := panicErrorShape(x); shape != "" {
+			return "a panic of " + ErrorKind(x) + ": " + shape
+		}
 	}
 	kind, n := panicKind(v)
 	if n < 0 {

@@ -527,8 +527,10 @@ func attachLogFileToSentry(logFile *os.File) error {
 // a parser's decoder among it, and its value is what that code made it, the
 // payload it could not read as often as not: the crash report, which leaves
 // the machine, names it by what logcontent.PanicText says of it, which is
-// the runtime's own words for a runtime error and the value's type and
-// length for anything else, whatever KEPLOY_LOG_CONTENT says. The run's log
+// the runtime's own words for a runtime error, keploy's own words for a
+// panic keploy raised (its text's shape: a value it formats is {}), and the
+// value's type and length for anything else, whatever KEPLOY_LOG_CONTENT
+// says. The run's log
 // goes with the report only while the switch is off: with it on, the log
 // carries the application's content.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
