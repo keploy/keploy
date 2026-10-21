@@ -114,7 +114,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 						logurl.Field("path", req.URL.Path),
 						logcontent.String("url", req.URL.String()),
-						zap.String("method", req.Method))
+						logurl.MethodField("method", req.Method))
 					return
 				}
 				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -166,7 +166,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 					logurl.Field("path", req.URL.Path),
 					logcontent.String("url", req.URL.String()),
-					zap.String("method", req.Method))
+					logurl.MethodField("method", req.Method))
 				return
 			}
 			utils.LogError(logger, err, "failed to decompress the response body")
@@ -183,7 +183,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int("respBodySize", len(respBody)),
 			logurl.Field("path", req.URL.Path),
 			logcontent.String("url", req.URL.String()),
-			zap.String("method", req.Method))
+			logurl.MethodField("method", req.Method))
 		return
 	}
 
@@ -197,7 +197,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int64("body_size_bytes", respBodySize),
 			logurl.Field("path", req.URL.Path),
 			logcontent.String("url", req.URL.String()),
-			zap.String("method", req.Method))
+			logurl.MethodField("method", req.Method))
 		respBody = []byte{} // clear the body — only size is stored
 	}
 
@@ -270,7 +270,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			// The manager warned of it as Keep found the window given up; the
 			// ingress ends the window.
 			logger.Debug("Test case left out: its request's window was given up while it was in flight",
-				zap.String("method", req.Method),
+				logurl.MethodField("method", req.Method),
 				zap.Time("in_flight_since", reqTimeTest))
 			return
 		}
@@ -298,7 +298,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// out with --sync: the recording it began in has ended without it,
 		// and it is no request of the next one.
 		logger.Debug("Test case left out: its request was in flight across its recording's stop",
-			zap.String("method", req.Method),
+			logurl.MethodField("method", req.Method),
 			zap.Time("in_flight_since", reqTimeTest))
 		return
 	}

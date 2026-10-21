@@ -1,6 +1,8 @@
 package models
 
 import (
+	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -92,6 +94,31 @@ type UnmetRequirement struct {
 	Kind Kind
 	Key  string
 }
+
+// DepKeyShape is a mock's dependency key (MockRequirement.Key) as a log line
+// names it. A MySQL statement's (MySQLStatementKey, MySQLStatementCloseKey),
+// keploy's words and the statement's and its connection's ids, is kept as it
+// is. An HTTP stateful sequence's (StatefulSequenceKey: its method, its URL
+// and its body's sha256) is its call's shape (URLShape), its method kept
+// only when it is HTTP's and its path's values and its query's {}, with its
+// body's hash left out, which names the body as a fingerprint does
+// (logcontent.Fingerprint). Any other key is {}.
+func DepKeyShape(key string) string {
+	if mysqlDepKey.MatchString(key) {
+		return key
+	}
+	call, _, isSequence := strings.Cut(strings.TrimPrefix(key, perTestSequencePrefix), "\x00")
+	if isSequence {
+		if s := URLShape(call); s != "" {
+			return s
+		}
+	}
+	return pathHole
+}
+
+// mysqlDepKey is a MySQL statement's dependency key (MySQLStatementKey,
+// MySQLStatementCloseKey).
+var mysqlDepKey = regexp.MustCompile(`^mysql (statement|close of statement) [0-9]+ on connection "[^"\\]*"$`)
 
 // MockDepsCheck finds, over every mock of a test set, the requirements no
 // mock of the set meets (see UnmetRequirement). Mocks are added in any order.

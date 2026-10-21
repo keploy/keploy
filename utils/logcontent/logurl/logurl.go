@@ -28,6 +28,15 @@
 // first ("pay.internal:8443/cards/42") is shaped as the URL with a scheme is,
 // as a call's destination is.
 //
+// A request's method and a place in a request or a response (a field's path,
+// an object's key, a header's or a query parameter's name, a template
+// variable's place) are content for the same reason: a client may send any
+// token for a method, and an API that keys a map by its data (an email
+// address, an id, a token) puts the value in the path that names a field of
+// it. MethodField and Method write a method as URLShape writes a call's
+// (models.MethodShape), and PlaceField, PlacesField and Place a place as it
+// writes a path's segments (models.PlaceShape).
+//
 // It is a package of its own because the shape is pkg/models', and
 // logcontent depends on nothing of keploy's.
 package logurl
@@ -42,6 +51,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Field is zap.String(key, u) with the switch on, and u's shape with it off.
@@ -79,6 +89,60 @@ func URL(u string) string {
 		return u
 	}
 	return shape(u)
+}
+
+// MethodField is zap.String(key, m) with the switch on, and with it off m's
+// shape (models.MethodShape): m when it is one of HTTP's methods or gRPC, ""
+// when it is "", and {} for any other token a client sent ("SECRETKEY"). The
+// shape is computed when a core encodes the entry, as Field's is.
+func MethodField(key, m string) zap.Field {
+	if logcontent.On() {
+		return zap.String(key, m)
+	}
+	return zap.Stringer(key, method(m))
+}
+
+// Method is m as a log line's message may carry it: m with the switch on, and
+// its shape with it off, as MethodField logs it, computed when it is called.
+// It is for a log line alone, as URL is.
+func Method(m string) string {
+	if logcontent.On() {
+		return m
+	}
+	return models.MethodShape(m)
+}
+
+// PlaceField is zap.String(key, p) with the switch on, and with it off p's
+// shape (models.PlaceShape): p, a place in a request or a response as keploy
+// names one ("body.users.alice@example.com.role", "response body.items[0].id",
+// "url.query.page", "header Set-Cookie.sid"), with each part that reads as no
+// name written {}: "body.users.{}.com.role". The shape is computed when a
+// core encodes the entry, as Field's is.
+func PlaceField(key, p string) zap.Field {
+	if logcontent.On() {
+		return zap.String(key, p)
+	}
+	return zap.Stringer(key, place(p))
+}
+
+// PlacesField is zap.Strings(key, ps) with the switch on, and with it off
+// each of ps by its shape, as PlaceField logs one.
+func PlacesField(key string, ps []string) zap.Field {
+	if logcontent.On() {
+		return zap.Strings(key, ps)
+	}
+	return zap.Array(key, places(ps))
+}
+
+// Place is p as a log line's message may carry it: p with the switch on, and
+// its shape with it off, as PlaceField logs it, computed when it is called.
+// It is for a log line alone, as URL is: a report, an error and anything
+// keploy compares, stores or sends carries p whole.
+func Place(p string) string {
+	if logcontent.On() {
+		return p
+	}
+	return models.PlaceShape(p)
 }
 
 // Error is err as a log line may carry it, for an error whose text names a
@@ -159,4 +223,27 @@ var shape = func(u string) string {
 		return s
 	}
 	return "{}"
+}
+
+// method is a request's method whose shape a core writes when it encodes the
+// entry (MethodField).
+type method string
+
+func (m method) String() string { return models.MethodShape(string(m)) }
+
+// place is a place whose shape a core writes when it encodes the entry
+// (PlaceField).
+type place string
+
+func (p place) String() string { return models.PlaceShape(string(p)) }
+
+// places are places whose shapes a core writes when it encodes the entry
+// (PlacesField).
+type places []string
+
+func (ps places) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	for _, p := range ps {
+		enc.AppendString(models.PlaceShape(p))
+	}
+	return nil
 }

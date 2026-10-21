@@ -976,7 +976,7 @@ func Vars(logger *zap.Logger, s string) {
 
 // URLs logs a request's URL: its path and its query are content, a site of
 // the url kind, which only a reason that says whose URL it is excuses.
-func URLs(logger *zap.Logger, r *http.Request) {
+func URLs(logger *zap.Logger, r *http.Request, s string) {
 	logger.Info("a path", zap.String("path", r.URL.Path))           // want: url
 	logger.Info("a target", zap.String("uri", r.RequestURI))        // want: url
 	logger.Info("a query", zap.String("q", r.URL.Query().Get("q"))) // want: url
@@ -990,6 +990,14 @@ func URLs(logger *zap.Logger, r *http.Request) {
 	_ = fmt.Errorf("bad path %s", r.URL.Path)  // want: url
 	_ = errors.New(r.URL.RawQuery)             // want: url
 	_ = fmt.Errorf("bad host %s", r.Host)      // want: errorf
+	// A method is a token a client may make any text of, shaped as a call's.
+	logger.Info("a method", zap.String("method", r.Method)) // want: url
+	logger.Info("a method", logurl.MethodField("method", r.Method))
+	logger.Info("a method " + logurl.Method(r.Method))
+	// A place in a request, by its shape.
+	logger.Info("a place", zap.String("where", "body."+s)) // want: field
+	logger.Info("a place", logurl.PlaceField("where", "body."+s))
+	logger.Info("places", logurl.PlacesField("paths", []string{"body." + s}))
 }
 
 // targets is a request's URL and its URL without its query.

@@ -92,7 +92,10 @@ a value instead:
   set {}: failed to decode the mock: {}"}`;
 - a payload, a body or a header's value by its length and a fingerprint, or by
   its length alone when its name is a credential's: `{"len": 5, "fp": "2cf24dba5fb0"}`;
-- a URL by its shape: `GET /users/{}?page={}`;
+- a URL by its shape: `GET /users/{}?page={}`; a request's method and a
+  place in it (a JSON key's path, a header's or a query parameter's name) the
+  same way, each part that reads as no name `{}`: `body.users.{}.role`, and a
+  method that is not one of HTTP's `{}`;
 - a recovered panic by its type and length, unless the Go runtime raised it.
 
 A line at Warn or above that withholds a value says so in its `withheld`

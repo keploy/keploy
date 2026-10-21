@@ -115,6 +115,18 @@ func urlMethodWord(w string) bool {
 	return isMethodWord(w) || knownMethods[w] || w == pathHole
 }
 
+// MethodShape is an HTTP request's method as a log line names it, as
+// URLShape keeps a call's: itself when it is one of knownMethods (GET, POST,
+// PROPFIND, ...), "" when it is "", and {} otherwise. A method is a token a
+// client may make any text of, and another word in capitals can be a code or
+// a key: "{}" for "SECRETKEY".
+func MethodShape(m string) string {
+	if m == "" {
+		return ""
+	}
+	return methodShape(m)
+}
+
 // methodShape is a call's method as URLShape keeps it: itself when it is one
 // of knownMethods, and {} otherwise.
 func methodShape(m string) string {

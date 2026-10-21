@@ -8,6 +8,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// A method is kept when it is one of HTTP's (or gRPC), and is {} otherwise:
+// a client may send any token there, a code or a key among them.
+func TestMethodShape(t *testing.T) {
+	for in, want := range map[string]string{
+		"": "", "GET": "GET", "POST": "POST", "PROPFIND": "PROPFIND", "gRPC": "gRPC",
+		"get": "{}", "SECRETKEY": "{}", "4111111111111111": "{}", "PURGE": "{}", "{}": "{}",
+	} {
+		require.Equal(t, want, MethodShape(in), in)
+	}
+}
+
 // A URL in its shape keeps the dependency it names, its scheme, host and
 // port, and nothing of the values it carries, as CallShape keeps the rest.
 func TestURLShape(t *testing.T) {

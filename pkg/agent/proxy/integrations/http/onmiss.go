@@ -120,7 +120,7 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 	}
 
 	h.Logger.Info("on-miss: served an unrecorded call from the real dependency",
-		zap.String("method", request.Method),
+		logurl.MethodField("method", request.Method),
 		logurl.Field("path", request.URL.Path),
 		logcontent.String("url", request.URL.String()),
 		zap.String("policy", string(opts.OnMiss)))

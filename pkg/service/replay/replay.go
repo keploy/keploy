@@ -7092,10 +7092,10 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 	}
 	if assessment != nil {
 		if len(assessment.AddedFields) > 0 {
-			fields = append(fields, zap.Strings("added_fields", assessment.AddedFields))
+			fields = append(fields, logurl.PlacesField("added_fields", assessment.AddedFields))
 		}
 		if len(assessment.Reasons) > 0 {
-			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
+			fields = append(fields, logurl.PlacesField("assessment_reasons", assessment.Reasons))
 		}
 	}
 	if assessmentErr != nil {

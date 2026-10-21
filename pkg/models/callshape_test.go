@@ -301,6 +301,58 @@ func TestFieldShape(t *testing.T) {
 	require.Equal(t, []string{"body.{}", "host"}, FieldShapes([]string{"body.12345", "host", "body.67890"}), "once each")
 }
 
+// A place keploy names (a field's path, a key, a header's or a query
+// parameter's name, a template variable's place) keeps each part that reads
+// as a name and its delimiters, indexes among them, and writes {} for each
+// part an API that keys a map by its data puts a value in.
+func TestPlaceShape(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"body.user.id", "body.user.id"},
+		{"body.items[0].id", "body.items[0].id"},
+		{"body[4]", "body[4]"},
+		{"body.items[3][1].sku", "body.items[3][1].sku"},
+		{"body.items[].id", "body.items[].id"},
+		{"url.path[2]", "url.path[2]"},
+		{"url.path.2", "url.path.2"},
+		{"Location.path.1", "Location.path.1"},
+		{"body.path.12345", "body.path.{}"},
+		{"body.users.12", "body.users.{}"},
+		{"url.query.page", "url.query.page"},
+		{"url.query.kq7Zt0x9resettoken", "url.query.{}"},
+		{"header.X-Request-Id", "header.X-Request-Id"},
+		{"header Set-Cookie.sid", "header Set-Cookie.sid"},
+		{"response body.user.id", "response body.user.id"},
+		{"request url_params.page", "request url_params.page"},
+		{"request form email", "request form email"},
+		{"body.users.alice@example.com.name", "body.users.{}.com.name"},
+		{"body.users.alice.smith@example.com", "body.users.alice.{}.com"},
+		{"body.sessions.4111111111111111.amount", "body.sessions.{}.amount"},
+		{"body.orders[4111111111111111].total", "body.{}.total"},
+		{"body.tokens.NffrFeUfNVaHib", "body.tokens.{}"},
+		{"body.headers{keys}", "body.headers{keys}"},
+		{"body.a1b2{keys}", "body.{}{keys}"},
+		{"body.x[y]", "body.{}"},
+		{"body frame 0.id", "body frame {}.id"},
+		{"header Set-Cookie.sid; Path=/admin", "header Set-Cookie.sid; {}"},
+		{"body.{}.id", "body.{}.id"},
+		{"body..id", "body..id"},
+		{"Removed fields: body.a, body.k3y9", "Removed fields: body.a, body.{}"},
+		{"Backward-compatible (with value differences): new fields.", "Backward-compatible (with value differences): new fields."},
+		{"response body key roles.{{string .id}}", "response body key roles.{{string .id}}"},
+		{"body.{{capture int .n}}.x2", "body.{{capture int .n}}.{}"},
+		{"body.{{.secret.token}}", "body.{{.secret.token}}"},
+		{"body.{{ .id | print }}.x", "body.{{.{}}}.x"},
+		{"body.{{.a.b}}", "body.{{.{}}}"},
+		{"body.{{.4111111111111111}}", "body.{{.{}}}"},
+		{"body.{{x.y", "body.{}"},
+	}
+	for _, c := range cases {
+		require.Equal(t, c.want, PlaceShape(c.in), c.in)
+		require.Equal(t, c.want, PlaceShape(c.want), "a shape is its own shape: "+c.in)
+	}
+}
+
 // What SQLShape cannot read for certain it withholds, and it never keeps a
 // literal or a bound parameter.
 func TestSQLShapeWithholdsWhatItCannotRead(t *testing.T) {

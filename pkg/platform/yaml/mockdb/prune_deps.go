@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -314,17 +315,27 @@ func warnUnmetRequirements(logger *zap.Logger, testSetID, path string, unmet []m
 		seen[u.Mock] = struct{}{}
 		if len(mocks) < maxUnmetLogged {
 			mocks = append(mocks, u.Mock)
-			needs = append(needs, u.Key)
+			needs = append(needs, loggedDepKey(u.Key))
 		}
 	}
 	logger.Warn(fmt.Sprintf("%d mocks in %s were recorded against mocks the test set does not hold, so they may not replay as they were recorded; "+
 		"the first is %s, which needs %s. Either an older keploy's mock prune (--remove-unused-mocks, or the prune after an auto-replay) deleted them, "+
 		"judging each mock alone, or the test set never held them (a statement prepared in an earlier test set of the same recording, or a COM_STMT_PREPARE of 16 MiB or more, which the recorder leaves out)",
-		len(seen), testSetID, unmet[0].Mock, unmet[0].Key),
+		len(seen), testSetID, unmet[0].Mock, loggedDepKey(unmet[0].Key)),
 		zap.String("testSetID", testSetID),
 		zap.Int("count", len(seen)),
 		zap.Strings("mocks", mocks),
 		zap.Strings("need", needs),
 		zap.Bool("truncated", len(seen) > len(mocks)),
 		zap.String("next_step", "if the test set was pruned by a keploy older than this one, re-record it, or restore its mock file from a copy made before the prune"))
+}
+
+// loggedDepKey is a mock's dependency key as the line above names it: whole
+// with logcontent's switch on, and by its shape otherwise
+// (models.DepKeyShape), since an HTTP sequence's key holds its URL.
+func loggedDepKey(key string) string {
+	if logcontent.On() {
+		return key
+	}
+	return models.DepKeyShape(key)
 }

@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 	"vitess.io/vitess/go/vt/sqlparser"
 )
@@ -312,7 +313,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 		g.logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
 			zap.String("mock", mock.Name),
 			zap.String("request_type", g.requestType),
-			zap.Strings("drifted_fields", paths))
+			logurl.PlacesField("drifted_fields", paths))
 	}
 	return false
 }

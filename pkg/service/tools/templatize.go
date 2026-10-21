@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -323,7 +324,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	// field is no longer compared, only checked.
 	for _, c := range plan.captures {
 		t.logger.Info(fmt.Sprintf("%s/%s %s now captures %s: its value is no longer compared, only that it is present, of type %s, and not empty",
-			testSetID, tcs[c.tc].Name, c.path, c.key, c.typ))
+			testSetID, tcs[c.tc].Name, logurl.Place(c.path), c.key, c.typ))
 	}
 	t.sayRepeats(testSetID, tcs, plan.captures)
 
@@ -1024,7 +1025,7 @@ func isLocation(l *location) bool {
 func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, locs []*location, existing map[string]interface{}, ignoreOrdering bool, untied func(*location) string) chainPlan {
 	// at names a place as the lines below say it: test set, test case, path.
 	at := func(l *location) string {
-		return fmt.Sprintf("%s/%s %s", testSetID, tcs[l.tc].Name, l.path)
+		return fmt.Sprintf("%s/%s %s", testSetID, tcs[l.tc].Name, logurl.Place(l.path))
 	}
 	byValue := map[string][]*location{}
 	var order []string
@@ -1356,7 +1357,7 @@ func (t *Tools) sayRepeats(testSetID string, tcs []*models.TestCase, captures []
 			next = "no use can stand there (" + rp.noUse + "): it stays as recorded"
 		}
 		t.logger.Info(fmt.Sprintf("%s/%s %s holds the value %s captures and stays as recorded; this test case fails there if the app issues a fresh value each run",
-			testSetID, tcs[rp.tc].Name, rp.path, rp.key),
+			testSetID, tcs[rp.tc].Name, logurl.Place(rp.path), rp.key),
 			zap.String("next_step", next))
 	}
 }

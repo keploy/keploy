@@ -190,7 +190,7 @@ func (m ReqMeta) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	if !m.ok {
 		return nil
 	}
-	enc.AddString("method", m.method)
+	enc.AddString("method", logurl.Method(m.method))
 	enc.AddString("host", m.host)
 	if m.url != nil {
 		logurl.Field("path", m.url.Path).AddTo(enc)

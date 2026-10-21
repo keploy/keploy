@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 )
 
 // Refusal is a placeholder a test case cannot be run with, found when the test
@@ -49,6 +51,11 @@ type Undefined struct {
 	// A set templatized by an older keploy wrote such a use where the value
 	// is issued.
 	Fix string
+	// recorded is the key's recorded value, for a key a request sends that
+	// no earlier test case captures, which its next step names (recordedOf);
+	// hasRecorded says config.yaml's template has one.
+	recorded    string
+	hasRecorded bool
 }
 
 // UncapturedNextStep is the next step for a key a request sends that no
@@ -59,16 +66,37 @@ func (u Undefined) UncapturedNextStep() string {
 		return u.Fix
 	}
 	return fmt.Sprintf("if an earlier response issues this value, mark that place {{capture string .%s}} (or int/float); if it is a constant or what the request sent, write %s in place of every placeholder of %s",
-		u.Key, recordedOf(u.Key), u.Key)
+		u.Key, u.recordedText(), u.Key)
+}
+
+// recordedText names u's key's recorded value in its next step (recordedOf).
+func (u Undefined) recordedText() string {
+	return recordedText(u.Key, u.recorded, u.hasRecorded)
 }
 
 // recordedOf names key's recorded value in a next step by where its user
-// finds it, never by the value: a next step is a log line's (keploy test's
-// WARN lines say it), and a recorded value is one the application sent,
-// which a line carries only as KEPLOY_LOG_CONTENT allows (utils/logcontent).
-// A refusal's why, which the report keeps and a line logs gated, quotes it.
-func recordedOf(key string) string {
-	return key + "'s recorded value in config.yaml's template"
+// finds it, and quotes the value too only with KEPLOY_LOG_CONTENT on
+// (utils/logcontent), as keploy templatize's lines do: a next step is a log
+// line's (keploy test's WARN lines say it), and a recorded value is one the
+// application sent. A secret's value (Placeholder.Secret) is none of the
+// template's recorded values, and is never quoted. A refusal's why, which the
+// report keeps and a line logs gated, quotes the value whatever the switch.
+func (r *Run) recordedOf(key string) string {
+	if r == nil {
+		return recordedText(key, "", false)
+	}
+	v, ok := r.Recorded(key)
+	return recordedText(key, v, ok)
+}
+
+// recordedText is recordedOf's text for key, whose recorded value is v when
+// ok.
+func recordedText(key, v string, ok bool) string {
+	where := key + "'s recorded value in config.yaml's template"
+	if ok && logcontent.On() {
+		return strconv.Quote(v) + " (" + where + ")"
+	}
+	return where
 }
 
 // Place is one variable place of an expected response: a capture, or a use
@@ -156,6 +184,9 @@ type CheckResult struct {
 	// keys are the keys config.yaml's template defines: a next step that
 	// names a new key gives it a name none of them has.
 	keys map[string]bool
+	// run is the run the set was checked for: a next step names a key's
+	// recorded value by it (recordedOf).
+	run *Run
 }
 
 // CheckOptions are the settings a check depends on.
@@ -214,10 +245,11 @@ const (
 )
 
 // noCaptureURLDelimiter is why a capture cannot stand at a part of a
-// URL-valued header whose recorded value, key's, holds a delimiter of that
-// part: said in a next step, it names the value by its key (recordedOf).
-func noCaptureURLDelimiter(key string) string {
-	return "the URL is read by its parts, and " + recordedOf(key) + " holds a delimiter of its part"
+// URL-valued header whose recorded value holds a delimiter of that part:
+// said in a next step, it names the value as recordedOf names key's,
+// recordedAs.
+func noCaptureURLDelimiter(recordedAs string) string {
+	return "the URL is read by its parts, and " + recordedAs + " holds a delimiter of its part"
 }
 
 func noCaptureOwnUse(key string) string {
@@ -347,7 +379,7 @@ func useType(p Placeholder) string {
 // placeholder whose key the test set defines can be refused: any other is
 // text (rule 6), so a set with no templates is never refused anything.
 func (r *Run) Check(cases []*models.TestCase, opts CheckOptions) CheckResult {
-	c := &checker{run: r, opts: opts, res: CheckResult{Refused: map[string][]Refusal{}, Sends: map[string]map[string]bool{}, keys: map[string]bool{}}, seen: map[string]bool{}, captured: map[string]bool{}, uncaptured: map[string]bool{}, firstUse: map[string]producerUse{}, refusedCapture: map[string]producerUse{}}
+	c := &checker{run: r, opts: opts, res: CheckResult{Refused: map[string][]Refusal{}, Sends: map[string]map[string]bool{}, keys: map[string]bool{}, run: r}, seen: map[string]bool{}, captured: map[string]bool{}, uncaptured: map[string]bool{}, firstUse: map[string]producerUse{}, refusedCapture: map[string]producerUse{}}
 	for k := range r.recorded {
 		c.res.keys[k] = true
 	}
@@ -541,14 +573,15 @@ func (c *checker) sendOnly(where, text string, why func(Placeholder) string) {
 		if !c.captured[p.Key] && !c.uncaptured[p.Key] {
 			c.uncaptured[p.Key] = true
 			u := Undefined{Key: p.Key, TestCase: c.tc.Name, Where: where, Placeholder: p.Text}
+			u.recorded, u.hasRecorded = c.run.Recorded(p.Key)
 			if pu, ok := c.firstUse[p.Key]; ok {
 				recorded, _ := c.run.recordedValue(pu.p)
-				u.Fix = producerAdvice(pu.testCase, pu.where, pu.p, recorded, pu.bare, pu.noCaptureWhy, pu.shared, pu.passedOver)
+				u.Fix = producerAdvice(pu.testCase, pu.where, pu.p, recorded, c.run.recordedOf(pu.p.Key), pu.bare, pu.noCaptureWhy, pu.shared, pu.passedOver)
 			} else if rc, ok := c.refusedCapture[p.Key]; ok {
 				// The one capture of the key is refused: its own edit is
 				// that refusal's, and the key is not captured there.
 				u.Fix = fmt.Sprintf("the capture %s at %s/%s is refused when the set loads (its refusal names the edit), so nothing captures %s: write %s in place of every placeholder of %s, or capture the value where a capture can stand",
-					rc.p.Text, rc.testCase, rc.where, p.Key, recordedOf(p.Key), p.Key)
+					rc.p.Text, rc.testCase, logurl.Place(rc.where), p.Key, c.run.recordedOf(p.Key), p.Key)
 			}
 			c.res.Uncaptured = append(c.res.Uncaptured, u)
 		}
@@ -710,7 +743,7 @@ func (c *checker) response(tc *models.TestCase) {
 // one can stand: the response refuses it as it would the capture written.
 func (c *checker) headerNoCapture(name, v string, p Placeholder, ps []Placeholder, n int, captures map[string]bool) string {
 	if c.urlDelimiter(name, v, p) != "" {
-		return noCaptureURLDelimiter(p.Key)
+		return noCaptureURLDelimiter(c.run.recordedOf(p.Key))
 	}
 	if n > 0 {
 		return noCaptureHeaderHeld
@@ -1285,14 +1318,14 @@ func RefusedNames(refused map[string][]Refusal) []string {
 // the place is a part of a URL-valued header outside a 201's Location
 // (Place.PassedOver), the producer only when no other place of its response
 // could be: the capture edit then says what a capture there gives up.
-func producerAdvice(testCase, where string, p Placeholder, recorded string, bare bool, noCaptureWhy string, shared, passedOver bool) string {
-	literal := fmt.Sprintf("write %s in place of every placeholder of %s", recordedOf(p.Key), p.Key)
+func producerAdvice(testCase, where string, p Placeholder, recorded, recordedAs string, bare bool, noCaptureWhy string, shared, passedOver bool) string {
+	literal := fmt.Sprintf("write %s in place of every placeholder of %s", recordedAs, p.Key)
 	if noCaptureWhy != "" {
 		return fmt.Sprintf("a capture cannot stand at %s/%s (%s): %s; if a response also gives the value whole (a JSON value), capture it there",
-			testCase, where, noCaptureWhy, literal)
+			testCase, logurl.Place(where), noCaptureWhy, literal)
 	}
 	return fmt.Sprintf("if the app issues this value anew each run: change %s at %s/%s to %s%s%s; if it is a constant or what the request sent: %s",
-		p.Text, testCase, where, captureForValue(p, bare, recorded), oneCapture(shared), targetCapture(passedOver), literal)
+		p.Text, testCase, logurl.Place(where), captureForValue(p, bare, recorded), oneCapture(shared), targetCapture(passedOver), literal)
 }
 
 // targetCapture is what a capture edit adds for a part of a URL-valued
@@ -1398,9 +1431,9 @@ func (c CheckResult) NextStep(testCase string, f Failure, canCapture bool) strin
 	// which the report shows), as the set check names it: where the edit
 	// goes.
 	at := c.placeOf(testCase, f)
-	here := testCase + "/response " + f.Where
+	here := testCase + "/response " + logurl.Place(f.Where)
 	if at != nil {
-		here = testCase + "/" + at.Where
+		here = testCase + "/" + logurl.Place(at.Where)
 	}
 	changed := "if the value changed on purpose, edit the expected value at " + here + " or re-record the test case"
 	ps := Find(f.Placeholder)
@@ -1442,13 +1475,13 @@ func (c CheckResult) NextStep(testCase string, f Failure, canCapture bool) strin
 	case captured != nil && captured.TestCase == testCase:
 		// The same answer gave the value and holds another here: one more
 		// capture of the key would contradict the first.
-		return fmt.Sprintf("this run's value of %s is what %s/%s captured from this same answer, and the answer here holds another: %s", p.Key, captured.TestCase, captured.Where, changed)
+		return fmt.Sprintf("this run's value of %s is what %s/%s captured from this same answer, and the answer here holds another: %s", p.Key, captured.TestCase, logurl.Place(captured.Where), changed)
 	case captured != nil && c.Sends[testCase][p.Key]:
 		// A read-back: this test case's own request sent the value, and the
 		// answer holds another. A capture here would accept whatever the
 		// app answers and send it on, so it is never offered.
 		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and this test case's own request sent it: the app answered a different value than the one captured at %s/%s; check the read-back at %s, or the producer at %s/%s; %s",
-			p.Key, captured.TestCase, captured.Where, captured.TestCase, captured.Where, here, captured.TestCase, captured.Where, changed)
+			p.Key, captured.TestCase, logurl.Place(captured.Where), captured.TestCase, logurl.Place(captured.Where), here, captured.TestCase, logurl.Place(captured.Where), changed)
 	case captured != nil && canCapture && at != nil && at.Producer && at.NoCaptureWhy == "":
 		// Two edits, one per thing this place can be. A capture of the same
 		// key would re-point every later use of it to this answer, so a
@@ -1458,19 +1491,19 @@ func (c CheckResult) NextStep(testCase string, f Failure, canCapture bool) strin
 		fresh := at.Placeholder
 		fresh.Key = c.newKey(p.Key)
 		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another: if this place issues a value of its own each run, capture it under a key of its own: change %s at %s to %s%s%s, give %s %s, and write %s where later requests send this place's value; if this place replaces %s from then on (a refreshed session cookie), change %s there to %s instead, which points every later use of %s at this answer; %s",
-			p.Key, captured.TestCase, captured.Where, p.Text, here, captureForValue(fresh, at.Bare, at.Recorded), oneCapture(at.Shared), targetCapture(at.PassedOver), fresh.Key, recordedOf(at.Placeholder.Key), useFor(fresh),
+			p.Key, captured.TestCase, logurl.Place(captured.Where), p.Text, here, captureForValue(fresh, at.Bare, at.Recorded), oneCapture(at.Shared), targetCapture(at.PassedOver), fresh.Key, c.run.recordedOf(at.Placeholder.Key), useFor(fresh),
 			p.Key, p.Text, captureForValue(at.Placeholder, at.Bare, at.Recorded), p.Key, changed)
 	case captured != nil && at != nil && at.NoCaptureWhy != "":
 		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another (a capture cannot stand at %s: %s): %s",
-			p.Key, captured.TestCase, captured.Where, here, at.NoCaptureWhy, changed)
+			p.Key, captured.TestCase, logurl.Place(captured.Where), here, at.NoCaptureWhy, changed)
 	case captured != nil:
-		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another: %s", p.Key, captured.TestCase, captured.Where, changed)
+		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another: %s", p.Key, captured.TestCase, logurl.Place(captured.Where), changed)
 	case producer != nil && producer.NoCaptureWhy != "":
 		return fmt.Sprintf("nothing captures %s, so every run expects its recorded value, and a capture cannot stand at %s/%s (%s): if a response also gives the value whole (a JSON value), capture it there; %s",
-			p.Key, producer.TestCase, producer.Where, producer.NoCaptureWhy, changed)
+			p.Key, producer.TestCase, logurl.Place(producer.Where), producer.NoCaptureWhy, changed)
 	case producer != nil:
 		return fmt.Sprintf("nothing captures %s, so every run expects its recorded value: if the app issues this value anew each run, make the producer a capture: change %s at %s/%s to %s%s%s; %s",
-			p.Key, producer.Placeholder.Text, producer.TestCase, producer.Where, captureForValue(producer.Placeholder, producer.Bare, producer.Recorded), oneCapture(producer.Shared), targetCapture(producer.PassedOver), changed)
+			p.Key, producer.Placeholder.Text, producer.TestCase, logurl.Place(producer.Where), captureForValue(producer.Placeholder, producer.Bare, producer.Recorded), oneCapture(producer.Shared), targetCapture(producer.PassedOver), changed)
 	}
 	return fmt.Sprintf("nothing captures %s before this test case, so every run expects its recorded value here: if the app issues this value anew each run, mark the place of an earlier response that issues it %s; %s",
 		p.Key, captureFor(p, false), changed)

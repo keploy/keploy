@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -50,8 +51,9 @@ func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consume
 	return nil
 }
 
-// learnedLine is what the learn step learned for one test: each field as
-// "<mock> <path> (<kind>)".
+// learnedLine is what the learn step learned for one test, for its line:
+// each field as "<mock> <path> (<kind>)", its path by its shape
+// (logurl.Place).
 type learnedLine struct {
 	test   string
 	fields []string
@@ -71,7 +73,7 @@ func learnedByTest(added map[string][]string, mapping *models.Mapping) []learned
 			var fields []string
 			for _, e := range tc.Mocks {
 				for _, f := range added[e.Name] {
-					fields = append(fields, e.Name+" "+f)
+					fields = append(fields, e.Name+" "+logurl.Place(f))
 				}
 				if len(added[e.Name]) > 0 {
 					seen[e.Name] = true
@@ -86,7 +88,7 @@ func learnedByTest(added map[string][]string, mapping *models.Mapping) []learned
 	for name := range added {
 		if !seen[name] {
 			for _, f := range added[name] {
-				rest = append(rest, name+" "+f)
+				rest = append(rest, name+" "+logurl.Place(f))
 			}
 		}
 	}

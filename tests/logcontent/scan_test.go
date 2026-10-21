@@ -52,8 +52,9 @@
 //     net/http prints that panic whole, its value and its stack, to stderr;
 //   - url: a field's value, a message, a print, a sugar's argument or an
 //     error's text (an errorf's, an errors.New's) made from a request's URL,
-//     its path or its query (urlOf: net/url's URL fields and methods, a
-//     request's RequestURI, a recorded test's HTTPReq.URL, followed through
+//     its path, its query or its method (urlOf: net/url's URL fields and
+//     methods, a request's RequestURI and Method, a recorded test's
+//     HTTPReq.URL and Method, followed through
 //     locals and keploy's functions' returns), which only logurl gates, and
 //     an entry excuses only with a reason that says whose URL it is
 //     (urlReason), or, an error's text, that the error keeps it for its
@@ -2089,11 +2090,14 @@ type assigned1 struct {
 
 // urlFields are the fields that hold a request's URL, its path or its query,
 // by their struct: net/url's URL, net/http's Request, and keploy's recorded
-// requests (models.HTTPReq's URL and URLParams, HTTP2Req's URL).
+// requests (models.HTTPReq's URL and URLParams, HTTP2Req's URL). And a
+// request's method, which logurl shapes as URLShape shapes a call's
+// (logurl.MethodField): a client may send any token there, a code or a key
+// among them, as it may any path.
 var urlFields = map[string]map[string]bool{
 	"net/url.URL":                   {"Path": true, "RawPath": true, "RawQuery": true, "Fragment": true, "RawFragment": true, "Opaque": true},
-	"net/http.Request":              {"URL": true, "RequestURI": true},
-	module + "/pkg/models.HTTPReq":  {"URL": true, "URLParams": true},
+	"net/http.Request":              {"URL": true, "RequestURI": true, "Method": true},
+	module + "/pkg/models.HTTPReq":  {"URL": true, "URLParams": true, "Method": true},
 	module + "/pkg/models.HTTP2Req": {"URL": true},
 }
 
@@ -4486,7 +4490,7 @@ func (fs *fileScan) ownMarshaler(v ast.Expr) bool {
 // shapes are pkg/models' shapes of what a call sent, which write every value
 // as {} or ? (models.CallShape): the forms the lines a default run prints
 // for a miss name a call by.
-var shapes = map[string]bool{"CallShape": true, "MissShape": true, "PathShape": true, "SQLShape": true, "URLShape": true}
+var shapes = map[string]bool{"CallShape": true, "MissShape": true, "PathShape": true, "SQLShape": true, "URLShape": true, "MethodShape": true, "PlaceShape": true, "DepKeyShape": true}
 
 // isShape: f is one of the shapes keploy writes a value by, which keep no
 // value of an application's: pkg/models' (shapes), and templates.Shape and

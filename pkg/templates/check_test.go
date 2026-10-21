@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 func httpCase(name string, req models.HTTPReq, resp models.HTTPResp) *models.TestCase {
@@ -404,8 +405,10 @@ func TestCheckResult_NextStepNamesBothCases(t *testing.T) {
 				changed + "test-3/response body.tok"}},
 		{"a use in a case that cannot capture", "test-3", Failure{Where: "body.tok", Placeholder: "{{string .tok}}"}, false,
 			[]string{"this run's value of tok is what test-2/response body.tok captured", changed}},
+		// A place is named by its shape with KEPLOY_LOG_CONTENT off
+		// (logurl.Place): id2, a key with a digit, reads as no name.
 		{"a use of a key its own response captures", "test-2", Failure{Where: "body.id2", Placeholder: "{{string .tok}}"}, true,
-			[]string{"this run's value of tok is what test-2/response body.tok captured from this same answer", changed + "test-2/response body.id2"}},
+			[]string{"this run's value of tok is what test-2/response body.tok captured from this same answer", changed + "test-2/response body.{}"}},
 		{"a capture that found nothing", "test-2", Failure{Where: "body.tok", Placeholder: "{{capture string .tok}}"}, true,
 			[]string{"the answer has no value of the capture's type there", changed + "test-2/response body.tok"}},
 	} {
@@ -423,6 +426,40 @@ func TestCheckResult_NextStepNamesBothCases(t *testing.T) {
 	same := res.NextStep("test-2", Failure{Where: "body.id2", Placeholder: "{{string .tok}}"}, true)
 	assert.NotContains(t, same, "{{capture", "a second capture of a key its own response captures would contradict the first")
 	assert.NotContains(t, same, "nothing captures")
+}
+
+// A next step names a key's recorded value by where its user finds it, and
+// quotes the value too only with KEPLOY_LOG_CONTENT on, as keploy
+// templatize's lines quote one: what the user needs for the edit when they
+// opted in, and none of the application's values when they did not.
+func TestANextStepQuotesTheRecordedValueOnlyWhenOptedIn(t *testing.T) {
+	const where = "tok's recorded value in config.yaml's template"
+	r := newRun(t, map[string]interface{}{"tok": "T0-recorded"})
+	cases := []*models.TestCase{
+		httpCase("test-1", models.HTTPReq{}, models.HTTPResp{Body: `{"tok":"{{capture string .tok}}"}`}),
+		httpCase("test-2", models.HTTPReq{}, models.HTTPResp{Body: `{"tok":"{{string .tok}}"}`}),
+		httpCase("test-3", models.HTTPReq{URL: "http://h/x?t={{string .tok}}"}, models.HTTPResp{}),
+	}
+	uncaptured := newRun(t, map[string]interface{}{"tok": "T0-recorded"}).Check([]*models.TestCase{
+		httpCase("test-1", models.HTTPReq{URL: "http://h/x?t={{string .tok}}"}, models.HTTPResp{}),
+	}, CheckOptions{})
+	require.Len(t, uncaptured.Uncaptured, 1)
+	for _, on := range []bool{false, true} {
+		restore := logcontent.Set(on)
+		steps := []string{
+			r.Check(cases, CheckOptions{}).NextStep("test-2", Failure{Where: "body.tok", Placeholder: "{{string .tok}}"}, true),
+			uncaptured.Uncaptured[0].UncapturedNextStep(),
+		}
+		restore()
+		for _, step := range steps {
+			assert.Contains(t, step, where)
+			if on {
+				assert.Contains(t, step, `"T0-recorded" (`+where+`)`)
+			} else {
+				assert.NotContains(t, step, "T0-recorded")
+			}
+		}
+	}
 }
 
 // A VARIABLE IN A NAME OR A gRPC TRAILER is refused (rule 9): a header's or a

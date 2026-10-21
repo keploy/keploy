@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -71,10 +72,11 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 	byTest := map[string][]string{}
 	seen := map[string]bool{}
 	for _, f := range flows {
-		var fields []string
+		var fields, logged []string
 		for _, st := range f.Consumed {
 			for _, a := range added[st.Name] {
 				fields = append(fields, st.Name+" "+a)
+				logged = append(logged, st.Name+" "+logurl.Place(a))
 			}
 			if len(added[st.Name]) > 0 {
 				seen[st.Name] = true
@@ -82,21 +84,23 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		}
 		if len(fields) > 0 {
 			byTest[f.Flow] = fields
-			m.logger.Info("learned fields that changed between record and replay", zap.String("test", f.Flow), zap.Strings("fields", fields))
+			m.logger.Info("learned fields that changed between record and replay", zap.String("test", f.Flow), zap.Strings("fields", logged))
 		}
 	}
-	var rest []string
+	var rest, logged []string
 	for name, as := range added {
 		if seen[name] {
 			continue
 		}
 		for _, a := range as {
 			rest = append(rest, name+" "+a)
+			logged = append(logged, name+" "+logurl.Place(a))
 		}
 	}
 	if len(rest) > 0 {
 		sort.Strings(rest)
-		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
+		sort.Strings(logged)
+		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", logged))
 	}
 	return byTest, rest, nil
 }

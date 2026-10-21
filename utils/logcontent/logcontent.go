@@ -63,7 +63,10 @@
 //     length, or an error's kind, unless the Go runtime raised it, whose
 //     own words (an index out of range, a nil dereference) it logs whole:
 //     any code a goroutine runs can panic, and with whatever it was reading.
-//   - logurl logs a URL, a path or a call by its shape (models.URLShape):
+//   - logurl logs a URL, a path or a call by its shape (models.URLShape), and
+//     a request's method and a place in a request (a field's path, a key) as
+//     that shape writes a call's method and a path's segments (MethodField,
+//     PlaceField):
 //     every path segment and query name that does not read as a name, and
 //     every query value, written {}, as the lines a default run prints for a
 //     call keploy could not answer write them (models.CallShape), and an

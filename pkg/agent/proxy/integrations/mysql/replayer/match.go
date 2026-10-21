@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -1856,7 +1857,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			logger.Debug("schema-noise detection: learned request-body drift on matched mock",
 				zap.String("mock", matchedMock.Name),
 				zap.String("request_type", req.Header.Type),
-				zap.Strings("fields", paths))
+				logurl.PlacesField("fields", paths))
 		}
 	}
 

@@ -19,7 +19,9 @@
 // gate it, or list it with its reason), and so does one with fewer (lower
 // the count: the list only ever shrinks). An entry with no reason fails too,
 // and so does a url site's (a value made from a request's URL) whose reason
-// does not say whose URL it is (urlReason).
+// does not say whose URL it is (urlReason), and one whose reason names when
+// its value does carry content ("..., unless the API keys a map by its
+// data": hedge).
 //
 // Scope: every package of keploy's module that a binary is built from:
 // ./pkg/..., ./utils/..., ./cli/..., ./config/... and main, which hold the
@@ -98,6 +100,14 @@ const contentReason = "content:"
 // are made. So a reviewer reads the site alone to check one: the reason
 // says what of its construction holds the content out.
 const constructedReason = "constructed:"
+
+// hedge is a reason's clause that names a case in which the value it
+// excuses carries content ("a JSON object's keys are the API's names, unless
+// the API keys a map by its data"): such a reason says itself that the site
+// is one, and excuses nothing. The value goes through logurl's shapes
+// (PlaceField, MethodField), or through logcontent, instead. A content
+// reason (contentReason) says the value is content, and is no excuse.
+var hedge = regexp.MustCompile(`(?i)\b(unless|except (when|where|if))\b`)
 
 // urlReason starts the reason of a url site (kindURL), a value made from a
 // request's URL, its path or its query: it says whose URL it is, keploy's
@@ -392,6 +402,9 @@ func TestNoLogLineCarriesContentUngated(t *testing.T) {
 			lower++
 			t.Errorf("%q occurs %d time(s) and %s lists %d: lower its count to %d (or drop the line at 0)", k, have, allowlistPath, may.count, have)
 		}
+		if have > 0 && hedge.MatchString(may.reason) && !strings.HasPrefix(may.reason, contentReason) {
+			t.Errorf("%q is listed with a reason that names when it carries content (%q): a reason says why a value never does; gate it (logurl.PlaceField, logurl.MethodField, logcontent)", k, hedge.FindString(may.reason))
+		}
 		if have > 0 && may.count > 0 && may.reason == "" {
 			noReason++
 			t.Errorf("%q is listed with no reason: say why it carries no customer content", k)
@@ -585,5 +598,29 @@ func TestAContentErrorIsGatedWhereverItIsLogged(t *testing.T) {
 	s := at(scanFixture(t, map[string]bool{write: true}), stalled)
 	if len(s) != 1 || !s[0].content {
 		t.Fatalf("the line that logs a stall whole, a field of whose text is written content, is not a content site: %v", s)
+	}
+}
+
+// A reason that names when its value carries content excuses nothing (hedge):
+// the reasons the allowlist held for a place before it was a rule are its
+// case. One that says why a value never does is read as it is.
+func TestAHedgedReasonExcusesNothing(t *testing.T) {
+	for _, r := range []string{
+		"a body field's path (body.user.id): where a value sits, not the value (a JSON object's keys are the API's names, unless the API keys a map by its data, an email or an id, which the path then names)",
+		"an id keploy gives, except when the user configures one",
+		"Unless a header names it, an address",
+	} {
+		if !hedge.MatchString(r) {
+			t.Errorf("%q excuses its site", r)
+		}
+	}
+	for _, r := range []string{
+		"a test case's name, which keploy gives it (test-N)",
+		"an exception's type: the runtime's words",
+		"content: a variable's place as a mock writes it, quoted by the error, unless the line gates it",
+	} {
+		if hedge.MatchString(r) && !strings.HasPrefix(r, contentReason) {
+			t.Errorf("%q is read as a hedge", r)
+		}
 	}
 }

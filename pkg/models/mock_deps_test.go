@@ -102,3 +102,23 @@ func TestRegisterMockDepsDeclaresAKindsLinks(t *testing.T) {
 		t.Errorf("DepsOf(nil) = %+v", got)
 	}
 }
+
+// A dependency key is named by a line by its shape: a MySQL statement's is
+// keploy's words and ids, kept; an HTTP sequence's is its call's shape,
+// without its body's hash, which names the body as a fingerprint does.
+func TestDepKeyShape(t *testing.T) {
+	seq := HTTPSequenceKey("POST", "http://pay.internal/cards/4111111111111111?cvv=123", `{"pin":"1234"}`)
+	for in, want := range map[string]string{
+		MySQLStatementKey("7", 3):      `mysql statement 3 on connection "7"`,
+		MySQLStatementCloseKey("7", 3): `mysql close of statement 3 on connection "7"`,
+		seq:                            "POST http://pay.internal/cards/{}?cvv={}",
+		perTestSequencePrefix + seq:    "POST http://pay.internal/cards/{}?cvv={}",
+		HTTPSequenceKey("SECRETKEY", "/reset/kq7Zt0x9", ""): "{} /reset/{}",
+		"a key of some other kind 4111111111111111":         "{}",
+		`mysql statement 3 on connection "7" 4111`:          "{}",
+	} {
+		if got := DepKeyShape(in); got != want {
+			t.Errorf("DepKeyShape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

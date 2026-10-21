@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -123,7 +124,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 
 	if tcs1.HTTPReq.Method != tcs2.HTTPReq.Method {
 		reqCompare.MethodResult.Normal = false
-		logger.Debug("test case http req method is not equal", zap.String("tcs1HttpReqMethod", string(tcs1.HTTPReq.Method)), zap.String("tcs2HttpReqMethod", string(tcs2.HTTPReq.Method)))
+		logger.Debug("test case http req method is not equal", logurl.MethodField("tcs1HttpReqMethod", string(tcs1.HTTPReq.Method)), logurl.MethodField("tcs2HttpReqMethod", string(tcs2.HTTPReq.Method)))
 		pass = false
 	}
 

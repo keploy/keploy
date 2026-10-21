@@ -177,6 +177,113 @@ func FieldShape(f string) string {
 	return strings.Join(parts, ".")
 }
 
+// PlaceShape is a place in a request or a response as keploy names one (a
+// field's path, an object's key, a header's, a form field's or a query
+// parameter's name, a template variable's place) in its shape, as a log line
+// names it: body.items[0].id, url.query.page, header.X-Request-Id, response
+// body.user.id, header Set-Cookie.sid. Each part that reads as a name
+// (PathShape's segment rule) is kept and every other one is {}, as URLShape
+// writes a path's segments and a query's names: a JSON object's key is the
+// API's name unless the API keys a map by its data (an email address, an id,
+// a token), and "body.users.{}.name" is how a line names the place of
+// "body.users.alice@example.com.name". A part is what lies between the
+// place's delimiters, which are kept as they are: a space, a '.', and an
+// index in brackets of up to four digits ([0], [], [3][1]), a position in an
+// array, not a key, as is a URL path segment's index after "path"
+// (url.path.2, Location.path.1); and learn's "{keys}" at the end of a part
+// (an object whose keys are learned, not their values). So are a ',', a ';', a '(' and
+// a ')', which keploy's own words write around places ("Removed fields:
+// body.a, body.b"), and which a key holding one is split at as at a '.'. A
+// templated key, named by its placeholder ("body key roles.{{string .id}}"),
+// is kept as it is when the placeholder is one of the template grammar's
+// (pkg/templates' placeholderRe), whose key is config.yaml's name for a
+// value, and is {{.{}}} otherwise, as templates.Shape writes template text. A part that reads as a name is
+// kept, so a value that reads as one too (a user name in lower-case letters)
+// is kept, as URLShape keeps a path's, and a key that holds a '.' is read as
+// the parts it splits into, as FieldShape reads one: "alice.smith@example.com"
+// keeps alice and com. A shape is its own shape.
+func PlaceShape(p string) string {
+	if p == "" {
+		return ""
+	}
+	var b strings.Builder
+	prev := ""
+	part := func(s string) {
+		defer func(whole string) { prev = whole }(s)
+		if prev == "path" && segmentIndex.MatchString(s) {
+			b.WriteString(s) // a URL's path segment by its index: url.path.2, Location.path.1
+			return
+		}
+		var suffix string
+		for {
+			switch {
+			case strings.HasSuffix(s, placeKeysMark):
+				s, suffix = s[:len(s)-len(placeKeysMark)], placeKeysMark+suffix
+				continue
+			case strings.HasSuffix(s, "]"):
+				if j := strings.LastIndexByte(s, '['); j >= 0 && fieldIndexes.MatchString(s[j:]) {
+					s, suffix = s[:j], s[j:]+suffix
+					continue
+				}
+			}
+			break
+		}
+		if s != "" {
+			s = pathSegmentShape(s)
+		}
+		b.WriteString(s + suffix)
+	}
+	start := 0
+	for i := 0; i < len(p); i++ {
+		if strings.HasPrefix(p[i:], "{{") {
+			end := strings.Index(p[i:], "}}")
+			if end < 0 {
+				break // the rest is one part: an unclosed {{ is no placeholder
+			}
+			for i+end+2 < len(p) && p[i+end+2] == '}' {
+				end++ // the text runs to the last } of its closing braces: {{.{}}}
+			}
+			part(p[start:i])
+			if t := p[i : i+end+2]; placeGrammarPlaceholder.MatchString(t) {
+				b.WriteString(t)
+			} else {
+				b.WriteString(placeHeldText)
+			}
+			i += end + 1
+			start = i + 1
+			continue
+		}
+		if strings.IndexByte(placeDelimiters, p[i]) >= 0 {
+			part(p[start:i])
+			b.WriteByte(p[i])
+			start = i + 1
+		}
+	}
+	part(p[start:])
+	return b.String()
+}
+
+// placeGrammarPlaceholder is a placeholder of the template grammar
+// (pkg/templates' placeholderRe, which imports this package), whole:
+// {{.id}}, {{string .id}}, {{capture int .n}}, {{.secret.token}}. Its key is
+// config.yaml's name for a value, which PlaceShape keeps.
+var placeGrammarPlaceholder = regexp.MustCompile(`^\{\{\s*(capture\s+)?(?:(string|int|float)\s+)?\.((?:secret\.)?[\p{L}_][\p{L}\p{Nd}_]*)\s*\}\}$`)
+
+// placeHeldText is what PlaceShape writes for template text outside the
+// grammar, as templates.Shape writes it.
+const placeHeldText = "{{.{}}}"
+
+// segmentIndex is a URL path segment's index after "path" in a place
+// (url.path.2), which PlaceShape keeps: a position, as an array's index is.
+var segmentIndex = regexp.MustCompile(`^[0-9]{1,4}$`)
+
+// placeDelimiters are what PlaceShape keeps between a place's parts.
+const placeDelimiters = " .,;()"
+
+// placeKeysMark ends the place of an object whose keys are learned, not its
+// values (pkg/matcher/learn): body.headers{keys}.
+const placeKeysMark = "{keys}"
+
 // fieldIndexes are a field part's array indexes: [], [0], [3][].
 var fieldIndexes = regexp.MustCompile(`^(\[[0-9]{0,4}\])+$`)
 

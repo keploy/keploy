@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/logcontent/logtest"
 )
 
@@ -44,5 +45,22 @@ func TestRequest_AValueThatIsNoNumberIsLoggedWithoutIt(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// models.PlaceShape keeps a templated key's placeholder as Shape keeps template
+// text: whole when it is one of the grammar's, {{.{}}} otherwise. It holds its
+// own copy of the grammar, since this package imports models; this holds the
+// two to each other.
+func TestAPlaceKeepsAPlaceholderAsShapeDoes(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	for _, text := range []string{
+		"{{.id}}", "{{string .id}}", "{{ int .n }}", "{{capture float .price}}", "{{.secret.token}}", "{{string .ünïcode_1}}",
+		"{{.a.b}}", "{{ .id | print }}", "{{.}}", "{{.4111111111111111}}", "{{capture .id}}", "{{bool .ok}}",
+	} {
+		want := "response body key roles." + Shape(text) + ".name"
+		if got := models.PlaceShape("response body key roles." + text + ".name"); got != want {
+			t.Errorf("PlaceShape of a place keyed by %q is %q, want %q", text, got, want)
+		}
 	}
 }

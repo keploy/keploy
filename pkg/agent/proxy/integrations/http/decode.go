@@ -132,7 +132,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
-				ce.Write(zap.Any("method", input.method),
+				ce.Write(logurl.MethodField("method", input.method),
 					logurl.Field("path", input.url.Path),
 					logcontent.Any("url", input.url),
 					zap.Array("header_names", utils.SortedKeys(input.header)),

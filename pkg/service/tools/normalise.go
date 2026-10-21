@@ -265,12 +265,13 @@ func wasRefused(r models.TestResult) bool {
 }
 
 // grpcPlaceholders names each placeholder of a gRPC expected response, by
-// where it is.
+// where it is, for the warning above: the placeholder by its shape
+// (templates.Shape), which keeps one of the grammar.
 func grpcPlaceholders(resp models.GrpcResp) []string {
 	var out []string
 	add := func(where, text string) {
 		for _, p := range templates.Find(text) {
-			out = append(out, where+": "+p.Text)
+			out = append(out, where+": "+templates.Shape(p.Text))
 		}
 	}
 	for _, h := range []struct {

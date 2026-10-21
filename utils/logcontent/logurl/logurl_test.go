@@ -223,3 +223,43 @@ func TestErrorNamesTheURLByItsShape(t *testing.T) {
 		t.Fatalf("Error(nil) = %v", got)
 	}
 }
+
+// A request's method and a place in it are logged by their shapes with the
+// switch off, a token or a key a client made up written {}, and whole with it
+// on, as zap's constructors log them.
+func TestAMethodAndAPlaceAreLoggedByTheirShapes(t *testing.T) {
+	const method, place = "SECRETKEY", "body.users.alice@example.com.sessions.kq7Zt0x9resettoken"
+	places := []string{place, "url.query.4111111111111111"}
+	logLines := func(l *zap.Logger) {
+		l.Debug("call", MethodField("method", method), PlaceField("where", place), PlacesField("paths", places))
+		l.Debug("call " + Method(method) + " at " + Place(place))
+	}
+	t.Cleanup(logcontent.Set(false))
+	off := observed(t, logLines)
+	for _, want := range []string{
+		`"method": "{}"`, `"where": "body.users.{}.com.sessions.{}"`, `"paths": ["body.users.{}.com.sessions.{}", "url.query.{}"]`,
+		"call {} at body.users.{}.com.sessions.{}",
+	} {
+		if !strings.Contains(strings.Join(off, "\n"), want) {
+			t.Errorf("no line carries %s: %v", want, off)
+		}
+	}
+	for _, v := range []string{"SECRETKEY", "alice", "kq7Zt0x9resettoken", "4111111111111111"} {
+		if strings.Contains(strings.Join(off, "\n"), v) {
+			t.Errorf("a line carries %q with the switch off: %v", v, off)
+		}
+	}
+	if got := observed(t, func(l *zap.Logger) { l.Debug("call", MethodField("method", "PROPFIND")) }); !strings.Contains(got[0], `"method": "PROPFIND"`) {
+		t.Errorf("HTTP's method is not kept: %v", got)
+	}
+
+	logcontent.Set(true)
+	on := observed(t, logLines)
+	want := observed(t, func(l *zap.Logger) {
+		l.Debug("call", zap.String("method", method), zap.String("where", place), zap.Strings("paths", places))
+		l.Debug("call " + method + " at " + place)
+	})
+	if strings.Join(on, "\n") != strings.Join(want, "\n") {
+		t.Errorf("with the switch on:\n got %v\nwant %v", on, want)
+	}
+}

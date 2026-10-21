@@ -1192,7 +1192,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 // request as fmt prints it. That print is no content to fingerprint with the
 // switch off: it holds the request's pointers, which differ on every run.
 func sentRequestFields(req *http.Request) []zap.Field {
-	fields := []zap.Field{zap.String("method", req.Method), logurl.Field("path", req.URL.Path), zap.Array("header_names", utils.SortedKeys(req.Header))}
+	fields := []zap.Field{logurl.MethodField("method", req.Method), logurl.Field("path", req.URL.Path), zap.Array("header_names", utils.SortedKeys(req.Header))}
 	if logcontent.On() {
 		fields = append(fields, zap.String("request", fmt.Sprintf("%v", req)))
 	}

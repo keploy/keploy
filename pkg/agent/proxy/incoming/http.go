@@ -969,7 +969,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Bool("chunked_transfer", chunkedTransfer),
 				logurl.Field("path", req.URL.Path),
 				logcontent.String("url", req.URL.String()),
-				zap.String("method", req.Method),
+				logurl.MethodField("method", req.Method),
 				zap.Int("status_code", resp.StatusCode),
 				zap.String("response_content_type", resp.Header.Get("Content-Type")),
 			)
@@ -1037,7 +1037,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Int64("response_bytes_seen", respBytesTotal),
 					logurl.Field("path", capturedReq.URL.Path),
 					logcontent.String("url", capturedReq.URL.String()),
-					zap.String("method", capturedReq.Method),
+					logurl.MethodField("method", capturedReq.Method),
 					zap.Int("status_code", capturedResp.StatusCode),
 				)
 				return
@@ -1402,7 +1402,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			upConnFresh = false
 			if err := req.Write(upConn); err != nil {
 				logger.Error("Failed to forward upgrade request to upstream. Verify upstream supports the requested upgrade and is listening on the resolved address.",
-					zap.String("method", req.Method),
+					logurl.MethodField("method", req.Method),
 					logcontent.String("upgrade", req.Header.Get("Upgrade")), // a header's value, whatever the client sent
 					zap.String("upstream", upstreamAddr),
 					zap.Error(err))
@@ -1510,7 +1510,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					// problem, so 400 (writeBadRequest) is the right
 					// status; 502 would misattribute it to the app.
 					logger.Error("Failed to read request body for replay-safe buffering. Possible client disconnect mid-body.",
-						zap.String("method", req.Method),
+						logurl.MethodField("method", req.Method),
 						zap.Int64("content_length", req.ContentLength),
 						zap.Error(rerr))
 					writeBadRequest(clientConn)
@@ -1524,7 +1524,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					// proxies/monitoring don't misattribute the failure
 					// to the app.
 					logger.Error("Request body length did not match declared Content-Length; treating as malformed client request. If this fires in production, check the downstream client/proxy for truncated uploads, mid-body disconnects, or an incorrectly computed Content-Length header on the request side.",
-						zap.String("method", req.Method),
+						logurl.MethodField("method", req.Method),
 						zap.Int64("content_length", req.ContentLength),
 						zap.Int("bytes_read", len(b)))
 					writeBadRequest(clientConn)
@@ -1583,7 +1583,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 			if canReplay {
 				logger.Debug("Idempotent request write failed; redial+replay",
-					zap.String("method", req.Method), zap.Error(err))
+					logurl.MethodField("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
 					pm.logAppDialFailure(logger, "Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
 						rerr, zap.String("upstream", upstreamAddr))
@@ -1601,7 +1601,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay of idempotent request failed after redial; upstream may be unhealthy or rejecting writes. Check application status and recent restarts on the resolved address.",
-						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
+						logurl.MethodField("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1614,7 +1614,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// Surface a 502 to the client and tear down so envoy
 				// doesn't reuse this conn.
 				logger.Error("Forward of request to upstream failed and request is not safely replayable (non-idempotent method or body cannot be re-sent). Verify upstream health on the resolved address.",
-					zap.String("method", req.Method),
+					logurl.MethodField("method", req.Method),
 					zap.String("upstream", upstreamAddr),
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
 					zap.Int64("content_length", req.ContentLength),
@@ -1654,7 +1654,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 			if canReplay && interims == 0 && isStaleConnError(err) {
 				logger.Debug("Empty response from upstream; redial+replay",
-					zap.String("method", req.Method), logcontent.Error(err))
+					logurl.MethodField("method", req.Method), logcontent.Error(err))
 				if rerr := redial(); rerr != nil {
 					pm.logAppDialFailure(logger, "Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
 						rerr, zap.String("upstream", upstreamAddr))
@@ -1668,7 +1668,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay request write failed after redial; upstream may be unhealthy. Check application status on the resolved address.",
-						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
+						logurl.MethodField("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1692,7 +1692,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// silent connection close (which presents as a
 				// confusing reset/hang rather than a structured 502).
 				logger.Error("Failed to read upstream response and request is not safely replayable. Verify upstream application health on the resolved address.",
-					zap.String("method", req.Method),
+					logurl.MethodField("method", req.Method),
 					zap.String("upstream", upstreamAddr),
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
 					zap.Int64("content_length", req.ContentLength),
