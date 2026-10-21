@@ -237,7 +237,7 @@ func TestSettleSharesPinsEachCallToTheTestThatMadeIt(t *testing.T) {
 		t.Fatalf("charged %v", charged)
 	}
 	got, ok := s.p.setShares(models.TestSetStatusPassed)
-	if !ok || got.State != models.SharesComplete || !reflect.DeepEqual(got.Pins, map[string]string{"ca": "a", "cb": "b"}) || len(got.Moves) != 0 || len(got.ToShared) != 0 {
+	if !ok || got.State != models.SharesComplete || !reflect.DeepEqual(got.Pins, map[string]string{"ca": "a", "cb": "b"}) || len(got.Moves) != 0 {
 		t.Fatalf("shares %+v", got)
 	}
 	if got, _ := s.p.setShares(models.TestSetStatusInternalErr); got.State != models.SharesIncomplete {
@@ -245,9 +245,10 @@ func TestSettleSharesPinsEachCallToTheTestThatMadeIt(t *testing.T) {
 	}
 }
 
-// A candidate no test made, with every test of its group kept, charges every
-// one of them that ran, once each; with a test the recording did not keep, no
-// one is charged and it is shared.
+// A candidate no test made that a kept test lists charges every test of its
+// group that ran, once each, whether or not its group held a test the
+// recording did not keep; one the mapping lists as shared (attributed to a
+// test the recording did not keep) charges no one, and stays shared.
 func TestSettleSharesLeftovers(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	registerShareKeys(t)
@@ -294,18 +295,58 @@ func TestSettleSharesLeftovers(t *testing.T) {
 			}
 		}
 	})
-	t.Run("a test not kept", func(t *testing.T) {
+	t.Run("a kept test lists it beside a test not kept", func(t *testing.T) {
+		// Before it was shared, left was required of a, which lists it: a
+		// round that does not make it fails a. Sharing it must not leave it
+		// required of no test because a test of its group was not kept.
 		ca := shMock("ca", 100, "INSERT", "bind.$1=a", "ok")
 		left := shMock("left", 200, "INSERT", "bind.$1=z", "ok")
+		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}, Unkept: 1}},
+			map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(left, "g1")}, "b": {}}, nil, nil, ca, left)
+		s.run("a", used("ca"))
+		s.run("b")
+		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a", "b"}) {
+			t.Fatalf("charged %v; want a and b, the kept tests of its group that ran", charged)
+		}
+		for _, test := range []string{"a", "b"} {
+			if r := s.resultOf(test); r.Status != models.TestStatusFailed || !reflect.DeepEqual(reasonsOf(r), []string{"unconsumed:left"}) {
+				t.Fatalf("%s: %s %v", test, r.Status, reasonsOf(r))
+			} else if u := r.FailureInfo.UnconsumedMocks[0]; u.Unkept != 1 {
+				t.Fatalf("%s: the leftover says %d tests not kept were open; want 1, which may have made it", test, u.Unkept)
+			}
+		}
+		got, _ := s.p.setShares(models.TestSetStatusFailed)
+		if got.State != models.SharesComplete || got.Pins["ca"] != "a" || got.Moves["left"].To != "a" || got.Pins["left"] != "" {
+			t.Fatalf("shares %+v; want ca pinned and left staying with a, which is charged", got)
+		}
+	})
+	t.Run("a shared one", func(t *testing.T) {
+		// s1 was attributed to a test the recording did not keep: no kept
+		// test lists it, and none is charged when no test makes it.
+		ca := shMock("ca", 100, "INSERT", "bind.$1=a", "ok")
+		s1 := shMock("s1", 200, "INSERT", "bind.$1=z", "ok")
 		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}, Unkept: 1}},
-			map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(left, "g1")}}, nil, nil, ca, left)
+			map[string][]models.MockEntry{"a": {shEntry(ca, "g1")}}, []models.MockEntry{shEntry(s1, "g1")}, nil, ca, s1)
 		s.run("a", used("ca"))
 		if charged := s.settle(t); len(charged) != 0 {
-			t.Fatalf("charged %v; a test the recording did not keep may have made it", charged)
+			t.Fatalf("charged %v; the test it was attributed to was not kept, and may have made it", charged)
 		}
 		got, _ := s.p.setShares(models.TestSetStatusPassed)
-		if !reflect.DeepEqual(got.ToShared, []string{"left"}) || got.Pins["ca"] != "a" {
-			t.Fatalf("shares %+v; want left shared", got)
+		if got.State != models.SharesComplete || got.Pins["ca"] != "a" || got.Pins["s1"] != "" || len(got.Moves) != 0 {
+			t.Fatalf("shares %+v; want ca pinned, s1 left shared", got)
+		}
+	})
+	t.Run("a shared one a kept test made", func(t *testing.T) {
+		ca := shMock("ca", 100, "INSERT", "bind.$1=a", "ok")
+		s1 := shMock("s1", 200, "INSERT", "bind.$1=z", "ok")
+		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}, Unkept: 1}},
+			map[string][]models.MockEntry{"a": {shEntry(ca, "g1")}}, []models.MockEntry{shEntry(s1, "g1")}, nil, ca, s1)
+		s.run("a", used("ca"), used("s1"))
+		if charged := s.settle(t); len(charged) != 0 {
+			t.Fatalf("charged %v", charged)
+		}
+		if got, _ := s.p.setShares(models.TestSetStatusPassed); got.Pins["s1"] != "a" {
+			t.Fatalf("shares %+v; want s1 pinned to a, which made it", got)
 		}
 	})
 }
@@ -500,19 +541,49 @@ func TestSettleSharesCorroboratesALearnedPair(t *testing.T) {
 }
 
 // A candidate answered for different tests across attempts, or not on its
-// test's last attempt, charges every candidate test of it.
+// test's last attempt, charges every candidate test of it, and stays with a
+// charged test.
 func TestSettleSharesARetryDisagreementChargesEveryCandidateTest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	registerShareKeys(t)
-	c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
-	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
-		map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {}}, nil, nil, c)
-	s.run("a", used("c"))
-	s.run("a") // the retry did not make it
-	s.run("b")
-	if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a", "b"}) {
-		t.Fatalf("charged %v", charged)
+	mk := func() *shareSet {
+		c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
+		return newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b", "c"}}},
+			map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {}, "c": {}}, nil, nil, c)
 	}
+	check := func(t *testing.T, s *shareSet) {
+		t.Helper()
+		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a", "b", "c"}) {
+			t.Fatalf("charged %v; want every candidate test that ran", charged)
+		}
+		for _, test := range []string{"a", "b", "c"} {
+			cs := s.resultOf(test).FailureInfo.UnmatchedCalls
+			if len(cs) != 1 || cs[0].Reason != models.MissConcurrentAmbiguous || cs[0].Concurrent.Case != models.ConcurrentCaseRetry {
+				t.Fatalf("%s: charged %+v; want the retry's charge", test, cs)
+			}
+		}
+		got, _ := s.p.setShares(models.TestSetStatusFailed)
+		if got.Pins["c"] != "" || got.Moves["c"].To != "a" {
+			t.Fatalf("shares %+v; want c unpinned, staying with a, which is charged", got)
+		}
+	}
+	t.Run("the retry did not make it", func(t *testing.T) {
+		s := mk()
+		s.run("a", used("c"))
+		s.run("a")
+		s.run("b")
+		s.run("c")
+		check(t, s)
+	})
+	t.Run("two tests answered with it", func(t *testing.T) {
+		// The claims make this one staging's impossible; a staging begun
+		// again mid-set (a new claims epoch) does not.
+		s := mk()
+		s.run("a", used("c"))
+		s.run("b", used("c"))
+		s.run("c")
+		check(t, s)
+	})
 }
 
 // What cannot be settled leaves the set's shares incomplete: its run did not

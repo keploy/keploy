@@ -31,9 +31,11 @@ import (
 //     made it (models.SetShares.Pins), and every case sharing cannot prove
 //     charges the tests it may be (a data-plane miss with the reason
 //     models.MissConcurrentAmbiguous or MissConcurrentConflict, or an
-//     unconsumed mock), each charged test FAILED. Every recording ends
-//     pinned, owned by a charged test, or shared (owned by none, as a call no
-//     kept test may have made).
+//     unconsumed mock), each charged test FAILED. Every recording a test
+//     lists ends pinned or owned by a charged test; one the mapping lists as
+//     shared (models.Mapping.Shared: attributed to a test the recording did
+//     not keep) ends pinned, or stays shared, owned by no test, as keploy
+//     record leaves the recordings of a test it did not keep.
 //   - keploy record's judging writes the settlement onto mappings.yaml before
 //     its confirming round, which, like every other replay, serves each
 //     recording to the test that lists it.
@@ -983,10 +985,10 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 
 	// Corroboration: a learned candidate pair pins only when every other
 	// learned candidate pair of its statement in its component drifted at
-	// the places it did at least, or a pair of the test's own of the
-	// statement drifted there.
-	// A pair of a test's own (definite) recording: its attribution is not
-	// in doubt. A worker-scope recording any test may answer with is none.
+	// the places it did at least, or a learned pair of any test's own
+	// recording of the statement, anywhere in the set, drifted there: the
+	// statement drifts there for a call whose attribution is not in doubt.
+	// A worker-scope recording any test may answer with is no test's own.
 	definite := map[string]bool{}
 	for _, names := range sp.definite {
 		for _, n := range names {
@@ -1033,10 +1035,14 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 	}
 
 	// Leftovers: a candidate no test consumed, outside an ambiguous class.
-	// With every test of its group kept, one of them did not make a call it
-	// recorded: each that ran is charged. With one the recording did not
-	// keep, that one may have made it: none is, and it is shared. The test
-	// whose miss the learn step found closest to it is named.
+	// One a kept test lists (whatever else its group holds) charges each
+	// test of its group that ran: one of them did not make a call it
+	// recorded, and the test that lists it was required to make it before
+	// it was shared. Only a shared one (Mapping.Shared: the test it was
+	// attributed to is one the recording did not keep, which may have made
+	// it) charges none, and stays shared, owned by no test, as keploy record
+	// leaves the recordings of a test it did not keep. The test whose miss
+	// the learn step found closest to it is named.
 	closestOf := map[string]string{}
 	for _, r := range results {
 		for _, c := range r.FailureInfo.UnmatchedCalls {
@@ -1049,10 +1055,10 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 		if _, consumed := consumer[n]; consumed || retried[n] || s.ambiguous[n] {
 			continue
 		}
-		g, _ := sp.conc.group(n)
-		if g.Unkept > 0 {
+		if sp.conc.entries[n].listedBy == "" {
 			continue
 		}
+		g, _ := sp.conc.group(n)
 		in := sp.info[n]
 		for _, t := range g.Tests {
 			if !s.ran[t] {
@@ -1068,12 +1074,12 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 			if c := closestOf[n]; c != "" && slices.Contains(g.Tests, c) {
 				closest = c
 			}
-			s.chargeUnconsumed(t, models.UnconsumedMock{Name: n, Kind: string(in.mock.Kind), Concurrent: strings.Join(with, ", "), Closest: closest})
+			s.chargeUnconsumed(t, models.UnconsumedMock{Name: n, Kind: string(in.mock.Kind), Concurrent: strings.Join(with, ", "), Closest: closest, Unkept: g.Unkept})
 		}
 	}
 
 	// Where each candidate goes. Pinned: its consumer. Every other case to a
-	// charged test, or to Mapping.Shared.
+	// charged test; an unconsumed shared one stays in Mapping.Shared.
 	for _, n := range cands {
 		t, consumed := consumer[n]
 		switch {
@@ -1098,11 +1104,7 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 			s.shares.Pins[n] = t
 			s.resolved[n] = true
 		default:
-			g, _ := sp.conc.group(n)
-			if g.Unkept > 0 {
-				if sp.conc.entries[n].listedBy != "" {
-					s.shares.ToShared = append(s.shares.ToShared, n)
-				}
+			if sp.conc.entries[n].listedBy == "" {
 				s.resolved[n] = true
 				continue
 			}
@@ -1124,7 +1126,6 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 		sp.settled = models.SetShares{State: models.SharesIncomplete, Why: "no test of " + n + "'s group that ran could be charged with it"}
 		return nil
 	}
-	sort.Strings(s.shares.ToShared)
 	sp.settled = s.shares
 	return s.apply(results)
 }
@@ -1259,7 +1260,7 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 						with = append(with, t)
 					}
 				}
-				u.Concurrent = strings.Join(with, ", ")
+				u.Concurrent, u.Unkept = strings.Join(with, ", "), g.Unkept
 			}
 		}
 		if sp.sharing || r.Status == models.TestStatusIgnored {
@@ -1408,7 +1409,7 @@ func (r *Replayer) logShares(testSetID string, charged []string) {
 			zap.String("testSetID", testSetID), zap.String("reason", s.Why))
 	case models.SharesComplete:
 		r.logger.Info("settled which test made each call recorded while several tests' requests were open",
-			zap.String("testSetID", testSetID), zap.Int("pinned", len(s.Pins)), zap.Int("moved", len(s.Moves)), zap.Int("shared", len(s.ToShared)))
+			zap.String("testSetID", testSetID), zap.Int("pinned", len(s.Pins)), zap.Int("moved", len(s.Moves)))
 	}
 	if len(charged) > 0 {
 		r.logger.Error("tests failed: keploy cannot tell which of the tests recorded together made some of their calls ("+provenswitch.Env+"=1); the report says why under unmatched_calls and unconsumed_mocks",

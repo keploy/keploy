@@ -44,36 +44,35 @@ func sharesMapping() *Mapping {
 
 // What keploy record's full round settled is written onto the mapping: a pin
 // moves its recording to the test that made the call, in recorded order,
-// without its group; a move keeps its group and marks it; a recording put in
-// shared leaves the test that listed it. A group no entry names any more is
-// dropped, and nothing else changes.
-func TestApplySharesPinsMovesAndShares(t *testing.T) {
+// without its group; a move keeps its group and marks it. A recording neither
+// names stays where it is listed, a test's or shared. A group no entry names
+// any more is dropped, and nothing else changes.
+func TestApplySharesPinsAndMoves(t *testing.T) {
 	m := sharesMapping()
-	changed := m.ApplyShares(SetShares{
-		State:    SharesComplete,
-		Pins:     map[string]string{"m1": "b", "m2": "a", "s1": "c"},
-		Moves:    map[string]ShareMove{"m3": {To: "c", Marker: MockEntryUnresolvedAmbiguous}},
-		ToShared: []string{"m4"},
-	})
-	if !changed {
+	m.Shared = append(m.Shared, shareEntry("s2", 1400, "g2"))
+	settled := SetShares{
+		State: SharesComplete,
+		Pins:  map[string]string{"m1": "b", "m2": "a", "s1": "c"},
+		Moves: map[string]ShareMove{"m3": {To: "c", Marker: MockEntryUnresolvedAmbiguous}, "m4": {To: "a"}},
+	}
+	if !m.ApplyShares(settled) {
 		t.Fatal("ApplyShares reported no change")
 	}
 	want := map[string][]string{
-		"a":       {"own-a//", "m2//"},
+		"a":       {"own-a//", "m2//", "m4/g2/"},
 		"b":       {"m1//", "own-b//"},
 		"c":       {"s1//", "m3/g1/ambiguous"},
-		"shared:": {"m4/g2"},
+		"shared:": {"s2/g2"},
 	}
 	if got := shareShape(m); !reflect.DeepEqual(got, want) {
 		t.Fatalf("after ApplyShares %v; want %v", got, want)
 	}
 	if ids := []string{m.Groups[0].ID, m.Groups[1].ID}; len(m.Groups) != 2 || !reflect.DeepEqual(ids, []string{"g1", "g2"}) {
-		t.Fatalf("groups %+v; want g1 and g2 kept (named by m3 and m4), g3 dropped", m.Groups)
+		t.Fatalf("groups %+v; want g1 and g2 kept (named by m3, m4 and s2), g3 dropped", m.Groups)
 	}
 	// Idempotent.
 	before := shareShape(m)
-	if m.ApplyShares(SetShares{State: SharesComplete, Pins: map[string]string{"m1": "b", "m2": "a", "s1": "c"},
-		Moves: map[string]ShareMove{"m3": {To: "c", Marker: MockEntryUnresolvedAmbiguous}}, ToShared: []string{"m4"}}) {
+	if m.ApplyShares(settled) {
 		t.Fatal("ApplyShares applied twice reported a change")
 	}
 	if got := shareShape(m); !reflect.DeepEqual(got, before) {
@@ -82,11 +81,15 @@ func TestApplySharesPinsMovesAndShares(t *testing.T) {
 }
 
 // A pin to a test the mapping lists no entry for adds its entry; a share that
-// names a recording the mapping does not list changes nothing.
+// names a recording the mapping does not list, or names no test, changes
+// nothing.
 func TestApplySharesAddsAnEntryAndLeavesWhatItDoesNotList(t *testing.T) {
 	m := sharesMapping()
 	if m.ApplyShares(SetShares{State: SharesComplete, Pins: map[string]string{"nowhere": "a"}}) {
 		t.Fatal("a pin of a recording the mapping does not list changed it")
+	}
+	if m.ApplyShares(SetShares{State: SharesComplete, Pins: map[string]string{"m1": ""}, Moves: map[string]ShareMove{"m2": {Marker: MockEntryUnresolvedAmbiguous}}}) {
+		t.Fatal("a pin and a move to no test changed the mapping")
 	}
 	if !m.ApplyShares(SetShares{State: SharesComplete, Pins: map[string]string{"m1": "new-test"}}) {
 		t.Fatal("no change")
