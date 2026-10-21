@@ -44,7 +44,10 @@ import (
 // the kernel dropped packets at the proxy's listener (dropped): its end
 // leaves it not verified. The run's read
 // of its misses settles the same way, so a call after the last test's end is
-// read, never filed after it.
+// read, never filed after it. A record never fails a test for what its
+// settle cannot tell: at a begin or an end it is the test's evidence
+// (models.CaptureLossUnsettled), which a strict replay of the test decides,
+// and its wait for the bytes goes on past a connection it cannot tell.
 //
 // The wait has a minimal watchdog (design v14 §8.4): it wakes once a second
 // and counts, for each thing the wait waits on, the wake-ups in a row at which
@@ -112,8 +115,10 @@ func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
 // settle waits until the test's calls are all in the proxy's hands, and, in a
 // replay (answers), answered. It returns the proxy listener's drops read once
 // settled (models.ProxyConnCounts.ListenDrops), which a test's end compares
-// with its begin's (settledDrops). An error says keploy cannot tell: the test
-// is not judged. holdsUnknown comes with the drops.
+// with its begin's (settledDrops). An error says keploy cannot tell: a
+// replay's test is not judged, and a record's is charged it as its evidence
+// (unsettledIsEvidence). holdsUnknown comes with the drops, and so does, in
+// a record, pairedBytesUnknown (dropsRead).
 func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
 	if !ok || a.Proxy == nil {
@@ -164,11 +169,24 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		return out
 	})
 	defer stop()
+	// A record that could not tell the bytes on a connection goes on to the
+	// requests in flight, and answers what it could not tell (bytesErr) once
+	// none is: a call the proxy holds is the test's, and the next test's
+	// window is not where it lands. A replay's answers at once, as the
+	// proxy's error.
+	var bytesErr error
 	if err := a.WaitProxySettled(ctx, counts); err != nil {
 		if cause := context.Cause(ctx); cause != nil {
 			return 0, cause
 		}
-		return 0, err
+		var bu pairedBytesUnknown
+		switch {
+		case !errors.As(err, &bu):
+			return 0, err
+		case !a.recording():
+			return 0, bu.err
+		}
+		bytesErr = bu
 	}
 	working.Store(true)
 	for {
@@ -185,10 +203,12 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			// Settled, but for a connection whose parser reads ahead and does
 			// not say which requests it holds, or says that for now it cannot
 			// tell: it may hold one.
+			// (A record's, which alone has bytesErr, reads no held
+			// requests: answers is a replay's.)
 			if len(unknown) > 0 {
 				return c.ListenDrops, holdsUnknown(unknown)
 			}
-			return c.ListenDrops, nil
+			return c.ListenDrops, bytesErr
 		}
 		select {
 		case <-changed:
@@ -282,11 +302,27 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 	}
 }
 
+// dropsRead reports whether a settle that answered err read the proxy
+// listener's drops (settle): it settled, or found only what it could not
+// tell once every connection was in the proxy's hands.
+func dropsRead(err error) bool {
+	var bu pairedBytesUnknown
+	return err == nil || errors.Is(err, errHoldsUnknown) || errors.As(err, &bu)
+}
+
 // markDrops notes the proxy listener's drops read as a window began (a
 // test's begin, or the settling that ended the window before).
 func (a *Agent) markDrops(drops uint64) {
 	a.provenMu.Lock()
 	a.proven.drops, a.proven.dropsKnown = drops, true
+	a.provenMu.Unlock()
+}
+
+// forgetDrops says the drops a window began with are not known (a record's
+// begin whose settle could not tell): its end compares nothing with them.
+func (a *Agent) forgetDrops() {
+	a.provenMu.Lock()
+	a.proven.dropsKnown = false
 	a.provenMu.Unlock()
 }
 

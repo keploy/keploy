@@ -41,7 +41,7 @@ func TestAResetAfterTheBytesArrivedIsNoLoss(t *testing.T) {
 	if _, err := reader.Read(buf); !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("the proxy's read after the reset: %v, want ECONNRESET", err)
 	}
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes: %v, want settled", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -78,7 +78,7 @@ func TestAResetThenACloseWithBytesUnreadSettlesOnTheLoss(t *testing.T) {
 		runtime.Gosched()
 	}
 	_ = reader.Close() // bytes unread: a loss, charged at the close
-	if err := p.waitPairTargets(context.Background(), targets); err != nil {
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 		t.Fatalf("waitPairTargets: %v, want settled on the loss its close charged", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
@@ -160,7 +160,7 @@ func TestAResetAfterTheTargetWasReadIsNoLoss(t *testing.T) {
 	if _, err := reader.Read(buf); !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("the proxy's read after the reset: %v, want ECONNRESET", err)
 	}
-	if err := p.waitPairTargets(context.Background(), targets); err != nil {
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 		t.Fatalf("waitPairTargets: %v", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -187,7 +187,7 @@ func TestTheProxysResetAfterTheBytesArrivedIsNoLoss(t *testing.T) {
 	_ = proxySide.SetLinger(0)
 	_ = reader.Close()
 	p.paired.remove(proxySide)
-	if err := p.waitPairTargets(context.Background(), targets); err != nil {
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 		t.Fatalf("waitPairTargets: %v", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -284,7 +284,7 @@ func TestTheWaitIsParkedUntilTheLastByteArrives(t *testing.T) {
 				t.Fatalf("the proxy's side received %d of %d at once: the fixture holds nothing back", got, want)
 			}
 			done := make(chan error, 1)
-			go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+			go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
 			// Parked: it took the registry's change channel (only it takes
 			// one here) before the first read below.
 			for {
@@ -334,7 +334,7 @@ func TestTheApplicationsResetWithItsCallUnsentIsUnknown(t *testing.T) {
 		t.Fatalf("pairTargets = %+v, %v; want one connection with bytes not sent yet", targets, err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+	go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
 	// Everything it sent acknowledged first, so its reset cannot overtake
 	// a byte on its way: what is missing was never sent.
 	awaitAcked(t, app)

@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -92,45 +94,86 @@ type pairTarget struct {
 // (pairAfterClose). Once one has been seen, an application socket that is
 // gone is one whose FIN or reset is on its way: the wait waits for it (it
 // ends the handler's read, or the kept socket's).
-func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64) error {
-	pending, err := p.pairTargets(n)
+//
+// mode is the agent's. A replay's wait ends at the first connection it
+// cannot tell, or read as it begins. A record's (models.MODE_RECORD) goes on
+// waiting for every other connection, and once each is reached answers all
+// it could not tell, sorted (readPairTargets, waitPairTargets).
+func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64, mode models.Mode) error {
+	record := mode == models.MODE_RECORD
+	pending, unknown, err := p.readPairTargets(n, record)
 	if err != nil {
 		return err
 	}
-	return p.waitPairTargets(ctx, pending)
+	if err := p.waitPairTargets(ctx, pending, record); err != nil {
+		if !record || ctx.Err() != nil {
+			return err
+		}
+		unknown = append(unknown, err)
+	}
+	return errors.Join(unknown...)
 }
 
 // pairTargets reads, for every paired connection the proxy holds whose
 // application connection is numbered 1..n, how much the application had
-// written to it: what waitPairTargets waits for.
+// written to it: what waitPairTargets waits for. It ends at the first
+// connection it cannot read (readPairTargets, a replay's).
 func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
+	pending, _, err := p.readPairTargets(n, false)
+	return pending, err
+}
+
+// readPairTargets is pairTargets. A replay's read ends at the first
+// connection it cannot read (err). A record's (record) goes on to the others,
+// and answers what it could not read of each (unknown, sorted): a
+// connection whose application socket a lookup could not read is one the
+// record could not tell, and its others are still waited for. What leaves
+// no connection readable (the listener's failure, sock_diag that cannot be
+// opened) is err in both.
+func (p *Proxy) readPairTargets(n uint64, record bool) (pending []*pairTarget, unknown []error, err error) {
 	pcs, err := p.paired.upTo(n)
 	if err != nil || len(pcs) == 0 {
-		return nil, err
+		return nil, nil, err
 	}
 	ds, err := openDiag()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err)
+		return nil, nil, fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err)
 	}
 	defer ds.close()
-	var pending []*pairTarget
 	for _, pc := range pcs {
 		t, err := p.pairTarget(ds, pc)
-		if err != nil {
-			return nil, err
-		}
-		if t != nil {
+		switch {
+		case err != nil && record:
+			unknown = append(unknown, err)
+		case err != nil:
+			return nil, nil, err
+		case t != nil:
 			pending = append(pending, t)
 		}
 	}
-	return pending, nil
+	return pending, sortedErrs(unknown), nil
 }
 
-// waitPairTargets waits until each of pending is reached (pairReached).
-func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) error {
+// sortedErrs is errs ordered by their text: the connections they come from
+// are read in no set order, and what keploy says of them is the same each
+// time.
+func sortedErrs(errs []error) []error {
+	slices.SortStableFunc(errs, func(a, b error) int { return strings.Compare(a.Error(), b.Error()) })
+	return errs
+}
+
+// waitPairTargets waits until each of pending is reached (pairReached). A
+// replay's wait ends at the first connection it cannot tell. A record's
+// (record) goes on waiting for the others, and answers what it could not tell
+// of each once every other one is reached: each call that reaches the proxy
+// before the test's end is one the end then sees, not one that lands in the
+// next test, and the record keeps what it could not tell as the test's
+// evidence, which the pass that judges each test decides.
+func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget, record bool) error {
 	if len(pending) == 0 {
 		return nil
 	}
+	var unknown []error
 	for {
 		// Taken before looking, so a read or close after the look still
 		// wakes.
@@ -142,18 +185,23 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) erro
 		next := pending[:0]
 		for _, t := range pending {
 			reached, err := p.pairReached(t)
-			if err != nil {
-				return err
-			}
-			if reached {
+			switch {
+			case err != nil && record:
+				// Resolved, as far as the wait goes: it waits for it no
+				// more.
+				unknown = append(unknown, err)
 				p.paired.progress.Add(1)
-			} else {
+			case err != nil:
+				return err
+			case reached:
+				p.paired.progress.Add(1)
+			default:
 				next = append(next, t)
 			}
 		}
 		pending = next
 		if len(pending) == 0 {
-			return nil
+			return errors.Join(sortedErrs(unknown)...)
 		}
 		select {
 		case <-reads:

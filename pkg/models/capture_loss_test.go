@@ -395,3 +395,39 @@ func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
 		}
 	}
 }
+
+// A settle a record could not tell at a test's begin or end is that test's own
+// judged loss, counted from the previous test (PerTest), which the replay
+// that judges the test decides (ReplayDecides); the text says it.
+func TestARecordsUnsettledCallsAreItsTestsOwnForTheReplayToDecide(t *testing.T) {
+	k := CaptureLossUnsettled
+	if k.NotJudged() || !k.PerTest() || k.runScoped() || !k.ReplayDecides() {
+		t.Fatal("calls_unsettled: a judged loss of the test's own, which a replay decides")
+	}
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n}} }
+	if got := at(5).Charged(at(1), nil, at(4)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the 1 since the previous test", got)
+	}
+	if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
+		t.Fatalf("Split = %v, %v: judged", judged, notJudged)
+	}
+	if txt := at(2).Text(); !strings.Contains(txt, "keploy could not tell 2 time(s) that every call of this test, or every call made before it began, had reached its proxy") {
+		t.Fatalf("text %q", txt)
+	}
+}
+
+// A strict replay decides a record's loss of each judged kind and each
+// evidence-only one (the kernel's skipped runs), and none of a kind that
+// leaves its tests without a verdict.
+func TestAReplayDecidesEveryJudgedLossOfARecord(t *testing.T) {
+	for _, k := range []CaptureLossKind{CaptureLossPIDMap, CaptureLossTLSAbort, CaptureLossAppBytesLost, CaptureLossUnread, CaptureLossUnrecorded, CaptureLossUnsettled, CaptureLossRealUncaptured, CaptureLossKernelSkip, CaptureLossKernelSkipCall} {
+		if !k.ReplayDecides() {
+			t.Errorf("%s: a replay decides it", k)
+		}
+	}
+	for _, k := range []CaptureLossKind{CaptureLossUnixSocket, CaptureLossUnixUnseen, CaptureLossTLSAbandoned, CaptureLossServerFirst, CaptureLossRefusedAtAccept, CaptureLossContainerUnread, CaptureLossUnclassified} {
+		if k.ReplayDecides() {
+			t.Errorf("%s: not judged, no replay decides it", k)
+		}
+	}
+}

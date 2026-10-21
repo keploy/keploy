@@ -112,7 +112,14 @@ func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCou
 	if !ok {
 		return fmt.Errorf("%w: this agent's proxy cannot wait for the bytes on its connections", models.ErrProxyConnsUnsupported)
 	}
-	return pb.WaitPairedBytes(ctx, counts.AppConns)
+	mode := models.MODE_OFF
+	if a.config != nil {
+		mode = a.config.Agent.Mode
+	}
+	if err := pb.WaitPairedBytes(ctx, counts.AppConns, mode); err != nil {
+		return pairedBytesUnknown{err}
+	}
+	return nil
 }
 
 // WaitProxyAccepted returns once the proxy has accepted every connection the
@@ -271,3 +278,13 @@ func (a *Agent) settlesReads() bool {
 // Compile-time proof that the agent offers begin and end the count: S12's
 // waits type-assert for it.
 var _ coreAgent.ProxyConnCounter = (*Agent)(nil)
+
+// pairedBytesUnknown is WaitProxySettled's answer when every connection was in
+// the proxy's hands and its wait for the bytes on them could not tell
+// (agent.PairedBytesWaiter): the bytes on one or more of them, or any (the
+// listener's failure, sock_diag that cannot be opened). A record's settle
+// goes on to the requests in flight (settle_proven.go).
+type pairedBytesUnknown struct{ err error }
+
+func (e pairedBytesUnknown) Error() string { return e.err.Error() }
+func (e pairedBytesUnknown) Unwrap() error { return e.err }

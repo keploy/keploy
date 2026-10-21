@@ -82,9 +82,11 @@ type acceptingProxy struct {
 	drops    uint64
 	parked   chan uint64
 	onRead   func()
-	// bytesWaited hears each WaitPairedBytes, bytesErr is its answer.
+	// bytesWaited hears each WaitPairedBytes, bytesErr is its answer;
+	// bytesMode is the mode the last one was given.
 	bytesWaited chan uint64
 	bytesErr    error
+	bytesMode   models.Mode
 }
 
 func (p *acceptingProxy) Accepted() (uint64, error) {
@@ -111,7 +113,8 @@ func (p *acceptingProxy) WaitAccepted(ctx context.Context, n uint64) error {
 
 // WaitPairedBytes answers bytesErr, and hears each wait's number on
 // bytesWaited when that is set.
-func (p *acceptingProxy) WaitPairedBytes(_ context.Context, n uint64) error {
+func (p *acceptingProxy) WaitPairedBytes(_ context.Context, n uint64, mode models.Mode) error {
+	p.bytesMode = mode
 	if p.bytesWaited != nil {
 		p.bytesWaited <- n
 	}
@@ -376,9 +379,25 @@ func TestWaitProxySettledLastWaitsForTheBytesOnThePairedConnections(t *testing.T
 	if err := a.WaitProxySettled(context.Background(), c); !errors.Is(err, lost) {
 		t.Fatalf("WaitProxySettled with the bytes unknown: %v, want the proxy's error", err)
 	}
-	// A proxy that cannot wait for them: unknown.
+	// Said as the bytes unknown (a record's settle goes on past it), and
+	// asked in the agent's mode: none without a config, a record's with one.
+	var bu pairedBytesUnknown
+	if err := a.WaitProxySettled(context.Background(), c); !errors.As(err, &bu) || err.Error() != lost.Error() {
+		t.Fatalf("WaitProxySettled with the bytes unknown: %v, want it as the bytes unknown", err)
+	}
+	if proxy.bytesMode != models.MODE_OFF {
+		t.Fatalf("asked in mode %q without a config, want %q", proxy.bytesMode, models.MODE_OFF)
+	}
+	a.config = &config.Config{}
+	a.config.Agent.Mode = models.MODE_RECORD
+	_ = a.WaitProxySettled(context.Background(), c)
+	if proxy.bytesMode != models.MODE_RECORD {
+		t.Fatalf("asked in mode %q, want the agent's %q", proxy.bytesMode, models.MODE_RECORD)
+	}
+	// A proxy that cannot wait for them: unknown, and no bytes it could not
+	// tell.
 	a.Proxy = &acceptingProxyNoBytes{p: proxy}
-	if err := a.WaitProxySettled(context.Background(), c); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+	if err := a.WaitProxySettled(context.Background(), c); !errors.Is(err, models.ErrProxyConnsUnsupported) || errors.As(err, &bu) {
 		t.Fatalf("WaitProxySettled with a proxy that cannot wait for the bytes: %v, want unknown", err)
 	}
 }
