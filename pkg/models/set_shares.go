@@ -27,10 +27,6 @@ type SetShares struct {
 	// (ShareMove.Marker), so that no test the round did not charge is left
 	// with a call it did not make.
 	Moves map[string]ShareMove `json:"moves,omitempty" yaml:"moves,omitempty"`
-	// ToShared are the shared recordings no test made the call of while a
-	// test the recording did not keep was open beside them: one of those may
-	// have made it. They move to Mapping.Shared, owned by no test.
-	ToShared []string `json:"toShared,omitempty" yaml:"toShared,omitempty"`
 }
 
 // SharesState is SetShares.State.
@@ -40,12 +36,17 @@ const (
 	// SharesNone: no test of the set was served a recording it shares
 	// with another: its mappings.yaml stays as recorded.
 	SharesNone SharesState = ""
-	// SharesIncomplete: the set's run did not complete, its agent changed,
-	// or what a test that was served shared recordings consumed could not
-	// be read. Its round's verdicts were computed with sharing, so the set
-	// is not judged, and its mappings.yaml stays as recorded.
+	// SharesIncomplete: the set's run did not complete; it ended with no
+	// verdict, neither PASSED nor FAILED (its agent started again mid-set
+	// among the causes: the set then ends INTERNAL_ERR, the claims of the
+	// agent before gone with it); what a test that was served shared
+	// recordings consumed could not be read; or a shared recording could
+	// not be given to a test that made it or that the round charged. Its
+	// round's verdicts were computed with sharing, so the set is not judged,
+	// and its mappings.yaml stays as recorded.
 	SharesIncomplete SharesState = "incomplete"
-	// SharesComplete: every shared recording is pinned, moved, or shared.
+	// SharesComplete: every shared recording a test lists is pinned or
+	// moved; one Mapping.Shared lists is pinned, or stays shared.
 	SharesComplete SharesState = "complete"
 )
 
@@ -59,31 +60,28 @@ type ShareMove struct {
 
 // Any reports whether s says anything to write.
 func (s SetShares) Any() bool {
-	return len(s.Pins) > 0 || len(s.Moves) > 0 || len(s.ToShared) > 0
+	return len(s.Pins) > 0 || len(s.Moves) > 0
 }
 
 // ApplyShares writes what keploy record's full round settled (s) onto m: each
 // pinned recording leaves whatever lists it (a test's entry, or Shared) and
 // joins its test's entry without its group; each moved one joins its test's
-// entry with its group and marker; each recording s puts in Shared leaves the
-// test that lists it. Every list keeps recorded order, and the groups no entry
-// names any more are dropped. A recording m does not list is left alone. It
-// is idempotent: applied twice, it changes nothing the second time. It
-// reports whether it changed m.
+// entry with its group and marker. Every list keeps recorded order, and the
+// groups no entry names any more are dropped. A recording m does not list is
+// left alone. It is idempotent: applied twice, it changes nothing the second
+// time. It reports whether it changed m.
 func (m *Mapping) ApplyShares(s SetShares) bool {
 	if m == nil || !s.Any() {
 		return false
 	}
 	before := m.sharesShape()
+	// A pin or a move that names no test leaves its recording where it is.
 	named := map[string]bool{}
-	for n := range s.Pins {
-		named[n] = true
+	for n, test := range s.Pins {
+		named[n] = test != ""
 	}
-	for n := range s.Moves {
-		named[n] = true
-	}
-	for _, n := range s.ToShared {
-		named[n] = true
+	for n, mv := range s.Moves {
+		named[n] = named[n] || mv.To != ""
 	}
 	// Take every named entry out of where it is listed, the first listing
 	// kept as its entry.
@@ -124,12 +122,9 @@ func (m *Mapping) ApplyShares(s SetShares) bool {
 		case s.Pins[name] != "":
 			e.Group, e.Unresolved = "", ""
 			add(s.Pins[name], e)
-		case s.Moves[name].To != "":
+		default:
 			e.Unresolved = s.Moves[name].Marker
 			add(s.Moves[name].To, e)
-		default:
-			e.Unresolved = ""
-			m.Shared = insertRecorded(m.Shared, e)
 		}
 	}
 	m.dropUnusedGroups()

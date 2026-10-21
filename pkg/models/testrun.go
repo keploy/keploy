@@ -378,9 +378,12 @@ type UnconsumedMock struct {
 	// comparable): when keploy record's full round shared it between them
 	// and none of them made its call, it is charged to each of them that
 	// ran. Closest names the one whose call came closest to it (a drifted
-	// version of it), when the learn step saw one.
+	// version of it), when the learn step saw one. Unkept counts the tests
+	// whose requests were open beside them that the recording did not keep
+	// (models.ConcurrencyGroup.Unkept): one of those may have made it.
 	Concurrent string `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
 	Closest    string `json:"closest,omitempty" yaml:"closest,omitempty"`
+	Unkept     int    `json:"unkept,omitempty" yaml:"unkept,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
