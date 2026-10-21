@@ -49,8 +49,6 @@ type Undefined struct {
 	// A set templatized by an older keploy wrote such a use where the value
 	// is issued.
 	Fix string
-	// Recorded is the key's value as recorded, for the edit that writes it.
-	Recorded string
 }
 
 // UncapturedNextStep is the next step for a key a request sends that no
@@ -60,8 +58,17 @@ func (u Undefined) UncapturedNextStep() string {
 	if u.Fix != "" {
 		return u.Fix
 	}
-	return fmt.Sprintf("if an earlier response issues this value, mark that place {{capture string .%s}} (or int/float); if it is a constant or what the request sent, write its recorded value %q in place of every placeholder of %s",
-		u.Key, u.Recorded, u.Key)
+	return fmt.Sprintf("if an earlier response issues this value, mark that place {{capture string .%s}} (or int/float); if it is a constant or what the request sent, write %s in place of every placeholder of %s",
+		u.Key, recordedOf(u.Key), u.Key)
+}
+
+// recordedOf names key's recorded value in a next step by where its user
+// finds it, never by the value: a next step is a log line's (keploy test's
+// WARN lines say it), and a recorded value is one the application sent,
+// which a line carries only as KEPLOY_LOG_CONTENT allows (utils/logcontent).
+// A refusal's why, which the report keeps and a line logs gated, quotes it.
+func recordedOf(key string) string {
+	return key + "'s recorded value in config.yaml's template"
 }
 
 // Place is one variable place of an expected response: a capture, or a use
@@ -109,7 +116,9 @@ type Place struct {
 	// offered there (the only place of its response, or the failing place
 	// itself) says what it gives up.
 	PassedOver bool
-	// Recorded is a Producer place's value as recorded, for its edits.
+	// Recorded is a Producer place's value as recorded: the type a capture
+	// edit there takes for a use that names none (captureForValue). An edit
+	// names the value by its key (recordedOf), never by itself.
 	Recorded string
 }
 
@@ -205,9 +214,10 @@ const (
 )
 
 // noCaptureURLDelimiter is why a capture cannot stand at a part of a
-// URL-valued header whose recorded value holds a delimiter of that part.
-func noCaptureURLDelimiter(recorded string) string {
-	return fmt.Sprintf("the URL is read by its parts, and %q holds a delimiter of its part", recorded)
+// URL-valued header whose recorded value, key's, holds a delimiter of that
+// part: said in a next step, it names the value by its key (recordedOf).
+func noCaptureURLDelimiter(key string) string {
+	return "the URL is read by its parts, and " + recordedOf(key) + " holds a delimiter of its part"
 }
 
 func noCaptureOwnUse(key string) string {
@@ -531,15 +541,14 @@ func (c *checker) sendOnly(where, text string, why func(Placeholder) string) {
 		if !c.captured[p.Key] && !c.uncaptured[p.Key] {
 			c.uncaptured[p.Key] = true
 			u := Undefined{Key: p.Key, TestCase: c.tc.Name, Where: where, Placeholder: p.Text}
-			u.Recorded, _ = c.run.recordedValue(p)
 			if pu, ok := c.firstUse[p.Key]; ok {
 				recorded, _ := c.run.recordedValue(pu.p)
 				u.Fix = producerAdvice(pu.testCase, pu.where, pu.p, recorded, pu.bare, pu.noCaptureWhy, pu.shared, pu.passedOver)
 			} else if rc, ok := c.refusedCapture[p.Key]; ok {
 				// The one capture of the key is refused: its own edit is
 				// that refusal's, and the key is not captured there.
-				u.Fix = fmt.Sprintf("the capture %s at %s/%s is refused when the set loads (its refusal names the edit), so nothing captures %s: write its recorded value %q in place of every placeholder of %s, or capture the value where a capture can stand",
-					rc.p.Text, rc.testCase, rc.where, p.Key, u.Recorded, p.Key)
+				u.Fix = fmt.Sprintf("the capture %s at %s/%s is refused when the set loads (its refusal names the edit), so nothing captures %s: write %s in place of every placeholder of %s, or capture the value where a capture can stand",
+					rc.p.Text, rc.testCase, rc.where, p.Key, recordedOf(p.Key), p.Key)
 			}
 			c.res.Uncaptured = append(c.res.Uncaptured, u)
 		}
@@ -701,8 +710,7 @@ func (c *checker) response(tc *models.TestCase) {
 // one can stand: the response refuses it as it would the capture written.
 func (c *checker) headerNoCapture(name, v string, p Placeholder, ps []Placeholder, n int, captures map[string]bool) string {
 	if c.urlDelimiter(name, v, p) != "" {
-		recorded, _ := c.run.recordedValue(p)
-		return noCaptureURLDelimiter(recorded)
+		return noCaptureURLDelimiter(p.Key)
 	}
 	if n > 0 {
 		return noCaptureHeaderHeld
@@ -1264,7 +1272,9 @@ func RefusedNames(refused map[string][]Refusal) []string {
 // issued, which nothing captures (a set templatized by an older keploy wrote
 // one there): one edit for each thing the value can be. A value the app
 // issues anew each run is captured there; a constant, or what the request
-// sent, is written as recorded in place of every placeholder of its key.
+// sent, is written as recorded in place of every placeholder of its key,
+// which the edit names by its key (recordedOf); recorded, the use's value as
+// recorded, gives a use that names no type the capture's (captureForValue).
 // Where a capture cannot stand (noCaptureWhy says why: a part of a
 // URL-valued header whose recorded value holds a delimiter of that part,
 // such as a whole Location "/jobs/j_1", inside an array under
@@ -1276,7 +1286,7 @@ func RefusedNames(refused map[string][]Refusal) []string {
 // (Place.PassedOver), the producer only when no other place of its response
 // could be: the capture edit then says what a capture there gives up.
 func producerAdvice(testCase, where string, p Placeholder, recorded string, bare bool, noCaptureWhy string, shared, passedOver bool) string {
-	literal := fmt.Sprintf("write its recorded value %q in place of every placeholder of %s", recorded, p.Key)
+	literal := fmt.Sprintf("write %s in place of every placeholder of %s", recordedOf(p.Key), p.Key)
 	if noCaptureWhy != "" {
 		return fmt.Sprintf("a capture cannot stand at %s/%s (%s): %s; if a response also gives the value whole (a JSON value), capture it there",
 			testCase, where, noCaptureWhy, literal)
@@ -1447,8 +1457,8 @@ func (c CheckResult) NextStep(testCase string, f Failure, canCapture bool) strin
 		// from then on. A value of its own takes a key of its own.
 		fresh := at.Placeholder
 		fresh.Key = c.newKey(p.Key)
-		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another: if this place issues a value of its own each run, capture it under a key of its own: change %s at %s to %s%s%s, give %s its recorded value %q in config.yaml's template, and write %s where later requests send this place's value; if this place replaces %s from then on (a refreshed session cookie), change %s there to %s instead, which points every later use of %s at this answer; %s",
-			p.Key, captured.TestCase, captured.Where, p.Text, here, captureForValue(fresh, at.Bare, at.Recorded), oneCapture(at.Shared), targetCapture(at.PassedOver), fresh.Key, at.Recorded, useFor(fresh),
+		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another: if this place issues a value of its own each run, capture it under a key of its own: change %s at %s to %s%s%s, give %s %s, and write %s where later requests send this place's value; if this place replaces %s from then on (a refreshed session cookie), change %s there to %s instead, which points every later use of %s at this answer; %s",
+			p.Key, captured.TestCase, captured.Where, p.Text, here, captureForValue(fresh, at.Bare, at.Recorded), oneCapture(at.Shared), targetCapture(at.PassedOver), fresh.Key, recordedOf(at.Placeholder.Key), useFor(fresh),
 			p.Key, p.Text, captureForValue(at.Placeholder, at.Bare, at.Recorded), p.Key, changed)
 	case captured != nil && at != nil && at.NoCaptureWhy != "":
 		return fmt.Sprintf("this run's value of %s is what %s/%s captured, and the answer here holds another (a capture cannot stand at %s: %s): %s",

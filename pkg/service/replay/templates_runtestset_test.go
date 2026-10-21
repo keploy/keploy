@@ -2466,7 +2466,8 @@ func TestRunTestSet_AnOlderSetsProducerIsNamedWithItsEdit(t *testing.T) {
 		next = fmt.Sprint(warned[0].ContextMap()["next_step"])
 	}
 	if !strings.Contains(next, "if the app issues this value anew each run: change {{string .id}} at test-1/response body.id to {{capture string .id}}") ||
-		!strings.Contains(next, `if it is a constant or what the request sent: write its recorded value "usr_1" in place of every placeholder of id`) {
+		!strings.Contains(next, `if it is a constant or what the request sent: write id's recorded value in config.yaml's template in place of every placeholder of id`) ||
+		strings.Contains(next, "usr_1") {
 		t.Errorf("the uncaptured key was named %d times: %+v; want once, with both edits at test-1's body.id", len(warned), warned)
 	}
 }
@@ -2766,7 +2767,8 @@ func TestRunTestSet_EveryTemplateFailureIsSavedWithItsNextStep(t *testing.T) {
 			// of its own, and the capture edit is offered (P7), under a key
 			// of its own, and the same key's capture only for a place that
 			// replaces the value from then on.
-			if !strings.Contains(next, `change {{string .id}} at test-3/response body.newest to {{capture string .id2}}, give id2 its recorded value "usr_REC0001"`) ||
+			if !strings.Contains(next, `change {{string .id}} at test-3/response body.newest to {{capture string .id2}}, give id2 id's recorded value in config.yaml's template`) ||
+				strings.Contains(next, "usr_REC0001") ||
 				!strings.Contains(next, "change {{string .id}} there to {{capture string .id}} instead, which points every later use of id at this answer") {
 				t.Errorf("test-3's next step %q does not offer both capture edits", next)
 			}
