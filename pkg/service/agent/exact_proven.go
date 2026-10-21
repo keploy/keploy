@@ -315,6 +315,9 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err
 		}
+		if len(ex.Concurrent) > 0 {
+			return a.serveTestConcurrently(es, ex, owned, open)
+		}
 		if open != nil {
 			return a.openExactTest(es, ex.Test, owned, open.given)
 		}
@@ -331,6 +334,39 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		}
 		return unknown
 	}
+}
+
+// serveTestConcurrently opens ex.Test with owned and the recordings it shares
+// with the tests that ran beside it at record time (ex.Concurrent, keploy
+// record's full round), when the proxy serves them
+// (coreAgent.ExactConcurrentServer), and with open begins its variables in
+// the same step (OpenExactTestConcurrent), as openExactTest does. The CLI
+// sends them only to an agent that said it does (ServesExactConcurrent); a
+// proxy that does not is refused, so a test is never served less than its
+// plan says without a word.
+func (a *Agent) serveTestConcurrently(es coreAgent.ExactServer, ex *models.ExactServing, owned []*models.Mock, open *opening) error {
+	cs, ok := es.(coreAgent.ExactConcurrentServer)
+	if !ok {
+		return fmt.Errorf("this keploy agent's proxy cannot serve %s the recordings it shares with the tests that ran beside it", ex.Test)
+	}
+	mocks, err := a.mocksByName(ex.Concurrent)
+	if err != nil {
+		return fmt.Errorf("serve %s the recordings it shares: %w", ex.Test, err)
+	}
+	cands := testMocks(ex.Concurrent, mocks)
+	if open != nil {
+		return cs.OpenExactTestConcurrent(ex.Test, owned, cands, ex.Inputs, ex.NotLearnable, open.given)
+	}
+	return cs.ServeExactTestConcurrent(ex.Test, owned, cands, ex.Inputs, ex.NotLearnable)
+}
+
+// ServesExactConcurrent reports whether this agent serves a test the
+// recordings it shares with the tests that ran beside it at record time
+// (coreAgent.ExactConcurrentServer): what /storemocks says under the proven
+// switch (models.ExactConcurrentHeader).
+func (a *Agent) ServesExactConcurrent() bool {
+	_, ok := a.Proxy.(coreAgent.ExactConcurrentServer)
+	return ok && a.Proxy != nil
 }
 
 // servePoolAhead serves the set's pool between test cases and, beside it, the

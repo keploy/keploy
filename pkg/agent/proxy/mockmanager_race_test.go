@@ -161,6 +161,7 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 			Consume:         models.ConsumeCursorSaturate,
 			ServedIn:        3,
 			StagedSet:       5,
+			Concurrent:      true,
 		},
 	}
 	v := reflect.ValueOf(src.TestModeInfo)

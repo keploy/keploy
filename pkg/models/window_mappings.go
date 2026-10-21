@@ -3,6 +3,8 @@ package models
 import (
 	"container/heap"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -76,7 +78,14 @@ func (m WindowedMock) placed() time.Time {
 
 // entry is the mock as a mapping lists it.
 func (m WindowedMock) entry() MockEntry {
+	return m.entryIn("")
+}
+
+// entryIn is the mock as a mapping lists it, in concurrency group group ("" for
+// none: recorded while one window was open).
+func (m WindowedMock) entryIn(group string) MockEntry {
 	return MockEntry{
+		Group:            group,
 		Name:             m.Name,
 		Kind:             string(m.Kind),
 		Timestamp:        m.At.Unix(),
@@ -105,6 +114,13 @@ type WindowMappings struct {
 	// together with another test's while a test mock was recorded: which of
 	// them owns that mock was decided by time alone.
 	Concurrent []string
+	// Groups are the concurrency groups the entries of Tests name
+	// (MockEntry.Group), in order of first use: each the windows that
+	// contained a test mock's place when more than one did, in window order,
+	// every window's test named (Unkept is the writer's to count). The
+	// window that opened first lists the mock; any of them may have made
+	// it.
+	Groups []ConcurrencyGroup
 	// Worker is the set's worker scope (Mapping.Worker): the test mocks
 	// recorded while no window was open, and the idle answers wherever they
 	// were recorded, which no test owns, in recorded order, each placed where
@@ -125,9 +141,12 @@ type WindowMappings struct {
 // while two windows were
 // open goes to the one that opened first: the earliest-started window that
 // contains it, the window models.WindowSchedule releases it at, and the one
-// the sync-mode mock manager gives it when it has nothing else to go by. A
-// --sync recording's mock manager attributes by request time only, so it gives
-// an in-flight call to no test.
+// the sync-mode mock manager gives it when it has nothing else to go by. Time
+// alone cannot tell which of them made it, so its entry names the windows that
+// contained it, its concurrency group (MockEntry.Group, WindowMappings.Groups),
+// from the recorded request and answer times alone: keploy record's full round
+// gives it to the test that makes its call. A --sync recording's mock manager
+// attributes by request time only, so it gives an in-flight call to no test.
 //
 // A test mock recorded while no window was open that the in-flight rule gives
 // to no test is the set's worker scope (WindowMappings.Worker, the founder's
@@ -169,6 +188,8 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 		out.Tests[i] = MappedTestCase{ID: w.TestCase, Mocks: []MockEntry{}}
 	}
 	concurrent := make([]bool, len(ws))
+	// groupOf names each concurrency group by its windows (groupKey).
+	groupOf := map[string]string{}
 
 	// A sweep over the mocks in time order. open holds the windows that have
 	// started, in start order: its head, once the windows that ended before
@@ -213,12 +234,27 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			continue
 		}
 		owner := open[0]
-		out.Tests[owner].Mocks = append(out.Tests[owner].Mocks, m.entry())
+		group := ""
 		if ending.Len() > 1 {
-			for _, i := range ending.idx {
+			// ending holds exactly the windows that contain the mock's
+			// place: its concurrency group, named by them in window order.
+			members := append([]int(nil), ending.idx...)
+			sort.Ints(members)
+			key := groupKey(members)
+			if group = groupOf[key]; group == "" {
+				group = "g" + strconv.Itoa(len(out.Groups)+1)
+				groupOf[key] = group
+				g := ConcurrencyGroup{ID: group, Tests: make([]string, 0, len(members))}
+				for _, i := range members {
+					g.Tests = append(g.Tests, ws[i].TestCase)
+				}
+				out.Groups = append(out.Groups, g)
+			}
+			for _, i := range members {
 				concurrent[i] = true
 			}
 		}
+		out.Tests[owner].Mocks = append(out.Tests[owner].Mocks, m.entryIn(group))
 	}
 	for i, c := range concurrent {
 		if c {
@@ -226,6 +262,18 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 		}
 	}
 	return out
+}
+
+// groupKey is a concurrency group's windows, sorted, as one key.
+func groupKey(members []int) string {
+	var b strings.Builder
+	for i, w := range members {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.Itoa(w))
+	}
+	return b.String()
 }
 
 // windowEnds is a min-heap of window indexes by the window's End.

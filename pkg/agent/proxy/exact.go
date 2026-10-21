@@ -95,6 +95,19 @@ type exactView struct {
 	worker map[string]struct{}
 	// poolKey is the key of that slice: its stateful cursors are its own.
 	poolKey string
+	// cand marks, by position in owned, the recordings the open test shares
+	// with the tests whose requests were open beside its own at record time
+	// (ServeExactTestConcurrent): filed after every one of its own, each
+	// answers at most once in the staging, for whichever of those tests
+	// makes its call first (claims), and none is required of the test. nil
+	// for a view with none.
+	cand []bool
+	// inputs and notLearnable are what the learn step reads of the open
+	// test (models.ExactServing.Inputs, NotLearnable).
+	inputs       []string
+	notLearnable map[string]bool
+	// claims is the manager's claims on the shared recordings.
+	claims *exactClaims
 
 	mu sync.Mutex
 	// closed: another view replaced this one; nothing consumes in it after
@@ -146,6 +159,76 @@ type exactState struct {
 	recorded recordingSource
 	// before is where RecordedBefore reads what the trees do not hold.
 	before recordedBeforeSource
+	// claims are the shared recordings the tests of the current staging
+	// answered with (exactClaims).
+	claims exactClaims
+}
+
+// exactClaims are, in one staging (stagingEpoch), the shared recordings
+// (models.ExactServing.Concurrent) the tests answered calls with, each by the
+// test that did: a shared recording answers at most once in the staging,
+// whichever of the tests it is shared with makes its call first. A staging
+// after it starts afresh.
+type exactClaims struct {
+	mu    sync.Mutex
+	epoch uint64
+	by    map[string]string
+}
+
+// in is the claims of staging epoch, with mu held: emptied when they were
+// another staging's.
+func (c *exactClaims) in(epoch uint64) map[string]string {
+	if c.by == nil || c.epoch != epoch {
+		c.epoch, c.by = epoch, map[string]string{}
+	}
+	return c.by
+}
+
+// claimant is the test that answered with name in staging epoch, if one did.
+func (c *exactClaims) claimant(epoch uint64, name string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.epoch != epoch {
+		return "", false
+	}
+	t, ok := c.by[name]
+	return t, ok
+}
+
+// claim gives name to test in staging epoch, and reports whether it is test's
+// now: it was no test's, or test's already.
+func (c *exactClaims) claim(epoch uint64, name, test string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	by := c.in(epoch)
+	if t, ok := by[name]; ok {
+		return t == test
+	}
+	by[name] = test
+	return true
+}
+
+// release gives back every shared recording test answered with in staging
+// epoch: a test opened again (a retry) starts afresh, as with its own.
+func (c *exactClaims) release(epoch uint64, test string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	by := c.in(epoch)
+	for n, t := range by {
+		if t == test {
+			delete(by, n)
+		}
+	}
+}
+
+// takenByOther reports whether name was claimed in staging epoch by a test
+// other than test.
+func (c *exactClaims) takenByOther(epoch uint64, name, test string) bool {
+	if c == nil {
+		return false
+	}
+	t, ok := c.claimant(epoch, name)
+	return ok && t != test
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -560,7 +643,7 @@ var _ integrations.StagedReader = (*MockManager)(nil)
 // mock answers between the two binds in no scope of the test's
 // (OpenExactTest).
 func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
-	m.serveExactTest(test, owned, false, nil)
+	m.serveExactTest(test, owned, ExactConcurrent{}, false, nil)
 }
 
 // OpenExactTest opens test as ServeExactTest does, and begins its variables
@@ -570,17 +653,69 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 // run's, which every later test of the set reads (NewVariableSet): another
 // test's value answered as this one's, a false pass.
 func (m *MockManager) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) {
-	m.serveExactTest(test, owned, true, given)
+	m.serveExactTest(test, owned, ExactConcurrent{}, true, given)
 }
 
-// serveExactTest is ServeExactTest, and, with begin, OpenExactTest.
-func (m *MockManager) serveExactTest(test string, owned []*models.Mock, begin bool, given []models.VariableBinding) {
+// ExactConcurrent is what a test shares with the tests whose requests were
+// open beside its own at record time (models.ExactServing.Concurrent): the
+// shared recordings, and what the learn step reads of the test.
+type ExactConcurrent struct {
+	// Cands are the shared recordings, in recorded order.
+	Cands []*models.Mock
+	// Inputs and NotLearnable are models.ExactServing.Inputs and
+	// NotLearnable.
+	Inputs       []string
+	NotLearnable []string
+}
+
+// ServeExactTestConcurrent is ServeExactTest for a test that shares
+// recordings with the tests whose requests were open beside its own at
+// record time (keploy record's full round, models.ExactServing.Concurrent):
+// after its own test mocks, the view shows c.Cands, each answering at most
+// once in the staging, for whichever of those tests makes its call first. A
+// shared recording another test answered with is not shown, and a consume of
+// it is refused. None is required of the test: ExactTestOutcome and the
+// mocks of the tests begun (StagedOwnerBegun) hold only its own. A shared
+// recording owned names too is its own. A test opened again (a retry) gives
+// back every shared recording it answered with, as it starts its own afresh.
+func (m *MockManager) ServeExactTestConcurrent(test string, owned []*models.Mock, c ExactConcurrent) {
+	m.serveExactTest(test, owned, c, false, nil)
+}
+
+// OpenExactTestConcurrent opens test as ServeExactTestConcurrent does, and
+// begins its variables with given bound in the same step, as OpenExactTest
+// does.
+func (m *MockManager) OpenExactTestConcurrent(test string, owned []*models.Mock, c ExactConcurrent, given []models.VariableBinding) {
+	m.serveExactTest(test, owned, c, true, given)
+}
+
+// serveExactTest is ServeExactTest and ServeExactTestConcurrent, and, with
+// begin, OpenExactTest and OpenExactTestConcurrent.
+func (m *MockManager) serveExactTest(test string, owned []*models.Mock, c ExactConcurrent, begin bool, given []models.VariableBinding) {
 	answered, ahead := m.closeAhead()
-	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned))}
+	m.exact.claims.release(m.stagingEpoch.Load(), test)
+	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(c.Cands))}
 	v.addOwned(owned)
+	if n := len(v.owned); len(c.Cands) > 0 {
+		v.addShared(c.Cands)
+		if len(v.owned) > n {
+			v.cand = make([]bool, len(v.owned))
+			for i := n; i < len(v.owned); i++ {
+				v.cand[i] = true
+			}
+		}
+		v.inputs = append([]string(nil), c.Inputs...)
+		for _, n := range c.NotLearnable {
+			if v.notLearnable == nil {
+				v.notLearnable = map[string]bool{}
+			}
+			v.notLearnable[n] = true
+		}
+	}
+	v.claims = &m.exact.claims
 	v.consumed = make([]bool, len(v.owned))
 	for _, name := range ahead {
-		if _, ok := v.index[name]; ok {
+		if i, ok := v.index[name]; ok && !v.isCand(i) {
 			if v.inFlight == nil {
 				v.inFlight = map[string]bool{}
 			}
@@ -589,7 +724,7 @@ func (m *MockManager) serveExactTest(test string, owned []*models.Mock, begin bo
 	}
 	for _, a := range answered {
 		i, ok := v.index[a.owned.Name]
-		if !ok || v.consumed[i] {
+		if !ok || v.consumed[i] || v.isCand(i) {
 			continue
 		}
 		v.consumed[i] = true
@@ -659,6 +794,30 @@ func (m *MockManager) closeAhead() (answered []aheadAnswer, ahead []string) {
 // addOwned files owned into v as the mocks it answers, each at most once:
 // the manager's copies, in owned's order.
 func (v *exactView) addOwned(owned []*models.Mock) {
+	v.add(owned, false)
+}
+
+// addShared files cands into v after its own, as the shared recordings it
+// answers (exactView.cand): each copy says so (TestModeInfo.Concurrent). One v
+// files already is left as it is.
+func (v *exactView) addShared(cands []*models.Mock) {
+	v.add(cands, true)
+}
+
+// isCand reports whether owned position i is a shared recording.
+func (v *exactView) isCand(i int) bool {
+	return i < len(v.cand) && v.cand[i]
+}
+
+// takenByOther reports whether owned position i is a shared recording another
+// test answered with in the current staging.
+func (v *exactView) takenByOther(i int) bool {
+	return v.isCand(i) && v.epoch != nil && v.claims.takenByOther(v.epoch.Load(), v.owned[i].Name, v.test)
+}
+
+// add files mocks into v as the mocks it answers, each at most once: the
+// manager's copies, in mocks' order, marked shared when shared is set.
+func (v *exactView) add(owned []*models.Mock, shared bool) {
 	for _, mk := range owned {
 		if mk == nil || mk.Name == "" {
 			continue
@@ -678,6 +837,7 @@ func (v *exactView) addOwned(owned []*models.Mock) {
 		c.TestModeInfo.ID = len(v.owned)
 		c.TestModeInfo.SortOrder = int64(len(v.owned)) + 1
 		c.TestModeInfo.ServedIn = v.gen
+		c.TestModeInfo.Concurrent = shared
 		c.MarkPooled()
 		v.index[c.Name] = len(v.owned)
 		v.owned = append(v.owned, c)
@@ -862,11 +1022,14 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	// Only the test's own: a shared recording is never required of it.
 	for _, i := range v.order {
-		consumed = append(consumed, v.owned[i].Name)
+		if !v.isCand(i) {
+			consumed = append(consumed, v.owned[i].Name)
+		}
 	}
 	for i, done := range v.consumed {
-		if !done {
+		if !done && !v.isCand(i) {
 			unconsumed = append(unconsumed, v.owned[i].Name)
 		}
 	}
@@ -890,6 +1053,45 @@ func (m *MockManager) ConsumedTestMocks() []*models.Mock {
 }
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
+
+// ClaimantOf implements integrations.ExactConcurrentReader: the test that
+// answered a call with the shared recording name in the current staging.
+func (m *MockManager) ClaimantOf(name string) (string, bool) {
+	return m.exact.claims.claimant(m.stagingEpoch.Load(), name)
+}
+
+// ExactTakenCandidates implements integrations.ExactConcurrentReader: the open
+// test's shared recordings of kind another test answered with.
+func (m *MockManager) ExactTakenCandidates(kind models.Kind) []*models.Mock {
+	v := m.exactView()
+	if v == nil || v.test == "" || len(v.cand) == 0 {
+		return nil
+	}
+	var out []*models.Mock
+	for i, mk := range v.owned {
+		if (kind == "" || mk.Kind == kind) && v.takenByOther(i) {
+			out = append(out, mk)
+		}
+	}
+	return out
+}
+
+// ExactTestInputs implements integrations.ExactConcurrentReader.
+func (m *MockManager) ExactTestInputs() []string {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return nil
+	}
+	return v.inputs
+}
+
+// ExactTestNotLearnable implements integrations.ExactConcurrentReader.
+func (m *MockManager) ExactTestNotLearnable(name string) bool {
+	v := m.exactView()
+	return v != nil && v.test != "" && v.notLearnable[name]
+}
+
+var _ integrations.ExactConcurrentReader = (*MockManager)(nil)
 
 // exactMissKind is where a miss reported now was made: in the open test, or
 // outside every test. "" when exact serving is off.
@@ -918,7 +1120,7 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 	defer v.mu.Unlock()
 	out := make([]*models.Mock, 0, len(v.owned))
 	for i, mk := range v.owned {
-		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) {
+		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) {
 			out = append(out, mk)
 		}
 	}
@@ -1074,6 +1276,12 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 				v.mu.Unlock()
 				return exactRefused
 			}
+			// A shared recording answers once in the staging: for the
+			// first of the tests it is shared with to make its call.
+			if v.isCand(i) && !m.exact.claims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
+				v.mu.Unlock()
+				return exactRefused
+			}
 			v.consumed[i] = true
 			v.order = append(v.order, i)
 			owned := v.owned[i]
@@ -1205,6 +1413,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		ReqBodyNoise:     reqBodyNoiseOf(served.Spec),
 		Variables:        variablesOf(served.Spec),
 		Binds:            bindsOf(served.Spec),
+		Concurrent:       owned.TestModeInfo.Concurrent,
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
