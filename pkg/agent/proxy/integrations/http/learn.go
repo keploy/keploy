@@ -922,8 +922,11 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(staged, m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
 			var unread recordedUnread
 			if errors.As(err, &unread) {
+				// The store's error may be another module's (an open
+				// RecordedBeforeReader), and a recording's read back can
+				// quote what it holds: by its kind.
 				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
-					zap.String("mock", m.Name), zap.Error(err))
+					zap.String("mock", m.Name), logcontent.Error(err))
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read the recordings of the test set made before "+m.Name+", so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
