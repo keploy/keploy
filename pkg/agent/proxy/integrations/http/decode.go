@@ -395,11 +395,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// recording: it did not change, so no learn-step reason
 				// explains it.
 				var elsewhere *models.Mock
+				var strictN strictNoise
 				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+					strictN = h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					elsewhere = notOwnedRecording(reqCtx, input, mockDb, strictN)
 				}
 				if elsewhere != nil {
-					markNotOwned(report, elsewhere, request, input.body)
+					markNotOwned(report, elsewhere, request, input.body, strictN)
 				} else if lmiss != nil {
 					lmiss.explain(report)
 				}

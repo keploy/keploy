@@ -260,12 +260,16 @@ type MockMismatchReport struct {
 	// switch, design v14 §5.3). Set by the strict HTTP matcher (row S1).
 	Differs []string
 	// VariablePlaces are, under the proven switch only, the URL path places
-	// (url.path[<n>]) of a test variable on this call: those declared by the
-	// closest mock or by a mock on the call's route (DeclaredPathPlaces), the
-	// place a variable miss names, and the segments that hold a value the
-	// test's variables have. The call holds the application's values there,
-	// which the miss's shape writes {} (MissShape); the summary then names
-	// the path escaped, as a place counts segments.
+	// (url.path[<n>]) at which keploy knows this call holds the
+	// application's values: a test variable's (those declared by the
+	// closest mock or by a mock on the call's route, DeclaredPathPlaces; the
+	// place a variable miss names; the segments that hold a value the test's
+	// variables have), and a segment the strict comparison excused as noise
+	// where the call's is not its closest recording's (one the recording
+	// learned, url.path.<i>, or keploy.yml's url noise masks:
+	// PathPlacesOtherThan). The miss's shape writes them {} (MissShape), and
+	// so does a report without content; with a variable's place the summary
+	// names the path escaped, as such a place counts segments.
 	VariablePlaces []string
 	// NotOwned says, under the proven switch, the call is ClosestMock, a
 	// recording the open test does not own (byte for byte, or at the per-test

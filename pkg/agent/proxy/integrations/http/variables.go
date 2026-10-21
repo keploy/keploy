@@ -985,6 +985,16 @@ func withRoutePlaces(r *models.MockMismatchReport, places []string) *models.Mock
 	return r
 }
 
+// addPlaces is places with each of more it does not hold yet, in order.
+func addPlaces(places, more []string) []string {
+	for _, p := range more {
+		if !slices.Contains(places, p) {
+			places = append(places, p)
+		}
+	}
+	return places
+}
+
 // routePathPlaces are the URL path places a test variable holds on a call:
 // those the closest mock declares; those of every mock in the pool whose
 // route the call is on (sameRoute: its method and path, the segments it

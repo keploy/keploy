@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -362,5 +363,27 @@ func TestAWithheldReportSaysWhetherItsRequestsWereTheSame(t *testing.T) {
 	b, err := yaml.Marshal(c)
 	if err != nil || strings.Contains(string(b), "requests_identical") {
 		t.Errorf("with the switch on the call's yaml names requests_identical: %s %v", b, err)
+	}
+}
+
+// The places of a call's path that are not its recording's are those whose
+// segment is another at the same place, or past the recording's end; a
+// summary that names no path has none.
+func TestPathPlacesOtherThanAreTheSegmentsNotRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		summary, recorded string
+		want              []string
+	}{
+		{"GET /api/users/kp-live-id", "/api/users/kp-rec-id", []string{"url.path[2]"}},
+		{"GET /api/users/kp-live-id?v=2", "/api/users/kp-rec-id", []string{"url.path[2]"}},
+		{"GET /a/b/c", "/a", []string{"url.path[1]", "url.path[2]"}},
+		{"GET /x/b", "/a/b", []string{"url.path[0]"}},
+		{"GET /a/b", "/a/b", nil},
+		{"GET /a", "/a/b/c", nil},
+		{"find on users", "/a", nil},
+	} {
+		if got := PathPlacesOtherThan(tc.summary, tc.recorded); !slices.Equal(got, tc.want) {
+			t.Errorf("PathPlacesOtherThan(%q, %q) = %v, want %v", tc.summary, tc.recorded, got, tc.want)
+		}
 	}
 }
