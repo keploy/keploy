@@ -51,11 +51,12 @@ func branchRecording() []*models.Mock {
 // Problem A: a name the test mints (Date.now and a random suffix) is sent
 // first in a request (learned there as noise: the call's answer does not
 // echo it), and a later call of the same test, which sends nothing of it,
-// answers it whole. F answers that later call with this run's name (a word
-// of it inside a longer text stays as recorded), and learns it: the name is
-// the test's variable, bound where it first appeared, answered at the later
-// call, and used by a call that sends it again. The replays after F follow
-// it: the later answer holds that run's name.
+// answers it whole. F answers that later call with this run's name (and a
+// text that holds it as a token, "<name> (draft)", with this run's name in
+// its place), and learns it: the name is the test's variable, bound where it
+// first appeared, answered at the later call, and used by a call that sends
+// it again. The replays after F follow it: the later answer holds that run's
+// name.
 func TestLearnMatchALaterAnswerOfAValueTheTestMadeHoldsThisRunsValue(t *testing.T) {
 	h, n, opts := learnOn(t)
 	ctx, tr := inTest()
@@ -74,7 +75,7 @@ func TestLearnMatchALaterAnswerOfAValueTheTestMadeHoldsThisRunsValue(t *testing.
 		}
 		served = append(served, out)
 	}
-	if want := `{"data":{"branches":[{"name":"main"},{"name":"` + fName + `","title":"` + recordedName + ` (draft)"}]}}`; served[1].Spec.HTTPResp.Body != want {
+	if want := `{"data":{"branches":[{"name":"main"},{"name":"` + fName + `","title":"` + fName + ` (draft)"}]}}`; served[1].Spec.HTTPResp.Body != want {
 		t.Fatalf("F answered the list with %s, want %s", served[1].Spec.HTTPResp.Body, want)
 	}
 	if len(db.consumed) != 3 {
@@ -85,7 +86,7 @@ func TestLearnMatchALaterAnswerOfAValueTheTestMadeHoldsThisRunsValue(t *testing.
 		t.Fatalf("the create learned %v: noise until a later call shows it flowed on", create.Spec.ReqBodyNoise)
 	}
 	bind := map[string]models.MockVariables{"mock-0": {"name": {Recorded: recordedName, Bind: "body.variables.input.name"}}}
-	if want := (models.MockVariables{"name": {Recorded: recordedName, Answer: []string{"body.data.branches[1].name"}}}); !reflect.DeepEqual(list.Spec.Learned(), want) {
+	if want := (models.MockVariables{"name": {Recorded: recordedName, Answer: []string{"body.data.branches[1].name", "body.data.branches[1].title"}}}); !reflect.DeepEqual(list.Spec.Learned(), want) {
 		t.Fatalf("the list learned %+v, want %+v", list.Spec.Learned(), want)
 	}
 	if !reflect.DeepEqual(list.Spec.LearnedBinds(), bind) {
@@ -109,7 +110,7 @@ func TestLearnMatchALaterAnswerOfAValueTheTestMadeHoldsThisRunsValue(t *testing.
 		t.Fatalf("the create in CI: %+v", diag)
 	}
 	ok, stub, diag := matchVar(t, h, ci, calls[1])
-	if want := `{"data":{"branches":[{"name":"main"},{"name":"` + ciName + `","title":"` + recordedName + ` (draft)"}]}}`; !ok || stub.Spec.HTTPResp.Body != want {
+	if want := `{"data":{"branches":[{"name":"main"},{"name":"` + ciName + `","title":"` + ciName + ` (draft)"}]}}`; !ok || stub.Spec.HTTPResp.Body != want {
 		t.Fatalf("the list in CI: ok %v diag %+v", ok, diag)
 	}
 	if ok, _, diag := matchVar(t, h, ci, calls[2]); !ok {
@@ -178,14 +179,16 @@ func TestLearnMatchAnEchoALaterAnswerHoldsIsTheTestsVariable(t *testing.T) {
 
 // What a later answer holds of a value the test made is answered only where
 // the answer holds it whole, at a scalar of its JSON body of the type the
-// request sent it as: not inside a longer text, in another case, at an
-// object key, in a header, or as a number where it was sent as a string.
-// Such an answer is served as recorded, and nothing is learned on it.
-func TestLearnMatchALaterAnswerHoldsAValueTheTestMadeOnlyWhole(t *testing.T) {
+// request sent it as, or as a token of a longer text of its body (a string
+// value of at least minWithin): not in another case, at an object key, in a
+// header, as a number where it was sent as a string, or inside a longer
+// text when it is too short to be told from a chance word. Those are served
+// as recorded.
+func TestLearnMatchALaterAnswerHoldsAValueTheTestMadeWholeOrAsAToken(t *testing.T) {
 	h, n, opts := learnOn(t)
 	ctx, tr := inTest()
 	list := gql("mock-1", 1, `{"operationName":"items","variables":{}}`,
-		`{"data":{"title":"n-1111 copy","code":"N-1111","byName":{"n-1111":{"ok":true}},"num":1111}}`)
+		`{"data":{"title":"n-1111 copy","code":"N-1111","byName":{"n-1111":{"ok":true}},"num":1111,"label":"no. 1111"}}`)
 	list.Spec.HTTPResp.Header["X-Name"] = "n-1111"
 	db := &learnDb{perTest: []*models.Mock{
 		gql("mock-0", 0, `{"operationName":"create","variables":{"input":{"name":"n-1111","n":"1111"}}}`, `{"data":{"ok":true}}`),
@@ -195,11 +198,12 @@ func TestLearnMatchALaterAnswerHoldsAValueTheTestMadeOnlyWhole(t *testing.T) {
 		t.Fatalf("the create: %+v", miss)
 	}
 	out, miss, _ := h.learnMatch(ctx, gqlLive(`{"operationName":"items","variables":{}}`), db, n, opts)
-	if out == nil || miss != nil || out.Spec.HTTPResp.Body != list.Spec.HTTPResp.Body || out.Spec.HTTPResp.Header["X-Name"] != "n-1111" {
-		t.Fatalf("served %v miss %+v: the answer is served as recorded", out, miss)
+	want := `{"data":{"title":"n-2222 copy","code":"N-1111","byName":{"n-1111":{"ok":true}},"num":1111,"label":"no. 1111"}}`
+	if out == nil || miss != nil || out.Spec.HTTPResp.Body != want || out.Spec.HTTPResp.Header["X-Name"] != "n-1111" {
+		t.Fatalf("served %v miss %+v: only the title holds this run's name", out, miss)
 	}
-	if got := db.consumed[1].Spec; len(got.Learned()) != 0 || len(got.LearnedBinds()) != 0 {
-		t.Fatalf("learned %+v binds %+v on an answer that holds no value whole", got.Learned(), got.LearnedBinds())
+	if want := (models.MockVariables{"name": {Recorded: "n-1111", Answer: []string{"body.data.title"}}}); !reflect.DeepEqual(db.consumed[1].Spec.Learned(), want) {
+		t.Fatalf("learned %+v, want %+v", db.consumed[1].Spec.Learned(), want)
 	}
 }
 
