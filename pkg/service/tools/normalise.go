@@ -196,7 +196,7 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 				for _, f := range testCaseResult.TemplateFailures {
 					t.logger.Info("not normalizing a test case that failed on a template variable",
 						zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID),
-						zap.String("where", f.Where), zap.String("placeholder", templates.Shape(f.Placeholder)), logcontent.StringLen("why", f.Why),
+						logcontent.StringLen("where", f.Where), zap.String("placeholder", templates.Shape(f.Placeholder)), logcontent.StringLen("why", f.Why),
 						zap.String("next_step", "if the app issues this value anew each run, make the place that issues it a {{capture ...}}; if the value changed on purpose, edit the expected value or re-record the test case. --allow-high-risk writes this run's value over the placeholder, and the next run fails on it"))
 				}
 				continue

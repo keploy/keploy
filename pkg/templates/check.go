@@ -1305,9 +1305,10 @@ func oneCapture(shared bool) string {
 }
 
 // placeOf is the variable place of testCase that the failure f names: the one
-// at its place, or else, where the failure names it by this run's values (a
-// place under an object key that holds a placeholder), the test case's one
-// place holding its placeholder; nil when that is not one place.
+// at its place (a failure names it as the test case writes it), or else,
+// where f names it by this run's values (a place under an object key that
+// holds a placeholder, as a report does), the test case's one place holding
+// its placeholder; nil when that is not one place.
 func (c CheckResult) placeOf(testCase string, f Failure) *Place {
 	var same *Place
 	n := 0
@@ -1382,10 +1383,10 @@ func captureForValue(p Placeholder, bare bool, recorded string) string {
 // next run fails on. canCapture is false for a test case that cannot capture
 // (gRPC, streamed).
 func (c CheckResult) NextStep(testCase string, f Failure, canCapture bool) string {
-	// The failing place as the test case writes it: a failure names a place
-	// under an object key by this run's value of the key (body key
-	// roles.u_LIVE2), the set check by the key as written (body key
-	// roles.{{string .id}}), which is where the edit goes.
+	// The failing place as the test case writes it (Failure.Where: body key
+	// roles.{{string .id}}, not this run's value of the key, roles.u_LIVE2,
+	// which the report shows), as the set check names it: where the edit
+	// goes.
 	at := c.placeOf(testCase, f)
 	here := testCase + "/response " + f.Where
 	if at != nil {

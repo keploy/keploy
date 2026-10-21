@@ -2639,6 +2639,58 @@ func TestRunTestSet_AStreamedCaseAnsweredWholeIsAssertedFrameByFrame(t *testing.
 	}
 }
 
+// A PLACE UNDER A TEMPLATED OBJECT KEY is logged as the test case writes it
+// (body.roles.{{string .id}}.id), and saved by this run's values: this run's
+// value of the key, an id a create answered here, can be a secret's or the
+// app's own, and no line names it, whatever KEPLOY_LOG_CONTENT says. The
+// next step names the place as written too, where the edit goes.
+func TestRunTestSet_APlaceUnderATemplatedKeyIsLoggedAsWritten(t *testing.T) {
+	const live = "usr_LIVE7c1d"
+	app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
+		mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			writeJSON(w, http.StatusCreated, `{"id":"`+live+`"}`)
+		})
+		mux.HandleFunc("/roles", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			writeJSON(w, http.StatusOK, `{"roles":{"`+live+`":{"id":"usr_OTHER01"}}}`)
+		})
+	})
+	conf := &tmplConf{stored: models.TestSet{Template: map[string]interface{}{"id": "usr_REC0001"}}}
+	roles := tmplCase(2, app.addr, "GET", "/roles", nil, "",
+		recorded(200, nil, `{"roles":{"{{string .id}}":{"id":"{{string .id}}"}}}`, conf.stored.Template))
+	delete(roles.HTTPResp.Header, "Content-Length")
+	cases := []*models.TestCase{
+		tmplCase(1, app.addr, "POST", "/users", map[string]string{"Content-Type": "application/json"}, `{"name":"alice"}`,
+			recorded(201, nil, `{"id":"{{capture string .id}}"}`, conf.stored.Template)),
+		roles,
+	}
+	h := newTmplHarness(t, conf, cases, nil)
+	core, logs := observer.New(zap.WarnLevel)
+	h.r.logger = zap.New(core)
+	h.run(t)
+	r := h.result(t, "test-2")
+	if len(r.TemplateFailures) != 1 || r.TemplateFailures[0].Where != "body.roles."+live+".id" {
+		t.Fatalf("test-2 saved template failures %+v; want one at body.roles.%s.id, by this run's values", r.TemplateFailures, live)
+	}
+	logged := logs.FilterMessageSnippet("a template variable's place does not hold what it must").All()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d template failures; want 1", len(logged))
+	}
+	m := logged[0].ContextMap()
+	if got := fmt.Sprint(m["where"]); got != "body.roles.{{string .id}}.id" {
+		t.Errorf("the line names the place %q; want it as the test case writes it", got)
+	}
+	for k, v := range m {
+		if strings.Contains(fmt.Sprint(v), live) {
+			t.Errorf("the line's %s carries this run's value of the key: %v", k, v)
+		}
+	}
+	if next := fmt.Sprint(m["next_step"]); !strings.Contains(next, "test-2/response body.roles.{{string .id}}.id") {
+		t.Errorf("the next step %q does not name the place as written", next)
+	}
+}
+
 // EVERY TEMPLATE FAILURE IS SAVED, and each is logged with the next step for
 // both things it can mean (RF1): a read-back answering another id in its body
 // and in a header saves both places; the next step says which test case's

@@ -154,6 +154,24 @@ func (k ObjectKey) DisplayPath() string { return Leaf{Path: k.Path}.DisplayPath(
 type jsonDoc struct {
 	leaves []Leaf
 	keys   []ObjectKey
+	// written is the document as the test case writes it, when this one is
+	// it with its object keys' placeholders rendered (withKeys): the same
+	// leaves and keys in the same order, each named by the keys as written.
+	written *jsonDoc
+}
+
+// writtenLeaf is d's i-th leaf as the test case writes its path: under an
+// object key that holds a placeholder, by the placeholder, not this run's
+// value of it. A document whose rendering does not read as the written one
+// leaf for leaf names none of its path.
+func (d *jsonDoc) writtenLeaf(i int) Leaf {
+	if d.written == nil {
+		return d.leaves[i]
+	}
+	if len(d.written.leaves) != len(d.leaves) {
+		return Leaf{}
+	}
+	return d.written.leaves[i]
 }
 
 // keysTemplated reports whether an object key of doc holds a placeholder.

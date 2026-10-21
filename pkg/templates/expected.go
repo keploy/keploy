@@ -18,25 +18,72 @@ import (
 type Capture struct {
 	Key   string
 	Value string
-	// Where names the place: "body.items[0].id", "header Set-Cookie.sid".
-	Where string
+	// Where names the place as the test case writes it: "body.items[0].id",
+	// "header Set-Cookie.sid", "body.{{string .id}}.name" under an object key
+	// that holds a placeholder. Shown names it by this run's values, when the
+	// two differ (Failure.Shown).
+	Where, Shown string
 	// Type is the placeholder's: TypeString, TypeInt or TypeFloat. Two
 	// numbers are one value when their values are (1.50 is 1.5); a string is
 	// its text.
 	Type string
 }
 
+// Report is the capture's place as a report names it: by this run's values.
+func (c Capture) Report() string { return shownOr(c.Shown, c.Where) }
+
 // Failure is a variable place that the app's answer does not satisfy: a
 // capture with no value of its type there, or a use whose place does not
 // hold the key's value. Either fails its test case, whatever the rest of the
 // comparison says, noise included.
 type Failure struct {
-	Where       string
+	// Where names the place as the test case writes it: "body.items[0].id",
+	// "header Set-Cookie.sid", "body key roles.{{string .id}}", which is where
+	// an edit goes and what the set check names it by (CheckResult.Places). A
+	// line logs it.
+	Where string
+	// Shown names the place by this run's values, when the two differ: a
+	// place under an object key that holds a placeholder, named by the key's
+	// value now ("body key roles.u_LIVE2"), as the report shows it (Report).
+	// That value can be a secret's, or the app's own, so no line logs it.
+	Shown       string
 	Placeholder string
 	Why         string
 }
 
-func (f Failure) String() string { return f.Where + ": " + f.Placeholder + " " + f.Why }
+// Report is the failure's place as a report names it: by this run's values.
+func (f Failure) Report() string { return shownOr(f.Shown, f.Where) }
+
+func (f Failure) String() string { return f.Report() + ": " + f.Placeholder + " " + f.Why }
+
+// shownOr is shown, a place by this run's values, or where, the place as
+// written, when the two are one.
+func shownOr(shown, where string) string {
+	if shown != "" {
+		return shown
+	}
+	return where
+}
+
+// shownIf is shown when it is not where: the Shown of a place.
+func shownIf(shown, where string) string {
+	if shown == where {
+		return ""
+	}
+	return shown
+}
+
+// withShown gives each of fs at where its place by this run's values.
+func withShown(fs []Failure, where, shown string) []Failure {
+	if s := shownIf(shown, where); s != "" {
+		for i := range fs {
+			if fs[i].Where == where {
+				fs[i].Shown = s
+			}
+		}
+	}
+	return fs
+}
 
 // ExpectOptions are the settings an expected response is resolved with.
 type ExpectOptions struct {
@@ -134,16 +181,16 @@ func (r *Run) Expected(exp, answer models.HTTPResp, opts ExpectOptions) Resolved
 			if !ok || !r.usable(p) || isSecret(p) || l.Shadowed {
 				continue
 			}
-			where := l.Under("body")
+			where, shown := doc.writtenLeaf(i).Under("body"), l.Under("body")
 			a, found := answerIdx[l.PathKey()]
 			value, why := captureLeaf(body, l, p, answer.Body, a, found && answerJSON)
 			if why != "" {
-				res.Failures = append(res.Failures, Failure{Where: where, Placeholder: p.Text, Why: why})
+				res.Failures = append(res.Failures, Failure{Where: where, Shown: shownIf(shown, where), Placeholder: p.Text, Why: why})
 				continue
 			}
 			r.set(p.Key, value)
 			overrides[i] = a.Raw(answer.Body)
-			res.Captures = append(res.Captures, Capture{Key: p.Key, Value: value, Where: where, Type: p.Type})
+			res.Captures = append(res.Captures, Capture{Key: p.Key, Value: value, Where: where, Shown: shownIf(shown, where), Type: p.Type})
 		}
 	}
 	headerEdits := map[string][]edit{}
@@ -203,7 +250,7 @@ func (r *Run) Expected(exp, answer models.HTTPResp, opts ExpectOptions) Resolved
 			if answerJSON {
 				ansLeaves = ansDoc.leaves
 			}
-			res.Failures = append(res.Failures, r.bodyUseFailures("body", body, doc.leaves, answer.Body, ansLeaves, answerJSON, opts)...)
+			res.Failures = append(res.Failures, r.bodyUseFailures("body", body, doc, answer.Body, ansLeaves, answerJSON, opts)...)
 		} else {
 			res.Failures = append(res.Failures, r.textUseFailures("body", exp.Body, answer.Body, "body", false)...)
 		}
@@ -231,6 +278,7 @@ func (r *Run) withKeys(doc string, d *jsonDoc, look lookupFunc) (string, *jsonDo
 	if !ok {
 		return doc, d
 	}
+	nd.written = d
 	return out, nd
 }
 
@@ -469,66 +517,69 @@ func renderAround(v string, es []edit, r *Run) string {
 // there; a string that holds a use among other text must read as written,
 // with each use at its key's value (textUseFailures). prefix names the
 // document in each place ("body", "body frame 0").
-func (r *Run) bodyUseFailures(prefix, body string, leaves []Leaf, answer string, answerLeaves []Leaf, answerJSON bool, opts ExpectOptions) []Failure {
+func (r *Run) bodyUseFailures(prefix, body string, doc *jsonDoc, answer string, answerLeaves []Leaf, answerJSON bool, opts ExpectOptions) []Failure {
 	var fails []Failure
-	for _, l := range leaves {
+	for i, l := range doc.leaves {
 		raw := l.Raw(body)
 		ps := Find(raw)
 		uses := r.uses(ps)
 		if len(uses) == 0 {
 			continue
 		}
-		where := l.Under(prefix)
-		var candidates []Leaf
-		if answerJSON {
-			candidates = leavesAt(answerLeaves, l, opts.IgnoreOrdering && l.InArray)
-		}
-		whole := (l.Kind == LeafBare && len(ps) == 1) || (l.Kind == LeafString && wholeString(raw, ps))
-		if whole {
-			p := uses[0]
-			want, ok := renderLeaf(body, l, r.use, r)
-			if !ok {
-				v, _ := r.current(p)
-				fails = append(fails, Failure{Where: where, Placeholder: p.Text, Why: r.redact(p, fmt.Sprintf("cannot be asserted: its value %q is not a number of type %s", v, p.Type))})
-				continue
-			}
-			if why := matchesAny(want, answer, candidates); why != "" {
-				fails = append(fails, Failure{Where: where, Placeholder: p.Text, Why: r.redact(p, fmt.Sprintf("must equal %s's value %s; %s", p.Key, want, why))})
-			}
-			continue
-		}
-		// A use among other text in a string: some element there must read
-		// as the string does with each use at its value.
-		text := l.Value(body)
-		var strs []Leaf
-		for _, c := range candidates {
-			if c.Kind == LeafString {
-				strs = append(strs, c)
-			}
-		}
-		if len(strs) == 0 {
-			for _, p := range uses {
-				fails = append(fails, Failure{Where: where, Placeholder: p.Text, Why: r.redact(p, "needs a string there; the answer has none")})
-			}
-			continue
-		}
-		var first []Failure
-		held := false
-		for i, c := range strs {
-			fs := r.textUseFailures(where, text, c.Value(answer), "string", false)
-			if len(fs) == 0 {
-				held = true
-				break
-			}
-			if i == 0 {
-				first = fs
-			}
-		}
-		if !held {
-			fails = append(fails, first...)
-		}
+		where, shown := doc.writtenLeaf(i).Under(prefix), l.Under(prefix)
+		fails = append(fails, withShown(r.leafUseFailures(where, body, l, ps, uses, answer, answerLeaves, answerJSON, opts), where, shown)...)
 	}
 	return fails
+}
+
+// leafUseFailures checks the uses of one leaf l of a JSON expected body
+// (bodyUseFailures), at where.
+func (r *Run) leafUseFailures(where, body string, l Leaf, ps, uses []Placeholder, answer string, answerLeaves []Leaf, answerJSON bool, opts ExpectOptions) []Failure {
+	var fails []Failure
+	raw := l.Raw(body)
+	var candidates []Leaf
+	if answerJSON {
+		candidates = leavesAt(answerLeaves, l, opts.IgnoreOrdering && l.InArray)
+	}
+	whole := (l.Kind == LeafBare && len(ps) == 1) || (l.Kind == LeafString && wholeString(raw, ps))
+	if whole {
+		p := uses[0]
+		want, ok := renderLeaf(body, l, r.use, r)
+		if !ok {
+			v, _ := r.current(p)
+			return append(fails, Failure{Where: where, Placeholder: p.Text, Why: r.redact(p, fmt.Sprintf("cannot be asserted: its value %q is not a number of type %s", v, p.Type))})
+		}
+		if why := matchesAny(want, answer, candidates); why != "" {
+			fails = append(fails, Failure{Where: where, Placeholder: p.Text, Why: r.redact(p, fmt.Sprintf("must equal %s's value %s; %s", p.Key, want, why))})
+		}
+		return fails
+	}
+	// A use among other text in a string: some element there must read
+	// as the string does with each use at its value.
+	text := l.Value(body)
+	var strs []Leaf
+	for _, c := range candidates {
+		if c.Kind == LeafString {
+			strs = append(strs, c)
+		}
+	}
+	if len(strs) == 0 {
+		for _, p := range uses {
+			fails = append(fails, Failure{Where: where, Placeholder: p.Text, Why: r.redact(p, "needs a string there; the answer has none")})
+		}
+		return fails
+	}
+	var first []Failure
+	for i, c := range strs {
+		fs := r.textUseFailures(where, text, c.Value(answer), "string", false)
+		if len(fs) == 0 {
+			return fails
+		}
+		if i == 0 {
+			first = fs
+		}
+	}
+	return append(fails, first...)
 }
 
 // keyUseFailures checks each use placeholder in a JSON body's object keys: the
@@ -562,7 +613,8 @@ func (r *Run) keyUseFailures(prefix, exp string, expDoc, rendered, answer *jsonD
 		if !found {
 			name := rk.Path[len(rk.Path)-1].Key
 			for _, p := range uses {
-				fails = append(fails, Failure{Where: prefix + " key " + rk.DisplayPath(), Placeholder: p.Text, Why: r.redact(p, fmt.Sprintf("must name the key %q there; the answer has no such key", name))})
+				where := prefix + " key " + k.DisplayPath()
+				fails = append(fails, Failure{Where: where, Shown: shownIf(prefix+" key "+rk.DisplayPath(), where), Placeholder: p.Text, Why: r.redact(p, fmt.Sprintf("must name the key %q there; the answer has no such key", name))})
 			}
 		}
 	}
@@ -1253,7 +1305,7 @@ func (r *Run) documentUseFailures(where, exp, answer string, opts ExpectOptions)
 		ad = nil
 	}
 	fails := r.keyUseFailures(where, exp, d, rd, ad, opts)
-	return append(fails, r.bodyUseFailures(where, doc, rd.leaves, answer, ansLeaves, answerJSON, opts)...)
+	return append(fails, r.bodyUseFailures(where, doc, rd, answer, ansLeaves, answerJSON, opts)...)
 }
 
 // redact keeps a secret's value out of a failure: the report and the log

@@ -435,11 +435,14 @@ func TestExpected_APlaceholderInAnObjectKey(t *testing.T) {
 	assert.Equal(t, `{"usr_1":{"name":"a","id":"usr_1"}}`, res.RecordedBody)
 
 	res = r.Expected(exp, models.HTTPResp{Body: `{"usr_2":{"name":"a","id":"usr_1"}}`}, ExpectOptions{})
-	var where []string
+	var where, shown []string
 	for _, f := range res.Failures {
-		where = append(where, f.Where)
+		where, shown = append(where, f.Where), append(shown, f.Report())
 	}
-	assert.Equal(t, []string{"body key usr_1", "body.usr_1.id"}, where)
+	// The report names a place by this run's value of the key; a line, by
+	// the key as written: this run's value can be a secret's.
+	assert.Equal(t, []string{"body key usr_1", "body.usr_1.id"}, shown)
+	assert.Equal(t, []string{"body key {{string .id}}", "body.{{string .id}}.id"}, where)
 	assert.Equal(t, `{"usr_1":1}`, r.ExpectedNoAnswer(models.HTTPResp{Body: `{"{{string .id}}":1}`}).Body)
 }
 
@@ -917,6 +920,30 @@ func TestExpected_ALiteralSiblingCookieIsComparedByItsLifetime(t *testing.T) {
 	assert.Contains(t, res.Resp.Header["Set-Cookie"], "django_language=en; expires=Tue, 05 Oct 2027 10:00:00 GMT", "another lifetime keeps the recorded date, so the comparison fails there")
 }
 
+// A PLACE UNDER AN OBJECT KEY that holds a placeholder is named as the test
+// case writes it (Where), which a line logs, and by this run's values
+// (Report), which the report shows: this run's value of a key can be a
+// secret's, or the app's own, and never names a line's place.
+func TestExpected_APlaceUnderATemplatedKeyIsNamedAsWritten(t *testing.T) {
+	r := newRun(t, map[string]interface{}{"id": "usr_1", "tok": "t_0"})
+	exp := models.HTTPResp{Body: `{"{{string .id}}":{"tok":"{{capture string .tok}}","n":"{{string .id}}"}}`}
+	res := r.Expected(exp, models.HTTPResp{Body: `{"usr_1":{"tok":"t_9","n":"other"}}`}, ExpectOptions{})
+	require.Len(t, res.Captures, 1)
+	assert.Equal(t, "body.{{string .id}}.tok", res.Captures[0].Where)
+	assert.Equal(t, "body.usr_1.tok", res.Captures[0].Report())
+	require.Len(t, res.Failures, 1)
+	assert.Equal(t, "body.{{string .id}}.n", res.Failures[0].Where)
+	assert.Equal(t, "body.usr_1.n", res.Failures[0].Report())
+	assert.Equal(t, "body.usr_1.n: {{string .id}} "+res.Failures[0].Why, res.Failures[0].String(), "a failure's text is the report's")
+
+	// A place under no templated key is one place: nothing to show apart.
+	plain := r.Expected(models.HTTPResp{Body: `{"n":"{{string .id}}"}`}, models.HTTPResp{Body: `{"n":"other"}`}, ExpectOptions{})
+	require.Len(t, plain.Failures, 1)
+	assert.Equal(t, "body.n", plain.Failures[0].Where)
+	assert.Empty(t, plain.Failures[0].Shown)
+	assert.Equal(t, "body.n", plain.Failures[0].Report())
+}
+
 // AN OBJECT KEY'S USE is asserted at its own path, array index included: the
 // key in another element of the array does not hold it, unless the array is
 // compared in any order.
@@ -927,7 +954,8 @@ func TestExpected_AnObjectKeyUseIsAtItsOwnIndex(t *testing.T) {
 	moved := models.HTTPResp{Body: `{"items":[{"usr_1":true},{"b":true}]}`}
 	fs := r.Expected(exp, moved, ExpectOptions{}).Failures
 	require.NotEmpty(t, fs)
-	assert.Equal(t, "body key items[1].usr_1", fs[0].Where)
+	assert.Equal(t, "body key items[1].usr_1", fs[0].Report())
+	assert.Equal(t, "body key items[1].{{string .id}}", fs[0].Where)
 	for _, f := range r.Expected(exp, moved, ExpectOptions{IgnoreOrdering: true}).Failures {
 		assert.NotContains(t, f.Where, "body key", "under ignoreOrdering any element may hold the key")
 	}

@@ -170,7 +170,7 @@ func reportCaptures(caps []templates.Capture) []models.TemplateCapture {
 	}
 	out := make([]models.TemplateCapture, 0, len(caps))
 	for _, c := range caps {
-		out = append(out, models.TemplateCapture{Key: c.Key, Value: c.Value, Where: c.Where})
+		out = append(out, models.TemplateCapture{Key: c.Key, Value: c.Value, Where: c.Report()})
 	}
 	return out
 }
@@ -193,7 +193,7 @@ func reportFailures(fs []templates.Failure) []models.TemplateFailure {
 	}
 	out := make([]models.TemplateFailure, 0, len(fs))
 	for _, f := range fs {
-		out = append(out, models.TemplateFailure{Where: f.Where, Placeholder: f.Placeholder, Why: f.Why})
+		out = append(out, models.TemplateFailure{Where: f.Report(), Placeholder: f.Placeholder, Why: f.Why})
 	}
 	return out
 }
@@ -562,7 +562,7 @@ func (r *Replayer) failRefusedTest(ctx context.Context, testRunID, testSetID str
 		zap.String("next_step", nextStepRefused))
 	res := r.refusedResult(testSetID, tc, reportRefusals(refusals), models.TemplateVariable)
 	if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
-		utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
+		utils.LogContentError(r.logger, err, "failed to insert test case result for a test that was not sent")
 		return err
 	}
 	return nil
@@ -638,9 +638,9 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	if !errors.Is(why, setfile.ErrReplaceInterrupted) {
 		return false, fmt.Errorf("failed to read the test set's files: %w", why)
 	}
-	utils.LogError(r.logger, why, "keploy test refused this test set, and ran none of its test cases: an interrupted keploy templatize left it half-written",
+	utils.LogContentError(r.logger, why, "keploy test refused this test set, and ran none of its test cases: an interrupted keploy templatize left it half-written",
 		zap.String("testSet", testSetID),
-		zap.String("next_step", "do what the error says (it names each file and the step for it), then run keploy test again"))
+		zap.String("next_step", "do what the error says (it names each file and the step for it; each test case's reason in the report holds it whole), then run keploy test again"))
 	refusal := []models.TemplateFailure{{
 		Where:   "test set " + testSetID,
 		Why:     "refused when the test set loaded: " + why.Error(),
@@ -650,7 +650,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	for _, tc := range testCases {
 		res := r.refusedResult(testSetID, tc, refusal, models.TestSetRefused)
 		if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
-			utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
+			utils.LogContentError(r.logger, err, "failed to insert test case result for a test that was not sent")
 			return true, err
 		}
 		results = append(results, *res)
@@ -802,7 +802,7 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 		r.logger.Warn("a value this test case captured is not the one the application sent its dependency",
 			zap.String("testcase", tc.Name), zap.String("where", c.Where), logcontent.String("why", why),
 			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
-		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
+		fails = append(fails, models.TemplateFailure{Where: c.Report(), Placeholder: templates.Format(true, "", c.Key), Why: why})
 	}
 	return bound, fails, unjudged
 }
