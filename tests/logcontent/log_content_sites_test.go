@@ -220,9 +220,11 @@ func wordsFile(s *scanner) string {
 
 // checkWords holds wordsPath to the formats and texts the scan found, or
 // writes it (LOG_CONTENT_SITES_WRITE_ALLOWLIST=1). A file behind the source
-// carries no content either way, since every word in it is keploy's: an
-// error a format added since has {} for a shape until it is written again,
-// so it is only said.
+// carries no content, since every word in it is keploy's, but an error a
+// format added since has {} for a shape, keploy's own words withheld from
+// every line that logs it by its kind, with nothing to say so: so a file
+// behind fails, as one ahead does. The file is the scan's, sorted, the same
+// for the same source.
 func checkWords(t *testing.T, root string, s *scanner) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(wordsPath))
@@ -238,7 +240,7 @@ func checkWords(t *testing.T, root string, s *scanner) {
 		t.Fatal(err)
 	}
 	if string(have) != want {
-		t.Logf("%s is behind keploy's error formats: the shapes of the errors made since are {} (write it with LOG_CONTENT_SITES_WRITE_ALLOWLIST=1)", wordsPath)
+		t.Errorf("%s is not keploy's error formats and texts: the shapes of the errors made since are {} (write it with LOG_CONTENT_SITES_WRITE_ALLOWLIST=1)", wordsPath)
 	}
 }
 
