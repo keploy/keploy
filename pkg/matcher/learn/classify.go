@@ -32,6 +32,19 @@ type Seen struct {
 	Leaf  Leaf
 	Live  string
 	Place string
+	// Written: the request stores the value at Place (a body it creates or
+	// updates a record with), rather than only naming or comparing with it
+	// (ReadBack).
+	Written bool
+	// Record names the record a Written place stores its value in, as the
+	// adapter names it (its collection, and the identity the record has in
+	// this run); "" when the adapter names none. A read of that record links
+	// its answer to this write (ReadBack): the adapter states the link, keploy
+	// never guesses it from the value.
+	Record string
+	// Name is the variable the learn step put at Place (bound or used
+	// there), "" for none (Named).
+	Name string
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -45,9 +58,13 @@ type Earlier struct {
 	Own bool
 	// Outside: a pool call made outside every test under the claim key the
 	// test runs in (a Playwright beforeAll): its values are the key's, which
-	// the key's tests carry (Tracker.ServedOutside).
+	// the key's tests carry (Tracker.ServedOutside). A claimed run's calls
+	// outside its tests are its keys', never the run's (Run).
 	Outside bool
-	Seen    []Seen
+	// Run: served while no test was open (Tracker.Served): a variable bound
+	// at it is the run's, which every later test uses (Tracker.RunName).
+	Run  bool
+	Seen []Seen
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
@@ -97,6 +114,10 @@ type Place struct {
 	// Outside: the mock is a call of the claim key made outside every test
 	// (Earlier.Outside).
 	Outside bool
+	// Run: the mock was served while no test was open (Earlier.Run).
+	Run bool
+	// Name is the variable already at Var (Seen.Name), "" for none.
+	Name string
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -124,8 +145,9 @@ type Learned struct {
 //     that drifted together with a part of the earlier value (sources). It
 //     is asserted equal to the live value at that earlier place, wherever F
 //     saw what: a value that came from somewhere is never stopped being
-//     compared. The earliest place a leaf names binds it; failing that, the
-//     first raw mock holding it.
+//     compared. The place a leaf names binds it: where the value was sent
+//     whole, the test's own call before the run's (appeared); failing that,
+//     the first raw mock holding it.
 //
 //   - Echo: the recorded answer echoes the recorded value (a scalar equal to
 //     it, or a string holding it as a token).
@@ -138,6 +160,13 @@ type Learned struct {
 // An empty recorded value is never followed: it carries nothing to follow.
 // dc keeps what each value drifted for the test (nil: for this call).
 func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf) []Learned {
+	return ClassifyIn(dc, drift, live, rec, at, earlier, raw, resp, nil)
+}
+
+// ClassifyIn is Classify of a call whose clock reads were made in w
+// (Tracker.CallWindow; nil: none): a drifted instant that is a read of each
+// run's clock within it is a clock read, as one the lead moved is.
+func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -148,7 +177,7 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		if r.Value != "" {
-			if from, ok := appeared(dc, r.Value, l.Value, at, served, raw); ok {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -157,7 +186,7 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 		// Noise, or an echo, only where its readings account for all it
 		// changed: an echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
-			if why := unaccounted(dc, dc.of(r.Value, l.Value), at, served, raw); why != "" {
+			if why := unaccounted(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
@@ -166,7 +195,7 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 		// argument, an OData filter) that the answer holds is an echo keploy
 		// cannot answer with this run's value.
 		if ln.Kind == KindNoise {
-			if why := echoedPart(dc, dc.of(r.Value, l.Value), resp); why != "" {
+			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w), resp); why != "" {
 				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
@@ -536,7 +565,7 @@ type valueDrift struct {
 // earlier places of a test are read once, not once per request.
 type DriftCache struct {
 	mu     sync.Mutex
-	m      map[run]*valueDrift
+	m      map[driftKey]*valueDrift
 	raw    map[string]string
 	rawTok map[string][]map[string]bool
 	// mockText is each mock's text as Classify reads it (RawOf), by mock:
@@ -550,7 +579,7 @@ type DriftCache struct {
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[run]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
+	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -660,15 +689,27 @@ func (dc *DriftCache) rawExtra(text string) string {
 	return t
 }
 
-func (dc *DriftCache) of(rec, live string) *valueDrift {
-	k := run{rec, live}
+// driftKey is a drifted value, with the window of the call it is read in
+// (Window.key).
+type driftKey struct {
+	run
+	w [4]int64
+}
+
+func (dc *DriftCache) of(rec, live string) *valueDrift { return dc.ofIn(rec, live, nil) }
+
+// ofIn is what the drifted value (rec, live) changed, its clock reads read
+// by the lead and in w, the window of the call that carries it (nil: by the
+// lead alone).
+func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
+	k := driftKey{run{rec, live}, w.key()}
 	dc.mu.Lock()
 	d, ok := dc.m[k]
 	dc.mu.Unlock()
 	if ok {
 		return d
 	}
-	d = &valueDrift{rec: rec, live: live, clock: clockOf(rec, live)}
+	d = &valueDrift{rec: rec, live: live, clock: clockIn(rec, live, w)}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -684,7 +725,7 @@ func (dc *DriftCache) of(rec, live string) *valueDrift {
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockOf(d.decRec, d.decLive)
+		dclock = clockIn(d.decRec, d.decLive, w)
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
@@ -692,7 +733,7 @@ func (dc *DriftCache) of(rec, live string) *valueDrift {
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
-		merge(clockOf(f[0], f[1]))
+		merge(clockIn(f[0], f[1], w))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -944,7 +985,19 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // raw mock served before or recorded before at (of which F saw no live
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	v := dc.of(recorded, now)
+	return appearedIn(dc, dc.of(recorded, now), at, served, raw)
+}
+
+// appearedIn is appeared of the drifted value v, read in its call's window.
+func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
+	recorded := v.rec
+	// The place is where the value was sent whole, not where it was answered
+	// or sent inside a longer value (a variable is bound where the
+	// application sent it, whole): the test's own call that sent it first,
+	// else the run's, else another's; then the same inside a longer value;
+	// an answer that gave it only when no call sent it. Earliest within each.
+	var best Place
+	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -953,11 +1006,35 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			if s.Live == s.Leaf.Value {
 				continue
 			}
-			if found, whole := sources(dc.of(s.Leaf.Value, s.Live), v); found {
-				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Outside: e.Outside}, true
+			ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v)
+			if !ok {
+				continue
+			}
+			r := 6
+			if s.Side == Request {
+				switch {
+				case e.Own:
+					r = 0
+				case e.Run || e.Outside:
+					r = 1
+				default:
+					r = 2
+				}
+				if !whole {
+					r += 3
+				}
+			}
+			if r < rank {
+				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Outside: e.Outside, Name: s.Name}, r
+			}
+			if rank == 0 {
+				return best, true
 			}
 		}
+	}
+	if rank < 7 {
+		return best, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
 	// the recorded value, or what of it drifted (a changed word, a piece),
@@ -1214,4 +1291,110 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 		return false
 	}
 	return containsWholeClock(d.encodedRec, o.rec) || o.decoded && containsWholeClock(d.encodedRec, o.decRec)
+}
+
+// ReadBack is where a value of a recorded answer was written earlier in this
+// run, by a write the read is linked to, with another value than its
+// recording's: the request place, held whole, of the earliest exchange served
+// before that marked a place a variable can hold Written into record
+// (Seen.Record), whose recorded value is r's and whose live value differs
+// from it. record is the record the read names, as the adapter names it (the
+// record its filter or its identity names); "" for a read the adapter links
+// to no record, which reads nothing back.
+//
+// That is where the value was first stored, so every read of it, and every
+// later write that carries it on, follows one variable. A call that answers
+// with what an earlier call wrote (a time, a code the application made and
+// stored) is then answered with what this run wrote there: r's place is an
+// answer place of the variable bound at that earlier place.
+//
+// What decides is the evidence alone: the write drifted, the adapter marked
+// the place Written, and the read names the record it wrote. A value is read
+// back whatever its length, script or type (the request place's type is not
+// compared with r's: an id stored as a number is read back as text), and a
+// value no linked write stored is never read back, however it looks.
+//
+// Every write into the record of r's recorded value is a value r may be, and
+// the evidence does not say which write r reads: another field's, or a later
+// write of one field (which carries the value on when it holds the same live
+// value, and replaces it when it holds another). One at no place a variable
+// can hold is one too: the store answers what it wrote all the same, though
+// no variable is bound there. r is read back only when every such write holds
+// one live value, other than the recorded one: a write that drifted to
+// another, one that kept the recorded value, and one whose live value F
+// could not read ("": it may hold anything) are each another value r may be,
+// in whichever order they came, so r is read back from none, and its drift
+// stays unexplained.
+func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
+	if r.Unnamed || r.Value == "" || record == "" {
+		return Place{}, false
+	}
+	served := append([]Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	var first Place
+	found := false
+	// live is the live value every write of r's recorded value holds, once
+	// one was seen (wrote).
+	live, wrote := "", false
+	for _, e := range served {
+		for _, s := range e.Seen {
+			if s.Side != Request || !s.Written || s.Record != record || s.Leaf.Value != r.Value {
+				continue
+			}
+			if !wrote {
+				live, wrote = s.Live, true
+			} else if s.Live != live {
+				return Place{}, false
+			}
+			if s.Place == "" || found {
+				continue
+			}
+			first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
+			found = true
+		}
+	}
+	// No write is at a place a variable can hold, the writes kept the
+	// recorded value, or F could not read it: nothing this run wrote is r's.
+	if !found || live == r.Value || live == "" {
+		return Place{}, false
+	}
+	return first, true
+}
+
+// Named is e with each request place that holds one of vars (as its bind or
+// a use) naming that variable (Seen.Name), the first by name when two hold
+// one place. An echo is not named: it is its call's alone, and a later call
+// that reads its value back binds it there as a variable of the test
+// (ReadBack). e's own Seen is left as it was: the result holds a copy, with
+// no name at any other place.
+func Named(e Earlier, vars models.MockVariables) Earlier {
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	at := map[string]string{}
+	for _, name := range names {
+		v := vars[name]
+		if v.Echo {
+			continue
+		}
+		if v.Bind != "" && at[v.Bind] == "" {
+			at[v.Bind] = name
+		}
+		for _, u := range v.Use {
+			if at[u] == "" {
+				at[u] = name
+			}
+		}
+	}
+	e.Seen = append([]Seen(nil), e.Seen...)
+	for i, s := range e.Seen {
+		e.Seen[i].Name = ""
+		if s.Side == Request && s.Place != "" {
+			e.Seen[i].Name = at[s.Place]
+		}
+	}
+	return e
 }

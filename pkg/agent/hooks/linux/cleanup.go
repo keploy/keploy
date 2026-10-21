@@ -30,8 +30,11 @@ var keployBPFProgNames = map[string]ebpf.AttachType{
 	"k_getpeername4": ebpf.AttachCgroupInet4GetPeername,
 	"k_getpeername6": ebpf.AttachCgroupInet6GetPeername,
 	"k_sockops":      ebpf.AttachCGroupSockOps,
+	"k_sock_create":  ebpf.AttachCGroupInetSockCreate,
 	"k_udp4_sendmsg": ebpf.AttachCGroupUDP4Sendmsg,
 	"k_udp6_sendmsg": ebpf.AttachCGroupUDP6Sendmsg,
+	"k_udp4_recvmsg": ebpf.AttachCGroupUDP4Recvmsg,
+	"k_udp6_recvmsg": ebpf.AttachCGroupUDP6Recvmsg,
 	// Attached only under the proven switch (udpwatch.go).
 	"k_udp_bind4":        ebpf.AttachCGroupInet4Bind,
 	"k_udp_bind6":        ebpf.AttachCGroupInet6Bind,

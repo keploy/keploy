@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -117,6 +119,9 @@ type exactView struct {
 // for a replay session (view nil), off again at the next one.
 type exactState struct {
 	view atomic.Pointer[exactView]
+	// poolNames are the names the replay's scope table puts in a pool slice,
+	// of every key (SetPoolNames): nil until a replay sent one.
+	poolNames atomic.Pointer[map[string]struct{}]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -139,6 +144,8 @@ type exactState struct {
 	// recorded is where a miss's diagnosis reads the set's recordings the
 	// trees do not hold (SetRecordingSource).
 	recorded recordingSource
+	// before is where RecordedBefore reads what the trees do not hold.
+	before recordedBeforeSource
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -315,18 +322,6 @@ func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
 // exactView returns the view exact serving shows, nil when it is off.
 func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 
-// InPoolSlice reports whether the mock named name is in the claim key's pool
-// slice served now (ServeExactPool); known is false while exact serving is off,
-// a test is open, or no slice is served (integrations.PoolSlice).
-func (m *MockManager) InPoolSlice(name string) (in, known bool) {
-	v := m.exactView()
-	if v == nil || v.test != "" || v.pool == nil {
-		return false, false
-	}
-	_, in = v.pool[name]
-	return in, true
-}
-
 // ExactServing reports whether the manager serves each test exactly its own
 // mocks (KEPLOY_PROVEN, S12): every read shows one view, which changes as a
 // test begins and ends, and a consume the view refuses returns false. A
@@ -479,6 +474,61 @@ func (m *MockManager) consumedInSet(name string) bool {
 	return ok
 }
 
+// recordedBeforeSource is where RangeRecordedBefore reads the staged set's
+// recordings the trees do not hold, by request time (SetRecordedBefore).
+type recordedBeforeSource struct {
+	mu  sync.Mutex
+	src func(t time.Time, visit func(*models.Mock) bool) error
+}
+
+// SetRecordedBefore sets where RangeRecordedBefore reads the staged set's
+// recordings the trees do not hold (the agent's on-disk store of per-test
+// mocks: DiskMocks.RangeRecordedBefore, which decodes one at a time); nil for
+// none, when every one is in the trees. The agent sets it as it stages a
+// set.
+func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) {
+	m.exact.before.mu.Lock()
+	defer m.exact.before.mu.Unlock()
+	m.exact.before.src = src
+}
+
+// RangeRecordedBefore visits every recording of the staged set made before
+// t, by request time, of any kind (integrations.RecordedBeforeReader): those
+// in the manager's trees (StagedMocks), then those the agent keeps on disk
+// (SetRecordedBefore), each once, until visit returns false. A recording a
+// tree holds a copy of (the open test's own, loaded from disk) is visited
+// from the tree. The disk's are visited as the source decodes them, one at a
+// time: the manager keeps none of them, only which it visited.
+func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
+	seen := map[string]bool{}
+	id := func(mk *models.Mock) string {
+		return mk.Name + "\x00" + string(mk.Kind) + "\x00" + strconv.FormatInt(mk.Spec.ReqTimestampMock.UnixNano(), 10)
+	}
+	for _, mk := range m.StagedMocks() {
+		if mk == nil || !mk.Spec.ReqTimestampMock.Before(t) || seen[id(mk)] {
+			continue
+		}
+		seen[id(mk)] = true
+		if !visit(mk) {
+			return nil
+		}
+	}
+	m.exact.before.mu.Lock()
+	src := m.exact.before.src
+	m.exact.before.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	return src(t, func(mk *models.Mock) bool {
+		if mk == nil || !mk.Spec.ReqTimestampMock.Before(t) || seen[id(mk)] {
+			return true
+		}
+		return visit(mk)
+	})
+}
+
+var _ integrations.RecordedBeforeReader = (*MockManager)(nil)
+
 // StagedMocks is every mock staged in the manager's trees (per-test, session,
 // startup, in that order), whatever the open view shows: exact serving spends
 // a served mock without taking it out of its tree, so a recording served or
@@ -505,7 +555,26 @@ var _ integrations.StagedReader = (*MockManager)(nil)
 // pool view just before it answered as the test's mocks in flight when it
 // began (ServeExactPool's ahead): those count as answered, first, in the order
 // they did.
+//
+// It begins none of the test's variables: begun after, a call the test's own
+// mock answers between the two binds in no scope of the test's
+// (OpenExactTest).
 func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
+	m.serveExactTest(test, owned, false, nil)
+}
+
+// OpenExactTest opens test as ServeExactTest does, and begins its variables
+// (StartVariables) with given bound, in the same step (variables.Table.
+// StartOpening): no call its mocks answer binds before them. Opened in two
+// steps, a call of a set's first test answered between them bound in the
+// run's, which every later test of the set reads (NewVariableSet): another
+// test's value answered as this one's, a false pass.
+func (m *MockManager) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) {
+	m.serveExactTest(test, owned, true, given)
+}
+
+// serveExactTest is ServeExactTest, and, with begin, OpenExactTest.
+func (m *MockManager) serveExactTest(test string, owned []*models.Mock, begin bool, given []models.VariableBinding) {
 	answered, ahead := m.closeAhead()
 	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned))}
 	v.addOwned(owned)
@@ -530,10 +599,21 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 		}
 		v.carried[a.owned.Name] = true
 	}
-	m.exact.begun.add(m.stagingEpoch.Load(), owned)
-	m.exact.fired.Store(true)
-	m.exact.last.Store(v)
-	m.installExact(v)
+	install := func() {
+		m.exact.begun.add(m.stagingEpoch.Load(), owned)
+		m.exact.fired.Store(true)
+		m.exact.last.Store(v)
+		m.installExact(v)
+	}
+	if begin {
+		// What the test's calls in flight bound is read before the
+		// variables' lock is taken: the scope they bound in reads the run's
+		// of vars, and so locks vars first (variables.Table.ReadRunOf).
+		m.vars.StartOpening(install, given, m.carriedInto(v))
+		m.aheadVars.Reset()
+	} else {
+		install()
+	}
 	// Their consumes are flagged now, as this test's: the test before it was
 	// drained since (the replay drains it after the pool call), and this
 	// test's drain reads them. One this test does not own was answered for
@@ -603,6 +683,36 @@ func (v *exactView) addOwned(owned []*models.Mock) {
 		v.owned = append(v.owned, c)
 	}
 }
+
+// SetPoolNames installs the names the replay's scope table puts in a pool
+// slice, of every key (keploy mock replay under the proven switch: the mocks
+// its recording made while no test was open). InPool reads them; a replay
+// that sends an empty table installs an empty set, which says no mock is the
+// pool's.
+func (m *MockManager) SetPoolNames(names []string) {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n != "" {
+			set[n] = struct{}{}
+		}
+	}
+	m.exact.poolNames.Store(&set)
+}
+
+// InPool reports whether mk is the pool's by the scope table SetPoolNames
+// installed (integrations.PoolMembership); known is false until one was. A
+// mock is named once in a recording, and the table is the running
+// recording's.
+func (m *MockManager) InPool(mk *models.Mock) (pool, known bool) {
+	set := m.exact.poolNames.Load()
+	if set == nil || mk == nil {
+		return false, false
+	}
+	_, pool = (*set)[mk.Name]
+	return pool, true
+}
+
+var _ integrations.PoolMembership = (*MockManager)(nil)
 
 // ServeExactPool turns exact serving on, or keeps it on, with no test open:
 // the pool slice names, of key, answers beside the protocol-phase mocks.

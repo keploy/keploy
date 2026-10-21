@@ -304,7 +304,7 @@ func TestAConnectionInItsCloseHoldsWork(t *testing.T) {
 	unreadArrived(t, proxySide, 15)
 	closed := make(chan struct{})
 	go func() { _ = srv.Close(); close(closed) }()
-	for tracked.unread() != 0 || tracked.reading.Load() == 0 { // the close reads on through the layer
+	for inq(tracked) != 0 || tracked.reading.Load() == 0 { // the close reads on through the layer
 		select {
 		case <-closed:
 			t.Fatal("the close did not wait for the rest of a record not all in")
@@ -335,7 +335,7 @@ func TestADeadlineSetDuringTheClosesReadIsNoEndOfIt(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, app); close(sawEnd) }()
 	closed := make(chan struct{})
 	go func() { _ = srv.Close(); close(closed) }()
-	for tracked.unread() != 0 || tracked.reading.Load() == 0 { // the close reads on through the layer
+	for inq(tracked) != 0 || tracked.reading.Load() == 0 { // the close reads on through the layer
 		select {
 		case <-closed:
 			t.Fatal("the close did not wait for the rest of a record not all in")

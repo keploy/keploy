@@ -895,7 +895,9 @@ func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // mergeVariable is two declarations of one variable in one call as one: a
 // bind place from either, every use and answer place of both, an echo only
 // when both say so (a call another uses the value of is not its echo), and
-// the claim key's (Outside) when either says so.
+// the claim key's (Outside) when either says so. A clock read goes with its
+// bind, and holds for one both bind only when both say so
+// (models.MergeVariables).
 func mergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
 		a.Recorded, a.Echo = b.Recorded, b.Echo
@@ -904,7 +906,9 @@ func mergeVariable(a, b models.MockVariable) models.MockVariable {
 	}
 	a.Outside = a.Outside || b.Outside
 	if a.Bind == "" {
-		a.Bind = b.Bind
+		a.Bind, a.Clock = b.Bind, append([]models.ClockRead(nil), b.Clock...)
+	} else if b.Bind != "" && len(b.Clock) == 0 {
+		a.Clock = nil
 	}
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)

@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -90,6 +91,13 @@ type FormData struct {
 	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
 }
 
+// HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
+// recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one
+// form of the stream: Keploy Cloud receives and serves a test case as JSON and
+// edits its Body (the golden body), so frames carried beside it would go stale
+// and outvote the edit. A test case read from frames has a Body that splits back
+// into them (streamChunksToLegacyBody), and the replay compares a stream that
+// kept no frames with its Body, read as the app's stream is read.
 type HTTPResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
@@ -123,6 +131,24 @@ type HTTPResp struct {
 func (h HTTPResp) WithExactBody() HTTPResp {
 	h.exactBody = true
 	return h
+}
+
+// HTTPResponseHasNoBody reports whether a response carries no body whatever
+// its headers say (RFC 9112 §6.3): the answer to a HEAD, an interim 1xx, 204
+// or 304. Not a 101, nor a 2xx to a CONNECT: their message has no body either,
+// but the connection then carries another protocol, which is no next HTTP
+// message. It is the one rule for this, the proxy's framing and the replay's
+// stream detection alike.
+func HTTPResponseHasNoBody(reqMethod string, status int) bool {
+	return reqMethod == http.MethodHead || IsInterimHTTPStatus(status) || status == http.StatusNoContent || status == http.StatusNotModified
+}
+
+// IsInterimHTTPStatus reports whether code is an interim response's (RFC 9110
+// 15.2): a 1xx other than 101 (Switching Protocols). An interim response has
+// no body, and the final response to the same request comes after it on the
+// connection. After a 101 the connection speaks another protocol: it is final.
+func IsInterimHTTPStatus(code int) bool {
+	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
 }
 
 // MongoDB's BSON DateTime is an int64 count of milliseconds, so the default

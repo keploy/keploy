@@ -793,7 +793,7 @@ func TestAGroupsKeyIsRealAsItsFilesTests(t *testing.T) {
 	require.True(t, a.realKey("e2e/a.spec.ts/G/Inner"))
 	require.False(t, a.realKey("e2e/b.spec.ts/G"), "a group of a file with a test that runs at its recorded begin")
 	require.False(t, a.realKey("e2e/a.spec.tsx/G"), "another file whose path starts like it")
-	require.False(t, keyNames("e2e/a.spec.ts", ""), "a bare test name is no key's")
+	require.False(t, keyCoversPath("e2e/a.spec.ts", ""), "a bare test name is no key's")
 }
 
 // Under the proven switch, a claim of a key whose recorded tests all use

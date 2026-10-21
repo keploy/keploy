@@ -373,6 +373,22 @@ type StagedReader interface {
 	StagedMocks() []*models.Mock
 }
 
+// RecordedBeforeReader is an optional MockMemDb capability: it visits every
+// recording of the staged test set made before t (by request time), of any
+// kind, whether the store holds it in its trees or keeps it on disk (a test's
+// own recordings are staged only as that test opens), served or not, each
+// once, until visit returns false. A recording kept on disk is decoded for
+// visit alone and kept by no one: visit must not keep m (or any part of it a
+// cache would key by m) past its return, so that no reader holds every
+// recording at once. For the learn step's earlier places of a recording that
+// is the pool's, which may carry a value any recording made before it held:
+// nothing it visits is handed out, nor served. err is why the store cannot
+// read them all; the learn step then refuses, as it cannot tell where a value
+// came from.
+type RecordedBeforeReader interface {
+	RangeRecordedBefore(t time.Time, visit func(m *models.Mock) bool) error
+}
+
 // TestWindows is an optional MockMemDb capability: where the request time of
 // a recorded mock falls among the replay's test windows. The learn step tells
 // the open test's own mocks, the pool's and other tests' apart by it where
@@ -419,6 +435,27 @@ func InFlightIntoOpenTest(db MockMemDb, m *models.Mock) bool {
 	return ok && o.InFlightIntoOpenTest(m)
 }
 
+// PoolMembership is an optional MockMemDb capability: whether a mock is the
+// pool's by the replay's scope table (keploy mock replay under the proven
+// switch: a mock its recording made while no test was open, which the table
+// puts in a pool slice, not in a test's mapping). keploy mock replay sends no
+// recorded test windows (TestWindows does not know), and its mappings hold
+// each test's begin but not its end, so the table is the store's only word on
+// whose a mock is there. known is false until the replay sent the table.
+type PoolMembership interface {
+	InPool(m *models.Mock) (pool, known bool)
+}
+
+// InPool reports whether db says m is the pool's by the replay's scope table
+// (PoolMembership); known is false for a db that cannot tell.
+func InPool(db MockMemDb, m *models.Mock) (pool, known bool) {
+	p, ok := db.(PoolMembership)
+	if !ok {
+		return false, false
+	}
+	return p.InPool(m)
+}
+
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
 // the open test's own, which its mapping lists, rather than the pool's. A view
 // that scopes the pool to a test (`keploy mock replay`'s) knows; known is
@@ -428,17 +465,6 @@ func InFlightIntoOpenTest(db MockMemDb, m *models.Mock) bool {
 // (design v14 §7.2 step 10).
 type TestOwnership interface {
 	OwnedByTest(m *models.Mock) (owned, known bool)
-}
-
-// PoolSlice is an optional MockMemDb capability of the proven wire: while no
-// test is open under exact serving, the store serves the claim key's own slice
-// of the pool (its calls outside every test, by the record's mapping:
-// MockManager.ServeExactPool). InPoolSlice says whether the mock named name is
-// in the slice served now; known is false while a test is open or the store
-// serves no slice. It tells the learn step whose a pool mock is by the claim's
-// key, never by a time.
-type PoolSlice interface {
-	InPoolSlice(name string) (in, known bool)
 }
 
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks

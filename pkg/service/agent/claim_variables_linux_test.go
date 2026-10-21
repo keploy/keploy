@@ -21,6 +21,13 @@ type claimVarProxy struct {
 }
 
 func (p *claimVarProxy) ResetVariables() { p.mm.Variables().Reset() }
+
+// OpenExactTest opens a test with its variables in one step, as keploy's proxy
+// does (proxy.Proxy.OpenExactTest): the claim key's stay bound.
+func (p *claimVarProxy) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error {
+	p.mm.OpenExactTest(test, owned, given)
+	return nil
+}
 func (p *claimVarProxy) BeginClaimVariables(key string) {
 	p.claims = append(p.claims, key)
 	p.mm.Variables().StartOutside()

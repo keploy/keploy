@@ -11,10 +11,11 @@ import (
 
 // CaptureLosses counts every kind of capture loss the agent can see, each
 // only ever growing for its life (models.CaptureLosses): the processes the
-// kernel refused a place in the PID maps (the hooks), and the calls the proxy
+// kernel refused a place in the PID maps (the hooks), the calls the proxy
 // intercepted and could not record or mock (a TLS client that rejected
-// keploy's certificate, a TLS upgrade it could not make). Each later
-// source (design v14 §3.2) adds its kind here. With neither source able to
+// keploy's certificate, a TLS upgrade it could not make), and a downstream
+// build's own (coreAgent.RegisterCaptureLossReporter). Each later source
+// (design v14 §3.2) adds its kind here. With neither source able to
 // count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
 // could not be read is its own error.
 func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
@@ -24,6 +25,14 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	if d, ok := a.Hooks.(coreAgent.CaptureLossDrainer); ok && a.Hooks != nil {
 		if err := d.DrainCaptureLosses(ctx); err != nil {
 			return nil, err
+		}
+	}
+	extra := coreAgent.CaptureLossReporters()
+	for _, r := range extra {
+		if d, ok := r.(coreAgent.CaptureLossDrainer); ok {
+			if err := d.DrainCaptureLosses(ctx); err != nil {
+				return nil, err
+			}
 		}
 	}
 	var out models.CaptureLosses
@@ -37,6 +46,18 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	if hooks, ok := a.Hooks.(coreAgent.CaptureLossReporter); ok && a.Hooks != nil {
 		out = append(out, hooks.CaptureLosses()...)
 	}
+	// A downstream build's own capture's (coreAgent.RegisterCaptureLossReporter),
+	// unknown, never 0, while one of them cannot count.
+	for _, r := range extra {
+		out = append(out, r.CaptureLosses()...)
+		// Asked after the read, as the hooks are: a read that failed is
+		// this read's.
+		if blind, ok := r.(coreAgent.CaptureLossErrReporter); ok {
+			if err := blind.CaptureLossesErr(); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// A count of theirs that could not start is unknown, never 0: not
 	// models.ErrCaptureLossesUnsupported (an agent that counts nothing),
 	// which leaves every test as it was.
@@ -48,7 +69,9 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	refusals, err := a.PIDMapRefusals(ctx)
 	switch {
 	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):
-		if !proxyCounts {
+		// A downstream build's reporter counts too: with one, the agent
+		// counts something, whatever its hooks can.
+		if !proxyCounts && len(extra) == 0 {
 			return nil, fmt.Errorf("%w: %v", models.ErrCaptureLossesUnsupported, err)
 		}
 	case err != nil:
@@ -62,7 +85,33 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr)})
 		}
 	}
-	return out, nil
+	return mergeKinds(out), nil
+}
+
+// mergeKinds is l with one entry per kind, in the order each kind first comes:
+// two sources may count one kind (the hooks' kernel_skipped and a downstream
+// build's, the proxy's capture_dropped and its ring's), and a mark is read
+// by kind (models.CaptureLosses.Since keeps one count per kind), so the
+// counts are added, which only grow as each does, and the Whats joined.
+func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
+	at := make(map[models.CaptureLossKind]int, len(l))
+	var out models.CaptureLosses
+	for _, c := range l {
+		i, ok := at[c.Kind]
+		if !ok {
+			at[c.Kind] = len(out)
+			out = append(out, c)
+			continue
+		}
+		out[i].Count += c.Count
+		switch {
+		case out[i].What == "":
+			out[i].What = c.What
+		case c.What != "" && c.What != out[i].What:
+			out[i].What += "; " + c.What
+		}
+	}
+	return out
 }
 
 // pidMapCause names a PID map's latest refusal by the map and its errno, never
@@ -140,7 +189,10 @@ func sinceRun(now models.CaptureLosses, mark captureLossMark) models.CaptureLoss
 // is not judged as if it were. Hooks that cannot count at all (other
 // platforms' hooks, which release 1 does not prove) leave every test as it
 // was, as the PID-map check does for a session
-// (models.ErrPIDMapRefusalsUnsupported).
+// (models.ErrPIDMapRefusalsUnsupported). A kernel's count of skipped runs
+// is left out (models.CaptureLosses.WithoutEvidence): it is evidence only,
+// no verdict of a test's or of the run's; keploy record's own watch says
+// it.
 func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, test models.CaptureLosses) (lost, now models.CaptureLosses, err error) {
 	if errors.Is(mark.err, models.ErrCaptureLossesUnsupported) {
 		return nil, nil, nil
@@ -157,6 +209,7 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, te
 		// was lost, which is not "never counted".
 		return nil, nil, err
 	}
+	now = now.WithoutEvidence()
 	if test == nil {
 		test = mark.at
 	}

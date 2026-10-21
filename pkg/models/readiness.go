@@ -33,13 +33,13 @@ type AppReadiness struct {
 	// connects, process forks and execs.
 	Progress ReadyProgress `json:"progress"`
 	// CPU is the CPU time the application's processes have used, each its
-	// own, as it grew, but a restart's (a process running again what an
-	// earlier one of the set ran): a start that computes moves it, one done
-	// again does not.
+	// own, as it grew (a process its pid and start time): a start that
+	// computes moves it. keploy test weighs it until the start restarts
+	// (Progress.Restarts).
 	CPU time.Duration `json:"cpu"`
 	// CPUKnown says CPU could be read.
 	CPUKnown bool `json:"cpu_known"`
-	// LastRestart is the program of the last exec seen again.
+	// LastRestart is the program of the last restart (Progress.Restarts).
 	LastRestart string `json:"last_restart,omitempty"`
 }
 
@@ -73,7 +73,10 @@ type ReadyProgress struct {
 	Connects uint64 `json:"connects"`
 	Forks    uint64 `json:"forks"`
 	Execs    uint64 `json:"execs"`
-	// Restarts counts the execs seen again in the set (its program and
-	// command line run before): a start done again, no progress.
+	// Restarts counts the restarts in the set: an exec of a command line
+	// (its program, its command line's length and its first eight reads of
+	// it, 63 bytes each) whose every earlier run in the set exited
+	// (one run again while an earlier run lives, or exec'd again in place,
+	// is none).
 	Restarts uint64 `json:"restarts"`
 }

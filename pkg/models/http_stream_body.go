@@ -467,6 +467,16 @@ func encodeStreamChunksNode(chunks []HTTPStreamChunk) *yamlLib.Node {
 //
 // For all other streaming formats (NDJSON, plain text, binary), each chunk's
 // "raw" field value becomes one line.
+//
+// The body is the one form of the stream that JSON carries (StreamBody is not
+// JSON): a test case read from YAML and sent on as JSON (an upload to Keploy
+// Cloud, which keeps and serves it so) reaches the replay with this body
+// alone, which reads it as it reads the app's stream to compare the two, and
+// a recording of it splits it again (MarshalYAML). So the body is written as
+// a wire that splits back into the frames: an SSE value of more than one line
+// (an event's data lines, which a read joins) is one line of its field each,
+// a value that starts with a space gets the one space a read takes off, and a
+// last line that is blank ends in its newline.
 func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) string {
 	if len(chunks) == 0 {
 		return ""
@@ -483,7 +493,7 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 				key := strings.TrimSpace(field.Key)
 				if strings.EqualFold(key, "comment") {
 					// SSE comments start with ':' and have no key prefix.
-					lines = append(lines, ":"+field.Value)
+					lines = appendSSEFieldLines(lines, ":", field.Value, false)
 					continue
 				}
 				if key == "" {
@@ -500,7 +510,7 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 				if utf8.ValidString(name) {
 					name = strings.ToLower(name)
 				}
-				lines = append(lines, name+":"+field.Value)
+				lines = appendSSEFieldLines(lines, name+":", field.Value, true)
 			}
 			if len(lines) == 0 {
 				continue
@@ -522,8 +532,32 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 				lines = append(lines, chunk.Data[0].Value)
 			}
 		}
-		return strings.Join(lines, "\n")
+		body := strings.Join(lines, "\n")
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			// A last line that is blank (a text stream's) ends in the
+			// newline a read of lines reads it by: without it the read
+			// ends one line short.
+			body += "\n"
+		}
+		return body
 	}
+}
+
+// appendSSEFieldLines appends an SSE field's lines to lines: prefix (its
+// name and ':', or ':' alone for a comment) and each line of value, so a
+// value of more than one line never reads back as a field of its own, or as
+// the end of its frame (an empty line). A field the parse takes a space off
+// (spaced) keeps a value that starts with one: it is written after one more.
+// Only data lines join when read: a value of more than one line in a field of
+// another name, which no SSE wire carries, reads back as a field per line.
+func appendSSEFieldLines(lines []string, prefix, value string, spaced bool) []string {
+	for _, line := range strings.Split(value, "\n") {
+		if spaced && strings.HasPrefix(line, " ") {
+			line = " " + line
+		}
+		lines = append(lines, prefix+line)
+	}
+	return lines
 }
 
 // ── Body → Chunk parsers ───────────────────────────────────────────────────────

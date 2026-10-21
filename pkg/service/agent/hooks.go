@@ -24,6 +24,16 @@ type AgentHooks interface {
 	// "no anchor available" and should be treated as a no-op.
 	SetFreezeAnchor(ctx context.Context, anchor time.Time) error
 }
+
+// AppClockReader is an optional AgentHooks capability: AppClock is the
+// instant the app's clock showed at the real instant real, as the hooks moved
+// it (the enterprise time-freeze), false where they cannot tell. The agent
+// hands it to the proxy (coreAgent.AppClockSetter): the learn step reads a
+// call's clock reads in the call's own window on it.
+type AppClockReader interface {
+	AppClock(real time.Time) (time.Time, bool)
+}
+
 type AgentHook struct{}
 
 func (n *AgentHook) BeforeSimulate(ctx context.Context, t time.Time, testSetID string, tcName string) error {

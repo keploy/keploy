@@ -98,11 +98,12 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		if pid == 0 && provenswitch.On() {
 			// The proven wire serves a test exactly its own mocks
 			// (exact_proven.go): one with no mapping, or none in it, owns
-			// none, so any data-plane call of its own is a miss.
+			// none, so any data-plane call of its own is a miss. Its
+			// variables begin as it opens, in the same step, so no call its
+			// mocks answer binds before them (serveTestExactly).
 			if err := a.serveTestExactly(ctx, name); err != nil {
 				return a.refuseBegin(ctx, name, pid, at, took, err)
 			}
-			beginVariables()
 			return nil
 		}
 		a.scopeMu.Lock()

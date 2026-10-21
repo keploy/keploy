@@ -372,7 +372,7 @@ func (a *Agent) realKey(key string) bool {
 	defer a.scopeMu.Unlock()
 	real := false
 	for id, dests := range a.testReal {
-		if len(dests) > 0 && keyNames(key, testPath(id)) {
+		if len(dests) > 0 && keyCoversPath(key, testPath(id)) {
 			real = true
 			break
 		}
@@ -380,7 +380,7 @@ func (a *Agent) realKey(key string) bool {
 	if !real {
 		return false
 	}
-	atBegin := func(id string) bool { return keyNames(key, testPath(id)) && len(a.testReal[id]) == 0 }
+	atBegin := func(id string) bool { return keyCoversPath(key, testPath(id)) && len(a.testReal[id]) == 0 }
 	for id := range a.scopeTable {
 		if atBegin(id) {
 			return false
@@ -394,11 +394,11 @@ func (a *Agent) realKey(key string) bool {
 	return true
 }
 
-// keyNames reports whether a claim of key covers the tests whose ID's path is
+// keyCoversPath reports whether a claim of key covers the tests whose ID's path is
 // path: the key is that path (a test file, a package), or a part of it, below
 // it (path/<part>...: a harness that claims each describe group of a test file
 // on its own, so its beforeAll's calls are that group's).
-func keyNames(key, path string) bool {
+func keyCoversPath(key, path string) bool {
 	return path != "" && (key == path || strings.HasPrefix(key, path+"/"))
 }
 

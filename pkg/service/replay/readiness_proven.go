@@ -144,11 +144,6 @@ type provenReadiness struct {
 	// listen is its own. An earlier set's application, or what outlived it,
 	// is not this one.
 	since readyMark
-	// restartsMarked: since.restarts is the agent's count of restarts at the
-	// mark before keploy started the set's application (its later sets' too,
-	// kept alive), where the set's restarts begin; else they begin at the
-	// wait's first read.
-	restartsMarked bool
 	// stalledAt is where an earlier set's wait called this application, kept
 	// alive, stalled: read again with nothing moved since, not a count, it is
 	// the same stall, and the set is not judged at once rather than after
@@ -321,12 +316,76 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		}
 		return false, p.stalled(health, lastProbe, why, st, st.Progress.Restarts-min(st.Progress.Restarts, restarts0))
 	}
+	// onRead weighs a read's answer; done when the wait ends with it.
+	onRead := func(r readResult) (bool, string, bool) {
+		reading = false
+		if p.tally != nil {
+			p.tally.taken.Add(1)
+		}
+		if r.err == nil && r.st.ListenCount < p.since.listens {
+			r.err = fmt.Errorf("the agent was told %d listens, fewer than the %d it had when this set's application started: another agent, which cannot tell this set's listens from an earlier one's", r.st.ListenCount, p.since.listens)
+		}
+		switch {
+		case r.err != nil && ctx.Err() != nil:
+			return false, "", true
+		case errors.Is(r.err, models.ErrReadinessUnsupported) && !read:
+			// An agent that cannot watch (another platform's, an
+			// older one): a health URL decides alone, else the first
+			// test's address taking a connect.
+			p.agent = nil
+			if health == "" {
+				p.dial = true
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
+				startProbe()
+			} else {
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
+			}
+		case r.err != nil:
+			// No progress seen (a transient failure, the agent
+			// replaced mid-wait); one that never ends is a stall, and
+			// says what.
+			lastErr = r.err.Error()
+		default:
+			st, lastErr, read = r.st, "", true
+			if health == "" && resolved {
+				if port, ok := p.listened(st); ok {
+					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), first && wakes == 0)
+					return ready, why, true
+				}
+			}
+			mark = p.progressOf(st, restarts0)
+			if first {
+				first = false
+				if p.stalledAt != nil && health == "" && mark == *p.stalledAt {
+					// The same stall as an earlier set's: nothing moved
+					// since.
+					ready, why := stalled()
+					return ready, why, true
+				}
+				last, said = mark, mark
+			}
+		}
+		if pending {
+			pending = false
+			if done := weigh(); done {
+				ready, why := stalled()
+				return ready, why, true
+			}
+		}
+		return false, "", false
+	}
 	// takePort takes docker's answer: the port the first test's is in the
 	// container, and ready (done) if the application listens there already.
 	takePort := func(port uint16) (ready bool, why string, done bool) {
 		resolved, p.listen = true, port
 		if p.tally != nil {
 			p.tally.ports.Add(1)
+		}
+		// Judged on the latest read only: a read's answer already in, newer
+		// than st (its listen closed since, a probe), is weighed now, with
+		// the port, before any wake-up is.
+		if len(reads) > 0 {
+			return onRead(<-reads)
 		}
 		if health == "" && !p.dial && read {
 			if port, ok := p.listened(st); ok {
@@ -365,63 +424,21 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			}
 			lastProbe = r.what // the next probe at the next wake-up
 		case r := <-reads:
-			reading = false
-			if p.tally != nil {
-				p.tally.taken.Add(1)
-			}
-			if r.err == nil && r.st.ListenCount < p.since.listens {
-				r.err = fmt.Errorf("the agent was told %d listens, fewer than the %d it had when this set's application started: another agent, which cannot tell this set's listens from an earlier one's", r.st.ListenCount, p.since.listens)
-			}
-			switch {
-			case r.err != nil && ctx.Err() != nil:
-				return false, ""
-			case errors.Is(r.err, models.ErrReadinessUnsupported) && !read:
-				// An agent that cannot watch (another platform's, an
-				// older one): a health URL decides alone, else the first
-				// test's address taking a connect.
-				p.agent = nil
-				if health == "" {
-					p.dial = true
-					p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
-					startProbe()
-				} else {
-					p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
-				}
-			case r.err != nil:
-				// No progress seen (a transient failure, the agent
-				// replaced mid-wait); one that never ends is a stall, and
-				// says what.
-				lastErr = r.err.Error()
-			default:
-				st, lastErr, read = r.st, "", true
-				if health == "" && resolved {
-					if port, ok := p.listened(st); ok {
-						return p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), first && wakes == 0)
-					}
-				}
-				if first && !p.restartsMarked {
-					restarts0 = st.Progress.Restarts
-				}
-				mark = p.progressOf(st, restarts0)
-				if first {
-					first = false
-					if p.stalledAt != nil && health == "" && mark == *p.stalledAt {
-						// The same stall as an earlier set's: nothing moved
-						// since.
-						return stalled()
-					}
-					last, said = mark, mark
-				}
-			}
-			if pending {
-				pending = false
-				if done := weigh(); done {
-					return stalled()
-				}
+			if ready, why, done := onRead(r); done {
+				return ready, why
 			}
 		case _, ok := <-wake:
 			if !ok {
 				return false, ""
+			}
+			// A read's answer already in is weighed first: the last wake-up
+			// is weighed by it, not as one whose read never answered.
+			select {
+			case r := <-reads:
+				if ready, why, done := onRead(r); done {
+					return ready, why
+				}
+			default:
 			}
 			wakes++
 			if reading {
@@ -469,16 +486,18 @@ func takesConnect(ctx context.Context, addr string) (bool, string) {
 // again, and that is no progress. A listen the kernel had no room to report
 // is counted as one.
 //
-// A restart (an exec the kernel saw before in the set: a supervisor
-// re-exec'ing a crashing application) is no progress either, nor a connect,
-// fork or exec seen before (the kernel counts each the first time only),
-// nor a restart's CPU time (the agent leaves it out), nor, once the start
-// restarted (restarts since the set began, from restarts0), anyone's CPU
-// time: a supervisor's own, a little at each restart, is a loop going round,
-// not a start going on. A start that loops is not judged, saying how often
-// it restarted. The cost, not judged, never a false pass: a start that runs
-// one command line twice (a probe exec'd again) and then only computes, for
-// longer than the count.
+// A restart (the kernel's: a command line run again once every earlier run
+// of it in the set exited, a supervisor re-exec'ing a crashing application)
+// is no progress either, nor a connect, fork or exec seen before (the kernel
+// counts each the first time only; a command line run again while an
+// earlier run lives, a second worker, and one exec'd again in place by the
+// process running it, are neither progress nor a restart), nor, once the
+// start restarted (restarts since the set's mark, restarts0), anyone's CPU
+// time: a supervisor's own and the restarted process's, a little at each
+// round, are a loop going round, not a start going on. A start that loops is
+// not judged, saying how often it restarted. The cost, not judged, never a
+// false pass: a start that runs one command line again after it exited (a
+// probe run again) and then only computes, for longer than the count.
 func (p provenReadiness) progressOf(st models.AppReadiness, restarts0 uint64) progressMark {
 	listens := p.listenedAddresses(st)
 	if p.listenedAnywhere(st) {
@@ -498,6 +517,8 @@ func (p provenReadiness) progressOf(st models.AppReadiness, restarts0 uint64) pr
 func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st models.AppReadiness, was, now progressMark, stalls int, restarts uint64) {
 	waits := fmt.Sprintf("a listen on :%d, where the set's first test dials %s", p.listen, net.JoinHostPort(p.host, p.port))
 	switch {
+	case p.resolve != nil && p.listen == 0 && health == "" && !p.dial:
+		waits = fmt.Sprintf("a listen where the set's first test dials %s (docker has not said which container port that is)", net.JoinHostPort(p.host, p.port))
 	case health != "":
 		waits = sanitizeHealthURL(health) + "'s answer"
 	case p.dial:
@@ -660,7 +681,7 @@ func (p provenReadiness) stalled(health, lastProbe, lastErr string, st models.Ap
 		what = fmt.Sprintf("the application never answered %s", sanitizeHealthURL(health))
 	case p.dial:
 		what = fmt.Sprintf("%s, where the set's first test dials, never took a connect", net.JoinHostPort(p.host, p.port))
-	case p.listen == 0:
+	case p.resolve != nil && p.listen == 0:
 		// docker has not said which container port the first test's is.
 		what = fmt.Sprintf("the application never listened where the set's first test dials %s", net.JoinHostPort(p.host, p.port))
 	default:
@@ -1137,16 +1158,15 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 			return false, fmt.Sprintf("%v: before it started the set's application keploy could not read which listens its agent had seen already, so none tells this application's from an earlier one's: %s", errNotReadable, r.readySinceErr)
 		}
 		if r.readySince != nil {
+			// Its listens, and its restarts, begin at the mark before keploy
+			// started it: a restart before the wait's first read is one.
+			// With no mark (an application kept alive for the run, one that
+			// came up with its agent, compose) both begin at 0: the agent's
+			// every listen and restart is the application's.
 			p.since = *r.readySince
 		}
 	} else if health == "" {
 		p.stalledAt = r.readyStalledAt
-	}
-	if r.readySince != nil {
-		// Its restarts begin at the mark before keploy started it, a kept-
-		// alive application's later sets' too: one before the wait's first
-		// read is one.
-		p.since.restarts, p.restartsMarked = r.readySince.restarts, true
 	}
 	p.onStall = func(m progressMark) { r.readyStalledAt = &m }
 	p.tally = r.readyTally

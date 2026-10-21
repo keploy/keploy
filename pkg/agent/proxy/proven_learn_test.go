@@ -827,6 +827,53 @@ func TestSeedRecordedWindowsOfASetWithNoneForgetsThePrevious(t *testing.T) {
 	}
 }
 
+// The learn step's recorded windows follow the set boundary as the release
+// rule's do: a set's seed is installed by its staging call, with the trees it
+// describes, and a replay session that seeds none (keploy mock replay, which
+// sends its scope table instead) places no recording by the last session's,
+// on the same agent; a session's parked seed whose staging never came is not
+// the next one's.
+func TestANewSessionPlacesNoRecordingByTheLastSessionsWindows(t *testing.T) {
+	now := time.Now()
+	in := now.Add(time.Millisecond)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	// keploy test: reset, seed, stage.
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: now, End: now.Add(time.Second)}})
+	if _, known := mm.InRecordedTestWindow(in); known {
+		t.Fatal("a set's windows placed recordings before its staging call")
+	}
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if inside, known := mm.InRecordedTestWindow(in); !inside || !known {
+		t.Fatalf("after the set's staging: inside %v known %v", inside, known)
+	}
+	// keploy mock replay on the same agent: reset, stage, no windows.
+	mm.ResetForReplaySession()
+	if inside, known := mm.InRecordedTestWindow(in); !inside || !known {
+		t.Fatal("before the next session's staging the manager no longer describes the last set")
+	}
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if _, known := mm.InRecordedTestWindow(in); known {
+		t.Fatal("the last session's windows place a recording of a session that sent none")
+	}
+	// A session whose staging never came leaves its seed to no one.
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-2", Start: now, End: now.Add(time.Second)}})
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if _, known := mm.InRecordedTestWindow(in); known {
+		t.Fatal("an aborted session's windows were installed for the next one")
+	}
+	// A session that seeds its own places by them.
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-9", Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, now.Add(time.Hour))
+	if inside, known := mm.InRecordedTestWindow(in); inside || !known {
+		t.Fatalf("by the new session's windows: inside %v known %v", inside, known)
+	}
+}
+
 // Under exact serving (S12: keploy test's agent under the switch), what the
 // learn step learned as a variable rides the consumed mock's state, as on
 // every other door: persistLearned writes it onto the recording.
@@ -869,5 +916,124 @@ func TestALearnStepVariableRidesExactServing(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || len(consumed) != 1 || len(consumed[0].Variables) == 0 {
 			t.Fatalf("exact=%v: answered %d %s; consumed %+v: the learned echo does not ride the state", exact, resp.StatusCode, body, consumed)
 		}
+	}
+}
+
+// Staged as the agent stages a set under its default strict mock window: a
+// test's own recordings stay on disk until that test opens, and the trees
+// hold the pool. At start-up a pool refresh recorded between tests, whose
+// token test 1's own login answered, is refused as it is with every
+// recording in memory: the learn step reads every recording made before the
+// pool's, the on-disk ones too (MockManager.RecordedBefore over the agent's
+// DiskMocks), and the token came from the login.
+func TestAPoolMocksEarlierPlacesAreReadFromTheDiskToo(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	base := time.Now().Add(-time.Hour)
+	w1 := models.TestWindow{TestCase: "test-1", Start: base.Add(time.Minute), End: base.Add(2 * time.Minute)}
+	w2 := models.TestWindow{TestCase: "test-2", Start: base.Add(4 * time.Minute), End: base.Add(5 * time.Minute)}
+	login := r3Mock("mock-1", w1.Start.Add(time.Second), "POST", "/v1/login", `{"user":"u-7"}`, `{"token":"tok-0c41b2"}`)
+	login.TestModeInfo.Lifetime = models.LifetimePerTest
+	refresh := r3Mock("mock-2", base.Add(3*time.Minute), "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, `{"ok":true}`)
+	refresh.DeriveLifetime()
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	if err := disk.Add(login); err != nil {
+		t.Fatal(err)
+	}
+	disk.Finalize()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
+	mm.SetMocksWithWindow(nil, []*models.Mock{refresh}, models.BaseTime, time.Now())
+	mm.SetRecordedBefore(disk.RangeRecordedBefore)
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-2"})
+	body := `{"token":"tok-9d8e7f"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /v1/sessions/refresh HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code == http.StatusOK && got == `{"ok":true}` {
+		t.Fatalf("the refresh was answered from the pool's recording, its token learned as noise: %+v", r3States(mm)["mock-2"].ReqBodyNoise)
+	}
+	if noise := r3States(mm)["mock-2"].ReqBodyNoise; len(noise) != 0 {
+		t.Fatalf("learned %v onto the pool's recording", noise)
+	}
+}
+
+// A test's own call reads its earlier places in its own test, as before: a
+// row of another test the agent keeps on disk is no earlier place of it, so
+// a value that coincides with one is still learned.
+func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	base := time.Now().Add(-time.Hour)
+	w1 := models.TestWindow{TestCase: "test-1", Start: base.Add(time.Minute), End: base.Add(2 * time.Minute)}
+	w2 := models.TestWindow{TestCase: "test-2", Start: base.Add(4 * time.Minute), End: base.Add(5 * time.Minute)}
+	other := r3Mock("mock-1", w1.Start.Add(time.Second), "GET", "/v1/notes", "", `{"note":"n-0c41b2"}`)
+	other.TestModeInfo.Lifetime = models.LifetimePerTest
+	own := r3Mock("mock-5", w2.Start.Add(time.Second), "POST", "/v1/notes", `{"note":"n-0c41b2"}`, `{"ok":true}`)
+	own.TestModeInfo.Lifetime = models.LifetimePerTest
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, m := range []*models.Mock{other, own} {
+		if err := disk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
+	mm.SetMocksWithWindow([]*models.Mock{own}, nil, w2.Start, w2.End)
+	mm.SetRecordedBefore(disk.RangeRecordedBefore)
+	mm.ServeExactTest("test-2", []*models.Mock{own})
+	p.ContinueTestErrorCapture()
+	body := `{"note":"n-9d8e7f"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /v1/notes HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code != http.StatusOK || got != `{"ok":true}` {
+		t.Fatalf("the test's own call was refused (%d %s): another test's row on disk read as its earlier place", code, got)
+	}
+}
+
+// Through the HTTP integration, the call's window ends when decodeHTTP had
+// the request whole: a start-up pool call's clock read in it is learned as
+// noise, where the lead alone (its minute and second words of the
+// receive's Date header) refuses it.
+func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+	rec := time.Now().Add(-time.Hour).Truncate(time.Second)
+	receive := r3Mock("mock-0", rec, "POST", "/queue/receive", `{"n":10}`, `{"Messages":[{"Body":"m-1"}]}`)
+	receive.Spec.HTTPResp.Header["Date"] = rec.Format(http.TimeFormat)
+	event := r3Mock("mock-1", rec.Add(4*time.Millisecond), "POST", "/v1/events", `{"processed_at":"`+iso(rec.Add(3*time.Millisecond))+`"}`, `{"ok":true}`)
+	event.DeriveLifetime()
+	receive.DeriveLifetime()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: rec.Add(time.Minute), End: rec.Add(2 * time.Minute)}})
+	mm.SetMocksWithWindow(nil, []*models.Mock{receive, event}, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-1"})
+	served := time.Now()
+	offset := rec.Add(learn.FullRoundLead + 2*time.Second).Sub(served)
+	p.learnTracker.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+	p.learnTracker.ServedMockAt(receive, served)
+	body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code != http.StatusOK || got != `{"ok":true}` {
+		t.Fatalf("answered %d %s; want the pool recording, its clock read learned", code, got)
+	}
+	if noise := r3States(mm)["mock-1"].ReqBodyNoise; noise["body.processed_at"] == nil {
+		t.Fatalf("learned %v; want body.processed_at", noise)
 	}
 }

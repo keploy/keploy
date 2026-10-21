@@ -32,6 +32,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -1083,5 +1084,24 @@ func assertOneOwnStage(t *testing.T, recs []bootStageRecord, name string) {
 	}
 	if r.beganOn != r.endOn || r.beganOn == goroutineID() {
 		t.Fatalf("%q was begun on goroutine %d and ended on %d (the test is %d): want both on the goroutine doing the work", name, r.beganOn, r.endOn, goroutineID())
+	}
+}
+
+// The app clock the agent hands the proxy is the one its learn step reads a
+// call's window on.
+func TestSetAppClockIsTheLearnStepsClock(t *testing.T) {
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	rec := time.Date(2026, 10, 20, 15, 49, 55, 0, time.UTC)
+	prev := &models.Mock{Name: "mock-0", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec}}
+	paired := &models.Mock{Name: "mock-4", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: rec.Add(4 * time.Millisecond)}}
+	served := time.Date(2026, 10, 20, 15, 50, 37, 0, time.UTC)
+	p.learnTracker.ServedMockAt(prev, served)
+	if w := p.learnTracker.CallWindow(paired, []*models.Mock{prev}, served.Add(time.Millisecond)); w != nil {
+		t.Fatalf("a window before the app's clock was set: %+v", w)
+	}
+	p.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(21 * time.Second), true })
+	w := p.learnTracker.CallWindow(paired, []*models.Mock{prev}, served.Add(time.Millisecond))
+	if w == nil || !w.F.From.Equal(served.Add(21*time.Second)) || !w.F.To.Equal(served.Add(21*time.Second+time.Millisecond)) {
+		t.Fatalf("window %+v; want F read on the app clock the agent handed the proxy", w)
 	}
 }

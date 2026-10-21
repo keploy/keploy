@@ -40,7 +40,9 @@ import (
 // otherwise (arm64 before 6.0) the syscall tracepoints, which know no peer:
 // there the agent finds who listens on the path. An owner that cannot be
 // found, a path the kernel could not read, and a report that found no room
-// are each counted: unknown is never safe.
+// are each counted: unknown is never safe. A kernel that loads the report
+// neither way gets one WARN and no report (startUnixConn): Unix sockets are
+// not supported.
 
 // unixConnectEvent mirrors struct unix_connect_event (keploy/ebpf k_unix.h).
 type unixConnectEvent struct {
@@ -110,14 +112,13 @@ func unixAllowed(p string) bool {
 }
 
 // unixConn is the loaded report: its object, links and reader, and what it
-// counted. off says why it is not loaded ("" when it is).
+// counted.
 type unixConn struct {
 	coll   *ebpf.Collection
 	links  []link.Link
 	rd     *ringbuf.Reader
 	lost   *ebpf.Map
 	losses captureloss.Counter
-	off    string
 	// fallback: the syscall tracepoints report, not fexit (no trampoline);
 	// why is the attach error that chose it.
 	fallback bool
@@ -169,7 +170,8 @@ var (
 // loadUnixConn loads unixconn beside objs, sharing its maps, and attaches its
 // fexit programs; where those cannot load or attach (arm64 before 6.0 has no
 // BPF trampoline), it loads unixconn again without them and attaches its
-// syscall tracepoints instead, which every kernel has.
+// syscall tracepoints instead. A kernel whose verifier refuses those too
+// (arm64 5.19) loads neither: startUnixConn says so, and starts no report.
 func loadUnixConn(logger *zap.Logger, objs *bpfObjects) (*unixConn, error) {
 	if unixFallbackOnly {
 		u, err := loadUnixConnWith(logger, objs, true)
@@ -454,8 +456,11 @@ func (u *unixConn) snapshot() models.CaptureLosses {
 	return out
 }
 
-// isMember reports whether tgid is a process of the application, as
-// pid_filter decides it: a target, not excluded.
+// isMember reports whether tgid is a process of the application: a target,
+// not excluded, as the PID maps hold it. Unlike pid_filter it does not
+// compare start times (pid_start_times), so an entry a dead process left
+// under the TGID counts: Unix sockets are not supported, and this owner
+// check is left as it was.
 func (h *Hooks) isMember(tgid uint32) bool {
 	h.objectsMutex.RLock()
 	defer h.objectsMutex.RUnlock()
@@ -466,24 +471,27 @@ func (h *Hooks) isMember(tgid uint32) bool {
 	return h.objects.ExcludedPids == nil || h.objects.ExcludedPids.Lookup(tgid, &v) != nil
 }
 
+// loadUnixConnFn is loadUnixConn, swapped by tests.
+var loadUnixConnFn = loadUnixConn
+
 // startUnixConn loads the report and watches it until ctx ends, under the
 // proven switch only: nothing reads it without the switch (as with the
-// application's connection count, markProxyListener), so nothing attaches. A
-// kernel that can load it neither way gets a WARN, once, and the report stays
-// off: what it would count is unknown, a standing unix_unseen (unixLosses).
+// application's connection count, markProxyListener), so nothing attaches.
+// The report is a detector: keploy does not support Unix sockets, and a test
+// it sees make such a call is said so, not judged. A kernel that can load it
+// neither way gets one WARN, and no report: keploy cannot see such calls
+// there, and judges every test as it would without one.
 func (h *Hooks) startUnixConn(ctx context.Context) {
 	if !provenswitch.On() {
 		return
 	}
 	h.objectsMutex.RLock()
-	u, err := loadUnixConn(h.logger, &h.objects)
+	u, err := loadUnixConnFn(h.logger, &h.objects)
 	h.objectsMutex.RUnlock()
 	if err != nil {
-		h.logger.Warn("keploy cannot see the application's calls over Unix sockets on this kernel: a call over one to a dependency is neither recorded nor mocked, so no test is judged from now on",
-			zap.Error(err), zap.String("next_step", "report this error to keploy: nothing done to the application or its dependencies (reaching them over TCP included) changes it"))
-		h.unixMu.Lock()
-		h.unix = &unixConn{off: err.Error()}
-		h.unixMu.Unlock()
+		h.logger.Warn("keploy could not load its report of the application's calls over Unix sockets, and Unix sockets are not supported: a call over one is neither recorded nor mocked, and no test is said to have made one",
+			zap.Error(err), zap.String("kernel", kernelName()),
+			zap.String("next_step", "on a kernel keploy supports (amd64 5.10 or later, arm64 6.6 or later) the report loads: report this error to keploy"))
 		return
 	}
 	if u.fallback {
@@ -497,8 +505,12 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 		defer utils.Recover(h.logger)
 		u.watch(h.logger, h.isMember)
 	}()
+	// Its programs' skipped runs are read with the hooks' (skipwatch.go):
+	// the counts as it closes stay counted.
+	h.skipsWatch(u.coll.Programs)
 	go func() {
 		<-ctx.Done()
+		h.skipsForget(u.coll.Programs)
 		u.close()
 	}()
 }
@@ -513,19 +525,16 @@ func kernelName() string {
 }
 
 // unixLosses are the application's AF_UNIX connects to sockets no member of
-// it owns (CaptureLosses), and, while keploy cannot see them (a report that
-// could not load, or stopped), a standing unix_unseen: every test from then
-// on is not judged, as one that made such a call is. Empty with the report
-// not started (the switch off).
+// it owns (CaptureLosses), and, once the report stopped (it loaded, and
+// then could not read on), a standing unix_unseen: every test from then on
+// is not judged, as one that made such a call is. Empty with the report not
+// started (the switch off, or a kernel that loads it neither way).
 func (h *Hooks) unixLosses() models.CaptureLosses {
 	h.unixMu.Lock()
 	u := h.unix
 	h.unixMu.Unlock()
 	if u == nil {
 		return nil
-	}
-	if u.off != "" {
-		return models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: u.off}}
 	}
 	out := u.snapshot()
 	if u.drain != nil {
@@ -547,7 +556,7 @@ func (h *Hooks) DrainCaptureLosses(ctx context.Context) error {
 	u := h.unix
 	h.unixMu.Unlock()
 	// A report that stopped is said by unixLosses (unix_unseen), not here.
-	if u != nil && u.off == "" && u.rd != nil {
+	if u != nil && u.rd != nil {
 		if err := u.drain.wait(ctx, u.rd.Flush); err != nil && u.drain.failure() == nil {
 			return fmt.Errorf("wait for keploy's report of the application's calls over Unix sockets: %w", err)
 		}
@@ -565,10 +574,12 @@ func (h *Hooks) DrainCaptureLosses(ctx context.Context) error {
 
 // CaptureLossesErr is why a count the hooks keep under the proven switch
 // cannot be told: the watch on the application's non-DNS UDP that could not
-// move its epoch on or read a report (udpwatch.go). What it would count is
-// unknown, never 0, so the agent reads no capture losses at all while it is
-// (Agent.CaptureLosses). (A Unix-socket report keploy cannot see through is
-// a standing unix_unseen instead: unixLosses.)
+// move its epoch on or read a report (udpwatch.go), or the count of
+// processes k_sock_create could not classify that could not be read
+// (skipwatch.go; a skip count that cannot be read is evidence missed, no
+// error). What it would count is unknown, never 0, so the agent reads no
+// capture losses at all while it is (Agent.CaptureLosses). (A Unix-socket
+// report that stopped is a standing unix_unseen instead: unixLosses.)
 func (h *Hooks) CaptureLossesErr() error {
 	h.udpMu.Lock()
 	w := h.udp
@@ -576,6 +587,14 @@ func (h *Hooks) CaptureLossesErr() error {
 	if w != nil {
 		if err := w.failure(); err != nil {
 			return fmt.Errorf("keploy cannot tell whether the application's UDP got a reply from a real destination: %w", err)
+		}
+	}
+	h.objectsMutex.RLock()
+	s := h.skips
+	h.objectsMutex.RUnlock()
+	if s != nil {
+		if err := s.err(); err != nil {
+			return fmt.Errorf("keploy cannot tell whether it could classify every process it saw make a socket: %w", err)
 		}
 	}
 	return nil

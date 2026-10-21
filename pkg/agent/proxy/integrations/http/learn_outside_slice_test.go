@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -11,9 +10,9 @@ import (
 )
 
 // agentDb is learnDb as the agent's store is in keploy mock replay's round F: it knows no recorded test
-// window (mock replay seeds none, so integrations.TestWindows answers known false), and while no test is
-// open it serves the claim key's own pool slice (MockManager.ServeExactPool), which it names
-// (integrations.PoolSlice).
+// window (mock replay seeds none, so integrations.TestWindows answers known false), and the replay's scope
+// table names which mocks are the pool's (integrations.PoolMembership); while no test is open the store
+// serves the claim key's own pool slice (MockManager.ServeExactPool).
 type agentDb struct {
 	*learnDb
 	slice map[string]bool
@@ -22,12 +21,7 @@ type agentDb struct {
 
 func (d *agentDb) InRecordedTestWindow(time.Time) (bool, bool)              { return false, false }
 func (d *agentDb) SameRecordedTestWindow(time.Time, time.Time) (bool, bool) { return false, false }
-func (d *agentDb) InPoolSlice(name string) (bool, bool) {
-	if d.tr.Open() {
-		return false, false
-	}
-	return d.slice[name], true
-}
+func (d *agentDb) InPool(m *models.Mock) (bool, bool)                       { return d.slice[m.Name], true }
 
 // atgr1 round F: a spec's beforeAll creates an app named after Date.now; keploy mock replay seeds no
 // recorded test window, so the learn step could not tell the beforeAll's recording was the claim key's and
@@ -35,7 +29,7 @@ func (d *agentDb) InPoolSlice(name string) (bool, bool) {
 // outside every test is, is the claim key's pool slice the store serves, by the record's mapping, never a
 // time: the beforeAll's call is paired there, and the key's test that lists the roles is answered with
 // this run's name.
-func TestLearnMatchABeforeAllCallIsTheClaimKeysByItsPoolSlice(t *testing.T) {
+func TestLearnMatchABeforeAllCallIsPairedAsThePools(t *testing.T) {
 	h, n, opts := learnOn(t)
 	opts.LearnPool = true
 	tr := learn.NewTracker()
@@ -58,21 +52,6 @@ func TestLearnMatchABeforeAllCallIsTheClaimKeysByItsPoolSlice(t *testing.T) {
 	}
 	if out, miss, _ := h.learnMatch(ctx, calls[2], db, n, opts); out == nil || miss != nil {
 		t.Fatalf("the assign: %+v", miss)
-	}
-}
-
-// A pool mock outside the claim key's slice (another key's beforeAll) is still no one's to pair.
-func TestLearnMatchAnotherKeysPoolCallIsNotPaired(t *testing.T) {
-	h, n, opts := learnOn(t)
-	opts.LearnPool = true
-	tr := learn.NewTracker()
-	tr.NewKey("e2e/other.spec.ts")
-	ctx := learn.WithTracker(context.Background(), tr)
-	base, _ := roleDb(tr)
-	db := &agentDb{learnDb: base, slice: map[string]bool{}, tr: tr}
-	out, miss, _ := h.learnMatch(ctx, roleCalls(fRole)[0], db, n, opts)
-	if out != nil || miss == nil || !strings.Contains(miss.res.Why, "not one the learn step may learn onto") {
-		t.Fatalf("another key's pool call: served %v miss %+v", out, miss)
 	}
 }
 

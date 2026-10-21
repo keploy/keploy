@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -579,6 +580,117 @@ func TestHTTPResp_YAML_WithExactBodyKeepsAStreamsBytes(t *testing.T) {
 			// A test case's is written as chunks, as before.
 			text, got = roundTrip(t, in)
 			assert.NotEmpty(t, got.StreamBody, "a test case's stream is no longer chunked:\n%s", text)
+		})
+	}
+}
+
+// framesData is the fields of each frame, what a stream is compared by (a
+// frame's TS is when it came).
+func framesData(chunks []HTTPStreamChunk) [][]HTTPStreamDataField {
+	out := make([][]HTTPStreamDataField, 0, len(chunks))
+	for _, c := range chunks {
+		out = append(out, c.Data)
+	}
+	return out
+}
+
+// throughYAML is resp written as YAML and read back, as a recording keeps it.
+func throughYAML(t *testing.T, resp HTTPResp) HTTPResp {
+	t.Helper()
+	out, err := yamlLib.Marshal(resp)
+	require.NoError(t, err)
+	var back HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &back))
+	return back
+}
+
+// carriedAsJSON is resp, recorded as frames and read back from YAML, after a
+// trip through JSON: its body, the one form of the stream JSON carries.
+func carriedAsJSON(t *testing.T, resp HTTPResp) HTTPResp {
+	t.Helper()
+	recorded := throughYAML(t, resp)
+	require.Equal(t, framesData(resp.StreamBody), framesData(recorded.StreamBody), "YAML keeps the frames")
+
+	j, err := json.Marshal(recorded)
+	require.NoError(t, err)
+	var carried HTTPResp
+	require.NoError(t, json.Unmarshal(j, &carried))
+	require.Empty(t, carried.StreamBody, "JSON carries the body alone: one form of the stream, which an edit of the body (api-server's golden body) cannot leave stale")
+	require.Equal(t, recorded.Body, carried.Body)
+	return carried
+}
+
+// The flat body a recording's SSE frames read back as is the SSE wire of
+// those frames: a test case carried as JSON, which carries that body alone,
+// is recorded again (a cloud test case written to YAML) with the frames its
+// recording kept. An event's data lines, a blank one among them, a value that
+// starts with a space, and a comment are no other event, or field, read back
+// from it.
+func TestAnSSEStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
+	frames := []HTTPStreamChunk{
+		{Data: []HTTPStreamDataField{{Key: "id", Value: "1"}, {Key: "event", Value: "log"}, {Key: "data", Value: "line one\nline two"}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: " indented"}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: "before\n\nafter"}}},
+		{Data: []HTTPStreamDataField{{Key: "comment", Value: " keepalive"}}},
+		{Data: []HTTPStreamDataField{{Key: "event", Value: "tick"}, {Key: "data", Value: ""}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: "  two spaces\n one"}}},
+	}
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "text/event-stream"},
+		StreamBody: frames,
+	}
+	carried := carriedAsJSON(t, resp)
+	assert.Equal(t, strings.Join([]string{
+		"id:1\nevent:log\ndata:line one\ndata:line two",
+		"data:  indented",
+		"data:before\ndata:\ndata:after",
+		": keepalive",
+		"event:tick\ndata:",
+		"data:   two spaces\ndata:  one",
+	}, "\n\n"), carried.Body, "a data line each, a comment as a comment")
+	assert.Equal(t, framesData(frames), framesData(throughYAML(t, carried).StreamBody), "body: %q", carried.Body)
+}
+
+// The same for a stream of lines: NDJSON, whose blank lines are keepalives,
+// and a text stream, whose blank lines are lines, a last one too. A recording
+// keeps a text/plain body whole (recordedFramesOf): its frames are an older
+// keploy's, and carried as JSON it is no stream (HTTPStreamOf, not framed),
+// compared whole by this body. So the body read as lines is those frames, and
+// is the wire they were read from, a blank last line ending in its newline.
+func TestALineStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
+	raw := func(vs ...string) []HTTPStreamChunk {
+		out := make([]HTTPStreamChunk, 0, len(vs))
+		for _, v := range vs {
+			out = append(out, HTTPStreamChunk{Data: []HTTPStreamDataField{{Key: "raw", Value: v}}})
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name, contentType, wire string
+		frames                  []HTTPStreamChunk
+	}{
+		{"ndjson", "application/x-ndjson", "{\"a\":1}\n{\"b\":\"x y\"}", raw(`{"a":1}`, `{"b":"x y"}`)},
+		{"text", "text/plain", "first\n\nthird", raw("first", "", "third")},
+		{"text ending in a blank line", "text/plain", "first\n\nlast\n\n", raw("first", "", "last", "")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			resp := HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": c.contentType},
+				StreamBody: c.frames,
+			}
+			carried := carriedAsJSON(t, resp)
+			assert.Equal(t, c.wire, carried.Body)
+			format := httpStreamFormatOf(c.contentType)
+			assert.Equal(t, framesData(c.frames), framesData(SplitStreamBody(format, carried.Body)), "body: %q", carried.Body)
+			again := throughYAML(t, carried)
+			if recordedFramesOf(c.contentType) == HTTPStreamNone {
+				assert.Empty(t, again.StreamBody, "a recording keeps a %s body whole", c.contentType)
+				assert.Equal(t, carried.Body, again.Body)
+				return
+			}
+			assert.Equal(t, framesData(c.frames), framesData(again.StreamBody), "body: %q", carried.Body)
 		})
 	}
 }

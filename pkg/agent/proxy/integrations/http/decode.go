@@ -67,6 +67,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			arrived := time.Now()
 			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
 
 			//Parse the request buffer
@@ -98,11 +99,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			input := &req{
-				method: request.Method,
-				url:    request.URL,
-				header: request.Header,
-				body:   reqBody,
-				raw:    reqBuf,
+				method:  request.Method,
+				url:     request.URL,
+				header:  request.Header,
+				body:    reqBody,
+				raw:     reqBuf,
+				arrived: arrived,
 			}
 
 			// Under the proven switch the request's destination is read once,
