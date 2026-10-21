@@ -49,11 +49,19 @@ func newClockRigOf(tasks map[int]taskTime, bound time.Duration, disks diskMark) 
 }
 
 // newClockRigWedged is newClockRigOf, taking a thread standing in the kernel
-// for wedge for wedged.
+// for wedge for wedged. Its credit of the waits in the kernel in all is far
+// beyond what its tests look at, so they pin the rules of one stretch; a
+// stop's is wedge (newClockRigCredited).
 func newClockRigWedged(tasks map[int]taskTime, bound, wedge time.Duration, disks diskMark) *clockRig {
+	return newClockRigCredited(tasks, bound, wedge, time.Hour, disks)
+}
+
+// newClockRigCredited is newClockRigWedged, crediting the waits in the
+// kernel, since the processes' last progress, for credit in all.
+func newClockRigCredited(tasks map[int]taskTime, bound, wedge, credit time.Duration, disks diskMark) *clockRig {
 	r := &clockRig{wall: time.Unix(1000, 0), own: &stall.ManualClock{}, tasks: tasks, ok: true,
 		disks: disks, disksOK: true, below: map[string][]string{}, belowRead: map[string]int{}}
-	r.c = newExitClock(nil, bound, wedge, r.own, func() time.Time { return r.wall },
+	r.c = newExitClock(nil, bound, wedge, credit, r.own, func() time.Time { return r.wall },
 		func([]Reached) (map[int]taskTime, bool) { return maps.Clone(r.tasks), r.ok },
 		func() (diskMark, bool) { return maps.Clone(r.disks), r.disksOK },
 		func(name string) []string { r.belowRead[name]++; return r.below[name] })
@@ -694,6 +702,92 @@ func TestTheExitClockTakesAWaitInTheKernelOnStorageThatServesForAWait(t *testing
 	})
 }
 
+// A thread whose waits in the kernel each end, making no progress between
+// them, has a turn on a CPU between any two, and stands in the kernel for no
+// stretch: a wait that ends does not say the next is not the same. Its waits
+// there are credited, since the processes' last progress, for no more than
+// the kernel's hung-task time of the time at stake in all, the stop's, of
+// whichever of their threads; then every thread's time there counts, as
+// while storage serves none, until their next progress.
+func TestTheExitClockCreditsWaitsInTheKernelForTheHungTaskTimeInAll(t *testing.T) {
+	const w = 100 * time.Millisecond
+	const wedge = 3 * w
+	held := taskTime{ran: time.Millisecond, slices: 3, blocked: true, seen: true}
+	// A stop's clock: its credit in all is its hung-task time.
+	stop := func(tasks map[int]taskTime) *clockRig {
+		return newClockRigCredited(tasks, wedge, wedge, wedge, diskMark{"259:0": {}})
+	}
+	// turn is a thread's turn on a CPU between two of its waits in the
+	// kernel, too short to count here: no stretch of it stands.
+	turn := func(tid int, blocked bool) func(map[int]taskTime) {
+		return func(m map[int]taskTime) {
+			adds(tid, 0, 0, 1, false)(m)
+			th := m[tid]
+			th.blocked = blocked
+			m[tid] = th
+		}
+	}
+	t.Run("waits that each end are credited for the hung-task time, and count after", func(t *testing.T) {
+		r := stop(map[int]taskTime{1: held})
+		for i, want := range []time.Duration{0, 0, 0, w, w, w} {
+			r.serves(w)
+			if got := r.look(w, w, turn(1, true)); got != want {
+				t.Fatalf("look %d of a thread in the kernel in turns, storage serving, added %v, want %v", i, got, want)
+			}
+		}
+	})
+	t.Run("the credit starts again at the processes' progress, and only there", func(t *testing.T) {
+		r := stop(map[int]taskTime{1: held})
+		for range 4 {
+			r.serves(w)
+			r.look(w, w, turn(1, true))
+		}
+		r.c.progressed()
+		for i, want := range []time.Duration{0, 0, 0, w} {
+			r.serves(w)
+			if got := r.look(w, w, turn(1, true)); got != want {
+				t.Fatalf("look %d after the processes' progress added %v, want %v", i, got, want)
+			}
+		}
+	})
+	t.Run("the credit is the processes', not one thread's", func(t *testing.T) {
+		// Each is in the kernel at every other look, asleep (S) between:
+		// counted by each thread's own waits, each would have the
+		// hung-task time of credit, twice the stop's.
+		r := stop(map[int]taskTime{1: held, 2: {ran: time.Millisecond, slices: 3, seen: true}})
+		for i, want := range []time.Duration{0, 0, 0, w, w, w} {
+			r.serves(w)
+			step := func(m map[int]taskTime) { turn(1, i%2 == 1)(m); turn(2, i%2 == 0)(m) }
+			if got := r.look(w, w, step); got != want {
+				t.Fatalf("look %d of two threads in the kernel in turns, storage serving, added %v, want %v", i, got, want)
+			}
+		}
+	})
+	t.Run("the credit is spent by no more than keploy could run", func(t *testing.T) {
+		r := stop(map[int]taskTime{1: held})
+		for i := range 12 {
+			r.serves(w)
+			if got := r.look(w, w/4, turn(1, true)); got != 0 {
+				t.Fatalf("look %d added %v, with %v of credit spent, want none", i, got, time.Duration(i)*w/4)
+			}
+		}
+		r.serves(w)
+		if got := r.look(w, w/4, turn(1, true)); got != w/4 {
+			t.Fatalf("the look after the credit was spent added %v, want the %v keploy could run", got, w/4)
+		}
+	})
+	t.Run("a thread standing in the kernel spends the credit too", func(t *testing.T) {
+		// A credit of two looks, short of the hung-task time of three.
+		r := newClockRigCredited(map[int]taskTime{1: held}, wedge, wedge, 2*w, diskMark{"259:0": {}})
+		for i, want := range []time.Duration{0, 0, w, w} {
+			r.serves(w)
+			if got := r.look(w, w, nil); got != want {
+				t.Fatalf("look %d of a thread standing in the kernel added %v, want %v", i, got, want)
+			}
+		}
+	})
+}
+
 // The kernel reports a task hung once it has stood in an uninterruptible
 // sleep, given no CPU, for its hung_task_timeout_secs; where it keeps none,
 // or the detector is off (0), its default, two minutes.
@@ -753,6 +847,9 @@ func TestAStopsClockTakesAThreadForWedgedAtTheKernelsHungTaskTime(t *testing.T) 
 		testStorage.Store(nil)
 		if c.wedge != tc.wedge {
 			t.Errorf("%s: a thread is taken for wedged after %v, want %v", tc.name, c.wedge, tc.wedge)
+		}
+		if c.credit != tc.wedge {
+			t.Errorf("%s: the waits in the kernel are credited for %v in all, want %v", tc.name, c.credit, tc.wedge)
 		}
 	}
 }
@@ -1116,7 +1213,7 @@ type liveRig struct {
 func newLiveRig() *liveRig { return &liveRig{wall: time.Now(), own: &stall.ManualClock{}} }
 
 func (r *liveRig) clock(procs []Reached) *ExitClock {
-	return newExitClock(procs, time.Hour, time.Hour, r.own, func() time.Time { return r.wall }, readTaskTimes, hostStorage.disks, hostStorage.below)
+	return newExitClock(procs, time.Hour, time.Hour, time.Hour, r.own, func() time.Time { return r.wall }, readTaskTimes, hostStorage.disks, hostStorage.below)
 }
 
 // looks looks at clocks n times, each after a pause, moving wall time and

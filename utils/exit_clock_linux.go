@@ -111,6 +111,27 @@ import (
 // time and the bound after it, and a look, whatever the host's storage
 // serves.
 //
+// Nor does a wait that ends say the next is not the same: a thread whose way
+// out loops through waits in the kernel that each end (a driver's loop of
+// short sleeps there, a cgroup's memory.high throttling it, a sync while
+// others dirty pages), making no progress between them, has a turn on a CPU
+// between any two, and no stretch of it stands for long. Credited for as long
+// as the host's disks served others, it accrued the stall only at the rate it
+// ran: a test app in waits of 50 ms, never let go, its storage serving
+// throughout, held a stop at a 300 ms bound for 72 times the bound, and in
+// waits of 300 ms for 177 times (at the default bound, an hour or more). So
+// the credit is bounded in all, not only in one stretch: of the time at
+// stake since the processes' last progress (ExitMeter.Advance), or since the
+// clock was made, their waits in the kernel withhold from the stall no more
+// than one wait may stand there (the kernel's hung-task time, or the bound
+// where that is longer), however each ends. The credit is the stop's, not a
+// thread's: threads that take turns in the kernel spend it as one. Once it
+// is spent, every thread's time in the kernel counts, as while storage
+// serves none, until their next progress. A stop of processes that make no
+// progress so goes on, whatever they wait on in the kernel, for no more than
+// that time and the bound (and a look) of the time they and keploy could run
+// with none of their time in the kernel taken for a wait.
+//
 // The rest counts, by the rule a stopping agent's teardown is judged by
 // (teardown_work.go): one held in the kernel for the whole bound is taken for
 // wedged, as waiting on would wait for ever on one the kernel never lets go.
@@ -122,17 +143,15 @@ import (
 // 9p, or a type not known), as what it waits on may be that one, dead.
 // Storage I/O the thread does itself as it waits is progress (ExitRatchet).
 //
-// What stays: a single wait in the kernel on storage that serves, but serves
-// that wait no sooner than the kernel's hung-task time of the time at stake
-// (an fsync behind a journal commit that must first flush gigabytes another
-// process dirtied, on a slow disk), is taken for wedged and judged, as the
-// kernel reports it hung, and as main judged it at the bound. A thread that
-// stands in the kernel short of that while it makes no progress holds the
-// stop for that long. A thread whose waits in the kernel each end, but which
-// makes no progress between them, accrues the stall only at the rate it runs,
-// as a process that spins on a share of a CPU accrues that share. And a
-// thread that can reach a network filesystem is judged on all of its wait in
-// the kernel, as before: a busy server is not told from a dead one.
+// What stays: waits in the kernel on storage that serves, but serves them no
+// sooner than the kernel's hung-task time of the time at stake since the
+// processes' last progress (an fsync behind a journal commit that must first
+// flush gigabytes another process dirtied, on a slow disk), are judged, as
+// the kernel reports such a wait hung. Processes that make no progress while
+// they wait in the kernel hold the stop for that time before their time there
+// counts: at the defaults, two minutes of the time at stake, then the bound's
+// one. And a thread that can reach a network filesystem is judged on all of
+// its wait in the kernel: a busy server is not told from a dead one.
 //
 // Where the kernel keeps no such account (a kernel without schedstat), or
 // none of the processes can be read, the stall is keploy's runnable time
@@ -151,10 +170,14 @@ type ExitClock struct {
 	// kernel before it is taken for wedged: the kernel's hung-task time, or
 	// bound where that is longer (see above).
 	wedge time.Duration
-	own   stall.Clock
-	now   func() time.Time
-	read  func([]Reached) (map[int]taskTime, bool)
-	disks func() (diskMark, bool)
+	// credit is how much of the time at stake, since the processes' last
+	// progress, their waits in the kernel may withhold from the stall in
+	// all: wedge, for a stop (see above).
+	credit time.Duration
+	own    stall.Clock
+	now    func() time.Time
+	read   func([]Reached) (map[int]taskTime, bool)
+	disks  func() (diskMark, bool)
 	// below is the block devices directly below the one named (storageBelow);
 	// nil where none is read.
 	below func(name string) []string
@@ -178,6 +201,10 @@ type ExitClock struct {
 	// inKernel is, by thread, the time at stake in its stretch standing in
 	// the kernel up to the last look: threads standing there at it only.
 	inKernel map[int]time.Duration
+	// credited is the time at stake the waits in the kernel withheld from
+	// the stall, in all, since the processes' last progress (progressed),
+	// or since the clock was made, up to the last look.
+	credited time.Duration
 	// accounted says whether the last look read the processes' account.
 	accounted bool
 	// unbooked is, for each thread runnable at the last look, what of its
@@ -214,31 +241,67 @@ func NewExitClock(procs []Reached, bound time.Duration) (*ExitClock, func()) {
 	if st.hung != nil {
 		wedge = max(bound, st.hung())
 	}
-	c := newExitClock(procs, bound, wedge, own, time.Now, read, st.disks, st.below)
+	c := newExitClock(procs, bound, wedge, wedge, own, time.Now, read, st.disks, st.below)
 	return c, release
 }
 
 // NewExitMeter is the stall meter of a stop of procs (each named by its pid
 // and start time) that judges them on bound: it expires once they made no
-// progress for bound of the time both they and keploy could run, measured on
-// their ExitClock, which takes a device standing still for that bound for
-// dead. stop stops the meter and releases the clock.
-func NewExitMeter(procs []Reached, bound time.Duration) (clock *ExitClock, meter *stall.Meter, stop func()) {
+// progress (ExitMeter.Advance) for bound of the time both they and keploy
+// could run, measured on their ExitClock, which takes a device standing still
+// for that bound for dead. stop stops the meter and releases the clock.
+func NewExitMeter(procs []Reached, bound time.Duration) (clock *ExitClock, meter *ExitMeter, stop func()) {
 	clock, release := NewExitClock(procs, bound)
-	meter = stall.NewMeter(clock, bound)
+	meter = &ExitMeter{Meter: stall.NewMeter(clock, bound), clock: clock}
 	return clock, meter, func() {
 		meter.Stop()
 		release()
 	}
 }
 
+// ExitMeter is the stall meter of a stop (NewExitMeter): a stall.Meter on the
+// stop's ExitClock, which reads the processes' progress itself (Advance), so
+// that the clock's credit of their waits in the kernel starts again with the
+// stall. Its Reset starts the stall again alone (a stop that killed them
+// gives them the bound again to be gone), the credit spent as it was.
+type ExitMeter struct {
+	*stall.Meter
+	clock *ExitClock
+	mark  ExitRatchet
+}
+
+// Advance takes reading r of how far the processes are on their way out
+// (ExitRatchet), the first setting the mark, and reports whether it passed
+// the mark: their progress, at which the stall starts again, and so does the
+// clock's credit of their waits in the kernel (ExitClock). Called from the
+// stop's own loop only.
+func (m *ExitMeter) Advance(r ExitMark) bool {
+	if !m.mark.Advance(r) {
+		return false
+	}
+	m.Reset()
+	m.clock.progressed()
+	return true
+}
+
 // newExitClock is an ExitClock on the given clocks and readers (the tests'),
-// first looked at now; below may be nil (no device stacked on another).
-func newExitClock(procs []Reached, bound, wedge time.Duration, own stall.Clock, now func() time.Time, read func([]Reached) (map[int]taskTime, bool), disks func() (diskMark, bool), below func(string) []string) *ExitClock {
-	c := &ExitClock{procs: procs, bound: bound, wedge: wedge, own: own, now: now, read: read, disks: disks, below: below,
+// first looked at now, which takes a thread standing in the kernel for wedge
+// for wedged, and credits the processes' waits in the kernel, since their
+// last progress, for credit in all; below may be nil (no device stacked on
+// another).
+func newExitClock(procs []Reached, bound, wedge, credit time.Duration, own stall.Clock, now func() time.Time, read func([]Reached) (map[int]taskTime, bool), disks func() (diskMark, bool), below func(string) []string) *ExitClock {
+	c := &ExitClock{procs: procs, bound: bound, wedge: wedge, credit: credit, own: own, now: now, read: read, disks: disks, below: below,
 		on: map[string][]string{}, inKernel: map[int]time.Duration{}, unbooked: map[int]time.Duration{}}
 	c.Runnable()
 	return c
+}
+
+// progressed says the processes made progress on their way out: the credit
+// of their waits in the kernel starts again from the last look (see above).
+func (c *ExitClock) progressed() {
+	c.mu.Lock()
+	c.credited = 0
+	c.mu.Unlock()
 }
 
 // Runnable is how long the processes and keploy could both run since the
@@ -259,9 +322,12 @@ func (c *ExitClock) Runnable() time.Duration {
 		if ok {
 			l := lookAt(w, c.last, tasks, c.unbooked)
 			// Standing in the kernel for the kernel's hung-task time up to
-			// the last look: taken for wedged.
+			// the last look: taken for wedged. With the credit spent, since
+			// the processes' last progress up to the last look, each thread
+			// held there is.
+			spent := c.credited >= c.credit
 			for i, h := range l.held {
-				if h.standing && c.inKernel[h.tid] >= c.wedge {
+				if spent || (h.standing && c.inKernel[h.tid] >= c.wedge) {
 					l.held[i].wedged = true
 				}
 			}
@@ -279,13 +345,15 @@ func (c *ExitClock) Runnable() time.Duration {
 				}
 			}
 			// What the waits credited withheld from the stall: the time at
-			// stake in each stretch in the kernel going on.
+			// stake in each stretch in the kernel going on, and in the
+			// credit spent.
 			stake := min(ownRan, l.could(0)) - min(ownRan, l.could(served))
 			for _, h := range l.held {
 				if h.standing {
 					inKernel[h.tid] = c.inKernel[h.tid] + stake
 				}
 			}
+			c.credited += stake
 			could = l.could(served)
 		}
 		c.ran += min(ownRan, could)
