@@ -15,8 +15,9 @@ import (
 // URL or statement held, as far as their look, or the call itself, tells them
 // apart (PathShape, SQLShape). The agent keeps a miss in its shape; so do the
 // reason it answers a test with and the JUnit file's proven evidence lines.
-// The report file and `keploy report` keep the full summary, as they keep
-// full bodies.
+// The report file and `keploy report` keep the summary as a report may carry
+// it: whole with KEPLOY_LOG_CONTENT set, and otherwise as
+// SummaryWithoutContent leaves it.
 
 // MissShape is a miss's summary in its shape (CallShape), with every URL path
 // segment that a test variable's place names (url.path[<n>]) written {}: a
