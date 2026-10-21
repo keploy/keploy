@@ -16,20 +16,38 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// fileMongoRequest is a Mongo mock's summary as a report file written with
+// the switch on (or by an older keploy) names it: the whole request the
+// recorder wrote as the mock's operation, createUser's password in it.
+const fileMongoRequest = `MongoDB {"flagBits":0,"sections":["{ SectionSingle msg: {\"createUser\":\"kp-file-mongo-user\",\"pwd\":\"kp-file-mongo-pwd\"} }"],"checksum":0}`
+
 // fileWithContent is a test result as a report file written with the switch
 // on (or by an older keploy) holds it: its call carries the application's
-// values.
+// values, and so do the mocks its matched calls and dependency rows name.
 func fileWithContent() models.TestResult {
-	return models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
-		Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM users WHERE email = 'kp-file-literal'", ClosestMock: "mock-1",
-		MatchPhase: models.MatchPhaseBody, Diff: "actual: SELECT 'kp-file-diff'",
-		FieldDiffs: []models.MockFieldDiff{
-			{Path: "body.email", Kind: models.DiffKindValueChanged, Expected: "kp-file-rec", Actual: "kp-file-live"},
-			{Path: "body.gone", Kind: models.DiffKindMissingInLive, Expected: "kp-file-gone"},
-		},
-		ClosestMockReq: "kp-file-mock-req", ReceivedReq: "kp-file-live-req",
-	}}}}
+	return models.TestResult{
+		FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
+			Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM users WHERE email = 'kp-file-literal'", ClosestMock: "mock-1",
+			MatchPhase: models.MatchPhaseBody, Diff: "actual: SELECT 'kp-file-diff'",
+			FieldDiffs: []models.MockFieldDiff{
+				{Path: "body.email", Kind: models.DiffKindValueChanged, Expected: "kp-file-rec", Actual: "kp-file-live"},
+				{Path: "body.gone", Kind: models.DiffKindMissingInLive, Expected: "kp-file-gone"},
+			},
+			ClosestMockReq: "kp-file-mock-req", ReceivedReq: "kp-file-live-req",
+		}}, MatchedCalls: []models.MatchedCall{
+			{MockName: "mock-2", Protocol: string(models.HTTP), Summary: "GET http://auth-svc:8080/v1/session?token=kp-file-matched-token"},
+			{MockName: "mock-3", Protocol: string(models.Mongo), Summary: fileMongoRequest},
+		}},
+		Result: models.Result{DepResult: []models.DepResult{{
+			Name: models.DepRowName(0, "mongo", fileMongoRequest), Type: "mongo",
+			Meta: []models.DepMetaResult{{Key: models.DepKeyPresence, Expected: models.DepPresenceConsumed, Actual: models.DepPresenceMissing}},
+		}}},
+	}
 }
+
+// fileCanaries are every value fileWithContent's test holds.
+var fileCanaries = []string{"kp-file-literal", "kp-file-diff", "kp-file-rec", "kp-file-live", "kp-file-gone", "kp-file-mock-req", "kp-file-live-req",
+	"kp-file-matched-token", "kp-file-mongo-user", "kp-file-mongo-pwd"}
 
 // keploy report reads a report file it did not write: by default it prints
 // the call and the fields that differ, and none of the values the file holds.
@@ -78,7 +96,7 @@ func TestEveryReportFormatReadsAFileWithoutItsContentByDefault(t *testing.T) {
 			UnclaimedCalls: []models.UnmatchedCall{{Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT 'kp-file-unclaimed'", Kind: models.MissOutsideTest}},
 		}}}
 	}
-	canaries := []string{"kp-file-literal", "kp-file-diff", "kp-file-rec", "kp-file-live", "kp-file-gone", "kp-file-mock-req", "kp-file-live-req", "kp-file-unclaimed"}
+	canaries := append([]string{"kp-file-unclaimed"}, fileCanaries...)
 	// names is what each format says of the calls: the text and the blob
 	// the test's call, JUnit the set's (the line for calls after the last
 	// test), NDJSON neither (it carries no calls), only the test.
@@ -118,7 +136,8 @@ func TestEveryReportFormatReadsAFileWithoutItsContentByDefault(t *testing.T) {
 	}
 	// With the switch on the file is read as written: the blob carries it.
 	t.Cleanup(logcontent.Set(true))
-	if out := run(t, &config.Config{JSONOutput: true}); !strings.Contains(out, "kp-file-rec") || !strings.Contains(out, "kp-file-unclaimed") {
+	if out := run(t, &config.Config{JSONOutput: true}); !strings.Contains(out, "kp-file-rec") || !strings.Contains(out, "kp-file-unclaimed") ||
+		!strings.Contains(out, "kp-file-matched-token") || !strings.Contains(out, "kp-file-mongo-pwd") {
 		t.Errorf("with the switch on --json lost the file's content:\n%s", out)
 	}
 }
@@ -179,7 +198,7 @@ func TestKeployReportReadsAReportPathWithoutItsContentByDefault(t *testing.T) {
 	if err := os.WriteFile(files["legacy"], legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	canaries := []string{"kp-file-literal", "kp-file-diff", "kp-file-rec", "kp-file-live", "kp-file-gone", "kp-file-mock-req", "kp-file-live-req"}
+	canaries := fileCanaries
 	run := func(t *testing.T, path string, cfg config.Config) string {
 		t.Helper()
 		cfg.Report.ReportPath = path
@@ -211,13 +230,17 @@ func TestKeployReportReadsAReportPathWithoutItsContentByDefault(t *testing.T) {
 				if !strings.Contains(out, "users WHERE email = ?") {
 					t.Errorf("%s does not name the call:\n%s", f.name, out)
 				}
+				if f.name == "--json" && (!strings.Contains(out, "GET http://auth-svc:8080/v1/session") || !strings.Contains(out, "MongoDB createUser")) {
+					t.Errorf("%s does not name the matched calls and the dependency:\n%s", f.name, out)
+				}
 			})
 		}
 	}
 	// With the switch on the file is read as written.
 	t.Cleanup(logcontent.Set(true))
 	for _, file := range []string{"report", "legacy"} {
-		if out := run(t, files[file], config.Config{JSONOutput: true}); !strings.Contains(out, "kp-file-rec") || !strings.Contains(out, "kp-file-live-req") {
+		if out := run(t, files[file], config.Config{JSONOutput: true}); !strings.Contains(out, "kp-file-rec") || !strings.Contains(out, "kp-file-live-req") ||
+			!strings.Contains(out, "kp-file-matched-token") || !strings.Contains(out, "kp-file-mongo-pwd") {
 			t.Errorf("with the switch on --json of the %s file lost its content:\n%s", file, out)
 		}
 	}

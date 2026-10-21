@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -150,12 +151,28 @@ func (h mutatingHooks) AfterGetMocks(_ context.Context, filtered, unfiltered []*
 // lookup now comes from the read that loads the mocks, which the mutator
 // changes in place afterwards. A mutator decrypts secrets for the agent; the
 // report must not carry them. A store that reads one pool per call still gets
-// the lookup from a read of its own.
+// the lookup from a read of its own. The mutator changes the URL's query,
+// which the report keeps only with KEPLOY_LOG_CONTENT set (whole, as
+// recorded); by default it names the mock without it.
 func TestRunTestSetReportsMocksAsRecordedNotAsMutated(t *testing.T) {
 	const recorded = "http://vault.internal/v1/secret?token=ENC:ciphertext"
 	const mutated = "http://vault.internal/v1/secret?token=plaintext"
-	for _, store := range []string{"one read", "a read per pool"} {
-		t.Run(store, func(t *testing.T) {
+	for _, run := range []struct {
+		store   string
+		content bool
+		want    string
+	}{
+		{"one read", true, "GET " + recorded},
+		{"a read per pool", true, "GET " + recorded},
+		{"one read", false, "GET http://vault.internal/v1/secret"},
+	} {
+		store := run.store
+		name := store
+		if !run.content {
+			name += ", by default"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(logcontent.Set(run.content))
 			h := newPartialRunHarness(t, 2, 0)
 			ys := useYAMLMocks(t, h, sessionHTTPMock(recorded))
 			if store == "a read per pool" {
@@ -195,8 +212,8 @@ func TestRunTestSetReportsMocksAsRecordedNotAsMutated(t *testing.T) {
 			if len(matched) != 1 {
 				t.Fatalf("want test-1's one matched call in the report, got %+v", matched)
 			}
-			if want := "GET " + recorded; matched[0].Summary != want {
-				t.Fatalf("the report describes mock-0 as %q; want it as recorded, %q", matched[0].Summary, want)
+			if want := run.want; matched[0].Summary != want {
+				t.Fatalf("the report describes mock-0 as %q (content %v); want it as recorded, %q", matched[0].Summary, run.content, want)
 			}
 			if strings.Contains(matched[0].Summary, "plaintext") {
 				t.Fatalf("the report carries the mutated mock: %q", matched[0].Summary)
