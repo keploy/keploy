@@ -500,7 +500,11 @@ func TestTheMockDifferencesRemedyNamesTheRemapFlagsOnlyWithTheSwitchOff(t *testi
 		t.Fatalf("under the switch the remedy is %q; want re-record, without the deleted remap flags", on)
 	}
 	t.Setenv(provenswitch.Env, "0")
-	if off := mockDifferencesNextStep(); !strings.Contains(off, "--disable-mapping --update-test-mapping") {
-		t.Fatalf("with the switch off the remedy is %q; want the remap flags, as before", off)
+	// With the switch off the remedy is byte for byte the next_step keploy
+	// said before the switch's flip (main's replay.go literal), the
+	// sentences this function joins included.
+	const before = "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record'. A failed test keeps its recorded mapping (--update-test-mapping updates only a passing test's); to remap tests whose mapping is stale, run with --disable-mapping --update-test-mapping, which serves each its recorded window and maps the ones that pass."
+	if off := mockDifferencesNextStep(); off != before {
+		t.Fatalf("with the switch off the remedy is\n%q\nwant, as before,\n%q", off, before)
 	}
 }
