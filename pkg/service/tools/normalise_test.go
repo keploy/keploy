@@ -185,7 +185,10 @@ func TestNormalizeTestCases_SaysWhyItLeavesATemplateFailure(t *testing.T) {
 	for _, want := range []string{"{{capture ...}}", "edit the expected value or re-record", "--allow-high-risk writes this run's value over the placeholder"} {
 		assert.Contains(t, next, want)
 	}
-	assert.Equal(t, "body.id", said[0].ContextMap()["where"])
+	// The place is the saved result's, the report's, which names a place
+	// under a templated key by this run's value of it: by its length unless
+	// KEPLOY_LOG_CONTENT is set.
+	assert.Equal(t, map[string]interface{}{"len": len("body.id")}, said[0].ContextMap()["where"])
 }
 
 // A TEST CASE REFUSED WHEN ITS SET LOADED was never sent: there is no answer

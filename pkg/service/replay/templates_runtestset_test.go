@@ -3580,9 +3580,15 @@ func TestRunTestSet_ASetAnInterruptedTemplatizeLeftIsRefused(t *testing.T) {
 	if rep == nil || rep.Status != string(models.TestSetStatusFailed) || !strings.Contains(rep.FailureReason, steps) || rep.Total != 1 || rep.Failure != 1 {
 		t.Fatalf("the set's report %+v; want FAILED, 1 of 1 failed, and the steps %q as its reason", rep, steps)
 	}
+	// The test store may be another module's, so the line logs its error by
+	// its kind and keploy's own words unless KEPLOY_LOG_CONTENT is set; the
+	// report's reason holds the steps whole, as the next step says.
 	said := logs.FilterMessageSnippet("keploy test refused this test set").All()
-	if len(said) != 1 || said[0].Level != zap.ErrorLevel || said[0].ContextMap()["next_step"] == "" || !strings.Contains(fmt.Sprint(said[0].ContextMap()["error"]), steps) {
-		t.Fatalf("the refusal was logged as %+v; want one error with the steps and a next step", said)
+	if len(said) != 1 || said[0].Level != zap.ErrorLevel || !strings.Contains(fmt.Sprint(said[0].ContextMap()["next_step"]), "in the report holds it whole") {
+		t.Fatalf("the refusal was logged as %+v; want one error and a next step that points at the report", said)
+	}
+	if shape := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(shape, "an earlier run was stopped while it replaced the set's files") || strings.Contains(shape, "test-1.yaml") {
+		t.Fatalf("the refusal's error was logged as %s; want it by its kind and keploy's own words", shape)
 	}
 	// Each test case of the set has a FAILED result refused unsent with the
 	// steps as its reason, so every report format and --must-pass read it as
