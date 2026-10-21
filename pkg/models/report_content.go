@@ -58,9 +58,9 @@ func ReportValue(v string) string {
 	return WithheldValue
 }
 
-// ReportSQL is a SQL statement as a report's text may carry it: whole with
-// logcontent's switch on, and with every literal written "?" (SQLShape) with
-// it off.
+// ReportSQL is a MySQL statement as a report's text may carry it: whole with
+// logcontent's switch on, and with every literal written "?" (SQLShape, by
+// MySQL's grammar) with it off.
 func ReportSQL(q string) string {
 	if logcontent.On() {
 		return q
@@ -75,7 +75,10 @@ const ProtocolUnknown = "unknown"
 // SummaryWithoutContent is a miss's summary (MockMismatchReport.ActualSummary)
 // as a report without content carries it.
 //
-//   - SQL: the statement with its literals written "?" (SQLShape).
+//   - SQL: the statement with its literals written "?", read by its
+//     protocol's grammar (sqlShapeOf): a PostgreSQL statement keeps its
+//     double-quoted identifiers, a MySQL one writes a double-quoted string
+//     "?" (SQLShape).
 //   - HTTP and gRPC: the method and the path, without a query, and with every
 //     path segment keploy knows holds one of the application's values written
 //     {}: a place in places ("url.path[<n>]": a test variable's, or one a
@@ -93,7 +96,7 @@ const ProtocolUnknown = "unknown"
 func SummaryWithoutContent(protocol, summary string, places []string) string {
 	switch {
 	case isSQLCall(protocol):
-		return SQLShape(summary)
+		return sqlShapeOf(protocol, summary)
 	case protocol == ProtocolUnknown && summary != "":
 		return WithheldValue
 	}
