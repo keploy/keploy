@@ -397,8 +397,8 @@ func TestARecordingSaysAKernelSkipAfterItsLastTestCase(t *testing.T) {
 		t.Fatalf("%s; want the recording kept", w)
 	}
 	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
-	if len(late) != 1 || !strings.Contains(late[0].Message, "the kernel skipped runs of keploy's capture programs") || !strings.Contains(late[0].Message, "evidence, not a verdict") ||
-		strings.Contains(fmt.Sprint(late[0].ContextMap()["next_step"]), "trust keploy's CA") {
+	if len(late) != 1 || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "the kernel skipped 1 capture run(s)") || !strings.Contains(late[0].Message, "evidence, not a verdict") ||
+		fmt.Sprint(late[0].ContextMap()["next_step"]) != models.KernelSkipRemedy {
 		t.Fatalf("%d lines for the late skip, want one WARN about the kernel's skip, as evidence, without the CA remedy: %+v", len(late), late)
 	}
 }
@@ -435,6 +435,32 @@ func TestARecordingSaysAKernelSkipAsEvidence(t *testing.T) {
 	failed, logs = run([]models.CaptureLosses{nil})
 	if failed || logs.Len() != 0 {
 		t.Fatalf("without the count: failed %v, logged %+v; want the same recording, said nothing", failed, logs.All())
+	}
+}
+
+// Events of a process keploy could not place, which its app scope dropped,
+// are evidence of the test case they were dropped in, no verdict: one WARN
+// names it with their text and remedy, not the kernel's skip, and the
+// recording is not failed.
+func TestARecordingSaysAnUnplacedProcessAsEvidence(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	up := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossUnplaced, Count: n}}
+	}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, nil, up(2), up(2), up(2)}})
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0", false) {
+		t.Fatal("a recording failed on evidence")
+	}
+	said := logs.FilterMessageSnippet("evidence, not a verdict").All()
+	if len(said) != 1 || logs.Len() != 1 || fmt.Sprint(said[0].ContextMap()["testCases"]) != "[test-2]" ||
+		!strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), "keploy dropped 2 capture event(s) of a process it could not place") ||
+		strings.Contains(said[0].Message, "kernel") || fmt.Sprint(said[0].ContextMap()["next_step"]) != models.UnplacedRemedy {
+		t.Fatalf("logged %+v, want one WARN naming test-2 with the drops and their remedy", logs.All())
 	}
 }
 

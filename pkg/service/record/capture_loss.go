@@ -72,9 +72,10 @@ type captureWatch struct {
 	// first on already).
 	chargedNotJudged models.CaptureLosses
 	finalNotJudged   models.CaptureLosses
-	// evidenced are the test cases recorded while or after the kernel
-	// skipped runs of keploy's capture programs, and evidence what it
-	// skipped so far (models.CaptureLossKind.Evidence); chargedEvidence and
+	// evidenced are the test cases recorded while or after keploy's capture
+	// may have missed a call (models.CaptureLossKind.Evidence: runs of its
+	// capture programs the kernel skipped, events of a process it could not
+	// place), and evidence what it counted so far; chargedEvidence and
 	// finalEvidence are its charged and final counterparts. Evidence only,
 	// never a verdict: said, and no failure.
 	evidenced       []string
@@ -343,8 +344,9 @@ func (w *captureWatch) waitForReads() {
 // nothing: what it would fail on it says in one WARN, and hands to that pass
 // with the rest (RecordedLosses). What fails nothing either way (a call
 // keploy cannot capture, an abandoned handshake, a container not named,
-// data passed through, runs of keploy's programs the kernel skipped, a
-// process keploy could not classify) is said as it always is.
+// data passed through, runs of keploy's programs the kernel skipped, events
+// of a process keploy could not place, a process keploy could not classify)
+// is said as it always is.
 func (w *captureWatch) finish(testSetID string, realUncaptured bool) bool {
 	fail, _ := w.finishWith(testSetID, realUncaptured, "")
 	return fail
@@ -411,13 +413,14 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 			zap.String("next_step", notJudged.NotJudgedRemedy()+", then re-record these test cases"))
 	}
 	if len(w.evidenced) > 0 {
-		// Evidence only (the kernel's recursion_misses, 5.12+): a kernel
-		// without the count records the same, and nothing fails.
-		w.logger.Warn("the kernel skipped runs of keploy's capture programs while these test cases were recorded: evidence, not a verdict; a call of theirs may be missing from the mocks, which their replay shows ("+provenswitch.Env+"=1)",
+		// Evidence only (the kernel's recursion_misses, 5.12+, which a
+		// kernel without the count records the same without; events of a
+		// process keploy could not place): nothing fails.
+		w.logger.Warn("keploy's capture may have missed a call of these test cases, as the reason says: evidence, not a verdict; whether one is missing from the mocks their replay shows ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.evidenced),
 			zap.String("reason", w.evidence.EvidenceText()),
-			zap.String("next_step", models.KernelSkipRemedy))
+			zap.String("next_step", w.evidence.EvidenceRemedy()))
 	}
 	var unmapped models.CaptureLosses
 	for name, what := range w.unreadMocks {
@@ -445,11 +448,11 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 			abandonedLate = append(abandonedLate, c)
 		}
 	}
-	if skippedLate := w.finalEvidence.Since(w.chargedEvidence); len(skippedLate) > 0 {
-		w.logger.Warn("the kernel skipped runs of keploy's capture programs after the last test case was recorded: evidence, not a verdict; no test case holds what they may have missed ("+provenswitch.Env+"=1)",
+	if evidenceLate := w.finalEvidence.Since(w.chargedEvidence); len(evidenceLate) > 0 {
+		w.logger.Warn("keploy's capture may have missed a call after the last test case was recorded, as the reason says: evidence, not a verdict; no test case holds it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", skippedLate.EvidenceText()),
-			zap.String("next_step", models.KernelSkipRemedy))
+			zap.String("reason", evidenceLate.EvidenceText()),
+			zap.String("next_step", evidenceLate.EvidenceRemedy()))
 	}
 	if len(relayedLate) > 0 {
 		w.logger.Warn("the application sent data on connections keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",

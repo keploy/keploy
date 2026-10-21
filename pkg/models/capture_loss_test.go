@@ -369,6 +369,42 @@ func TestAProcessKeployCouldNotClassifyLeavesTheTestsFromItNotJudged(t *testing.
 	}
 }
 
+// An event of a process keploy could not place in its PID namespace, which
+// its app scope dropped, may have been the application's call: evidence of
+// the test it happened in (PerTest), never a verdict, and no taint of the
+// tests after it. Its text and remedy say so, not the kernel's skip.
+func TestAnUnplacedProcessIsEvidenceOfItsOwnTest(t *testing.T) {
+	k := CaptureLossUnplaced
+	if !k.Evidence() || k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("Evidence %v, NotJudged %v, PerTest %v, runScoped %v; want the test's own evidence, no verdict", k.Evidence(), k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n}} }
+	if judged, notJudged := at(2).Split(); len(judged) != 0 || len(notJudged) != 0 {
+		t.Fatalf("Split = %+v, %+v; want neither", judged, notJudged)
+	}
+	// Charged from the previous test's end alone: a later test is not.
+	if got := at(3).Charged(at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the previous test", got)
+	}
+	if got := at(3).Charged(at(1), nil, at(3)); len(got) != 0 {
+		t.Fatalf("Charged = %+v to a test after the drops, want nothing", got)
+	}
+	txt := at(2).EvidenceText()
+	if !strings.Contains(txt, "keploy dropped 2 capture event(s) of a process it could not place in its PID namespace") || strings.Contains(txt, "kernel skipped") {
+		t.Fatalf("text %q", txt)
+	}
+	if r := at(2).EvidenceRemedy(); r != UnplacedRemedy {
+		t.Fatalf("remedy %q, want %q", r, UnplacedRemedy)
+	}
+	both := at(1).Plus(CaptureLosses{{Kind: CaptureLossKernelSkip, Count: 1}})
+	if r := both.EvidenceRemedy(); !strings.Contains(r, KernelSkipRemedy) || !strings.Contains(r, UnplacedRemedy) {
+		t.Fatalf("remedy %q, want both kinds'", r)
+	}
+	if r := (CaptureLosses{{Kind: CaptureLossUnread, Count: 1}}).EvidenceRemedy(); r != "" {
+		t.Fatalf("remedy %q for no evidence, want none", r)
+	}
+}
+
 // What a downstream build's capture saw and could not read, or stopped
 // recording a connection over, fails the test it happened in (judged), and
 // that test only (PerTest); the text says which.

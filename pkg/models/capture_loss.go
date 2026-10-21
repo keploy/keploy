@@ -187,6 +187,15 @@ const (
 	// it: each test it carries traffic in fails (judged), a test's own kind
 	// (PerTest). Only under the proven switch.
 	CaptureLossUnrecorded CaptureLossKind = "connection_unrecorded"
+	// CaptureLossUnplaced: capture events of a target process that a
+	// downstream build's capture could not place in the agent's PID
+	// namespace (a process in a PID namespace of its own below the agent's:
+	// a sandbox, unshare, a nested container), which its app scope then
+	// dropped: whether they were the application's calls cannot be told.
+	// Counted by event, each the test's it happened in (PerTest), and
+	// EVIDENCE only (Evidence), never a verdict: the replay of a test that
+	// carries it judges it. Only under the proven switch.
+	CaptureLossUnplaced CaptureLossKind = "process_unplaced"
 )
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
@@ -208,11 +217,12 @@ func (k CaptureLossKind) NotJudged() bool {
 // Evidence reports whether a loss of kind k is evidence only, never a
 // verdict: the kernel's count of skipped runs of keploy's programs
 // (recursion_misses, 5.12 onwards), which a kernel without it (5.10) does
-// not have. It fails no test and leaves none not judged (Split takes it into
-// neither); a recording's tests it covers carry it as evidence for the
-// replay that judges them.
+// not have, and events of a process keploy could not place, which may not
+// have been the application's (CaptureLossUnplaced). It fails no test and
+// leaves none not judged (Split takes it into neither); a recording's tests
+// it covers carry it as evidence for the replay that judges them.
 func (k CaptureLossKind) Evidence() bool {
-	return k == CaptureLossKernelSkip || k == CaptureLossKernelSkipCall
+	return k == CaptureLossKernelSkip || k == CaptureLossKernelSkipCall || k == CaptureLossUnplaced
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
@@ -264,7 +274,8 @@ func (l CaptureLosses) Evidence() CaptureLosses {
 }
 
 // EvidenceText is keploy's sentence for l's evidence (Evidence), "" for
-// none: what the kernel skipped during the recording, which judges nothing.
+// none: what the kernel skipped during the recording, and what keploy
+// dropped of a process it could not place, which judges nothing.
 func (l CaptureLosses) EvidenceText() string {
 	var parts []string
 	for _, c := range l.Evidence() {
@@ -339,6 +350,33 @@ const UnixUnseenRemedy = "report the reason to keploy (its report of the applica
 // kernel programs (CaptureLossKernelSkip): a kernel that does not preempt
 // them does not skip them, and the agent's log names the programs.
 const KernelSkipRemedy = "run keploy where the kernel does not preempt its programs (a kernel with voluntary or no preemption: /sys/kernel/debug/sched/preempt lists the modes this one offers), or report the programs keploy's agent log names to keploy"
+
+// UnplacedRemedy is what to do when keploy dropped events of a process it
+// could not place in its agent's PID namespace (CaptureLossUnplaced): one
+// in a PID namespace of its own is placed once it shares the agent's.
+const UnplacedRemedy = "run the application's processes in keploy's agent's PID namespace (without a sandbox's or a nested container's own), or report it to keploy with the agent's log"
+
+// EvidenceRemedy is what to do about l's evidence (Evidence), for a
+// next_step: each kind's remedy, "" for none.
+func (l CaptureLosses) EvidenceRemedy() string {
+	var skip, unplaced bool
+	for _, c := range l.Evidence() {
+		switch c.Kind {
+		case CaptureLossKernelSkip, CaptureLossKernelSkipCall:
+			skip = true
+		case CaptureLossUnplaced:
+			unplaced = true
+		}
+	}
+	var do []string
+	if skip {
+		do = append(do, KernelSkipRemedy)
+	}
+	if unplaced {
+		do = append(do, UnplacedRemedy)
+	}
+	return strings.Join(do, ", and ")
+}
 
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
@@ -423,7 +461,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossUnplaced
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -611,6 +649,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and %d piece(s) of its traffic, its stops included, were neither recorded nor mocked", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
+	case CaptureLossUnplaced:
+		return fmt.Sprintf("keploy dropped %d capture event(s) of a process it could not place in its PID namespace (one in a PID namespace below the agent's), which may have been the application's calls, while this test ran", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}
