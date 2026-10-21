@@ -153,15 +153,16 @@ func TestAMissOnAnotherPathNamesNoSegmentThatDiffersByDefault(t *testing.T) {
 func TestANotOwnedMissRendersNoRecordingByDefault(t *testing.T) {
 	m := onHost("other-test", "/api/users", "localhost:50001")
 	m.Spec.HTTPReq.Body = `{"email":"kp-rec@example.com"}`
+	live := makeReq("GET", "/api/users")
 	r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /api/users", ContentWithheld: true}
-	markNotOwned(r, m)
-	if r.ClosestMockReq != "" || !r.NotOwned || r.ClosestMock != "other-test" {
+	markNotOwned(r, m, live, nil)
+	if r.ClosestMockReq != "" || r.ReceivedReq != "" || !r.NotOwned || r.ClosestMock != "other-test" {
 		t.Errorf("the not-owned report is %+v", r)
 	}
 	t.Cleanup(logcontent.Set(true))
 	r = &models.MockMismatchReport{Protocol: "HTTP"}
-	markNotOwned(r, m)
-	if !strings.Contains(r.ClosestMockReq, "kp-rec@example.com") || r.ContentWithheld {
+	markNotOwned(r, m, live, nil)
+	if !strings.Contains(r.ClosestMockReq, "kp-rec@example.com") || r.ReceivedReq == "" || r.ContentWithheld {
 		t.Errorf("with the switch on the not-owned report renders %q", r.ClosestMockReq)
 	}
 }
@@ -433,10 +434,68 @@ func sameCallMiss(t *testing.T) *models.MockMismatchReport {
 	t.Helper()
 	mock := httpMockWithReq("mock-1", "POST", "http://users.internal:8080/api/users?customer=kp-rec-cust",
 		`{"email":"kp-rec@example.com"}`, map[string]string{"Content-Type": "application/json"}, nil)
+	req, body := sameCall()
+	diag := &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{mock}}
+	return newHTTP().buildHTTPMismatchReport(req, body, &mockMemDb{mocks: []*models.Mock{mock}}, nil, nil, nil, diag)
+}
+
+// sameCall is the call sameCallMiss reports, and its body.
+func sameCall() (*http.Request, []byte) {
 	req := makeReqWithQuery("POST", "/api/users", "customer=kp-rec-cust")
 	req.Header.Set("Content-Type", "application/json")
-	diag := &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{mock}}
-	return newHTTP().buildHTTPMismatchReport(req, []byte(`{"email":"kp-rec@example.com"}`), &mockMemDb{mocks: []*models.Mock{mock}}, nil, nil, nil, diag)
+	return req, []byte(`{"email":"kp-rec@example.com"}`)
+}
+
+// A miss on a call that is a recording the open view does not show (a
+// not-owned miss, under KEPLOY_PROVEN) says by default whether the call and
+// that recording rendered the same, which is what a reader of the report
+// with its content finds comparing the two (cloud triage: a mock keploy did
+// not serve, or a changed call): the same answer either way. The call is the
+// recording byte for byte; or it is only outside what the recording knows
+// varies (a body field it learned, a query value the obfuscator redacted,
+// which both renders write alike, rendered with the recording's noise).
+func TestANotOwnedMissSaysItsRequestsWereTheRecordingsWithTheSwitchOffAsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mock func() *models.Mock
+		same bool
+	}{
+		{name: "the call to the byte", same: true, mock: func() *models.Mock {
+			return httpMockWithReq("other-test", "POST", "http://users.internal:8080/api/users?customer=kp-rec-cust",
+				`{"email":"kp-rec@example.com"}`, map[string]string{"Content-Type": "application/json"}, nil)
+		}},
+		{name: "a redacted query value", same: true, mock: func() *models.Mock {
+			m := httpMockWithReq("other-test", "POST", "http://users.internal:8080/api/users?customer=kp-obf-cust",
+				`{"email":"kp-rec@example.com"}`, map[string]string{"Content-Type": "application/json"}, nil)
+			m.Noise = []string{"^kp-(obf|rec)-cust$"}
+			return m
+		}},
+		{name: "a learned body field", same: false, mock: func() *models.Mock {
+			return httpMockWithReq("other-test", "POST", "http://users.internal:8080/api/users?customer=kp-rec-cust",
+				`{"email":"kp-other@example.com"}`, map[string]string{"Content-Type": "application/json"}, map[string][]string{"body.email": {}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, body := sameCall()
+			off := sameCallMiss(t)
+			markNotOwned(off, tc.mock(), req, body)
+			if off.RequestsIdentical != tc.same || off.ClosestMockReq != "" || off.ReceivedReq != "" || !off.ContentWithheld || !off.NotOwned {
+				t.Errorf("by default: identical %v (want %v), requests %q %q, withheld %v, not owned %v",
+					off.RequestsIdentical, tc.same, off.ClosestMockReq, off.ReceivedReq, off.ContentWithheld, off.NotOwned)
+			}
+			if text := reportText(t, off); strings.Contains(text, "kp-") {
+				t.Errorf("the default report carries the request:\n%s", text)
+			}
+			restore := logcontent.Set(true)
+			on := sameCallMiss(t)
+			markNotOwned(on, tc.mock(), req, body)
+			restore()
+			if got := on.ClosestMockReq != "" && on.ClosestMockReq == on.ReceivedReq; got != tc.same || on.RequestsIdentical || on.ContentWithheld {
+				t.Errorf("with the switch on: renders the same %v (want %v), identical %v, withheld %v\nrecording: %s\ncall: %s",
+					got, tc.same, on.RequestsIdentical, on.ContentWithheld, on.ClosestMockReq, on.ReceivedReq)
+			}
+		})
+	}
 }
 
 // A default report drops the rendered requests and says whether they were
