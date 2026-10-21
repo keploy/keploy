@@ -1039,7 +1039,8 @@ func TestClassifyAccountsForWhatFlowedInEveryForm(t *testing.T) {
 
 // What did not change is no word of what changed: two fresh tokens that share
 // a JWT header and its claims' names, or two values that share a line, are
-// each noise.
+// each noise. (A JWT whose iat F's clock moved is more than its clock read,
+// and refused: TestAValueThatHoldsAClockReadAndMoreIsRefused.)
 func TestClassifyLearnsFreshValuesThatShareWhatDidNotChange(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
 	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
@@ -1056,7 +1057,7 @@ func TestClassifyLearnsFreshValuesThatShareWhatDidNotChange(t *testing.T) {
 		name, rec, live string
 		earlier         []Earlier
 	}{
-		{"two fresh JWTs", tok("Hq6Ys0Bc5D", t0+1), tok("Mw2Xr8Ue3F", t1+1), seen(tok("k3J9xQ2mW8", t0), tok("Lp4Zt7Vn1R", t1))},
+		{"two fresh JWTs issued at one instant", tok("Hq6Ys0Bc5D", t0+1), tok("Mw2Xr8Ue3F", t0+1), seen(tok("k3J9xQ2mW8", t0), tok("Lp4Zt7Vn1R", t1))},
 		{"two messages that share a line", "Order created\nref: Hq6Ys0Bc5D", "Order created\nref: Mw2Xr8Ue3F",
 			seen("Order created\nref: k3J9xQ2mW8", "Order created\nref: Lp4Zt7Vn1R")},
 		{"two pretty-printed JSON texts", "{\n  \"ref\": \"Hq6Ys0Bc5D\"\n}", "{\n  \"ref\": \"Mw2Xr8Ue3F\"\n}",

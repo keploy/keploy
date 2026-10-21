@@ -23,13 +23,104 @@ const FullRoundLead = 61500 * time.Millisecond
 type clockSet struct {
 	rec, live map[string]bool
 	whole     bool
-	reads     []models.ClockRead
+	// read: a clock read moved in the value (merged, DriftCache.ofIn: in
+	// any of its declared forms).
+	read bool
+	// zoned: an instant moved as a clock read does, by the lead or within
+	// the call's window, but its zone is written otherwise live ("Z" and
+	// "+01:00", "GMT" and "UTC"): no clock read, as F's clock moves no
+	// zone, and yet a read of the clock (merged: in any form).
+	zoned bool
+	// alone: a clock read moved, and the value is nothing but its clock
+	// reads: what stands outside them is the same, recorded and live, and
+	// holds no word (a separator), in every form that drifted (merged,
+	// DriftCache.ofIn). beyond, when a clock read moved and the value is
+	// more than its reads, says what of it is, for a person to read; it
+	// never holds a value.
+	alone  bool
+	beyond string
+	reads  []models.ClockRead
+}
+
+// clockSpan is where an accepted clock read stands in a value, [from, to),
+// and its layout (an index of clockLayouts).
+type clockSpan struct{ from, to, lay int }
+
+// besideReads says what of a drifted value (recorded, live) is more than
+// its accepted clock reads (rs and ls, the recorded and the live places of
+// each, the k-th of a layout in one read against the k-th in the other),
+// "" when nothing is: the reads stand in the same order, and what stands
+// before, between and after them is the same, recorded and live, and holds
+// no word. It names the part, never its value: the first part that changed
+// (a word, the order of its words, or a sign or separator, which changes no
+// word), else the first that holds text that did not change.
+func besideReads(recorded, live string, rs, ls []clockSpan) string {
+	// rs and ls are as many: each read is a pair (clockIn).
+	sort.Slice(rs, func(i, j int) bool { return rs[i].from < rs[j].from })
+	sort.Slice(ls, func(i, j int) bool { return ls[i].from < ls[j].from })
+	for i := range rs {
+		if rs[i].lay != ls[i].lay {
+			return "its clock reads stand in another order than when it was recorded"
+		}
+	}
+	outside := func(s string, sp []clockSpan) []string {
+		out, at := make([]string, 0, len(sp)+1), 0
+		for _, x := range sp {
+			out = append(out, s[at:x.from])
+			at = x.to
+		}
+		return append(out, s[at:])
+	}
+	ro, lo := outside(recorded, rs), outside(live, ls)
+	n := len(rs)
+	where := func(i int) string {
+		switch {
+		case n == 1 && i == 0:
+			return "before its clock read"
+		case n == 1:
+			return "after its clock read"
+		case i == 0:
+			return "before its first clock read"
+		case i == n:
+			return "after its last clock read"
+		}
+		return "between two of its clock reads"
+	}
+	for i := range ro {
+		if ro[i] == lo[i] {
+			continue
+		}
+		rw, lw := wordsBy(ro[i], wordByte), wordsBy(lo[i], wordByte)
+		switch {
+		case !sameStrings(sortedCopy(rw), sortedCopy(lw)):
+			return "a word " + where(i) + " changed too"
+		case !sameStrings(rw, lw):
+			return "the order of the words " + where(i) + " changed too"
+		}
+		return "a sign or separator " + where(i) + " changed too"
+	}
+	for i := range ro {
+		if hasWord(ro[i]) {
+			return "it holds text " + where(i) + " that did not change"
+		}
+	}
+	return ""
+}
+
+// sortedCopy is ws sorted, ws left as it was.
+func sortedCopy(ws []string) []string {
+	out := append([]string(nil), ws...)
+	sort.Strings(out)
+	return out
 }
 
 // A clock layout is a way a value can carry an instant, as a pattern of the
 // recorded text and how to read it. timeWord, when not nil, says which words
 // of a match hold the instant (a UUID's time groups); every word of the match
-// does otherwise.
+// does otherwise. A layout that writes a zone captures it in the pattern's
+// groups (zoneOf), each held to what a zone is written with: a zone's name,
+// a region, an offset, never free text, which noise would excuse beside the
+// read.
 type clockLayout struct {
 	re       *regexp.Regexp
 	read     func(s string) (t time.Time, res time.Duration, ok bool)
@@ -39,9 +130,25 @@ type clockLayout struct {
 }
 
 var clockLayouts = []clockLayout{
-	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})`), read: readRFC1123},
-	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?)?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
-	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
+	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (GMT|UTC|[+-]\d{4})`), read: readRFC1123},
+	// Unix date, C's asctime, Go's UnixDate and RubyDate, Java's
+	// Date#toString: "Wed Oct 21 10:28:02 UTC 2026", the year last, in UTC,
+	// GMT or an offset (another zone's abbreviation names no offset keploy
+	// can read the same on every host).
+	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ \d]\d \d{2}:\d{2}:\d{2}(?: (UTC|GMT|[+-]\d{4}))? \d{4}`), read: readUnixDate},
+	// JavaScript's Date#toString: "Wed Oct 21 2026 10:28:02 GMT+0000
+	// (Coordinated Universal Time)", the zone's long name in parentheses
+	// ("... Standard Time", "... Summer Time", "Greenwich Mean Time").
+	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{2} \d{4} \d{2}:\d{2}:\d{2} (GMT[+-]\d{4}(?: \((?:[A-Z][a-z]+ )*(?:Standard|Daylight|Summer|Mean|Universal) Time\))?)`), read: readJSDate},
+	// RFC 3339 and ISO 8601, a SQL datetime, its date and a time to the
+	// second joined by a '+' (a form-encoded space; "2026-10-21+05:00" is a
+	// date and its offset), Ruby's Time#to_s and Go's Time.String (an offset
+	// of a time after a space; Go's " UTC" after it is the zone's name, read
+	// as the next group's), and Java's ZonedDateTime (an IANA region after
+	// the offset, "[Europe/Paris]", "[Etc/UTC]"; its places are named in
+	// letters).
+	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|\+\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)( [+-](?:0\d|1[0-4]):?[0-5]\d)?)?((?:Z|[+-]\d{2}(?::?\d{2})?)(?:\[(?:UTC|GMT|UCT|Etc/(?:UTC|UCT|GMT(?:[+-]?\d{1,2})?|Universal|Zulu|Greenwich)|(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)(?:/[A-Z][A-Za-z_-]+)+)\])?| ?(?:UTC|GMT))?`), read: readISO},
+	{re: regexp.MustCompile(`\d{8}T\d{6}(Z?)`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
 	{re: regexp.MustCompile(`\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?`), read: readTimeOfDay, wraps: true},
@@ -137,38 +244,66 @@ func (w *Window) key() [4]int64 {
 	return [4]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano()}
 }
 
+// zoneOf is the zone text s, an instant in layout lay, is written with
+// ("Z", "+05:30", " UTC", " +0000 UTC"): its pattern's groups, "" for none
+// or a layout that writes none.
+func zoneOf(lay clockLayout, s string) string {
+	if lay.re.NumSubexp() == 0 {
+		return ""
+	}
+	if m := lay.re.FindStringSubmatch(s); m != nil {
+		return strings.Join(m[1:], "")
+	}
+	return ""
+}
+
 // clockOf is clockIn with no call's window: the clock reads that moved by
 // FullRoundLead.
 func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, nil) }
 
-// clockIn finds in a drifted value the clock reads that moved by
-// FullRoundLead, or that are reads of each run's clock within the window w
-// of the call that carries the value (nil: none): the recorded and the live
-// value are each searched for instants in clockLayouts, at ASCII word
-// boundaries (so one glued to text
-// of another script, "创建于2026-10-14 10:00:41", is found), and the k-th
-// of a layout in one is read against the k-th in the other: where the live
-// one is the recorded one later by the lead, the words that changed between
-// them are clock words. Nothing else of the values need line up (a fresh
+// clockIn is clockInBy with the lead: a read is one F's lead moved, or one
+// within w.
+func clockIn(recorded, live string, w *Window) clockSet { return clockInBy(recorded, live, w, true) }
+
+// clockInBy finds in a drifted value the clock reads that moved by
+// FullRoundLead (when lead), or that are reads of each run's clock within
+// the window w of the call that carries the value (nil: none): the recorded
+// and the live value are each searched for instants in clockLayouts, at
+// ASCII word boundaries (so one glued to text of another script,
+// "创建于2026-10-14 10:00:41", is found), and the k-th of a layout in one
+// is read against the k-th in the other: where the live one is the
+// recorded one later by the lead, the words that changed between them are
+// clock words. Nothing else of the values need line up (a fresh
 // signature beside the read may change their number of words). The lead is
 // compared at the instant's own resolution, and to the second for finer
 // ones: F's clock is set to each recorded instant plus the lead when the
 // test begins, and how long the app then takes to read its clock is its own
-// (a millisecond read moves by the lead plus that).
-func clockIn(recorded, live string, w *Window) clockSet {
+// (a millisecond read moves by the lead plus that). A read pairs instants
+// of one layout written in one zone ("Z" and "Z", never "Z" and "+00:00"):
+// F's clock moves the instant, never how its zone is written, and an instant
+// that moved but whose zone did not stay is no clock read (zoned).
+func clockInBy(recorded, live string, w *Window, lead bool) clockSet {
 	c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
 	var at []int
-	for _, lay := range clockLayouts {
+	// Where each accepted read stands, recorded and live.
+	var spansR, spansL []clockSpan
+	for li, lay := range clockLayouts {
 		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
 		for k := 0; k < len(rm) && k < len(lm); k++ {
 			rs, ls := recorded[rm[k][0]:rm[k][1]], live[lm[k][0]:lm[k][1]]
-			if rs == ls || !moved(lay, rs, ls) && !w.holds(lay, rs, ls) {
+			if rs == ls || !(lead && moved(lay, rs, ls)) && !w.holds(lay, rs, ls) {
+				continue
+			}
+			if zoneOf(lay, rs) != zoneOf(lay, ls) {
+				c.zoned = true
 				continue
 			}
 			rt, rres, _ := lay.read(rs)
 			c.reads = append(c.reads, models.ClockRead{At: rt.UTC(), Res: rres, Day: lay.wraps})
 			at = append(at, rm[k][0])
+			spansR = append(spansR, clockSpan{rm[k][0], rm[k][1], li})
+			spansL = append(spansL, clockSpan{lm[k][0], lm[k][1], li})
 			for i := rm[k][0]; i < rm[k][1]; i++ {
 				takenR[i] = true
 			}
@@ -209,6 +344,12 @@ func clockIn(recorded, live string, w *Window) clockSet {
 		}
 	}
 	c.whole = c.whole && changed
+	// Whether the value is nothing but its clock reads (alone), and what
+	// of it is more, when a read moved.
+	if c.read = len(c.reads) > 0; c.read {
+		c.beyond = besideReads(recorded, live, spansR, spansL)
+		c.alone = c.beyond == ""
+	}
 	return c
 }
 
@@ -295,7 +436,20 @@ func readRFC1123(s string) (time.Time, time.Duration, bool) {
 }
 
 func readISO(s string) (time.Time, time.Duration, bool) {
+	// A region after the offset names the zone the offset is of: the offset
+	// reads the instant.
+	if k := strings.IndexByte(s, '['); k >= 0 {
+		s = s[:k]
+	}
 	s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, "UTC"), "GMT"), " ")
+	// An offset after a space (" +0000", " +00:00") is the offset glued, and
+	// a '+' between the date and the time a space.
+	if m := spacedZone.FindStringIndex(s); m != nil {
+		s = s[:m[0]] + s[m[0]+1:]
+	}
+	if plusTime.MatchString(s) {
+		s = s[:10] + " " + s[11:]
+	}
 	n := strings.Replace(strings.Replace(s, " ", "T", 1), ",", ".", 1)
 	res := 24 * time.Hour
 	if i := strings.Index(n, "T"); i >= 0 {
@@ -317,6 +471,41 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 		if t, err := time.Parse(layout, n); err == nil && inClockRange(t) {
 			return t, res, true
 		}
+	}
+	return time.Time{}, 0, false
+}
+
+// spacedZone is an offset after a space, ending an instant; plusTime a
+// date and a time to the second joined by a '+'.
+var (
+	spacedZone = regexp.MustCompile(` [+-]\d{2}:?\d{2}$`)
+	plusTime   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\+\d{2}:\d{2}:\d{2}`)
+)
+
+// readUnixDate reads an instant of Unix date's layouts (unixDateLayouts),
+// to the second, in UTC when it names no zone, "UTC" and "GMT" at none:
+// the same instant on every host.
+func readUnixDate(s string) (time.Time, time.Duration, bool) {
+	for _, layout := range unixDateLayouts {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil && inClockRange(t) {
+			return t, time.Second, true
+		}
+	}
+	return time.Time{}, 0, false
+}
+
+// unixDateLayouts are asctime's, Unix date's (a zone's abbreviation before
+// the year) and Ruby's (a numeric zone), the day padded or not.
+var unixDateLayouts = []string{time.ANSIC, time.UnixDate, time.RubyDate, "Mon Jan _2 15:04:05 -0700 2006"}
+
+// readJSDate reads JavaScript's Date#toString, to the second; the zone's
+// name in parentheses after its offset is not read.
+func readJSDate(s string) (time.Time, time.Duration, bool) {
+	if i := strings.Index(s, " ("); i >= 0 {
+		s = s[:i]
+	}
+	if t, err := time.Parse("Mon Jan 02 2006 15:04:05 GMT-0700", s); err == nil && inClockRange(t) {
+		return t, time.Second, true
 	}
 	return time.Time{}, 0, false
 }

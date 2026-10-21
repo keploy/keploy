@@ -678,25 +678,28 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // beside the value as read raw: decoded (percent and backslash escapes),
 // case-folded, and the text its encoded runs decode to (b64Text), itself
 // case-folded; and that text, recorded and live, on its own (encoded).
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, encoded [2]string) {
-	forms = [][2]string{{decRec, decLive}}
+// names say how each form reads the value, for a person ("decoded", "as
+// quoted-printable"), "" for a case-folded one (the lower case of the form
+// before it).
+func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, names []string, encoded [2]string) {
+	forms, names = [][2]string{{decRec, decLive}}, []string{"decoded"}
 	fold := func(f [2]string) {
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
-			forms = append(forms, [2]string{lr, ll})
+			forms, names = append(forms, [2]string{lr, ll}), append(names, "")
 		}
 	}
 	fold(forms[0])
 	if qr, ql := qpForm(rec), qpForm(live); qr != decRec || ql != decLive {
 		q := [2]string{qr, ql}
-		forms = append(forms, q)
+		forms, names = append(forms, q), append(names, "as quoted-printable")
 		fold(q)
 	}
 	if br, bl := b64Text(decRec, clock.rec), b64Text(decLive, clock.live); br != "" || bl != "" {
 		encoded = [2]string{br, bl}
-		forms = append(forms, encoded)
+		forms, names = append(forms, encoded), append(names, "in the text its encoded runs decode to")
 		fold(encoded)
 	}
-	return forms, encoded
+	return forms, names, encoded
 }
 
 // allIn reports whether every word of ws is in set, and there is one.
