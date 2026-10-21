@@ -39,7 +39,8 @@ func MissShape(m UnmatchedCall) string {
 
 // CallShape is a miss's summary in its shape: for HTTP and gRPC the method
 // and the target's shape ("GET /users/{}/orders", "/pkg.v1.Service/Method"),
-// for SQL the statement with its literals written "?" (SQLShape), and "" for
+// for SQL the statement with its literals written "?", read by its
+// protocol's grammar (sqlShapeOf: SQLShape's, or PostgreSQL's), and "" for
 // any other protocol, whose summary may hold the values it sent (a cache key,
 // a document) and which keploy has no shape for. An HTTP or gRPC shape is its
 // own shape; a SQL statement cut at its bound may shape again shorter.
@@ -48,7 +49,7 @@ func CallShape(protocol, summary string) string {
 	case IsPathProtocol(protocol):
 		return methodTargetShape(summary)
 	case isSQLCall(protocol):
-		return SQLShape(summary)
+		return sqlShapeOf(protocol, summary)
 	}
 	return ""
 }
@@ -588,15 +589,40 @@ func isPathNameSeparator(c byte) bool {
 const maxSQLText = 160
 
 // SQLShape is a SQL statement with every quoted string and number written
-// "?". It fails closed: what it cannot read for certain is withheld, the rest
-// of the statement written "…": a literal holding a backslash (MySQL reads
-// \' as a quote by default, so where the literal ends depends on the
-// server's sql_mode), one never closed, a dollar quote ($tag$), and a
-// comment. MySQL's bound parameters ("params=[...]", which the replayer adds
-// to a prepared statement's summary) are dropped whole, and a backtick
-// identifier is kept only when it holds no quote. A quoted identifier
-// (Postgres "table") is written "?" too: hiding a name beats keeping a value.
+// "?", read by MySQL's grammar. It fails closed: what it cannot read for
+// certain is withheld, the rest of the statement written "…": a literal
+// holding a backslash (MySQL reads \' as a quote by default, so where the
+// literal ends depends on the server's sql_mode), one never closed, a dollar
+// quote ($tag$), and a comment. MySQL's bound parameters ("params=[...]",
+// which the replayer adds to a prepared statement's summary) are dropped
+// whole, and a backtick identifier is kept only when it holds no quote. A
+// double-quoted token is a string, as MySQL reads it unless its sql_mode has
+// ANSI_QUOTES, which a report cannot know: it is written "?" too, hiding a
+// name rather than keeping a value. A PostgreSQL statement is read by its
+// own grammar (sqlShapeOf).
 func SQLShape(q string) string {
+	return sqlShape(q, false)
+}
+
+// sqlShapeOf is a SQL call's statement shaped by its protocol's grammar: a
+// PostgreSQL call's (a protocol naming Postgres: "PostgreSQL", "PostgresV2")
+// with every double-quoted token kept as the identifier it is there, every
+// other call's as SQLShape reads it. In PostgreSQL a string constant is only
+// ever single-quoted (or dollar-quoted, which is withheld); a double-quoted
+// token is always a name, a table's or a column's, never a value. The ORMs
+// quote every name they write (GORM, Prisma, Sequelize, TypeORM, Django), so
+// read as SQLShape reads it their statement would name nothing:
+// SELECT ?.? FROM ? WHERE ?.? = $1.
+func sqlShapeOf(protocol, q string) string {
+	return sqlShape(q, strings.Contains(strings.ToLower(protocol), "postgres"))
+}
+
+// sqlShape is SQLShape, and with postgres a double-quoted token is a
+// PostgreSQL identifier, kept as a MySQL backtick identifier is: as a name,
+// its runs of digits written "?". One holding a quote (a doubled "", or a ')
+// is written "?", a name a reader could misread; one never closed, or with a
+// backslash in it, is withheld with the rest, as such a literal is.
+func sqlShape(q string, postgres bool) string {
 	if i := strings.Index(q, "params=["); i >= 0 {
 		q = q[:i]
 	}
@@ -607,6 +633,26 @@ scan:
 	for i := 0; i < len(q); {
 		c := q[i]
 		switch {
+		case c == '"' && postgres:
+			end, ok := closeQuote(q, i)
+			if !ok {
+				// Never closed, or a backslash in it: withheld with the
+				// rest, from the first literal before it when it is never
+				// closed, as a backtick identifier is.
+				if end < 0 && firstLiteral >= 0 {
+					s := b.String()[:firstLiteral]
+					b.Reset()
+					b.WriteString(s)
+				}
+				withheld = true
+				break scan
+			}
+			if strings.ContainsAny(q[i+1:end-1], `'"`) {
+				b.WriteString("?")
+			} else {
+				b.WriteString(digitRuns.ReplaceAllString(q[i:end], "?"))
+			}
+			i = end
 		case c == '\'' || c == '"':
 			if firstLiteral < 0 {
 				firstLiteral = b.Len()
