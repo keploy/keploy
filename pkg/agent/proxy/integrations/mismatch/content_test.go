@@ -132,3 +132,26 @@ func TestBuildWritesAFieldDiffsPathPlaceInTheSummary(t *testing.T) {
 		t.Errorf("with the switch on the summary is %q", r.ActualSummary)
 	}
 }
+
+// A parser's words that quote the call's summary, its own Diff and next
+// steps, quote it as the summary the report keeps names it: by default the
+// path's value segment written {} and no query, there too.
+func TestBuildsWordsQuoteTheSummaryItKeeps(t *testing.T) {
+	b := func() *Builder {
+		return NewReport(ProtocolHTTP, "GET /orders/kp-canary-order/items?token=kp-canary-q").
+			WithPhase(models.MatchPhaseVariable, 1).
+			WithClosest("mock-2", []models.MockFieldDiff{{Path: "url.path[1]", Kind: models.DiffKindVariable, Expected: "kp-canary-rec", Actual: "kp-canary-order"}}).
+			WithDiff("GET /orders/kp-canary-order/items?token=kp-canary-q: url.path[1] is not the test variable's").
+			WithNextSteps(`serve "/orders/kp-canary-order/items" to every test, or re-record`)
+	}
+	r := b().Build()
+	if r.ActualSummary != "GET /orders/{}/items" || r.Diff != "GET /orders/{}/items: url.path[1] is not the test variable's" ||
+		r.NextSteps != `serve "/orders/{}/items" to every test, or re-record` {
+		t.Errorf("summary %q, diff %q, next steps %q", r.ActualSummary, r.Diff, r.NextSteps)
+	}
+	t.Cleanup(logcontent.Set(true))
+	if r := b().Build(); r.Diff != "GET /orders/kp-canary-order/items?token=kp-canary-q: url.path[1] is not the test variable's" ||
+		r.NextSteps != `serve "/orders/kp-canary-order/items" to every test, or re-record` {
+		t.Errorf("with the switch on: diff %q, next steps %q", r.Diff, r.NextSteps)
+	}
+}

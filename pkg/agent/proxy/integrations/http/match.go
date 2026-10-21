@@ -1939,7 +1939,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 // without content (models.MockMismatchReport.ContentWithheld) names it by its
 // summary, where every segment that holds a value of the application's is
 // written {} (models.SummaryWithoutContent), and so does the hint, which the
-// report keeps whole as the parser's own words. A {} is a segment for the
+// report keeps as the parser's own words. The hint quotes the path as Go
+// quotes a string (%q), so a reader that withholds a report made with the
+// switch on writes it there as that report's summary then names it
+// (models.QuotesOfSummary). A {} is a segment for the
 // user to write; a prefix cut at the first one would serve every call under
 // it to every test, which the user never asked for.
 func sessionCallHint(request *http.Request, r *models.MockMismatchReport) string {
