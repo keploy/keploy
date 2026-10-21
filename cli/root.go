@@ -113,19 +113,42 @@ func HardenUnknownSubcommands(root *cobra.Command) {
 // flag it never defined is keploy's bug, not the user's). A command's existing
 // flag-error func still runs, and still prints; its error is only tagged.
 // Exported so a downstream build can tag commands it adds after Root returns.
+//
+// A tagged error is also left to the binary's main to say (sayUsageError):
+// cobra followed it with the command's whole usage text, so `keploy record
+// --delay 10` printed every flag record has, some 80 lines, under the one line
+// that said what was wrong, and that line scrolled away. Each main says the
+// error once, then where the command's help is (`Run 'keploy record --help'
+// for usage.`). An error a command returns while it runs is not touched:
+// cobra prints it, and its usage, as it did.
 func TagUsageErrors(root *cobra.Command) {
 	flagErr := root.FlagErrorFunc()
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
-		return utils.UsageError(flagErr(cmd, err))
+		return sayUsageError(cmd, utils.UsageError(flagErr(cmd, err)))
 	})
 	if args := root.Args; args != nil {
 		root.Args = func(cmd *cobra.Command, a []string) error {
-			return utils.UsageError(args(cmd, a))
+			return sayUsageError(cmd, utils.UsageError(args(cmd, a)))
 		}
 	}
 	for _, c := range root.Commands() {
 		TagUsageErrors(c)
 	}
+}
+
+// sayUsageError hands a usage error raised on cmd to the binary's main to say:
+// cobra prints neither the error nor the usage text it would print under it.
+// Both mains say an error cobra was silenced for -- this repository's, unless
+// the command's flag-error func said it already; the enterprise binary's, for
+// a command cobra was silenced for -- and point at `<command> --help`, which
+// is where the flags cobra would have listed are. Set on cmd only once the
+// error is raised, so nothing else the command does is silenced.
+func sayUsageError(cmd *cobra.Command, err error) error {
+	if err != nil {
+		cmd.SilenceErrors = true
+		cmd.SilenceUsage = true
+	}
+	return err
 }
 
 // rejectUnknownSubcommand installs the reject-on-unknown-verb RunE on one group.
