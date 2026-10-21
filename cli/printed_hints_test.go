@@ -76,10 +76,12 @@ func TestEveryHintARecordOrTestPrintsIsALineOfTheCommandRun(t *testing.T) {
 	}
 	// ValidateFlags: delay <= 5. Natively the hint is test's own Example.
 	cases = append(cases,
-		// Its line runs docker run, whatever the application: it is there
-		// for --delay. Not asked.
+		// In docker its line runs docker run, whatever the application:
+		// keploy in a container starts the application as a container, and
+		// the line is there for --delay. A user of keploy in docker is not
+		// shown the native Example (`keploy test -c "/path/to/user/app"`).
 		hintCase{name: "default delay, in docker", command: "test", args: compose, inDocker: true, keployDir: true,
-			reason: "Delay is set to", raises: "delay", above: 5},
+			reason: "Delay is set to", kind: utils.DockerRun, raises: "delay", above: 5},
 		hintCase{name: "default delay", command: "test", args: []string{"-c", nativeRunApp}, keployDir: true,
 			reason: "Delay is set to", kind: utils.Native, raises: "delay", above: 5},
 	)
