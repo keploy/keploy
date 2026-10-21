@@ -3017,3 +3017,67 @@ func TestLearnMatchAViewSwappedWhileTheScopeWasReadIsLookedAtAgain(t *testing.T)
 		t.Fatalf("served %v miss %+v err %v lost %v; want answered on the second look", served, miss, err, db.lost)
 	}
 }
+
+// An API key is created at a second (createdAt), and in that second its
+// record is written again (PUT) with lastUsedAt, a fresh clock read. The
+// two are equal only because they fell in one second: F learned lastUsedAt
+// as a use of createdAt, and the next replay, whose two reads fell in two
+// seconds, refused the PUT. A time a write stores is its own clock read:
+// noise, never a use.
+func TestLearnMatchATimeAWriteStoresIsNoUseOfAnEarlierTime(t *testing.T) {
+	at := func(d time.Duration) string { return strconv.FormatInt(learnAt.Add(d).Unix(), 10) }
+	create := func(ts string) string { return `{"name":"k","createdAt":` + ts + `}` }
+	use := func(ts string) string { return `{"data":{"name":"k","lastUsedAt":` + ts + `}}` }
+	recs := []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/keys", create(at(0)), nil, `{}`),
+		learnRecorded("mock-1", 300*time.Millisecond, "PUT", "/v1/secret/data/keys/k", use(at(0)), nil, `{"ok":true}`),
+	}
+	// F runs the test learn.FullRoundLead past its recording: both reads
+	// moved by it, and fell in one second again.
+	consumed := fullRound(t, recs, []*req{
+		live("POST", "/v1/keys", create(at(learn.FullRoundLead)), nil),
+		live("PUT", "/v1/secret/data/keys/k", use(at(learn.FullRoundLead)), nil),
+	})
+	put := consumed[1]
+	if vars, binds := put.Spec.Learned(), put.Spec.LearnedBinds(); len(vars) != 0 || len(binds) != 0 {
+		t.Fatalf("the stored time was learned as a use of the earlier one: variables %+v binds %+v", vars, binds)
+	}
+	if want := (map[string][]string{"body.data.lastUsedAt": {}}); !reflect.DeepEqual(put.Spec.ReqBodyNoise, want) {
+		t.Fatalf("learned noise %v, want %v", put.Spec.ReqBodyNoise, want)
+	}
+	// The next replay's two reads fall in two seconds: both calls are
+	// answered.
+	inCI(t, learnedOnto(recs, consumed), []*req{
+		live("POST", "/v1/keys", create(at(time.Hour)), nil),
+		live("PUT", "/v1/secret/data/keys/k", use(at(time.Hour+time.Second)), nil),
+	})
+}
+
+// A value at the same stored place that is no time still flowed from the
+// earlier call: a use of its variable, bound there.
+func TestLearnMatchAnIdAWriteStoresIsStillAUse(t *testing.T) {
+	create := func(id string) string { return `{"name":"k","keyId":"` + id + `"}` }
+	use := func(id string) string { return `{"data":{"name":"k","keyId":"` + id + `"}}` }
+	recs := []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/keys", create("k-7Hq2Lm"), nil, `{}`),
+		learnRecorded("mock-1", 300*time.Millisecond, "PUT", "/v1/secret/data/keys/k", use("k-7Hq2Lm"), nil, `{"ok":true}`),
+	}
+	consumed := fullRound(t, recs, []*req{
+		live("POST", "/v1/keys", create("k-9Zp4Rx"), nil),
+		live("PUT", "/v1/secret/data/keys/k", use("k-9Zp4Rx"), nil),
+	})
+	put := consumed[1]
+	vars := put.Spec.Learned()
+	if len(vars) != 1 || len(put.Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("variables %+v noise %v, want one use and no noise", vars, put.Spec.ReqBodyNoise)
+	}
+	for name, v := range vars {
+		if v.Recorded != "k-7Hq2Lm" || !reflect.DeepEqual(v.Use, []string{"body.data.keyId"}) {
+			t.Fatalf("variable %s is %+v, want a use at body.data.keyId", name, v)
+		}
+		want := map[string]models.MockVariables{"mock-0": {name: {Recorded: "k-7Hq2Lm", Bind: "body.keyId"}}}
+		if got := put.Spec.LearnedBinds(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("binds %+v, want %+v", got, want)
+		}
+	}
+}

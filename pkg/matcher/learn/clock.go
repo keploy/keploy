@@ -277,6 +277,30 @@ func moved(lay clockLayout, recorded, live string) bool {
 	return d > FullRoundLead-res && d < FullRoundLead+res
 }
 
+// IsTime reports whether s, whole, is an instant a clock read gives, in a
+// layout of clockLayouts: a date, or a date and time (ISO 8601, RFC 1123,
+// compact), or seconds or milliseconds since the epoch, between 2000 and
+// 2100. A time-ordered UUID and a count of micro- or nanoseconds are not:
+// they are ids as often (a v7 UUID, a snowflake ID). Nor is a time of day
+// alone, which names no instant.
+func IsTime(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, lay := range clockLayouts {
+		if lay.timeWord != nil || lay.wraps || lay.re.FindString(s) != s {
+			continue
+		}
+		if digits, _, frac := strings.Cut(s, "."); strings.Trim(digits, "0123456789") == "" && len(digits) != 10 && (len(digits) != 13 || frac) {
+			continue
+		}
+		if _, _, ok := lay.read(s); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // An instant before 2000 or after 2100 is no clock read of a recording.
 var (
 	clockFrom = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)

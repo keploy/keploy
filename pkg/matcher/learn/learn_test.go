@@ -1582,3 +1582,30 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 		t.Fatalf("an answer that cannot be read back: err %v; want the store's", err)
 	}
 }
+
+func TestIsTime(t *testing.T) {
+	for s, want := range map[string]bool{
+		"1792438920":                           true,  // seconds
+		"1792438920.437":                       true,  // seconds, with a fraction
+		"1792438920437":                        true,  // milliseconds
+		"2026-10-19T19:42:00Z":                 true,  // RFC 3339
+		"2026-10-19T19:42:00.437913341Z":       true,  // with nanoseconds
+		"2026-10-19 19:42:00+05:30":            true,  // a SQL timestamp
+		"2026-10-19":                           true,  // a date
+		"Mon, 19 Oct 2026 19:42:00 GMT":        true,  // RFC 1123
+		"20261019T194200Z":                     true,  // compact
+		"1792438920437913":                     false, // microseconds: an id as often
+		"1792438920403707704":                  false, // nanoseconds, or a snowflake ID
+		"019a0d6e-1c2a-7b3e-9f00-0123456789ab": false, // a v7 UUID is an id
+		"19:42:00":                             false, // a time of day names no instant
+		"9876543210":                           false, // after 2100
+		"0946684799":                           false, // before 2000
+		"k-1792438920":                         false, // not whole
+		"1792438920 ":                          false,
+		"":                                     false,
+	} {
+		if got := IsTime(s); got != want {
+			t.Errorf("IsTime(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
