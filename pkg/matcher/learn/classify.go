@@ -225,6 +225,16 @@ func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 			}
 			toks := dc.rawTokens(a.Value)[i]
 			for t := range words {
+				// A UUID's group comes back only with its UUID.
+				if us, in := v.asWords(t, true); in {
+					uuids := dc.rawUUIDs(a.Value)
+					for _, u := range us {
+						if uuids[u] {
+							return "a word of it comes back in the answer at " + a.Path + ", which keploy cannot answer with this run's value"
+						}
+					}
+					continue
+				}
 				if toks[t] || toks[strings.ToLower(t)] {
 					return "a word of it comes back in the answer at " + a.Path + ", which keploy cannot answer with this run's value"
 				}
@@ -553,6 +563,12 @@ type valueDrift struct {
 	unparsed string
 	// wholes are the value whole, recorded, in each declared form.
 	wholes map[string]bool
+	// uuidRec and uuidLive are the UUIDs the value holds, recorded and live,
+	// in every form, lower-cased; uuidGroupsRec and uuidGroupsLive the words
+	// it holds only as a group of one of them, each with the UUIDs that hold
+	// it (uuidParts).
+	uuidRec, uuidLive             map[string]bool
+	uuidGroupsRec, uuidGroupsLive map[string][]string
 }
 
 // DriftCache keeps each value's drift for one test of the learn step: the
@@ -562,6 +578,8 @@ type DriftCache struct {
 	m      map[driftKey]*valueDrift
 	raw    map[string]string
 	rawTok map[string][]map[string]bool
+	// rawUUID are the UUIDs of each payload's text (rawUUIDs).
+	rawUUID map[string]map[string]bool
 	// mockRead is each mock's text as Classify reads it (RawOf), by mock:
 	// the store's mocks are read once per test, not once per request.
 	// readRead is each mock's text with its answer read back (ReadRaw), by
@@ -584,7 +602,7 @@ type DriftCache struct {
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	dc := &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockRead: map[*models.Mock]*rawRead{}, readRead: map[*models.Mock]*rawRead{}, rawIndexed: map[*rawRead]bool{}}
+	dc := &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, rawUUID: map[string]map[string]bool{}, mockRead: map[*models.Mock]*rawRead{}, readRead: map[*models.Mock]*rawRead{}, rawIndexed: map[*rawRead]bool{}}
 	for range readings {
 		dc.rawHolders = append(dc.rawHolders, map[string][]*rawRead{})
 	}
@@ -772,6 +790,12 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 		d.clock.live[strings.ToLower(w)] = true
 	}
 	d.forms = forms
+	recs, lives := make([]string, len(forms)), make([]string, len(forms))
+	for i, f := range forms {
+		recs[i], lives[i] = f[0], f[1]
+	}
+	d.uuidRec, d.uuidGroupsRec = uuidParts(recs)
+	d.uuidLive, d.uuidGroupsLive = uuidParts(lives)
 	// What the readings cannot read whole, in every form but the raw one
 	// of a value with escapes (whose '%' and '\' are the escapes).
 	for i, f := range forms {
@@ -1039,15 +1063,18 @@ func appearedIn(dc *DriftCache, v *valueDrift, w earlierView, raws rawView) (Pla
 	if !v.clock.whole {
 		searched = append(searched, recorded)
 	}
+	// A UUID's group is looked for as its UUID (uuidParts).
 	add := func(p run) {
 		if p.rec != recorded && !isClock(p, v.clock) {
-			searched = append(searched, p.rec)
+			ws, _ := v.asWords(p.rec, true)
+			searched = append(searched, ws...)
 		}
 	}
 	for i := range readings {
 		for t := range v.lost[i] {
 			if t != recorded && !clockWord(t, true, v, v.clock) {
-				searched = append(searched, t)
+				ws, _ := v.asWords(t, true)
+				searched = append(searched, ws...)
 			}
 		}
 	}

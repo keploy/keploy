@@ -44,7 +44,10 @@ type servedIndex struct {
 	// reading, recorded and live (valueDrift.recTok, liveTok), as an index
 	// into firsts: the earliest leaves holding it (unaccounted).
 	recTok, liveTok []map[string]int32
-	firsts          [][]firstsAt
+	// uuidRec and uuidLive are every UUID of every leaf, recorded and live
+	// (valueDrift.uuidRec, uuidLive), as an index into firsts.
+	uuidRec, uuidLive map[string]int32
+	firsts            [][]firstsAt
 }
 
 // indexedPair is a drifted value served in the test, and the earliest leaves
@@ -81,6 +84,7 @@ func newServedIndex() *servedIndex {
 		recWord: map[string][]int32{}, liveWord: map[string][]int32{}, recWin: map[string][]int32{}, liveWin: map[string][]int32{},
 		pieceRec: map[string][]int32{}, pieceLive: map[string][]int32{},
 		clockRec: map[string][]int32{}, encWord: map[string][]int32{},
+		uuidRec: map[string]int32{}, uuidLive: map[string]int32{},
 	}
 	for range readings {
 		ix.lost, ix.gained = append(ix.lost, map[string][]int32{}), append(ix.gained, map[string][]int32{})
@@ -219,6 +223,12 @@ func (ix *servedIndex) add(dc *DriftCache, es []Earlier) {
 				for t := range d.liveTok[i] {
 					ix.place(ix.firstsOf(ix.liveTok[i], t), at)
 				}
+			}
+			for u := range d.uuidRec {
+				ix.place(ix.firstsOf(ix.uuidRec, u), at)
+			}
+			for u := range d.uuidLive {
+				ix.place(ix.firstsOf(ix.uuidLive, u), at)
 			}
 			// A place F saw hold its recorded value did not drift (appeared).
 			if s.Live == s.Leaf.Value {
@@ -670,6 +680,30 @@ func (w earlierView) holding(i int, t string, recorded bool) (mock, path string,
 	return e.Mock, e.Seen[at.leaf].Leaf.Path, e.Run, true
 }
 
+// holdingUUID is the mock and the path of the earliest leaf of w that holds
+// UUID u (lower-cased) in its recorded value (recorded) or its live one, and
+// whether its exchange is the run's (Earlier.Run); ok is false when none
+// does.
+func (w earlierView) holdingUUID(u string, recorded bool) (mock, path string, run, ok bool) {
+	ix := w.ix
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	m := ix.uuidLive
+	if recorded {
+		m = ix.uuidRec
+	}
+	id, ok := m[u]
+	if !ok {
+		return "", "", false, false
+	}
+	at := w.first(ix.firsts[id])
+	if at == noLeaf {
+		return "", "", false, false
+	}
+	e := &ix.list[at.ex]
+	return e.Mock, e.Seen[at.leaf].Leaf.Path, e.Run, true
+}
+
 // rawRead is a mock's payload as the learn step reads it, once per test
 // (DriftCache.RawOf): once read (words), its words in every declared form,
 // by reading (rawTokens), and what it is searched in besides itself
@@ -679,6 +713,8 @@ type rawRead struct {
 	once  sync.Once
 	toks  []map[string]bool
 	extra string
+	// uuids are the UUIDs its text holds, in every form, lower-cased.
+	uuids map[string]bool
 }
 
 // words reads r's words and its other forms, once.
@@ -687,6 +723,7 @@ func (r *rawRead) words() {
 		forms := textForms(r.text)
 		r.toks = formTokens(forms)
 		r.extra = strings.Join(forms[1:], "\n")
+		r.uuids, _ = uuidParts(forms)
 	})
 }
 
@@ -741,6 +778,22 @@ func (v rawView) first(dc *DriftCache, i int, t string) int {
 	best := -1
 	for _, r := range hs {
 		if p, ok := v.pos[r]; ok && (best < 0 || p < best) {
+			best = p
+		}
+	}
+	return best
+}
+
+// firstUUID is the first place in v's raw of an earlier place whose text
+// holds UUID u (lower-cased), -1 when none (v.pos is not nil): of those that
+// hold its longest group as a word.
+func (v rawView) firstUUID(dc *DriftCache, u string) int {
+	dc.rawMu.Lock()
+	hs := dc.rawHolders[0][longestWord(u)]
+	dc.rawMu.Unlock()
+	best := -1
+	for _, r := range hs {
+		if p, ok := v.pos[r]; ok && r.uuids[u] && (best < 0 || p < best) {
 			best = p
 		}
 	}

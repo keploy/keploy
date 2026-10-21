@@ -148,13 +148,15 @@ func refAppeared(dc *DriftCache, recorded, now string, at time.Time, served []Ea
 	}
 	add := func(p run) {
 		if p.rec != recorded && !isClock(p, v.clock) {
-			searched = append(searched, p.rec)
+			ws, _ := v.asWords(p.rec, true)
+			searched = append(searched, ws...)
 		}
 	}
 	for i := range readings {
 		for t := range v.lost[i] {
 			if t != recorded && !clockWord(t, true, v, v.clock) {
-				searched = append(searched, t)
+				ws, _ := v.asWords(t, true)
+				searched = append(searched, ws...)
 			}
 		}
 	}
@@ -190,6 +192,18 @@ func refUnaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlie
 		if moved && allClock(t, recorded, v.clock) || !moved && clockWord(t, recorded, v, v.clock) {
 			return ""
 		}
+		us, inUUID := v.asWords(t, recorded)
+		holds := func(ed *valueDrift) bool {
+			if !inUUID {
+				return recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t]
+			}
+			for _, u := range us {
+				if recorded && ed.uuidRec[u] || !recorded && ed.uuidLive[u] {
+					return true
+				}
+			}
+			return false
+		}
 		for _, e := range served {
 			where := "earlier in the test"
 			if e.Run {
@@ -197,7 +211,7 @@ func refUnaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlie
 			}
 			for _, s := range e.Seen {
 				ed := dc.of(s.Leaf.Value, s.Live)
-				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
+				if holds(ed) {
 					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
 				}
 			}
@@ -206,7 +220,11 @@ func refUnaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlie
 			if !x.Served && !x.At.Before(at) {
 				continue
 			}
-			if dc.rawTokens(x.Text)[i][t] {
+			found := !inUUID && dc.rawTokens(x.Text)[i][t]
+			for _, u := range us {
+				found = found || inUUID && dc.rawUUIDs(x.Text)[u]
+			}
+			if found {
 				return "a word of it appears earlier in the test, in " + x.Mock + "'s payload: keploy cannot tell whether it came from there"
 			}
 		}
