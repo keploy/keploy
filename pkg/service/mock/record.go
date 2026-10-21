@@ -263,7 +263,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// here, so aborting now is safe and leaves it intact.
 	if err := m.mockDB.DiscardStagedSet(persistCtx, staging); err != nil {
 		stopReason = "failed to clear a leftover staging set before recording"
-		utils.LogError(m.logger, err, stopReason, zap.String("staging", staging),
+		utils.LogContentError(m.logger, err, stopReason, zap.String("staging", staging),
 			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"))
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
@@ -351,7 +351,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	persist := func(mk *models.Mock) {
 		mctx := &rec.MockContext{Mock: mk, TestSetID: staging}
 		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
-			m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+			m.logger.Debug("BeforeMockInsert hook failed", logcontent.Error(err), zap.String("mock", mk.Name))
 		}
 		if mctx.Skip {
 			return
@@ -368,7 +368,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{
 			Mock: mk, TestSetID: staging, Encoded: encoded, EncodedFormat: encodedFormat,
 		}); err != nil {
-			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+			m.logger.Debug("AfterMockInsert hook failed", logcontent.Error(err), zap.String("mock", mk.Name))
 		}
 		mockCount++
 		kind := mk.Spec.Metadata["type"]
@@ -534,7 +534,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", refused.CaptureIncomplete()))...)
 	} else if pidCheck.known && refused.Any() {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
-			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
+			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), logcontent.Error(derr))
 		}
 		reason := refused.CaptureIncomplete()
 		msg := "the recording was not kept: the agent could not track every process the test command ran, so their calls were not recorded; the existing mock set (if any) was left unchanged"
@@ -560,7 +560,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.String("mock-set", name), zap.String("reason", t))
 	} else if t != "" {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
-			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
+			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), logcontent.Error(derr))
 		}
 		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", t))
@@ -620,7 +620,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
 		if mockCount == 0 && len(capture.list()) == 0 {
 			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
-				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
+				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), logcontent.Error(derr))
 			}
 			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
 			return nil
@@ -642,7 +642,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// stop and not its verdict -- and only the agent's container says so.
 	if cause := m.runFailure(ctx); cause != nil {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
-			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
+			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), logcontent.Error(derr))
 		}
 		stopReason = "the recording did not finish"
 		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
@@ -816,7 +816,7 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	if keep {
 		if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
-			m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
+			m.logger.Warn("AfterRecordingComplete hook failed", logcontent.Error(err), zap.String("mock-set", name))
 		}
 	}
 
@@ -829,7 +829,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
 		}
 	} else if err := m.store.Push(persistCtx, name); err != nil {
-		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
+		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), logcontent.Error(err))
 	}
 
 	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
@@ -852,7 +852,7 @@ func (m *mockService) saveMocks(ctx context.Context, staging, name string, n int
 		return m.mockDB.PromoteStagedSet(ctx, staging, name)
 	}
 	if err := m.mockDB.DiscardStagedSet(ctx, staging); err != nil {
-		m.logger.Debug("failed to discard an empty staging set", zap.String("staging", staging), zap.Error(err))
+		m.logger.Debug("failed to discard an empty staging set", zap.String("staging", staging), logcontent.Error(err))
 	}
 	return m.mockDB.DeleteMocksForSet(ctx, name)
 }
@@ -1015,7 +1015,7 @@ func (m *mockService) deleteCases(ctx context.Context, name string, ids []string
 		return
 	}
 	if err := m.testDB.DeleteTests(ctx, name, ids); err != nil {
-		m.logger.Debug("failed to delete the old test cases", zap.String("mock-set", name), zap.Error(err))
+		m.logger.Debug("failed to delete the old test cases", zap.String("mock-set", name), logcontent.Error(err))
 	}
 }
 
@@ -1058,7 +1058,7 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 		return
 	}
 	if err := deleter.Delete(ctx, name); err != nil {
-		m.logger.Debug("no existing mappings to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+		m.logger.Debug("no existing mappings to overwrite (or delete failed)", zap.String("mock-set", name), logcontent.Error(err))
 	}
 }
 

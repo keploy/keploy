@@ -832,7 +832,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 
 	all, err := t.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		utils.LogError(t.logger, err, "failed to get all test sets")
+		utils.LogContentError(t.logger, err, "failed to get all test sets")
 		return err
 	}
 	testSets := t.config.Templatize.TestSets

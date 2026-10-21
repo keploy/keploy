@@ -265,7 +265,7 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 	// freeze to: only its move onto real time below.
 	if !real || !req.TimeStamp.IsZero() {
 		if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
-			a.logger.Error("failed to execute before simulate hook", zap.Error(err))
+			a.logger.Error("failed to execute before simulate hook", logcontent.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -295,7 +295,7 @@ func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.ActiveHooks.AfterSimulate(r.Context(), req.TestSetID, req.TestCaseName); err != nil {
-		a.logger.Error("failed to execute after simulate hook", zap.Error(err))
+		a.logger.Error("failed to execute after simulate hook", logcontent.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -403,7 +403,7 @@ func (a *Agent) HandleKeylogStream(w http.ResponseWriter, r *http.Request) {
 	// short and bursty, and Wireshark wants them as soon as the
 	// matching encrypted frames arrive in the parallel pcap stream.
 	if err := a.svc.StreamKeylog(r.Context(), &flushOnWrite{w: w, flusher: flusher}); err != nil {
-		a.logger.Warn("keylog stream ended with error", zap.Error(err))
+		a.logger.Warn("keylog stream ended with error", logcontent.Error(err))
 	}
 }
 
@@ -493,7 +493,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
-		a.logger.Error(stopReason, zap.Error(err))
+		a.logger.Error(stopReason, logcontent.Error(err))
 		http.Error(w, fmt.Sprintf("%s: %v", stopReason, err), http.StatusInternalServerError)
 		return // Important: return after handling the error
 	}
@@ -1377,7 +1377,7 @@ func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
 		ctx = models.WithDrainsAfterStop(ctx)
 	}
 	if err := a.svc.SetGracefulShutdown(ctx); err != nil {
-		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
+		a.logger.Error("failed to set graceful shutdown flag", logcontent.Error(err))
 		http.Error(w, fmt.Sprintf("failed to set graceful shutdown: %v", err), http.StatusInternalServerError)
 		return
 	}

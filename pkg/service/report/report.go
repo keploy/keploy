@@ -535,7 +535,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		r.logger.Info("No test sets selected for report generation, Generating report for all test sets")
 		testSetIDs, err = r.testDB.GetReportTestSets(ctx, latestRunID)
 		if err != nil {
-			r.logger.Error("failed to get all test set ids", zap.Error(err))
+			r.logger.Error("failed to get all test set ids", logcontent.Error(err))
 			return fmt.Errorf("failed to get test sets for report: %w", err)
 		}
 		if len(testSetIDs) == 0 {
@@ -816,7 +816,7 @@ func (r *Report) processLegacyFailedTests(ctx context.Context, tests []models.Te
 func (r *Report) getLatestTestRunID(ctx context.Context) (string, error) {
 	testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
 	if err != nil {
-		r.logger.Error("failed to get all test run ids", zap.Error(err))
+		r.logger.Error("failed to get all test run ids", logcontent.Error(err))
 		return "", err
 	}
 

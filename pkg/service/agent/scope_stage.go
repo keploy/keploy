@@ -64,7 +64,7 @@ func (a *Agent) stageScope(ctx context.Context, names []string, open bool) error
 		return err
 	}
 	if err := stager.SetScopeMocks(ctx, filtered, unfiltered, open); err != nil {
-		utils.LogError(a.logger, err, "failed to stage the mocks of a test on the proxy")
+		utils.LogContentError(a.logger, err, "failed to stage the mocks of a test on the proxy")
 		return err
 	}
 	return nil

@@ -13,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
@@ -202,10 +203,10 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 			// start failure here is expected teardown, not a real error. Keep it out
 			// of ERROR so it doesn't trip error-grep gates in CI record output.
 			pm.logger.Debug("Ingress forwarder start aborted; agent shutting down",
-				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), logcontent.Error(err))
 		} else {
 			pm.logger.Error("Ingress hook failed to start; verify hook configuration/permissions and required kernel features, or disable the custom ingress hook",
-				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), logcontent.Error(err))
 		}
 		pm.mu.Lock()
 		delete(pm.active, origAppPort)

@@ -54,7 +54,7 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 		for tc := range incoming {
 			seen.Add(1)
 			if err := m.hooks.BeforeTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
-				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
+				m.logger.Debug("BeforeTestCaseInsert hook failed", logcontent.Error(err), zap.String("case", tc.Name))
 			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
 				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
@@ -62,7 +62,7 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 				continue
 			}
 			if err := m.hooks.AfterTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
-				m.logger.Debug("AfterTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
+				m.logger.Debug("AfterTestCaseInsert hook failed", logcontent.Error(err), zap.String("case", tc.Name))
 			}
 			c.add(tc)
 			c.handled.Add(1)

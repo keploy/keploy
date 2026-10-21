@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/utils/logcontent"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -1142,7 +1143,7 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	if !anchor.IsZero() {
 		if err := ActiveHooks.SetFreezeAnchor(ctx, anchor); err != nil {
 			a.logger.Warn("SetFreezeAnchor hook returned error",
-				zap.Error(err), zap.Time("anchor", anchor))
+				logcontent.Error(err), zap.Time("anchor", anchor))
 		}
 	}
 	a.wireAppClock()
@@ -1867,7 +1868,7 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 			return nil
 		}
 		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
-			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
+			utils.LogContentError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
 			return err
 		}
 	} else {

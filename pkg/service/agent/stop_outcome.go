@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -137,10 +138,10 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	case err == nil:
 		outcome.PIDMapRefusals = &refusals
 	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):
-		a.logger.Debug("these hooks do not count refused PID map inserts; none are left in the replay outcome", zap.Error(err))
+		a.logger.Debug("these hooks do not count refused PID map inserts; none are left in the replay outcome", logcontent.Error(err))
 	default:
 		outcome.PIDMapRefusalsError = err.Error()
-		a.logger.Warn("could not read the refused PID map inserts to leave in the replay outcome: keploy cannot prove that every process of the test command was tracked", zap.Error(err),
+		a.logger.Warn("could not read the refused PID map inserts to leave in the replay outcome: keploy cannot prove that every process of the test command was tracked", logcontent.Error(err),
 			zap.String("next_step", "check this agent's logs for a WARN about its PID maps"))
 	}
 	body, err := json.Marshal(outcome)

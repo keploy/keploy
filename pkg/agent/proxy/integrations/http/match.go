@@ -217,14 +217,14 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// per-test pool — they need to be reachable here.
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get per-test mocks")
+			utils.LogContentError(h.Logger, err, "failed to get per-test mocks")
 			return false, nil, nil, errors.New("error while matching the request with the mocks")
 		}
 		own := openTestOwner(mockDb, perTestMocks)
 		ctx = context.WithValue(ctx, ownedKey{}, own)
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get session mocks")
+			utils.LogContentError(h.Logger, err, "failed to get session mocks")
 			return false, nil, nil, errors.New("error while matching the request with the mocks")
 		}
 		combined := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))

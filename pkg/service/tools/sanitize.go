@@ -38,7 +38,7 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 	// folder, as keploy test and keploy templatize read them.
 	recorded, err := t.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		t.logger.Error("Failed to get test sets", zap.Error(err))
+		t.logger.Error("Failed to get test sets", logcontent.Error(err))
 		return fmt.Errorf("failed to get test sets: %w", err)
 	}
 	// From CLI: SelectedTests

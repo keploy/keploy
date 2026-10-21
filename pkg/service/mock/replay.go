@@ -148,7 +148,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 	// 0. Materialise the set locally (registry download in enterprise; no-op on files).
 	if err := m.store.Pull(ctx, name); err != nil {
-		utils.LogError(m.logger, err, "failed to fetch the mock set", zap.String("mock-set", name))
+		utils.LogContentError(m.logger, err, "failed to fetch the mock set", zap.String("mock-set", name))
 		return err
 	}
 
@@ -974,7 +974,7 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			zap.Int("new", appended), zap.String("mock-set", name),
 			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
 		if err := m.store.Push(ctx, name); err != nil {
-			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
+			m.logger.Warn("failed to publish the refreshed mock set", logcontent.Error(err))
 		}
 	}
 }

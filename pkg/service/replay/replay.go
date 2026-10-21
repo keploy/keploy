@@ -788,14 +788,14 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		stopSaid = "failed to get all test set ids"
-		utils.LogError(r.logger, err, "failed to get all test set ids")
+		utils.LogContentError(r.logger, err, "failed to get all test set ids")
 		return fmt.Errorf("%s", stopReason)
 	}
 
 	if len(testSetIDs) == 0 {
 		recordCmd := models.HighlightGrayString("keploy record")
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
-		utils.LogError(r.logger, err, errMsg)
+		utils.LogError(r.logger, nil, errMsg)
 		// Ran `keploy test` before any tests were recorded — a distinct
 		// funnel signal, so surface it via the categorized stop reason
 		// rather than letting the default "completed" mask it.
@@ -843,7 +843,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
 		stopSaid = "failed to get next test run id"
-		utils.LogError(r.logger, err, "failed to get next test run id")
+		utils.LogContentError(r.logger, err, "failed to get next test run id")
 		return fmt.Errorf("%s", stopReason)
 	}
 
@@ -1223,7 +1223,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
 			if err != nil {
 				if r.saysResultsUnread(testSetStatus, testSet) {
-					utils.LogError(r.logger, err, "failed to get testcase results")
+					utils.LogContentError(r.logger, err, "failed to get testcase results")
 				}
 				break
 			}
@@ -1298,7 +1298,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
 
 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
-				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
+				utils.LogContentError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
 				break
 			}
 			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
@@ -1313,7 +1313,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 		err = r.hookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
+			utils.LogContentError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
@@ -1461,7 +1461,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 			err = r.hookImpl.AfterTestRun(hookCtx, testRunID, testSets, coverageData)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to execute after test run hook")
+				utils.LogContentError(r.logger, err, "failed to execute after test run hook")
 			}
 		}
 	}
@@ -1737,7 +1737,7 @@ func (r *Replayer) failUnsentTest(ctx context.Context, testRunID, testSetID stri
 		zap.String("next_step", "write the test case's request URL with its scheme and host, as in http://localhost:8080/orders: they are what the base path replaces"))
 	result := r.CreateFailedTestResult(testCase, testSetID, time.Now().UTC(), why)
 	if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, result); err != nil {
-		utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
+		utils.LogContentError(r.logger, err, "failed to insert test case result for a test that was not sent")
 		return err
 	}
 	return nil
@@ -1894,7 +1894,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if rows := r.ignoredSetResults(testSetID, testCases); rows != nil {
 			for i := range rows {
 				if err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &rows[i]); err != nil {
-					utils.LogError(r.logger, err, "failed to insert test case result")
+					utils.LogContentError(r.logger, err, "failed to insert test case result")
 					return models.TestSetStatusFailed, err
 				}
 			}
@@ -2312,7 +2312,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// dependency containers + project network behind. Fresh ctx since
 				// runTestSetCtx is being torn down; composeDown bounds itself.
 				if downErr := r.instrumentation.ComposeDownOnSetupFailure(context.Background()); downErr != nil {
-					r.logger.Debug("composeDown after the agent did not come up failed", zap.Error(downErr))
+					r.logger.Debug("composeDown after the agent did not come up failed", logcontent.Error(downErr))
 				}
 				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
 			case ready, ok := <-agentReadyCh:
@@ -2411,7 +2411,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// its pids are marked, so its startup is this set's.
 		if composeRestart != nil {
 			if err := composeRestart.StartComposeApp(ctx); err != nil {
-				utils.LogError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
+				utils.LogContentError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
 				return models.TestSetStatusAppHalted, err
 			}
 			r.composeAppStopped = false
@@ -2640,7 +2640,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if err := r.hookImpl.BeforeTestSetReplay(runTestSetCtx, testSetID); err != nil {
-		utils.LogError(r.logger, err, "BeforeTestSetReplay hook failed; inspect your custom hook implementation or disable it for this test set if this failure is expected",
+		utils.LogContentError(r.logger, err, "BeforeTestSetReplay hook failed; inspect your custom hook implementation or disable it for this test set if this failure is expected",
 			zap.String("testSetID", testSetID),
 		)
 	}
@@ -2946,7 +2946,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
-				utils.LogError(r.logger, loopErr, "failed to insert test case result")
+				utils.LogContentError(r.logger, loopErr, "failed to insert test case result")
 				break
 			}
 			ignored++
@@ -3089,7 +3089,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, loopErr, "failed to insert test case result")
+					utils.LogContentError(r.logger, loopErr, "failed to insert test case result")
 					break
 				}
 				ignored++
@@ -3296,7 +3296,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
-						utils.LogError(r.logger, loopErr, "failed to insert test case result for an answer judged on its start")
+						utils.LogContentError(r.logger, loopErr, "failed to insert test case result for an answer judged on its start")
 						break
 					}
 					continue
@@ -3317,7 +3317,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
+					utils.LogContentError(r.logger, loopErr, "failed to insert test case result for simulation error")
 					break
 				}
 				continue
@@ -3559,7 +3559,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					attachMisses(testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
-						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
+						utils.LogContentError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
 						break testLoop
 					}
 					continue
@@ -3614,7 +3614,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					attachMisses(testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
-						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
+						utils.LogContentError(r.logger, loopErr, "failed to insert test case result for type assertion error")
 						break testLoop
 					}
 					continue
@@ -4114,7 +4114,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: test case result is nil"))
 					attachMisses(failedResult)
 					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
-						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
+						utils.LogContentError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
 					}
 					// Outcome was already counted at lines ~1850-1864; don't double-count here.
 					break
@@ -4127,7 +4127,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: comparison returned no result"))
 				attachMisses(failedResult)
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
-					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
+					utils.LogContentError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
 				}
 				// Outcome was already counted at lines ~1850-1864; don't double-count here.
 				break
@@ -4174,7 +4174,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
 		}
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to insert final test case result")
+			utils.LogContentError(r.logger, err, "failed to insert final test case result")
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
@@ -4362,7 +4362,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
+					utils.LogContentError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
 					break
 				}
 				continue
@@ -4489,7 +4489,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 							loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 							if loopErr != nil {
-								utils.LogError(r.logger, loopErr, "failed to save a streaming test result judged on its start")
+								utils.LogContentError(r.logger, loopErr, "failed to save a streaming test result judged on its start")
 								break
 							}
 							continue
@@ -4531,7 +4531,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
-							utils.LogError(r.logger, loopErr, "failed to save streaming test result")
+							utils.LogContentError(r.logger, loopErr, "failed to save streaming test result")
 							break
 						}
 						continue
@@ -4580,7 +4580,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
-						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
+						utils.LogContentError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
 						break
 					}
 					continue
@@ -4722,7 +4722,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
-					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
+					utils.LogContentError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
 				}
 				continue
 			}
@@ -4925,7 +4925,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, loopErr, "failed to save streaming test result")
+					utils.LogContentError(r.logger, loopErr, "failed to save streaming test result")
 					break
 				}
 			} else {
@@ -4978,7 +4978,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), resultsErr); ok {
 				testSetStatus = resolvedStatus
 			} else {
-				utils.LogError(r.logger, resultsErr, "failed to get test case results")
+				utils.LogContentError(r.logger, resultsErr, "failed to get test case results")
 				testSetStatus = models.TestSetStatusInternalErr
 			}
 		}
@@ -5083,7 +5083,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// run's failed-test list is read back from it.
 		for i := scored; i < len(testCaseResults); i++ {
 			if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &testCaseResults[i]); insErr != nil {
-				utils.LogError(r.logger, insErr, "failed to insert a test result the evidence floor put back")
+				utils.LogContentError(r.logger, insErr, "failed to insert a test result the evidence floor put back")
 			}
 		}
 		if len(held) > 0 {
@@ -5868,7 +5868,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.Int("obsolete", obsolete),
 			zap.Int("testsToScore", toScore),
 			zap.String("status", string(testSetStatus)),
-			zap.Error(resultsErr),
+			logcontent.Error(resultsErr),
 		}
 		if n := len(noAnswerTests); n > 0 {
 			// One chronically unanswered test stops pruning for the whole set;
@@ -6279,7 +6279,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
 		r.afterTestRunCalled = true
 		if hookErr := r.hookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
-			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
+			utils.LogContentError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
 
@@ -6774,7 +6774,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	// r.firstRun is already false by now (setup clears it), which is correct: a
 	// repair is not the first run and must not re-trigger first-run cleanup.
 	if err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, testSetID, r.firstRun); err != nil {
-		utils.LogError(r.logger, err, "failed to re-run BeforeTestSetCompose hook on the replacement agent")
+		utils.LogContentError(r.logger, err, "failed to re-run BeforeTestSetCompose hook on the replacement agent")
 	}
 	// A replacement agent knows no list: it is handed it again.
 	if err := realclient.Keep(ctx, r.logger, r.instrumentation, r.mockReal()); err != nil {
@@ -7798,7 +7798,7 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
 		}
-		utils.LogError(r.logger, err, "failed to get all test set ids")
+		utils.LogContentError(r.logger, err, "failed to get all test set ids")
 		return nil, fmt.Errorf("failed to get test set ids")
 	}
 	return r.selectTestSets(testSetIDs)

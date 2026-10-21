@@ -429,12 +429,12 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	var sc scope
 	perTest, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to get per-test mocks")
+		utils.LogContentError(h.Logger, err, "failed to get per-test mocks")
 		return sc, errors.New("error while matching the request with the mocks")
 	}
 	session, err := mockDb.GetSessionMocks()
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to get session mocks")
+		utils.LogContentError(h.Logger, err, "failed to get session mocks")
 		return sc, errors.New("error while matching the request with the mocks")
 	}
 	sc.visible = append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)

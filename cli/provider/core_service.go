@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/report"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 )
 
@@ -134,14 +135,14 @@ func resolveDockerNames(logger *zap.Logger, c *config.Config, cont, net string, 
 
 	switch {
 	case c.ContainerName == "":
-		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", c.Command))
+		utils.LogContentError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", c.Command))
 	case cont == "":
 		logger.Warn("could not read a container name out of the docker command; using the one that was provided",
-			zap.String("containerName", c.ContainerName), zap.Error(err))
+			zap.String("containerName", c.ContainerName), logcontent.Error(err))
 	default:
 		// The container resolved and only the network did not. Nothing reads
 		// the network name today, so this is not worth the user's attention.
-		logger.Debug("docker command parsed without a network name", zap.String("containerName", c.ContainerName), zap.Error(err))
+		logger.Debug("docker command parsed without a network name", zap.String("containerName", c.ContainerName), logcontent.Error(err))
 	}
 }
 

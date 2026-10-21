@@ -48,7 +48,7 @@ func Export(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			}
 			err = tools.Export(ctx) // Assuming ExportPostmanCollection is a method in tools service
 			if err != nil {
-				utils.LogError(logger, err, "failed to export Postman collection")
+				utils.LogContentError(logger, err, "failed to export Postman collection")
 			}
 			return nil
 		},

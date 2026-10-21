@@ -203,7 +203,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	})
 	if err != nil {
 		// Log the error but don't fail, consistent with original logic.
-		utils.LogError(logger, err, "failed to create debugfs volume")
+		utils.LogContentError(logger, err, "failed to create debugfs volume")
 	}
 
 	// Preserves the alias generation

@@ -1072,7 +1072,7 @@ func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string)
 		Path:      r.config.Path,
 	}); hookErr != nil {
 		r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
-			zap.Error(hookErr), zap.String("testSetID", testSetID))
+			logcontent.Error(hookErr), zap.String("testSetID", testSetID))
 	}
 }
 
@@ -1917,7 +1917,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				for _, n := range toDelete {
 					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
 						r.logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
-							zap.String("testSetID", newTestSetID), zap.String("testCase", n), zap.Error(err))
+							zap.String("testSetID", newTestSetID), zap.String("testCase", n), logcontent.Error(err))
 						continue
 					}
 					deletedSet[n] = struct{}{}
@@ -2226,7 +2226,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	newTestSetID, err = r.GetNextTestSetID(ctx)
 	if err != nil {
 		stopReason = "failed to get new test-set id"
-		utils.LogError(r.logger, err, stopReason)
+		utils.LogContentError(r.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
@@ -2535,7 +2535,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				TestCase: testCase, TestSetID: newTestSetID,
 			}); hookErr != nil {
 				r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
-					zap.Error(hookErr),
+					logcontent.Error(hookErr),
 					zap.String("testSetID", newTestSetID),
 					zap.String("testCaseName", testCase.Name))
 			}
@@ -2620,7 +2620,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					TestCase: testCase, TestSetID: newTestSetID,
 				}); hookErr != nil {
 					r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
-						zap.Error(hookErr),
+						logcontent.Error(hookErr),
 						zap.String("testSetID", newTestSetID),
 						zap.String("testCaseName", testCase.Name))
 				}
@@ -2655,7 +2655,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			mockCtx := &MockContext{Mock: mock, TestSetID: newTestSetID}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, mockCtx); hookErr != nil {
 				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
-					zap.Error(hookErr),
+					logcontent.Error(hookErr),
 					zap.String("testSetID", newTestSetID),
 					zap.String("mockName", mock.Name),
 					zap.String("mockKind", mock.GetKind()))
@@ -2782,7 +2782,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					Encoded: encoded, EncodedFormat: encodedFormat,
 				}); hookErr != nil {
 					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
-						zap.Error(hookErr),
+						logcontent.Error(hookErr),
 						zap.String("testSetID", newTestSetID),
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()))

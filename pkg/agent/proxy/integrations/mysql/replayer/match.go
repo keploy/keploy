@@ -400,7 +400,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				if ctx.Err() != nil {
 					return nil, nil, nil, ctx.Err()
 				}
-				utils.LogError(logger, err, "failed to get per-test mocks")
+				utils.LogContentError(logger, err, "failed to get per-test mocks")
 				return nil, nil, nil, err
 			}
 		}

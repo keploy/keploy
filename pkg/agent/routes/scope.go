@@ -246,7 +246,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		}
 		if !first.IsZero() {
 			if err := agent.ActiveHooks.SetFreezeAnchor(r.Context(), first); err != nil {
-				a.logger.Debug("could not anchor the clock at the first recorded suite start", zap.Error(err))
+				a.logger.Debug("could not anchor the clock at the first recorded suite start", logcontent.Error(err))
 			}
 		}
 	}

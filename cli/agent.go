@@ -263,7 +263,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					err := agent.SetupAgentHook.AfterSetup(ctx)
 					endHooks()
 					if err != nil {
-						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
+						utils.LogContentError(logger, err, "failed to execute pre-server startup hooks")
 						utils.FailBoot(fmt.Errorf("failed to execute the agent's pre-server startup hooks: %w", err))
 						return
 					}

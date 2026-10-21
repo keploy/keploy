@@ -229,7 +229,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		// Log and return error if test set IDs retrieval fails.
-		utils.LogError(s.logger, err, "failed to get test set IDs")
+		utils.LogContentError(s.logger, err, "failed to get test set IDs")
 		return err
 	}
 
@@ -320,7 +320,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []string) error {
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to get test set IDs")
+		utils.LogContentError(s.logger, err, "failed to get test set IDs")
 		return err
 	}
 
@@ -408,7 +408,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	testSetIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory", zap.String("path", keployPath), zap.String("hint", "verify that --path points to a directory containing keploy/<test-set>/tests/*.yaml files"))
+		utils.LogContentError(s.logger, err, "failed to get test set IDs from keploy directory", zap.String("path", keployPath), zap.String("hint", "verify that --path points to a directory containing keploy/<test-set>/tests/*.yaml files"))
 		return err
 	}
 
@@ -785,7 +785,7 @@ func (s *contract) Validate(ctx context.Context) error {
 	} else if s.config.Contract.Driven == models.ProviderMode.String() {
 		err := s.provider.ValidateSchema(ctx)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to validate schema")
+			utils.LogContentError(s.logger, err, "failed to validate schema")
 			return err
 		}
 		fmt.Println("Provider driven validation is not implemented yet")

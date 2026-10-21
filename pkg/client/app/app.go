@@ -201,7 +201,7 @@ func (a *App) SetupDocker(ctx context.Context) error {
 	if HookImpl != nil {
 		newCmd, err := HookImpl.BeforeDockerSetup(ctx, a.cmd)
 		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during docker setup")
+			utils.LogContentError(a.logger, err, "hook failed during docker setup")
 			return err
 		}
 		a.cmd = newCmd
@@ -309,7 +309,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 
 	serviceInfo, err := a.docker.FindContainerInComposeFiles(paths, a.container)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to find container in compose files")
+		utils.LogContentError(a.logger, err, "failed to find container in compose files")
 		return err
 	}
 
@@ -326,13 +326,13 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 
 	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
+		utils.LogContentError(a.logger, err, "failed to modify compose for keploy integration")
 		return err
 	}
 	if HookImpl != nil {
 		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, a.container)
 		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during docker compose setup")
+			utils.LogContentError(a.logger, err, "hook failed during docker compose setup")
 			return err
 		}
 		if changed {
@@ -408,7 +408,7 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 
 	serviceInfo, err := a.docker.FindContainerInCompose(&compose, a.container)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to find container in in-memory compose")
+		utils.LogContentError(a.logger, err, "failed to find container in in-memory compose")
 		return err
 	}
 
@@ -418,14 +418,14 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 	a.composeService = serviceInfo.AppServiceName
 
 	if err := a.docker.ModifyComposeForAgent(&compose, a.opts, a.container); err != nil {
-		utils.LogError(a.logger, err, "failed to modify in-memory compose for keploy integration")
+		utils.LogContentError(a.logger, err, "failed to modify in-memory compose for keploy integration")
 		return err
 	}
 
 	if HookImpl != nil {
 		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, &compose, a.container)
 		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during in-memory docker compose setup")
+			utils.LogContentError(a.logger, err, "hook failed during in-memory docker compose setup")
 			return err
 		}
 		if changed {

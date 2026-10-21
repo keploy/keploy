@@ -242,7 +242,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 			destConn, err = tlsUpgrader.UpgradeDestTLS(tlsConfig)
 			if err != nil {
-				utils.LogError(logger, err, "failed to upgrade the destination connection to TLS for mysql")
+				utils.LogContentError(logger, err, "failed to upgrade the destination connection to TLS for mysql")
 				return res, err
 			}
 			logger.Debug("TLS connection established with the destination server")

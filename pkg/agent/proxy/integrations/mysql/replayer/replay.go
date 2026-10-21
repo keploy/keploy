@@ -25,7 +25,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 	unfiltered, err := mockDb.GetSessionMocks()
 	if err != nil {
-		utils.LogError(logger, err, "failed to get session mocks")
+		utils.LogContentError(logger, err, "failed to get session mocks")
 		return err
 	}
 
