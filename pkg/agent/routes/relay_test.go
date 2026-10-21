@@ -142,6 +142,73 @@ func TestExtractRelayPort(t *testing.T) {
 	}
 }
 
+// TestHandleRelay_ThroughAuthenticate drives the relay through the production
+// Authenticate middleware. The relay must pass even when:
+// - the request carries an Origin header (recorded from a browser call)
+// - the agent has a session token and the request carries the app's own
+//   Authorization, not the agent token
+// Without the auth exemption, these produce 403 and 401 respectively.
+func TestHandleRelay_ThroughAuthenticate(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer app.Close()
+	appPort := app.Listener.Addr().(*net.TCPAddr).Port
+	stubPodIP(t, "127.0.0.1")
+
+	// Build router WITH Authenticate middleware, matching production wiring.
+	agentToken := "test-agent-secret-token"
+	r := chi.NewRouter()
+	r.Use(Authenticate(zap.NewNop(), agentToken))
+	a := &Agent{logger: zap.NewNop()}
+	r.HandleFunc("/agent/relay/{port}/*", a.HandleRelay)
+
+	tests := []struct {
+		name   string
+		origin string
+		auth   string
+		want   int
+	}{
+		{"Origin header from recorded browser call", "https://app.keploy.io", "", http.StatusOK},
+		{"app's own Authorization (not agent token)", "", "Bearer app-jwt-token", http.StatusOK},
+		{"both Origin and app Authorization", "https://app.keploy.io", "Bearer app-jwt-token", http.StatusOK},
+		{"no special headers", "", "", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/agent/relay/%d/data", appPort), nil)
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.auth != "" {
+				req.Header.Set("Authorization", tt.auth)
+			}
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.want, rec.Body.String())
+			}
+		})
+	}
+
+	// Non-relay routes must still be guarded.
+	t.Run("non-relay route with Origin is still refused", func(t *testing.T) {
+		r2 := chi.NewRouter()
+		r2.Use(Authenticate(zap.NewNop(), agentToken))
+		r2.Get("/agent/stop", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		req := httptest.NewRequest(http.MethodGet, "/agent/stop", nil)
+		req.Header.Set("Origin", "https://evil.com")
+		rec := httptest.NewRecorder()
+		r2.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("non-relay with Origin: status = %d, want 403", rec.Code)
+		}
+	})
+}
+
 func TestExtractRelayForwardPath(t *testing.T) {
 	tests := []struct {
 		path string
