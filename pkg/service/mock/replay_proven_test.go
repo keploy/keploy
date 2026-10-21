@@ -189,7 +189,9 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 }
 
 // Under the switch a run list conflicts with the deny list: --run-only is
-// refused before anything runs.
+// refused before anything runs, as a usage error (exit 8), so CI tells the
+// misconfigured job from a red suite (exit 1). Mutation: refuse it with a
+// plain error.
 func TestRunOnlyIsRefusedUnderTheSwitch(t *testing.T) {
 	provenOn(t)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
@@ -199,6 +201,9 @@ func TestRunOnlyIsRefusedUnderTheSwitch(t *testing.T) {
 	cfg.Mock.RunOnly = []string{"TestA"}
 	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
 	require.ErrorContains(t, err, "--run-only is not used with the proven model")
+	require.True(t, utils.IsUsageError(err), "the refusal is a usage error (exit 8): %v", err)
+	runs, _ := instr.counts()
+	require.Zero(t, runs)
 }
 
 // A build that does not judge a replay refuses one under the switch: its
@@ -324,13 +329,15 @@ func TestReadWindowsWithoutAReaderIsAnErrorUnderTheSwitch(t *testing.T) {
 }
 
 // Under the switch a call served live is not judged, so --on-miss
-// passthrough and record are refused before anything runs.
+// passthrough and record are refused before anything runs, as usage errors
+// (exit 8). Mutation: refuse them with a plain error.
 func TestOnMissOtherThanFailIsRefusedUnderTheSwitch(t *testing.T) {
 	provenOn(t)
 	for _, policy := range []string{"passthrough", "record"} {
 		instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 		err := replayErrOnMiss(t, instr, utils.Native, policy)
 		require.ErrorContains(t, err, "--on-miss "+policy+" is not used with the proven model")
+		require.True(t, utils.IsUsageError(err), "the refusal is a usage error (exit 8): %v", err)
 		runs, _ := instr.counts()
 		require.Zero(t, runs)
 	}
@@ -484,7 +491,9 @@ func TestNothingVerifiedIsTheSwitchOffRule(t *testing.T) {
 	}
 }
 
-// --strict's miss check is the verdict's second rule under the switch.
+// --strict's miss check is the verdict's second rule under the switch: it is
+// refused before anything runs, as a usage error (exit 8). Mutation: refuse
+// it with a plain error.
 func TestStrictIsRefusedUnderTheSwitch(t *testing.T) {
 	provenOn(t)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
@@ -494,6 +503,38 @@ func TestStrictIsRefusedUnderTheSwitch(t *testing.T) {
 	cfg.Mock.Strict = true
 	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
 	require.ErrorContains(t, err, "--strict is not used with the proven model")
+	require.True(t, utils.IsUsageError(err), "the refusal is a usage error (exit 8): %v", err)
+	runs, _ := instr.counts()
+	require.Zero(t, runs)
+}
+
+// ProvenRefusal is nothing with the switch off, whatever keploy mock replay
+// was asked: the switch-off path takes --run-only, --strict, every --on-miss
+// policy and a docker command as before. Under it a docker command is
+// refused for record and replay alike, and only replay refuses the three
+// flags. Mutation: refuse with the switch off; refuse replay's flags on
+// record.
+func TestProvenRefusalIsTheSwitchs(t *testing.T) {
+	asked := func(cmdType utils.CmdType) *config.Config {
+		cfg := &config.Config{CommandType: string(cmdType)}
+		cfg.Mock.RunOnly = []string{"TestA"}
+		cfg.Mock.Strict = true
+		cfg.Mock.OnMiss = string(models.MissRecord)
+		return cfg
+	}
+	t.Setenv(provenswitch.Env, "0")
+	for _, verb := range []string{"record", "replay"} {
+		require.NoError(t, ProvenRefusal(asked(utils.DockerCompose), verb))
+	}
+	t.Setenv(provenswitch.Env, "1")
+	require.NoError(t, ProvenRefusal(asked(utils.Native), "record"), "record takes no replay flag")
+	require.ErrorContains(t, ProvenRefusal(asked(utils.Native), "replay"), "--run-only")
+	for _, verb := range []string{"record", "replay"} {
+		require.ErrorContains(t, ProvenRefusal(asked(utils.DockerCompose), verb), "runs the test command natively")
+	}
+	fine := &config.Config{CommandType: string(utils.Native)}
+	fine.Mock.OnMiss = string(models.MissFail)
+	require.NoError(t, ProvenRefusal(fine, "replay"))
 }
 
 // A record that captured no call names keploy's Go integration under the

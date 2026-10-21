@@ -145,32 +145,23 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if provenswitch.On() && !replaysJudged.Load() {
 		return fmt.Errorf("keploy mock replay under the proven model needs a keploy build that judges each test (keploy enterprise): this one exits with the test command's code, so a test keploy failed after it ended, or a call no test made that got no recorded answer, would pass; set %s=0 to replay without the proven model", provenswitch.Env)
 	}
+	// What the proven model does not do is refused before anything runs:
+	// before the set is fetched from a registry, too.
+	if err := ProvenRefusal(m.config, "replay"); err != nil {
+		return err
+	}
 	// 0. Materialise the set locally (registry download in enterprise; no-op on files).
 	if err := m.store.Pull(ctx, name); err != nil {
 		utils.LogError(m.logger, err, "failed to fetch the mock set", zap.String("mock-set", name))
 		return err
 	}
 
-	if provenswitch.On() && len(m.config.Mock.RunOnly) > 0 {
-		return errors.New("--run-only is not used with the proven model: select the tests with your own test command; keploy skips only the tests verdicts.yaml quarantines")
-	}
-	if provenswitch.On() && m.config.Mock.Strict {
-		return errors.New("--strict is not used with the proven model: keploy's verdict fails a run on every call the recording did not answer, charged to a test or not")
-	}
-	if err := m.refuseProvenDocker("replay"); err != nil {
-		return err
-	}
 	if err := m.checkRealDeps(); err != nil {
 		return err
 	}
 	policy := models.MissPolicy(m.config.Mock.OnMiss)
 	if !policy.Valid() {
 		return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", m.config.Mock.OnMiss)
-	}
-	if provenswitch.On() && policy != models.MissFail {
-		// A call served live is not a miss, so it would reach no test's
-		// evidence and no verdict: a test that called real infra would pass.
-		return fmt.Errorf("--on-miss %s is not used with the proven model: keploy judges each test by the calls the recording answers, so a miss must fail it (--on-miss fail)", policy)
 	}
 
 	m.logger.Info("Replaying mocks for your test command",

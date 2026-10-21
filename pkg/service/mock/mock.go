@@ -168,11 +168,42 @@ const agentEpilogueTimeout = 10 * time.Second
 // project, before a record can read what each test did: a run that could
 // only end unjudged is refused up front instead.
 func (m *mockService) refuseProvenDocker(verb string) error {
-	if !provenswitch.On() || !utils.IsDockerCmd(utils.CmdType(m.config.CommandType)) {
+	return provenDockerRefusal(m.config, verb)
+}
+
+func provenDockerRefusal(cfg *config.Config, verb string) error {
+	if !provenswitch.On() || !utils.IsDockerCmd(utils.CmdType(cfg.CommandType)) {
 		return nil
 	}
 	return fmt.Errorf("keploy mock %[1]s under the proven model runs the test command natively in this release: inside a container keploy cannot tell which process runs the tests, or read what each of them did. "+
 		"Run the test command itself through keploy (keploy mock %[1]s -c \"go test -p 1 -json ./...\"), or set %[2]s=0 to run without the proven model", verb, provenswitch.Env)
+}
+
+// ProvenRefusal is what keploy mock <verb> ("record" or "replay") refuses in
+// cfg under the proven model before anything runs, or nil (always with the
+// switch off): a docker command (refuseProvenDocker), and for replay
+// --run-only, --strict and an --on-miss other than fail, which the proven
+// model's verdict replaces. Those three are usage errors (exit 8), as a
+// refused flag of keploy record or keploy test is, so a CI job that passes
+// one is told apart from a suite that failed (exit 1). An --on-miss value
+// that is no policy at all is left to the replay's own check. keploy's --help
+// test runs it for every flag keploy mock's --help offers under the switch.
+func ProvenRefusal(cfg *config.Config, verb string) error {
+	if err := provenDockerRefusal(cfg, verb); err != nil || !provenswitch.On() || verb != "replay" {
+		return err
+	}
+	if len(cfg.Mock.RunOnly) > 0 {
+		return utils.UsageError(errors.New("--run-only is not used with the proven model: select the tests with your own test command; keploy skips only the tests verdicts.yaml quarantines"))
+	}
+	if cfg.Mock.Strict {
+		return utils.UsageError(errors.New("--strict is not used with the proven model: keploy's verdict fails a run on every call the recording did not answer, charged to a test or not"))
+	}
+	if policy := models.MissPolicy(cfg.Mock.OnMiss); policy.Valid() && policy != models.MissFail {
+		// A call served live is not a miss, so it would reach no test's
+		// evidence and no verdict: a test that called real infra would pass.
+		return utils.UsageError(fmt.Errorf("--on-miss %s is not used with the proven model: keploy judges each test by the calls the recording answers, so a miss must fail it (--on-miss fail)", policy))
+	}
+	return nil
 }
 
 // isDockerCompose reports whether the wrapped command is a compose project.
