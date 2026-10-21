@@ -826,6 +826,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	} else {
 		envVars = append(envVars, token.Env)
 	}
+	if e := logContentEnv(); e != "" {
+		envVars = append(envVars, e)
+	}
 
 	// When the operator's keploy folder is resolved, bind-mount it into
 	// the agent container at /keploy-host and point KEPLOY_DEBUG_FILE at
