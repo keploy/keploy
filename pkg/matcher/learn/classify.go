@@ -1134,7 +1134,7 @@ var payloadKeys = map[string]bool{
 // recorded request and answer, the payload only, as one text.
 func RawOf(m *models.Mock, served bool) Raw {
 	r := Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served}
-	b, err := json.Marshal(m.Spec)
+	b, err := json.Marshal(payloadSpec(m.Spec))
 	if err != nil {
 		return r
 	}
@@ -1149,6 +1149,25 @@ func RawOf(m *models.Mock, served bool) Raw {
 	textOf(dropKeys(v, 0), &sb)
 	r.Text = sb.String()
 	return r
+}
+
+// payloadSpec is spec without what says, below the spec's own fields
+// (payloadKeys), where and when it was recorded: a Postgres query's
+// invocation id (its statement's hash, connection, recorded instant and
+// sequence; models.PostgresV3QuerySpec.InvocationID). Its date and time words
+// are the recording's own clock, and a value found there did not flow from
+// it: read as payload, a clock the app read late in F (past what the lead
+// accounts for) was a value from that recording, refused as changed. spec is
+// not changed: the copy is.
+func payloadSpec(spec models.MockSpec) models.MockSpec {
+	if pg := spec.PostgresV3; pg != nil && pg.Query != nil && pg.Query.InvocationID != "" {
+		q := *pg.Query
+		q.InvocationID = ""
+		p := *pg
+		p.Query = &q
+		spec.PostgresV3 = &p
+	}
+	return spec
 }
 
 // textOf writes v's keys and scalars to sb, each on a line of its own, in a
