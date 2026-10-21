@@ -40,6 +40,19 @@
 // files they mark it with in MemDir, and run from programs there (ExecDir):
 // on storage, a loaded host holds them in the kernel too, and a test of the
 // CPU is then one of the disk.
+//
+// Nothing a hold starts, nor any process a test starts to spin, outlives the
+// test's process, however that ends: a timeout's panic, a crash, or a kill
+// leave no t.Cleanup run. A hog dies with the thread that started it
+// (PR_SET_PDEATHSIG), held for as long as the hogs run. A process of the
+// test's own that spins or waits for the test (Spin, EndWithOwner) has the
+// test's process named in its environment (Owner) and exits once it is gone;
+// a shell's spin (ShellSpin) looks for it at each turn.
+//
+// A hold keeps a CPU busy with its hogs: a test that holds, or spins, runs
+// only where KEPLOY_TEST_CPU_HOLD=1 says the host is one for such tests (CI's
+// go-test lane, a test box), and skips elsewhere (TakesACPU), so that a
+// routine `go test` of a package on a laptop pins no CPU.
 package starvetest
 
 import (
@@ -48,8 +61,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -61,12 +77,28 @@ import (
 // whatever their number.
 const hogs = 32
 
+// cpuHoldEnv, set to 1, says the host runs tests that keep a CPU busy
+// (TakesACPU).
+const cpuHoldEnv = "KEPLOY_TEST_CPU_HOLD"
+
+// TakesACPU skips the test unless cpuHoldEnv is 1: it keeps a CPU busy
+// (a hold's hogs, or a process that spins), as a test box or CI may, and a
+// laptop's routine `go test` of the package must not (see above).
+func TakesACPU(t *testing.T) {
+	t.Helper()
+	if os.Getenv(cpuHoldEnv) != "1" {
+		t.Skip("keeps a CPU busy (hogs, or a process that spins): runs where " + cpuHoldEnv + "=1, as CI's go-test lane sets it")
+	}
+}
+
 // Hold holds processes pids off the CPU until release (idempotent; also run
 // at the test's cleanup), after which they run again. It skips the test where
-// the scheduler will not hold them (no CPU to pin to, or the calls refused,
-// as a sandbox may).
+// the host is not one for it (TakesACPU), or the scheduler will not hold them
+// (no CPU to pin to, or the calls refused, as a sandbox may). Its hogs die
+// with this process, however it ends (see above).
 func Hold(t *testing.T, pids ...int) (release func()) {
 	t.Helper()
+	TakesACPU(t)
 	if _, ok := Ran(os.Getpid()); !ok {
 		t.Skip("this kernel keeps no account of a thread's time on a CPU (schedstat): a stop cannot tell a held process from a stalled one")
 	}
@@ -87,34 +119,30 @@ func Hold(t *testing.T, pids ...int) (release func()) {
 	one.Set(cpu)
 
 	var mu sync.Mutex
-	var running []*exec.Cmd
+	endHogs := func() {}
 	var held []*heldProcess
 	stop := func() {
 		mu.Lock()
 		defer mu.Unlock()
-		for _, h := range running {
-			_ = h.Process.Kill()
-			_ = h.Wait()
-		}
-		running = nil
+		endHogs()
+		endHogs = func() {}
 		for _, p := range held {
 			p.let()
 		}
 		held = nil
 	}
 	t.Cleanup(stop)
-	for range hogs {
-		h := exec.Command("sh", "-c", "while :; do :; done")
-		if err := h.Start(); err != nil {
-			t.Fatalf("start a hog: %v", err)
+	end, err := startHogs(hogs, &one)
+	if err != nil {
+		var refused pinRefused
+		if errors.As(err, &refused) {
+			t.Skipf("cannot pin a hog to CPU %d: %v", cpu, refused.err)
 		}
-		mu.Lock()
-		running = append(running, h)
-		mu.Unlock()
-		if err := unix.SchedSetaffinity(h.Process.Pid, &one); err != nil {
-			t.Skipf("cannot pin a hog to CPU %d: %v", cpu, err)
-		}
+		t.Fatal(err)
 	}
+	mu.Lock()
+	endHogs = end
+	mu.Unlock()
 	for _, pid := range pids {
 		p := holdProcess(t, pid, &one)
 		mu.Lock()
@@ -123,6 +151,57 @@ func Hold(t *testing.T, pids ...int) (release func()) {
 	}
 	var once sync.Once
 	return func() { once.Do(stop) }
+}
+
+// pinRefused is a hog the kernel would not pin to the hold's CPU.
+type pinRefused struct{ err error }
+
+func (p pinRefused) Error() string { return "pin a hog: " + p.err.Error() }
+
+// startHogs starts n hogs pinned to cpus, and returns the func that ends them
+// (idempotent). They are started from one thread, which a goroutine keeps for
+// as long as they run (runtime.LockOSThread), each to be killed as that
+// thread exits (Pdeathsig): so with this process, however it ends, and not
+// before end, as another thread's exit could. The goroutine exits locked once
+// they are ended, and the runtime ends the thread with it.
+func startHogs(n int, cpus *unix.CPUSet) (end func(), err error) {
+	ready := make(chan error, 1)
+	quit, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.LockOSThread()
+		var running []*exec.Cmd
+		kill := func() {
+			for _, h := range running {
+				_ = h.Process.Kill()
+				_ = h.Wait()
+			}
+		}
+		for range n {
+			h := exec.Command("sh", "-c", "while :; do :; done")
+			h.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+			if err := h.Start(); err != nil {
+				kill()
+				ready <- fmt.Errorf("start a hog: %w", err)
+				return
+			}
+			running = append(running, h)
+			if err := unix.SchedSetaffinity(h.Process.Pid, cpus); err != nil {
+				kill()
+				ready <- pinRefused{err}
+				return
+			}
+		}
+		ready <- nil
+		<-quit
+		kill()
+	}()
+	if err := <-ready; err != nil {
+		<-done
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { close(quit); <-done }) }, nil
 }
 
 // heldProcess is a process Hold holds: by thread, how it ran before (its
@@ -268,13 +347,139 @@ func holdProcess(t *testing.T, pid int, cpus *unix.CPUSet) *heldProcess {
 // way out of a held process that is the test's own, which a hold keeps
 // waiting for a CPU and which cannot get out before the test releases it,
 // whatever turns the hold gives it (see above). The file is on a memory
-// filesystem (MemDir): its look waits on no storage.
+// filesystem (MemDir): its look waits on no storage. Where its environment
+// names the test's process (Owner), and that is gone, it exits this process
+// at once: nothing will release it.
 func Spin(released string) {
+	gone := ownerGone()
 	for {
 		if _, err := os.Stat(released); err == nil {
 			return
 		}
+		if gone() {
+			os.Exit(ownerGoneExit)
+		}
 	}
+}
+
+// ownerEnv names, in a process a test starts, the test's process: its pid
+// and start time (Owner).
+const ownerEnv = "KEPLOY_TEST_OWNER"
+
+// ownerGoneExit is the exit code of a process that ended as its test's
+// process was gone (Spin, EndWithOwner).
+const ownerGoneExit = 125
+
+// Owner is the environment entry that names this process, the test's, to a
+// process it starts that spins or waits for it (Spin, EndWithOwner): its
+// pid and start time, as /proc gives them.
+func Owner() string {
+	start, _ := startTime(os.Getpid())
+	return ownerEnv + "=" + strconv.Itoa(os.Getpid()) + ":" + strconv.FormatUint(start, 10)
+}
+
+// EndWithOwner exits this process once the test's process its environment
+// names (Owner) is gone, from a goroutine that waits on it in the kernel: a
+// process of the test's own that waits for the test (asleep, or held in the
+// kernel) does not outlive it. A no-op where none is named.
+func EndWithOwner() {
+	fd, named := openOwner()
+	if !named {
+		return
+	}
+	if fd < 0 {
+		os.Exit(ownerGoneExit)
+	}
+	go func() {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		for {
+			if n, err := unix.Poll(fds, -1); n > 0 || (err != nil && !errors.Is(err, unix.EINTR)) {
+				os.Exit(ownerGoneExit)
+			}
+		}
+	}()
+}
+
+// ownerGone reports, without waiting, whether the test's process this
+// process's environment names (Owner) is gone; never where none is named.
+func ownerGone() func() bool {
+	fd, named := openOwner()
+	switch {
+	case !named:
+		return func() bool { return false }
+	case fd < 0:
+		return func() bool { return true }
+	}
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	return func() bool {
+		n, err := unix.Poll(fds, 0)
+		return n > 0 || (err != nil && !errors.Is(err, unix.EINTR))
+	}
+}
+
+// openOwner is a pidfd of the test's process this process's environment
+// names (Owner), readable once it has exited; -1 where it is gone already,
+// or its pid names another process now. named is false where none is named.
+func openOwner() (fd int, named bool) {
+	v, ok := os.LookupEnv(ownerEnv)
+	if !ok {
+		return -1, false
+	}
+	p, s, _ := strings.Cut(v, ":")
+	pid, err1 := strconv.Atoi(p)
+	start, err2 := strconv.ParseUint(s, 10, 64)
+	if err1 != nil || err2 != nil || pid <= 0 {
+		return -1, true
+	}
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return -1, true
+	}
+	// The pidfd first, then the pid's start: a pid given to another process
+	// before the open shows another start time; once open, the pidfd names
+	// the process it was opened on.
+	if now, ok := startTime(pid); !ok || now != start {
+		unix.Close(fd)
+		return -1, true
+	}
+	return fd, true
+}
+
+// startTime is process pid's start time (field 22 of its stat, in clock
+// ticks after boot); false where it cannot be read.
+func startTime(pid int) (uint64, bool) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, false
+	}
+	// The fields after the command, which may hold any byte, ")" too.
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := bytes.Fields(b[i+1:])
+	if len(f) < 20 {
+		return 0, false
+	}
+	start, err := strconv.ParseUint(string(f[19]), 10, 64)
+	return start, err == nil
+}
+
+// ShellSpin is a shell loop that spins while cond holds (a shell test, such
+// as `[ ! -e released ]`; "" for ever) and this process, the test's, runs:
+// it ends with the test, however that ends (see above). It looks for this
+// process by its pid, which the kernel gives another only once it has cycled
+// through the rest, with a kill(2) of no signal alone: a call that never
+// sleeps, so the spin stays runnable throughout, as a spinner a test judges
+// must (one that sleeps could run while it sleeps). No redirection, which
+// opens a file at each turn and may sleep there: once the test is gone,
+// kill says so on the shell's stderr. No single quote in it: a trap's
+// command may hold it.
+func ShellSpin(cond string) string {
+	if cond != "" {
+		cond += " && "
+	}
+	return fmt.Sprintf("while %skill -0 %d; do :; done", cond, os.Getpid())
 }
 
 // Ran is how long the threads of process pid have run on a CPU (the sum of

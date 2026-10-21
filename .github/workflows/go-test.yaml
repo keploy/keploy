@@ -44,6 +44,12 @@ jobs:
       # signals pid 1; without user namespaces it skips, and the package
       # still reports ok. With this set it fails instead.
       KEPLOY_TEST_USERNS_REQUIRED: "1"
+      # The tests that hold processes off the CPU (internal/starvetest: 32
+      # hogs pinned to one CPU) or spin one run where this says the host is
+      # one for them, and skip elsewhere, so that a routine `go test` of
+      # utils or pkg/platform/http on a developer's machine pins no CPU.
+      # This lane is where they run.
+      KEPLOY_TEST_CPU_HOLD: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass

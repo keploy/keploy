@@ -1273,10 +1273,11 @@ func asleep(t *testing.T, p Reached, comm string) {
 // none) could run no more than the CPU it had while a stop waits on it, and
 // one that sleeps all of the time.
 func TestTheExitClockOfAProcessHeldOffTheCPU(t *testing.T) {
+	starvetest.TakesACPU(t)
 	if !schedAccountKept() {
 		t.Skip("this kernel keeps no account of a thread's time on and waiting for a CPU")
 	}
-	spinner, sleeper := startProc(t, "while :; do :; done"), startProc(t, "exec sleep 600")
+	spinner, sleeper := startProc(t, starvetest.ShellSpin("")), startProc(t, "exec sleep 600")
 	asleep(t, sleeper[0], "sleep")
 	release := starvetest.Hold(t, spinner[0].PID)
 	defer release()
@@ -1297,6 +1298,7 @@ func TestTheExitClockOfAProcessHeldOffTheCPU(t *testing.T) {
 // kernel books a wait for a CPU only once it ends, so a look that finds it
 // waiting again after a slice does not show that wait yet.
 func TestTheExitClockOfAProcessSharingACPU(t *testing.T) {
+	starvetest.TakesACPU(t)
 	if !schedAccountKept() {
 		t.Skip("this kernel keeps no account of a thread's time on and waiting for a CPU")
 	}
@@ -1315,7 +1317,7 @@ func TestTheExitClockOfAProcessSharingACPU(t *testing.T) {
 	}
 	var one unix.CPUSet
 	one.Set(cpu)
-	spinner, other := startProc(t, "while :; do :; done"), startProc(t, "while :; do :; done")
+	spinner, other := startProc(t, starvetest.ShellSpin("")), startProc(t, starvetest.ShellSpin(""))
 	for _, p := range []Reached{spinner[0], other[0]} {
 		if err := unix.SchedSetaffinity(p.PID, &one); err != nil {
 			t.Skipf("cannot pin process %d to CPU %d: %v", p.PID, cpu, err)

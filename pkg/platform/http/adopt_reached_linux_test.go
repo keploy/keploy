@@ -59,6 +59,9 @@ func TestStopHelperProcess(t *testing.T) {
 	if name == "" {
 		t.Skip("a process of the stop tests' application")
 	}
+	// It waits for the test (released, or a signal it may never send): it
+	// ends with the test's own process, however that ends.
+	starvetest.EndWithOwner()
 	dir := os.Getenv(stopHelperDirEnv)
 	note := func(file string) {
 		if err := os.WriteFile(filepath.Join(dir, file), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
@@ -163,7 +166,7 @@ func helperCommand(bin, name, dir string, held bool) string {
 	if held {
 		env = stopHelperHeldEnv + "=1 "
 	}
-	return fmt.Sprintf(`env GORACE="${GORACE:+$GORACE }atexit_sleep_ms=0" %s%s=%s %s=%s %s -test.run='^TestStopHelperProcess$'`, env, stopHelperEnv, name, stopHelperDirEnv, dir, bin)
+	return fmt.Sprintf(`env GORACE="${GORACE:+$GORACE }atexit_sleep_ms=0" %s %s%s=%s %s=%s %s -test.run='^TestStopHelperProcess$'`, starvetest.Owner(), env, stopHelperEnv, name, stopHelperDirEnv, dir, bin)
 }
 
 // helperPid is the pid stop helper name wrote in dir as it got ready.
@@ -226,6 +229,9 @@ func TestTheStopDoesNotJudgeWhatIsHeldOffTheCPU(t *testing.T) {
 // while the stop checks them for three times the checks a stall is judged on
 // (held), or not.
 func stopOfWhatTheAppLeft(t *testing.T, held bool) {
+	if held {
+		starvetest.TakesACPU(t)
+	}
 	if !inOwnProcess(t) {
 		return
 	}
@@ -353,6 +359,7 @@ func stopOfWhatTheAppLeft(t *testing.T, held bool) {
 // what the stop marks so (leftToKernel), not from what is left once it ended:
 // a daemon leaving the kernel as the stop gives up on it is still caught.
 func TestAKilledDaemonHeldOffTheCPUIsWaitedForUntilGone(t *testing.T) {
+	starvetest.TakesACPU(t)
 	if !inOwnProcess(t) {
 		return
 	}
