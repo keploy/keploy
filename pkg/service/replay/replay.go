@@ -5715,13 +5715,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// never judged; an ignored test, or one the run did not select, verified
 	// nothing of what was learned while the set ran.
 	//
-	// This is the round's own half, decided before anything is written.
+	// This is the round's own half, decided before anything is written onto
+	// the mocks. It is not the whole rule: a before-test-result hook ran
+	// above, before this set's verdict was known, and enterprise's auto-noise
+	// hook writes the response noise it learned onto the test cases there.
 	// keploy record's judging decides the set only later, on its confirming
-	// round too, and puts back what this round wrote onto the mocks of every
-	// set it does not decide (enterprise record_judge.go, recordedMocks): a
-	// set this round judged can still be one judging does not, when the
-	// confirming round did not complete or could not run, or judging was
-	// interrupted or failed.
+	// round too, and puts back what this round wrote onto the recording (its
+	// mocks and its test cases) of every set it does not decide (enterprise
+	// record_judge.go, recordedFiles): a set this round did not judge, and
+	// one it judged that judging does not, when the confirming round did not
+	// complete or could not run, or judging was interrupted or failed.
 	if r.learning() && r.instrument {
 		if unchecked != "" {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
