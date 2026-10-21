@@ -1671,6 +1671,46 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
+	// EVERY RECORDED VERDICT, for the reporter -- which is a different set from
+	// finalTestCaseResults.
+	//
+	// finalTestCaseResults holds only the cases that reached the normal
+	// end-of-test path. A case whose app never answered, whose response type
+	// was wrong, or whose result came back nil is persisted by its own terminal
+	// branch and never lands there. Reporting from the one site that filled
+	// that map therefore reported a fraction of the run: measured on a set of
+	// 4 with 3 no-answer failures, the run recorded 4 verdicts and the reporter
+	// saw 1.
+	//
+	// Keyed by case name, so a --retry-passing cycle that re-runs a passing
+	// case overwrites its earlier entry and the LAST verdict is the one
+	// reported -- the old call sat inside that retry loop and fired once per
+	// cycle.
+	//
+	// Drained by a defer below, not at the end of the happy path, because a run
+	// that bails has still recorded the verdicts it got, and the consumer of
+	// this hook (k8s-proxy's in-Pod driver) settles and retires cases from it.
+	settledVerdicts := make(map[string]settledVerdict)
+	recordVerdict := func(tc *models.TestCase, res *models.TestResult) {
+		if tc == nil || res == nil || tc.Name == "" {
+			return
+		}
+		settledVerdicts[tc.Name] = settledVerdict{tc: tc, result: res}
+	}
+	defer func() {
+		reporter, ok := r.hookImpl.(TestCaseReporter)
+		if !ok {
+			return
+		}
+		for _, v := range settledVerdicts {
+			if err := reporter.AfterTestCaseRun(runTestSetCtx, testSetID, v.tc, v.result); err != nil {
+				utils.LogError(r.logger, err, "AfterTestCaseRun hook failed; the result stands and the replay continues",
+					zap.String("testcase", v.tc.Name),
+					zap.String("next_step", "check the AfterTestCaseRun implementation and anything it writes to (e.g. a progress file on a full disk)"))
+			}
+		}
+	}()
+
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
 	// notReady is why the set's application never got ready, under the
@@ -2810,6 +2850,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 			}
+			recordVerdict(testCase, testCaseResult)
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, loopErr, "failed to insert test case result")
@@ -2953,6 +2994,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 					SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 				}
+				recordVerdict(testCase, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
@@ -3158,6 +3200,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					recordVerdict(testCase, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for an answer judged on its start")
@@ -3179,6 +3222,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// during this (failed) test attaches here and isn't carried to
 				// the next test or lost.
 				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+				recordVerdict(testCase, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
@@ -3421,6 +3465,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for HTTP test case"))
 					attachMisses(testCaseResult)
+					recordVerdict(testCase, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
@@ -3476,6 +3521,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for gRPC test case"))
 					attachMisses(testCaseResult)
+					recordVerdict(testCase, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
@@ -3970,16 +4016,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.MappingStale = mappingStaleReason
 					}
 					finalTestCaseResults[testCase.Name] = testCaseResult
-					// The verdict is settled here, after the retry loop. See
-					// TestCaseReporter for why this is the only per-case
-					// post-verdict seam.
-					if reporter, ok := r.hookImpl.(TestCaseReporter); ok {
-						if err := reporter.AfterTestCaseRun(runTestSetCtx, testSetID, testCase, testCaseResult); err != nil {
-							utils.LogError(r.logger, err, "AfterTestCaseRun hook failed; the result stands and the replay continues",
-								zap.String("testcase", testCase.Name),
-								zap.String("next_step", "check the AfterTestCaseRun implementation and anything it writes to (e.g. a progress file on a full disk)"))
-						}
-					}
+					recordVerdict(testCase, testCaseResult)
 				} else {
 					utils.LogError(r.logger, nil, "test case result is nil")
 					// Finalize the capture window and persist a failed result so a
@@ -3987,6 +4024,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// later test (or vanishing) when we bail out on this internal error.
 					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: test case result is nil"))
 					attachMisses(failedResult)
+					recordVerdict(testCase, failedResult)
 					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
 					}
@@ -4000,6 +4038,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// failed result so the miss surfaces and can't carry forward.
 				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: comparison returned no result"))
 				attachMisses(failedResult)
+				recordVerdict(testCase, failedResult)
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
 				}
@@ -4234,6 +4273,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, simErr)
 				markAnswerStalled(testCaseResult, simErr)
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+				recordVerdict(tc, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
@@ -4361,6 +4401,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							failure++
 							testSetStatus = models.TestSetStatusFailed
 							r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+							recordVerdict(tc, testCaseResult)
 							loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 							if loopErr != nil {
 								utils.LogError(r.logger, loopErr, "failed to save a streaming test result judged on its start")
@@ -4393,6 +4434,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, streamErr)
 						markAnswerStalled(testCaseResult, streamErr)
 						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+						recordVerdict(tc, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
 							utils.LogError(r.logger, loopErr, "failed to save streaming test result")
@@ -4442,6 +4484,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New(errMsg))
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+					recordVerdict(tc, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
@@ -4585,6 +4628,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				attachStreamMisses(failedResult)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
+				recordVerdict(tc, failedResult)
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
 				}
@@ -4787,6 +4831,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// are included - and attach them to this result.
 				attachStreamMisses(testCaseResult)
 
+				recordVerdict(tc, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to save streaming test result")
@@ -8630,4 +8675,15 @@ func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.Mo
 		names[i] = m.Name
 	}
 	return streamingTest{testCase: &tcCopy, expectedMocks: names}
+}
+
+// settledVerdict is one case's final result, held for the TestCaseReporter.
+//
+// The test case travels with the result because the hook takes both and the
+// terminal branches that record a verdict do not all have the original
+// *models.TestCase in the same variable -- a no-answer failure reports the
+// view it actually sent.
+type settledVerdict struct {
+	tc     *models.TestCase
+	result *models.TestResult
 }

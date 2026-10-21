@@ -2,7 +2,6 @@ package replay
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -41,33 +40,15 @@ func TestTheReporterIsOptional(t *testing.T) {
 	}
 }
 
-// The signature carries what a consumer needs to report a case without going
-// back to the engine: which set, which case, and what the verdict was.
-func TestTheReporterIsHandedTheSettledVerdict(t *testing.T) {
-	h := &reporterHooks{}
-	var r TestCaseReporter = h
-	err := r.AfterTestCaseRun(context.Background(), "set-1",
-		&models.TestCase{Name: "get-health-1"},
-		&models.TestResult{Status: models.TestStatusPassed})
-	if err != nil {
-		t.Fatalf("AfterTestCaseRun: %v", err)
-	}
-	if len(h.calls) != 1 || h.calls[0] != "set-1/get-health-1=PASSED" {
-		t.Fatalf("reporter saw %v, want [set-1/get-health-1=PASSED]", h.calls)
-	}
-}
-
-// A reporter that cannot report must not fail a run whose tests passed: the
-// call site logs and carries on, so returning an error is survivable by
-// contract, not by accident.
-func TestAFailingReporterStillReturnsItsError(t *testing.T) {
-	want := errors.New("progress file is on a full disk")
-	h := &reporterHooks{err: want}
-	var r TestCaseReporter = h
-	if got := r.AfterTestCaseRun(context.Background(), "set-1", &models.TestCase{Name: "a"}, &models.TestResult{}); !errors.Is(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	if len(h.calls) != 1 {
-		t.Fatalf("the reporter was called %d times, want 1", len(h.calls))
-	}
-}
+// The two tests that used to sit here -- one asserting the double recorded what
+// it was handed, one asserting the double returned its own error -- exercised
+// only the double: a mutation disabling the hook call in RunTestSet left both
+// green. What they claimed to pin is now pinned against the real engine, in
+// testcase_reporter_runtestset_test.go:
+//
+//	TestRunTestSetReportsEveryRecordedVerdict   what is handed over, and once each
+//	TestAFailingReporterDoesNotFailTheRun       the "logs and carries on" contract
+//
+// TestTheReporterIsOptional stays here because it is about the TYPE: no engine
+// can tell you whether an implementation without AfterTestCaseRun satisfies the
+// interface.
