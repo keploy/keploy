@@ -155,3 +155,29 @@ func TestBuildsWordsQuoteTheSummaryItKeeps(t *testing.T) {
 		t.Errorf("with the switch on: diff %q, next steps %q", r.Diff, r.NextSteps)
 	}
 }
+
+// A PostgreSQL miss's summary keeps its statement's double-quoted
+// identifiers, the names an ORM writes, and loses its literals: by default
+// the report, the MOCK MISMATCH heading and the agent's miss line still say
+// which statement missed. A writer withholding a call it was handed keeps
+// them too. With the switch on the statement is whole.
+func TestAPostgresMissSummaryKeepsItsNames(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{`SELECT "users"."id", "users"."email" FROM "users" WHERE "users"."email" = $1 AND "users"."deleted_at" IS NULL LIMIT $2`,
+			`SELECT "users"."id", "users"."email" FROM "users" WHERE "users"."email" = $1 AND "users"."deleted_at" IS NULL LIMIT $2`},
+		{`SELECT "public"."Post"."id" FROM "public"."Post" WHERE "public"."Post"."authorId" = 'kp-canary-author'`,
+			`SELECT "public"."Post"."id" FROM "public"."Post" WHERE "public"."Post"."authorId" = ?`},
+	} {
+		if r := NewReport(ProtocolPostgres, c.in).Build(); r.ActualSummary != c.want || !r.ContentWithheld {
+			t.Errorf("Build: summary %q (withheld %v), want %q", r.ActualSummary, r.ContentWithheld, c.want)
+		}
+		if got := (models.UnmatchedCall{Protocol: ProtocolPostgres, ActualSummary: c.in}).WithoutContent().ActualSummary; got != c.want {
+			t.Errorf("WithoutContent: summary %q, want %q", got, c.want)
+		}
+		restore := logcontent.Set(true)
+		if r := NewReport(ProtocolPostgres, c.in).Build(); r.ActualSummary != c.in {
+			t.Errorf("with the switch on the summary is %q, want %q", r.ActualSummary, c.in)
+		}
+		restore()
+	}
+}
