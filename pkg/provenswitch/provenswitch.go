@@ -5,11 +5,15 @@
 // comparison, and the rest of the design's build plan) landed behind this one
 // switch, so it could merge piece by piece while the old behaviour stayed
 // exactly as it was. Release 1 turns it on by default on Linux, the platform
-// it was built and proven on: there KEPLOY_PROVEN unset or empty means on, and
+// it was built and proven on, in a build that runs release 1's flow (record,
+// an auto-replay that judges and learns, replay: RunsTheFlow), which keploy
+// enterprise is: there KEPLOY_PROVEN unset or empty means on, and
 // KEPLOY_PROVEN=0 runs the old paths. Every other platform keeps the old
-// default, off, until it is ruled on (Windows and macOS, P221): there an unset
-// KEPLOY_PROVEN means off, and KEPLOY_PROVEN=1 turns it on, as before. The old
-// paths stay for as long as a platform runs them.
+// default, off, until it is ruled on (Windows and macOS, P221), and so does a
+// build that does not run that flow (keploy's open-source build) on every
+// platform: there an unset KEPLOY_PROVEN means off, and KEPLOY_PROVEN=1 turns
+// it on, as before. The old paths stay for as long as a platform or a build
+// runs them.
 //
 // On is the ONE place the switch is read. keploy, enterprise and the
 // integrations all call it, so a row cannot be on in one of them and off in
@@ -49,7 +53,7 @@ import (
 const (
 	// Env is the variable that sets the switch for a keploy process:
 	// KEPLOY_PROVEN=0 turns it off, KEPLOY_PROVEN=1 on, and unset or empty
-	// leaves it at the platform's default (PlatformDefault).
+	// leaves it at this build's default on this platform (Default).
 	Env = "KEPLOY_PROVEN"
 	// AgentFlag is the hidden `keploy agent` flag that carries the switch from
 	// the CLI to the agent it starts (see AgentArgs).
@@ -78,28 +82,64 @@ const (
 var pinned atomic.Int32
 
 // PlatformDefault is the switch on a platform (a runtime.GOOS value) when
-// KEPLOY_PROVEN does not set it: on on Linux, which release 1 flips, and off
-// everywhere else. Windows and macOS stay out of the flip (P221): their
-// keploy judges as it did before, so a platform turns the proven model on by
-// default only once it is ruled on. WSL, and Lima on an Intel Mac, run the
-// Linux binary, so they are Linux here.
+// KEPLOY_PROVEN does not set it, in a build that runs release 1's flow
+// (RunsTheFlow): on on Linux, which release 1 flips, and off everywhere else.
+// Windows and macOS stay out of the flip (P221): their keploy judges as it did
+// before, so a platform turns the proven model on by default only once it is
+// ruled on. WSL, and Lima on an Intel Mac, run the Linux binary, so they are
+// Linux here. A build that does not run the flow is off on every platform
+// (Default).
 func PlatformDefault(goos string) bool {
 	return goos == "linux"
 }
 
-// defaultOn is this process's PlatformDefault. A variable only so this
-// package's tests can check another platform's default on any machine.
-var defaultOn = PlatformDefault(runtime.GOOS)
+// thisPlatform is PlatformDefault of this process's platform. A variable only
+// so this package's tests can check another platform's default on any
+// machine.
+var thisPlatform = PlatformDefault(runtime.GOOS)
+
+// flowBuild is set by a build that runs release 1's flow (RunsTheFlow).
+var flowBuild atomic.Bool
+
+// RunsTheFlow says this build runs release 1's flow: a record's auto-replay
+// judges each test the record wrote and learns what the app changes at each
+// run (a clock read it writes to a dependency, say), and a replay's exit code
+// is keploy's verdict on each test. keploy enterprise says so before anything
+// reads the switch. Only such a build turns the proven model on by default
+// (Default; on Linux, PlatformDefault). keploy's open-source build does not
+// call it: its keploy record has no auto-replay, so nothing learns those
+// values, and under the proven model's exact serving every test whose
+// dependency call carries one would fail its replay. There an unset
+// KEPLOY_PROVEN is off on every platform, as in earlier releases, and
+// KEPLOY_PROVEN=1 turns the proven model on.
+func RunsTheFlow() { flowBuild.Store(true) }
+
+// Default is this process's switch when KEPLOY_PROVEN does not set it: on in a
+// build that runs release 1's flow (RunsTheFlow) on a platform release 1 flips
+// (PlatformDefault: Linux), off otherwise.
+func Default() bool { return thisPlatform && flowBuild.Load() }
+
+// HowToTurnOn says, for a remedy, how a user runs keploy with the proven model
+// on: in a build that runs release 1's flow, its default on Linux and
+// KEPLOY_PROVEN=1 elsewhere; in one that does not, KEPLOY_PROVEN=1 on every
+// platform. It speaks of keploy, not of this process: an agent says it to the
+// keploy that started it, which may run on another platform.
+func HowToTurnOn() string {
+	if flowBuild.Load() {
+		return "its default on Linux, " + Env + "=1 elsewhere"
+	}
+	return Env + "=1"
+}
 
 // On reports whether the proven model's rows are on in this process. A process
 // whose switch was pinned (an agent, from its --proven flag) answers with what
 // was pinned. Any other process reads KEPLOY_PROVEN, on every call, so the
 // answer is its environment as it is now (and a test can set the switch with
 // t.Setenv): on for a value strconv.ParseBool reads as true ("1", "true", …),
-// off for one it reads as false ("0", "false", …), and the platform's default
-// (PlatformDefault: on on Linux) when it is unset or empty. A value it does not
-// read at all is the default here too; keploy's own commands refuse it before
-// they start (Validate).
+// off for one it reads as false ("0", "false", …), and the default (Default:
+// on on Linux in a build that runs release 1's flow) when it is unset or
+// empty. A value it does not read at all is the default here too; keploy's own
+// commands refuse it before they start (Validate).
 func On() bool {
 	switch pinned.Load() {
 	case pinnedOn:
@@ -118,7 +158,7 @@ func On() bool {
 func OnFor(v string) bool {
 	on, set, err := parse(v)
 	if err != nil || !set {
-		return defaultOn
+		return Default()
 	}
 	return on
 }
@@ -192,10 +232,13 @@ func Validate() error {
 	return nil
 }
 
-// settingHint says how to set the switch on this platform.
+// settingHint says how to set the switch on this platform, in this build.
 func settingHint() string {
-	if defaultOn {
+	switch {
+	case Default():
 		return "set it to 0 to run without the proven model, or unset it: the proven model is on by default on " + platformName(runtime.GOOS)
+	case !flowBuild.Load():
+		return "set it to 1 to run the proven model, or unset it: this keploy build runs without it by default"
 	}
 	return "set it to 1 to run the proven model, or unset it: the proven model is off by default on " + platformName(runtime.GOOS)
 }
@@ -220,15 +263,18 @@ func platformName(goos string) string {
 // judges as it did before, while Linux runs the proven model. On Linux it is
 // how a user learns which model ran when the variable they set did not reach
 // keploy (sudo's env_reset drops it unless sudo is given -E). "" when the
-// user set the switch either way, and for a pinned process (an agent).
+// user set the switch either way, for a pinned process (an agent), and in a
+// build that does not run release 1's flow (keploy's open-source build): its
+// default is off on every platform, as in earlier releases, so it says
+// nothing it did not say before.
 func PlatformNotice() string {
-	if pinned.Load() != unpinned {
+	if pinned.Load() != unpinned || !flowBuild.Load() {
 		return ""
 	}
 	if _, set, err := parse(os.Getenv(Env)); set || err != nil {
 		return ""
 	}
-	if defaultOn {
+	if thisPlatform {
 		return fmt.Sprintf("the proven model is on, keploy's default on %s; %s=0 runs without it", platformName(runtime.GOOS), Env)
 	}
 	return fmt.Sprintf("the proven model, keploy's default on Linux, is not on by default on %s in this release: tests here are recorded and judged as in earlier releases", platformName(runtime.GOOS))

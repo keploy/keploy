@@ -167,9 +167,12 @@ func TestAProvenAgentRefusesARunList(t *testing.T) {
 }
 
 // An agent without the switch refuses a skip list it would ignore, and says
-// where its switch comes from: the keploy that starts it, whose default on
-// Linux is the proven model, so naming only KEPLOY_PROVEN=1 points a Linux
-// user at a variable whose default is already on.
+// where its switch comes from: the keploy that starts it, run with the proven
+// model on as this build turns it on (provenswitch.HowToTurnOn): in a build
+// that runs release 1's flow its default on Linux, so naming only
+// KEPLOY_PROVEN=1 there would point a Linux user at a variable whose default
+// is already on; in keploy's open-source build, this test binary,
+// KEPLOY_PROVEN=1 on every platform.
 func TestAnAgentWithoutTheSwitchRefusesASkipList(t *testing.T) {
 	t.Setenv(provenswitch.Env, "0")
 	a := &Agent{logger: zap.NewNop(), svc: &wireSvc{}}
@@ -177,7 +180,10 @@ func TestAnAgentWithoutTheSwitchRefusesASkipList(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "KEPLOY_PROVEN=1") {
 		t.Fatalf("gate: %d %s", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{"let it start its agent", "default on Linux"} {
+	if strings.Contains(rec.Body.String(), "default on Linux") {
+		t.Fatalf("keploy's open-source build has no default on Linux to name: %s", rec.Body.String())
+	}
+	for _, want := range []string{"let it start its agent", "(" + provenswitch.HowToTurnOn() + ")"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("the refusal's remedy does not say %q: %s", want, rec.Body.String())
 		}

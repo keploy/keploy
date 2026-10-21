@@ -16,13 +16,27 @@ func unpin(t *testing.T) {
 	t.Cleanup(func() { pinned.Store(unpinned) })
 }
 
-// onPlatform runs the rest of the test as a process whose platform default
-// (PlatformDefault) is def: on, as on Linux, or off, as on Windows and macOS.
+// onPlatform runs the rest of the test as a process of a build that runs
+// release 1's flow (RunsTheFlow, as keploy enterprise does) whose platform
+// default (PlatformDefault) is def: on, as on Linux, or off, as on Windows and
+// macOS.
 func onPlatform(t *testing.T, def bool) {
 	t.Helper()
-	saved := defaultOn
-	defaultOn = def
-	t.Cleanup(func() { defaultOn = saved })
+	savedPlatform, savedFlow := thisPlatform, flowBuild.Load()
+	thisPlatform = def
+	RunsTheFlow()
+	t.Cleanup(func() { thisPlatform = savedPlatform; flowBuild.Store(savedFlow) })
+}
+
+// inOSSBuild runs the rest of the test as a process of a build that does not
+// run release 1's flow (keploy's open-source build) on a platform whose
+// default in a build that does would be def.
+func inOSSBuild(t *testing.T, def bool) {
+	t.Helper()
+	savedPlatform, savedFlow := thisPlatform, flowBuild.Load()
+	thisPlatform = def
+	flowBuild.Store(false)
+	t.Cleanup(func() { thisPlatform = savedPlatform; flowBuild.Store(savedFlow) })
 }
 
 // Release 1 flips the proven model on by default on Linux only: Windows and
@@ -38,8 +52,54 @@ func TestPlatformDefaultIsOnOnlyOnLinux(t *testing.T) {
 			t.Fatalf("PlatformDefault(%q) = %v, want %v", goos, got, want)
 		}
 	}
-	if defaultOn != PlatformDefault(runtime.GOOS) {
-		t.Fatalf("this process's default is %v; %s's is %v", defaultOn, runtime.GOOS, PlatformDefault(runtime.GOOS))
+	if thisPlatform != PlatformDefault(runtime.GOOS) {
+		t.Fatalf("this process's platform default is %v; %s's is %v", thisPlatform, runtime.GOOS, PlatformDefault(runtime.GOOS))
+	}
+}
+
+// Only a build that runs release 1's flow (keploy enterprise: record, an
+// auto-replay that judges each test and learns what the app changes at each
+// run, replay) turns the proven model on by default. keploy's open-source
+// build, which this package's test binary is (nothing in it calls
+// RunsTheFlow), has no auto-replay to learn the app's clock reads, so on
+// every platform an unset KEPLOY_PROVEN is off there, as in earlier releases,
+// and says nothing new; KEPLOY_PROVEN=1 still turns it on. Mutation: Default
+// ignores the build; PlatformNotice speaks in a build without the flow.
+func TestOnlyABuildThatRunsTheFlowTurnsTheProvenModelOnByDefault(t *testing.T) {
+	unpin(t)
+	if flowBuild.Load() || Default() {
+		t.Fatal("keploy's open-source build (this test binary) runs release 1's flow: nothing in it may call RunsTheFlow")
+	}
+	for _, linux := range []bool{true, false} {
+		inOSSBuild(t, linux)
+		for _, v := range []string{"", "  ", "yes"} {
+			t.Setenv(Env, v)
+			if On() || OnFor(v) || State() != "off" || AgentArgs() != nil {
+				t.Fatalf("open-source build, platform default %v, %s=%q: On() = %v, OnFor = %v, State() = %q, AgentArgs() = %q, want off and the argv of before", linux, Env, v, On(), OnFor(v), State(), AgentArgs())
+			}
+			if got := PlatformNotice(); got != "" {
+				t.Fatalf("open-source build, platform default %v, %s=%q: PlatformNotice() = %q, want nothing, as before the flip", linux, Env, v, got)
+			}
+		}
+		t.Setenv(Env, "1")
+		if !On() {
+			t.Fatalf("open-source build, platform default %v, %s=1: On() = false, want on", linux, Env)
+		}
+		t.Setenv(Env, "yes")
+		if err := Validate(); err == nil || !strings.Contains(err.Error(), "set it to 1") || !strings.Contains(err.Error(), "this keploy build runs without it by default") {
+			t.Fatalf("open-source build, platform default %v: Validate() = %v, want a refusal that says to set it to 1, as this build runs without it by default", linux, err)
+		}
+		if got, want := HowToTurnOn(), Env+"=1"; got != want {
+			t.Fatalf("open-source build: HowToTurnOn() = %q, want %q", got, want)
+		}
+		onPlatform(t, linux)
+		t.Setenv(Env, "")
+		if On() != linux || Default() != linux {
+			t.Fatalf("a build that runs the flow, platform default %v: On() = %v, Default() = %v", linux, On(), Default())
+		}
+		if got, want := HowToTurnOn(), "its default on Linux, "+Env+"=1 elsewhere"; got != want {
+			t.Fatalf("a build that runs the flow: HowToTurnOn() = %q, want %q", got, want)
+		}
 	}
 }
 

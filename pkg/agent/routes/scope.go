@@ -333,7 +333,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 			Status:  http.StatusUnprocessableEntity,
 			Code:    models.ScopeErrUpgradeIntegration,
 			Message: "this keploy agent does not run the proven model, so it cannot skip the tests verdicts.yaml lists",
-			Remedy:  "run keploy with the proven model on (its default on Linux, KEPLOY_PROVEN=1 elsewhere) and let it start its agent: an agent takes the switch only from the keploy that starts it",
+			Remedy:  "run keploy with the proven model on (" + provenswitch.HowToTurnOn() + ") and let it start its agent: an agent takes the switch only from the keploy that starts it",
 		})
 		return
 	}

@@ -529,7 +529,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		if provenswitch.On() {
 			// The proven model holds every response-failing test FAILED
 			// (strictFailure), and deletes the remap flags (P220).
-			strictFailureHelp = "Under the proven model, keploy's default on Linux, every response-failing test is FAILED, never demoted to OBSOLETE, so this flag changes nothing. It mattered with the proven model off (KEPLOY_PROVEN=0)."
+			strictFailureHelp = "Under the proven model every response-failing test is FAILED, never demoted to OBSOLETE, so this flag changes nothing. It mattered with the proven model off (KEPLOY_PROVEN=0)."
 		}
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, strictFailureHelp)
 		// Default false is deliberate: a response-matched test whose

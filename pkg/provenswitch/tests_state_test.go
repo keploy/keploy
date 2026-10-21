@@ -16,9 +16,10 @@ import (
 // module, and fails for each call that sets KEPLOY_PROVEN (provenswitch.Env,
 // or the name spelled out) to an empty or blank string.
 // Before the flip an empty switch was off, and a test set it so to run the
-// switch-off paths. On Linux an empty switch is now the platform's default,
-// the proven model, so such a test runs the paths it was not written for,
-// and fails or, worse, passes on them. A test of the switch-off paths sets
+// switch-off paths. On Linux, in a build that runs release 1's flow (keploy
+// enterprise, whose tests run this module's code), an empty switch is now the
+// default, the proven model, so such a test runs the paths it was not written
+// for, and fails or, worse, passes on them. A test of the switch-off paths sets
 // "0", off on every platform; one of the default unsets the variable
 // (os.Unsetenv after t.Setenv). This package's own tests set an empty value
 // on purpose, to check that it is the default, and name the switch Env,

@@ -33,16 +33,16 @@
 #        not called;
 #     2. overflow: FAILED as capture incomplete, exit non-zero, the prune
 #        skipped for that reason, no mock deleted, no mappings.yaml written.
-#   - under the proven model (KEPLOY_PROVEN=1, the default on Linux), keploy
-#     test with no prune flag and no readiness ceiling, both of which it
-#     refuses (exit 8): it prunes nothing and only keploy record writes
-#     mappings.yaml (design v14 U18), so:
+#   - under the proven model (KEPLOY_PROVEN=1, keploy enterprise's default on
+#     Linux), keploy test with no prune flag and no readiness ceiling, both of
+#     which it refuses (exit 8): it prunes nothing and only keploy record
+#     writes mappings.yaml (design v14 U18), so:
 #     1. no overflow: PASSED, the dependency not called, and the recording
 #        (mocks.yaml, the mappings.yaml the record wrote) byte for byte as it
 #        was;
 #     2. overflow: FAILED as capture incomplete, exit non-zero, and the
 #        recording byte for byte as it was. This is the false green the lane
-#        guards on Linux's default: a full PID map must fail keploy test, not
+#        guards under the proven model: a full PID map must fail keploy test, not
 #        pass it with calls that reached the real dependency.
 #
 # Nothing in 2 depends on WHICH process the full map refused. The holder's own
