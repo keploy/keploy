@@ -214,16 +214,22 @@ func platformName(goos string) string {
 }
 
 // PlatformNotice is what keploy says once, as a judged or recorded run starts,
-// on a platform whose default is off (P221) while KEPLOY_PROVEN leaves the
-// switch at that default: that this platform's keploy still judges as it did
-// before, while Linux runs the proven model. "" otherwise: on Linux, or when
-// the user set the switch either way.
+// while KEPLOY_PROVEN leaves the switch at the platform's default: on Linux,
+// that the proven model is on and KEPLOY_PROVEN=0 runs without it; on a
+// platform whose default is off (P221), that this platform's keploy still
+// judges as it did before, while Linux runs the proven model. On Linux it is
+// how a user learns which model ran when the variable they set did not reach
+// keploy (sudo's env_reset drops it unless sudo is given -E). "" when the
+// user set the switch either way, and for a pinned process (an agent).
 func PlatformNotice() string {
-	if defaultOn || pinned.Load() != unpinned {
+	if pinned.Load() != unpinned {
 		return ""
 	}
 	if _, set, err := parse(os.Getenv(Env)); set || err != nil {
 		return ""
+	}
+	if defaultOn {
+		return fmt.Sprintf("the proven model is on, keploy's default on %s; %s=0 runs without it", platformName(runtime.GOOS), Env)
 	}
 	return fmt.Sprintf("the proven model, keploy's default on Linux, is not on by default on %s in this release: tests here are recorded and judged as in earlier releases", platformName(runtime.GOOS))
 }

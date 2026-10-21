@@ -111,8 +111,11 @@ func TestAgentArgsFollowTheCLIsPlatform(t *testing.T) {
 	}
 }
 
-// Windows and macOS say once that they stay out of the flip, unless the user
-// set the switch either way; Linux says nothing.
+// Windows and macOS say once that they stay out of the flip, and Linux once
+// that the proven model is on and KEPLOY_PROVEN=0 runs without it, unless the
+// user set the switch either way: a user whose KEPLOY_PROVEN=0 sudo dropped
+// is told which model ran. Mutation: say nothing on Linux; say it with the
+// switch set.
 func TestPlatformNotice(t *testing.T) {
 	unpin(t)
 	for _, tc := range []struct {
@@ -120,13 +123,16 @@ func TestPlatformNotice(t *testing.T) {
 		value  string
 		notice bool
 	}{
-		{true, "", false},
+		{true, "", true},
+		{true, " ", true},
 		{true, "0", false},
+		{true, "1", false},
+		{true, "yes", false}, // refused by Validate, which says how to set it
 		{false, "", true},
 		{false, " ", true},
 		{false, "0", false},
 		{false, "1", false},
-		{false, "yes", false}, // refused by Validate, which says how to set it
+		{false, "yes", false},
 	} {
 		onPlatform(t, tc.linux)
 		t.Setenv(Env, tc.value)
@@ -134,7 +140,16 @@ func TestPlatformNotice(t *testing.T) {
 		if (got != "") != tc.notice {
 			t.Fatalf("platform default %v, %s=%q: PlatformNotice() = %q, want a notice: %v", tc.linux, Env, tc.value, got, tc.notice)
 		}
-		if got != "" && (!strings.Contains(got, "Linux") || !strings.Contains(got, platformName(runtime.GOOS))) {
+		if got == "" {
+			continue
+		}
+		if tc.linux {
+			if !strings.Contains(got, "the proven model is on") || !strings.Contains(got, Env+"=0 runs without it") {
+				t.Fatalf("on Linux the notice must say the proven model is on, and how to run without it: %q", got)
+			}
+			continue
+		}
+		if !strings.Contains(got, "Linux") || !strings.Contains(got, platformName(runtime.GOOS)) {
 			t.Fatalf("the notice must name Linux, where the proven model is the default, and this platform (%s): %q", platformName(runtime.GOOS), got)
 		}
 	}
