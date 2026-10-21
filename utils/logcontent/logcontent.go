@@ -5,14 +5,22 @@
 // The level a line is logged at is not consent. keploy's agent tees its Debug
 // log to agent-debug.log on every docker recording and replay, so a Debug line
 // is written to disk whether or not anyone asked to debug anything, and
-// whatever content a parser put in it lands there in the clear, where secret
-// protection, which covers mocks, never looks. So by default, at any level, a
-// line that goes through the helpers here does not write a value out: it
-// names the value by its length, by its length and a fingerprint, which gives
-// away a value that can be guessed, or, for a URL, by a shape that keeps what
-// reads as a name (below). Setting EnvVar to 1 or true is the explicit
-// opt-in: each helper then logs the value itself, as zap.ByteString,
-// zap.Binary, zap.String, zap.Any and zap.Error do.
+// whatever content a parser put in it lands there. Enterprise's secret
+// protection, where it runs, rewrites in a log line only what it can tell is
+// a secret: a value under a key or a header that names a credential, a JSON
+// key's value so named, a token of a pattern it knows. The rest of what an
+// application sent (its names, addresses, numbers, rows and documents) it
+// writes as it is. So by default, at any level, a line that goes through the
+// helpers here does not write a value out: it names the value by its length,
+// by its length and a fingerprint, which gives away a value that can be
+// guessed, or, for a URL, by a shape that keeps what reads as a name (below).
+// Setting EnvVar to 1 or true is the explicit opt-in: each helper then logs
+// the value itself, as zap.ByteString, zap.Binary, zap.String, zap.Any and
+// zap.Error do. Every logger utils/log builds gives such a value's text the
+// passes secret protection gives a message, a []byte's and an error's field
+// as Whole tells it from zap's, and a string field that holds a line break
+// or a JSON key: a field so made holds what a line's message held before, a
+// request's dump with its header lines and its JSON body among it.
 //
 // With the switch off, the default, a line keeps the facts that are not
 // content (a message's type, an op's name, a protocol's or keploy's own ids,
@@ -177,7 +185,7 @@ func Set(v bool) (restore func()) {
 // TestTheAgentDebugLogCarriesContentOnlyWhenOptedIn holds the debug file to it.
 func Bytes(key string, b []byte) zap.Field {
 	if on.Load() {
-		return zap.ByteString(key, b)
+		return wholeBytes(key, b)
 	}
 	return zap.Object(key, bytesDigest{key, b})
 }
@@ -280,7 +288,7 @@ func StringLen(key, s string) zap.Field {
 // one, where zap.ByteString's is one of 24, for the slice.
 func BytesLen(key string, b []byte) zap.Field {
 	if on.Load() {
-		return zap.ByteString(key, b)
+		return wholeBytes(key, b)
 	}
 	return zap.Object(key, lenOnly(len(b)))
 }
@@ -328,8 +336,11 @@ func Error(err error) zap.Field {
 
 // NamedError is Error under key, as zap.NamedError(key, err) is zap.Error's.
 func NamedError(key string, err error) zap.Field {
-	if on.Load() || err == nil {
+	if err == nil {
 		return zap.NamedError(key, err)
+	}
+	if on.Load() {
+		return wholeError(key, err)
 	}
 	return zap.Object(key, errorDigest{err})
 }
@@ -357,6 +368,58 @@ func Withheld(f zapcore.Field) bool {
 	return false
 }
 
+// Whole is f as a string field of its text, zap.String(f.Key, text), when one
+// of the helpers here built f with the switch on from a []byte or an error,
+// so that it carries a value an application sent whole: a Bytes or a
+// BytesLen, an Error or a NamedError, or a Panic of an error. Each such field
+// is what zap's own constructor makes of the value (zap.ByteString,
+// zap.NamedError), which it encodes, maps and compares as (zapcore.Field's
+// Equals reads neither type's String), but for a mark in its String, which
+// zap leaves unused for those types, that Whole reads. A text the helpers
+// write whole is zap.String's own field, a string field a redactor reads as
+// it is.
+//
+// It is for a logger that redacts what a line carries (utils/log, with
+// enterprise's secret protection): a field so made holds what a line's
+// message held before the switch, a request's dump with its header lines and
+// its JSON body among it, so the logger gives its text the passes it gives a
+// message (Redactor.RedactEncoded), which find a credential's header line or
+// JSON key in it, where the pass it gives a field reads only a string
+// field's key and its value's known patterns, and none of a []byte's or an
+// error's.
+func Whole(f zapcore.Field) (zapcore.Field, bool) {
+	switch f.Type {
+	case zapcore.ByteStringType:
+		if b, ok := f.Interface.([]byte); ok && f.String == wholeMarkText {
+			return zap.String(f.Key, string(b)), true
+		}
+	case zapcore.ErrorType:
+		if err, ok := f.Interface.(error); ok && f.String == wholeMarkText {
+			return zap.String(f.Key, err.Error()), true
+		}
+	}
+	return f, false
+}
+
+// wholeMarkText is the mark Whole reads: a []byte's or an error's String,
+// which zap leaves unused for those types.
+const wholeMarkText = "\x00logcontent.whole"
+
+// wholeBytes is zap.ByteString(key, b), marked (Whole).
+func wholeBytes(key string, b []byte) zap.Field {
+	f := zap.ByteString(key, b)
+	f.String = wholeMarkText
+	return f
+}
+
+// wholeError is zap.NamedError(key, err) of an err that is not nil, marked
+// (Whole).
+func wholeError(key string, err error) zap.Field {
+	f := zap.NamedError(key, err)
+	f.String = wholeMarkText
+	return f
+}
+
 // Panic is a recovered panic's value v under key: zap.Any(key, v) with the
 // switch on. With it off, a panic the Go runtime raised (a runtime.Error of
 // package runtime's own: an index out of range, a nil dereference, a failed
@@ -371,6 +434,10 @@ func Withheld(f zapcore.Field) bool {
 // (Error).
 func Panic(key string, v any) zap.Field {
 	if on.Load() {
+		// What zap.Any makes of an error, told apart (Whole).
+		if err, ok := v.(error); ok {
+			return wholeError(key, err)
+		}
 		return zap.Any(key, v)
 	}
 	if s, ok := runtimeText(v); ok {

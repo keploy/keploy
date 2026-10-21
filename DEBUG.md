@@ -107,7 +107,11 @@ keploy hands it on to the agent it starts. The switch changes only what the
 log lines carry: what keploy records, how it matches, and the verdicts it
 reaches are the same either way. With it set, the log holds your
 application's data, so keploy then leaves it out of a crash report; a crash
-report never carries a panic's value, whatever the switch says.
+report never carries a panic's value, whatever the switch says. Keploy
+Enterprise's secret protection still masks, in such a line, the secrets it
+recognizes (a credential's header line, a JSON key that names one, a token of
+a known pattern), in a request's dump as in a message; the rest of the data
+is written as it is.
 
 A fingerprint is no redaction: it is the first 48 bits of the value's
 sha256, with no key, so a value from a small set (a PIN, a status, an email

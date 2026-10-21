@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -117,7 +118,13 @@ var LogCfg zap.Config
 // There are two redaction hooks because zap fields come in two flavours:
 //   - strings we can inspect directly (zap.String, the common case) — those
 //     go through RedactEntry / RedactField before encoding, which lets us
-//     redact by field NAME as well as value.
+//     redact by field NAME as well as value. A field that carries an
+//     application's text whole, as logcontent's helpers make one with
+//     KEPLOY_LOG_CONTENT on (logcontent.Whole: a dump that was a line's
+//     message before the switch), goes through RedactField as a string
+//     field, whatever its type, and its text through RedactEncoded, as a
+//     message's would; so does a string field's text that holds a line
+//     break or a JSON key (redactFields).
 //   - everything else (zap.Any over http.Header, protocol structs, byte
 //     packets, reflect-marshaled values) — those only exist as text after
 //     zap's encoder runs. RedactEncoded operates on that final text, so it
@@ -192,9 +199,7 @@ func (c *redactingCore) Inner() zapcore.Core {
 
 func (c *redactingCore) With(fields []zapcore.Field) zapcore.Core {
 	if r := loadRedactor(); r != nil {
-		for i := range fields {
-			r.RedactField(&fields[i])
-		}
+		redactFields(r, fields)
 	}
 	return &redactingCore{Core: c.Core.With(fields)}
 }
@@ -212,14 +217,47 @@ func (c *redactingCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapc
 func (c *redactingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	if r := loadRedactor(); r != nil {
 		r.RedactEntry(&ent)
-		for i := range fields {
-			r.RedactField(&fields[i])
-		}
+		redactFields(r, fields)
 	}
 	if ent.Level >= zapcore.ErrorLevel {
 		observeError(ent)
 	}
 	return c.Core.Write(ent, withHint(ent, fields))
+}
+
+// redactFields runs r over each of fields, in place. A []byte's or an
+// error's field that carries an application's text whole, as logcontent's
+// helpers make one with the switch on (logcontent.Whole), is made a string
+// field of that text first, which r's field pass reads by its key whatever
+// the field's type was, and then its text gets the passes r gives a message
+// (RedactEncoded); so does a string field's text that holds a line break or
+// a JSON key (textLike), once r's field pass is done with it. Such a field
+// holds what a line's message held before the switch, a request's dump,
+// whose header lines and JSON keys name the secrets in it, which only those
+// passes read: in the encoded line its line breaks and its quotes are
+// escaped, where no header line starts and no JSON key reads as one. Every
+// other field gets r's field pass alone, as before.
+func redactFields(r Redactor, fields []zapcore.Field) {
+	for i := range fields {
+		f, whole := logcontent.Whole(fields[i])
+		if !whole {
+			r.RedactField(&fields[i])
+			if fields[i].Type == zapcore.StringType && textLike(fields[i].String) {
+				fields[i].String = r.RedactEncoded(fields[i].String)
+			}
+			continue
+		}
+		r.RedactField(&f)
+		f.String = r.RedactEncoded(f.String)
+		fields[i] = f
+	}
+}
+
+// textLike reports whether s holds what a redactor's passes over a message
+// read and its pass over a field does not: a line break, after which a
+// header line may start, or a JSON key's end ("key":).
+func textLike(s string) bool {
+	return strings.IndexByte(s, '\n') >= 0 || strings.Contains(s, `":`)
 }
 
 // withHint is fields with logcontent's Hint added, for a line at Warn or above

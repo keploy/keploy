@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -999,6 +1000,132 @@ func TestAWithheldValueAtWarnCarriesTheHint(t *testing.T) {
 	logger.Error("opted in", logcontent.Error(err))
 	if _, ok := logs.All()[4].ContextMap()[logcontent.HintKey]; ok {
 		t.Error("with the switch on, a line carries the hint")
+	}
+}
+
+// secretRedactor stands in for enterprise's secret protection
+// (pkg/secret/log_redactor.go) as far as its passes read a line: a message,
+// and the text RedactEncoded is given, get a pass over its header lines and
+// one over its JSON keys, each of which rewrites the value of a name that
+// names a credential; a field gets a pass only when it is a string, by its
+// key; a []byte's or an error's field gets none.
+type secretRedactor struct{}
+
+var (
+	secretHeaderLine = regexp.MustCompile(`(?m)^([A-Za-z][A-Za-z0-9-]*)[ \t]*:[ \t]*(.+?)[ \t\r]*$`)
+	secretJSONKey    = regexp.MustCompile(`"([^"\\]{1,128})"[ \t]*:[ \t]*"((?:\\.|[^"\\])*)"`)
+)
+
+func secretName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "password") || strings.Contains(n, "authorization") || strings.Contains(n, "api-key")
+}
+
+func (secretRedactor) text(s string) string {
+	s = secretHeaderLine.ReplaceAllStringFunc(s, func(line string) string {
+		m := secretHeaderLine.FindStringSubmatch(line)
+		if !secretName(m[1]) {
+			return line
+		}
+		return strings.Replace(line, m[2], "REDACTED", 1)
+	})
+	return secretJSONKey.ReplaceAllStringFunc(s, func(kv string) string {
+		m := secretJSONKey.FindStringSubmatch(kv)
+		if !secretName(m[1]) {
+			return kv
+		}
+		return strings.Replace(kv, `"`+m[2]+`"`, `"REDACTED"`, 1)
+	})
+}
+
+func (r secretRedactor) RedactEntry(ent *zapcore.Entry) { ent.Message = r.text(ent.Message) }
+func (secretRedactor) RedactField(f *zapcore.Field) {
+	if f.Type == zapcore.StringType && secretName(f.Key) {
+		f.String = "REDACTED"
+	}
+}
+func (r secretRedactor) RedactEncoded(text string) string { return r.text(text) }
+
+// With the switch on, a field that carries a request's dump whole, as the
+// HTTP parser logs one (logcontent.Bytes("request", dump)), is redacted as
+// the line's message was before the switch, when the dump was the message:
+// secret protection's passes over a message, which read its header lines and
+// its JSON keys, are given the field's text, whatever its type. Its field
+// pass reads only a string field's key, and the encoded line carries the
+// dump's line breaks escaped, where no header line starts. A zap.String
+// field that holds one is given them too.
+func TestAWholeFieldIsRedactedAsAMessageIs(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
+	SetRedactor(secretRedactor{})
+	t.Cleanup(func() { SetRedactor(nil) })
+	const dump = "POST /login HTTP/1.1\r\nHost: app\r\nAuthorization: Basic dXNlcjpodW50ZXIy\r\nX-Api-Key: k3y-0123456789\r\n\r\n{\"user\":\"alice\",\"password\":\"hunter2-secret\"}"
+	secrets := []string{"dXNlcjpodW50ZXIy", "k3y-0123456789", "hunter2-secret"}
+	lines := map[string]func(*zap.Logger){
+		"the dump as the message, before the switch": func(l *zap.Logger) { l.Debug("This is the initial request: " + dump) },
+		"logcontent.Bytes":                           func(l *zap.Logger) { l.Debug("This is the initial request", logcontent.Bytes("request", []byte(dump))) },
+		"logcontent.BytesLen":                        func(l *zap.Logger) { l.Debug("headers", logcontent.BytesLen("headers", []byte(dump))) },
+		"logcontent.String":                          func(l *zap.Logger) { l.Debug("This is the initial request", logcontent.String("request", dump)) },
+		"logcontent.StringLen":                       func(l *zap.Logger) { l.Debug("headers", logcontent.StringLen("headers", dump)) },
+		"logcontent.NamedString":                     func(l *zap.Logger) { l.Debug("body", logcontent.NamedString("value", "body", dump)) },
+		"logcontent.Any of a text":                   func(l *zap.Logger) { l.Debug("body", logcontent.Any("body", dump)) },
+		"logcontent.Error":                           func(l *zap.Logger) { l.Debug("bad request", logcontent.Error(fmt.Errorf("malformed: %s", dump))) },
+		"logcontent.Panic":                           func(l *zap.Logger) { l.Debug("recovered", logcontent.Panic("panic", dump)) },
+		"logcontent.Bytes on a logger's With": func(l *zap.Logger) {
+			l.With(logcontent.Bytes("request", []byte(dump))).Debug("This is the initial request")
+		},
+		"zap.String": func(l *zap.Logger) { l.Debug("This is the initial request", zap.String("request", dump)) },
+	}
+	for name, logLine := range lines {
+		var buf syncBuffer
+		logLine(newConsoleLogger(&buf, zap.DebugLevel))
+		out := buf.String()
+		if !strings.Contains(out, "REDACTED") {
+			t.Errorf("%s: nothing is redacted: %s", name, out)
+		}
+		for _, secret := range secrets {
+			if strings.Contains(out, secret) {
+				t.Errorf("%s: %q reaches the log: %s", name, secret, out)
+			}
+		}
+	}
+	// What is no credential is the dump's, as the switch says.
+	var buf syncBuffer
+	newConsoleLogger(&buf, zap.DebugLevel).Debug("This is the initial request", logcontent.Bytes("request", []byte(dump)))
+	if !strings.Contains(buf.String(), "alice") || !strings.Contains(buf.String(), "POST /login") {
+		t.Errorf("the dump is not logged with the switch on: %s", buf.String())
+	}
+}
+
+// A field the switch leaves whole is what zap's own constructor makes, which
+// it equals (zapcore.Field.Equals), but for the mark Whole reads on a []byte's
+// and an error's: with no redactor, the line is zap's. A text's is zap's own.
+func TestAWholeFieldLogsWhatZapLogs(t *testing.T) {
+	t.Cleanup(logcontent.Set(true))
+	SetRedactor(nil)
+	err := fmt.Errorf("bad: %s", "x")
+	if f := logcontent.String("s", "v\n1"); f != zap.String("s", "v\n1") {
+		t.Errorf("logcontent.String with the switch on is %#v, not zap.String's field", f)
+	}
+	for _, c := range []struct{ ours, zaps zap.Field }{
+		{logcontent.Bytes("b", []byte("v\n1")), zap.ByteString("b", []byte("v\n1"))},
+		{logcontent.Error(err), zap.Error(err)},
+	} {
+		if !c.ours.Equals(c.zaps) {
+			t.Errorf("%s: the field does not equal zap's", c.ours.Key)
+		}
+		var a, b syncBuffer
+		newConsoleLogger(&a, zap.DebugLevel).Debug("line", c.ours)
+		newConsoleLogger(&b, zap.DebugLevel).Debug("line", c.zaps)
+		strip := func(s string) string { return s[strings.Index(s, "DEBUG"):] } // the time differs
+		if strip(a.String()) != strip(b.String()) {
+			t.Errorf("%s:\n got %s\nwant %s", c.ours.Key, a.String(), b.String())
+		}
+		if _, ok := logcontent.Whole(c.ours); !ok {
+			t.Errorf("%s: Whole does not tell the field from zap's", c.ours.Key)
+		}
+		if _, ok := logcontent.Whole(c.zaps); ok {
+			t.Errorf("%s: Whole reads zap's own field as one of logcontent's", c.zaps.Key)
+		}
 	}
 }
 
