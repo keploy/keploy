@@ -1249,6 +1249,27 @@ func cpuSince(before, now map[int]taskTime) (ran, waited time.Duration) {
 	return ran, waited
 }
 
+// spinning waits until process p spins: it has run for 10 ms on a CPU, by
+// its own account, which one still starting has not (its program paged in
+// from storage, held in the kernel). Its time held there is a wait only for
+// what storage served of it (ExitClock), so a test of a process that only
+// spins starts once it does: on .142 at load 20, one started 61 ms before the
+// first look was held in the kernel for 470 ms, and the few hundred
+// microseconds of each look storage did not serve counted, as they must.
+// The test's own timeout is the only bound.
+func spinning(t *testing.T, p Reached) {
+	t.Helper()
+	for {
+		if ran, _ := starvetest.Ran(p.PID); ran >= 10*time.Millisecond {
+			return
+		}
+		if now, ok := ProcOf(p.PID); !ok || now != p {
+			t.Fatalf("process %d is gone", p.PID)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // asleep waits until process p runs program comm and sleeps: an exec'd
 // sleep(1) that waits on its timer, with no more to run.
 func asleep(t *testing.T, p Reached, comm string) {
@@ -1279,6 +1300,7 @@ func TestTheExitClockOfAProcessHeldOffTheCPU(t *testing.T) {
 	}
 	spinner, sleeper := startProc(t, starvetest.ShellSpin("")), startProc(t, "exec sleep 600")
 	asleep(t, sleeper[0], "sleep")
+	spinning(t, spinner[0])
 	release := starvetest.Hold(t, spinner[0].PID)
 	defer release()
 	rig := newLiveRig()
@@ -1322,6 +1344,9 @@ func TestTheExitClockOfAProcessSharingACPU(t *testing.T) {
 		if err := unix.SchedSetaffinity(p.PID, &one); err != nil {
 			t.Skipf("cannot pin process %d to CPU %d: %v", p.PID, cpu, err)
 		}
+	}
+	for _, p := range []Reached{spinner[0], other[0]} {
+		spinning(t, p)
 	}
 	rig := newLiveRig()
 	c := rig.clock(spinner)
