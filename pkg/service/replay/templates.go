@@ -69,7 +69,7 @@ func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckRes
 	r.logTemplateFailures(sent.Name, testSetID, res.Failures, check, true)
 	for _, c := range res.Captures {
 		r.logger.Debug("captured a template value from the app's answer",
-			zap.String("testcase", sent.Name), zap.String("key", c.Key), logcontent.String("value", c.Value), zap.String("where", c.Where))
+			zap.String("testcase", sent.Name), zap.String("key", templates.KeyShape(c.Key)), logcontent.NamedString("value", c.Key, c.Value), zap.String("where", c.Where))
 	}
 	exp := *sent
 	exp.HTTPResp = res.Resp
@@ -117,9 +117,12 @@ func (r *Replayer) logTemplateFailures(testCase, testSetID string, fs []template
 		if check != nil {
 			next = check.NextStep(testCase, f, canCapture)
 		}
+		// The why quotes the live answer and the value the place wants,
+		// short ones as often as not: by its length alone, unless the
+		// switch is on, with no fingerprint a short value is found from.
 		r.logger.Warn("a template variable's place does not hold what it must, so the test case fails",
 			zap.String("testcase", testCase), zap.String("testset", testSetID),
-			zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), logcontent.String("why", f.Why),
+			zap.String("where", f.Where), zap.String("placeholder", templates.Shape(f.Placeholder)), logcontent.StringLen("why", f.Why),
 			zap.String("next_step", next))
 	}
 }
@@ -345,35 +348,38 @@ func inArray(path []templates.PathSeg) bool {
 func (r *Replayer) logTemplateCheck(testSetID string, check templates.CheckResult, cases []*models.TestCase) {
 	for _, name := range templates.RefusedNames(check.Refused) {
 		for _, f := range check.Refused[name] {
+			// The why names the recorded value to write ("write its
+			// recorded value ... here"): by its length alone, unless the
+			// switch is on, as the template failures' whys are.
 			utils.LogError(r.logger, nil, "a test case's placeholder is refused; the test case fails without being sent",
-				zap.String("testset", testSetID), zap.String("testcase", f.TestCase), zap.String("placeholder", f.Placeholder),
-				zap.String("where", f.Where), logcontent.String("why", f.Why),
+				zap.String("testset", testSetID), zap.String("testcase", f.TestCase), zap.String("placeholder", templates.Shape(f.Placeholder)),
+				zap.String("where", f.Where), logcontent.StringLen("why", f.Why),
 				zap.String("next_step", "edit the test case as the reason says, then run keploy test again"))
 		}
 	}
 	for _, u := range check.Undefined {
 		if u.Expression {
 			r.logger.Warn("template text is an expression (a pipe, a function call, a bare dot), which keploy test does not render: it is sent and compared as the literal text",
-				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
+				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", templates.Shape(u.Placeholder)),
 				zap.String("where", u.Where),
 				zap.String("next_step", "an older keploy rendered some of these ({{ .id | print }}): write the value the expression stood for in its place, or a placeholder keploy reads ({{string .k}}, {{int .k}}, {{float .k}}), or leave the text as it is"))
 			continue
 		}
 		if u.OutsideGrammar {
 			r.logger.Warn("a placeholder names a key that is not a template key (one name of letters, digits and _, starting with a letter or _): it is sent and compared as the literal text",
-				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
+				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", templates.Shape(u.Placeholder)),
 				zap.String("where", u.Where),
 				zap.String("next_step", "a template key is one name ({{string .userId}}): rename the key in config.yaml's template and in the test cases, or leave the text as it is"))
 			continue
 		}
 		r.logger.Warn("a placeholder names a key the test set's config.yaml does not define: it is sent and compared as the literal text",
-			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
+			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", templates.Shape(u.Placeholder)),
 			zap.String("where", u.Where),
 			zap.String("next_step", "add the key to config.yaml's template (its value as recorded), or fix the key's name in the test case"))
 	}
 	for _, u := range check.Uncaptured {
 		r.logger.Warn("a request sends a template key that no earlier test case captures: every run sends config.yaml's recorded value there",
-			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
+			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", templates.Shape(u.Placeholder)),
 			zap.String("where", u.Where),
 			zap.String("next_step", u.UncapturedNextStep()))
 	}
@@ -421,7 +427,7 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 		}
 		r.logger.Warn("a noise entry covers a template variable's place: the variable is asserted there anyway, and the noise still applies to the rest",
 			zap.String("testset", testSetID), zap.String("testcase", p.TestCase), zap.String("noise", entry),
-			zap.String("variable", p.Placeholder.Text), zap.String("where", p.Where),
+			zap.String("variable", templates.Shape(p.Placeholder.Text)), zap.String("where", p.Where),
 			zap.String("next_step", next))
 	}
 }

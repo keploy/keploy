@@ -89,6 +89,15 @@ func TestMatchCommand_AQuerysComparisonLinesCarryNoStatement(t *testing.T) {
 					t.Fatal(err)
 				}
 				logtest.Check(t, logs, canary, on, tc.want...)
+				// The parser's error quotes the literal it stopped at: no
+				// line carries its text's fingerprint either.
+				var parseErrs []string
+				for _, q := range append([]string{tc.live}, tc.recorded...) {
+					if _, err := getQueryStructureCached(q); err != nil {
+						parseErrs = append(parseErrs, err.Error())
+					}
+				}
+				logtest.CheckNoFingerprint(t, logs, parseErrs...)
 			})
 		})
 	}
@@ -321,5 +330,24 @@ func TestReplay_AnOrphanQuerysLinesCarryNoLiteral(t *testing.T) {
 		if got, want := reporter.MismatchReport().ActualSummary, "COM_QUERY "+query; got != want {
 			t.Fatalf("the miss reports %q, want the call as it was made, %q, for the report", got, want)
 		}
+	})
+}
+
+// The session variable's value is logged beside its name: one whose name is
+// a credential's (session_track_gtids, by its "session") is logged by its
+// length alone with the switch off, with no fingerprint a short value is
+// found from, and whole with it on.
+func TestBuildSessionVarResponse_ANamedValueIsLoggedAsItsNameAllows(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		pool := probeMockPool()
+		trs := pool[0].Spec.MySQLResponses[0].Message.(*mysql.TextResultSet)
+		trs.Columns[0].Name, trs.Columns[0].OrgName = "session_track_gtids", "session_track_gtids"
+		trs.Rows[0].Values[0].Value = canary
+		logger, logs := logtest.Observe()
+		if resp := buildSessionVarResponse(logger, pool, "session_track_gtids", deprecateEOFContext()); resp == nil {
+			t.Fatal("precondition: no result set for the recorded variable")
+		}
+		logtest.Check(t, logs, canary, on, "built single-column session-variable result set")
+		logtest.CheckNoFingerprint(t, logs, canary)
 	})
 }

@@ -449,7 +449,8 @@ func assertLeftAsItIs(t *testing.T, logs *observer.ObservedLogs, files []setfile
 	if want == nil {
 		return
 	}
-	assert.Equal(t, want.text, m[1], "the placeholder the line names")
+	// Template text outside the grammar is named by its shape (templates.Shape).
+	assert.Equal(t, templates.Shape(want.text), m[1], "the placeholder the line names")
 	if want.where != "" {
 		assert.Equal(t, want.where, m[2])
 		return

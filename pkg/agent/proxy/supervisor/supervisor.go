@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -376,7 +377,7 @@ func (s *Supervisor) classifyReturn(outerCtx context.Context, panicked bool, pan
 		// their time while the connection's bytes were captured for no one.
 		s.fireOnAbort()
 		s.cfg.Logger.Error("parser panicked",
-			zap.Any("panic", panicVal),
+			logcontent.Panic("panic", panicVal),
 			zap.ByteString("stack", stack),
 			zap.String("next_step", "the supervisor is falling through to raw passthrough so user traffic continues unaffected; file the panic with the parser owner using the captured stack, and set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely until the root cause is fixed"),
 		)
@@ -435,7 +436,7 @@ func (s *Supervisor) reportPanic(v any, stack []byte) {
 	defer func() {
 		if rr := recover(); rr != nil {
 			s.cfg.Logger.Error("panic reporter itself panicked",
-				zap.Any("panic", rr),
+				logcontent.Panic("panic", rr),
 				zap.String("next_step", "the configured PanicReporter must be non-blocking and must not panic; fix the reporter implementation, or unset it via supervisor.Config.PanicReporter=nil to fall back to no external reporting (the recovered parser panic is still logged at Error level)"),
 			)
 		}
@@ -542,7 +543,7 @@ func (s *Supervisor) fireOnAbort() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.cfg.Logger.Error("SessionOnAbort callback panicked",
-					zap.Any("panic", r),
+					logcontent.Panic("panic", r),
 					zap.String("next_step", "SessionOnAbort callbacks must be non-blocking and must not panic — they run on the supervisor's abort path where further errors have nowhere to propagate to; fix the callback (typical use is just closing FakeConns and pausing tees — see proxy_v2.go for the reference implementation), or unset it by constructing the Supervisor without SessionOnAbort if the caller can tolerate parser-side reads not unblocking promptly on abort"),
 				)
 			}

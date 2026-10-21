@@ -1453,8 +1453,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	case "":
 		// no-op, use httpResp.Body directly
 	default:
+		// The answer's own header value, which no decoder here vouches for:
+		// logged as logcontent allows, as Decompress logs one.
 		logger.Debug("unsupported content-encoding for stream; returning raw response body",
-			zap.String("content_encoding", contentEncoding))
+			logcontent.String("content_encoding", contentEncoding))
 	}
 
 	if cfg.answer != nil {
@@ -2001,12 +2003,16 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		ok, cmpErr := compareJSONTextWithNoise(expected, line, jsonNoiseKeys)
 		if cmpErr != nil || !ok {
 			reason := "json mismatch"
+			// The comparison's error quotes the frame it could not read: it
+			// is logged by its kind, as an error is.
+			reasonField := zap.String("reason", reason)
 			if cmpErr != nil {
 				reason = cmpErr.Error()
+				reasonField = logcontent.NamedError("reason", cmpErr)
 			}
 			logger.Debug("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				logcontent.String("reason", reason),
+				reasonField,
 				logcontent.String("expected_frame", expected),
 				logcontent.String("actual_frame", line))
 			mismatchInfo := &StreamMismatchInfo{
@@ -4649,8 +4655,10 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 	default:
 		// Common on proxied traffic (zstd, deflate, ...) — debug, not warn,
 		// matching the streaming path in SimulateHTTPStreaming.
+		// The encoding is the message's own header value, which no
+		// decoder here vouches for: logged as logcontent allows.
 		logger.Debug("unsupported Content-Encoding; storing body without decompression",
-			zap.String("encoding", encoding))
+			logcontent.String("encoding", encoding))
 		return data, nil
 	}
 }
@@ -4830,8 +4838,10 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			}
 		}
 		if port == "" {
+			// An authority here, a URL on the branch above: the
+			// target is the test's, so it is logged by its shape.
 			logger.Debug("Authority has no explicit port, using gRPC default",
-				zap.String("target", finalTarget), zap.String("default_port", "443"))
+				logurl.Field("target", finalTarget), zap.String("default_port", "443"))
 			port = "443"
 		}
 	}

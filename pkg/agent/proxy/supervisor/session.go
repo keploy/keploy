@@ -892,6 +892,17 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	s.reportLeftOut(m, reason, nil)
 }
 
+// ReportLeftOutError is ReportLeftOut for an exchange left out for err:
+// reason says what was left out, in keploy's words ("mysql exchange not
+// recorded"), and err, logged beside it, why. A parser's error can quote what
+// it could not read (a row's value its decoder could not parse, the bytes a
+// header was misread from), and the reason is logged at WARN, so err is logged
+// as logcontent allows: by its kind and its shape, and its text only with the
+// switch on. The reason keys the WARN's limit, as ReportLeftOut's does.
+func (s *Session) ReportLeftOutError(m *models.Mock, reason string, err error) {
+	s.reportLeftOut(m, reason, err)
+}
+
 // reportLeftOut is ReportLeftOut, with the error the exchange was left out
 // for, if one is given, logged beside the reason as logcontent allows.
 func (s *Session) reportLeftOut(m *models.Mock, reason string, err error) {

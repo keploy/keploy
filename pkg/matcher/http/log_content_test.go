@@ -232,3 +232,32 @@ func TestCompareCurl_TheHeadersAreLoggedByName(t *testing.T) {
 		logtest.Check(t, logs, canary, on, "test case curl headers are not equal")
 	})
 }
+
+// A header assertion on a header named as a credential logs the values it
+// compared by their lengths alone: their fingerprints would give a short
+// token away to whoever hashes the tokens it can be.
+func TestAssertionMatch_ACredentialHeadersValuesCarryNoFingerprint(t *testing.T) {
+	const recorded, live = "Bearer 7710", "Bearer 4821"
+	for name, a := range map[string]map[models.AssertionType]interface{}{
+		"header_equal":    {models.HeaderEqual: map[string]interface{}{"X-Auth-Token": recorded}},
+		"header_contains": {models.HeaderContains: map[string]interface{}{"X-Auth-Token": recorded}},
+		"header_matches":  {models.HeaderMatches: map[string]interface{}{"X-Auth-Token": "^" + recorded + "$"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				logger, logs := logtest.Observe()
+				tc := canaryCase("a", canary)
+				tc.Assertions = a
+				actual := canaryCase("a", canary).HTTPResp
+				actual.Header = map[string]string{"X-Auth-Token": live}
+				if pass, _ := AssertionMatch(tc, &actual, logger); pass {
+					t.Fatal("an answer that differs passed the assertion")
+				}
+				if len(logs.FilterMessage(name+" assertion failed").All()) == 0 {
+					t.Fatalf("precondition: no %s line", name)
+				}
+				logtest.CheckNoFingerprint(t, logs, recorded, live, "^"+recorded+"$")
+			})
+		})
+	}
+}

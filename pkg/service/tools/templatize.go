@@ -250,7 +250,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	}
 	if held != nil {
 		t.logger.Warn(fmt.Sprintf("%s holds template placeholders already (%s at %s): keploy templatize writes only into a plain recording, so it changes nothing in this set",
-			testSetID, held.Text, held.Where),
+			testSetID, templates.Shape(held.Text), held.Where),
 			zap.String("next_step", heldNextStep))
 		return nil
 	}
@@ -413,6 +413,19 @@ func valueSaid(v string) string {
 		return strconv.Quote(v)
 	}
 	return fmt.Sprintf("the recorded value (%d bytes)", len(v))
+}
+
+// chainValueSaid is a chain's recorded value, the app's, as the chain
+// analysis prints it: as valueSaid says it, and with the switch on whole, cut
+// to 50 bytes.
+func chainValueSaid(v string) string {
+	if logcontent.On() {
+		if len(v) > 50 {
+			v = v[:47] + "..."
+		}
+		return strconv.Quote(v)
+	}
+	return valueSaid(v)
 }
 
 // placeSaid is a place and the value recorded there, as a line of keploy
@@ -1519,11 +1532,7 @@ func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCa
 		if i > 0 {
 			fmt.Println("--------------------")
 		}
-		truncatedValue := chain.Value
-		if len(truncatedValue) > 50 {
-			truncatedValue = truncatedValue[:47] + "..."
-		}
-		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
+		fmt.Printf("🔗 Chain for {{.%s}} (value: %s)\n", chain.TemplateKey, chainValueSaid(chain.Value))
 		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
 		for j, consumer := range chain.Consumers {
 			branch := "├─>"

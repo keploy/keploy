@@ -818,8 +818,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_equal assertion failed",
 						zap.String("header", header),
-						logcontent.String("expected", exp),
-						logcontent.String("actual", act),
+						logcontent.NamedString("expected", header, exp),
+						logcontent.NamedString("actual", header, act),
 					)
 				}
 			}
@@ -837,8 +837,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_contains assertion failed",
 						zap.String("header", header),
-						logcontent.String("expected_substr", exp),
-						logcontent.String("actual", act),
+						logcontent.NamedString("expected_substr", header, exp),
+						logcontent.NamedString("actual", header, act),
 					)
 				}
 			}
@@ -898,8 +898,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_matches assertion failed",
 						zap.String("header", header),
-						logcontent.String("pattern", pattern),
-						logcontent.String("actual", act),
+						logcontent.NamedString("pattern", header, pattern),
+						logcontent.NamedString("actual", header, act),
 						patternError(err),
 					)
 				}
@@ -1040,6 +1040,6 @@ func assertRenderedDigests(res *models.Result, recordedBody, answerBody string, 
 		want := form(answerBody)
 		hr.Normal = strings.Join(hr.Actual.Value, ",") == want
 		logger.Debug("a digest header of a templated body is asserted over the answer's body",
-			zap.String("header", name), logcontent.String("want", want), zap.Bool("normal", hr.Normal))
+			zap.String("header", name), logcontent.NamedString("want", name, want), zap.Bool("normal", hr.Normal))
 	}
 }

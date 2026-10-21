@@ -1357,7 +1357,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					// Do not append non-existent paths to newPaths — they would
 					// cause replay failures when the system tries to read them.
 					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
-						logcontent.String("fileName", form.FileNames[j]),
+						logcontent.NamedString("fileName", form.Key, form.FileNames[j]),
 						zap.String("key", form.Key))
 				}
 			}

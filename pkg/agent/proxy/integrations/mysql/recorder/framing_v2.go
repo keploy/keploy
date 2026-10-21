@@ -337,20 +337,15 @@ func notRecorded(format string, args ...any) error {
 func leaveOut(sess *supervisor.Session, reqTs, resTs time.Time, err error) {
 	m := &models.Mock{Kind: models.MySQL}
 	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = reqTs, resTs
-	sess.ReportLeftOut(m, leftOutReason(err))
+	sess.ReportLeftOutError(m, leftOutCause, err)
 }
 
-// leftOutReason is the reason leaveOut and leaveOutInFlight report an exchange
-// left out for err: one cause for every MySQL exchange left out (the text
-// before the first colon, which keys the WARN's limit), then err's text.
-// errNotRecorded's own text is left off: the cause says it already.
-func leftOutReason(err error) string {
-	const cause = "mysql exchange not recorded"
-	if err == nil {
-		return cause
-	}
-	return cause + ": " + strings.TrimPrefix(err.Error(), errNotRecorded.Error()+": ")
-}
+// leftOutCause is the reason leaveOut and leaveOutInFlight report an exchange
+// left out for: one cause for every MySQL exchange left out, which keys the
+// WARN's limit. Why is the error, logged beside it as logcontent allows: a
+// decoder's error quotes the row value it could not read, and lost framing the
+// bytes a header was misread from, a row's as often as not.
+const leftOutCause = "mysql exchange not recorded"
 
 // clearPending tells the supervisor the input read so far is consumed, as an
 // emitted mock does (Session.EmitMock): its client bytes armed pending work,
@@ -384,7 +379,7 @@ func leaveOutInFlight(sess *supervisor.Session, reqTs time.Time, err error) erro
 	if err == nil || streamEnded(err) {
 		return err
 	}
-	sess.ReportStoppedOn(models.MySQL, reqTs, leftOutReason(err))
+	sess.ReportStoppedOnError(models.MySQL, reqTs, leftOutCause, err)
 	return err
 }
 

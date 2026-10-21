@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -218,7 +219,23 @@ func (c *redactingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	if ent.Level >= zapcore.ErrorLevel {
 		observeError(ent)
 	}
-	return c.Core.Write(ent, fields)
+	return c.Core.Write(ent, withHint(ent, fields))
+}
+
+// withHint is fields with logcontent's Hint added, for a line at Warn or above
+// that names a value by its length or its kind (logcontent.Withheld): a user
+// reading a failed run's console learns how to see it. The fields are the
+// caller's, so the hint goes in a copy.
+func withHint(ent zapcore.Entry, fields []zapcore.Field) []zapcore.Field {
+	if ent.Level < zapcore.WarnLevel {
+		return fields
+	}
+	for _, f := range fields {
+		if logcontent.Withheld(f) {
+			return append(fields[:len(fields):len(fields)], zap.String(logcontent.HintKey, logcontent.Hint))
+		}
+	}
+	return fields
 }
 
 // errorObserver is what ObserveErrors set: told of each entry logged at ERROR

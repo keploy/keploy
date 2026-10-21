@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -964,6 +965,40 @@ func TestObserveErrorsSeesEachErrorOnce(t *testing.T) {
 	logger.Error("after the observer stopped")
 	if len(got) != 2 {
 		t.Fatalf("observed %q after the observer stopped", got)
+	}
+}
+
+// A line at Warn or above that names a value by its kind or its length, as
+// logcontent does with the switch off, tells its reader how to see it; one
+// below Warn, or one that withholds nothing, does not, and the caller's fields
+// are left as they were.
+func TestAWithheldValueAtWarnCarriesTheHint(t *testing.T) {
+	t.Cleanup(logcontent.Set(false))
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(newRedactingCore(core))
+	err := fmt.Errorf("decode: %w", os.ErrInvalid)
+	fields := make([]zap.Field, 1, 4)
+	fields[0] = logcontent.Error(err)
+	logger.Error("failed to mock the outgoing message", fields...)
+	logger.Warn("a body", logcontent.String("body", "x"))
+	logger.Debug("failed to mock the outgoing message", fields...)
+	logger.Error("an own error", zap.Error(err))
+	all := logs.All()
+	if len(all) != 4 {
+		t.Fatalf("%d entries, want 4", len(all))
+	}
+	for i, want := range []bool{true, true, false, false} {
+		if got := all[i].ContextMap()[logcontent.HintKey] == logcontent.Hint; got != want {
+			t.Errorf("entry %d (%s %q): hint %v, want %v: %v", i, all[i].Level, all[i].Message, got, want, all[i].ContextMap())
+		}
+	}
+	if fields[:cap(fields)][1].Key != "" {
+		t.Errorf("the hint was written into the caller's fields: %v", fields[:cap(fields)])
+	}
+	logcontent.Set(true)
+	logger.Error("opted in", logcontent.Error(err))
+	if _, ok := logs.All()[4].ContextMap()[logcontent.HintKey]; ok {
+		t.Error("with the switch on, a line carries the hint")
 	}
 }
 

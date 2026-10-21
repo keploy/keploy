@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -228,7 +229,7 @@ func TestTemplatize_TemplateTextAnywhereInAFileLeavesTheSetAsItIs(t *testing.T) 
 			require.NoError(t, err)
 			assert.Equal(t, before, s.files(t), "no byte of the set changes")
 			text, file, line := heldLine(t, s, logs)
-			assert.Equal(t, c.text, text)
+			assert.Equal(t, templates.Shape(c.text), text)
 			assert.Equal(t, filepath.Base(c.file), file)
 			assert.Contains(t, line, c.line)
 			assert.Len(t, logs.All(), 1, "one line, and nothing else")

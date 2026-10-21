@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -136,6 +137,9 @@ func TestMockFailed_AParsersErrorIsLoggedWithoutTheCallItQuotes(t *testing.T) {
 			"mock mismatch: no matching mock for outgoing call (no structured report)",
 			"failed to handle the client connection",
 			discarded)
+		// Nor by its text's fingerprint, which whoever hashes the texts
+		// net/http makes around a header line finds a short value from.
+		logtest.CheckNoFingerprint(t, logs, err.Error())
 		for _, msg := range []string{"failed to mock the outgoing message", "mock mismatch: no matching mock for outgoing call (no structured report)", "failed to handle the client connection"} {
 			if got, want := logs.FilterMessage(msg).All()[0].ContextMap()["error_kind"], "textproto.ProtocolError"; got != want {
 				t.Errorf("%q names the error %v, want its kind %q", msg, got, want)
@@ -198,6 +202,7 @@ func TestMockMySQLOutgoing_AParsersErrorIsLoggedWithoutThePacketItQuotes(t *test
 			"mysql mock outgoing finished with error",
 			"mock mismatch: no matching mock for outgoing call (no structured report)",
 			"failed to handle the client connection")
+		logtest.CheckNoFingerprint(t, logs, parserErr.Error())
 	})
 }
 
@@ -356,4 +361,40 @@ func TestRecordViaSupervisor_AClosedConnectionsErrorIsLoggedWithoutWhatItQuotes(
 		_ = awaitEvent(t, done, "recordViaSupervisor returning after the recording stopped")
 		logtest.Check(t, logs, canary, on, "V2 parser exited with network-closed error")
 	})
+}
+
+// parserFailed only says how the accept loop logs a parser's error: what the
+// handler's line is, and whether there is one, is what it was for the error
+// itself. A parser that returns a bare io.EOF (a client that connects and
+// closes without sending, as a health probe or a pre-dialled pool does) gets
+// no line, wrapped or not; one that returns a refused local dial, a closed
+// connection or a cancel gets the Debug line it gets unwrapped.
+func TestLogHandlerError_AParsersErrorIsClassifiedAsItWasBeforeItWasWrapped(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5432}, Err: syscall.ECONNREFUSED}
+	for name, err := range map[string]error{
+		"a clean EOF":               io.EOF,
+		"a closed connection":       net.ErrClosed,
+		"a cancel":                  context.Canceled,
+		"a refused local dial":      refused,
+		"a reset":                   errors.New("read tcp: connection reset by peer"),
+		"a parser's own error":      errors.New("malformed frame"),
+		"a wrapped EOF":             fmt.Errorf("read the header: %w", io.EOF),
+		"a parser's unexpected EOF": io.ErrUnexpectedEOF,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lines := func(err error) []string {
+				logger, logs := logtest.Observe()
+				(&Proxy{logger: logger}).logHandlerError(err)
+				var out []string
+				for _, e := range logs.AllUntimed() {
+					out = append(out, e.Level.String()+" "+e.Message)
+				}
+				return out
+			}
+			bare, wrapped := lines(err), lines(parserFailed{err})
+			if strings.Join(bare, "\n") != strings.Join(wrapped, "\n") {
+				t.Fatalf("the handler's lines for parserFailed{%v} are %q, want those for the error itself, %q", err, wrapped, bare)
+			}
+		})
+	}
 }

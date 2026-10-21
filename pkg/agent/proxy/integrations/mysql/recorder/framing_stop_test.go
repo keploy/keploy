@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -184,6 +185,7 @@ func TestRecordV2_AFramingLossFoundAsTheRecordingStopsIsNotWarnedOf(t *testing.T
 // Not parallel: the WARNs are limited process-wide, and this test counts them.
 func TestRecordV2_AResponseLeftOutAloneIsCountedAndStampsNoStop(t *testing.T) {
 	resetWarnLimiters()
+	t.Cleanup(logcontent.Set(true)) // why, the error, is read whole
 	xs := kitTraffic(t, []int{7}, false)
 	// An empty packet where the column count should be.
 	xs[2].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
@@ -211,12 +213,12 @@ func TestRecordV2_AResponseLeftOutAloneIsCountedAndStampsNoStop(t *testing.T) {
 		t.Fatalf("%d left-out WARNs for the exchange, want 1", len(w))
 	}
 	fields := w[0].ContextMap()
-	reason, _ := fields["reason"].(string)
-	if fields["kind"] != string(models.MySQL) || !strings.HasPrefix(reason, "mysql exchange not recorded: its response cannot be framed (") ||
-		!strings.Contains(reason, "first packet does not decode") || !strings.Contains(reason, "the connection's recording goes on from its next command") {
+	why := leftOutWhy(w[0])
+	if fields["kind"] != string(models.MySQL) || fields["reason"] != leftOutCause || !strings.HasPrefix(strings.TrimPrefix(why, errNotRecorded.Error()+": "), "its response cannot be framed (") ||
+		!strings.Contains(why, "first packet does not decode") || !strings.Contains(why, "the connection's recording goes on from its next command") {
 		t.Fatalf("the left-out WARN says %v, want the MySQL kind, what was found, and that the connection's recording goes on", fields)
 	}
-	if strings.Contains(reason, ErrFramingLost.Error()) {
-		t.Fatalf("the left-out WARN's reason says the connection's framing is lost: %q; the exchange alone is left out", reason)
+	if strings.Contains(why, ErrFramingLost.Error()) {
+		t.Fatalf("the left-out WARN's error says the connection's framing is lost: %q; the exchange alone is left out", why)
 	}
 }

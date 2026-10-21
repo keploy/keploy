@@ -796,8 +796,8 @@ func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (s
 	// Checked first: it runs for every variable a replayed call binds.
 	for _, b := range hit.binds {
 		if ce := h.Logger.Check(zap.DebugLevel, "variable bound"); ce != nil {
-			ce.Write(zap.String("variable", b.Name), logcontent.String("value", b.Value),
-				logcontent.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+			ce.Write(zap.String("variable", b.Name), logcontent.NamedString("value", b.Name, b.Value),
+				logcontent.NamedString("recorded", b.Name, b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
 		}
 	}
 	if !consume(hit.mock) {

@@ -89,3 +89,17 @@ func TestReportOutcome_AnUnreadAccountIsLoggedByItsKind(t *testing.T) {
 		logtest.Check(t, logs, canary, on, "failed to read consumed mocks", "failed to read mock misses")
 	})
 }
+
+// A miss's next step can name the call it was made for (an HTTP session
+// call's path): the line that tells it carries it only as logcontent allows.
+func TestReportOutcome_AMissNextStepIsLoggedWithoutThePathItNames(t *testing.T) {
+	const canary = "kp-canary-mock-miss-next-4b1c"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		inst := &missesInstr{misses: []models.UnmatchedCall{{Protocol: "HTTP", Destination: "api.test:443", ActualSummary: "GET /reset/{}",
+			NextSteps: `Each test is served the HTTP calls it recorded. (sessionCalls: [{host: "api.test", method: "GET", pathPrefix: "/reset/` + canary + `"}])`}}}
+		m := &mockService{logger: logger, instrumentation: inst, config: &config.Config{}}
+		m.reportOutcome(context.Background(), 0, replayDetail{}, func() bool { return false })
+		logtest.Check(t, logs, canary, on, "no recorded mock matched an outgoing call")
+	})
+}

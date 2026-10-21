@@ -5688,7 +5688,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		unverifiedNotJudged = testSetStatus != models.TestSetStatusInternalErr
 		notJudged = alsoNotJudged(notJudged, captureUnverified)
 		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call the application made; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
-			zap.String("test-set", testSetID), logcontent.String("reason", captureUnverified),
+			// The reason holds the read's error, whose text the agent's
+			// answer can fill: by its length, as a fingerprint of an
+			// error's text gives a short value away.
+			zap.String("test-set", testSetID), logcontent.StringLen("reason", captureUnverified),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)

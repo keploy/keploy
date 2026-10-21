@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 func TestFind_TheGrammar(t *testing.T) {
@@ -180,4 +182,51 @@ func TestEachString(t *testing.T) {
 	EachString(map[string]interface{}{"header_equal": []elem{{Key: "X-User", Value: "{{string .id}}", note: "unexported"}}},
 		func(path, text string) { got = append(got, path+"="+text) })
 	assert.Equal(t, []string{"header_equal=header_equal", "header_equal[0].Key=X-User", "header_equal[0].Value={{string .id}}"}, got)
+}
+
+// A line logs a placeholder of the grammar as it is, and other template text,
+// which can hold any text without a brace, as {{.{}}}, unless
+// KEPLOY_LOG_CONTENT is set.
+func TestShapeKeepsAPlaceholderOfTheGrammarAlone(t *testing.T) {
+	const secret = "kp-canary-templates-shape-77ab"
+	for _, on := range []bool{false, true} {
+		restore := logcontent.Set(on)
+		for text, want := range map[string]string{
+			"{{string .user_id}}":         "{{string .user_id}}",
+			"{{ capture int .count }}":    "{{ capture int .count }}",
+			"{{.secret.K}}":               "{{.secret.K}}",
+			"{{.a.b}}":                    "{{.{}}}",
+			"{{ .id | print }}":           "{{.{}}}",
+			"{{." + secret + " x}}":       "{{.{}}}",
+			"prefix {{string .id}}":       "{{.{}}}",
+			"{{string .id}}{{string .x}}": "{{.{}}}",
+		} {
+			if on {
+				want = text
+			}
+			if got := Shape(text); got != want {
+				t.Errorf("switch %v: Shape(%q) = %q, want %q", on, text, got, want)
+			}
+		}
+		restore()
+	}
+}
+
+// A line logs a key of the grammar as it is, and any other text a key's place
+// holds as {}, unless KEPLOY_LOG_CONTENT is set.
+func TestKeyShapeKeepsAKeyOfTheGrammarAlone(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		restore := logcontent.Set(on)
+		for key, want := range map[string]string{
+			"user_id": "user_id", "secret.K": "secret.K", "a.b": "{}", "id | print": "{}", "user-id": "{}", "": "{}",
+		} {
+			if on {
+				want = key
+			}
+			if got := KeyShape(key); got != want {
+				t.Errorf("switch %v: KeyShape(%q) = %q, want %q", on, key, got, want)
+			}
+		}
+		restore()
+	}
 }

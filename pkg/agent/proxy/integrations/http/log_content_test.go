@@ -616,3 +616,48 @@ func TestEncodeHTTP_AnExchangeItCannotParseIsLoggedWithoutWhatItQuotes(t *testin
 		})
 	}
 }
+
+// A variable named as a credential (an OTP) is logged by its values' lengths
+// alone: their fingerprints would give a short code away to whoever hashes
+// the codes it can be.
+func TestVariables_ACredentialsBoundLineCarriesNoFingerprint(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		h := &HTTP{Logger: logger}
+		const recorded, live = "7710", "4821"
+		db := &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "POST", "http://store/orders", `{"otp":"`+recorded+`","item":"pen"}`, 201, `{"otp":"`+recorded+`"}`,
+				models.MockVariables{"otp": bindV(recorded, "body.otp", "body.otp")}), 1),
+		}}
+		if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"otp":"`+live+`","item":"pen"}`)); !ok {
+			t.Fatal("the create was not answered")
+		}
+		bound := logs.FilterMessage("variable bound").All()
+		if len(bound) == 0 {
+			t.Fatal("precondition: no variable was bound")
+		}
+		logtest.CheckNoFingerprint(t, logs, recorded, live)
+	})
+}
+
+// A query parameter named as a credential (a token) whose value was recorded
+// as another of its type is logged by the values' lengths alone.
+func TestDecodeHTTP_ACredentialsDynamicQueryValueCarriesNoFingerprint(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		const recorded, live = "8812770044", "4821337799"
+		db := &mockMemDb{mocks: []*models.Mock{learnRecorded("mock-token", 0, "GET", "http://api.test/profile?token="+recorded, "", nil, `{"user":"u"}`)},
+			updateUnFilteredReturn: true, deleteFilteredReturn: true}
+		app, done := decodeLogged(t, logger, "GET /profile?token="+live+" HTTP/1.1\r\nHost: api.test\r\nContent-Type: application/json\r\n\r\n", db)
+		if resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("the call was not served (%v)", err)
+		}
+		_ = app.Close()
+		<-done
+		if len(logs.FilterMessage("http query: value treated as auto-detected dynamic").All()) == 0 {
+			t.Fatal("precondition: the value was not treated as dynamic")
+		}
+		logtest.CheckNoFingerprint(t, logs, recorded, live)
+	})
+}

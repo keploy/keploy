@@ -45,10 +45,16 @@
 //     a byte slice its length and its fingerprint too, as String and Bytes
 //     log them, with what they give away.
 //   - Error logs an error by what it is (ErrorKind: textproto.ProtocolError,
-//     *strconv.NumError, syscall.Errno(connection reset by peer)) and its
-//     text's length, and no fingerprint: a parser's error quotes the value it
-//     could not read, a length or a header line, and a short one is found
-//     from its text's fingerprint as from its own.
+//     *strconv.NumError, syscall.Errno(connection reset by peer)), its
+//     text's length, and its shape: keploy's own words of it, each value
+//     they were written around {} ("failed to run test set {}: failed to
+//     decode the mock: {}", errorShape). No fingerprint: a parser's error
+//     quotes the value it could not read, a length or a header line, and a
+//     short one is found from its text's fingerprint as from its own.
+//   - Panic logs a recovered panic's value by its type and its text's
+//     length, or an error's kind, unless the Go runtime raised it, whose
+//     own words (an index out of range, a nil dereference) it logs whole:
+//     any code a goroutine runs can panic, and with whatever it was reading.
 //   - logurl logs a URL, a path or a call by its shape (models.URLShape):
 //     every path segment and query name that does not read as a name, and
 //     every query value, written {}, as the lines a default run prints for a
@@ -67,7 +73,12 @@
 //
 // The switch decides only what the lines that go through these helpers
 // carry: a line that logs a value through zap's own constructors carries it
-// whole, whatever the switch says.
+// whole, whatever the switch says. What keploy records, how it matches and
+// the verdicts it reaches never depend on it. A line at Warn or above that a
+// helper withheld a value from (Withheld) carries the Hint, which names
+// EnvVar, from every logger utils/log builds. A crash report, which leaves
+// the machine, never carries a panic's value (PanicText), and goes without
+// the run's log while the switch is on, since the log then carries content.
 //
 // It depends on nothing of keploy's, so the parsers in keploy, integrations
 // and enterprise all import the same switch. logurl, which shapes a URL as
@@ -75,6 +86,7 @@
 package logcontent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -83,6 +95,8 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -299,12 +313,15 @@ func Any(key string, v any) zap.Field {
 // "textproto.ProtocolError", "len": 57}, and no fingerprint: the text holds
 // the value it quotes among words anyone can read in the parser's source, so
 // a short value (a PIN in a header line, the number strconv could not
-// parse) is found by hashing the texts it would make. A nil err is
-// zap.Error's, which logs nothing.
+// parse) is found by hashing the texts it would make. When keploy's own
+// words make err's text, the field has its shape too (errorShape): those
+// words, each value they were written around {}, "failed to run test set {}:
+// failed to decode the mock: {}". A nil err is zap.Error's, which logs
+// nothing.
 //
-// ErrorKind and the text are computed when a core encodes the entry, not
-// here, so a disabled line costs one small allocation, for err, that
-// zap.Error's does not.
+// ErrorKind, the text and the shape are computed when a core encodes the
+// entry, not here, so a disabled line costs one small allocation, for err,
+// that zap.Error's does not.
 func Error(err error) zap.Field {
 	return NamedError("error", err)
 }
@@ -315,6 +332,124 @@ func NamedError(key string, err error) zap.Field {
 		return zap.NamedError(key, err)
 	}
 	return zap.Object(key, errorDigest{err})
+}
+
+// HintKey and Hint are the field a logger adds to a line, at Warn and above,
+// one of whose fields the switch withheld (Withheld): what a user reading a
+// failed run's console needs to see the value, and what that costs.
+const (
+	HintKey = "withheld"
+	Hint    = "a value above is named by its kind or length only; set " + EnvVar + "=1 to log it whole (it may hold your app's data)"
+)
+
+// Withheld reports whether f is a field one of the helpers here built with
+// the switch off, which names a value by its length, kind or fingerprint
+// instead of writing it: a logger adds the Hint to a line at Warn and above
+// that holds one.
+func Withheld(f zapcore.Field) bool {
+	if f.Type != zapcore.ObjectMarshalerType {
+		return false
+	}
+	switch f.Interface.(type) {
+	case bytesDigest, stringDigest, lenOnly, errorDigest, typeOnly, panicDigest:
+		return true
+	}
+	return false
+}
+
+// Panic is a recovered panic's value v under key: zap.Any(key, v) with the
+// switch on. With it off, a panic the Go runtime raised (a runtime.Error of
+// package runtime's own: an index out of range, a nil dereference, a failed
+// type assertion, a divide by zero), whose text names only types, indices and
+// lengths, is logged whole, as zap.String(key, its text); an error by what
+// Error logs of it, its kind and its text's length; and any other value by its
+// Go type, and a string's or a []byte's exact length. Nothing else of it, and
+// no fingerprint: a panic can come from any code its goroutine runs, a
+// third-party decoder's among it, and its value is what that code made it,
+// panic(err) of an error that quotes the payload, or panic(fmt.Sprintf("bad
+// frame %x", b)), which is found from a fingerprint as an error's text is
+// (Error).
+func Panic(key string, v any) zap.Field {
+	if on.Load() {
+		return zap.Any(key, v)
+	}
+	if s, ok := runtimeText(v); ok {
+		return zap.String(key, s)
+	}
+	return zap.Object(key, panicDigest{v})
+}
+
+// PanicText is v, a recovered panic's value, as a text that carries no
+// content whatever the switch says, for what is no log line and leaves the
+// machine, a crash report: the Go runtime's own error whole, as Panic logs
+// it, and any other value by its type and its text's length, "a panic of
+// string (31 bytes)", or for an error by its kind, "a panic of
+// *strconv.NumError (40 bytes)".
+func PanicText(v any) string {
+	if s, ok := runtimeText(v); ok {
+		return s
+	}
+	kind, n := panicKind(v)
+	if n < 0 {
+		return "a panic of " + kind
+	}
+	return "a panic of " + kind + " (" + strconv.Itoa(n) + " bytes)"
+}
+
+// runtimeText is v's text when v is a panic the Go runtime raised: a
+// runtime.Error whose type is package runtime's, as every error the runtime
+// panics with is. A type of any other package may have a RuntimeError method
+// too, and its text is whatever that package made it.
+func runtimeText(v any) (string, bool) {
+	re, ok := v.(runtime.Error)
+	if !ok {
+		return "", false
+	}
+	t := reflect.TypeOf(re)
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.PkgPath() != "runtime" {
+		return "", false
+	}
+	return re.Error(), true
+}
+
+// panicKind is what a panic's value v is, for a line or a report that does not
+// carry it: an error's kind (ErrorKind) or any other value's Go type, and the
+// length of its text (an error's, a string's, a []byte's), or -1 for a value
+// that has none.
+func panicKind(v any) (string, int) {
+	switch x := v.(type) {
+	case nil:
+		return "<nil>", -1
+	case error:
+		return ErrorKind(x), len(x.Error())
+	}
+	rv := reflect.ValueOf(v)
+	switch {
+	case rv.Kind() == reflect.String:
+		return rv.Type().String(), rv.Len()
+	case rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.Uint8:
+		return rv.Type().String(), rv.Len()
+	}
+	return rv.Type().String(), -1
+}
+
+// panicDigest is a panic's value by its kind and its text's length (Panic).
+type panicDigest struct{ v any }
+
+func (p panicDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	kind, n := panicKind(p.v)
+	if _, isErr := p.v.(error); isErr {
+		enc.AddString("kind", kind)
+	} else {
+		enc.AddString("type", kind)
+	}
+	if n >= 0 {
+		enc.AddInt("len", n)
+	}
+	return nil
 }
 
 // ErrorKind is what err is, for a line that does not carry its text: the Go
@@ -367,6 +502,16 @@ var sentinels = []struct {
 	{io.ErrShortBuffer, "io.ErrShortBuffer"},
 	{io.ErrShortWrite, "io.ErrShortWrite"},
 	{context.Canceled, "context.Canceled"},
+	{io.ErrNoProgress, "io.ErrNoProgress"},
+	{os.ErrNotExist, "os.ErrNotExist"},
+	{os.ErrExist, "os.ErrExist"},
+	{os.ErrPermission, "os.ErrPermission"},
+	{os.ErrInvalid, "os.ErrInvalid"},
+	{os.ErrClosed, "os.ErrClosed"},
+	{os.ErrProcessDone, "os.ErrProcessDone"},
+	{bufio.ErrBufferFull, "bufio.ErrBufferFull"},
+	{bufio.ErrTooLong, "bufio.ErrTooLong"},
+	{bufio.ErrNegativeCount, "bufio.ErrNegativeCount"},
 }
 
 // textOnly reports whether t is an error type of the errors or fmt package,
@@ -444,8 +589,12 @@ func (n lenOnly) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 type errorDigest struct{ err error }
 
 func (e errorDigest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	text := e.err.Error()
 	enc.AddString("kind", ErrorKind(e.err))
-	enc.AddInt("len", len(e.err.Error()))
+	enc.AddInt("len", len(text))
+	if shape := errorShape(e.err, text); shape != "" {
+		enc.AddString("shape", shape)
+	}
 	return nil
 }
 

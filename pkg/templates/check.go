@@ -494,7 +494,7 @@ func (c *checker) note(where string, p Placeholder) {
 // earlier keploy rendered ({{ .id | print }}), which this one sends and
 // compares as written. In a set with no templates, untyped text such as
 // {{ .Values.name }} is the app's (a Helm chart, a mail template).
-func (c *checker) noteOutsideGrammar(where string, p Placeholder) {
+func (c *checker) noteOutsideGrammar(where string, p Held) {
 	if c.seen["\x00"+p.Key] || (c.run.Empty() && p.Type == "" && !p.Capture) {
 		return
 	}

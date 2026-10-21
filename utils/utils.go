@@ -521,16 +521,26 @@ func attachLogFileToSentry(logFile *os.File) error {
 	return nil
 }
 
-// HandleRecovery handles the common logic for recovering from a panic.
+// HandleRecovery handles the common logic for recovering from a panic: it
+// logs the panic's value as logcontent.Panic allows, with the stack, and
+// sends Sentry the crash. A panic can come from any code its goroutine runs,
+// a parser's decoder among it, and its value is what that code made it, the
+// payload it could not read as often as not: the crash report, which leaves
+// the machine, names it by what logcontent.PanicText says of it, which is
+// the runtime's own words for a runtime error and the value's type and
+// length for anything else, whatever KEPLOY_LOG_CONTENT says. The run's log
+// goes with the report only while the switch is off: with it on, the log
+// carries the application's content.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(LogFile)
-	if err != nil {
+	if logcontent.On() {
+		logger.Debug("not attaching the log to the crash report: " + logcontent.EnvVar + " has it carry the application's content")
+	} else if err := attachLogFileToSentry(LogFile); err != nil {
 		LogError(logger, err, "failed to attach log file to sentry")
 	}
-	sentry.CaptureException(errors.New(fmt.Sprint(r)))
+	sentry.CaptureException(errors.New(logcontent.PanicText(r)))
 	// Get the stack trace
 	stackTrace := debug.Stack()
-	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
+	LogError(logger, nil, errMsg, logcontent.Panic("panic", r), zap.String("stack trace", string(stackTrace)))
 }
 
 // Recover recovers from a panic and logs the stack trace to Sentry.
@@ -547,7 +557,9 @@ func Recover(logger *zap.Logger) {
 		HandleRecovery(logger, r, "Recovered from panic")
 		// Before Stop: the process may exit as soon as the global context ends.
 		sentry.Flush(2 * time.Second)
-		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		// The panic's value is logged above, as logcontent allows; the
+		// reason Stop logs whole is keploy's own.
+		err := Stop(logger, "recovered from a panic")
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
 		}

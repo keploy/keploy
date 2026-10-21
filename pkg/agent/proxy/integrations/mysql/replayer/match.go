@@ -2175,11 +2175,13 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	// definitive match.
 	// The parser's error quotes the statement where it stopped ("syntax
 	// error at position 37 near 'x'"), a literal as often as not, so it is
-	// logged as the statement is.
+	// logged by its kind and its length (logcontent.Error): a fingerprint of
+	// its text would give a short literal away to whoever hashes the texts
+	// the parser makes around it.
 	actualSignature, err := live.structure()
 	if err != nil {
 		if ce := log.Check(zap.DebugLevel, "failed to get actual query structure"); ce != nil {
-			ce.Write(logcontent.String("actual Query", actualQuery), logcontent.String("error", err.Error()))
+			ce.Write(logcontent.String("actual Query", actualQuery), logcontent.Error(err))
 		}
 		return false, 0, expectedQuery
 	}
@@ -2187,7 +2189,7 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	expectedSignature, err := getQueryStructureCached(expectedQuery)
 	if err != nil {
 		if ce := log.Check(zap.DebugLevel, "failed to get expected query structure"); ce != nil {
-			ce.Write(logcontent.String("expected Query", expectedQuery), logcontent.String("error", err.Error()))
+			ce.Write(logcontent.String("expected Query", expectedQuery), logcontent.Error(err))
 		}
 		return false, 0, expectedQuery
 	}
@@ -3645,9 +3647,13 @@ func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName st
 		// falling back to a synthesized autocommit terminator otherwise.
 		FinalResponse: terminatorForSingleColumn(probeTerminator),
 	}
+	// The value is the variable's, which the line names beside it: logged
+	// as logcontent allows a named value (a variable called like a
+	// credential gets its length alone).
 	if logger != nil {
-		logger.Debug("built single-column session-variable result set",
-			zap.String("var", varName), logcontent.Any("value", val.Value))
+		if ce := logger.Check(zap.DebugLevel, "built single-column session-variable result set"); ce != nil {
+			ce.Write(zap.String("var", varName), logcontent.NamedString("value", varName, fmt.Sprint(val.Value)))
+		}
 	}
 	return &mysql.Response{
 		PacketBundle: mysql.PacketBundle{

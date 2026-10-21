@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
@@ -785,4 +786,29 @@ func TestConcurrentBumpAndPending(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+// A panic's value is what the code that raised it made it, the payload a
+// parser's decoder could not read as often as not: the lines the supervisor
+// logs it on, a parser's, a reporter's and an abort callback's, carry it only
+// as logcontent.Panic allows, by its type and length unless
+// KEPLOY_LOG_CONTENT is set. What the parser's Result carries is the panic
+// whole, whatever the switch says.
+func TestAPanicsValueIsLoggedAsLogcontentAllows(t *testing.T) {
+	const canary = "kp-canary-supervisor-panic-91ab"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		cfg := shortCfg(t)
+		cfg.Logger = logger
+		cfg.PanicReporter = func(r any, stack []byte) { panic("reporter: bad frame " + canary) }
+		s := New(cfg)
+		s.SessionOnAbort = func() { panic("abort: bad frame " + canary) }
+		res := s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error { panic("parser: bad frame " + canary) },
+			&Session{})
+		if res.Status != StatusPanicked || res.Err == nil || !strings.Contains(res.Err.Error(), canary) {
+			t.Fatalf("the result is %s %v, want a panic that carries its value", res.Status, res.Err)
+		}
+		logtest.Check(t, logs, canary, on, "parser panicked", "panic reporter itself panicked", "SessionOnAbort callback panicked")
+	})
 }

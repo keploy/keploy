@@ -79,6 +79,26 @@ func Check(t testing.TB, logs *observer.ObservedLogs, canary string, on bool, wa
 	}
 }
 
+// CheckNoFingerprint fails t when, with the switch off, a kept line carries
+// the fingerprint (logcontent.Fingerprint) of any of texts: the text of an
+// error a parser made, which quotes what it could not read, or a value a
+// line names by a credential's name (an OTP, a token), whose fingerprint
+// gives a short one away to whoever hashes the values it can be.
+func CheckNoFingerprint(t testing.TB, logs *observer.ObservedLogs, texts ...string) {
+	t.Helper()
+	if logcontent.On() {
+		return
+	}
+	for _, e := range logs.AllUntimed() {
+		line := encode(t, e)
+		for _, s := range texts {
+			if fp := logcontent.Fingerprint([]byte(s)); strings.Contains(line, fp) {
+				t.Fatalf("with the switch off, the line %q carries the fingerprint %s of %q:\n%s", e.Message, fp, s, line)
+			}
+		}
+	}
+}
+
 // Disabled is a logger whose Debug level is off, as a default run's console
 // is: a line at Debug costs it only what its fields cost to build.
 func Disabled() *zap.Logger {

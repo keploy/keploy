@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -478,6 +479,10 @@ func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
 // none is told to record the call. A connection whose client sent nothing is
 // said to have made no call.
 func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
+	// A next step can name the call (an HTTP session call's path), so a
+	// line carries it whole only with KEPLOY_LOG_CONTENT set: which next
+	// step each miss is told is read from there.
+	t.Cleanup(logcontent.Set(true))
 	const listPort = "if 172.17.0.1:3307 is MySQL, add 3307 to mysqlPorts in keploy.yml"
 	misses := []models.UnmatchedCall{
 		{Protocol: "MySQL", ActualSummary: "connection phase: server greeting", Destination: "172.17.0.1:3307",

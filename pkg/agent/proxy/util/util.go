@@ -990,7 +990,7 @@ func RecoverWithoutClose(logger *zap.Logger) {
 
 	if r := recover(); r != nil {
 		logger.Error("Recovered from panic in parser",
-			zap.Any("panic", r),
+			logcontent.Panic("panic", r),
 			zap.String("next_step", "the supervisor (if wrapping this call) will fall through to raw passthrough so user traffic continues; file the panic with the parser owner using the Sentry issue that was just captured, or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely until the root cause is fixed"),
 		)
 		utils.HandleRecovery(logger, r, "Recovered from panic")

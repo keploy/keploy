@@ -85,13 +85,13 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		firstChunk, err := nextRequestV2(sess)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
-				logger.Debug("V2 HTTP record: client stream ended at start of request", logcontent.Error(err))
+				logger.Debug("V2 HTTP record: client stream ended at start of request", zap.Error(err))
 				return nil
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			utils.LogContentError(logger, err, "V2 HTTP record: initial request read failed")
+			utils.LogError(logger, err, "V2 HTTP record: initial request read failed")
 			return err
 		}
 		reqTs := firstChunk.ReadAt

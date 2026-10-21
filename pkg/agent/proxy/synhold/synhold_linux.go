@@ -21,6 +21,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -674,7 +675,7 @@ func (h *Holder) runSafely(what string, f func()) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			h.logger.Error("synhold: a held handshake's "+what+" panicked", zap.Any("panic", r))
+			h.logger.Error("synhold: a held handshake's "+what+" panicked", logcontent.Panic("panic", r))
 		}
 	}()
 	f()
@@ -686,7 +687,7 @@ func (h *Holder) decideSafely(ctx context.Context, client, proxy netip.AddrPort)
 	defer func() {
 		if r := recover(); r != nil {
 			h.logger.Error("synhold: deciding a held handshake panicked; letting it complete",
-				zap.String("client", client.String()), zap.Any("panic", r))
+				zap.String("client", client.String()), logcontent.Panic("panic", r))
 			d = Decision{Outcome: Accept}
 		}
 	}()

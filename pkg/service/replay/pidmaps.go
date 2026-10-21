@@ -161,9 +161,10 @@ func (r *Replayer) pidMapCaptureIncomplete(ctx context.Context, testSetID string
 func (r *Replayer) pidMapUnverified(testSetID string, err error) pidMapVerdict {
 	reason := models.CaptureUnverified(err)
 	// The reason holds err's text, which the agent's answer can fill: the
-	// verdict keeps it, and the line says it as logcontent lets it.
+	// verdict keeps it, and the line says it by its length, beside err by
+	// its kind: a fingerprint of an error's text gives a short value away.
 	r.logger.Warn("this test set is not verified: keploy could not read whether the agent tracked every process the application ran, so a call may have reached the real dependency unmocked; its mocks are not pruned and mappings.yaml is not written from it",
-		zap.String("test-set", testSetID), logcontent.Error(err), logcontent.String("reason", reason))
+		zap.String("test-set", testSetID), logcontent.Error(err), logcontent.StringLen("reason", reason))
 	return pidMapVerdict{unverified: reason}
 }
 

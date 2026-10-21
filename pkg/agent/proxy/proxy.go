@@ -2459,7 +2459,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 // logHandlerError logs what a connection's handler returned, as the accept
 // loop does once the connection is done.
 func (p *Proxy) logHandlerError(err error) {
-	if err == nil || err == io.EOF {
+	// A parser's error is classified as it is, without the parserFailed
+	// that only says how its line logs it: a bare io.EOF, a client that
+	// closed without sending, gets no line, as it did before the wrapper.
+	if cause := handlerCause(err); cause == nil || cause == io.EOF {
 		return
 	}
 	// Network closed errors are expected when client closes connection (e.g., app shutdown)
@@ -4996,11 +4999,14 @@ func errorKind(err error) string {
 }
 
 // parserErrorFields are how a line logs a parser's error, or a miss the proxy
-// made of one: by its kind, and its text only as logcontent allows. The text
-// is whatever the parser said, which can quote the call it could not read
-// (net/http quotes a malformed header line whole, a decoder the packet).
+// made of one: by its kind, and its text only as logcontent.Error allows,
+// which with the switch off is the text's length alone. The text is whatever
+// the parser said, which can quote the call it could not read (net/http
+// quotes a malformed header line whole, a decoder the packet, strconv the
+// number), so a fingerprint of it would give a short value away to whoever
+// hashes the texts the parser can make.
 func parserErrorFields(err error) []zap.Field {
-	return []zap.Field{zap.String("error_kind", errorKind(err)), logcontent.String("error", err.Error())}
+	return []zap.Field{zap.String("error_kind", errorKind(err)), logcontent.Error(err)}
 }
 
 // parserFailed is a parser's error, from MockOutgoing or RecordOutgoing, as
@@ -5011,6 +5017,17 @@ type parserFailed struct{ err error }
 func (f parserFailed) Error() string { return f.err.Error() }
 
 func (f parserFailed) Unwrap() error { return f.err }
+
+// handlerCause is what a connection's handler returned, without the
+// parserFailed the proxy wraps a parser's error in: the error the accept
+// loop's classifiers judge, which compare a clean io.EOF by identity, as
+// they did before the wrapper.
+func handlerCause(err error) error {
+	if f, ok := err.(parserFailed); ok {
+		return f.err
+	}
+	return err
+}
 
 // handlerErrorFields are how the accept loop logs what a connection's handler
 // returned: a parser's error as parserErrorFields does, anything else whole.

@@ -303,8 +303,9 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// at request index 0 and 1 to be tolerant to recording layout.
 
 	// Not the packet: its auth response is the cleartext password under
-	// mysql_clear_password (PAM, LDAP, IAM tokens).
-	logger.Debug("matching handshake response", logcontent.StringLen("user", hr41.Username), zap.String("database", printable(hr41.Database)), zap.String("auth_plugin", hr41.AuthPluginName))
+	// mysql_clear_password (PAM, LDAP, IAM tokens). The plugin's name is the
+	// one the client's packet gives, logged as logcontent allows.
+	logger.Debug("matching handshake response", logcontent.StringLen("user", hr41.Username), zap.String("database", printable(hr41.Database)), logcontent.String("auth_plugin", hr41.AuthPluginName))
 
 	// compared counts the candidates whose recorded HandshakeResponse41 was
 	// compared. closest is why the closest of them did not match, for the

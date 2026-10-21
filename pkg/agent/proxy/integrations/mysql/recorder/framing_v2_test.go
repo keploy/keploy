@@ -21,6 +21,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/logcontent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -557,6 +558,13 @@ func TestErrFramingLostSaysItWasReported(t *testing.T) {
 // (Session.ReportLeftOut): the ones with a reason. The recorder's own WARNs,
 // of a connection's stop (warnFramingLost) and of a response it could not
 // frame (reportFault), have none.
+// leftOutWhy is why a left-out line says its exchange was left out: its
+// error's text, which a test reads with the switch on (logcontent.Set).
+func leftOutWhy(e observer.LoggedEntry) string {
+	why, _ := e.ContextMap()["error"].(string)
+	return why
+}
+
 func leftOutWarnings(logs *observer.ObservedLogs) []observer.LoggedEntry {
 	return logs.FilterLevelExact(zapcore.WarnLevel).Filter(func(e observer.LoggedEntry) bool {
 		_, ok := e.ContextMap()["reason"]
@@ -677,6 +685,7 @@ func TestRecordV2_LargeResultFramesAcrossAnyChunking(t *testing.T) {
 // Not parallel: the WARN is limited process-wide, and this test counts it.
 func TestRecordV2_TheExchangeAFramingLossStopsInIsCounted(t *testing.T) {
 	resetWarnLimiters()
+	t.Cleanup(logcontent.Set(true)) // why, the error, is read whole
 	xs := kitTraffic(t, []int{7}, false)
 	s := layOut(xs)
 	// From the start of SET autocommit=0 to inside the first SELECT's text.
@@ -691,8 +700,7 @@ func TestRecordV2_TheExchangeAFramingLossStopsInIsCounted(t *testing.T) {
 		t.Fatalf("%d left-out WARNs, want one for the exchange the recording stopped in", len(w))
 	}
 	fields := w[0].ContextMap()
-	if reason, _ := fields["reason"].(string); fields["kind"] != string(models.MySQL) ||
-		!strings.HasPrefix(reason, "mysql exchange not recorded: ") || !strings.Contains(reason, ErrFramingLost.Error()) {
+	if fields["kind"] != string(models.MySQL) || fields["reason"] != leftOutCause || !strings.Contains(leftOutWhy(w[0]), ErrFramingLost.Error()) {
 		t.Fatalf("the left-out WARN says %v, want the MySQL kind, the recorder's cause and the framing lost", fields)
 	}
 	if n := rec.logs.FilterMessageSnippet("the connection is no longer recorded").FilterLevelExact(zapcore.WarnLevel).Len(); n != 1 {
@@ -710,6 +718,7 @@ func TestRecordV2_TheExchangeAFramingLossStopsInIsCounted(t *testing.T) {
 // Not parallel: the WARN is limited process-wide, and this test counts it.
 func TestLeaveOutInFlightReportsTheExchangeItStopsInAsEveryParserDoes(t *testing.T) {
 	resetWarnLimiters()
+	t.Cleanup(logcontent.Set(true)) // why, the error, is read whole
 	core, logs := observer.New(zapcore.DebugLevel)
 	spans := &orphanSpans{}
 	mgr := syncMock.New(nil)
@@ -742,8 +751,8 @@ func TestLeaveOutInFlightReportsTheExchangeItStopsInAsEveryParserDoes(t *testing
 	if len(w) != 1 {
 		t.Fatalf("%d left-out WARNs, want 1", len(w))
 	}
-	if reason := w[0].ContextMap()["reason"]; reason != "per_conn_cap: mysql exchange not recorded: "+lost.Error() {
-		t.Fatalf("the WARN's reason is %v, want the relay's mark, then the recorder's cause and why", reason)
+	if reason, why := w[0].ContextMap()["reason"], leftOutWhy(w[0]); reason != "per_conn_cap: "+leftOutCause || why != lost.Error() {
+		t.Fatalf("the WARN's reason is %v and its error %q, want the relay's mark then the recorder's cause, and why", reason, why)
 	}
 	if sess.IsMockIncomplete() {
 		t.Fatal("the mark was left on the flag: nothing takes it once the recorder returns")
@@ -2078,6 +2087,7 @@ func TestRecordV2_PostTLS_AFetchSettlesAnAssumedFraming(t *testing.T) {
 // Not parallel: the WARN limit is process-wide.
 func TestLeaveOutSaysOnlyWhatHoldsOfTheTestCasesOverIt(t *testing.T) {
 	resetWarnLimiters()
+	t.Cleanup(logcontent.Set(true)) // why, the error, is read whole
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
 	spans := &orphanSpans{}
@@ -2104,9 +2114,8 @@ func TestLeaveOutSaysOnlyWhatHoldsOfTheTestCasesOverIt(t *testing.T) {
 		t.Errorf("the WARN %q promises the test cases over the exchange are left out", w[0].Message)
 	}
 	ctx := w[0].ContextMap()
-	if reason, _ := ctx["reason"].(string); !strings.HasPrefix(reason, "mysql exchange not recorded: ") || !strings.HasSuffix(reason, ": a test") ||
-		strings.Contains(reason, errNotRecorded.Error()) {
-		t.Errorf("the WARN's reason is %q, want the recorder's cause and why, once", reason)
+	if reason, why := ctx["reason"], leftOutWhy(w[0]); reason != leftOutCause || why != notRecorded("a test").Error() {
+		t.Errorf("the WARN's reason is %v and its error %q, want the recorder's cause, and why", reason, why)
 	}
 	if ctx["kind"] != string(models.MySQL) || ctx["connID"] != "c1" {
 		t.Errorf("the WARN names kind %v on connection %v, want a MySQL mock on c1", ctx["kind"], ctx["connID"])
@@ -2130,7 +2139,9 @@ func TestLeaveOutSaysOnlyWhatHoldsOfTheTestCasesOverIt(t *testing.T) {
 	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 1 {
 		t.Fatalf("%d WARN lines, want the first only: the second is within the interval", n)
 	}
-	held := logs.FilterLevelExact(zapcore.DebugLevel).FilterField(zap.String("reason", "mysql exchange not recorded: another")).Len()
+	held := logs.FilterLevelExact(zapcore.DebugLevel).FilterField(zap.String("reason", leftOutCause)).Filter(func(e observer.LoggedEntry) bool {
+		return leftOutWhy(e) == "another"
+	}).Len()
 	if held != 1 {
 		t.Fatalf("%d DEBUG lines for the exchange held back from WARN, want 1: it leaves no trace", held)
 	}
@@ -2147,6 +2158,7 @@ func TestLeaveOutSaysOnlyWhatHoldsOfTheTestCasesOverIt(t *testing.T) {
 // Not parallel: the WARN limit is process-wide.
 func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 	resetWarnLimiters()
+	t.Cleanup(logcontent.Set(true)) // why, the error, is read whole
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
 	sess := &supervisor.Session{Orphans: &orphanSpans{}, Mgr: syncMock.New(nil), ClientConnID: "c1", Logger: logger}
@@ -2157,7 +2169,7 @@ func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 	leaveOut(sess, at, at.Add(time.Millisecond), notRecorded("a test"))
 	warnFramingLost(logger, sess, lost, errors.New("a test"))
 	w := warns()
-	if len(w) != 2 || w[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" || w[1].Message != lost {
+	if len(w) != 2 || w[0].ContextMap()["reason"] != leftOutCause || leftOutWhy(w[0]) != notRecorded("a test").Error() || w[1].Message != lost {
 		t.Fatalf("logged %d WARN lines, want the exchange left out and then the framing loss: one was held back behind the other's", len(w))
 	}
 	for _, e := range w {
@@ -2174,7 +2186,7 @@ func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 	if n := len(warns()); n != 0 {
 		t.Fatalf("%d WARN lines for warnings already logged within the interval, want 0", n)
 	}
-	if d := logs.FilterLevelExact(zapcore.DebugLevel).All(); len(d) != 2 || d[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" || d[1].Message != lost {
+	if d := logs.FilterLevelExact(zapcore.DebugLevel).All(); len(d) != 2 || d[0].ContextMap()["reason"] != leftOutCause || leftOutWhy(d[0]) != notRecorded("a test").Error() || d[1].Message != lost {
 		t.Fatalf("%d DEBUG lines for the two held back, want the exchange left out and then the framing loss: one left no trace", len(d))
 	}
 	// Another message is not held back, nor counts the one held back of the

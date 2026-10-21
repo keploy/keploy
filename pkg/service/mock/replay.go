@@ -1913,9 +1913,11 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	logger.Warn(msg,
 		zap.String("protocol", miss.Protocol),
 		zap.String("call_shape", models.MissShape(miss)),
-		logcontent.String("call", miss.ActualSummary),
+		logcontent.StringLen("call", miss.ActualSummary),
 		zap.String("destination", miss.Destination),
-		zap.String("next_step", next))
+		// A matcher's next step can name the call (an HTTP session call's
+		// path): it is logged as logcontent allows, as the proxy's is.
+		logcontent.String("next_step", next))
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a

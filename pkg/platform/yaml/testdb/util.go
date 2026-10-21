@@ -285,7 +285,12 @@ func Flatten(j interface{}) map[string][]string {
 			}
 		}
 	default:
-		fmt.Println(utils.Emoji, "found invalid value in json", j, x.Kind())
+		// The value is the application's; its kind is not.
+		if logcontent.On() {
+			fmt.Println(utils.Emoji, "found invalid value in json", j, x.Kind())
+		} else {
+			fmt.Println(utils.Emoji, "found invalid value in json of kind", x.Kind())
+		}
 	}
 	return o
 }

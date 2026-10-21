@@ -51,6 +51,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"go.keploy.io/server/v3/utils/logcontent"
 )
 
 // Types a placeholder can name.
@@ -161,20 +163,41 @@ func Contains(s string) bool {
 // Such text is not a placeholder, so it stays as written; its Key is the text
 // after the '.', trimmed. A secret ({{string .secret.K}}) is in the grammar
 // and is not returned.
-func FindOutsideGrammar(s string) []Placeholder {
+func FindOutsideGrammar(s string) []Held {
 	if !strings.Contains(s, "{{") {
 		return nil
 	}
-	var out []Placeholder
+	var out []Held
 	for _, m := range heldRe.FindAllStringSubmatchIndex(s, -1) {
 		if g := anchoredRe.FindStringIndex(s[m[0]:m[1]]); g != nil && g[1] == m[1]-m[0] {
 			continue
 		}
-		p := placeholderAt(s, m)
-		p.Key = strings.TrimSpace(p.Key)
-		out = append(out, p)
+		out = append(out, heldAt(s, m))
 	}
 	return out
+}
+
+// Held is template text outside the grammar that a text holds
+// (FindOutsideGrammar), with a Placeholder's fields: its span, whether it
+// captures, its type, the text after its '.', trimmed, as its key, and its
+// text. It is no placeholder: its key can be any text without a brace, as an
+// application's own value can be, so it is a type of its own.
+type Held struct {
+	Start, End int
+	Capture    bool
+	Type       string
+	Key        string
+	Text       string
+}
+
+// heldAt is the template text heldRe matched at m in s.
+func heldAt(s string, m []int) Held {
+	h := Held{Start: m[0], End: m[1], Text: s[m[0]:m[1]], Capture: m[2] >= 0}
+	if m[4] >= 0 {
+		h.Type = s[m[4]:m[5]]
+	}
+	h.Key = strings.TrimSpace(s[m[6]:m[7]])
+	return h
 }
 
 // FirstHeld returns the first template text in s and where it starts; ok is
@@ -229,6 +252,10 @@ func Find(s string) []Placeholder {
 	return out
 }
 
+// placeholderAt is the placeholder of the grammar placeholderRe matched at m
+// in s: its whole text, whether it captures, its type and its key, each a
+// match of the grammar's own groups ({{ [capture] [string|int|float]
+// .key }}, a key of letters, digits and '_'), whatever else s holds.
 func placeholderAt(s string, m []int) Placeholder {
 	p := Placeholder{Start: m[0], End: m[1], Text: s[m[0]:m[1]]}
 	p.Capture = m[2] >= 0
@@ -293,4 +320,32 @@ func sortByStart(ps []Placeholder) {
 			ps[j], ps[j-1] = ps[j-1], ps[j]
 		}
 	}
+}
+
+// Shape is text, a placeholder or template text a test case holds, as a line
+// logs it: whole when it is one placeholder of the grammar ({{string .id}}),
+// whose words are a template variable's name, or when KEPLOY_LOG_CONTENT is
+// set (logcontent.On); otherwise "{{.{}}}". Template text outside the
+// grammar ({{.a.b}}, {{ .id | print }}) is any text without a brace after
+// its '.', as an application's own value can be, so the line names where it
+// is instead of what it says.
+func Shape(text string) string {
+	if logcontent.On() {
+		return text
+	}
+	if g := anchoredRe.FindStringIndex(text); g != nil && g[1] == len(text) {
+		return text
+	}
+	return "{{.{}}}"
+}
+
+// KeyShape is key, a template variable's key, as a line logs it: whole when
+// it is a key of the grammar (IsKey), one name of letters, digits and '_', or
+// when KEPLOY_LOG_CONTENT is set; otherwise "{}", as Shape writes template
+// text outside the grammar.
+func KeyShape(key string) string {
+	if logcontent.On() || IsKey(key) {
+		return key
+	}
+	return "{}"
 }

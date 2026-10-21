@@ -1072,8 +1072,8 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				// allocation that zap.String's does not.
 				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
 					ce.Write(zap.String("param", key),
-						logcontent.String("mock value", rv[i]),
-						logcontent.String("request value", av[i]),
+						logcontent.NamedString("mock value", key, rv[i]),
+						logcontent.NamedString("request value", key, av[i]),
 						zap.String("type class", c))
 				}
 				continue

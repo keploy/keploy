@@ -1053,7 +1053,7 @@ func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string)
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.logger.Error("AfterRecordingComplete hook panicked; recording is saved but the post-record pass did not finish. Check your RecordHooks implementation.",
-				zap.Any("panic", rec), zap.String("testSetID", testSetID))
+				logcontent.Panic("panic", rec), zap.String("testSetID", testSetID))
 		}
 	}()
 	// The recorder ctx is already cancelled on the normal SIGINT stop of an

@@ -613,7 +613,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// The reason holds the read's error, whose text the agent's answer
 		// can fill: the line says it as logcontent lets it.
 		m.logger.Warn("the recording is kept, but keploy could not verify it is complete: it could not read whether the agent "+unread,
-			zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable), logcontent.String("reason", reason),
+			zap.String("mock-set", name), logcontent.Error(pidCheck.unreadable), logcontent.StringLen("reason", reason),
 			zap.String("next_step", "record again once the agent answers, or replay the set: under --on-miss fail (the default) a call it is missing fails the replay"))
 	}
 

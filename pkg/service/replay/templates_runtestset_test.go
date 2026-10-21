@@ -1460,7 +1460,7 @@ func TestRunTestSet_AKeyOutsideTheGrammarIsNamedOnce(t *testing.T) {
 	h.r.logger = zap.New(core)
 	h.run(t)
 	warned := logs.FilterMessageSnippet("names a key that is not a template key").All()
-	if len(warned) != 1 || warned[0].ContextMap()["placeholder"] != "{{string .user-id}}" || warned[0].ContextMap()["testcase"] != "test-1" {
+	if len(warned) != 1 || warned[0].ContextMap()["placeholder"] != templates.Shape("{{string .user-id}}") || warned[0].ContextMap()["testcase"] != "test-1" {
 		t.Errorf("the key outside the grammar was named %d times: %+v; want once, at test-1", len(warned), warned)
 	}
 	if got := app.sent("GET", "/users/"); len(got) != 2 || !strings.Contains(got[0].path, "{{string .user-id}}") {
@@ -1503,7 +1503,7 @@ func TestRunTestSet_AnExpressionIsNamedOnceAndSentAsWritten(t *testing.T) {
 		{"{{ .userId | len }}", "test-3", "response body.len"},
 	} {
 		got := warned[i].ContextMap()
-		if got["placeholder"] != want.placeholder || got["testcase"] != want.testcase || got["where"] != want.where {
+		if got["placeholder"] != templates.Shape(want.placeholder) || got["testcase"] != want.testcase || got["where"] != want.where {
 			t.Errorf("expression %d was named %+v; want %+v", i, got, want)
 		}
 		if next := fmt.Sprint(got["next_step"]); !strings.Contains(next, "write the value the expression stood for in its place") {
@@ -1826,6 +1826,11 @@ func TestRunTestSet_ACreatesLocationIsAssertedAsTheCapturedID(t *testing.T) {
 					// wants, so the line names it by its length unless
 					// KEPLOY_LOG_CONTENT is set; the report keeps it whole.
 					_, hasWhy := m["why"]
+					// Nor by a fingerprint, which whoever hashes the whys a
+					// place can fail with finds a short value from.
+					if w, ok := m["why"].(map[string]interface{}); ok && w["fp"] != nil {
+						t.Errorf("the why carries a fingerprint, %v: a short value it quotes is found from it", w)
+					}
 					if m["testcase"] == "test-1" && m["where"] == "header Location" && m["placeholder"] == "{{string .id}}" &&
 						hasWhy && !strings.Contains(fmt.Sprint(m["why"]), "id's value") &&
 						strings.Contains(next, "this run's value of id is what test-1/response body.id captured from this same answer") &&

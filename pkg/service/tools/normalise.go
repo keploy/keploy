@@ -196,7 +196,7 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 				for _, f := range testCaseResult.TemplateFailures {
 					t.logger.Info("not normalizing a test case that failed on a template variable",
 						zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID),
-						zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), logcontent.String("why", f.Why),
+						zap.String("where", f.Where), zap.String("placeholder", templates.Shape(f.Placeholder)), logcontent.StringLen("why", f.Why),
 						zap.String("next_step", "if the app issues this value anew each run, make the place that issues it a {{capture ...}}; if the value changed on purpose, edit the expected value or re-record the test case. --allow-high-risk writes this run's value over the placeholder, and the next run fails on it"))
 				}
 				continue
@@ -221,8 +221,10 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 			// answer as it is.
 			accepted, dropped := tmplRun.Keep(testCase.HTTPResp, resolvedExpected(testCaseResult.Result), testCaseResult.Res)
 			for _, d := range dropped {
+				// What Keep says of a cookie it dropped holds the value the
+				// app answers now: it is logged as logcontent allows.
 				t.logger.Warn("keploy normalize wrote the app's answer where a placeholder was: the run resolved it to another value than the app answered",
-					zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID), zap.String("placeholder", d),
+					zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID), logcontent.String("placeholder", d),
 					zap.String("next_step", "if the value should still follow a template key, put the placeholder back in the test case by hand"))
 			}
 			testCase.HTTPResp = accepted

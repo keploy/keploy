@@ -16,6 +16,7 @@ import (
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/utils/logcontent/logtest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -205,4 +206,25 @@ func TestNormalizeTestCases_LeavesARefusedTestCase(t *testing.T) {
 	require.NoError(t, tools.NormalizeTestCases(context.Background(), "test-run-0", "test-set-0", nil, []models.TestResult{result}))
 	assert.Empty(t, db.written, "a refused test case is not normalized")
 	assert.Len(t, logs.FilterMessageSnippet("refused when its test set loaded").All(), 1)
+}
+
+// A Set-Cookie placeholder normalize drops is said with the value the app
+// answers now, which is the app's: the line carries it only as logcontent
+// allows.
+func TestNormalizeTestCases_ADroppedCookieIsSaidWithoutTheValueTheAppAnswers(t *testing.T) {
+	const canary = "kp-canary-normalise-cookie-5d2e"
+	logtest.Each(t, func(t *testing.T, on bool) {
+		templated := tcase("test-1", "POST", "http://h/login", nil, `{}`, 200,
+			map[string]string{"Set-Cookie": "sid={{string .sid}}; Path=/"}, `{"ok":true}`)
+		db := &normaliseTestDB{placementTestDB: placementTestDB{written: map[string]models.TestCase{}}, cases: []*models.TestCase{templated}}
+		logger, logs := logtest.Observe()
+		tools := &Tools{logger: logger, testDB: db, testSetConf: &placementConfStore{}, config: &config.Config{}}
+		results := []models.TestResult{{
+			TestCaseID: "test-1", Status: models.TestStatusFailed,
+			Res: models.HTTPResp{StatusCode: 200, Header: map[string]string{"Set-Cookie": "sid=" + canary + "; Path=/"}, Body: `{"ok":true}`},
+			Result: models.Result{HeadersResult: []models.HeaderResult{{Expected: models.Header{Key: "Set-Cookie", Value: []string{"sid=resolved-elsewhere; Path=/"}}}}},
+		}}
+		require.NoError(t, tools.NormalizeTestCases(context.Background(), "test-run-0", "test-set-0", nil, results))
+		logtest.Check(t, logs, canary, on, "keploy normalize wrote the app's answer where a placeholder was: the run resolved it to another value than the app answered")
+	})
 }

@@ -90,9 +90,9 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
 			zap.String("call_shape", models.MissShape(c)),
-			logcontent.String("call", c.ActualSummary),
+			logcontent.StringLen("call", c.ActualSummary),
 			zap.String("destination", c.Destination),
-			logcontent.String("diff", c.Diff),
+			logcontent.StringLen("diff", c.Diff),
 			zap.String("next_step", "a call the application makes before the set's first test (as it starts, or while it waits for the set) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"))
 	}
 }

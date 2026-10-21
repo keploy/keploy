@@ -1,6 +1,7 @@
 package logcontent
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
@@ -596,6 +597,8 @@ func TestErrorKind(t *testing.T) {
 		{errors.Join(parseErr, io.EOF), "*errors.joinError"},
 		{errors.New("unexpected " + canary), "*errors.errorString"},
 		{io.EOF, "io.EOF"},
+		{fmt.Errorf("read the mocks of %s: %w", canary, os.ErrNotExist), "os.ErrNotExist"},
+		{fmt.Errorf("scan the frame: %w", bufio.ErrTooLong), "bufio.ErrTooLong"},
 		{nil, "<nil>"},
 	} {
 		if got := ErrorKind(c.err); got != c.want {
@@ -741,4 +744,131 @@ func BenchmarkBytesAtADisabledLevel(b *testing.B) {
 			logger.Debug("frame", zap.String("payload", Fingerprint(payload)))
 		}
 	})
+}
+
+// runtimePanic is the value the Go runtime panics with for an index out of
+// range, as a parser's recover() gets it.
+func runtimePanic() (v any) {
+	defer func() { v = recover() }()
+	var s []int
+	i := len(canary)
+	_ = s[i]
+	return nil
+}
+
+// fakeRuntimeError has a RuntimeError method, as any package's type may: it
+// is no panic the runtime raised.
+type fakeRuntimeError struct{ s string }
+
+func (e fakeRuntimeError) Error() string { return e.s }
+
+func (fakeRuntimeError) RuntimeError() {}
+
+func TestAPanicIsLoggedByItsKindUnlessTheRuntimeRaisedIt(t *testing.T) {
+	rt := runtimePanic()
+	if rt == nil {
+		t.Fatal("no runtime panic")
+	}
+	values := []any{
+		"bad frame " + canary,
+		[]byte(canary),
+		fmt.Errorf("decode: %w", &strconv.NumError{Func: "Atoi", Num: canary, Err: strconv.ErrSyntax}),
+		fakeRuntimeError{"runtime error: " + canary},
+		mock,
+		rt,
+		nil,
+	}
+	logAll := func(l *zap.Logger, field func(string, any) zap.Field) {
+		for _, v := range values {
+			l.Error("Recovered from panic in parser", field("panic", v))
+		}
+	}
+	t.Run("off", func(t *testing.T) {
+		t.Cleanup(Set(false))
+		lines := observed(t, func(l *zap.Logger) { logAll(l, Panic) })
+		for i, line := range lines[:len(values)-2] {
+			if carries(line) {
+				t.Errorf("line %d carries the panic's value: %s", i, line)
+			}
+			if strings.Contains(line, Fingerprint([]byte(canary))) || strings.Contains(line, Fingerprint([]byte("bad frame "+canary))) {
+				t.Errorf("line %d carries the panic's fingerprint: %s", i, line)
+			}
+		}
+		for i, want := range []string{
+			fmt.Sprintf(`"panic": {"type": "string", "len": %d}`, len("bad frame "+canary)),
+			fmt.Sprintf(`"panic": {"type": "[]uint8", "len": %d}`, len(canary)),
+			`"panic": {"kind": "*strconv.NumError", "len": `,
+			`"panic": {"kind": "logcontent.fakeRuntimeError", "len": `,
+			`"panic": {"type": "*logcontent.row"}`,
+			fmt.Sprintf(`"panic": "runtime error: index out of range [%d] with length 0"`, len(canary)),
+			`"panic": {"type": "<nil>"}`,
+		} {
+			if !strings.Contains(lines[i], want) {
+				t.Errorf("line %d does not carry %s: %s", i, want, lines[i])
+			}
+		}
+		for _, line := range lines {
+			if !strings.Contains(line, `"panic"`) {
+				t.Errorf("a line names no panic: %s", line)
+			}
+		}
+	})
+	t.Run("on", func(t *testing.T) {
+		t.Cleanup(Set(true))
+		on := observed(t, func(l *zap.Logger) { logAll(l, Panic) })
+		zapped := observed(t, func(l *zap.Logger) { logAll(l, zap.Any) })
+		for i := range on {
+			if on[i] != zapped[i] {
+				t.Errorf("with the switch on, line %d is not what zap.Any logs:\n got %s\nwant %s", i, on[i], zapped[i])
+			}
+		}
+	})
+}
+
+// A crash report leaves the machine: PanicText carries no content with the
+// switch on or off, and keeps the runtime's own words.
+func TestPanicTextCarriesNoContentWhateverTheSwitch(t *testing.T) {
+	for _, sw := range []bool{false, true} {
+		restore := Set(sw)
+		for v, want := range map[any]string{
+			"bad frame " + canary:    fmt.Sprintf("a panic of string (%d bytes)", len("bad frame "+canary)),
+			fakeRuntimeError{canary}: fmt.Sprintf("a panic of logcontent.fakeRuntimeError (%d bytes)", len(canary)),
+			mock:                     "a panic of *logcontent.row",
+		} {
+			if got := PanicText(v); got != want {
+				t.Errorf("switch %v: PanicText(%T) = %q, want %q", sw, v, got, want)
+			}
+		}
+		if got, want := PanicText(runtimePanic()), fmt.Sprintf("runtime error: index out of range [%d] with length 0", len(canary)); got != want {
+			t.Errorf("switch %v: PanicText(a runtime panic) = %q, want %q", sw, got, want)
+		}
+		restore()
+	}
+}
+
+// Withheld names the fields the switch withheld a value from, which a logger
+// adds its Hint to a line for, and none other.
+func TestWithheldNamesTheFieldsThatWithholdAValue(t *testing.T) {
+	t.Cleanup(Set(false))
+	for _, f := range []zap.Field{
+		Bytes("b", []byte(canary)), Binary("b", []byte(canary)), String("s", canary), NamedString("v", "n", canary),
+		StringLen("s", canary), BytesLen("b", []byte(canary)), Any("a", mock), Error(parseErr), NamedError("e", parseErr),
+		Panic("p", canary),
+	} {
+		if !Withheld(f) {
+			t.Errorf("Withheld(%s) = false, want true", f.Key)
+		}
+	}
+	for _, f := range []zap.Field{
+		zap.String("s", canary), zap.Error(parseErr), Error(nil), Panic("p", runtimePanic()), zap.Object("o", zapcore.ObjectMarshalerFunc(func(zapcore.ObjectEncoder) error { return nil })),
+	} {
+		if Withheld(f) {
+			t.Errorf("Withheld(%s) = true, want false", f.Key)
+		}
+	}
+	restore := Set(true)
+	defer restore()
+	if Withheld(String("s", canary)) {
+		t.Error("with the switch on, String's field is withheld")
+	}
 }

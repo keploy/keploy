@@ -1,9 +1,12 @@
 package recorder
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils/logcontent/logtest"
 )
@@ -53,4 +56,32 @@ func TestRecordV2_TheServersOwnErrorIsLoggedWithoutItsMessage(t *testing.T) {
 			logtest.Check(t, logs, canary, on, msg)
 		})
 	})
+}
+
+// An exchange the recorder leaves out, or stops recording in, is reported
+// with its error beside the cause, which is logged at WARN: a decoder's error
+// quotes the row value it could not read, and lost framing the bytes a header
+// was misread from, a row's as often as not. The WARN carries neither unless
+// KEPLOY_LOG_CONTENT is set.
+func TestLeaveOut_TheWarningCarriesNoRowItsErrorQuotes(t *testing.T) {
+	for name, leave := range map[string]func(sess *supervisor.Session, err error){
+		"left out": func(sess *supervisor.Session, err error) {
+			at := time.Now().Add(-time.Minute)
+			leaveOut(sess, at, at.Add(time.Millisecond), err)
+		},
+		"stopped in": func(sess *supervisor.Session, err error) {
+			_ = leaveOutInFlight(sess, time.Now().Add(-time.Minute), err)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logtest.Each(t, func(t *testing.T, on bool) {
+				resetWarnLimiters()
+				logger, logs := logtest.Observe()
+				sess := &supervisor.Session{Mgr: syncMock.New(nil), Orphans: &orphanSpans{}, ClientConnID: "c1", Logger: logger}
+				row := &strconv.NumError{Func: "ParseInt", Num: canary, Err: strconv.ErrSyntax}
+				leave(sess, notRecorded("row %d of the %s response does not decode: %v", 3, "COM_QUERY", row))
+				logtest.Check(t, logs, canary, on, supervisor.LeftOutWarnMsg)
+			})
+		})
+	}
 }

@@ -277,3 +277,47 @@ func TestSimulateHTTP_AURLThatDoesNotParseIsLoggedWithoutItsQuery(t *testing.T) 
 		})
 	}
 }
+
+// An encoding Decompress does not know is the message's own Content-Encoding
+// value, whatever the client or the server put there: the line that says the
+// body is stored as it came names it only as logcontent allows.
+func TestDecompress_AnUnknownEncodingIsLoggedAsLogcontentAllows(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		body := []byte("as it came")
+		got, err := Decompress(logger, "x-"+canary, body, 1<<20)
+		if err != nil || string(got) != string(body) {
+			t.Fatalf("Decompress = %q, %v; want the body as it came", got, err)
+		}
+		logtest.Check(t, logs, canary, on, "unsupported Content-Encoding; storing body without decompression")
+	})
+}
+
+// A stream whose Content-Encoding keploy does not decode is read as it came:
+// the line that says so names the encoding, the answer's own header value,
+// only as logcontent allows.
+func TestSimulateHTTPStreaming_AnUnknownEncodingIsLoggedAsLogcontentAllows(t *testing.T) {
+	logtest.Each(t, func(t *testing.T, on bool) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Content-Encoding", "x-"+canary)
+			_, _ = w.Write([]byte("id:1\ndata:{}\n\n"))
+		}))
+		defer server.Close()
+		tc := &models.TestCase{
+			Name:    "sse-encoded",
+			HTTPReq: models.HTTPReq{Method: "GET", URL: server.URL + "/events", Header: map[string]string{"Accept": "text/event-stream"}},
+			HTTPResp: models.HTTPResp{
+				Header:     map[string]string{"Content-Type": "text/event-stream"},
+				StreamBody: []models.HTTPStreamChunk{{Data: []models.HTTPStreamDataField{{Key: "id", Value: "1"}, {Key: "data", Value: "{}"}}}},
+			},
+		}
+		logger, logs := logtest.Observe()
+		resp, err := SimulateHTTPStreaming(context.Background(), tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Reader.Close()
+		logtest.Check(t, logs, canary, on, "unsupported content-encoding for stream; returning raw response body")
+	})
+}

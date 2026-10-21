@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 )
 
@@ -63,7 +64,7 @@ func Authenticate(logger *zap.Logger, sessionToken string) func(http.Handler) ht
 			// probing the API at all.
 			if r.Header.Get("Origin") != "" {
 				logger.Warn("rejecting agent API request carrying an Origin header; no keploy client sends one, so this is a browser",
-					zap.String("path", r.URL.Path), zap.String("origin", r.Header.Get("Origin")))
+					logurl.Field("path", r.URL.Path), zap.String("origin", r.Header.Get("Origin")))
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -85,12 +86,12 @@ func Authenticate(logger *zap.Logger, sessionToken string) func(http.Handler) ht
 				// costs nothing to refuse loudly.
 				if r.URL.Path == agentRoutePrefix+token.ProbePath {
 					logger.Debug("refused the keploy control-plane authentication probe, as expected",
-						zap.String("path", r.URL.Path))
+						logurl.Field("path", r.URL.Path))
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
 					return
 				}
 				logger.Warn("rejecting unauthenticated agent API request",
-					zap.String("path", r.URL.Path), zap.String("remote", r.RemoteAddr),
+					logurl.Field("path", r.URL.Path), zap.String("remote", r.RemoteAddr),
 					zap.String("next_step", nextStepFor(r.URL.Path)))
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return

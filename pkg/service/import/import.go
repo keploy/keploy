@@ -134,7 +134,15 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("key", variable["key"]), logcontent.Any("value", variable["value"]))
+			// What it is says why it was skipped; what it holds is the
+			// variable's, which the line names beside it, so it is logged
+			// only with the switch on (a fingerprint of a short one, a
+			// token's, would give it away).
+			fields := []zap.Field{zap.Any("key", variable["key"]), zap.String("value type", fmt.Sprintf("%T", variable["value"]))}
+			if logcontent.On() {
+				fields = append(fields, zap.Any("value", variable["value"]))
+			}
+			pi.logger.Error("Global variable value is not a string", fields...)
 			continue
 		}
 
