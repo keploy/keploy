@@ -74,6 +74,9 @@ type Registry struct {
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
+	// changes counts every change to which tests are open (Begin, End,
+	// Reset). It only grows: Changes.
+	changes uint64
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -95,6 +98,7 @@ func (r *Registry) Reset() {
 	r.sets = nil
 	r.universe = nil
 	r.marked = false
+	r.changes++
 }
 
 func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time) {
@@ -103,6 +107,7 @@ func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.changes++
 	w := r.worker(pid)
 	if dir != "" && (suite || w.dir == "") {
 		w.dir = dir
@@ -129,6 +134,7 @@ func (r *Registry) End(pid uint32, name string, suite bool, at time.Time) {
 	if !ok {
 		return
 	}
+	r.changes++
 	if suite {
 		w.frames = nil
 		w.suite = false
@@ -332,10 +338,90 @@ func (r *Registry) chain(pid uint32) ([]uint32, *worker) {
 	return path, nil
 }
 
+// servedAs is chain for a call being served: the worker whose test a call
+// from pid is served as, and the processes between pid and it. A process no
+// scope registered — not a worker and descending from none, such as a helper
+// the CI started beside the test binary rather than under it — is served as
+// the worker of the run's one open test (soleOpen), with no path between, as
+// a call that worker made itself is: its own recordings first, another test's
+// hidden. With no test open, or more than one at once, it stays a call of no
+// worker (nil), the whole pool, as before.
+//
+// It is not used to place a start (startOf, rootStart): a process outside
+// every worker's tree is no app the tests started.
+func (r *Registry) servedAs(pid uint32) ([]uint32, *worker) {
+	path, w := r.chain(pid)
+	if w != nil {
+		return path, w
+	}
+	if sole, _ := r.soleOpen(); sole != nil {
+		return nil, sole
+	}
+	return path, nil
+}
+
+// soleOpen is the one test open on the run and the worker it is open on: one
+// worker alone has a test open, and its open tests nest (each a subtest of
+// the one before it, "TestA" then "TestA/case"), so the innermost is the one
+// running. nil when no test is open, when tests of two workers are open, or
+// when one worker has two tests open that do not nest (tests run in
+// parallel in one process): which of them a call is of would be a guess.
+func (r *Registry) soleOpen() (*worker, *frame) {
+	var sole *worker
+	for _, w := range r.workers {
+		if len(w.frames) < 2 {
+			continue
+		}
+		if sole != nil {
+			return nil, nil
+		}
+		sole = w
+	}
+	if sole == nil {
+		return nil, nil
+	}
+	for i := 2; i < len(sole.frames); i++ {
+		if !strings.HasPrefix(sole.frames[i].place, sole.frames[i-1].place+"/") {
+			return nil, nil
+		}
+	}
+	return sole, sole.frames[len(sole.frames)-1]
+}
+
+// SoleOpenTest is, for a call from a process chain (a process and its
+// ancestors) none of which is a registered worker, the PID of the worker the
+// run's one open test is open on (soleOpen): the worker the call is served
+// as. false when a process on the chain is a worker (its own scope decides),
+// or no test, or more than one, is open. It reads no /proc.
+func (r *Registry) SoleOpenTest(chain []uint32) (uint32, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, pid := range chain {
+		if _, ok := r.workers[pid]; ok {
+			return 0, false
+		}
+	}
+	sole, _ := r.soleOpen()
+	if sole == nil {
+		return 0, false
+	}
+	return sole.pid, true
+}
+
+// Changes is a count of the changes to which tests are open, which only
+// grows: what SoleOpenTest answers can change only when it does.
+func (r *Registry) Changes() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.changes
+}
+
 // Scope names the scope a call from pid runs in, resolved as View resolves
 // the test whose mocks it sees: the test frame currentFrame picks (a re-run of
 // the same test is a new frame, so a new scope), or, with no test open to it,
-// the registered worker it descends from. "" when pid belongs to no worker.
+// the registered worker it descends from. A process no scope registered is
+// resolved as the worker of the run's one open test (servedAs). "" when pid
+// is served as no worker.
 //
 // It follows View's attribution exactly, so a call's stateful cursors are
 // those of the test whose recordings it is served — including currentFrame's
@@ -347,7 +433,7 @@ func (r *Registry) Scope(pid uint32) string {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, w := r.chain(pid)
+	_, w := r.servedAs(pid)
 	if w == nil {
 		return ""
 	}
@@ -588,7 +674,8 @@ func (r *Registry) currentFrame(w *worker) *frame {
 // call from pid, resolved as View resolves it (currentTest): whether that
 // test's mapping names it. A boot, runner or unmapped mock, which View also
 // shows the call, is no test's own, and with no test open to pid nothing is.
-// known is false when pid has no view (View's ok), and owned is then false.
+// known is false when pid has no view (View's ok), and owned is then false. A
+// process no scope registered is resolved as View resolves it (servedAs).
 func (r *Registry) Owns(pid uint32, name string) (owned, known bool) {
 	if pid == 0 {
 		return false, false
@@ -598,7 +685,7 @@ func (r *Registry) Owns(pid uint32, name string) (owned, known bool) {
 	if r.sets == nil {
 		return false, false
 	}
-	_, w := r.chain(pid)
+	_, w := r.servedAs(pid)
 	if w == nil {
 		return false, false
 	}
@@ -618,13 +705,18 @@ func (r *Registry) Owns(pid uint32, name string) (owned, known bool) {
 	return false, true
 }
 
+// View is the mock names a call from pid at may see, each with its rank
+// (lower first), the universe of every name the table lists, and whether pid
+// has a view at all. A process no scope registered has the view of the
+// worker of the run's one open test (servedAs); with no test open, or more
+// than one, it has none (the whole pool).
 func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]struct{}, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sets == nil || pid == 0 {
 		return nil, nil, false
 	}
-	path, w := r.chain(pid)
+	path, w := r.servedAs(pid)
 	if w == nil {
 		return nil, nil, false
 	}
