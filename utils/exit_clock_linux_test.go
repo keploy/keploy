@@ -933,6 +933,30 @@ func TestStorageServedIsTheLongestADeviceServingWasBusy(t *testing.T) {
 	}
 }
 
+// The kernel's counters are unsigned 64-bit: one longer than a Duration holds
+// is the longest Duration, never a negative one.
+func TestAKernelCounterLongerThanADurationHoldsIsTheLongestOne(t *testing.T) {
+	fits := uint64(math.MaxInt64 / int64(startTick))
+	for _, tc := range []struct {
+		n    uint64
+		unit time.Duration
+		want time.Duration
+	}{
+		{0, time.Millisecond, 0},
+		{12, time.Millisecond, 12 * time.Millisecond},
+		{math.MaxInt64, time.Nanosecond, math.MaxInt64},
+		{math.MaxInt64 + 1, time.Nanosecond, math.MaxInt64},
+		{math.MaxUint64, time.Nanosecond, math.MaxInt64},
+		{fits, startTick, time.Duration(fits) * startTick},
+		{fits + 1, startTick, math.MaxInt64},
+		{math.MaxUint64, time.Millisecond, math.MaxInt64},
+	} {
+		if got := durationOf(tc.n, tc.unit); got != tc.want {
+			t.Errorf("%d × %v: %v, want %v", tc.n, tc.unit, got, tc.want)
+		}
+	}
+}
+
 // /proc/diskstats is read whatever the kernel's count of fields: discards
 // from Linux 4.18 and flushes from 5.5 are I/O completed too.
 func TestDiskstatsAreReadAsEachKernelWritesThem(t *testing.T) {
@@ -941,6 +965,7 @@ func TestDiskstatsAreReadAsEachKernelWritesThem(t *testing.T) {
 		" 259       0 nvme0n1 100 1 800 50 200 2 1600 90 3 120 140 10 0 80 4 30 7",
 		" 259       1 nvme0n1p1 10 0 80 5 20 0 160 9 0 12 14 1 0 8 0",
 		"   8       0 sda 7 0 56 4 8 0 64 6 1 9 10",
+		"   8      16 sdb 1 0 8 1 1 0 8 1 0 18446744073709551615 1",
 		"   7       0 loop0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
 		"garbage",
 	}, "\n") + "\n"
@@ -956,6 +981,7 @@ func TestDiskstatsAreReadAsEachKernelWritesThem(t *testing.T) {
 		"259:0": {name: "nvme0n1", done: 100 + 200 + 10 + 30, inFlight: 3, busy: 120 * ms},
 		"259:1": {name: "nvme0n1p1", done: 10 + 20 + 1, busy: 12 * ms},
 		"8:0":   {name: "sda", done: 7 + 8, inFlight: 1, busy: 9 * ms},
+		"8:16":  {name: "sdb", done: 1 + 1, busy: math.MaxInt64},
 		"7:0":   {name: "loop0"},
 	}
 	if !maps.Equal(got, want) {
