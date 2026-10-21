@@ -1572,14 +1572,15 @@ func TestStart_TheSwitchsCheckOfATestCaseSavedSlowlyIsMadeWhileTheAgentIsHeld(t 
 	}
 }
 
-// The consumer asks a saved test case's check before it stops counting the
-// test case as one still to be checked (Recorder.unchecked), so a drain that
-// looks while the check is being asked holds the agent's streams for it, and
-// the check is made while the agent is up: the recording, which lost
-// nothing, passes. Were the consumer to stop counting it first, a drain
-// looking in between would find nothing unchecked and no read out, and end
-// the streams; the agent would go, the check be refused, and test-2 be named
-// not verified (exit 1).
+// A saved test case stays counted as one still to be checked
+// (uncheckedCount) until its read is asked, which takes it off under the
+// lock the drains look under (countReads.askTest), so a drain that looks
+// while the check is being asked holds the agent's streams for it, and the
+// check is made while the agent is up: the recording, which lost nothing,
+// passes. Were the consumer to take it off before the ask, a drain looking
+// in between would find nothing unchecked and no read out, and end the
+// streams; the agent would go, the check be refused, and test-2 be named not
+// verified (exit 1).
 func TestStart_ADrainThatLooksAsACheckIsAskedHoldsTheAgentsStreamsForIt(t *testing.T) {
 	a := newStopHeldAgent(0)
 	asking, release := make(chan struct{}), make(chan struct{})
@@ -1637,6 +1638,102 @@ func TestStart_ADrainThatLooksAsACheckIsAskedHoldsTheAgentsStreamsForIt(t *testi
 	passedWhole(t, done, logs, &a.refused)
 	if n := a.answered.Load(); n != 4 {
 		t.Fatalf("%d reads answered; want the base, test-1's check, the final read and test-2's check", n)
+	}
+}
+
+// tokenReader answers each read of the agent's count, nothing lost, once it
+// is handed a token on answer, or as its context ends.
+type tokenReader struct{ answer chan struct{} }
+
+func (r *tokenReader) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	select {
+	case <-r.answer:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// heldChecks is the reads of a watch whose reader answers a read only once
+// handed a token, holding the test cases handed over whose check they are
+// yet to ask (unchecked).
+func heldChecks(t *testing.T) (*countReads, *tokenReader, *uncheckedCount) {
+	t.Helper()
+	reader := &tokenReader{answer: make(chan struct{})}
+	reads := newCountReads(context.Background(), zap.NewNop(), reader, &sync.Mutex{}, errCaptureCountSilent, "", "", func(countRead) {})
+	unchecked := new(uncheckedCount)
+	reads.holdFor(unchecked)
+	t.Cleanup(func() { close(reader.answer) }) // a read a failed test left out ends
+	return reads, reader, unchecked
+}
+
+// What the stop's frame drains hold the agent's streams for, as one look
+// sees it (countReads.holds): a test case handed over is unchecked until its
+// save fails or its check's read is asked, which takes it off as it puts
+// the read out; the read out holds them until it is answered.
+func TestACheckIsTakenOffUncheckedAsItsReadIsAsked(t *testing.T) {
+	reads, reader, unchecked := heldChecks(t)
+	look := func(wantOut, wantUnchecked bool, when string) {
+		t.Helper()
+		if out, u := reads.holds(); out != wantOut || u != wantUnchecked {
+			t.Fatalf("%s: a look found a read out %v, a test case unchecked %v; want %v, %v", when, out, u, wantOut, wantUnchecked)
+		}
+	}
+	look(false, false, "nothing handed over")
+	unchecked.handed()
+	unchecked.handed()
+	look(false, true, "test-1 and test-2 handed over")
+	unchecked.settled() // test-2's save failed
+	look(false, true, "test-1 still being saved")
+	reads.askTest("test-1")
+	look(true, false, "test-1's check asked")
+	reader.answer <- struct{}{}
+	if !reads.wait(false) {
+		t.Fatal("the wait for test-1's check did not see it answered")
+	}
+	look(false, false, "test-1's check answered")
+}
+
+// No look of the stop's drains finds a test case's check taken off unchecked
+// with its read not yet out: askTest does both in one step, under the lock
+// a look is made under. A drain that looks without pause sees each test
+// case handed over unchecked, or its check's read out, until the read is
+// answered. Were the test case taken off first, outside that step, a look in
+// between would find neither, and end the agent's streams with the check yet
+// to be made.
+func TestNoLookFindsACheckTakenOffBeforeItsReadIsOut(t *testing.T) {
+	reads, reader, unchecked := heldChecks(t)
+	const checks = 500
+	for i := 1; i <= checks; i++ {
+		unchecked.handed()
+		var looks atomic.Int64
+		var stop, found atomic.Bool
+		looked := make(chan struct{})
+		go func() {
+			defer close(looked)
+			for !stop.Load() {
+				if out, u := reads.holds(); !out && !u {
+					found.Store(true)
+				}
+				looks.Add(1)
+			}
+		}()
+		for looks.Load() == 0 { // the drain is looking as the check is asked
+			runtime.Gosched()
+		}
+		reads.askTest(fmt.Sprintf("test-%d", i))
+		for n := looks.Load(); looks.Load() == n; { // and looks once it is
+			runtime.Gosched()
+		}
+		stop.Store(true)
+		<-looked
+		if found.Load() {
+			t.Fatalf("test-%d: a look found it off unchecked with its check's read not out", i)
+		}
+		reader.answer <- struct{}{}
+		if !reads.wait(false) {
+			t.Fatalf("the wait for test-%d's check did not see it answered", i)
+		}
 	}
 }
 
@@ -1786,7 +1883,9 @@ func TestStart_ARecorderStartedAgainHoldsTheAgentsStreamsForItsOwnReadsAlone(t *
 	a := newStopHeldAgent(2) // the base read; test-1's check is slow
 	a.clear.Store(true)      // nothing held from before the stop
 	_, logs, done := startHeld(t, a, nil, func(r *Recorder) {
-		r.unchecked.Store(1)       // the earlier recording's consumer, still saving
+		earlier := new(uncheckedCount)
+		earlier.handed() // the earlier recording's consumer, still saving
+		r.unchecked.Store(earlier)
 		r.readHoldSaid.Store(true) // the earlier recording's stop said it held
 		r.drainClock = &stall.ManualClock{}
 	})

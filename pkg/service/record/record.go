@@ -633,15 +633,16 @@ type Recorder struct {
 	// (drainProgress). readHoldSaid: the stop has said so.
 	readHolds    atomic.Uint64
 	readHoldSaid atomic.Bool
-	// unchecked counts the test cases the test-case drain has handed to its
-	// consumer that the consumer has neither asked the capture watch's check
-	// of (captureWatch.afterTestCase) nor failed to save: with capReads, the
-	// stop's frame drains hold the agent's streams open meanwhile too
-	// (holdForReads), so the check is asked, and made, while the agent is up.
-	// checkHolds counts the looks at which a drain held them for that alone:
-	// not progress for the stop's outer drains, which a consumer wedged in a
-	// save must not keep from giving up.
-	unchecked  atomic.Int64
+	// unchecked is the recording's count of the test cases the test-case
+	// drain has handed to its consumer whose capture watch's check is yet to
+	// be asked (uncheckedCount): with capReads, which takes them off as it
+	// asks their reads, the stop's frame drains hold the agent's streams
+	// open meanwhile too (holdForReads), so the check is asked, and made,
+	// while the agent is up. Start makes a new one. checkHolds counts the
+	// looks at which a drain held them for that alone: not progress for the
+	// stop's outer drains, which a consumer wedged in a save must not keep
+	// from giving up.
+	unchecked  atomic.Pointer[uncheckedCount]
 	checkHolds atomic.Uint64
 	// teardown is the recording's own teardown scope (Start): what keploy
 	// sees its stops do -- the agent's, the app's, the daemons', the
@@ -901,10 +902,9 @@ func (r *Recorder) holdForReads() bool {
 	if reads == nil {
 		return false
 	}
-	// Read before the reads: the consumer asks a test case's check before
-	// it stops counting it, so one asked since is out below.
-	unchecked := r.unchecked.Load() > 0
-	if !reads.out() {
+	// One look: a check is taken off unchecked as its read is asked.
+	readOut, unchecked := reads.holds()
+	if !readOut {
 		if unchecked {
 			r.checkHolds.Add(1)
 		}
@@ -1502,7 +1502,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	r.mappingsStreamed.Store(0)
 	r.capReads.Store(nil)
 	r.readHoldSaid.Store(false)
-	r.unchecked.Store(0)
+	// This recording's own: a consumer an earlier one left saving settles
+	// what it counted.
+	unchecked := new(uncheckedCount)
+	r.unchecked.Store(unchecked)
 
 	sessionStart := time.Now()
 
@@ -2496,7 +2499,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// What the agent could not capture is counted from here: the agent is
 	// capturing, and a native app has not started.
 	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
-	// Its reads hold the agent's streams open at the stop (holdForReads).
+	// Its reads hold the agent's streams open at the stop (holdForReads),
+	// for every test case handed over whose check they are yet to ask too.
+	capWatch.reads.holdFor(unchecked)
 	r.capReads.Store(capWatch.reads)
 	if agentStopping != nil {
 		// Compose is stopping the agent (the app exited on its own, or a
@@ -2681,7 +2686,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
 				// Not saved: no check is asked for it (holdForReads).
-				r.unchecked.Add(-1)
+				unchecked.settled()
 				windowMaps.addLostTest(testCase)
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
@@ -2718,13 +2723,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
+				// Off unchecked as its read is asked, under the lock the
+				// stop's drains look under (countReads.askTest): its read
+				// out holds them in its turn (holdForReads).
 				capWatch.afterTestCase(ctx, testCase.Name)
-				// Asked: its read is out now, which holds the stop's drains
-				// in its turn (holdForReads). Uncounted only after the ask,
-				// or a drain that looks in between ends the agent's streams
-				// with the check yet to be made
-				// (TestStart_ADrainThatLooksAsACheckIsAskedHoldsTheAgentsStreamsForIt).
-				r.unchecked.Add(-1)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
@@ -3133,6 +3135,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	ends.join(models.TestCaseStream)
+	// The recording's count of the test cases handed over whose check is yet
+	// to be asked (holdForReads): taken now, as Start made it.
+	unchecked := r.unchecked.Load()
 	g.Go(func() error {
 		defer close(incomingChan)
 		defer frameDrained()
@@ -3178,7 +3183,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				handed = handing(tc)
 			}
 			return func() {
-				r.unchecked.Add(1)
+				unchecked.handed()
 				handed()
 			}
 		}

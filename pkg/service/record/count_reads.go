@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -58,8 +59,8 @@ var askingCheck func(name string)
 // streams open (routes.HoldStop), and goes once they end: a read asked of it
 // then is refused. So with the proven switch on, where such a read fails the
 // recording, the stop's frame drains keep the agent's streams open while a
-// read asked is out (out, Recorder.holdForReads), and while a test case they
-// handed over is still being saved, its check yet to be asked: the final
+// read asked is out, and while a test case they handed over is still being
+// saved, its check yet to be asked (holds, Recorder.holdForReads): the final
 // read, asked as the stop begins, and the check of every test case handed
 // over before the drains end the streams, are made while the agent is up,
 // however slow the read before them or the save. The CA watch's reads, only
@@ -116,6 +117,47 @@ type countReads struct {
 	// inflight those the read out counts.
 	pending  []string
 	inflight []string
+	// unchecked is, under the proven switch, the recording's test cases the
+	// stop's test-case drain has handed over whose check is yet to be asked
+	// (uncheckedCount): askTest takes each off as it asks its read, under
+	// mu, which holds looks under. Set (holdFor) before the first check is
+	// asked; nil, none is counted.
+	unchecked *uncheckedCount
+}
+
+// uncheckedCount counts, for one recording under the proven switch, the test
+// cases its stop's test-case drain has handed to the consumer that the
+// consumer has neither asked the check of (captureWatch.afterTestCase) nor
+// failed to save: the stop's frame drains hold the agent's streams open while
+// one is (countReads.holds, Recorder.holdForReads), so its check is asked, and
+// made, while the agent is up. A hand-over counts one (handed), on the
+// drain's own goroutine before its next look; a save that failed takes it off
+// (settled); its check takes it off under the reads' lock as its read is
+// asked (countReads.askTest), the lock a drain's look is made under: no look
+// finds a test case off this count with its read not yet out. Only those
+// reads look at it: a recording with none (the switch off, or its base read
+// failed) asks no check, holds nothing for one, and leaves its test cases
+// counted. Each recording has its own (Start): a consumer an earlier one
+// left saving takes its test cases off its own.
+type uncheckedCount struct{ n atomic.Int64 }
+
+// handed counts a test case handed to the consumer.
+func (c *uncheckedCount) handed() {
+	if c != nil {
+		c.n.Add(1)
+	}
+}
+
+// settled takes a test case off: its check is asked, or its save failed.
+func (c *uncheckedCount) settled() {
+	if c != nil {
+		c.n.Add(-1)
+	}
+}
+
+// any reports whether a test case handed over is yet to be settled.
+func (c *uncheckedCount) any() bool {
+	return c != nil && c.n.Load() > 0
 }
 
 // countRead is one read's answer (countReads.apply).
@@ -218,14 +260,16 @@ func (r *countReads) readNow() (models.CaptureLosses, error) {
 }
 
 // askTest asks for a read that counts test case name, just saved (and those
-// saved since the last read, if the reads lag). It does not wait for the
-// read.
+// saved since the last read, if the reads lag), and takes it off unchecked
+// under the same lock: a drain's look (holds) finds it either still
+// unchecked or with its read out. It does not wait for the read.
 func (r *countReads) askTest(name string) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.unchecked.settled()
 	if r.finished {
 		return
 	}
@@ -293,16 +337,31 @@ func (r *countReads) readAll() {
 	}
 }
 
-// out reports whether a read asked for is not yet answered, failed or given
-// up: the stop's frame drains hold the agent's streams open meanwhile
-// (Recorder.holdForReads).
-func (r *countReads) out() bool {
+// holdFor has askTest take each test case it asks the check of off
+// unchecked (uncheckedCount), which holds reports. Called before the first
+// check is asked.
+func (r *countReads) holdFor(unchecked *uncheckedCount) {
 	if r == nil {
-		return false
+		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.reading
+	r.unchecked = unchecked
+}
+
+// holds reports, from one look under mu, what the stop's frame drains hold
+// the agent's streams open for (Recorder.holdForReads): readOut, a read
+// asked is not yet answered, failed or given up; unchecked, a test case
+// handed over is yet to have its check asked, or its save fail. askTest
+// changes both under mu, so no look finds a test case taken off unchecked
+// with its read not yet out.
+func (r *countReads) holds() (readOut, unchecked bool) {
+	if r == nil {
+		return false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reading, r.unchecked.any()
 }
 
 // unreadLocked is, once the watch has finished (r.mu held), the test cases
