@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -94,7 +95,9 @@ func TestRunTestSet_ATestCaseSendsTheAgentTheVariablesItsRequestCarries(t *testi
 				return
 			}
 			want := models.VariableBinding{Name: "id", Value: "u_live_0002", Recorded: "u_rec_0001", Mock: "test case test-2", Place: "request", Given: true}
-			if len(sent[1]) != 1 || sent[1][0] != want {
+			// Every field, the clock reads (VariableBinding.Clock) too: none
+			// for a value the test case's request gave.
+			if len(sent[1]) != 1 || !reflect.DeepEqual(sent[1][0], want) {
 				t.Fatalf("the read-back sent %+v, want [%+v]", sent[1], want)
 			}
 		})
