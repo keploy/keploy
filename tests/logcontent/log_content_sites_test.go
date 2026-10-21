@@ -17,7 +17,9 @@
 // the file, and one line that says why it carries no content. So it is a
 // ratchet: a file with more of an expression than listed fails (a new site:
 // gate it, or list it with its reason), and so does one with fewer (lower
-// the count: the list only ever shrinks). An entry with no reason fails too.
+// the count: the list only ever shrinks). An entry with no reason fails too,
+// and so does a url site's (a value made from a request's URL) whose reason
+// does not say whose URL it is (urlReason).
 //
 // Scope: every package of keploy's module that a binary is built from:
 // ./pkg/..., ./utils/..., ./cli/..., ./config/... and main, which hold the
@@ -97,6 +99,14 @@ const contentReason = "content:"
 // says what of its construction holds the content out.
 const constructedReason = "constructed:"
 
+// urlReason starts the reason of a url site (kindURL), a value made from a
+// request's URL, its path or its query: it says whose URL it is, keploy's
+// own (its API's, a release's) or one the user configured, not the app's
+// traffic's. A reason that says what a value is not (an address, a name)
+// does not stand for a URL's path or query, whose segments are content as
+// its query's values are.
+const urlReason = "url:"
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -149,7 +159,6 @@ func scanScope(t *testing.T, root string, listed, constructed map[string]bool) (
 	t.Helper()
 	s := newScanner(root)
 	s.listed, s.constructed = listed, constructed
-	s.strictIfaces = os.Getenv("LOG_CONTENT_STRICT_IFACES") == "1" // a measure, for the scan's debugging
 	why := map[string]string{}
 	for _, p := range platforms {
 		s.add(load(t, root, p.goos, p.goarch, p.tags, scopePatterns...), excluded)
@@ -191,7 +200,9 @@ func wordsFile(s *scanner) string {
 		"package logcontent\n\n" +
 		"// errorFormats are the constant formats keploy's code makes errors with\n" +
 		"// (fmt.Errorf), and errorTexts the constant texts it makes them of\n" +
-		"// (errors.New): the words an error's shape keeps (errorShape).\n" +
+		"// (errors.New), and those it panics with (panic(\"...\"),\n" +
+		"// panic(fmt.Sprintf(...))): the words an error's shape keeps\n" +
+		"// (errorShape), and a panic's (PanicText).\n" +
 		"var errorFormats = []string{\n" + list(s.errFormats) + "}\n\n" +
 		"var errorTexts = []string{\n" + list(s.errTexts) + "}\n"
 }
@@ -366,6 +377,9 @@ func TestNoLogLineCarriesContentUngated(t *testing.T) {
 		if have > 0 && may.count > 0 && may.reason == "" {
 			noReason++
 			t.Errorf("%q is listed with no reason: say why it carries no customer content", k)
+		}
+		if have > 0 && may.reason != "" && strings.Contains(k, " | "+kindURL+" | ") && !strings.HasPrefix(may.reason, urlReason) {
+			t.Errorf("%q is a URL's path or query, listed as %q: gate it with logurl, or say whose URL it is (%s ...)", k, may.reason, urlReason)
 		}
 	}
 	if t.Failed() {

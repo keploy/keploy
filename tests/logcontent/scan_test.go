@@ -28,11 +28,27 @@
 //     error's format that is not one;
 //   - errors.New: errors.New of a text that is not a constant;
 //   - sugar: an argument of a SugaredLogger's method, or of the standard
-//     library's log.Printf and its kin, that is not a constant;
-//   - print: an argument fmt prints to the process's stdout or stderr
-//     (fmt.Println, fmt.Fprintf(os.Stderr, ...)), which a user reads beside
-//     the log's lines: a command's own output, judged where it is printed
-//     (what it is made of is not followed to where it is written);
+//     library's log.Printf and its kin, or of a function value of their
+//     shape (logf := logger.Sugar().Debugf, pf := fmt.Printf, a logf
+//     func(string, ...any) parameter), that is not a constant;
+//   - print: an argument printed to the process's stdout or stderr, which a
+//     user reads beside the log's lines: fmt's Print kin, and its Fprint kin,
+//     io.WriteString and a writer's Write or WriteString, to any writer that
+//     may be a std stream, followed through locals, fields, parameters and
+//     returns (findStdWriters: os.Stdout, a cobra command's OutOrStdout, a
+//     bufio.Writer on one, an exported function's io.Writer, which another
+//     module's caller may give stdout); the builtins print and println;
+//     k0kubun/pp's and fatih/color's prints; a cobra command's Print kin;
+//     and a tablewriter table's rows, headers and footers when it is made on
+//     a std stream. A command's own output, judged where it is printed (what
+//     it is made of is not followed to where it is written);
+//   - url: a field's value, a message, a print or a sugar's argument made
+//     from a request's URL, its path or its query (urlOf: net/url's URL
+//     fields and methods, a request's RequestURI, a recorded test's
+//     HTTPReq.URL, followed through locals and keploy's functions' returns),
+//     which only logurl gates, and an entry excuses only with a reason that
+//     says whose URL it is (urlReason): a path's segments are content as a
+//     query's values are;
 //   - telemetry: an argument of a crash report (sentry's CaptureException,
 //     CaptureMessage, a scope's SetExtra and SetTag), which leaves the
 //     machine for Keploy's Sentry.
@@ -122,7 +138,13 @@
 //   - an error whose origin cannot hold content (safeOrigin): a sentinel
 //     declared as a constant text, errors.New of a constant, fmt.Errorf of
 //     safe values wrapping errors whose origins are safe, the context's
-//     error, and the error of a call into a package whose errors name only
+//     error, the error of an interface's method whose implementations are
+//     all keploy's and safe (an interface whose values may be another
+//     module's is open, openIface: an exported one whose methods are all
+//     exported, an interface literal, and an unexported one that another
+//     interface's value is asserted or converted to; another module's
+//     implementation may return any error, so its error is a site), and the
+//     error of a call into a package whose errors name only
 //     paths, addresses, errnos or the kernel's verdicts (os, syscall, net's
 //     sockets, io's readers and writers, os/exec, cilium/ebpf, a print's
 //     writer, ...); not time's, whose Parse and ParseDuration quote the text
@@ -164,13 +186,21 @@ const (
 	kindErrorf    = "errorf"
 	kindErrorsNew = "errors.New"
 	kindSugar     = "sugar"
-	// kindPrint is an argument fmt prints to the process's stdout or
-	// stderr (fmt.Println, fmt.Fprintf(os.Stderr, ...)), which a user reads
-	// beside the log's lines, and kindTelemetry one a crash report sends
-	// Keploy (sentry's CaptureException, a scope's SetExtra), which leaves
-	// the machine.
+	// kindPrint is an argument printed to the process's stdout or stderr
+	// (fmt.Println, fmt.Fprintf(os.Stderr, ...), a table on stdout's rows,
+	// printCall), which a user reads beside the log's lines, and
+	// kindTelemetry one a crash report sends Keploy (sentry's
+	// CaptureException, a scope's SetExtra), which leaves the machine.
 	kindPrint     = "print"
 	kindTelemetry = "telemetry"
+	// kindURL is a field's value, a message, a print or a sugar's argument
+	// made from a request's URL, its path or its query (urlDerived): what
+	// logurl gates by its shape. A path's segments are content as its
+	// query's values are (/reset/<token>, /users/<email>), so no reason that
+	// says what a value is not (an address, a name) stands for one: an
+	// entry's reason for a url site starts with urlReason, and says whose
+	// URL it is.
+	kindURL = "url"
 	// kindOvergated is no site: an error logged by its kind (logcontent.Error,
 	// utils.LogContentError) whose origin carries no content, so the line
 	// withholds keploy's own words for nothing. The guard fails on one,
@@ -179,7 +209,7 @@ const (
 	kindOvergated = "overgated"
 )
 
-var kinds = []string{kindField, kindError, kindMessage, kindErrorf, kindErrorsNew, kindSugar, kindPrint, kindTelemetry}
+var kinds = []string{kindField, kindError, kindMessage, kindErrorf, kindErrorsNew, kindSugar, kindPrint, kindTelemetry, kindURL}
 
 // site is one place a value reaches a line or an error's text ungated.
 type site struct {
@@ -205,10 +235,6 @@ type scanner struct {
 	decls map[*types.Func]funcDecl
 	named []*types.Named // keploy's named types, for an interface's implementations
 	safe  map[*types.Func]int8
-	// safeStrict is safe as an over-gated error is judged (strictIfaces):
-	// an exported interface's method's errors are another module's too.
-	safeStrict   map[*types.Func]int8
-	strictIfaces bool
 	// passes are the parameters a function returns, or wraps, as its error:
 	// its errors are as safe as the arguments it is given for them.
 	passes map[*types.Func]map[int]bool
@@ -229,7 +255,7 @@ type scanner struct {
 	// by how it is made, whatever it is made from (a match of keploy's
 	// placeholder grammar): what they are made from is not judged.
 	constructed map[string]bool
-	sites  map[string]site // by position and kind: the platforms' loads overlap
+	sites       map[string]site // by position and kind: the platforms' loads overlap
 	// errFormats and errTexts are the constant formats keploy's code makes
 	// errors with and the constant texts it makes them of, across the
 	// platforms' loads: the words logcontent keeps of an error's text
@@ -241,7 +267,7 @@ type scanner struct {
 	// fingerprint, through the function's own lines or the functions it
 	// passes it to. Each call of the function the scan reads is judged by
 	// what it gives them.
-	sinks map[*types.Func]map[int]sinkMask
+	sinks     map[*types.Func]map[int]sinkMask
 	addrTaken map[*types.Var]bool // fieldAddrs
 	// constTables are keploy's unexported package-level maps, slices and
 	// arrays whose initializer gives every element a constant and which
@@ -280,8 +306,24 @@ type scanner struct {
 	// log one.
 	ifaceCallers map[string]map[ast.Decl]declRef
 	methodSinks  map[string]bool
-	queue        []declRef
-	queued       map[ast.Decl]bool
+	// stdVars are the variables (locals, parameters, fields) that may hold
+	// the process's stdout or stderr, or a table that writes to one, and
+	// stdFuncs keploy's functions that may return one (findStdWriters): a
+	// print to one is a print to the user's terminal.
+	stdVars  map[*types.Var]bool
+	stdFuncs map[*types.Func]bool
+	osFile   types.Type // *os.File
+	// openIfaces are keploy's unexported interfaces that may hold another
+	// module's value (findOpenIfaces), whose methods' errors are another
+	// module's, as an exported interface's are (openIface).
+	openIfaces map[*types.Named]bool
+	// urlResults are keploy's functions' results whose text may hold a URL's
+	// path or query (urlDerived), by function and result: 1 may, -1 may
+	// not, 0 while it is read.
+	urlResults map[urlResult]int8
+	urlLocals  map[*types.Var][]assigned1
+	queue      []declRef
+	queued     map[ast.Decl]bool
 }
 
 // sinkMask is how a value reaches a line: as its message, as a field's value
@@ -358,6 +400,35 @@ func (fs *fileScan) keepWords(call *ast.CallExpr, f *types.Func) {
 	}
 }
 
+// keepPanicWords keeps the constant text a panic of keploy's raises, or the
+// constant format of the fmt.Sprintf it raises (errTexts, errFormats): the
+// words a crash report keeps of the panic (logcontent.PanicText). An error
+// it raises keeps its words where it is made.
+func (fs *fileScan) keepPanicWords(call *ast.CallExpr) {
+	if len(call.Args) != 1 {
+		return
+	}
+	constant := func(e ast.Expr) (string, bool) {
+		tv, ok := fs.info.Types[ast.Unparen(e)]
+		if !ok || tv.Value == nil {
+			return "", false
+		}
+		s, err := strconv.Unquote(tv.Value.ExactString())
+		return s, err == nil && s != ""
+	}
+	if s, ok := constant(call.Args[0]); ok {
+		fs.s.errTexts[s] = true
+		return
+	}
+	if c, ok := ast.Unparen(call.Args[0]).(*ast.CallExpr); ok && len(c.Args) > 0 {
+		if g := calleeFunc(fs.info, c); g != nil && funcPkg(g) == "fmt" && g.Name() == "Sprintf" {
+			if s, ok := constant(c.Args[0]); ok {
+				fs.s.errFormats[s] = true
+			}
+		}
+	}
+}
+
 // add scans pkgs, whose files under root but outside excluded are keploy's
 // own: one platform's load, of which the scanner keeps the union.
 func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
@@ -367,7 +438,6 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 	s.decls = map[*types.Func]funcDecl{}
 	s.named = nil
 	s.safe = map[*types.Func]int8{}
-	s.safeStrict = map[*types.Func]int8{}
 	s.passes = map[*types.Func]map[int]bool{}
 	s.why = map[*types.Func]string{}
 	s.text = map[*types.Func]int8{}
@@ -422,6 +492,9 @@ func (s *scanner) add(pkgs []*packages.Package, excluded []string) {
 	s.impls = map[*types.Func][]*types.Func{}
 	s.ifaceCallers = map[string]map[ast.Decl]declRef{}
 	s.methodSinks = map[string]bool{}
+	s.findStdWriters(pkgs)
+	s.findOpenIfaces(pkgs)
+	s.urlResults, s.urlLocals = map[urlResult]int8{}, map[*types.Var][]assigned1{}
 	s.queue, s.queued = nil, map[ast.Decl]bool{}
 	for _, p := range pkgs {
 		for _, f := range p.Syntax {
@@ -1546,11 +1619,20 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 	fs.fieldKeys(call)
 	f := calleeFunc(fs.info, call)
 	if f == nil {
+		if isBuiltin(fs.info, call.Fun, "panic") {
+			fs.keepPanicWords(call)
+		}
+		if isBuiltin(fs.info, call.Fun, "print") || isBuiltin(fs.info, call.Fun, "println") {
+			// The builtins write to stderr.
+			fs.printArgs(kindPrint, fs.text(call.Fun), call.Args, false)
+			return
+		}
 		fs.funcValueCall(call)
 		fs.boundLitCall(call)
 		return
 	}
 	pkg, recv := funcPkg(f), recvName(f)
+	fs.printCall(call, f, pkg, recv)
 	if loggerShaped(f.Type()) && (isIfaceMethod(f) || !strings.HasPrefix(pkg, module)) && recv != "go.uber.org/zap.Logger" {
 		// A line through an interface (var d interface{ Debug(string,
 		// ...zap.Field) } = logger), or through a library's function of a
@@ -1700,10 +1782,6 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 		// (ctx.Value(models.ClientConnectionIDKey).(string)) is what each
 		// WithValue under its key puts there.
 		fs.fieldValue(call.Args[2], "context.WithValue", call.Args[2])
-	case pkg == "fmt" && (f.Name() == "Print" || f.Name() == "Printf" || f.Name() == "Println"):
-		fs.printArgs(kindPrint, "fmt."+f.Name(), call.Args, f.Name() == "Printf")
-	case pkg == "fmt" && strings.HasPrefix(f.Name(), "Fprint") && len(call.Args) > 0 && stdStream(fs.info, call.Args[0]):
-		fs.printArgs(kindPrint, "fmt."+f.Name(), call.Args[1:], f.Name() == "Fprintf")
 	case pkg == sentryPkg && sentrySinks[f.Name()]:
 		// What a crash report carries leaves the machine for Keploy's
 		// Sentry: each value it is given, a key's included.
@@ -1721,6 +1799,281 @@ func (fs *fileScan) call(call *ast.CallExpr) {
 	}
 }
 
+// urlKind is kindURL for a value made from a request's URL (urlDerived),
+// and kind for any other.
+func (fs *fileScan) urlKind(e ast.Expr, kind string) string {
+	var scope ast.Node
+	if len(fs.funcs) > 0 {
+		scope = fs.funcs[0]
+	}
+	if fs.s.urlOf(fs.info, scope, e, 0) {
+		return kindURL
+	}
+	return kind
+}
+
+// urlResult is one result of a function of keploy's.
+type urlResult struct {
+	f *types.Func
+	i int
+}
+
+// assigned1 is a value assigned to a local variable: rhs, or its i-th
+// result when rhs is a call of several (a, b := f()), or an element of what
+// it ranges over (for _, v := range x).
+type assigned1 struct {
+	rhs   ast.Expr
+	i     int
+	multi bool
+}
+
+// urlFields are the fields that hold a request's URL, its path or its query,
+// by their struct: net/url's URL, net/http's Request, and keploy's recorded
+// requests (models.HTTPReq's URL and URLParams, HTTP2Req's URL).
+var urlFields = map[string]map[string]bool{
+	"net/url.URL":                   {"Path": true, "RawPath": true, "RawQuery": true, "Fragment": true, "RawFragment": true, "Opaque": true},
+	"net/http.Request":              {"URL": true, "RequestURI": true},
+	module + "/pkg/models.HTTPReq":  {"URL": true, "URLParams": true},
+	module + "/pkg/models.HTTP2Req": {"URL": true},
+}
+
+// urlMethods are net/url's methods whose result holds a URL's path or query.
+var urlMethods = map[string]map[string]bool{
+	"net/url.URL":    {"String": true, "EscapedPath": true, "RequestURI": true, "Redacted": true, "EscapedFragment": true, "Query": true, "JoinPath": true, "ResolveReference": true},
+	"net/url.Values": {"Encode": true, "Get": true},
+}
+
+// textPkgs are the packages whose functions make a text of the values they
+// are given (fmt.Sprintf, strings.TrimPrefix, path.Join, url.PathUnescape):
+// a URL's, of a URL.
+var textPkgs = map[string]bool{"fmt": true, "strings": true, "path": true, "net/url": true, "strconv": true, "bytes": true}
+
+// urlOf: e's text may hold a request's URL, its path or its query: a field
+// that holds one (urlFields), a net/url method's result that does
+// (urlMethods), an index or a slice of one (u.Query()["k"]), a conversion,
+// a concatenation, or a text a function of textPkgs or of keploy's makes of
+// one (followed to its returns, each result on its own), and a local
+// variable any value assigned to which, in the function it is in, does.
+// It names the kind of a site that is one anyway (urlKind): a value it does
+// not follow (a parameter's, a field's of keploy's other than urlFields) is
+// a site of the kind it is logged as.
+func (s *scanner) urlOf(info *types.Info, scope ast.Node, e ast.Expr, depth int) bool {
+	if e == nil || depth > 8 {
+		return false
+	}
+	switch x := ast.Unparen(e).(type) {
+	case *ast.SelectorExpr:
+		v, ok := info.Uses[x.Sel].(*types.Var)
+		if !ok || !v.IsField() {
+			return false
+		}
+		t := info.TypeOf(x.X)
+		if p, ok := t.(*types.Pointer); ok {
+			t = p.Elem()
+		}
+		if n, ok := types.Unalias(t).(*types.Named); ok && n.Obj().Pkg() != nil {
+			return urlFields[n.Obj().Pkg().Path()+"."+n.Obj().Name()][v.Name()]
+		}
+	case *ast.Ident:
+		v, ok := info.Uses[x].(*types.Var)
+		if !ok || v.IsField() || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() || scope == nil {
+			return false
+		}
+		return s.urlVar(info, scope, v, depth)
+	case *ast.BinaryExpr:
+		return x.Op == token.ADD && (s.urlOf(info, scope, x.X, depth+1) || s.urlOf(info, scope, x.Y, depth+1))
+	case *ast.IndexExpr:
+		return s.urlOf(info, scope, x.X, depth+1)
+	case *ast.SliceExpr:
+		return s.urlOf(info, scope, x.X, depth+1)
+	case *ast.StarExpr:
+		return s.urlOf(info, scope, x.X, depth+1)
+	case *ast.CallExpr:
+		if tv, ok := info.Types[x.Fun]; ok && tv.IsType() {
+			return len(x.Args) == 1 && s.urlOf(info, scope, x.Args[0], depth+1)
+		}
+		f := calleeFunc(info, x)
+		if f == nil {
+			return false
+		}
+		pkg, recv := funcPkg(f), recvName(f)
+		switch {
+		case urlMethods[recv] != nil:
+			return urlMethods[recv][f.Name()]
+		case recv == "" && textPkgs[pkg]:
+			for _, a := range x.Args {
+				if s.urlOf(info, scope, a, depth+1) {
+					return true
+				}
+			}
+		case strings.HasPrefix(pkg, module) && !isIfaceMethod(f):
+			if sel, ok := ast.Unparen(x.Fun).(*ast.SelectorExpr); ok && recv != "" && s.urlOf(info, scope, sel.X, depth+1) {
+				return true // a method of a URL's value (u.String() of keploy's)
+			}
+			return s.urlResultOf(f, 0, depth+1)
+		}
+	}
+	return false
+}
+
+// urlVar: a value assigned to v, a local variable or a named result, in
+// scope may hold a request's URL (urlOf).
+func (s *scanner) urlVar(info *types.Info, scope ast.Node, v *types.Var, depth int) bool {
+	for _, a := range s.localAssigns1(info, scope, v) {
+		if a.multi {
+			if c, ok := ast.Unparen(a.rhs).(*ast.CallExpr); ok {
+				if f := calleeFunc(info, c); f != nil && strings.HasPrefix(funcPkg(f), module) && !isIfaceMethod(f) {
+					if s.urlResultOf(f, a.i, depth+1) {
+						return true
+					}
+					continue
+				}
+			}
+		}
+		if s.urlOf(info, scope, a.rhs, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// urlResultOf: f's i-th result may hold a request's URL (urlOf), as each of
+// its returns gives it.
+func (s *scanner) urlResultOf(f *types.Func, i int, depth int) bool {
+	f = f.Origin()
+	k := urlResult{f, i}
+	if v, ok := s.urlResults[k]; ok {
+		return v > 0
+	}
+	s.urlResults[k] = 0
+	d, ok := s.decls[f]
+	if !ok {
+		s.urlResults[k] = -1
+		return false
+	}
+	sig := f.Type().(*types.Signature)
+	info := d.p.TypesInfo
+	found := false
+	ast.Inspect(d.decl.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch r := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			switch {
+			case len(r.Results) == sig.Results().Len() && i < len(r.Results):
+				found = s.urlOf(info, d.decl, r.Results[i], depth)
+			case len(r.Results) == 1:
+				found = s.urlOf(info, d.decl, r.Results[0], depth)
+			case len(r.Results) == 0 && i < sig.Results().Len():
+				found = s.urlVar(info, d.decl, sig.Results().At(i), depth) // a bare return: the named result
+			}
+			return false
+		}
+		return true
+	})
+	if found {
+		s.urlResults[k] = 1
+	} else {
+		s.urlResults[k] = -1
+	}
+	return found
+}
+
+// localAssigns1 are the values assigned to v, a local variable, anywhere in
+// scope, the function it is in, whatever their order.
+func (s *scanner) localAssigns1(info *types.Info, scope ast.Node, v *types.Var) []assigned1 {
+	if out, ok := s.urlLocals[v]; ok {
+		return out
+	}
+	var out []assigned1
+	is := func(e ast.Expr) bool {
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		return ok && (info.Defs[id] == v || info.Uses[id] == v)
+	}
+	ast.Inspect(scope, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for j, l := range x.Lhs {
+				if !is(l) {
+					continue
+				}
+				switch {
+				case len(x.Lhs) == len(x.Rhs):
+					out = append(out, assigned1{rhs: x.Rhs[j]})
+				case len(x.Rhs) == 1:
+					out = append(out, assigned1{rhs: x.Rhs[0], i: j, multi: true})
+				}
+			}
+		case *ast.ValueSpec:
+			for j, nm := range x.Names {
+				if info.Defs[nm] != v {
+					continue
+				}
+				switch {
+				case len(x.Values) == len(x.Names):
+					out = append(out, assigned1{rhs: x.Values[j]})
+				case len(x.Values) == 1:
+					out = append(out, assigned1{rhs: x.Values[0], i: j, multi: true})
+				}
+			}
+		case *ast.RangeStmt:
+			if (x.Key != nil && is(x.Key)) || (x.Value != nil && is(x.Value)) {
+				out = append(out, assigned1{rhs: x.X})
+			}
+		}
+		return true
+	})
+	s.urlLocals[v] = out
+	return out
+}
+
+// printCall: call, of f, prints to the process's stdout or stderr, which a
+// user reads beside the log's lines: fmt's Print, Printf and Println, and
+// its Fprint, Fprintf and Fprintln, io.WriteString and a writer's Write and
+// WriteString, to a writer that may be a std stream (stdExpr); k0kubun/pp's
+// prints, its package's and a PrettyPrinter's (stdout, unless keploy set
+// another output, which it never does); fatih/color's color functions and a
+// Color's prints (color.Output); a cobra command's Print, Println, Printf
+// and PrintErr kin; and the rows, headers, footers and captions of a
+// tablewriter table made on a std stream.
+func (fs *fileScan) printCall(call *ast.CallExpr, f *types.Func, pkg, recv string) {
+	name := f.Name()
+	formatted := strings.HasSuffix(name, "f")
+	short := pkg[strings.LastIndex(pkg, "/")+1:]
+	if pkg == ppPkg {
+		short = "pp"
+	}
+	label := short + "." + name
+	if recv != "" {
+		label = fs.text(call.Fun)
+	}
+	switch {
+	case (pkg == "fmt" || pkg == ppPkg) && recv == "" && (name == "Print" || name == "Printf" || name == "Println"):
+		fs.printArgs(kindPrint, label, call.Args, formatted)
+	case (pkg == "fmt" || pkg == ppPkg || pkg == colorPkg) && strings.HasPrefix(name, "Fprint") && len(call.Args) > 0 && fs.s.stdExpr(fs.info, call.Args[0]):
+		fs.printArgs(kindPrint, label, call.Args[1:], formatted)
+	case pkg == "io" && recv == "" && name == "WriteString" && len(call.Args) == 2 && fs.s.stdExpr(fs.info, call.Args[0]):
+		fs.printArgs(kindPrint, label, call.Args[1:], false)
+	case (name == "Write" || name == "WriteString") && recv != "" && len(call.Args) == 1:
+		if sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && fs.s.stdExpr(fs.info, sel.X) {
+			fs.printArgs(kindPrint, label, call.Args, false)
+		}
+	case (recv == ppPkg+".PrettyPrinter" || recv == colorPkg+".Color") && (name == "Print" || name == "Printf" || name == "Println"):
+		fs.printArgs(kindPrint, label, call.Args, formatted)
+	case pkg == colorPkg && recv == "" && colorPrints[name]:
+		fs.printArgs(kindPrint, label, call.Args, true)
+	case recv == cobraPkg+".Command" && (strings.HasPrefix(name, "Print") || strings.HasPrefix(name, "PrintErr")):
+		fs.printArgs(kindPrint, label, call.Args, formatted)
+	case recv == tablewriterPkg+".Table" && (name == "Append" || name == "Bulk" || name == "Header" || name == "Footer" || name == "Caption"):
+		if sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && fs.s.stdExpr(fs.info, sel.X) {
+			fs.printArgs(kindPrint, label, call.Args, false)
+		}
+	}
+}
+
 // overgated: e, an error a line logs by its kind (logcontent.Error), has an
 // origin that carries no content: the line should log it whole, keploy's
 // own words with it. A parameter's error is its callers' (it is not safe
@@ -1732,13 +2085,7 @@ func (fs *fileScan) overgated(at ast.Node, ctor string, e ast.Expr) {
 	if !fs.isError(e) {
 		return
 	}
-	// An error a method of an exported interface returns may be another
-	// module's implementation's (enterprise's), which the scan does not
-	// read: the line keeps it by its kind.
-	prev := fs.s.strictIfaces
-	fs.s.strictIfaces = true
 	o, safe := fs.origin(e, 0)
-	fs.s.strictIfaces = prev
 	if safe {
 		fs.report(at, kindOvergated, ctor+"("+fs.text(e)+") <- "+o)
 	}
@@ -1750,7 +2097,7 @@ func (fs *fileScan) sugarArg(what string, a ast.Expr) {
 	defer fs.enter(sinkField)()
 	fs.sinkParams(sinkField, a)
 	if !fs.safe(a) {
-		fs.report(a, kindSugar, what+"("+fs.text(a)+")")
+		fs.report(a, fs.urlKind(a, kindSugar), what+"("+fs.text(a)+")")
 	}
 }
 
@@ -1764,10 +2111,347 @@ var sentrySinks = map[string]bool{
 	"SetUser": true, "SetFingerprint": true, "SetTransaction": true, "SetRequest": true, "SetRequestBody": true,
 }
 
-// stdStream: e is os.Stdout or os.Stderr.
+// stdStream: e is os.Stdout or os.Stderr, or fatih/color's Output or
+// Error, which write to them.
 func stdStream(info *types.Info, e ast.Expr) bool {
 	v := tableVar(info, e)
-	return v != nil && v.Pkg().Path() == "os" && (v.Name() == "Stdout" || v.Name() == "Stderr")
+	if v == nil {
+		return false
+	}
+	switch v.Pkg().Path() {
+	case "os":
+		return v.Name() == "Stdout" || v.Name() == "Stderr"
+	case colorPkg:
+		return v.Name() == "Output" || v.Name() == "Error"
+	}
+	return false
+}
+
+// The printers whose lines a user reads beside the log's.
+const (
+	ppPkg          = "github.com/k0kubun/pp/v3"
+	colorPkg       = "github.com/fatih/color"
+	cobraPkg       = "github.com/spf13/cobra"
+	tablewriterPkg = "github.com/olekukonko/tablewriter"
+)
+
+// colorPrints are fatih/color's functions that print a format to stdout in
+// a color (color.Red("%s", s)).
+var colorPrints = map[string]bool{
+	"Black": true, "Red": true, "Green": true, "Yellow": true, "Blue": true, "Magenta": true, "Cyan": true, "White": true,
+	"HiBlack": true, "HiRed": true, "HiGreen": true, "HiYellow": true, "HiBlue": true, "HiMagenta": true, "HiCyan": true, "HiWhite": true,
+}
+
+// findStdWriters finds stdVars and stdFuncs: what may hold the process's
+// stdout or stderr. A value may when it is os.Stdout or os.Stderr (or
+// color's Output or Error), a cobra command's OutOrStdout, OutOrStderr or
+// ErrOrStderr, the standard library logger's Writer, a colorable stdout or
+// stderr, a writer that wraps one (bufio.NewWriter, io.MultiWriter,
+// zapcore.AddSync, tabwriter.NewWriter), a tablewriter table made on one, a
+// conversion or a type assertion of one, a variable that may, or a call of
+// a keploy function that may return one. A variable may when any value
+// assigned to it anywhere may (an assignment, a declaration, a struct
+// literal's field, a call's argument for a parameter, through an interface
+// to each implementation's), whatever the order: the reading only
+// overstates. And so may a writer parameter of a function the scan does not
+// read every call of (not closed: an exported function, a method, one used
+// as a value, a closure's), and an exported writer field of an exported
+// struct, which a caller the scan does not read (enterprise's) may give a
+// std stream. A variable can only hold one when *os.File can be assigned to
+// its type (an *os.File, an io.Writer, an io.WriteCloser, ...), or it is a
+// table: a net.Conn, an http.ResponseWriter or a bytes.Buffer never can,
+// and what is written to one is no print.
+func (s *scanner) findStdWriters(pkgs []*packages.Package) {
+	s.stdVars, s.stdFuncs, s.osFile = map[*types.Var]bool{}, map[*types.Func]bool{}, nil
+	seen := map[*types.Package]bool{}
+	var find func(p *types.Package)
+	find = func(p *types.Package) {
+		if s.osFile != nil || seen[p] {
+			return
+		}
+		seen[p] = true
+		if p.Path() == "os" {
+			if tn, ok := p.Scope().Lookup("File").(*types.TypeName); ok {
+				s.osFile = types.NewPointer(tn.Type())
+			}
+			return
+		}
+		for _, q := range p.Imports() {
+			find(q)
+		}
+	}
+	for _, p := range pkgs {
+		find(p.Types)
+	}
+	if s.osFile == nil {
+		return // nothing loaded imports os: nothing prints to a std stream
+	}
+	for f := range s.decls {
+		if s.closed[f.Origin()] {
+			continue
+		}
+		sig := f.Origin().Type().(*types.Signature)
+		for i := 0; i < sig.Params().Len(); i++ {
+			if v := sig.Params().At(i); s.stdCarrier(v.Type()) {
+				s.stdVars[v] = true
+			}
+		}
+	}
+	for _, n := range s.named {
+		st, ok := n.Underlying().(*types.Struct)
+		if !ok || !n.Obj().Exported() {
+			continue
+		}
+		for i := 0; i < st.NumFields(); i++ {
+			if v := st.Field(i); v.Exported() && s.stdCarrier(v.Type()) {
+				s.stdVars[v.Origin()] = true
+			}
+		}
+	}
+	mark := func(v *types.Var) bool {
+		if v == nil || s.stdVars[v.Origin()] || !s.stdCarrier(v.Type()) {
+			return false
+		}
+		s.stdVars[v.Origin()] = true
+		return true
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range pkgs {
+			info := p.TypesInfo
+			target := func(e ast.Expr) *types.Var {
+				switch x := ast.Unparen(e).(type) {
+				case *ast.Ident:
+					if v, ok := info.Defs[x].(*types.Var); ok {
+						return v
+					}
+					v, _ := info.Uses[x].(*types.Var)
+					return v
+				case *ast.SelectorExpr:
+					v, _ := info.Uses[x.Sel].(*types.Var)
+					return v
+				}
+				return nil
+			}
+			for _, file := range p.Syntax {
+				var funcs []*types.Func // the declarations the walk is in; nil for a closure
+				var walk func(n ast.Node) bool
+				walk = func(n ast.Node) bool {
+					switch x := n.(type) {
+					case *ast.FuncDecl:
+						f, _ := info.Defs[x.Name].(*types.Func)
+						if x.Body != nil {
+							funcs = append(funcs, f)
+							ast.Inspect(x.Body, walk)
+							funcs = funcs[:len(funcs)-1]
+						}
+						return false
+					case *ast.FuncLit:
+						for _, fl := range x.Type.Params.List {
+							for _, nm := range fl.Names {
+								if v, ok := info.Defs[nm].(*types.Var); ok && mark(v) {
+									changed = true // a closure's: its callers are not read
+								}
+							}
+						}
+						funcs = append(funcs, nil)
+						ast.Inspect(x.Body, walk)
+						funcs = funcs[:len(funcs)-1]
+						return false
+					case *ast.AssignStmt:
+						switch {
+						case len(x.Lhs) == len(x.Rhs):
+							for i, l := range x.Lhs {
+								if s.stdExpr(info, x.Rhs[i]) && mark(target(l)) {
+									changed = true
+								}
+							}
+						case len(x.Rhs) == 1 && s.stdExpr(info, x.Rhs[0]):
+							for _, l := range x.Lhs {
+								if mark(target(l)) {
+									changed = true
+								}
+							}
+						}
+					case *ast.ValueSpec:
+						for i, nm := range x.Names {
+							v, _ := info.Defs[nm].(*types.Var)
+							switch {
+							case len(x.Values) == len(x.Names):
+								if s.stdExpr(info, x.Values[i]) && mark(v) {
+									changed = true
+								}
+							case len(x.Values) == 1 && s.stdExpr(info, x.Values[0]):
+								if mark(v) {
+									changed = true
+								}
+							}
+						}
+					case *ast.RangeStmt:
+						if lit, ok := ast.Unparen(x.X).(*ast.CompositeLit); ok && x.Value != nil {
+							for _, el := range lit.Elts {
+								if s.stdExpr(info, el) && mark(target(x.Value)) {
+									changed = true
+								}
+							}
+						}
+					case *ast.CompositeLit:
+						t := info.TypeOf(x)
+						if t == nil {
+							break
+						}
+						if pt, ok := t.Underlying().(*types.Pointer); ok {
+							t = pt.Elem()
+						}
+						st, ok := t.Underlying().(*types.Struct)
+						if !ok {
+							break
+						}
+						for i, el := range x.Elts {
+							var fv *types.Var
+							val := el
+							if kv, ok := el.(*ast.KeyValueExpr); ok {
+								if id, ok := kv.Key.(*ast.Ident); ok {
+									fv, _ = info.Uses[id].(*types.Var)
+								}
+								val = kv.Value
+							} else if i < st.NumFields() {
+								fv = st.Field(i)
+							}
+							if s.stdExpr(info, val) && mark(fv) {
+								changed = true
+							}
+						}
+					case *ast.CallExpr:
+						f := calleeFunc(info, x)
+						if f == nil {
+							break
+						}
+						targets := []*types.Func{f.Origin()}
+						if isIfaceMethod(f) {
+							targets = append(targets, s.implsOf(f)...)
+						}
+						for _, g := range targets {
+							sig, _ := g.Type().(*types.Signature)
+							if sig == nil {
+								continue
+							}
+							for i, a := range x.Args {
+								if i >= sig.Params().Len() || (sig.Variadic() && i >= sig.Params().Len()-1) {
+									break
+								}
+								if s.stdExpr(info, a) && mark(sig.Params().At(i)) {
+									changed = true
+								}
+							}
+						}
+					case *ast.ReturnStmt:
+						if len(funcs) == 0 || funcs[len(funcs)-1] == nil {
+							break
+						}
+						f := funcs[len(funcs)-1].Origin()
+						for _, r := range x.Results {
+							if !s.stdFuncs[f] && s.stdExpr(info, r) {
+								s.stdFuncs[f] = true
+								changed = true
+							}
+						}
+					}
+					return true
+				}
+				ast.Inspect(file, walk)
+			}
+		}
+	}
+}
+
+// stdCarrier: a variable of type t can hold the process's stdout or stderr,
+// or a writer to one: an *os.File, an interface with a Write method an
+// *os.File can be assigned to (io.Writer, io.WriteCloser), a writer that
+// wraps another (a *bufio.Writer, a *tabwriter.Writer), or a tablewriter
+// table, which writes to the writer it is made on.
+func (s *scanner) stdCarrier(t types.Type) bool {
+	if t == nil || s.osFile == nil {
+		return false
+	}
+	if p, ok := t.(*types.Pointer); ok && (isNamed(p.Elem(), tablewriterPkg, "Table") || isNamed(p.Elem(), "bufio", "Writer") ||
+		isNamed(p.Elem(), "bufio", "ReadWriter") || isNamed(p.Elem(), "text/tabwriter", "Writer")) {
+		return true
+	}
+	if types.Identical(t, s.osFile) {
+		return true
+	}
+	it, ok := t.Underlying().(*types.Interface)
+	if !ok {
+		return false
+	}
+	hasWrite := false
+	for i := 0; i < it.NumMethods(); i++ {
+		if it.Method(i).Name() == "Write" {
+			hasWrite = true
+		}
+	}
+	return hasWrite && types.AssignableTo(s.osFile, t)
+}
+
+// stdExpr: e may be the process's stdout or stderr, a writer to one, or a
+// table that writes to one (findStdWriters).
+func (s *scanner) stdExpr(info *types.Info, e ast.Expr) bool {
+	e = ast.Unparen(e)
+	switch x := e.(type) {
+	case *ast.Ident, *ast.SelectorExpr:
+		if stdStream(info, x) {
+			return true
+		}
+		id, _ := x.(*ast.Ident)
+		if sel, ok := x.(*ast.SelectorExpr); ok {
+			id = sel.Sel
+		}
+		v, ok := info.Uses[id].(*types.Var)
+		return ok && s.stdVars[v.Origin()]
+	case *ast.TypeAssertExpr:
+		return s.stdExpr(info, x.X)
+	case *ast.CallExpr:
+		if tv, ok := info.Types[x.Fun]; ok && tv.IsType() {
+			return len(x.Args) == 1 && s.stdExpr(info, x.Args[0]) // io.Writer(os.Stdout)
+		}
+		f := calleeFunc(info, x)
+		if f == nil {
+			return false
+		}
+		pkg, recv := funcPkg(f), recvName(f)
+		switch {
+		case recv == cobraPkg+".Command":
+			return f.Name() == "OutOrStdout" || f.Name() == "OutOrStderr" || f.Name() == "ErrOrStderr"
+		case pkg == "github.com/mattn/go-colorable":
+			return f.Name() == "NewColorableStdout" || f.Name() == "NewColorableStderr"
+		case pkg == "log" && f.Name() == "Writer":
+			return true // the standard library logger's: stderr unless set
+		case (pkg == "bufio" && strings.HasPrefix(f.Name(), "NewWriter")) || (pkg == "text/tabwriter" && f.Name() == "NewWriter") ||
+			(pkg == "go.uber.org/zap/zapcore" && (f.Name() == "AddSync" || f.Name() == "Lock")) ||
+			(pkg == tablewriterPkg && (f.Name() == "NewTable" || f.Name() == "NewWriter" || strings.HasPrefix(f.Name(), "NewCSV"))):
+			return len(x.Args) > 0 && s.stdExpr(info, x.Args[0])
+		case pkg == "io" && f.Name() == "MultiWriter":
+			for _, a := range x.Args {
+				if s.stdExpr(info, a) {
+					return true
+				}
+			}
+			return false
+		case strings.HasPrefix(pkg, module):
+			if s.stdFuncs[f.Origin()] {
+				return true
+			}
+			if isIfaceMethod(f) {
+				for _, m := range s.implsOf(f) {
+					if s.stdFuncs[m] {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // printArgs: args, the values a print to stdout or stderr, or a crash
@@ -1809,6 +2493,9 @@ func (fs *fileScan) printArg(kind, what string, a ast.Expr) {
 	if fs.reportErrorParts(what, a, nil) && fs.errSafe(a) {
 		return
 	}
+	if kind == kindPrint {
+		kind = fs.urlKind(a, kind)
+	}
 	fs.report(a, kind, what+"("+fs.text(a)+")")
 }
 
@@ -1829,7 +2516,13 @@ func isBytes(t types.Type) bool {
 // funcValueCall: a call of a function value whose type is a *zap.Logger
 // method's, func(msg string, fields ...zap.Field), as log := logger.Debug;
 // log(msg) is, or p.mismatchLog()(msg): its first argument is a line's
-// message. The fields are built where they are, as any field is.
+// message. The fields are built where they are, as any field is. One whose
+// type is a sugared logger's or a print's (sugarShaped: logf :=
+// logger.Sugar().Debugf, pf := fmt.Printf, a logf func(string, ...any)
+// parameter) formats each of its arguments into a line or onto a std
+// stream, as a sugared logger's method does, whatever value it holds: each
+// is judged as a sugar's argument is. A closure bound to a local variable
+// that is only ever called (boundLits) is read where it is written instead.
 func (fs *fileScan) funcValueCall(call *ast.CallExpr) {
 	tv, ok := fs.info.Types[call.Fun]
 	if !ok || tv.IsType() || tv.IsBuiltin() || len(call.Args) == 0 {
@@ -1837,7 +2530,58 @@ func (fs *fileScan) funcValueCall(call *ast.CallExpr) {
 	}
 	if loggerShaped(tv.Type) {
 		fs.message(call.Args[0])
+		return
 	}
+	if !sugarShaped(tv.Type) {
+		return
+	}
+	if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+		if v, ok := fs.info.Uses[id].(*types.Var); ok {
+			for _, bound := range fs.boundLits() {
+				if bound == v {
+					return
+				}
+			}
+		}
+	}
+	for _, a := range call.Args {
+		fs.sugarArg(fs.text(call.Fun), a)
+	}
+}
+
+// sugarShaped: t is a sugared logger's method's signature or a print's,
+// func(template string, args ...any) or func(args ...any), with no results
+// or a print's (n int, err error).
+func sugarShaped(t types.Type) bool {
+	sig, ok := t.Underlying().(*types.Signature)
+	if !ok || !sig.Variadic() {
+		return false
+	}
+	switch r := sig.Results(); r.Len() {
+	case 0:
+	case 2:
+		if b, ok := r.At(0).Type().Underlying().(*types.Basic); !ok || b.Kind() != types.Int || !implementsError(r.At(1).Type()) {
+			return false
+		}
+	default:
+		return false
+	}
+	ps := sig.Params()
+	switch ps.Len() {
+	case 1:
+	case 2:
+		if !isString(ps.At(0).Type()) {
+			return false
+		}
+	default:
+		return false
+	}
+	sl, ok := ps.At(ps.Len() - 1).Type().(*types.Slice)
+	if !ok {
+		return false
+	}
+	it, ok := sl.Elem().Underlying().(*types.Interface)
+	return ok && it.Empty()
 }
 
 // fieldKeys: call builds a field, or writes one through an encoder, and its
@@ -2227,7 +2971,7 @@ func (fs *fileScan) namedSiblings(args []ast.Expr) {
 
 // fieldValue: v, the value of a field ctor builds.
 func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
-	if (marshalerCtors[ctor] && fs.ownMarshaler(v)) || (stringerCtors[ctor] && fs.stringerSafe(fs.info.TypeOf(v))) {
+	if (marshalerCtors[ctor] && fs.ownMarshaler(v)) || (stringerCtors[ctor] && fs.stringerSafe(fs.info.TypeOf(v), v)) {
 		// What it writes is read where it writes it: its encoder's
 		// calls, or its String's returns.
 		return
@@ -2248,7 +2992,7 @@ func (fs *fileScan) fieldValue(at ast.Node, ctor string, v ast.Expr) {
 	if fs.reportErrorParts(ctor, v, nil) && fs.errSafe(v) {
 		return
 	}
-	fs.report(at, kindField, ctor+"("+fs.text(v)+")")
+	fs.report(at, fs.urlKind(v, kindField), ctor+"("+fs.text(v)+")")
 }
 
 // message: a log line's message.
@@ -2288,7 +3032,7 @@ func (fs *fileScan) messageAs(label string, m ast.Expr) {
 	if fs.reportErrorParts("message", m, errPart) && fs.errSafe(m) {
 		return
 	}
-	fs.report(m, kindMessage, what)
+	fs.report(m, fs.urlKind(m, kindMessage), what)
 }
 
 // errorText: v, the value of a logcontent field that fingerprints what it is
@@ -3037,8 +3781,11 @@ var stringerCtors = map[string]bool{"zap.Stringer": true, "zap.Stringers": true}
 
 // stringerSafe: a value of type t (or each element of a slice of them) is
 // written by a String method of keploy's that returns a safe text of its
-// receiver alone (textSummary), or t is safe itself.
-func (fs *fileScan) stringerSafe(t types.Type) bool {
+// receiver alone (textSummary), or t is safe itself. The fields that String
+// reads are safe as their writes are: each is marked a sink field, as a
+// text's are where it is called (textSafe), so every write of one is judged
+// by what it writes.
+func (fs *fileScan) stringerSafe(t types.Type, at ast.Expr) bool {
 	if t == nil {
 		return false
 	}
@@ -3054,7 +3801,16 @@ func (fs *fileScan) stringerSafe(t types.Type) bool {
 		return false
 	}
 	ok, passes := fs.s.textSummary(m)
-	return ok && len(passes) == 0
+	if !ok || len(passes) > 0 {
+		return false
+	}
+	if fs.gated == 0 {
+		for v := range fs.s.textFields[m.Origin()] {
+			fs.noteSink("field "+fs.fieldKey(v), sinkField&^fs.s.sinkFields[v], at)
+			fs.s.markSinkField(v, sinkField, fs.file+":"+strconv.Itoa(fs.fset.Position(at.Pos()).Line))
+		}
+	}
+	return true
 }
 
 // ownMarshaler: v is a zap marshaler of keploy's, whose MarshalLogObject or
@@ -3786,46 +4542,59 @@ func (fs *fileScan) callOrigin(c *ast.CallExpr, f *types.Func, depth int) (strin
 // returnsSafe: every error f returns has a safe origin. f is keploy's: a
 // function or a method whose declaration the load holds, or an interface's
 // method, which is safe when it has implementations in keploy and each of
-// them is. A function the scan is still reading (a recursion) is taken as
-// safe, so that its other returns decide.
+// them is, and the interface is not open (openIface): a method of an
+// interface whose values may be another module's (enterprise's TestHooks,
+// RecordHooks, a mock store's Push, a capability its service's value is
+// asserted for) may be that module's implementation's, whose errors the
+// scan does not read, so its error is a site wherever it is logged whole,
+// as an exported function's parameter is for the callers the scan does not
+// read. A function the scan is still
+// reading (a recursion) is taken as safe, so that its other returns decide.
 func (s *scanner) returnsSafe(f *types.Func) bool {
 	f = f.Origin()
-	cache := s.safe
-	if s.strictIfaces {
-		cache = s.safeStrict
-	}
-	if v, ok := cache[f]; ok {
+	if v, ok := s.safe[f]; ok {
 		return v >= 0
 	}
-	cache[f] = 0 // in progress
+	s.safe[f] = 0 // in progress
 	ok := s.computeSafe(f)
 	if !ok && s.why != nil && s.why[f] == "" {
 		s.why[f] = "?"
 	}
 	if ok {
-		cache[f] = 1
+		s.safe[f] = 1
 	} else {
-		cache[f] = -1
+		s.safe[f] = -1
 	}
 	return ok
 }
 
-// openIface: m is a method of an exported interface of keploy's whose
-// methods are all exported, which a module the scan does not read
-// (enterprise's) may implement, with errors of its own.
-func openIface(m *types.Func) bool {
+// openIface: m is a method of an interface whose methods are all exported
+// and whose values may be another module's (enterprise's), with errors of
+// its own: an exported interface, which that module may implement and name;
+// an interface literal (x.(interface{ Close() error })), whose value is
+// whatever the asserted value holds; and an unexported interface that a
+// value of another interface's type is converted to (a capability a
+// service's value is asserted for, svc.(scopeBeginner)) or that an exported
+// function's parameter or an exported struct's field is of (openIfaces).
+func (s *scanner) openIface(m *types.Func) bool {
 	sig, _ := m.Type().(*types.Signature)
 	if sig == nil || sig.Recv() == nil {
 		return false
 	}
+	it, ok := sig.Recv().Type().Underlying().(*types.Interface)
+	if !ok || !allExported(it) {
+		return false
+	}
 	n, ok := types.Unalias(sig.Recv().Type()).(*types.Named)
-	if !ok || !n.Obj().Exported() {
-		return false
-	}
-	it, ok := n.Underlying().(*types.Interface)
 	if !ok {
-		return false
+		return true
 	}
+	return n.Obj().Exported() || s.openIfaces[n.Origin()]
+}
+
+// allExported: every method of it is exported, so a type of any package may
+// implement it.
+func allExported(it *types.Interface) bool {
 	for i := 0; i < it.NumMethods(); i++ {
 		if !it.Method(i).Exported() {
 			return false
@@ -3834,14 +4603,206 @@ func openIface(m *types.Func) bool {
 	return true
 }
 
+// findOpenIfaces finds openIfaces: keploy's unexported interfaces whose
+// methods are all exported and which may hold a value of another module's
+// type. One may when a value of another interface's type is converted to it,
+// which may hold anything that interface's may: a type assertion or a type
+// switch's case of it, an explicit conversion, or an implicit one, an
+// assignment, a declaration, a call's argument, a return or a composite
+// literal's element of another interface's value where it is wanted. And so
+// may one that an exported function's parameter, or an exported struct's
+// exported field, is of, which another module may give its own value.
+func (s *scanner) findOpenIfaces(pkgs []*packages.Package) {
+	s.openIfaces = map[*types.Named]bool{}
+	candidate := func(t types.Type) *types.Named {
+		n, ok := types.Unalias(t).(*types.Named)
+		if !ok || n.Obj().Exported() || n.Obj().Pkg() == nil || !strings.HasPrefix(n.Obj().Pkg().Path(), module) {
+			return nil
+		}
+		it, ok := n.Underlying().(*types.Interface)
+		if !ok || !allExported(it) {
+			return nil
+		}
+		return n.Origin()
+	}
+	// into: a value of type from goes where one of type to is wanted.
+	into := func(to, from types.Type) {
+		n := candidate(to)
+		if n == nil || from == nil || !types.IsInterface(from) || types.Identical(to, from) {
+			return
+		}
+		s.openIfaces[n] = true
+	}
+	for f := range s.decls {
+		if !f.Exported() {
+			continue
+		}
+		sig := f.Type().(*types.Signature)
+		for i := 0; i < sig.Params().Len(); i++ {
+			if n := candidate(sig.Params().At(i).Type()); n != nil {
+				s.openIfaces[n] = true
+			}
+		}
+	}
+	for _, n := range s.named {
+		st, ok := n.Underlying().(*types.Struct)
+		if !ok || !n.Obj().Exported() {
+			continue
+		}
+		for i := 0; i < st.NumFields(); i++ {
+			if v := st.Field(i); v.Exported() {
+				if c := candidate(v.Type()); c != nil {
+					s.openIfaces[c] = true
+				}
+			}
+		}
+	}
+	for _, p := range pkgs {
+		info := p.TypesInfo
+		for _, file := range p.Syntax {
+			var results []*types.Tuple // the results of the functions the walk is in
+			var walk func(n ast.Node) bool
+			walk = func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.FuncDecl:
+					if x.Body == nil {
+						return false
+					}
+					if f, ok := info.Defs[x.Name].(*types.Func); ok {
+						results = append(results, f.Type().(*types.Signature).Results())
+						ast.Inspect(x.Body, walk)
+						results = results[:len(results)-1]
+					}
+					return false
+				case *ast.FuncLit:
+					if sig, ok := info.TypeOf(x).(*types.Signature); ok {
+						results = append(results, sig.Results())
+						ast.Inspect(x.Body, walk)
+						results = results[:len(results)-1]
+					}
+					return false
+				case *ast.TypeAssertExpr:
+					if x.Type != nil {
+						into(info.TypeOf(x.Type), info.TypeOf(x.X))
+					}
+				case *ast.TypeSwitchStmt:
+					var subject ast.Expr
+					switch a := x.Assign.(type) {
+					case *ast.AssignStmt:
+						if ta, ok := a.Rhs[0].(*ast.TypeAssertExpr); ok {
+							subject = ta.X
+						}
+					case *ast.ExprStmt:
+						if ta, ok := a.X.(*ast.TypeAssertExpr); ok {
+							subject = ta.X
+						}
+					}
+					if subject != nil {
+						for _, cc := range x.Body.List {
+							for _, e := range cc.(*ast.CaseClause).List {
+								into(info.TypeOf(e), info.TypeOf(subject))
+							}
+						}
+					}
+				case *ast.AssignStmt:
+					if x.Tok == token.ASSIGN && len(x.Lhs) == len(x.Rhs) {
+						for i := range x.Lhs {
+							into(info.TypeOf(x.Lhs[i]), info.TypeOf(x.Rhs[i]))
+						}
+					}
+				case *ast.ValueSpec:
+					if x.Type != nil && len(x.Values) == len(x.Names) {
+						for _, v := range x.Values {
+							into(info.TypeOf(x.Type), info.TypeOf(v))
+						}
+					}
+				case *ast.ReturnStmt:
+					if len(results) == 0 || results[len(results)-1] == nil {
+						break
+					}
+					r := results[len(results)-1]
+					if len(x.Results) == r.Len() {
+						for i, e := range x.Results {
+							into(r.At(i).Type(), info.TypeOf(e))
+						}
+					}
+				case *ast.CallExpr:
+					t := info.TypeOf(x.Fun)
+					if tv, ok := info.Types[x.Fun]; ok && tv.IsType() {
+						if len(x.Args) == 1 {
+							into(t, info.TypeOf(x.Args[0])) // J(v)
+						}
+						break
+					}
+					sig, ok := t.Underlying().(*types.Signature)
+					if !ok {
+						break
+					}
+					for i, a := range x.Args {
+						var pt types.Type
+						switch {
+						case sig.Variadic() && i >= sig.Params().Len()-1:
+							if sl, ok := sig.Params().At(sig.Params().Len() - 1).Type().(*types.Slice); ok && x.Ellipsis == token.NoPos {
+								pt = sl.Elem()
+							}
+						case i < sig.Params().Len():
+							pt = sig.Params().At(i).Type()
+						}
+						if pt != nil {
+							into(pt, info.TypeOf(a))
+						}
+					}
+				case *ast.CompositeLit:
+					t := info.TypeOf(x)
+					if t == nil {
+						break
+					}
+					switch u := t.Underlying().(type) {
+					case *types.Struct:
+						for i, el := range x.Elts {
+							if kv, ok := el.(*ast.KeyValueExpr); ok {
+								if id, ok := kv.Key.(*ast.Ident); ok {
+									if fv, ok := info.Uses[id].(*types.Var); ok {
+										into(fv.Type(), info.TypeOf(kv.Value))
+									}
+								}
+							} else if i < u.NumFields() {
+								into(u.Field(i).Type(), info.TypeOf(el))
+							}
+						}
+					case *types.Slice, *types.Array, *types.Map:
+						var elem types.Type
+						switch e := u.(type) {
+						case *types.Slice:
+							elem = e.Elem()
+						case *types.Array:
+							elem = e.Elem()
+						case *types.Map:
+							elem = e.Elem()
+						}
+						for _, el := range x.Elts {
+							if kv, ok := el.(*ast.KeyValueExpr); ok {
+								el = kv.Value
+							}
+							into(elem, info.TypeOf(el))
+						}
+					}
+				}
+				return true
+			}
+			ast.Inspect(file, walk)
+		}
+	}
+}
+
 func (s *scanner) computeSafe(f *types.Func) bool {
 	sig, _ := f.Type().(*types.Signature)
 	if sig == nil {
 		return false
 	}
 	if recv := sig.Recv(); recv != nil && types.IsInterface(recv.Type()) {
-		if s.strictIfaces && openIface(f) {
-			s.why[f] = "an exported interface another module may implement"
+		if s.openIface(f) {
+			s.why[f] = "an interface another module's value may implement"
 			return false
 		}
 		iface, _ := recv.Type().Underlying().(*types.Interface)

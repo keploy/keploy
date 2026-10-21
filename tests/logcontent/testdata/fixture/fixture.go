@@ -5,6 +5,7 @@
 package fixture
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -12,13 +13,18 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/getsentry/sentry-go"
+	"github.com/k0kubun/pp/v3"
+	"github.com/olekukonko/tablewriter"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/mock"
 
 	"go.keploy.io/server/v3/tests/logcontent/testdata/fixture/sentinel"
@@ -144,7 +150,8 @@ func Sites(logger *zap.Logger, body []byte, s string, n int, k Kind, c conn, d t
 	logger.Error("another package's sentinel", zap.Error(sentinel.ErrConstant))
 	logger.Error("a path error", zap.Error(pathError(s)))
 	logger.Error("a store's error", zap.Error(store(fileStore{}).Get()))
-	logger.Error("a quoted sentinel", zap.Error(errQuoted)) // want: error
+	logger.Error("an open store's error", zap.Error(Store(fileStore{}).Get())) // want: error
+	logger.Error("a quoted sentinel", zap.Error(errQuoted))                    // want: error
 	if logcontent.On() {
 		logger.Debug("whole, with the switch on", zap.String("body", s))
 	}
@@ -553,6 +560,12 @@ type counted struct{ n int }
 
 func (c counted) String() string { return strconv.Itoa(c.n) + " calls" }
 
+// relayed is a Stringer of keploy's whose String writes a field of its own:
+// each write of the field is judged where it is made.
+type relayed struct{ s string }
+
+func (r relayed) String() string { return r.s }
+
 // errKind is an error type of a string's kind, with a constant: converted
 // from a value, it is that value's text.
 type errKind string
@@ -583,6 +596,8 @@ func Shapes(logger *zap.Logger, s string, h map[string][]string, k Kind, d time.
 	logger.Info("a payload by its String", zap.Stringer("p", shown{[]byte(s)})) // want: field
 	logger.Info("a payload by its marshaler", zap.Object("p", shown{[]byte(s)}))
 	logger.Info("a count by its String", zap.Stringer("c", counted{len(s)}))
+	logger.Info("a field by its String", zap.Stringer("r", relayed{s})) // want: field
+	logger.Info("a constant by its String", zap.Stringer("r", relayed{"constant"}))
 	logger.Info("an enum converted from a value", zap.String("kind", string(Kind(s)))) // want: field
 	logger.Info("an enum converted from a value", zap.Any("kind", Kind(s)))            // want: field
 	logger.Info("an enum", zap.Any("kind", k), zap.String("kind", string(KindHTTP)))
@@ -645,6 +660,21 @@ func Overgated(logger *zap.Logger, s string) {
 // Store is an exported interface, which another module may implement with
 // errors of its own: one of its errors is not over-gated.
 type Store interface{ Get() error }
+
+// getter is an unexported interface a Store's value is asserted for: what
+// the value holds may be another module's, whose errors are its own.
+type getter interface{ Get() error }
+
+// Capabilities logs the errors of the capabilities a Store's value is
+// asserted for, whose one implementation in keploy is safe.
+func Capabilities(logger *zap.Logger, st Store) {
+	if g, ok := st.(getter); ok {
+		logger.Error("a capability's error", zap.Error(g.Get())) // want: error
+	}
+	if g, ok := st.(interface{ Get() error }); ok {
+		logger.Error("an interface literal's error", zap.Error(g.Get())) // want: error
+	}
+}
 
 // Panics logs a recovered panic's value, whatever code raised it, and the
 // connection id under its key in a context and a map, where every value put
@@ -736,8 +766,9 @@ func OptedIn(logger *zap.Logger, s string) { optedIn(logger, s) }
 
 // Prints writes to the process's stdout and stderr, which a user reads beside
 // the log, and to a crash report, which leaves the machine: each value is
-// judged as a field's is.
-func Prints(logger *zap.Logger, w io.Writer, s string, n int) {
+// judged as a field's is. w is an exported function's writer, which a caller
+// the scan does not read may give stdout.
+func Prints(logger *zap.Logger, w io.Writer, cmd *cobra.Command, s string, n int) {
 	fmt.Println("a constant", n)
 	fmt.Println("a value", s) // want: print
 	fmt.Printf("%d calls\n", n)
@@ -745,10 +776,40 @@ func Prints(logger *zap.Logger, w io.Writer, s string, n int) {
 	fmt.Printf("a type %T\n", s)
 	fmt.Fprintln(os.Stderr, "a value", s) // want: print
 	fmt.Fprintf(os.Stdout, "%d\n", n)
-	fmt.Fprintln(w, "a value", s)
+	fmt.Fprintln(w, "a value", s)     // want: print
 	fmt.Println("an error", parse(s)) // want: error
 	fmt.Println("an error", opened())
-	_, err := fmt.Fprintf(w, "a value %s", s)
+	var buf strings.Builder
+	fmt.Fprintln(&buf, "a value", s) // a buffer's text is judged where it is printed or logged
+	toFile(s)
+	println("a value", s) // want: print
+	print("a constant")
+	_, _ = os.Stderr.Write([]byte(s))   // want: print
+	_, _ = os.Stdout.WriteString(s)     // want: print
+	_, _ = io.WriteString(os.Stdout, s) // want: print
+	out := os.Stderr
+	fmt.Fprintf(out, "%s", s) // want: print
+	var wr io.Writer = os.Stdout
+	fmt.Fprintln(wr, s) // want: print
+	p := printer{out: os.Stdout}
+	p.say(s)
+	pp.Printf("%s", s)                     // want: print
+	pp.New().Println(s)                    // want: print
+	color.New(color.FgRed).Printf("%s", s) // want: print
+	color.Red("%s", s)                     // want: print
+	cmd.Println(s)                         // want: print
+	fmt.Fprintln(cmd.OutOrStdout(), s)     // want: print
+	fmt.Fprintln(cmd.ErrOrStderr(), "a constant")
+	bw := bufio.NewWriter(os.Stdout)
+	fmt.Fprintf(bw, "%s", s) // want: print
+	_ = bw.Flush()
+	t := tablewriter.NewTable(os.Stdout)
+	_ = t.Append([]string{s}) // want: print
+	logf := logger.Sugar().Debugf
+	logf("%s", s) // want: sugar
+	pf := fmt.Printf
+	pf("%s", s)                               // want: sugar
+	_, err := fmt.Fprintf(w, "a value %s", s) // want: print
 	logger.Error("a print's error is its writer's", zap.Error(err))
 	sentry.CaptureMessage("a constant")
 	sentry.CaptureMessage(s)          // want: telemetry
@@ -811,6 +872,46 @@ func Vars(logger *zap.Logger, s string) {
 	logger.Info("joined", zap.String("p", filepath.Join("a", banner)))
 	logger.Info("cut", zap.Strings("p", strings.Split(s, ","))) // want: field
 }
+
+// URLs logs a request's URL: its path and its query are content, a site of
+// the url kind, which only a reason that says whose URL it is excuses.
+func URLs(logger *zap.Logger, r *http.Request) {
+	logger.Info("a path", zap.String("path", r.URL.Path))           // want: url
+	logger.Info("a target", zap.String("uri", r.RequestURI))        // want: url
+	logger.Info("a query", zap.String("q", r.URL.Query().Get("q"))) // want: url
+	full, path := targets(r)
+	logger.Info("a target's path", zap.String("upstream", path)) // want: url
+	logger.Info("a target", zap.String("full", full))            // want: url
+	logger.Info("a host", zap.String("host", r.Host))            // want: field
+	logger.Info("a shaped path", logurl.Field("path", r.URL.Path))
+	fmt.Println("a path", r.URL.EscapedPath()) // want: url
+	logger.Info("a path: " + r.URL.Path)       // want: url
+}
+
+// targets is a request's URL and its URL without its query.
+func targets(r *http.Request) (string, string) {
+	return r.URL.String(), "http://" + r.Host + r.URL.EscapedPath()
+}
+
+// printer writes its lines to out, which its one literal sets to stdout.
+type printer struct{ out io.Writer }
+
+func (p printer) say(s string) { fmt.Fprintln(p.out, s) } // want: print
+
+// toFile writes to a file it makes, which is no print.
+func toFile(s string) {
+	f, err := os.Create(filepath.Join(os.TempDir(), "out.txt"))
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	fmt.Fprintln(f, s)
+	_, _ = f.WriteString(s)
+	writeTo(f, s)
+}
+
+// writeTo is given a file alone: what it writes is no print.
+func writeTo(w io.Writer, s string) { fmt.Fprintln(w, s) }
 
 // said is a value as a line may say it: whole only where the switch's opt-in
 // returns it.
