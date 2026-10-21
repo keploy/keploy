@@ -538,10 +538,13 @@ func TestProvenRefusalIsTheSwitchs(t *testing.T) {
 }
 
 // A record that captured no call names keploy's Go integration under the
-// switch, and keeps its advice with the switch off.
+// switch, and tells a suite in another language, which has none in this
+// release, to run with KEPLOY_PROVEN=0; it keeps its advice with the switch
+// off.
 func TestNothingCapturedNext(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	require.Contains(t, nothingCapturedNext(), "defer keploytest.T(t)()")
+	require.Contains(t, nothingCapturedNext(), "for Go only, so run a suite in another language with KEPLOY_PROVEN=0")
 	require.NotContains(t, nothingCapturedNext(), "docker")
 	t.Setenv(provenswitch.Env, "0")
 	require.Equal(t, "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command", nothingCapturedNext())

@@ -1552,11 +1552,13 @@ func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks
 
 // nothingCapturedNext is what to do about a record that captured no call.
 // Under the proven switch a test's calls are captured once its harness
-// reports it to keploy, so the integration is named; with the switch off the
-// advice is as it was.
+// reports it to keploy, so the integration is named, and, as this release
+// has one for Go only, a suite in another language (pytest, jest, JUnit) is
+// told to run without the proven model, as enterprise's replay verdict tells
+// it; with the switch off the advice is as it was.
 func nothingCapturedNext() string {
 	if provenswitch.On() {
-		return "confirm the tests call an external dependency (HTTP, MySQL, ...) and report themselves to keploy: in Go, make `defer keploytest.T(t)()` each test's first line (github.com/keploy/go-sdk/v3/keploytest)"
+		return "confirm the tests call an external dependency (HTTP, MySQL, ...) and report themselves to keploy: in Go, make `defer keploytest.T(t)()` each test's first line (github.com/keploy/go-sdk/v3/keploytest); this release has a keploy integration for Go only, so run a suite in another language with " + provenswitch.Env + "=0, without the proven model"
 	}
 	return "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"
 }
