@@ -23,6 +23,20 @@ var countReadClock stall.Clock
 // soon it says it waits (countReads.every). Tests shorten it.
 var countReadEvery = drainProgressEvery
 
+// countReadTicks is what such a wait looks again on, every countReadEvery:
+// keploy's own ticker. Tests set one they drive, to count the wait's looks.
+var countReadTicks = func(every time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(every)
+	return t.C, t.Stop
+}
+
+// askingCheck, set only by a test, is called under the proven switch as the
+// consumer asks a saved test case's check (captureWatch.afterTestCase),
+// before the ask takes effect: a test holds it there to see what the stop's
+// drains do while the check is being asked (Recorder.holdForReads). nil in
+// keploy.
+var askingCheck func(name string)
+
 // countReads are a record watch's reads of the agent's count of what it could
 // not capture (CaptureLossReader): the CA watch's with the proven switch off
 // (caRejectWatch), and captureWatch's with it on. Every read but a watch's
@@ -350,8 +364,8 @@ func (r *countReads) waitFor(done <-chan struct{}, offer bool) bool {
 		notice = utils.NewStopNowNotice(r.every)
 		defer notice.Withdraw()
 	}
-	tick := time.NewTicker(r.every)
-	defer tick.Stop()
+	ticks, stopTicks := countReadTicks(r.every)
+	defer stopTicks()
 	said, offering := false, false
 	for {
 		var interrupt <-chan struct{}
@@ -368,7 +382,7 @@ func (r *countReads) waitFor(done <-chan struct{}, offer bool) bool {
 			// left it before the wait ends, whichever goroutine runs first.
 			<-done
 			return false
-		case <-tick.C:
+		case <-ticks:
 		}
 		wasOffering := offering
 		if notice != nil {

@@ -222,6 +222,9 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		w.mu.Unlock()
 		return
 	}
+	if askingCheck != nil {
+		askingCheck(name)
+	}
 	w.reads.askTest(name)
 }
 

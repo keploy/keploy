@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -145,13 +144,13 @@ func (r *Recorder) readRealRun(ctx context.Context) (*models.RealRun, error) {
 		}
 		got <- answer{run, err}
 	}()
-	tick := time.NewTicker(countReadEvery)
-	defer tick.Stop()
+	ticks, stopTicks := countReadTicks(countReadEvery)
+	defer stopTicks()
 	for said := false; ; {
 		select {
 		case a := <-got:
 			return a.run, a.err
-		case <-tick.C:
+		case <-ticks:
 			if !said {
 				said = true
 				r.logger.Info(fmt.Sprintf("Still waiting for the keploy agent to say which mock.real connections it could not capture; Ctrl+C does not cut this short: the read is given up once keploy has had %s of its own time to run without an answer", stall.HangBudget))

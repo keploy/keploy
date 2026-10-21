@@ -2720,7 +2720,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				windowMaps.addTest(testCase)
 				capWatch.afterTestCase(ctx, testCase.Name)
 				// Asked: its read is out now, which holds the stop's drains
-				// in its turn (holdForReads).
+				// in its turn (holdForReads). Uncounted only after the ask,
+				// or a drain that looks in between ends the agent's streams
+				// with the check yet to be made
+				// (TestStart_ADrainThatLooksAsACheckIsAskedHoldsTheAgentsStreamsForIt).
 				r.unchecked.Add(-1)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{

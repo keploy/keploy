@@ -36,6 +36,9 @@ import (
 
 // manualCounts has every read of the agent's count measure its bound on a
 // clock the test drives, and its waits look every millisecond.
+// keploysTicks is countReadTicks as keploy has it.
+var keploysTicks = countReadTicks
+
 func manualCounts(t *testing.T) *stall.ManualClock {
 	t.Helper()
 	clk := &stall.ManualClock{}
@@ -788,9 +791,11 @@ func TestStart_ACheckTheAgentNeverAnswersHoldsNoTestCaseUp(t *testing.T) {
 // holds its own stop only while this recording holds its frame streams open
 // (routes.HoldStop). Asked to end them (EndRecordingStreams), it ends each at
 // its marker, and goes: a read of its count asked from then on is refused (its
-// HTTP server shuts down), while one it took before is answered. It says it
+// HTTP server shuts down), and the one it was answering is cut (its process
+// exits: Shutdown waits for no read past its own short grace). It says it
 // still holds something from before the stop, its capture moving (with stuck,
 // not moving), until clear is set, and holds read number slow until released.
+// refused counts the reads it refused or cut.
 type stopHeldAgent struct {
 	*endingAgent
 	appEnd   chan struct{}
@@ -821,6 +826,9 @@ func (a *stopHeldAgent) GetCaptureLosses(ctx context.Context) (models.CaptureLos
 		close(a.asked)
 		select {
 		case <-a.release:
+		case <-a.ended: // it went with this read out
+			a.refused.Add(1)
+			return nil, errors.New("failed to ask the agent for its capture losses: read tcp 127.0.0.1:52114->127.0.0.1:43900: read: connection reset by peer")
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -955,6 +963,41 @@ func TestStart_TheSwitchsFinalReadIsMadeWhileTheAgentIsHeld(t *testing.T) {
 	close(a.appEnd) // the stop, while test-1's check is out
 	if !releaseOnceHeldOrGone(t, a, logs) {
 		t.Error("the recording ended the agent's streams, and the agent went, with a read of its count out")
+	}
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 3 {
+		t.Fatalf("%d reads answered; want the base, test-1's check and the final read", n)
+	}
+}
+
+// The stop's drains hold the agent's streams for a read out with none asked
+// behind it, as for one with another queued: at a loaded stop the final read
+// is most often the only one slow to come back. test-1's check is answered
+// before the stop; the final read, slow and out alone, is made while the agent
+// is up, and the recording, which lost nothing, passes. Were the drains to
+// hold only while a read waits behind the one out, they would end the streams
+// with the final read out; the agent would go and cut it, and the recording
+// fail as not verified after its last test case (exit 1).
+func TestStart_TheSwitchsFinalReadOutAloneIsMadeWhileTheAgentIsHeld(t *testing.T) {
+	a := newStopHeldAgent(3) // the base read, test-1's check; the final read, out alone, is slow
+	a.clear.Store(true)      // nothing held from before the stop
+	_, logs, done := startHeld(t, a, nil, nil)
+	select {
+	case a.incoming <- tcAt("test-1", time.Now()):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("test-1 was never taken")
+	}
+	deadline := time.Now().Add(30 * time.Second) // bounds only a check that never comes back
+	for a.answered.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("test-1's check never came back")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(a.appEnd) // the stop, with no read out
+	within(t, a.asked, "the final read")
+	if !releaseOnceHeldOrGone(t, a, logs) {
+		t.Error("the recording ended the agent's streams, and the agent went, with the final read out alone")
 	}
 	passedWhole(t, done, logs, &a.refused)
 	if n := a.answered.Load(); n != 3 {
@@ -1523,6 +1566,74 @@ func TestStart_TheSwitchsCheckOfATestCaseSavedSlowlyIsMadeWhileTheAgentIsHeld(t 
 		}
 	}
 	close(db.release)
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 4 {
+		t.Fatalf("%d reads answered; want the base, test-1's check, the final read and test-2's check", n)
+	}
+}
+
+// The consumer asks a saved test case's check before it stops counting the
+// test case as one still to be checked (Recorder.unchecked), so a drain that
+// looks while the check is being asked holds the agent's streams for it, and
+// the check is made while the agent is up: the recording, which lost
+// nothing, passes. Were the consumer to stop counting it first, a drain
+// looking in between would find nothing unchecked and no read out, and end
+// the streams; the agent would go, the check be refused, and test-2 be named
+// not verified (exit 1).
+func TestStart_ADrainThatLooksAsACheckIsAskedHoldsTheAgentsStreamsForIt(t *testing.T) {
+	a := newStopHeldAgent(0)
+	asking, release := make(chan struct{}), make(chan struct{})
+	askingCheck = func(name string) {
+		if name == "test-2" {
+			close(asking)
+			<-release
+		}
+	}
+	t.Cleanup(func() { askingCheck = nil })
+	var releaseOnce sync.Once
+	letAsk := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letAsk) // a test that failed with the ask held lets it go
+	r, logs, done := startHeld(t, a, nil, nil)
+	captured := time.Now()
+	send := func(name string) {
+		t.Helper()
+		select {
+		case a.incoming <- tcAt(name, captured):
+		case <-time.After(30 * time.Second): // only turns a hang into a failure
+			t.Fatalf("%s was never taken", name)
+		}
+	}
+	deadline := time.Now().Add(30 * time.Second) // bounds only what never comes
+	waitAnswered := func(n int32, what string) {
+		t.Helper()
+		for a.answered.Load() < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s never came back", what)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	send("test-1")
+	waitAnswered(2, "test-1's check")
+	close(a.appEnd) // the stop
+	waitAnswered(3, "the final read")
+	send("test-2") // saved by the drain; its check is being asked
+	within(t, asking, "test-2's check, being asked")
+	a.clear.Store(true) // the agent holds nothing more
+	// Two looks that held the streams for test-2 alone: every read through,
+	// and test-2's check not yet asked.
+	for held := r.checkHolds.Load(); r.checkHolds.Load() < held+2; {
+		select {
+		case <-a.ended:
+			t.Fatal("the recording ended the agent's streams, and the agent went, with test-2's check being asked")
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop's drain never held the agent's streams for test-2's check: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	letAsk()
 	passedWhole(t, done, logs, &a.refused)
 	if n := a.answered.Load(); n != 4 {
 		t.Fatalf("%d reads answered; want the base, test-1's check, the final read and test-2's check", n)

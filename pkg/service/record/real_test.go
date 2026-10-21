@@ -256,6 +256,9 @@ func TestReportRealRunIsGivenUpOnItsBound(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	stoppedRun(t)
 	clk := manualCounts(t)
+	ticks := make(chan time.Time) // the wait's looks, each taken as it is sent
+	countReadTicks = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+	t.Cleanup(func() { countReadTicks = keploysTicks })
 	inst := newSilentRealInst()
 	r, logs := realRecorder(inst, "db:5432")
 	ctx, stop := context.WithCancel(context.Background())
@@ -263,6 +266,17 @@ func TestReportRealRunIsGivenUpOnItsBound(t *testing.T) {
 	done := make(chan struct{})
 	go func() { r.reportRealRun(ctx); close(done) }()
 	within(t, inst.asked, "the mock.real read")
+	look := func() {
+		t.Helper()
+		select {
+		case ticks <- time.Time{}:
+		case <-done:
+			t.Fatal("the mock.real read ended on the stop, a press, or wall time keploy could not run")
+		case <-time.After(30 * time.Second): // only turns a hang into a failure
+			t.Fatal("the wait never looked again")
+		}
+	}
+	look() // its first look says it waits
 	saidTheRealBound(t, logs)
 	if utils.MarkInterruptedAgain() {
 		t.Fatal("the mock.real read stood an offer of the stop's")
@@ -270,11 +284,8 @@ func TestReportRealRunIsGivenUpOnItsBound(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		clk.Pass() // wall time passes; keploy cannot run
 	}
-	time.Sleep(50 * time.Millisecond) // the wait looks again, every millisecond: it says so once
-	select {
-	case <-done:
-		t.Fatal("the mock.real read ended on the stop, a press, or wall time keploy could not run")
-	default:
+	for i := 0; i < 11; i++ {
+		look() // taken once the look before is through: ten more looks
 	}
 	if n := logs.FilterMessageSnippet("Still waiting for the keploy agent to say which mock.real").Len(); n != 1 {
 		t.Fatalf("said %d times that it waits, want once", n)
