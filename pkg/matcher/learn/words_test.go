@@ -532,6 +532,10 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		{"a layout it does not know", rec, with(func(c *models.WordsEntry) { c.Slots[1].Layout = "iso9999" }), whyKind},
 		{"a skeleton that is not the recorded one", rec, with(func(c *models.WordsEntry) { c.Slots[1].Skeleton = "d4-d2-d2" }), whyRecSkeleton},
 		{"an instant slot where none is", rec, with(func(c *models.WordsEntry) { c.Slots[1].Seg = 0 }), whyRange},
+		{"a token slot beside a run slot", rec, with(func(c *models.WordsEntry) {
+			c.Slots = append(c.Slots, models.WordSlot{Seg: c.Slots[0].Seg, Kind: models.WordSlotToken})
+		}), whyRange},
+		{"a run slot twice", rec, with(func(c *models.WordsEntry) { c.Slots = append(c.Slots, c.Slots[0]) }), whyRange},
 	} {
 		ok, why := WordsAdmit(tc.rec, f, tc.e)
 		if ok || why != tc.why {
@@ -539,6 +543,38 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		}
 		if ok, _ := WordsAdmit(tc.rec, tc.rec, tc.e); ok && tc.rec == rec {
 			t.Errorf("%s: a void entry admits even the recording", tc.name)
+		}
+	}
+}
+
+// Every instant a value's entry collapses is one instant slot's: an entry
+// whose two instant slots name one instant of a value of two (malformed: the
+// learn step never writes it) is void, for F's value and the recording
+// alike, and never reaches the instant that has no slot.
+func TestEachInstantOfAnEntryIsOneSlots(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	at := func(t time.Time) string { return t.Format(time.RFC3339) }
+	rec := "from " + at(wAt) + " to " + at(wAt.Add(time.Second))
+	f := "from " + at(later) + " to " + at(later.Add(time.Second))
+	e := learnedWords(t, rec, f)
+	if got := slotsOf(e); got != "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ s3i:iso8601:d4-d2-d2Td2:d2:d2FZ" {
+		t.Fatalf("slots %s", got)
+	}
+	for _, seg := range []int{1, 3} {
+		c := e.Clone()
+		c.Slots[0].Seg, c.Slots[1].Seg = seg, seg
+		for _, live := range []string{f, rec} {
+			if ok, why := WordsAdmit(rec, live, c); ok || why != whyRange {
+				t.Errorf("both instant slots at segment %d, %q: admitted %v (%q), want void %q", seg, live, ok, why, whyRange)
+			}
+		}
+	}
+	// A token or a run slot at an instant is void too.
+	for _, kind := range []string{models.WordSlotToken, models.WordSlotRun} {
+		c := e.Clone()
+		c.Slots = append(c.Slots, models.WordSlot{Seg: 1, Kind: kind})
+		if ok, why := WordsAdmit(rec, f, c); ok || why != whyRange {
+			t.Errorf("a %q slot beside an instant's: admitted %v (%q), want void %q", kind, ok, why, whyRange)
 		}
 	}
 }

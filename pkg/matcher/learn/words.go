@@ -1121,16 +1121,21 @@ func WordsAdmit(rec, live string, e models.WordsEntry) (ok bool, why string) {
 		}
 		bySeg[s.Seg] = append(bySeg[s.Seg], s)
 	}
-	// A segment holds one instant or token slot, or slots of its runs, each
-	// once; and every collapsed instant is an instant slot's.
+	// Every collapsed instant is one instant slot's, and is read as it
+	// (admitWords): a segment of an instant holds that slot alone (only an
+	// instant slot names one, above). Any other segment holds one token
+	// slot, or slots of its runs, each once.
 	for g, sg := range tr.segs {
 		slots := bySeg[g]
-		if sg.inst >= 0 && (len(slots) != 1 || slots[0].Kind != models.WordSlotInstant) {
-			return false, whyRange
+		if sg.inst >= 0 {
+			if len(slots) != 1 {
+				return false, whyRange
+			}
+			continue
 		}
 		runs := map[int]bool{}
 		for _, s := range slots {
-			if s.Kind != models.WordSlotRun && len(slots) != 1 || s.Kind == models.WordSlotRun && runs[s.Run] {
+			if s.Kind == models.WordSlotToken && len(slots) != 1 || s.Kind == models.WordSlotRun && runs[s.Run] {
 				return false, whyRange
 			}
 			runs[s.Run] = true
