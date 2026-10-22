@@ -33,12 +33,15 @@ func withWords(t *testing.T, m *models.Mock, place, rec, f string) *models.Mock 
 	return m
 }
 
-// multipartNote is a multipart form with one field, note.
-func multipartNote(boundary, note string) (string, string) {
+// multipartNote is a multipart form whose field note holds notes, a part
+// each.
+func multipartNote(boundary string, notes ...string) (string, string) {
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
 	_ = w.SetBoundary(boundary)
-	_ = w.WriteField("note", note)
+	for _, note := range notes {
+		_ = w.WriteField("note", note)
+	}
 	_ = w.Close()
 	return "multipart/form-data; boundary=" + boundary, b.String()
 }
@@ -46,7 +49,9 @@ func multipartNote(boundary, note string) (string, string) {
 // Every strict serve site reads a leaf's words (r9 §1, SF1): the path, a
 // query value, a header, a form field, a multipart field and a JSON body
 // field each let only the learned words change. The founder's case at each:
-// a fresh ref is no difference, "paid 999" is.
+// a fresh ref is no difference, "paid 999" is. Words admit one value: where
+// a call can send the field twice, the fresh ref with one more value beside
+// it is refused, as with no words.
 func TestEachStrictSiteReadsTheWords(t *testing.T) {
 	const rec, f, fresh, regressed = "ORD-1 paid 100 ref=a1b2c3", "ORD-1 paid 100 ref=d4e5f6", "ORD-1 paid 100 ref=0f9e8d", "ORD-1 paid 999 ref=0f9e8d"
 	seg := func(s string) string { return strings.NewReplacer(" ", "-", "=", "-").Replace(s) }
@@ -58,25 +63,39 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 		mock  func(v string) *models.Mock
 		call  func(v string) *req
 		value func(v string) string
+		// twice is the call sending the field twice, a then b (nil where
+		// a call cannot).
+		twice func(a, b string) *req
 	}{
 		{"a path segment", "url.path.2",
 			func(v string) *models.Mock { return recorded("m", "/v1/orders/"+seg(v), nil, "") },
-			func(v string) *req { return sent("/v1/orders/"+seg(v), nil, "") }, seg},
+			func(v string) *req { return sent("/v1/orders/"+seg(v), nil, "") }, seg, nil},
 		{"a query value", "url.query.note",
 			func(v string) *models.Mock { return recorded("m", "/v1/orders?note="+url.QueryEscape(v), nil, "") },
-			func(v string) *req { return sent("/v1/orders?note="+url.QueryEscape(v), nil, "") }, func(v string) string { return v }},
+			func(v string) *req { return sent("/v1/orders?note="+url.QueryEscape(v), nil, "") }, func(v string) string { return v },
+			func(a, b string) *req {
+				return sent("/v1/orders?note="+url.QueryEscape(a)+"&note="+url.QueryEscape(b), nil, "")
+			}},
 		{"a header", "header.x-order-ref",
 			func(v string) *models.Mock {
 				return recorded("m", "/v1/orders", map[string]string{"X-Order-Ref": v}, "")
 			},
-			func(v string) *req { return sent("/v1/orders", map[string]string{"X-Order-Ref": v}, "") }, func(v string) string { return v }},
+			func(v string) *req { return sent("/v1/orders", map[string]string{"X-Order-Ref": v}, "") }, func(v string) string { return v },
+			func(a, b string) *req {
+				in := sent("/v1/orders", map[string]string{"X-Order-Ref": a}, "")
+				in.header.Add("X-Order-Ref", b)
+				return in
+			}},
 		{"a form field", "body.note",
 			func(v string) *models.Mock {
 				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(v))
 			},
 			func(v string) *req {
 				return sent("/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(v))
-			}, func(v string) string { return v }},
+			}, func(v string) string { return v },
+			func(a, b string) *req {
+				return sent("/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(a)+"&"+form(b))
+			}},
 		{"a multipart field", "body.note",
 			func(v string) *models.Mock {
 				ct, body := multipartNote("AAA", v)
@@ -85,7 +104,11 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			func(v string) *req {
 				ct, body := multipartNote("BBB", v)
 				return sent("/v1/orders", map[string]string{"Content-Type": ct}, body)
-			}, func(v string) string { return v }},
+			}, func(v string) string { return v },
+			func(a, b string) *req {
+				ct, body := multipartNote("BBB", a, b)
+				return sent("/v1/orders", map[string]string{"Content-Type": ct}, body)
+			}},
 		{"a JSON body field", "body.note",
 			func(v string) *models.Mock {
 				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/json"}, jsonOf(v))
@@ -93,7 +116,7 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			func(v string) *req {
 				return sent("/v1/orders", map[string]string{"Content-Type": "application/json"}, jsonOf(v))
 			},
-			func(v string) string { return v }},
+			func(v string) string { return v }, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))
@@ -102,6 +125,15 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			}
 			if served, _ := strictMatch(t, tc.call(regressed), nil, nil, nil, withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))); served != nil {
 				t.Fatalf("paid 999 at %s is served: a word F did not see change changed", tc.place)
+			}
+			if tc.twice != nil {
+				// The first value is one the words admit; the second is
+				// one more value the recording never held.
+				for _, extra := range []string{"EXTRA", tc.value(fresh)} {
+					if served, _ := strictMatch(t, tc.twice(fresh, extra), nil, nil, nil, withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))); served != nil {
+						t.Fatalf("a fresh ref at %s sent with %q beside it is served: words admit one value", tc.place, extra)
+					}
+				}
 			}
 			// The words are read only under the switch (knownOf): against
 			// the recording's own destination, so only the words decide, a
@@ -123,8 +155,9 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 // a key recorded once ("ORD-1 paid, ref=a1b2c3") admit only one value, by
 // the matcher's strict serve and by the learn step's own pass, so the same
 // text sent as two values ("ORD-1 paid" and "ref=..."), its ref fresh or as
-// recorded, is refused, as with no words. A key recorded twice is compared
-// whole: the learn step learns no words of it.
+// recorded, is refused, as with no words, and so is a value they admit sent
+// with one more beside it. A key recorded twice is compared whole: the learn
+// step learns no words of it.
 func TestAFormKeySentTwiceIsNotOneValue(t *testing.T) {
 	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	const note, noteF = "ORD-1 paid, ref=a1b2c3", "ORD-1 paid, ref=d4e5f6"
@@ -137,6 +170,8 @@ func TestAFormKeySentTwiceIsNotOneValue(t *testing.T) {
 		{"one value, a fresh ref", one("ORD-1 paid, ref=0f9e8d"), true},
 		{"two values, a fresh ref", two("ORD-1 paid", "ref=0f9e8d"), false},
 		{"two values, as recorded", two("ORD-1 paid", "ref=a1b2c3"), false},
+		{"a fresh ref, one more value beside it", two("ORD-1 paid, ref=0f9e8d", "EXTRA"), false},
+		{"as recorded, then a fresh ref", two(note, "ORD-1 paid, ref=0f9e8d"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := withWords(t, recorded("m", "/v1/orders", ct, one(note)), "body.note", note, noteF)
@@ -157,6 +192,51 @@ func TestAFormKeySentTwiceIsNotOneValue(t *testing.T) {
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/orders", two("ORD-1", "ref-a1"), ct, `{"ok":true}`)}}
 	if served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/orders", two("ORD-1", "ref-b2"), ct), db, n, opts); err != nil || served != nil || miss == nil {
 		t.Fatalf("a key recorded twice: served %v miss %+v err %v, want refused", served, miss, err)
+	}
+}
+
+// A key recorded twice holds a set of values: sent in another order, the
+// call is the recorded one, to the strict serve (which reads them as
+// members) and to the learn step alike (its shape reads them sorted), for a
+// form key and a query parameter; another set of values is refused by both.
+func TestAKeySentTwiceInAnotherOrderIsTheRecordedCall(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	for _, tc := range []struct {
+		name, method, target, body string
+		header                     map[string]string
+		// sent is the call with its values as given.
+		sent func(a, b string) (target, body string)
+	}{
+		{"a form key", "POST", "/v1/orders", "note=ORD-1&note=ref-a1", ct,
+			func(a, b string) (string, string) { return "/v1/orders", "note=" + a + "&note=" + b }},
+		{"a query parameter", "GET", "/v1/orders?note=ORD-1&note=ref-a1", "", nil,
+			func(a, b string) (string, string) { return "/v1/orders?note=" + a + "&note=" + b, "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, c := range []struct {
+				a, b string
+				ok   bool
+			}{
+				{"ref-a1", "ORD-1", true},
+				{"ORD-1", "ref-a1", true},
+				{"ref-b2", "ORD-1", false},
+			} {
+				target, body := tc.sent(c.a, c.b)
+				h, n, opts := learnOn(t)
+				db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, tc.method, tc.target, tc.body, tc.header, `{"ok":true}`)}}
+				served, miss, err := h.learnMatch(context.Background(), live(tc.method, target, body, tc.header), db, n, opts)
+				if err != nil || (served != nil) != c.ok {
+					t.Errorf("%s, %s: the learn step served %v (miss %+v, err %v), want %v", c.a, c.b, served != nil, miss, err, c.ok)
+				}
+				rec := recorded("m", tc.target, tc.header, tc.body)
+				in := sent(target, tc.header, body)
+				in.method = tc.method
+				rec.Spec.HTTPReq.Method = models.Method(tc.method)
+				if served, diag := strictMatch(t, in, nil, nil, nil, rec); (served != nil) != c.ok {
+					t.Errorf("%s, %s: the strict serve served %v (%+v), want %v", c.a, c.b, served != nil, diag, c.ok)
+				}
+			}
+		})
 	}
 }
 
