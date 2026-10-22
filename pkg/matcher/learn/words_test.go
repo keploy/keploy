@@ -259,6 +259,31 @@ func TestAnInstantSlotIsSelectedBySegmentNotByMatch(t *testing.T) {
 	}
 }
 
+// WordsAdmit tries at most maxCollapses ways to place a live value's
+// instants; a value with more is refused, and says so: a way it did not try
+// might have admitted it, so no way it tried says why it is not.
+func TestAValueOfTooManyInstantsToPlaceIsRefusedSayingSo(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	at := func(t time.Time) string { return t.Format(time.RFC3339) }
+	rec := "from " + at(wAt) + " to " + at(wAt.Add(time.Second))
+	e := learnedWords(t, rec, "from "+at(later)+" to "+at(later.Add(time.Second)))
+	if got := slotsOf(e); got != "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ s3i:iso8601:d4-d2-d2Td2:d2:d2FZ" {
+		t.Fatalf("slots %s", got)
+	}
+	// 24 instants hold C(24, 2) = 276 ways to place two.
+	many := make([]string, 24)
+	for i := range many {
+		many[i] = at(later.Add(time.Duration(i) * time.Minute))
+	}
+	if ok, why := WordsAdmit(rec, strings.Join(many, " "), e); ok || why != whyTooMany {
+		t.Fatalf("24 instants admitted %v (%s), want refused: %s", ok, why, whyTooMany)
+	}
+	// A few are placed, and judged by the ways tried.
+	if ok, why := WordsAdmit(rec, strings.Join(many[:3], " "), e); ok || why == whyTooMany {
+		t.Fatalf("3 instants admitted %v (%s), want refused by a way tried", ok, why)
+	}
+}
+
 // What is refused, each with its reason: a value whose parts changed, a word
 // that moved or changed only its case, one beyond ASCII, one after an escape,
 // one inside an instant that is no accepted clock read (its zone changed, or

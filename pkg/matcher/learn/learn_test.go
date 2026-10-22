@@ -1589,7 +1589,7 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 // excuseAll is a KnownLive whose words admit every live value.
 type excuseAll struct{}
 
-func (excuseAll) Excused(Leaf) (bool, bool)          { return false, false }
+func (excuseAll) Excused(Leaf) (bool, bool)           { return false, false }
 func (excuseAll) ExcusedLive(Leaf, Leaf) (bool, bool) { return true, true }
 
 // Compare asks a KnownLive of a leaf only once both sides hold it in one

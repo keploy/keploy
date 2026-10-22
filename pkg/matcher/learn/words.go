@@ -487,16 +487,16 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 			return whyEscape
 		}
 	}
-	// Instants that moved as F's clock moves them but changed their zone,
-	// and every other instant of a declared layout that is no accepted read.
+	// Every instant of a declared layout that is no accepted read. (One that
+	// moved as F's clock moves it but changed its zone never gets here:
+	// learnWords refuses it first, whyZone.)
 	for _, side := range []struct {
 		s       string
-		pairs   func(clockPair) clockSpan
 		spanOf  func(changedSpan) [2]int
 		instant []collapsed
 	}{
-		{rec, func(p clockPair) clockSpan { return p.r }, func(c changedSpan) [2]int { return c.r }, spansOf(c.pairs, true)},
-		{live, func(p clockPair) clockSpan { return p.l }, func(c changedSpan) [2]int { return c.l }, spansOf(c.pairs, false)},
+		{rec, func(c changedSpan) [2]int { return c.r }, spansOf(c.pairs, true)},
+		{live, func(c changedSpan) [2]int { return c.l }, spansOf(c.pairs, false)},
 	} {
 		overlaps := func(from, to int) bool {
 			for _, sp := range spans {
@@ -509,12 +509,6 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 				}
 			}
 			return false
-		}
-		for _, z := range c.zoned {
-			sp := side.pairs(z)
-			if overlaps(sp.from, sp.to) {
-				return whyZone
-			}
 		}
 		taken := make([]bool, len(side.s))
 		for _, x := range side.instant {
@@ -1161,10 +1155,12 @@ func WordsAdmit(rec, live string, e models.WordsEntry) (ok bool, why string) {
 	switch {
 	case admitted:
 		return true, ""
+	case exhausted:
+		// Cut short: a collapse not tried might have admitted it, so no
+		// one tried says why it is not.
+		return false, whyTooMany
 	case first != "":
 		return false, first
-	case exhausted:
-		return false, whyTooMany
 	}
 	return false, "an instant of it is not where it was recorded, in its layout"
 }
