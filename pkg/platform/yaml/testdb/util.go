@@ -135,7 +135,7 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
 		Real:        tc.Real,
-		Origin:      tc.Origin,
+		Origin:      tc.Origin.Persisted(),
 	}
 	switch tc.Kind {
 	case models.HTTP:
@@ -171,7 +171,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
 		Real:        tc.Real,
-		Origin:      tc.Origin,
+		Origin:      tc.Origin.Persisted(),
 	}
 
 	switch tc.Kind {

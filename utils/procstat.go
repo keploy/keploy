@@ -41,7 +41,12 @@ const statBufSize = 4096
 // ReadProcStat reads and parses /proc/<pid>/stat. It is false when the line
 // cannot be read (the process has exited, or there is no /proc) or parsed.
 func ReadProcStat(pid int) (ProcStat, bool) {
-	line, err := readStat(os.DirFS("/proc"), strconv.Itoa(pid), make([]byte, statBufSize))
+	return ReadProcStatIn("/proc", pid)
+}
+
+// ReadProcStatIn is ReadProcStat of the /proc at procRoot.
+func ReadProcStatIn(procRoot string, pid int) (ProcStat, bool) {
+	line, err := readStat(os.DirFS(procRoot), strconv.Itoa(pid), make([]byte, statBufSize))
 	if err != nil {
 		return ProcStat{}, false
 	}

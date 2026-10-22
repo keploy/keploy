@@ -2,7 +2,10 @@ package reportdb
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -47,5 +50,50 @@ func TestAReportsAnswersRoundTrip(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Why keploy named no process a call came from (it runs in a PID namespace of
+// its own), and the kernel pid, travel with the call and are never written to
+// a report, in either format: a named process's comm and argv[0] are; the
+// report the replay holds keeps them all.
+func TestAReportHoldsNoKernelPid(t *testing.T) {
+	unnamed := &models.Origin{Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	named := &models.Origin{Comm: "sqs", Exe: "./sqs"}
+	call := func(src *models.Origin, answer string) models.UnmatchedCall {
+		return models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "insert keploy.events", Kind: models.MissInTest, Answer: answer, Source: src}
+	}
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(format.FileExtension(), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			report := goldenReport()
+			report.Tests[0].Answers = []models.UnmatchedCall{call(unnamed, models.AnswerByKind), call(named, models.AnswerByKind)}
+			report.Tests[0].FailureInfo.UnmatchedCalls = []models.UnmatchedCall{call(unnamed, "")}
+			report.SetAnswers = []models.UnmatchedCall{call(unnamed, models.AnswerProvisional)}
+			report.UnclaimedCalls = []models.UnmatchedCall{call(unnamed, "")}
+			if err := NewWithFormat(zap.NewNop(), dir, format).InsertReport(ctx, "test-run-0", "test-set-0", &report); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "test-run-0", "test-set-0-report."+format.FileExtension()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, leak := range []string{"2912345", models.UnnamedPIDNamespace, "source: {}", `"source":{}`} {
+				if strings.Contains(string(raw), leak) {
+					t.Fatalf("the %s report holds %q:\n%s", format.FileExtension(), leak, raw)
+				}
+			}
+			got, err := NewWithFormat(zap.NewNop(), dir, format).GetReport(ctx, "test-run-0", "test-set-0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a := got.Tests[0].Answers; len(a) != 2 || a[0].Source != nil || a[1].Source == nil || *a[1].Source != *named {
+				t.Fatalf("the answers read back as %+v", a)
+			}
+			if report.Tests[0].Answers[0].Source != unnamed || report.SetAnswers[0].Source != unnamed || report.UnclaimedCalls[0].Source != unnamed || report.Tests[0].FailureInfo.UnmatchedCalls[0].Source != unnamed {
+				t.Fatal("writing the report edited the replay's report")
+			}
+		})
 	}
 }

@@ -70,6 +70,8 @@ func fillEveryField(v reflect.Value) {
 			f.SetString(v.Type().Field(i).Name)
 		case f.Kind() == reflect.Int:
 			f.SetInt(int64(i + 1))
+		case f.Kind() == reflect.Uint32:
+			f.SetUint(uint64(i + 1))
 		case f.Kind() == reflect.Bool:
 			f.SetBool(true)
 		case f.Kind() == reflect.Slice:

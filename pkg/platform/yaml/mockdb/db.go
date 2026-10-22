@@ -1308,6 +1308,21 @@ func (ys *MockYaml) drainAndClose() {
 	}
 }
 
+// persisted is mock as a mocks.gob holds it: its origin as a file holds one
+// (models.Origin.Persisted, without what only travels), on a copy when that
+// differs; mock itself otherwise. gob writes every field a mock has.
+func persisted(mock *models.Mock) *models.Mock {
+	if mock == nil {
+		return nil
+	}
+	if p := mock.Origin.Persisted(); p != mock.Origin {
+		c := mock.ShallowCopy()
+		c.Origin = p
+		return c
+	}
+	return mock
+}
+
 func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
@@ -1323,7 +1338,7 @@ func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
 			return err
 		}
 	}
-	return ys.gobEnc.Encode(job.mock)
+	return ys.gobEnc.Encode(persisted(job.mock))
 }
 
 func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
@@ -1415,7 +1430,7 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 			return err
 		}
 	}
-	if err := ys.gobEnc.Encode(mock); err != nil {
+	if err := ys.gobEnc.Encode(persisted(mock)); err != nil {
 		return fmt.Errorf("failed to encode mock gob: %w", err)
 	}
 	// Flush immediately so the "sync" semantics hold — by the time

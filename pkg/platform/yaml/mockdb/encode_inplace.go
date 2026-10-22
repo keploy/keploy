@@ -80,7 +80,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 		Async:        mock.Spec.Async,
 		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 		Variables:    mock.Spec.Variables.Clone(),
-		Origin:       mock.Origin,
+		Origin:       mock.Origin.Persisted(),
 	}
 	switch mock.Kind {
 	case models.MySQL:

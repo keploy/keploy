@@ -161,18 +161,86 @@ func TestWindowMappingsMarkASetTheAgentMapped(t *testing.T) {
 }
 
 // The process a routing line names: comm and argv[0], one when they agree,
-// and a process keploy could not name.
+// and a process keploy could not name; one it would not name because it runs
+// in a PID namespace of its own says so, with the kernel pid and the remedy,
+// never a name.
 func TestProcessOfNamesCommAndArgv0(t *testing.T) {
-	for _, tc := range []struct{ comm, exe, want string }{
-		{"sqs", "./sqs", "`sqs` (`./sqs`)"},
-		{"sqs", "sqs", "`sqs`"},
-		{"sqs", "", "`sqs`"},
-		{"", "./sqs", "`./sqs`"},
-		{"", "", "a process keploy could not name"},
+	for _, tc := range []struct {
+		m    models.WindowedMock
+		want string
+	}{
+		{models.WindowedMock{Comm: "sqs", Exe: "./sqs"}, "`sqs` (`./sqs`)"},
+		{models.WindowedMock{Comm: "sqs", Exe: "sqs"}, "`sqs`"},
+		{models.WindowedMock{Comm: "sqs"}, "`sqs`"},
+		{models.WindowedMock{Exe: "./sqs"}, "`./sqs`"},
+		{models.WindowedMock{}, "a process keploy could not name"},
 	} {
-		if got := processOf(tc.comm, tc.exe); got != tc.want {
-			t.Errorf("processOf(%q, %q) = %q; want %q", tc.comm, tc.exe, got, tc.want)
+		for _, log := range []bool{true, false} {
+			if got := processOf(tc.m, log); got != tc.want {
+				t.Errorf("processOf(%+v, %v) = %q; want %q", tc.m, log, got, tc.want)
+			}
 		}
+	}
+	// One keploy would not name: why and the remedy, the kernel pid in the
+	// record log's line only, never in the committed reason.
+	unnamed := models.WindowedMock{Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	if got, want := processOf(unnamed, true), "a process keploy could not name ("+models.PIDNamespaceReason(2912345)+")"; got != want {
+		t.Errorf("the log line names %q; want %q", got, want)
+	}
+	for log, line := range map[bool]string{true: processOf(unnamed, true), false: processOf(unnamed, false)} {
+		for _, want := range []string{"a process keploy could not name (keploy runs in a PID namespace of its own", "--pid=host", "hostPID", "docker and compose modes"} {
+			if want == "a process keploy could not name (keploy runs in a PID namespace of its own" && log {
+				want = "a process keploy could not name (kernel pid 2912345: keploy runs in a PID namespace of its own"
+			}
+			if !strings.Contains(line, want) {
+				t.Errorf("log=%v: the namespace line %q does not say %q", log, line, want)
+			}
+		}
+		if !log && strings.Contains(line, "2912345") {
+			t.Errorf("the committed line %q holds the kernel pid", line)
+		}
+	}
+}
+
+// A routed write whose process keploy would not name, because it runs in a
+// PID namespace of its own, says that in its reason line, with the remedy and
+// without the kernel pid, which no committed file holds (S12 v16 §4.4): two
+// recordings of one app commit one line, whatever pid its process had. The
+// record log's line gives the pid.
+func TestARoutedWritesLineSaysKeployRunsInAPIDNamespaceOfItsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t.Cleanup(replay.RegisterS12Serving(func() bool { return true }))
+	t.Cleanup(models.RegisterWriteKind(testWrites, func(*models.Mock) (string, bool) { return "Test insert keploy.events", true }))
+	const clock = "proxy:run-1"
+	rec := &windowMappings{}
+	p, post := winTest("P", 1000, 1100), winTest("post-url-1", 2000, 2100)
+	p.Origin, post.Origin = &models.Origin{Clock: clock}, &models.Origin{Clock: clock}
+	rec.addTest(p)
+	rec.addTest(post)
+	insert := winMock("mock-6", testWrites, "", 1500)
+	insert.Spec.ResTimestampMock = winAt(2050)
+	// As the agent stamps it in a PID namespace of its own: the clock, and
+	// why no process is named (starts.Registry.StampOrigin).
+	insert.Origin = &models.Origin{Clock: clock, Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	rec.addMock(insert)
+	db := &markingMappingDB{}
+	core, logs := observer.New(zapcore.InfoLevel)
+	rec.write(context.Background(), zap.New(core), db, "test-set-0", nil, true, 0)
+	if len(db.worker) != 1 || db.worker[0].Name != "mock-6" {
+		t.Fatalf("worker scope %+v; want mock-6 routed", db.worker)
+	}
+	reason := db.worker[0].Reason
+	for _, want := range []string{"a process keploy could not name (keploy runs in a PID namespace of its own", "--pid=host"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("the line %q does not say %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "2912345") {
+		t.Fatalf("the committed line %q holds the kernel pid", reason)
+	}
+	routed := logs.FilterMessageSnippet("routed a write").All()
+	if len(routed) != 1 || !strings.Contains(routed[0].ContextMap()["process"].(string), "kernel pid 2912345") {
+		t.Fatalf("the record log's routing line %+v does not give the kernel pid", routed)
 	}
 }
 

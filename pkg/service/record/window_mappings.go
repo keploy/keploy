@@ -473,7 +473,7 @@ func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEnt
 			zap.String("mock", r.Mock.Name),
 			zap.String("write", r.Mock.WriteKind),
 			zap.String("test", test),
-			zap.String("process", processOf(r.Mock.Comm, r.Mock.Exe)))
+			zap.String("process", processOf(r.Mock, true)))
 	}
 }
 
@@ -484,25 +484,27 @@ func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEnt
 // own calls are.
 func routedReason(m models.WindowedMock, test string, kept bool) string {
 	why := fmt.Sprintf("%s (%s) routed to background at record: %s sent it before %s began, and it was answered once %s had begun, both stamped on %s, so %s did not make it.",
-		m.Name, m.WriteKind, processOf(m.Comm, m.Exe), test, test, clockName(m.Clock), test)
+		m.Name, m.WriteKind, processOf(m, false), test, test, clockName(m.Clock), test)
 	if !kept {
 		return why + fmt.Sprintf(" Undo: delete this entry: %s is not in this set (the recording did not keep it), so without the routing the call is no test's, as its own calls are", test)
 	}
 	return why + fmt.Sprintf(" Undo: move this entry under tests[%s].mocks and delete this reason: %s then owns it, as it would without the routing", test, test)
 }
 
-// processOf names a process by its comm and argv[0] (models.Origin), as a
-// reason line does: "`sqs` (`./sqs`)".
-func processOf(comm, exe string) string {
-	switch {
-	case comm == "" && exe == "":
-		return "a process keploy could not name"
-	case exe == "" || exe == comm:
-		return "`" + comm + "`"
-	case comm == "":
-		return "`" + exe + "`"
+// processOf names the process that made m's call: "`sqs` (`./sqs`)"; one
+// keploy saw but would not name, why (it runs in a PID namespace of its own)
+// and the remedy, with its kernel pid in a log line (log) and without it in
+// the committed reason (models.Origin.FileProcessText); else "a process
+// keploy could not name".
+func processOf(m models.WindowedMock, log bool) string {
+	p := m.FileProcess()
+	if log {
+		p = m.Process()
 	}
-	return "`" + comm + "` (`" + exe + "`)"
+	if p != "" {
+		return p
+	}
+	return "a process keploy could not name"
 }
 
 // clockName says which clock a clock id (fakeconn.ClockID) names.

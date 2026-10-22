@@ -27,6 +27,38 @@ import (
 // (StampOrigin) as its parser hands it over, while its connection is still
 // open; a connection closed since is kept for a late mock, as the container
 // keyer keeps one (keptClosedOrigins).
+//
+// That pid is a kernel pid: the initial PID namespace's. keploy reads a
+// process by it only where it names that process in keploy's own /proc
+// (KernelPids: keploy runs in the initial PID namespace). In a PID namespace
+// of its own (a container without --pid=host) the same number names another
+// process there, or none, so keploy names none: the mock's origin says why
+// (models.UnnamedPIDNamespace, with the kernel pid), every line that would
+// name the process says so (models.Origin.ProcessText), and the record log
+// says it once, with the remedy. Naming a process from inside a PID
+// namespace of its own is ledgered (S12-NAME-IN-PRIVATE-PIDNS). Only naming
+// is so guarded: the registry's starts, which attribute a call by its pid to
+// a worker the scope API registered (by number first, a direct worker's call
+// in keploy's docker mode included), are read as before, whatever the
+// switch.
+
+// KernelPids is implemented by a Proc that tells whether a kernel pid (the
+// initial PID namespace's, which keploy's proxy reports) names in it the
+// process the kernel names by it (utils.KernelPidsLocalIn). The registry
+// names a process by a kernel pid only when it does. A Proc that does not
+// say is taken to: its numbers are its own (a test's fake).
+type KernelPids interface {
+	KernelPidsLocal() bool
+}
+
+// kernelPidsLocal reports whether r reads a process by a kernel pid
+// (KernelPids).
+func (r *Registry) kernelPidsLocal() bool {
+	if k, ok := r.proc.(KernelPids); ok {
+		return k.KernelPidsLocal()
+	}
+	return true
+}
 
 // Commander is implemented by a Proc that reads a process's name: its comm
 // and its command line (argv). ok is false for a process it cannot read.
@@ -60,6 +92,9 @@ type origins struct {
 	unborn map[uint32]string
 	// logger is where a process's command line is logged, once (SetLogger).
 	logger atomic.Pointer[zap.Logger]
+	// foreignSaid: the record log said, once, that keploy names no process
+	// because it runs in a PID namespace of its own.
+	foreignSaid atomic.Bool
 }
 
 // connOrigin is one connection's process, named once, at its first stamp.
@@ -70,10 +105,13 @@ type connOrigin struct {
 }
 
 // procName is a process's comm and argv[0]; ok is false when it could not
-// be read.
+// be read. foreign: its pid is a kernel pid keploy does not read a process by
+// (KernelPids), so nothing was read. pid is the pid it was asked by.
 type procName struct {
 	comm, exe string
 	ok        bool
+	foreign   bool
+	pid       uint32
 }
 
 // SetLogger sets where the registry logs, once per process, the command line
@@ -142,32 +180,59 @@ func (r *Registry) ForgetOrigin(conn string) {
 // is. The origin is replaced whole, never edited: a copy of the mock may share
 // it (models.Mock.Origin).
 func (r *Registry) StampOrigin(m *models.Mock) {
-	if m == nil || (m.Origin != nil && (m.Origin.Comm != "" || m.Origin.Exe != "")) {
+	if m == nil || (m.Origin != nil && (m.Origin.Comm != "" || m.Origin.Exe != "" || m.Origin.Unnamed != "")) {
 		return
 	}
 	id := m.ConnectionID
 	if id == "" && m.Spec.Metadata != nil {
 		id = m.Spec.Metadata["connID"]
 	}
-	name, ok := r.connName(id, m.SourcePID)
-	if !ok {
+	name, _ := r.connName(id, m.SourcePID)
+	o := name.origin()
+	if o == nil {
 		return
 	}
-	o := models.Origin{Comm: name.comm, Exe: name.exe}
 	if m.Origin != nil {
 		o.Clock = m.Origin.Clock
 	}
-	m.Origin = &o
+	m.Origin = o
+}
+
+// origin is the origin a mock or a call from n's process names it by: its
+// comm and argv[0], or, for a process keploy would not read (foreign), why,
+// with its kernel pid; nil when n names nothing.
+func (n procName) origin() *models.Origin {
+	switch {
+	case n.ok:
+		return &models.Origin{Comm: n.comm, Exe: n.exe}
+	case n.foreign:
+		return &models.Origin{Unnamed: models.UnnamedPIDNamespace, PID: n.pid}
+	}
+	return nil
 }
 
 // ProcessOf is process pid's comm and argv[0], as a recorded call's origin
-// names it (StampOrigin); ok is false when it cannot be read.
+// names it (StampOrigin); ok is false when it cannot be read, and when pid
+// is a kernel pid keploy does not read a process by (KernelPids).
 func (r *Registry) ProcessOf(pid uint32) (comm, exe string, ok bool) {
 	if pid == 0 {
 		return "", "", false
 	}
 	n := r.nameOf(pid)
 	return n.comm, n.exe, n.ok
+}
+
+// SourceOf is how a call from process pid (a kernel pid) names it
+// (models.UnmatchedCall.Source): its comm and argv[0]; where keploy does not
+// read a process by a kernel pid (KernelPids), no name, why, and the pid;
+// nil for pid 0, or a process that cannot be read.
+func (r *Registry) SourceOf(pid uint32) *models.Origin {
+	if pid == 0 {
+		return nil
+	}
+	n := r.nameOf(pid)
+	n.pid = pid
+	return n.origin()
 }
 
 // connName is the process of connection id, named once (at its first
@@ -189,6 +254,7 @@ func (r *Registry) connName(id string, pid uint32) (procName, bool) {
 		return procName{}, false
 	}
 	n := r.nameOf(pid)
+	n.pid = pid
 	// Only a name read is kept: a read that failed (the process's /proc
 	// entry not readable yet) is tried again at the next stamp.
 	if c != nil && n.ok {
@@ -206,6 +272,13 @@ func (r *Registry) nameOf(pid uint32) procName {
 	cmd, ok := r.proc.(Commander)
 	if !ok {
 		return procName{}
+	}
+	// A kernel pid names another process in keploy's /proc, or none, when
+	// keploy runs in a PID namespace of its own: nothing is read by it, and
+	// no command line is logged.
+	if !r.kernelPidsLocal() {
+		r.origin.sayForeign(pid)
+		return procName{foreign: true}
 	}
 	key := procKey{pid: pid}
 	born, bornKnown := r.proc.Birth(pid)
@@ -265,6 +338,19 @@ func (r *Registry) nameOf(pid uint32) procName {
 	return n
 }
 
+// sayForeign says in the record log, once, that keploy names no process a
+// call came from because it runs in a PID namespace of its own, with the
+// first kernel pid it was asked to name (pid) and the remedy.
+func (o *origins) sayForeign(pid uint32) {
+	l := o.logger.Load()
+	if l == nil || !o.foreignSaid.CompareAndSwap(false, true) {
+		return
+	}
+	l.Warn("keploy names no process its recorded calls came from, and its reason lines say so: "+models.PIDNamespaceReason(pid),
+		zap.String("pid", strconv.FormatUint(uint64(pid), 10)),
+		zap.String("next_step", "run keploy in the host PID namespace (docker run --pid=host, or hostPID: true in Kubernetes) and record again, to have each routed or moved call name its process; keploy's own docker and compose modes start its agent in the application's PID namespace, where it names no process yet: nothing to do there, the lines say why instead"))
+}
+
 // logProcess logs, at debug, that a recorded call came from process pid,
 // named n, with its whole command line, redacted (line).
 func (o *origins) logProcess(pid uint32, n procName, line string) {
@@ -296,4 +382,5 @@ func (r *Registry) resetOrigins() {
 	o.mu.Lock()
 	o.conns, o.opened, o.closed, o.named, o.unborn = nil, nil, nil, nil, nil
 	o.mu.Unlock()
+	o.foreignSaid.Store(false)
 }

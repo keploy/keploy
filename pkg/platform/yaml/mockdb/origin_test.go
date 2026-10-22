@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -301,5 +302,44 @@ func checkOrigins(t *testing.T, when, path string, origins map[string]models.Ori
 	}
 	if kept != nil && keptWithOrigin == 0 {
 		t.Fatalf("%s: no consumed mock with an origin was kept: the prune checked nothing", when)
+	}
+}
+
+// Why keploy named no process (models.Origin.Unnamed, PID: it runs in a PID
+// namespace of its own) travels with a mock to keploy record and is never
+// written to its file, in any format: the origin is written as its clock
+// alone, and one with nothing else is no origin at all, as a mock recorded
+// without the switch has.
+func TestWhyNoProcessWasNamedIsNeverWritten(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, format := range []string{"yaml", "json", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			mocks := pruneMixedFixture()
+			origins := map[string]models.Origin{}
+			for i, m := range mocks {
+				if i%2 == 0 {
+					m.Origin = &models.Origin{Clock: "proxy:run-1", Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+					origins[fmt.Sprintf("mock-%d", i)] = models.Origin{Clock: "proxy:run-1"}
+				} else {
+					m.Origin = &models.Origin{Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+				}
+			}
+			path := writePruneFixture(t, t.TempDir(), format, mocks, "")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, leak := range []string{models.UnnamedPIDNamespace, "2912345", "origin: {}"} {
+				if bytes.Contains(raw, []byte(leak)) {
+					t.Fatalf("the %s file holds %q", format, leak)
+				}
+			}
+			checkOrigins(t, "as written", path, origins, nil)
+			for _, m := range mocks {
+				if m.Origin == nil || m.Origin.Unnamed == "" {
+					t.Fatalf("writing %s edited the recorded mock's origin: %+v", m.Name, m.Origin)
+				}
+			}
+		})
 	}
 }

@@ -62,7 +62,25 @@ type WindowedMock struct {
 	WriteKind string
 	// Comm and Exe are the process that made the call (Origin.Comm, Exe), for
 	// the line that says why it was routed; "" when its origin names none.
+	// Unnamed and PID say why its origin names none (Origin.Unnamed, PID),
+	// which that line says instead (Process).
 	Comm, Exe string
+	Unnamed   string
+	PID       uint32
+}
+
+// Process names the process that made the call as a log line does
+// (Origin.ProcessText): "" when its origin names none.
+func (m WindowedMock) Process() string {
+	o := Origin{Comm: m.Comm, Exe: m.Exe, Unnamed: m.Unnamed, PID: m.PID}
+	return o.ProcessText()
+}
+
+// FileProcess names it as a committed reason line does
+// (Origin.FileProcessText): no kernel pid.
+func (m WindowedMock) FileProcess() string {
+	o := Origin{Comm: m.Comm, Exe: m.Exe, Unnamed: m.Unnamed, PID: m.PID}
+	return o.FileProcessText()
 }
 
 // NewWindowedMock is m as the window derivation reads it.
@@ -81,6 +99,7 @@ func NewWindowedMock(m *Mock) WindowedMock {
 	if m.Origin != nil {
 		w.WriteKind, _ = WriteKindOf(m)
 		w.Comm, w.Exe = m.Origin.Comm, m.Origin.Exe
+		w.Unnamed, w.PID = m.Origin.Unnamed, m.Origin.PID
 	}
 	return w
 }

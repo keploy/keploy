@@ -54,7 +54,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
-		Origin: mock.Origin,
+		Origin: mock.Origin.Persisted(),
 	}
 
 	var spec any
@@ -327,7 +327,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
-		Origin: mock.Origin,
+		Origin: mock.Origin.Persisted(),
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
