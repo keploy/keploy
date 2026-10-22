@@ -77,7 +77,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Async:        mock.Spec.Async,
-		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise, mock.Spec.LearnedWords),
 		Variables:    mock.Spec.Variables.Clone(),
 	}
 	switch mock.Kind {

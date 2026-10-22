@@ -68,6 +68,15 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 	if err != nil {
 		return nil, nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
 	}
+	// The set's learned files, derived from the mocks now that they carry
+	// what was learned (design r9 §6); a store that writes none writes none.
+	if w, ok := m.mockDB.(interface {
+		WriteLearnedFiles(testSetID string, mockStates map[string]models.MockState) error
+	}); ok {
+		if err := w.WriteLearnedFiles(set, states); err != nil {
+			m.logger.Warn("what the learn step learned is on the set's mocks, but its learned files were not written", zap.String("set", set), zap.Error(err))
+		}
+	}
 	byTest := map[string][]string{}
 	seen := map[string]bool{}
 	for _, f := range flows {

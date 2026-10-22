@@ -35,9 +35,9 @@ import "sort"
 // decoder, encoder and rewrite (a prune, a noise persist, an edit), whatever
 // the switch says: read an entry and write it back, a key this build does not
 // know included (learned_codec.go); only its use is gated on the switch. A
-// variable's words already ride with the variable; noise.words is not yet
-// read into MockSpec.LearnedWords nor written from it, as nothing learns
-// words yet. An entry this build cannot read admits nothing
+// variable's words ride with the variable, and noise.words with the noise
+// block (platform/yaml's NewDocNoise and ResolveWords, used by every mock
+// decoder and encoder). An entry this build cannot read admits nothing
 // (WordsEntry.Unreadable), so its leaf is compared whole: it fails closed.
 
 // The kinds of a WordSlot.
@@ -281,10 +281,12 @@ func MergeWords(a, b map[string]WordsEntry) map[string]WordsEntry {
 	return out
 }
 
-// mergeVariableWords is the words of one variable two blocks declare (a, b:
+// MergeVariableWords is the words of one variable two blocks declare (a, b:
 // either nil), as MergeVariables keeps them for a variable both bind at one
 // place: one side's when the other has none (a side without words never
-// strips them), else MergeWordsEntry of the two.
+// strips them), else MergeWordsEntry of the two. Neither is changed.
+func MergeVariableWords(a, b *WordsEntry) *WordsEntry { return mergeVariableWords(a, b) }
+
 func mergeVariableWords(a, b *WordsEntry) *WordsEntry {
 	switch {
 	case a == nil && b == nil:

@@ -55,7 +55,30 @@ func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consume
 		r.logger.Info("learned fields that changed between record and replay",
 			zap.String("testSetID", testSetID), zap.String("test", line.test), zap.Strings("fields", line.fields))
 	}
+	writeLearnedFiles(r.logger, r.mockDB, testSetID, consumed)
 	return nil
+}
+
+// learnedFilesWriter writes a set's learned files (the yaml mock store,
+// WriteLearnedFiles): learned.yaml from its mocks, learned.local.yaml with
+// record's full round's values.
+type learnedFilesWriter interface {
+	WriteLearnedFiles(testSetID string, mockStates map[string]models.MockState) error
+}
+
+// writeLearnedFiles writes the set's learned files once what the learn step
+// learned is on its mocks (design r9 §6): they are derived from the mocks and
+// say, for a person or an LLM, what was learned and how to undo it. A store
+// that writes none writes none, and one that fails says so: the recording is
+// written all the same.
+func writeLearnedFiles(logger *zap.Logger, db interface{}, testSetID string, consumed map[string]models.MockState) {
+	w, ok := db.(learnedFilesWriter)
+	if !ok {
+		return
+	}
+	if err := w.WriteLearnedFiles(testSetID, consumed); err != nil {
+		logger.Warn("what the learn step learned is on the set's mocks, but its learned files were not written", zap.String("testSetID", testSetID), zap.Error(err))
+	}
 }
 
 // learnedLine is what the learn step learned for one test: each field as

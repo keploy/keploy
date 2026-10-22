@@ -3338,6 +3338,8 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
+			LearnedWords:     learnedWordsOf(new.Spec),
+			LearnedF:         learnedFOf(new.Spec),
 		}, old.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				// The previous set's pool: not this set's consume.
@@ -3418,6 +3420,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedWords:     learnedWordsOf(mock.Spec),
+			LearnedF:         learnedFOf(mock.Spec),
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				consumed = false
@@ -3488,6 +3492,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 				Variables:        variablesOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
+				LearnedWords:     learnedWordsOf(mock.Spec),
+				LearnedF:         learnedFOf(mock.Spec),
 				CarryOver:        true,
 			}, mk.TestModeInfo.StagedSet); err != nil {
 				if errors.Is(err, errPreviousSet) {
@@ -3556,6 +3562,8 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedWords:     learnedWordsOf(mock.Spec),
+			LearnedF:         learnedFOf(mock.Spec),
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				// The previous set's pool: not this set's consume. The
@@ -3719,6 +3727,8 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedWords:     learnedWordsOf(mock.Spec),
+			LearnedF:         learnedFOf(mock.Spec),
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -3948,8 +3958,10 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// What record's full round learned onto a mock this door keeps (a
 		// reusable stateful recording, a scoped worker's held own mock), as
 		// the other doors carry it (nil with the switch off).
-		Variables: variablesOf(mock.Spec),
-		Binds:     bindsOf(mock.Spec),
+		Variables:    variablesOf(mock.Spec),
+		Binds:        bindsOf(mock.Spec),
+		LearnedWords: learnedWordsOf(mock.Spec),
+		LearnedF:     learnedFOf(mock.Spec),
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -4206,6 +4218,28 @@ func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
 	return out
 }
 
+// learnedWordsOf is what a consumed mock's state carries of the words the
+// learn step learned of its leaves (MockSpec.LearnedWords): under the proven
+// switch, what it learned this round with what the recording carried before.
+// Without the switch nothing, as nothing learns words then.
+func learnedWordsOf(spec models.MockSpec) map[string]models.WordsEntry {
+	if !provenswitch.On() || len(spec.LearnedWords) == 0 {
+		return nil
+	}
+	return models.MergeWords(nil, spec.LearnedWords)
+}
+
+// learnedFOf is what a consumed mock's state carries of record's full
+// round's values at the places the learn step learned words of
+// (MockSpec.LearnedF), for the set's learned.local.yaml: under the proven
+// switch only.
+func learnedFOf(spec models.MockSpec) map[string]map[string]string {
+	if !provenswitch.On() {
+		return nil
+	}
+	return models.MergeLearnedF(nil, spec.LearnedF())
+}
+
 // flagMockAsUsed records that a mock was consumed from the network.
 // The first call for a given name establishes its position in the consumption
 // order; subsequent calls for the same name update the stored state in-place
@@ -4254,6 +4288,10 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 			if len(prev.ReqBodyNoise) > 0 {
 				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
 			}
+			if len(prev.LearnedWords) > 0 {
+				mock.LearnedWords = mocknoise.MergeLearnedWords(prev.LearnedWords, mock.LearnedWords)
+			}
+			mock.LearnedF = models.MergeLearnedF(prev.LearnedF, mock.LearnedF)
 		}
 	}
 	if inScope && m.scopeConsumed != nil {

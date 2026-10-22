@@ -139,7 +139,9 @@ func TestALearnStepReusedStatedMockKeepsEveryEchoItWasServedWith(t *testing.T) {
 			p.ContinueTestErrorCapture()
 			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
 			for _, c := range []struct{ target, want string }{
-				{"/users/u-2?rid=r-2", `{"id":"u-2","rid":"r-2"}`},
+				// The id and the rid change apart (r9 N8: two values that
+				// both went from 1 to 2 are refused).
+				{"/users/u-2?rid=r-7", `{"id":"u-2","rid":"r-7"}`},
 				{"/users/u-1?rid=r-3", `{"id":"u-1","rid":"r-3"}`},
 			} {
 				code, got := r3Send(t, p, mm, opts, "GET "+c.target+" HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")

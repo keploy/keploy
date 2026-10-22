@@ -113,7 +113,7 @@ func TestALearnStepPairingAnswersAndLearns(t *testing.T) {
 	if len(consumed) != 1 {
 		t.Fatalf("consumed %+v", consumed)
 	}
-	want := models.MockVariables{"rid": {Recorded: "r-1", Bind: "body.rid", Answer: []string{"body.rid"}, Echo: true}}
+	want := models.MockVariables{"rid": {Recorded: "r-1", Bind: "body.rid", Answer: []string{"body.rid"}, Echo: true, Words: wordsLearnedOf(t, "r-1", "r-2")}}
 	if !reflect.DeepEqual(consumed[0].Variables, want) {
 		t.Fatalf("the consumed mock's state carries %+v", consumed[0].Variables)
 	}
@@ -180,7 +180,7 @@ func TestALearnStepFollowsAVariableAcrossCalls(t *testing.T) {
 	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(states["mock-b"].Variables, want) {
 		t.Fatalf("mock-b's state carries %+v", states["mock-b"].Variables)
 	}
-	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
+	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order", Words: wordsLearnedOf(t, "o-1", "o-9")}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
 		t.Fatalf("mock-b's state binds %+v", states["mock-b"].Binds)
 	}
 }
@@ -364,8 +364,8 @@ func TestALearnStepStartupTierMockKeepsWhatWasLearned(t *testing.T) {
 		t.Fatalf("precondition: the learn step pairs the start-up call and answers the echo: %d %s", code, got)
 	}
 	st := r3States(mm)["mock-boot"]
-	if _, ok := st.ReqBodyNoise["body.ts"]; !ok || st.Variables["nonce"].Bind == "" {
-		t.Fatalf("what F served the start-up call with is not on its consumed state: noise %v variables %+v", st.ReqBodyNoise, st.Variables)
+	if _, ok := st.LearnedWords["body.ts"]; !ok || st.Variables["nonce"].Bind == "" || len(st.ReqBodyNoise) != 0 {
+		t.Fatalf("what F served the start-up call with is not on its consumed state: words %v noise %v variables %+v", st.LearnedWords, st.ReqBodyNoise, st.Variables)
 	}
 }
 
@@ -388,7 +388,9 @@ func TestALearnStepReusedMockKeepsEveryEchoItWasServedWith(t *testing.T) {
 	p.ContinueTestErrorCapture()
 	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
 	for _, c := range []struct{ target, want string }{
-		{"/users/u-2?rid=r-2", `{"id":"u-2","rid":"r-2"}`},
+		// The id and the rid change apart: two values that both went from
+		// 1 to 2 would be one changed word at two places (r9 N8, refused).
+		{"/users/u-2?rid=r-7", `{"id":"u-2","rid":"r-7"}`},
 		{"/users/u-1?rid=r-3", `{"id":"u-1","rid":"r-3"}`},
 	} {
 		code, got := r3Send(t, p, mm, opts, "GET "+c.target+" HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
@@ -513,15 +515,15 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	p.ContinueTestErrorCapture() // test 1 (nothing called)
 	_, _ = p.GetMockErrors(context.Background())
 	p.ContinueTestErrorCapture() // test 2
-	body := `{"at":1760436093}`
+	body := `{"at":1760436061}` // moved by F's lead: a clock read
 	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
 		"POST /pong HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
 	if code != http.StatusOK {
 		misses, _ := p.GetMockErrors(context.Background())
 		t.Fatalf("test 2's own clock read was refused because test 1's recording (same second) is visible: %d %s %+v", code, got, misses)
 	}
-	if _, ok := r3States(mm)["mock-t2"].ReqBodyNoise["body.at"]; !ok {
-		t.Fatalf("test 2's clock read is noise: %+v", r3States(mm)["mock-t2"])
+	if _, ok := r3States(mm)["mock-t2"].LearnedWords["body.at"]; !ok {
+		t.Fatalf("test 2's clock read is not learned by its words: %+v", r3States(mm)["mock-t2"])
 	}
 }
 
@@ -996,7 +998,18 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 	if code != http.StatusOK || got != `{"ok":true}` {
 		t.Fatalf("answered %d %s; want the pool recording, its clock read learned", code, got)
 	}
-	if noise := r3States(mm)["mock-1"].ReqBodyNoise; noise["body.processed_at"] == nil {
-		t.Fatalf("learned %v; want body.processed_at", noise)
+	if words := r3States(mm)["mock-1"].LearnedWords; len(words["body.processed_at"].Slots) == 0 {
+		t.Fatalf("learned %v; want the words of body.processed_at", words)
 	}
+}
+
+// wordsLearnedOf is what F learns of the words of a drifted value (rec,
+// live), by the lead.
+func wordsLearnedOf(t *testing.T, rec, live string) *models.WordsEntry {
+	t.Helper()
+	e, why := learn.NewDriftCache().Words(rec, live, nil)
+	if why != "" {
+		t.Fatalf("%q -> %q: no words: %s", rec, live, why)
+	}
+	return &e
 }

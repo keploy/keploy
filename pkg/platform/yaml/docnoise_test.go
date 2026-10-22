@@ -71,7 +71,7 @@ func TestNewDocNoise_DropsRegexValuesAndSorts(t *testing.T) {
 	got := NewDocNoise([]string{"^tok-.*$"}, map[string][]string{
 		"body.z": {"^ignored.*$"}, // regex value must be dropped
 		"body.a": {},
-	})
+	}, nil)
 	if got == nil {
 		t.Fatal("expected non-nil DocNoise")
 	}
@@ -82,7 +82,7 @@ func TestNewDocNoise_DropsRegexValuesAndSorts(t *testing.T) {
 		t.Fatalf("value mismatch: %v", got.Value)
 	}
 
-	if NewDocNoise(nil, nil) != nil {
+	if NewDocNoise(nil, nil, nil) != nil {
 		t.Fatal("empty inputs must yield nil so omitempty drops the noise key")
 	}
 }
@@ -139,10 +139,37 @@ func TestDocNoise_WordsRoundTrip(t *testing.T) {
 		t.Fatalf("read back %#v (yaml), %#v (json), want %#v", fromYAML, fromJSON, in)
 	}
 
-	plain := NewDocNoise([]string{"^tok-.*$"}, map[string][]string{"body.a": {}})
+	plain := NewDocNoise([]string{"^tok-.*$"}, map[string][]string{"body.a": {}}, nil)
 	y, _ = yamlLib.Marshal(plain)
 	j, _ = json.Marshal(plain)
 	if string(y) != "req:\n    - body.a\nvalue:\n    - ^tok-.*$\n" || string(j) != `{"req":["body.a"],"value":["^tok-.*$"]}` {
 		t.Fatalf("noise with no words written otherwise than before:\n%s\n%s", y, j)
+	}
+}
+
+// NewDocNoise writes the learned words a mock carries, a copy, and
+// ResolveWords reads them back: noise.words travels with every encode and
+// decode of a mock, whatever the switch says, and words alone make a noise
+// block.
+func TestNewDocNoise_CarriesWords(t *testing.T) {
+	words := map[string]models.WordsEntry{"body.note": {V: models.WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []models.WordSlot{{Seg: 1}}}}
+	n := NewDocNoise(nil, nil, words)
+	if n == nil || !reflect.DeepEqual(n.Words, words) || n.Req != nil {
+		t.Fatalf("noise %#v", n)
+	}
+	n.Words["body.note"].Slots[0].Seg = 9
+	if words["body.note"].Slots[0].Seg != 1 {
+		t.Fatal("the noise block shares its words with the mock")
+	}
+	back := ResolveWords(&DocNoise{Words: words})
+	if !reflect.DeepEqual(back, words) {
+		t.Fatalf("resolved %#v", back)
+	}
+	back["body.note"].Slots[0].Seg = 7
+	if words["body.note"].Slots[0].Seg != 1 {
+		t.Fatal("the resolved words share their slots with the doc")
+	}
+	if ResolveWords(nil) != nil || ResolveWords(&DocNoise{Req: []string{"body.a"}}) != nil {
+		t.Fatal("a doc with no words resolves to some")
 	}
 }

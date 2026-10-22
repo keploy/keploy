@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -602,7 +603,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	withNoise := make(map[string]models.MockState)
 	binds := map[string]models.MockVariables{}
 	for name, st := range mockStates {
-		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.LearnedWords) > 0 {
 			withNoise[name] = st
 		}
 		for target, vs := range st.Binds {
@@ -797,14 +798,20 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 }
 
 // mergeLearned writes what a consumed mock's state carries of what the
-// learn step learned onto the mock read from disk: its learned noise, its
-// variables, and binds, the variables other mocks of its test use that are
-// bound at it. It returns what it added, sorted, each as "<path> (noise)",
-// "<place> (variable <name>: bind|use)" or "<place> (echo <name>)". Noise and
-// variables are monotonic (what is on disk stays), with one exception: a
-// place that is a variable's is never noise, so learned noise there is
-// dropped (the learn step may have learned a value as noise at the call
-// that first sent it, before a later call showed it flowed on).
+// learn step learned onto the mock read from disk: its learned noise and the
+// words it learned of leaves (MockState.LearnedWords), its variables (with
+// their words), and binds, the variables other mocks of its test use that
+// are bound at it. It returns what it added, sorted, each as "<path>
+// (noise)", "<path> (words)", "<place> (variable <name>: bind|use)" or
+// "<place> (echo <name>)". Noise, words and variables are monotonic (what is
+// on disk stays; two entries of one leaf merge, models.MergeWords, and an
+// entry the two read apart is void), with one exception: a place that is a
+// variable's is never noise, so learned noise there, whole or by its words,
+// is dropped (the learn step may have learned a value as noise at the call
+// that first sent it, before a later call showed it flowed on); the
+// variable's own words stay with it. What the mock read from disk carries
+// and this build does not use (a newer keploy's words, words with the
+// switch off) stays as it is.
 func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
 	if !provenswitch.On() {
@@ -882,9 +889,30 @@ func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
 		}
 	}
+	if len(st.LearnedWords) > 0 {
+		words := make(map[string]models.WordsEntry, len(st.LearnedWords))
+		for k, e := range st.LearnedWords {
+			if !varPlaces[k] {
+				words[k] = e
+			}
+		}
+		for k, e := range words {
+			if cur, ok := mock.Spec.LearnedWords[k]; !ok || !reflect.DeepEqual(cur, models.MergeWordsEntry(cur, e)) {
+				added = append(added, k+" (words)")
+			}
+		}
+		if len(words) > 0 {
+			mock.Spec.LearnedWords = models.MergeWords(mock.Spec.LearnedWords, words)
+		}
+	}
 	for k := range mock.Spec.ReqBodyNoise {
 		if varPlaces[k] {
 			delete(mock.Spec.ReqBodyNoise, k)
+		}
+	}
+	for k := range mock.Spec.LearnedWords {
+		if varPlaces[k] {
+			delete(mock.Spec.LearnedWords, k)
 		}
 	}
 	sort.Strings(added)
@@ -902,10 +930,22 @@ func mergeVariable(a, b models.MockVariable) models.MockVariable {
 	} else {
 		a.Echo = a.Echo && b.Echo
 	}
-	if a.Bind == "" {
+	// Words go with the bind, as models.MergeVariables keeps them: a side
+	// without words never strips them, and two that bind at one place
+	// union theirs (void when they read the value apart).
+	switch {
+	case a.Bind == "":
 		a.Bind, a.Clock = b.Bind, append([]models.ClockRead(nil), b.Clock...)
-	} else if b.Bind != "" && len(b.Clock) == 0 {
-		a.Clock = nil
+		if b.Words != nil {
+			a.Words = models.MergeVariableWords(nil, b.Words)
+		}
+	case b.Bind != "":
+		if len(b.Clock) == 0 {
+			a.Clock = nil
+		}
+		if b.Bind == a.Bind {
+			a.Words = models.MergeVariableWords(a.Words, b.Words)
+		}
 	}
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)

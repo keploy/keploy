@@ -1348,6 +1348,8 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
 		Variables:        variablesOf(mk.Spec),
 		Binds:            bindsOf(mk.Spec),
+		LearnedWords:     learnedWordsOf(mk.Spec),
+		LearnedF:         learnedFOf(mk.Spec),
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
@@ -1378,6 +1380,8 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		Variables:        variablesOf(served.Spec),
 		Binds:            bindsOf(served.Spec),
 		Concurrent:       owned.TestModeInfo.Concurrent,
+		LearnedWords:     learnedWordsOf(served.Spec),
+		LearnedF:         learnedFOf(served.Spec),
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}

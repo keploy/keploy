@@ -89,9 +89,10 @@ type NetworkTrafficDoc struct {
 //     place in Words is never in Req. Absent unless the learn step wrote it.
 //     This block's codec reads and writes it whatever the proven switch says
 //     (an older or a newer keploy's entry, versioned, included:
-//     models.WordsEntry); only its use is gated on the switch. The mock's
-//     decoders and encoders do not carry it to and from
-//     models.MockSpec.LearnedWords yet, as nothing learns words yet.
+//     models.WordsEntry), and every decoder, encoder and rewrite of a mock
+//     carries it to and from models.MockSpec.LearnedWords (NewDocNoise,
+//     ResolveWords) with the switch on and off: only its use is gated on the
+//     switch, so a rewrite by any keploy keeps what the learn step learned.
 //
 // For backward compatibility the custom unmarshalers also accept the OLD shape
 // where `noise:` was a bare string list — that decodes into Value. New writes
@@ -103,13 +104,15 @@ type DocNoise struct {
 }
 
 // NewDocNoise builds the unified noise block for encoding from the in-memory
-// model fields: the obfuscator value-regex list (models.Mock.Noise) and the
-// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). Only the field
+// model fields: the obfuscator value-regex list (models.Mock.Noise), the
+// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise) and the words
+// the learn step learned of leaves (models.MockSpec.LearnedWords, written as
+// they are, whatever the switch says: a rewrite keeps them). Only the field
 // PATHS of the schema-noise map are persisted — the per-path regex values are
 // intentionally dropped (unused on the strict path). Returns nil when there is
 // nothing to write so `omitempty` drops the `noise:` key entirely. Req paths are
-// sorted for deterministic output.
-func NewDocNoise(value []string, reqBodyNoise map[string][]string) *DocNoise {
+// sorted for deterministic output, and Words' places are written in order.
+func NewDocNoise(value []string, reqBodyNoise map[string][]string, words map[string]models.WordsEntry) *DocNoise {
 	var req []string
 	if len(reqBodyNoise) > 0 {
 		req = make([]string, 0, len(reqBodyNoise))
@@ -118,10 +121,33 @@ func NewDocNoise(value []string, reqBodyNoise map[string][]string) *DocNoise {
 		}
 		sort.Strings(req)
 	}
-	if len(req) == 0 && len(value) == 0 {
+	if len(req) == 0 && len(value) == 0 && len(words) == 0 {
 		return nil
 	}
-	return &DocNoise{Req: req, Value: value}
+	return &DocNoise{Req: req, Value: value, Words: cloneWords(words)}
+}
+
+// ResolveWords returns the words the learn step learned of a decoded doc's
+// leaves (noise.words, models.MockSpec.LearnedWords), whatever the switch
+// says: a copy that shares nothing with the doc, nil when it has none.
+func ResolveWords(noise *DocNoise) map[string]models.WordsEntry {
+	if noise == nil || len(noise.Words) == 0 {
+		return nil
+	}
+	return cloneWords(noise.Words)
+}
+
+// cloneWords is a copy of words that shares no map or slice with it; nil for
+// none.
+func cloneWords(words map[string]models.WordsEntry) map[string]models.WordsEntry {
+	if len(words) == 0 {
+		return nil
+	}
+	out := make(map[string]models.WordsEntry, len(words))
+	for place, e := range words {
+		out[place] = e.Clone()
+	}
+	return out
 }
 
 // ValueNoise returns the obfuscator value-regex list (models.Mock.Noise). nil-safe.

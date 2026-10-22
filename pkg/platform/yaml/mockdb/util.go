@@ -47,7 +47,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// parser implements the schema-noise adapter and learned drift (HTTP, plus
 		// Pulsar in enterprise). NewDocNoise returns nil when there is nothing to
 		// write, so omitempty keeps the noise key out of the doc entirely.
-		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise, mock.Spec.LearnedWords),
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
@@ -316,7 +316,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// regex values dropped). Set before the mapper/per-kind projection runs so it
 		// survives regardless of the spec envelope. NewDocNoise returns nil when
 		// empty, so omitempty drops the key.
-		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise, mock.Spec.LearnedWords),
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
@@ -687,6 +687,9 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 				mock.Spec.ReqBodyNoise = rb
 			}
+			// And the words the learn step learned (noise.words), read
+			// whatever the switch says, so a rewrite keeps them.
+			mock.Spec.LearnedWords = yaml.ResolveWords(m.Noise)
 			// Restore the kind-agnostic async block off the doc envelope
 			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
 			// No in-tree kind is both mapper-registered AND async-capable today
@@ -878,8 +881,9 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 			mock.Spec.ReqBodyNoise = rb
 		}
-		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
-		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
+		mock.Spec.LearnedWords = yaml.ResolveWords(m.Noise) // noise.words, whatever the switch says: a rewrite keeps them
+		mock.Spec.Async = m.Async                           // kind-agnostic async block off the doc envelope
+		mock.Spec.Variables = m.Variables.Clone()           // kind-agnostic, like async
 		mocks = append(mocks, &mock)
 	}
 
@@ -1924,8 +1928,9 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 			mock.Spec.ReqBodyNoise = rb
 		}
-		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
-		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
+		mock.Spec.LearnedWords = yaml.ResolveWords(m.Noise) // noise.words, whatever the switch says: a rewrite keeps them
+		mock.Spec.Async = m.Async                           // kind-agnostic async block off the doc envelope
+		mock.Spec.Variables = m.Variables.Clone()           // kind-agnostic, like async
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil
