@@ -2970,6 +2970,9 @@ type elsewhereDb struct {
 	// lookups counts the lookups of a recording made elsewhere, of either
 	// kind.
 	lookups int
+	// unread, when set, is the error each lookup of a recording made
+	// elsewhere ends with: the store could not read what it had to look in.
+	unread error
 }
 
 func (d *elsewhereDb) ConsumedTestMocks() []*models.Mock { return d.answered }
@@ -2992,8 +2995,11 @@ func (d *elsewhereDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 	return ""
 }
 
-func (d *elsewhereDb) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool) {
+func (d *elsewhereDb) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool, error) {
 	d.lookups++
+	if d.unread != nil {
+		return "", false, d.unread
+	}
 	again := ""
 	for _, m := range d.elsewhere {
 		used := d.named[m.Name] || d.spent[m.Name]
@@ -3002,11 +3008,11 @@ func (d *elsewhereDb) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 		}
 		if !used {
 			d.claim(m.Name)
-			return m.Name, true
+			return m.Name, true, nil
 		}
 		again = m.Name
 	}
-	return again, false
+	return again, false, nil
 }
 
 // (LEARN-vs-NOTOWNED) A request that is another test's recording exactly is

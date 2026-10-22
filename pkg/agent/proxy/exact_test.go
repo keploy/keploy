@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -1691,7 +1692,7 @@ func TestFindStagedElsewhereFindsTheCallsRecordingAgainOnceItIsSpent(t *testing.
 	mm := stagedManager(t, []*models.Mock{feedA, feedB}, []*models.Mock{own, other, consumed, pollA, pollB, worker})
 	mm.ServeExactWorker([]string{"worker"})
 	find := func(match func(*models.Mock) bool) (string, bool) {
-		return mm.FindStagedElsewhere(models.HTTP, integrations.ElsewhereQuery{Match: match})
+		return elsewhereOf(t, mm, integrations.ElsewhereQuery{Match: match})
 	}
 	byName := func(name string) func(*models.Mock) bool {
 		return func(m *models.Mock) bool { return m.Name == name }
@@ -1731,7 +1732,7 @@ func TestFindStagedElsewhereFindsTheCallsRecordingAgainOnceItIsSpent(t *testing.
 	}
 	// Without exact serving: nothing.
 	off := stagedManager(t, nil, []*models.Mock{httpCall("other", time.Second, "/delete")})
-	if name, _ := off.FindStagedElsewhere(models.HTTP, integrations.ElsewhereQuery{Match: byName("other")}); name != "" {
+	if name, _ := elsewhereOf(t, off, integrations.ElsewhereQuery{Match: byName("other")}); name != "" {
 		t.Fatalf("without exact serving the lookup found %q", name)
 	}
 }
@@ -1780,7 +1781,7 @@ func TestFindStagedElsewhereDigestsNoShownRecordingAndHoldsNoTreeLockMeanwhile(t
 		},
 	}
 	for i := 0; i < 2; i++ {
-		if name, notOwned := mm.FindStagedElsewhere(models.HTTP, q); name != "b" || notOwned != (i == 0) {
+		if name, notOwned := elsewhereOf(t, mm, q); name != "b" || notOwned != (i == 0) {
 			t.Fatalf("lookup %d found %q (not owned %v), want b", i, name, notOwned)
 		}
 	}
@@ -1815,7 +1816,7 @@ func TestFindStagedElsewhereDigestsNoShownRecordingAndHoldsNoTreeLockMeanwhile(t
 	}
 	compared = nil
 	q.RulesOut = func(any) bool { return false }
-	if name, _ := mm2.FindStagedElsewhere(models.HTTP, q); name != "" {
+	if name, _ := elsewhereOf(t, mm2, q); name != "" {
 		t.Fatalf("found %q for a call no recording is", name)
 	}
 	if !reflect.DeepEqual(compared, []string{"dup"}) {
@@ -1871,7 +1872,7 @@ func TestFindStagedElsewhereComparesOnlyWhatItsDigestSaysMayBeTheCall(t *testing
 		}
 	}
 	mm.ServeExactPool("k", nil)
-	if name, notOwned := mm.FindStagedElsewhere(models.HTTP, query(2, "b")); name != "b" || !notOwned {
+	if name, notOwned := elsewhereOf(t, mm, query(2, "b")); name != "b" || !notOwned {
 		t.Fatalf("found %q (%v), want b", name, notOwned)
 	}
 	if want := []string{"b", "undigested"}; !reflect.DeepEqual(compared, want) && !reflect.DeepEqual(compared, []string{"b"}) {
@@ -1880,14 +1881,14 @@ func TestFindStagedElsewhereComparesOnlyWhatItsDigestSaysMayBeTheCall(t *testing
 	// A call none is: compared with the undigested one alone, and the disk
 	// recording read back once, for its digest.
 	compared, digested = nil, nil
-	if name, _ := mm.FindStagedElsewhere(models.HTTP, query(9, "")); name != "" {
+	if name, _ := elsewhereOf(t, mm, query(9, "")); name != "" {
 		t.Fatalf("found %q for a call no recording is", name)
 	}
 	if !reflect.DeepEqual(compared, []string{"undigested"}) || decoded != 1 || !reflect.DeepEqual(digested, []string{"undigested", "on-disk"}) {
 		t.Fatalf("compared %v, decoded %d, digested %v; want undigested compared, on-disk read back once for its digest", compared, decoded, digested)
 	}
 	compared, digested = nil, nil
-	if name, _ := mm.FindStagedElsewhere(models.HTTP, query(9, "")); name != "" || decoded != 1 || len(digested) != 0 {
+	if name, _ := elsewhereOf(t, mm, query(9, "")); name != "" || decoded != 1 || len(digested) != 0 {
 		t.Fatalf("found %q, decoded %d, digested %v; want nothing read back or digested again", name, decoded, digested)
 	}
 	// A recording the trees swap for another is digested again.
@@ -1897,7 +1898,7 @@ func TestFindStagedElsewhereComparesOnlyWhatItsDigestSaysMayBeTheCall(t *testing
 		t.Fatal("fixture: could not swap a's recording")
 	}
 	digested = nil
-	mm.FindStagedElsewhere(models.HTTP, query(9, ""))
+	_, _ = elsewhereOf(t, mm, query(9, ""))
 	if !reflect.DeepEqual(digested, []string{"a"}) {
 		t.Fatalf("after a's recording was swapped, digested %v; want a again", digested)
 	}
@@ -1910,7 +1911,7 @@ func TestFindStagedElsewhereComparesOnlyWhatItsDigestSaysMayBeTheCall(t *testing
 	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
 	mm.ServeExactPool("k", nil)
 	digested = nil
-	mm.FindStagedElsewhere(models.HTTP, query(9, ""))
+	_, _ = elsewhereOf(t, mm, query(9, ""))
 	sort.Strings(digested)
 	if got := strings.Join(digested, ","); !strings.Contains(got, "a,b,") || !strings.HasSuffix(got, "undigested") {
 		t.Fatalf("the next staging digested %v; want a, b and undigested again", digested)
@@ -1921,4 +1922,95 @@ func TestFindStagedElsewhereComparesOnlyWhatItsDigestSaysMayBeTheCall(t *testing
 	if _, kept := mm.exact.digests.of(mm.stagingEpoch.Load(), "test").byMock.Load(before); kept {
 		t.Fatal("the next staging keeps the digest of a recording the one before staged")
 	}
+}
+
+// A lookup of a recording made elsewhere that cannot read what it has to look
+// in (a recording kept on disk that cannot be read back, a store that cannot
+// be read) says so, and names nothing: whether the call is a recording made
+// elsewhere is unknown, and a recording the trees hold that the call is
+// again does not stand for the answer, since a fresh one may be among what it
+// could not read. A lookup that finds a fresh one in the trees never reads
+// the disk, and so never fails on it.
+func TestFindStagedElsewhereSaysWhenItCouldNotLook(t *testing.T) {
+	inTrees := httpCall("in-trees", time.Second, "/v1/jobs")
+	onDisk := httpCall("on-disk", 2*time.Second, "/v1/jobs")
+	readFails := errors.New("disk mocks: read at 4096: input/output error")
+	jobs := integrations.ElsewhereQuery{Keys: []string{"k"}, Match: func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/v1/jobs" }}
+	onlyOnDisk := integrations.ElsewhereQuery{Keys: []string{"k"}, Match: func(m *models.Mock) bool { return m.Name == "on-disk" }}
+	setup := func(t *testing.T) (*MockManager, *int, func(err error, sourceErr error)) {
+		mm := stagedManager(t, nil, []*models.Mock{inTrees})
+		visits := 0
+		source := func(err error, sourceErr error) {
+			mm.SetRecordingSource(func(kind models.Kind, _ []string, visit func(string, func() (*models.Mock, error)) bool) error {
+				visits++
+				if sourceErr != nil {
+					return sourceErr
+				}
+				visit(onDisk.Name, func() (*models.Mock, error) {
+					if err != nil {
+						return nil, err
+					}
+					return onDisk, nil
+				})
+				return nil
+			})
+		}
+		mm.ServeExactPool("k", nil)
+		return mm, &visits, source
+	}
+	t.Run("a recording on disk cannot be read back", func(t *testing.T) {
+		mm, _, source := setup(t)
+		source(readFails, nil)
+		name, notOwned, err := mm.FindStagedElsewhere(models.HTTP, onlyOnDisk)
+		if !errors.Is(err, readFails) || !strings.Contains(err.Error(), "on-disk") || name != "" || notOwned {
+			t.Fatalf("got %q (not owned %v), %v; want nothing named and the read's error, naming on-disk", name, notOwned, err)
+		}
+		// Nothing was named: once it reads, the lookup names on-disk.
+		source(nil, nil)
+		if name, notOwned := elsewhereOf(t, mm, onlyOnDisk); name != "on-disk" || !notOwned {
+			t.Fatalf("once the disk reads, found %q (not owned %v), want on-disk", name, notOwned)
+		}
+	})
+	t.Run("the store cannot be read", func(t *testing.T) {
+		mm, _, source := setup(t)
+		closed := errors.New("disk mocks: store closed")
+		source(nil, closed)
+		if name, _, err := mm.FindStagedElsewhere(models.HTTP, onlyOnDisk); !errors.Is(err, closed) || name != "" {
+			t.Fatalf("got %q, %v; want nothing named and the store's error", name, err)
+		}
+	})
+	t.Run("a fresh one in the trees", func(t *testing.T) {
+		mm, visits, source := setup(t)
+		source(readFails, nil)
+		if name, notOwned := elsewhereOf(t, mm, jobs); name != "in-trees" || !notOwned || *visits != 0 {
+			t.Fatalf("found %q (not owned %v) after %d reads of the disk; want in-trees, the disk unread", name, notOwned, *visits)
+		}
+	})
+	t.Run("one the call is again in the trees", func(t *testing.T) {
+		mm, _, source := setup(t)
+		source(nil, nil)
+		if name, notOwned := elsewhereOf(t, mm, jobs); name != "in-trees" || !notOwned {
+			t.Fatalf("fixture: the first call found %q (not owned %v), want in-trees", name, notOwned)
+		}
+		source(readFails, nil)
+		name, notOwned, err := mm.FindStagedElsewhere(models.HTTP, jobs)
+		if !errors.Is(err, readFails) || name != "" || notOwned {
+			t.Fatalf("the second call got %q (not owned %v), %v; want nothing named and the read's error: on-disk, which it could not read, may be the fresh one", name, notOwned, err)
+		}
+		source(nil, nil)
+		if name, notOwned := elsewhereOf(t, mm, jobs); name != "on-disk" || !notOwned {
+			t.Fatalf("once the disk reads, the second call found %q (not owned %v), want on-disk", name, notOwned)
+		}
+	})
+}
+
+// elsewhereOf is mm's lookup of the recording made elsewhere that q's HTTP
+// call is (FindStagedElsewhere), which must look in all it has to.
+func elsewhereOf(t *testing.T, mm *MockManager, q integrations.ElsewhereQuery) (string, bool) {
+	t.Helper()
+	name, notOwned, err := mm.FindStagedElsewhere(models.HTTP, q)
+	if err != nil {
+		t.Fatalf("the lookup of a recording made elsewhere could not look: %v", err)
+	}
+	return name, notOwned
 }

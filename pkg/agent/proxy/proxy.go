@@ -5096,6 +5096,13 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		first := len(errs)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
 			if parserErr.MismatchReport != nil {
+				// A miss keploy could not tell from a recording made
+				// elsewhere (MockMismatchReport.Unread): what the call is,
+				// another test's or this one's, is unknown, so the read is
+				// incomplete and the test that reads it has no verdict.
+				if u := parserErr.MismatchReport.Unread; u != "" && unreadCause == "" {
+					unreadCause = "a call no mock answered could not be told: " + u
+				}
 				errs = append(errs, models.UnmatchedCall{
 					At:            parserErr.MismatchReport.At,
 					Protocol:      parserErr.MismatchReport.Protocol,

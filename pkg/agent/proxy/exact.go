@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -468,7 +469,7 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 	// The recordings kept on disk, in recorded order, each decoded only once
 	// the checks by name have passed it, and none after the first that is
 	// the call.
-	m.rangeRecorded(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+	err := m.rangeRecorded(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
 		if seen[name] || m.consumedInSet(name) || m.exact.named.has(epoch, name) {
 			return true
 		}
@@ -484,6 +485,9 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 		}
 		return !try(mk)
 	})
+	if err != nil && m.logger != nil {
+		m.logger.Debug("a miss's diagnosis could not read the set's recordings kept on disk; it names none of them", zap.String("kind", string(kind)), zap.Error(err))
+	}
 	return found
 }
 
@@ -497,6 +501,15 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 // the first one either did, named for nothing: the call is one more than it
 // holds. "" for none.
 //
+// err: the lookup could not look in all it had to (a recording kept on disk
+// could not be read back, or the on-disk store could not be read), so whether
+// the call is a recording made elsewhere is unknown. It then names nothing
+// for the call, and returns "", whatever it found before: a recording the
+// call is again, found in the trees, may not be the first of those, and a
+// fresh one may be among what it could not read. A lookup that finds a fresh
+// one before it reaches what cannot be read reads no further, and has no
+// error.
+//
 // A recording whose digest (q.Digest, computed once per recording and
 // staging) rules it out (q.RulesOut) is not compared, nor read back from
 // disk once its digest is kept: a lookup compares the call only with the
@@ -506,10 +519,10 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 // recordings that may be the call are digested, when none is kept yet, and
 // compared once its lock is released, so the lookup that first digests a
 // staging's recordings keeps no call from its trees meanwhile.
-func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (name string, notOwned bool) {
+func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (name string, notOwned bool, err error) {
 	v := m.exactView()
 	if v == nil || q.Match == nil {
-		return "", false
+		return "", false, nil
 	}
 	epoch := m.stagingEpoch.Load()
 	m.treesMu.RLock()
@@ -606,8 +619,10 @@ func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 	}
 	if fresh == "" && inTrees != nil {
 		// The recordings kept on disk, each read back only while its digest
-		// is unknown or may be the call's.
-		m.rangeRecorded(kind, q.Keys, func(name string, load func() (*models.Mock, error)) bool {
+		// is unknown or may be the call's. One that cannot be read back ends
+		// the lookup, which could not look (unread).
+		var unread error
+		err := m.rangeRecorded(kind, q.Keys, func(name string, load func() (*models.Mock, error)) bool {
 			if seen[name] || inTrees[name] {
 				return true
 			}
@@ -624,9 +639,7 @@ func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 			}
 			mk, err := load()
 			if err != nil {
-				if m.logger != nil {
-					m.logger.Debug("a lookup of a recording made elsewhere could not read a recording kept on disk; it names none of them", zap.String("mock", name), zap.Error(err))
-				}
+				unread = fmt.Errorf("the recording %s kept on disk could not be read back: %w", name, err)
 				return false
 			}
 			if mk == nil || mk.Kind != kind {
@@ -637,11 +650,23 @@ func (m *MockManager) FindStagedElsewhere(kind models.Kind, q integrations.Elsew
 			}
 			return !try(mk)
 		})
+		if err != nil && unread == nil {
+			unread = fmt.Errorf("the test set's recordings kept on disk could not be read: %w", err)
+		}
+		if unread != nil && fresh == "" {
+			// Said by its caller: the parser's miss carries it, and the
+			// replay names it as why the test has no verdict.
+			if m.logger != nil {
+				m.logger.Debug("a lookup of a recording made elsewhere could not read all the test set's recordings it had to look in; it names none of them",
+					zap.String("kind", string(kind)), zap.Error(unread))
+			}
+			return "", false, unread
+		}
 	}
 	if fresh != "" {
-		return fresh, true
+		return fresh, true, nil
 	}
-	return again, false
+	return again, false, nil
 }
 
 var _ integrations.ElsewhereFinder = (*MockManager)(nil)
@@ -679,17 +704,16 @@ func (m *MockManager) hasRecordingSource() bool {
 
 // rangeRecorded visits what the recording source holds of kind under keys
 // (RecordingSource): decoded only as visit loads it, kept by nobody; nothing
-// when there is no source, or it fails.
-func (m *MockManager) rangeRecorded(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) {
+// when there is no source. It returns the source's error: what it could not
+// visit, when it fails.
+func (m *MockManager) rangeRecorded(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
 	m.exact.recorded.mu.Lock()
 	src := m.exact.recorded.src
 	m.exact.recorded.mu.Unlock()
 	if src == nil {
-		return
+		return nil
 	}
-	if err := src(kind, keys, visit); err != nil && m.logger != nil {
-		m.logger.Debug("a miss's diagnosis could not read the set's recordings kept on disk; it names none of them", zap.String("kind", string(kind)), zap.Error(err))
-	}
+	return src(kind, keys, visit)
 }
 
 // consumedInSet reports whether a call of the current test set consumed the

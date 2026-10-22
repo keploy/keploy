@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1141,6 +1142,129 @@ func TestALearnStepRefusesACallMadeElsewhereOnceMoreThanItsRecordingHolds(t *tes
 	})
 }
 
+// (LEARN-vs-NOTOWNED, fail closed) The learn step asks whether a call is a
+// recording made elsewhere before it pairs the call with a recording of its
+// scope it drifted from. Test A's recording is on the agent's disk store,
+// test B's in the trees, and A's poll is made in B's window. A lookup that
+// cannot read what it has to look in (a recording kept on disk that cannot
+// be read back, a store a re-staging closed) cannot tell whether the call is
+// A's: so nothing is answered, learned or named for it, and its miss says
+// keploy could not look, which makes the read of the test's misses
+// incomplete (models.ErrUnmatchedCallsUnread): the test has no verdict. A
+// replay round's miss (no learn step) is reported so too. Nothing was named
+// by the lookup that could not look: once the store reads again, the same
+// call is named A's recording, not owned. With the read working it is named
+// so at once.
+func TestALearnStepThatCannotLookUpACallMadeElsewhereAnswersAndLearnsNothing(t *testing.T) {
+	readFails := errors.New("read mock-a: input/output error")
+	for _, tc := range []struct {
+		name string
+		opts models.OutgoingOptions
+		// fail is how the store fails, nil when it reads.
+		fail func(a *models.Mock) RecordingSource
+	}{
+		{name: "the disk read works", opts: models.OutgoingOptions{Learn: true}},
+		{name: "a recording kept on disk cannot be read back", opts: models.OutgoingOptions{Learn: true},
+			fail: func(*models.Mock) RecordingSource {
+				return func(kind models.Kind, _ []string, visit func(string, func() (*models.Mock, error)) bool) error {
+					if kind == models.HTTP {
+						visit("mock-a", func() (*models.Mock, error) { return nil, readFails })
+					}
+					return nil
+				}
+			}},
+		{name: "the disk store cannot be read", opts: models.OutgoingOptions{Learn: true},
+			fail: func(*models.Mock) RecordingSource {
+				return func(models.Kind, []string, func(string, func() (*models.Mock, error)) bool) error {
+					return errors.New("disk mocks: store closed")
+				}
+			}},
+		{name: "a replay round's miss, a recording on disk cannot be read back",
+			fail: func(*models.Mock) RecordingSource {
+				return func(kind models.Kind, _ []string, visit func(string, func() (*models.Mock, error)) bool) error {
+					if kind == models.HTTP {
+						visit("mock-a", func() (*models.Mock, error) { return nil, readFails })
+					}
+					return nil
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			now := time.Now()
+			a := r3Mock("mock-a", now, "GET", "/v1/jobs?cursor=c1", "", `{"jobs":["j1"]}`)
+			b := r3Mock("mock-b", now.Add(time.Second), "GET", "/v1/jobs?cursor=c2", "", `{"jobs":[]}`)
+			for _, m := range []*models.Mock{a, b} {
+				m.DeriveLifetime()
+			}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SeedRecordedWindows([]models.TestWindow{
+				{Start: now.Add(-100 * time.Millisecond), End: now.Add(500 * time.Millisecond)},
+				{Start: now.Add(900 * time.Millisecond), End: now.Add(1500 * time.Millisecond)},
+			})
+			mm.SetMocksWithWindow(nil, []*models.Mock{b}, models.BaseTime, now.Add(time.Hour))
+			reads := RecordingSource(func(kind models.Kind, _ []string, visit func(string, func() (*models.Mock, error)) bool) error {
+				if kind == models.HTTP {
+					visit("mock-a", func() (*models.Mock, error) { return a, nil })
+				}
+				return nil
+			})
+			if tc.fail != nil {
+				mm.SetRecordingSource(tc.fail(a))
+			} else {
+				mm.SetRecordingSource(reads)
+			}
+			mm.SetServedObserver(p.learnTracker.ServedMock)
+			mm.ServeExactTest("test-b", []*models.Mock{b})
+			p.ContinueTestErrorCapture()
+
+			code, body := r3Send(t, p, mm, tc.opts, pollOfA)
+			// Read once: a read of what was consumed takes it.
+			learned := r3States(mm)["mock-b"].ReqBodyNoise
+			if _, noise := learned["url.query.cursor"]; noise || code == http.StatusOK {
+				t.Fatalf("test A's call made in test B was answered from test B's recording (%d %s), which learned %v", code, body, learned)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if len(misses) != 1 || misses[0].Reason != "" {
+				t.Fatalf("want one miss with no learn-step reason; misses %+v", misses)
+			}
+			if tc.fail == nil {
+				if err != nil || !misses[0].NotOwned || misses[0].ClosestMock != "mock-a" {
+					t.Fatalf("with the read working, want the call named mock-a not owned, and the read whole; misses %+v, %v", misses, err)
+				}
+				return
+			}
+			if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), "could not tell whether this call is a recording made elsewhere") {
+				t.Fatalf("a miss keploy could not tell from a recording made elsewhere left the read of the test's misses whole (%v): the test would have a verdict", err)
+			}
+			if misses[0].NotOwned {
+				t.Fatalf("the call was named not owned by a lookup that could not look: %+v", misses[0])
+			}
+			if !strings.Contains(misses[0].NextSteps, "could not read all the test set's recordings") {
+				t.Fatalf("the miss does not say keploy could not look: %q", misses[0].NextSteps)
+			}
+
+			// The store reads again: the lookup that could not look named
+			// nothing, so the same call is A's recording, not owned.
+			mm.SetRecordingSource(reads)
+			p.ContinueTestErrorCapture()
+			if code, body := r3Send(t, p, mm, tc.opts, pollOfA); code == http.StatusOK {
+				t.Fatalf("A's call in B was answered once the store read again: %d %s", code, body)
+			}
+			misses, err = p.GetMockErrors(context.Background())
+			if err != nil || len(misses) != 1 || !misses[0].NotOwned || misses[0].ClosestMock != "mock-a" {
+				t.Fatalf("once the store reads, want the call named mock-a not owned; misses %+v, %v", misses, err)
+			}
+			if learned := r3States(mm)["mock-b"].ReqBodyNoise; len(learned) != 0 {
+				t.Fatalf("test B's recording learned %v", learned)
+			}
+		})
+	}
+}
+
 // comparingStore is a mock manager that counts the recordings its lookups of
 // a recording made elsewhere compare with a call, and the digests they
 // compute, of every kind of lookup.
@@ -1156,7 +1280,7 @@ func (c *comparingStore) counted(match func(*models.Mock) bool) func(*models.Moc
 	}
 }
 
-func (c *comparingStore) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool) {
+func (c *comparingStore) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool, error) {
 	q.Match = c.counted(q.Match)
 	if digest := q.Digest; digest != nil {
 		q.Digest = func(m *models.Mock) any {

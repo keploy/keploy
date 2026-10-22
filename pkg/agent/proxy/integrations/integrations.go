@@ -374,15 +374,25 @@ type StagedKeyFinder interface {
 // the call, in what it keeps on disk under the query's Keys (as
 // StagedKeyFinder does). The query's digest narrows what is compared. For
 // the decision only: the mock is never handed out, nor served.
+//
+// err, when set, says the store could not look in all it had to (a recording
+// it keeps on disk could not be read back, or the store could not be read):
+// whether the call is a recording made elsewhere is then unknown, and name is
+// "", with nothing named for the call. "" with no error is the store's word
+// that no recording it keeps is the call. A parser that would otherwise pair
+// the call with a recording of its scope must not, on an error, pair, serve,
+// learn or name anything for it: it reports a miss that says keploy could not
+// look (MockMismatchReport.Unread), so the test that reads it has no verdict.
 type ElsewhereFinder interface {
-	FindStagedElsewhere(kind models.Kind, q ElsewhereQuery) (name string, notOwned bool)
+	FindStagedElsewhere(kind models.Kind, q ElsewhereQuery) (name string, notOwned bool, err error)
 }
 
 // FindStagedElsewhere asks mockDb's ElsewhereFinder for the recording made
-// elsewhere that q's call is. A store with none names, through its
-// StagedKeyFinder or StagedFinder, only a recording no call consumed and no
-// miss named (notOwned); "" from a store with neither.
-func FindStagedElsewhere(mockDb MockMemDb, kind models.Kind, q ElsewhereQuery) (name string, notOwned bool) {
+// elsewhere that q's call is (err: it could not look in all it had to). A
+// store with none names, through its StagedKeyFinder or StagedFinder, only a
+// recording no call consumed and no miss named (notOwned); "" from a store
+// with neither.
+func FindStagedElsewhere(mockDb MockMemDb, kind models.Kind, q ElsewhereQuery) (name string, notOwned bool, err error) {
 	switch f := mockDb.(type) {
 	case ElsewhereFinder:
 		return f.FindStagedElsewhere(kind, q)
@@ -391,7 +401,7 @@ func FindStagedElsewhere(mockDb MockMemDb, kind models.Kind, q ElsewhereQuery) (
 	case StagedFinder:
 		name = f.FindStagedNotOwned(kind, q.Match)
 	}
-	return name, name != ""
+	return name, name != "", nil
 }
 
 // ElsewhereQuery is what ElsewhereFinder looks for.

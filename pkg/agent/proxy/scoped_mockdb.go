@@ -318,7 +318,7 @@ var _ integrations.StagedKeyFinder = (*scopedMockDb)(nil)
 // elsewhere (integrations.FindStagedElsewhere): the learn step on a view made
 // before exact serving began asks the bare manager, as a miss's diagnosis
 // does.
-func (s *scopedMockDb) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool) {
+func (s *scopedMockDb) FindStagedElsewhere(kind models.Kind, q integrations.ElsewhereQuery) (string, bool, error) {
 	return integrations.FindStagedElsewhere(s.MockMemDb, kind, q)
 }
 

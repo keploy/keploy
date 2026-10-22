@@ -408,6 +408,11 @@ type learnMiss struct {
 	// the miss is that recording's (not owned). again is one the request is
 	// once more than it holds, named for nothing. nil for any other miss.
 	elsewhere, again *models.Mock
+	// unread is why keploy could not tell whether the request is a
+	// recording made elsewhere, before the learn step would have paired it
+	// (elsewhereRecording's err): nothing was named for it. nil for any
+	// other miss.
+	unread error
 }
 
 // scope is what a request's scope offers: the HTTP candidates learn.Pair
@@ -932,7 +937,22 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			// learnPlan, tracker.Answer and claimLearned: any learn outcome
 			// that learns, binds a variable or records a served exchange
 			// from a drifted pairing asks elsewhereRecording before it does.
-			if rec, notOwned := elsewhereRecording(ctx, input, mockDb, n.strict); rec != nil {
+			//
+			// One keploy could not answer (a recording it had to look in
+			// could not be read back) is a refusal too: the request may be
+			// another test's recording, so nothing is paired, served,
+			// learned or named for it, and its miss says keploy could not
+			// look, which leaves the test with no verdict.
+			rec, notOwned, lookErr := elsewhereRecording(ctx, input, mockDb, n.strict)
+			if lookErr != nil {
+				h.Logger.Warn("the learn step could not tell whether this call is a recording made elsewhere; answering nothing and learning nothing from it",
+					zap.String("mock", m.Name), zap.Error(lookErr))
+				miss := &learnMiss{res: res, closest: m, pool: sc.http, unread: lookErr}
+				miss.res.Outcome, miss.res.Reason = learn.Miss, ""
+				miss.res.Why = "keploy could not tell whether it is a recording made elsewhere: " + lookErr.Error()
+				return nil, miss, nil
+			}
+			if rec != nil {
 				miss := &learnMiss{res: res, closest: m, pool: sc.http}
 				if notOwned {
 					miss.res.Why, miss.elsewhere = "it is "+rec.Name+", a recording made elsewhere", rec

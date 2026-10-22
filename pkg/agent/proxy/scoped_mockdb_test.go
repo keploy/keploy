@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"testing"
@@ -510,4 +511,19 @@ func TestAWorkersViewPassesStraightThroughUnderExactServing(t *testing.T) {
 	if view.DeleteFilteredMock(*fresh[0]) {
 		t.Fatal("a test mock answered twice through the old view")
 	}
+}
+
+// The scoped view forwards a lookup of a recording made elsewhere whole: one
+// that could not look in all it had to (a store that cannot be read) says so
+// through the view, as through the manager, and names nothing.
+func TestScopedMockDbForwardsALookupThatCouldNotLook(t *testing.T) {
+	mm := stagedManager(t, nil, nil)
+	closed := errors.New("disk mocks: store closed")
+	mm.SetRecordingSource(func(models.Kind, []string, func(string, func() (*models.Mock, error)) bool) error { return closed })
+	mm.ServeExactPool("k", nil)
+	q := integrations.ElsewhereQuery{Keys: []string{"k"}, Match: func(*models.Mock) bool { return true }}
+	name, notOwned, err := integrations.FindStagedElsewhere(&scopedMockDb{MockMemDb: mm}, models.HTTP, q)
+	require.ErrorIs(t, err, closed)
+	require.Empty(t, name)
+	require.False(t, notOwned)
 }

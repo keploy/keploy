@@ -327,17 +327,31 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// the open test's call changed, its report would offer noise
 				// for what tells the two apart, which answers the other
 				// test's call with this test's recording on the next replay.
+				//
+				// One keploy could not tell from a recording made elsewhere
+				// (a recording it had to look in could not be read back) is
+				// named as no recording, and its report says keploy could
+				// not look (markElsewhereUnread): the test that reads it has
+				// no verdict, since what it is is unknown.
 				var elsewhere, again *models.Mock
+				var unread error
 				switch {
 				case madeElsewhere:
 					// Looked up once, by the learn step: a recording is
 					// named for one miss at most (integrations.ElsewhereFinder).
 					elsewhere, again = lmiss.elsewhere, lmiss.again
+				case n == 0 && lmiss != nil && lmiss.unread != nil:
+					// The learn step could not look, and turned the call
+					// away unnamed: it is not looked up again.
+					unread = lmiss.unread
 				case n == 0 && report != nil && provenswitch.On():
-					rec, notOwned := elsewhereRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
-					if notOwned {
+					rec, notOwned, err := elsewhereRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+					switch {
+					case err != nil:
+						unread = err
+					case notOwned:
 						elsewhere = rec
-					} else {
+					default:
 						again = rec
 					}
 				}
@@ -347,6 +361,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					markNotOwned(report, elsewhere)
 				case again != nil:
 					markMadeAgain(report, again)
+				case unread != nil:
+					markElsewhereUnread(report, unread)
 				case lmiss != nil:
 					lmiss.explain(report)
 				}

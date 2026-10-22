@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,8 +43,11 @@ func TestAMissCarriesEveryFieldOfItsReport(t *testing.T) {
 		p.BeginTestErrorCapture()
 		p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, &report))
 		got, err := p.GetMockErrors(context.Background())
-		if err != nil || len(got) != 1 {
-			t.Fatalf("stamped=%v: want the one miss, got %+v (%v)", stamped, got, err)
+		// Filled whole, the report says keploy could not tell what the
+		// call is (Unread): the read is incomplete, naming why, and
+		// returns the miss all the same.
+		if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), report.Unread) || len(got) != 1 {
+			t.Fatalf("stamped=%v: want the one miss, and the read incomplete for its Unread, got %+v (%v)", stamped, got, err)
 		}
 		from, to := reflect.ValueOf(report), reflect.ValueOf(got[0])
 		for i := 0; i < from.NumField(); i++ {

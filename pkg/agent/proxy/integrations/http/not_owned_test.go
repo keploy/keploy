@@ -46,13 +46,13 @@ func TestElsewhereRecordingIsTheCallMadeElsewhere(t *testing.T) {
 	db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-get", "/get", host), elsewhere}}
 	n := newHTTP().newStrictNoise(nil, nil, nil)
 	ctx := context.Background()
-	if got, notOwned := elsewhereRecording(ctx, getTo("/delete", host), db, n); got != elsewhere || !notOwned {
+	if got, notOwned, _ := elsewhereRecording(ctx, getTo("/delete", host), db, n); got != elsewhere || !notOwned {
 		t.Fatalf("named %v (not owned: %v), want the recording that is this call, not owned", got, notOwned)
 	}
-	if got, _ := elsewhereRecording(ctx, getTo("/changed", host), db, n); got != nil {
+	if got, _, _ := elsewhereRecording(ctx, getTo("/changed", host), db, n); got != nil {
 		t.Fatalf("a call no recording is was named as %s", got.Name)
 	}
-	if got, _ := elsewhereRecording(ctx, getTo("/delete", host), &mockMemDb{mocks: []*models.Mock{elsewhere}}, n); got != nil {
+	if got, _, _ := elsewhereRecording(ctx, getTo("/delete", host), &mockMemDb{mocks: []*models.Mock{elsewhere}}, n); got != nil {
 		t.Fatalf("a store that stages nothing more named %s", got.Name)
 	}
 
@@ -211,7 +211,7 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 			}
 			var offered []string
 			db := keyedDb{mockMemDb: &mockMemDb{}, onDisk: append(others, tc.rec), offered: &offered}
-			got, _ := elsewhereRecording(context.Background(), tc.live, db, n)
+			got, _, _ := elsewhereRecording(context.Background(), tc.live, db, n)
 			if named := got == tc.rec; named != tc.want {
 				t.Fatalf("named %v (offered %v); want the recording named: %v", got, offered, tc.want)
 			}
@@ -478,5 +478,95 @@ func TestAMissOnACallMadeElsewhereNamesItsRecordingWhateverPairDecided(t *testin
 				}
 			})
 		}
+	}
+}
+
+// (LEARN-vs-NOTOWNED, fail closed) A call keploy could not tell from a
+// recording made elsewhere (the store could not read all it had to look in:
+// a recording kept on disk that cannot be read back) may be another test's
+// recording. Whatever the learn step made of it against the open test's own
+// recordings, it is answered with none of them, nothing is learned or named
+// for it, and its miss says keploy could not look (MockMismatchReport.Unread)
+// with no learn-step reason and no hint that what differs is noise: the
+// proxy's read of the test's misses is then incomplete, so the test has no
+// verdict. In the arm that would pair it (learnMatch's Paired) the learn
+// step looks, and the report does not look again.
+func TestAMissOnACallKeployCouldNotTellFromARecordingMadeElsewhereSaysSo(t *testing.T) {
+	const call = "GET /v1/jobs?cursor=c1&page=1 HTTP/1.1\r\nHost: api.test\r\nContent-Type: application/json\r\n\r\n"
+	unread := errors.New("the recording other-test-poll kept on disk could not be read back: disk mocks: read at 4096: input/output error")
+	for _, tc := range []struct {
+		name string
+		opts models.OutgoingOptions
+		own  func() []*models.Mock
+		// answered is the open test's recording the tracker holds as
+		// answered.
+		answered string
+		// paired: with the lookup working and nothing elsewhere, the learn
+		// step pairs the call with the open test's recording.
+		paired bool
+	}{
+		{name: "the learn step would pair it", opts: models.OutgoingOptions{Learn: true}, own: func() []*models.Mock {
+			return []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2&page=1", "", nil, `{"jobs":[]}`)}
+		}, paired: true},
+		{name: "two recordings tie in different places", opts: models.OutgoingOptions{Learn: true}, own: func() []*models.Mock {
+			return []*models.Mock{
+				learnRecorded("own-poll-1", 0, "GET", "/v1/jobs?cursor=c2&page=1", "", nil, `{"jobs":[]}`),
+				learnRecorded("own-poll-2", time.Millisecond, "GET", "/v1/jobs?cursor=c1&page=2", "", nil, `{"jobs":[]}`),
+			}
+		}},
+		{name: "it differs in more than values", opts: models.OutgoingOptions{Learn: true}, own: func() []*models.Mock {
+			return []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2&page=1&limit=5", "", nil, `{"jobs":[]}`)}
+		}},
+		{name: "its closest recording answered already", opts: models.OutgoingOptions{Learn: true}, own: func() []*models.Mock {
+			return []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2&page=1", "", nil, `{"jobs":[]}`)}
+		}, answered: "own-poll"},
+		{name: "a replay round", own: func() []*models.Mock {
+			return []*models.Mock{learnRecorded("own-poll", 0, "GET", "/v1/jobs?cursor=c2&page=1", "", nil, `{"jobs":[]}`)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := func(own []*models.Mock) *learn.Tracker {
+				tr := learn.NewTracker()
+				tr.Begin()
+				test, _, _, _ := tr.Test()
+				for _, m := range own {
+					if m.Name == tc.answered && !tr.Answer(test, m) {
+						t.Fatal("fixture: the tracker did not take the answered recording")
+					}
+				}
+				return tr
+			}
+			if tc.paired {
+				// The fixture: with the lookup working the learn step
+				// pairs the call with the open test's recording, answers
+				// from it and learns its drift.
+				own := tc.own()
+				db := &elsewhereDb{learnDb: &learnDb{perTest: own}}
+				if code, _ := switchedMiss(t, tracker(own), db, tc.opts, call); code != http.StatusOK || len(db.consumed) != 1 {
+					t.Fatalf("fixture: with nothing elsewhere the learn step answered %d and consumed %d recordings, want it paired", code, len(db.consumed))
+				}
+			}
+			own := tc.own()
+			db := &elsewhereDb{learnDb: &learnDb{perTest: own}, unread: unread}
+			code, r := switchedMiss(t, tracker(own), db, tc.opts, call)
+			if code != http.StatusBadGateway || r == nil {
+				t.Fatalf("the app got %d (report %+v) for a call keploy could not tell from a recording made elsewhere, want the miss's 502", code, r)
+			}
+			if len(db.consumed) != 0 || len(db.named) != 0 {
+				t.Fatalf("consumed %v and named %v for a call keploy could not tell from a recording made elsewhere", db.consumed, db.named)
+			}
+			if !strings.Contains(r.Unread, "could not tell whether this call is a recording made elsewhere") || !strings.Contains(r.Unread, unread.Error()) {
+				t.Fatalf("the miss does not say keploy could not look: unread %q", r.Unread)
+			}
+			if r.NotOwned || r.Reason != "" || r.MissKind != "" || strings.Contains(r.NextSteps, "noise") || !strings.Contains(r.NextSteps, "this test has no verdict") {
+				t.Fatalf("the miss reads as a verdict (not owned %v, reason %q, kind %q, next steps %q)", r.NotOwned, r.Reason, r.MissKind, r.NextSteps)
+			}
+			if len(r.FieldDiffs) != 0 || len(r.Differs) != 0 || r.Diff != "" {
+				t.Fatalf("the miss says fields differ from the open test's recording (%v %v %q): the call may be another test's", r.FieldDiffs, r.Differs, r.Diff)
+			}
+			if db.lookups != 1 {
+				t.Fatalf("%d lookups of a recording made elsewhere, want one", db.lookups)
+			}
+		})
 	}
 }

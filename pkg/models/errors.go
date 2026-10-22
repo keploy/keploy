@@ -281,6 +281,13 @@ type MockMismatchReport struct {
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
+	// Unread says, under the proven switch, why keploy could not tell what
+	// this call is: it could not read all the recordings it had to look in
+	// to tell whether the call is one made elsewhere (another test's), so
+	// nothing was answered or learned for it. The proxy's read of the misses
+	// that carries it is incomplete (ErrUnmatchedCallsUnread, naming it), so
+	// the test that reads it has no verdict, and its set is not judged.
+	Unread string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

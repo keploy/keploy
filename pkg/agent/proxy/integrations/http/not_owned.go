@@ -39,7 +39,13 @@ func callRequestKeys(input *req, n strictNoise) []string {
 // no staged mocks to look in. Only the recordings whose digest may be the
 // request's are compared (requestDigest). ctx carries the request's
 // destination as it came (liveDestination).
-func elsewhereRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) (rec *models.Mock, notOwned bool) {
+//
+// err: keploy could not look in all the recordings it had to (the store
+// could not read one back), so whether the request is a recording made
+// elsewhere is unknown; rec is nil, and nothing is named for it. A caller
+// pairs, serves, learns and names nothing for such a request: it is a miss
+// whose report says keploy could not look (markElsewhereUnread).
+func elsewhereRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) (rec *models.Mock, notOwned bool, err error) {
 	live := liveDestination(ctx, input)
 	digest := liveRequestDigest(input, n)
 	matched := map[string]*models.Mock{}
@@ -59,11 +65,14 @@ func elsewhereRecording(ctx context.Context, input *req, mockDb integrations.Moc
 			return true
 		},
 	}
-	name, notOwned := integrations.FindStagedElsewhere(mockDb, models.HTTP, q)
-	if name == "" {
-		return nil, false
+	name, notOwned, err := integrations.FindStagedElsewhere(mockDb, models.HTTP, q)
+	if err != nil {
+		return nil, false, err
 	}
-	return matched[name], notOwned
+	if name == "" {
+		return nil, false, nil
+	}
+	return matched[name], notOwned, nil
 }
 
 // amzTargetHeader names an AWS JSON-protocol call's action.
@@ -187,6 +196,27 @@ func markMadeAgain(report *models.MockMismatchReport, m *models.Mock) {
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = madeAgainNextSteps(m.Name)
 }
+
+// markElsewhereUnread makes report the miss of a call keploy could not tell
+// from a recording made elsewhere: it could not read all the test set's
+// recordings it had to look in (elsewhereRecording's err). It stands in for
+// the learn step's explanation (learnMiss.explain, never called for such a
+// miss) and for the recording made elsewhere a lookup would name. What the
+// call is is unknown, so no learn-step reason stands for it, nor does any
+// field said to differ from the open test's closest recording, which a
+// reader would take for noise to add: the call may be another test's, which
+// differs from none of it. report.Unread says so, and the proxy's read of
+// the test's misses is then incomplete (models.ErrUnmatchedCallsUnread), so
+// the test has no verdict and its set is not judged.
+func markElsewhereUnread(report *models.MockMismatchReport, err error) {
+	report.FieldDiffs, report.Differs, report.Diff = nil, nil, ""
+	report.Unread = "keploy could not tell whether this call is a recording made elsewhere: " + err.Error()
+	report.NextSteps = elsewhereUnreadNextSteps
+}
+
+// elsewhereUnreadNextSteps says what a miss on a call keploy could not tell
+// from a recording made elsewhere (markElsewhereUnread) means.
+const elsewhereUnreadNextSteps = "keploy could not read all the test set's recordings it had to look in to tell whether this request is one recorded elsewhere (in another test's window, or between tests), so it did not answer it, learned nothing from it, and this test has no verdict. Check the agent's log for why a recording kept on disk could not be read (a full or failing disk, the set's staging ending under load), then run the test set again."
 
 // madeAgainNextSteps says what a miss on a call that is a recording the open
 // view does not show, made once more than it holds (markMadeAgain), means.

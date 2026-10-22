@@ -212,9 +212,11 @@ type FailureInfo struct {
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
 	// UnmatchedCallsUnread says UnmatchedCalls may be missing calls: the
 	// agent's record of the calls no mock answered during this test could not
-	// all be read (models.ErrUnmatchedCallsUnread, or the read failed). The
-	// test's evidence is unknown, so its test set is not judged. Set only under
-	// the proven switch.
+	// all be read (models.ErrUnmatchedCallsUnread, or the read failed), or
+	// what one of them is could not be told (MockMismatchReport.Unread: keploy
+	// could not read the recordings it had to look in to tell whether it is
+	// another test's). The test's evidence is unknown, so its test set is not
+	// judged. Set only under the proven switch.
 	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
 	// MissesUnattributed says, with the proven switch off, what
 	// UnmatchedCallsUnread says under it: the calls no mock answered during
