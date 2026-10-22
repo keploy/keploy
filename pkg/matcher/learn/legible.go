@@ -637,10 +637,11 @@ type LocalValue struct {
 // WriteLearned writes the learned files of the test set in setDir under the
 // proven switch: learned.yaml whole from the set's mocks (Legible), and into
 // learned.local.yaml, by ID, each learned leaf of this run with record's
-// full round's value (local), the earlier entries of leaves the mocks still
-// learn kept, and every other pruned. The project's keploy/.gitignore
-// (setDir's parent) is ensured first (EnsureLearnedIgnored); when it cannot
-// be, neither file is written. With the switch off it writes nothing.
+// full round's value (local; of two for one leaf, the least), the earlier
+// entries of leaves the mocks still learn kept, and every other pruned. The
+// project's keploy/.gitignore (setDir's parent) is ensured first
+// (EnsureLearnedIgnored); when it cannot be, neither file is written. With
+// the switch off it writes nothing.
 func WriteLearned(setDir string, local []LocalValue) error {
 	if !provenswitch.On() {
 		return nil
@@ -660,9 +661,16 @@ func WriteLearned(setDir string, local []LocalValue) error {
 	if err := writeLearned(setDir, models.LearnedFile, leaves); err != nil {
 		return err
 	}
+	// A leaf of which local holds more than one value (a mock the run
+	// answered more than once; an earlier call's place a later call bound
+	// too) keeps the least: the file is a function of the values, never of
+	// the order they come in (a map's, MockState by mock).
 	f := map[string]string{}
 	for _, v := range local {
-		f[v.Mock+"\x00"+v.Path] = v.F
+		k := v.Mock + "\x00" + v.Path
+		if cur, ok := f[k]; !ok || v.F < cur {
+			f[k] = v.F
+		}
 	}
 	var fresh []models.LearnedLeaf
 	for _, l := range leaves {

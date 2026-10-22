@@ -246,6 +246,41 @@ func TestTheLocalFileRedactsFsValues(t *testing.T) {
 	}
 }
 
+// learned.local.yaml is a function of F's values, not of the order they come
+// in: a leaf two states saw take two values (a mock answered more than once)
+// keeps the least, in either order.
+func TestTheLocalFileIsDeterministic(t *testing.T) {
+	keploy := filepath.Join(t.TempDir(), "keploy")
+	set := filepath.Join(keploy, "test-set-0")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := NewDriftCache().Words("ORD-1 ref=a1", "ORD-1 ref=b2", nil)
+	mocks := []*models.Mock{{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{"body.note": "ORD-1 ref=a1"}, LearnedWords: map[string]models.WordsEntry{"body.note": e}}}}
+	withSet(t, nil)
+	RegisterSetReader(func(string) ([]*models.Mock, error) { return mocks, nil })
+	t.Setenv(provenswitch.Env, "1")
+	b2, c3 := LocalValue{Mock: "mock-1", Path: "body.note", F: "ORD-1 ref=b2"}, LocalValue{Mock: "mock-1", Path: "body.note", F: "ORD-1 ref=c3"}
+	var written []string
+	for _, local := range [][]LocalValue{{b2, c3}, {c3, b2}} {
+		if err := os.Remove(filepath.Join(set, models.LearnedLocalFile)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := WriteLearned(set, local); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(set, models.LearnedLocalFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		written = append(written, string(b))
+	}
+	if written[0] != written[1] || !strings.Contains(written[0], "ref=b2") {
+		t.Fatalf("learned.local.yaml depends on the order of F's values:\n%s\n---\n%s", written[0], written[1])
+	}
+}
+
 func TestTheLearnedFilesAreWrittenIgnoredFirst(t *testing.T) {
 	root := t.TempDir()
 	keploy := filepath.Join(root, "keploy")
