@@ -2,6 +2,7 @@ package mismatch
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -153,13 +154,33 @@ func TestRenderFieldDiffs_AllKinds(t *testing.T) {
 // (models.KindsOfProtocol), which a miss of a test recorded beside others
 // reads to say which of their recordings its own may be.
 func TestEveryCanonicalProtocolNamesItsKinds(t *testing.T) {
-	for _, p := range []string{ProtocolHTTP, ProtocolHTTP2, ProtocolGRPC, ProtocolMySQL, ProtocolPostgres, ProtocolMongo, ProtocolRedis, ProtocolGeneric, ProtocolDNS} {
-		if len(models.KindsOfProtocol(p)) == 0 {
-			t.Errorf("%s names no kind", p)
-		}
+	// Each canonical protocol, and exactly the kinds its calls are recorded
+	// as. A miss of one names, as the recordings it may be, only recordings
+	// of these kinds: a wrong entry would have a MongoDB miss name an HTTP
+	// recording.
+	want := map[string][]models.Kind{
+		ProtocolHTTP:     {models.HTTP},
+		ProtocolHTTP2:    {models.HTTP2},
+		ProtocolGRPC:     {models.GRPC_EXPORT},
+		ProtocolMySQL:    {models.MySQL},
+		ProtocolPostgres: {models.Postgres, models.PostgresV2, models.PostgresV3},
+		ProtocolMongo:    {models.Mongo},
+		ProtocolRedis:    {models.REDIS},
+		ProtocolGeneric:  {models.GENERIC},
+		ProtocolDNS:      {models.DNS},
 	}
-	if got := models.KindsOfProtocol(ProtocolHTTP); len(got) != 1 || got[0] != models.HTTP {
-		t.Errorf("HTTP is recorded as %v", got)
+	of := map[models.Kind]string{}
+	for p, kinds := range want {
+		if got := models.KindsOfProtocol(p); !slices.Equal(got, kinds) {
+			t.Errorf("%s is recorded as %v; want %v", p, got, kinds)
+		}
+		// No kind is another protocol's too.
+		for _, k := range models.KindsOfProtocol(p) {
+			if other, dup := of[k]; dup {
+				t.Errorf("kind %s is recorded under both %s and %s", k, other, p)
+			}
+			of[k] = p
+		}
 	}
 	if len(models.KindsOfProtocol("unknown")) != 0 {
 		t.Error("a protocol keploy does not name names a kind")
