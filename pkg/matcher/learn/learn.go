@@ -108,9 +108,8 @@ type Known interface {
 // reports, as Excused does, whether the leaf is not compared by value there
 // (WordsAdmit) and whether its type is still enforced (typed). Compare finds
 // it on the Known it is given by a type assertion, so Known is unchanged and
-// every Known outside this package still satisfies Compare.
-//
-// This build declares it only: Compare does not ask it yet.
+// every Known outside this package still satisfies Compare. It is asked of a
+// leaf both sides hold, of one type, that Excused does not excuse.
 type KnownLive interface {
 	ExcusedLive(rec, live Leaf) (excused, typed bool)
 }
@@ -161,11 +160,14 @@ func insideAny(path string, arrays []string) bool {
 	return false
 }
 
-// Compare says how live differs from rec, excusing what known excuses.
+// Compare says how live differs from rec, excusing what known excuses: by
+// Excused, and, of a Known that is a KnownLive, a leaf both sides hold, of
+// one type, by its live value (ExcusedLive: its learned words).
 func Compare(live, rec Shape, known Known) Diff {
 	if known == nil {
 		known = None
 	}
+	byLive, _ := known.(KnownLive)
 	var d Diff
 	if name := fixedDiffers(live.Fixed, rec.Fixed); name != "" {
 		d.Structural = name + " differs"
@@ -208,6 +210,8 @@ func Compare(live, rec Shape, known Known) Diff {
 			return d
 		case l.Value == r.Value || excused:
 			continue
+		case byLive != nil && excusedLive(byLive, r, l):
+			continue
 		case r.Unnamed:
 			d.Structural = p + " drifted, and no path names it alone"
 			return d
@@ -216,6 +220,13 @@ func Compare(live, rec Shape, known Known) Diff {
 	}
 	d.Reordered = reorderedArrays(rec.Body, live.Body, known)
 	return d
+}
+
+// excusedLive reports whether k excuses the drifted leaf (rec, live) by its
+// live value.
+func excusedLive(k KnownLive, rec, live Leaf) bool {
+	excused, _ := k.ExcusedLive(rec, live)
+	return excused
 }
 
 // fixedDiffers names the first fixed part (in sorted order) the two requests
