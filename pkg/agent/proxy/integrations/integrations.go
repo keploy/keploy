@@ -504,6 +504,14 @@ func BackgroundCursorOf(db MockMemDb) (MockCursor, bool) {
 	return nil, false
 }
 
+// S12Background reports whether db serves its staged set by S12's background
+// rules (S12 v16 §2.3; BackgroundCursorOf's ok): false for a set served by
+// today's rules, and for a store that implements none of them.
+func S12Background(db MockMemDb) bool {
+	_, ok := BackgroundCursorOf(db)
+	return ok
+}
+
 // Pairing is record's full round's pairing (S12 v16 §4.1). It answers only
 // while the session pairs: OutgoingOptions.Learn under the proven switch.
 // An optional MockMemDb capability: the agent's MockManager implements it,

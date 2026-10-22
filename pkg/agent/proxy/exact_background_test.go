@@ -638,3 +638,59 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 		t.Fatal("today's rules spent by kind")
 	}
 }
+
+// An async lane's worker-scope recording keeps today's reuse under S12's
+// rules (S12 v16 §2.1): the view shows it, as today, but it is no
+// background: exact serving's background (Background, SpentBackground) and
+// the kind's whole background (KindBackground) leave it out, and no by-kind
+// answer spends it, whether its place is reached or not.
+func TestS12LeavesAnAsyncWorkerRecordingOutOfTheBackground(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own := httpCall("own", 0, "/own")
+	lane := httpCall("w-lane", time.Second, "/lane")
+	lane.Spec.Async = &models.AsyncMeta{}
+	laneLater := httpCall("w-lane-later", 2*time.Second, "/lane")
+	laneLater.Spec.Async = &models.AsyncMeta{}
+	boot := httpCall("w-boot", 3*time.Second, "/w-boot")
+	mm := stagedManager(t, nil, []*models.Mock{own, lane, laneLater, boot})
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, []string{"w-lane", "w-lane-later", "w-boot"})
+	mm.ServeExactWorker([]string{"w-lane", "w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := sessionNames(mm); !strings.Contains(got, "w-lane") {
+		t.Fatalf("the view hides the async lane's worker recording (%s): today's reuse shows it", got)
+	}
+	equalNames(t, "the background", mm.Background(models.HTTP), "w-boot")
+	unused, spent := mm.KindBackground(models.HTTP)
+	equalNames(t, "the kind's unused background", unused, "w-boot")
+	equalNames(t, "the kind's spent background", spent)
+	for _, mk := range []*models.Mock{lane, laneLater} {
+		if mm.SpendByKind(mk) {
+			t.Fatalf("a by-kind answer spent %s, an async lane's", mk.Name)
+		}
+	}
+	equalNames(t, "the spent background", mm.SpentBackground(models.HTTP))
+}
+
+// SpentBackground lists the staging's spent background in recorded order,
+// whatever order the calls spent it in: what a by-kind reuse answers with
+// (S12 v16 §3).
+func TestSpentBackgroundIsInRecordedOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	// The per-test tier, which the trees read first, holds the
+	// later-recorded pool recording.
+	pool := httpCall("pool", 4*time.Second, "/pool")
+	pool.TestModeInfo.Lifetime = models.LifetimePerTest
+	boot := httpCall("w-boot", time.Second, "/w-boot")
+	later := httpCall("w-later", 2*time.Second, "/w-later")
+	mm := stagedManager(t, []*models.Mock{pool}, []*models.Mock{later, boot})
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+	for _, mk := range []*models.Mock{pool, later, boot} {
+		if !mm.SpendByKind(mk) {
+			t.Fatalf("could not spend %s", mk.Name)
+		}
+	}
+	equalNames(t, "the spent background", mm.SpentBackground(models.HTTP), "w-boot", "w-later", "pool")
+	_, spent := mm.KindBackground(models.HTTP)
+	equalNames(t, "the kind's spent background", spent, "w-boot", "w-later", "pool")
+}

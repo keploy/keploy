@@ -484,14 +484,24 @@ func (r *Replayer) logReturnedMoves(testSetID string, returned map[string]string
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	// A build that registers no judging (S12Serving: keploy enterprise
+	// registers it) reads no verdicts.yaml: it runs every test, a
+	// quarantined owner too.
+	judged := S12Serving()
 	for _, n := range names {
 		owner := returned[n]
+		cause := owner + "'s test was edited since the judging, or verdicts.yaml lost its entry"
+		next := "record the test set again: a recording re-derives what each test owns, and its judging what moves"
+		if !judged {
+			cause = "this keploy build reads no verdicts.yaml (it has no judging: keploy enterprise's does), so it runs every test, " + owner + " among them"
+			next = "replay the test set with the keploy build that recorded and judged it, which skips " + owner + " while its quarantine applies; or record it again"
+		}
 		r.logger.Warn("a recording record's judging moved to the test set's background is its test's own again: the move rested on "+owner+"'s quarantine (keploy/unseparable_write), and this run runs "+owner+", so that quarantine no longer applies ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.String("mock", n),
 			zap.String("owner", owner),
-			zap.String("why", owner+"'s test was edited since the judging, or verdicts.yaml lost its entry; run beside the moved write, its own write could be answered unchecked, so "+n+" answers only as "+owner+"'s own, as recorded, and a call it answered elsewhere misses"),
-			zap.String("next_step", "record the test set again: a recording re-derives what each test owns, and its judging what moves"))
+			zap.String("why", cause+"; run beside the moved write, its own write could be answered unchecked, so "+n+" answers only as "+owner+"'s own, as recorded, and a call it answered elsewhere misses"),
+			zap.String("next_step", next))
 	}
 }
 

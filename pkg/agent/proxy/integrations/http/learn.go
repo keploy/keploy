@@ -453,6 +453,13 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	windows, _ := mockDb.(integrations.TestWindows)
 	inFlight, _ := mockDb.(integrations.InFlightOwner)
 	pools, _ := mockDb.(integrations.PoolMembership)
+	// Under S12's background rules a test learns from its own recordings
+	// only (S12 v16 §2.3: own exact, own learn, then background exact): with
+	// a test open the background (the worker scope and the pool the view
+	// shows in it) answers a call exactly or not at all, and no drift of the
+	// test's is learned onto a background recording. The pool is learned
+	// from between tests only.
+	exactBackground := open && integrations.S12Background(mockDb)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -476,7 +483,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		c := learn.Candidate{
 			Shape:    n.shape(rp, d),
 			Known:    n.known(m),
-			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn),
+			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !exactBackground),
 		}
 		inScope[m.Name] = true
 		if own && tracker.Answered(m.Name) {

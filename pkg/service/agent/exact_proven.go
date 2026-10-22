@@ -307,7 +307,8 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			// A proxy that cannot serve S12's rules serves the set by
 			// today's, and the agent says so (ServedBackground): the replay
 			// keeps today's checks.
-			a.logger.Info("this keploy agent's proxy cannot serve a test set's background by the S12 rules it was recorded under; the set is served by today's rules, which check its worker scope at the set's end")
+			a.logger.Info("this keploy agent's proxy cannot serve a test set's background by the S12 rules it was recorded under; the set is served by today's rules, which check its worker scope at the set's end",
+				zap.String("next_step", "nothing to do for this run: its checks are today's, and its verdicts hold. This agent's proxy (a mode or a build that predates S12's background serving) serves no set by S12's rules; replay with one that does to have the set served by them"))
 			bg = nil
 		}
 		a.scopeMu.Lock()

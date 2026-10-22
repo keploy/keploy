@@ -1,10 +1,12 @@
 package http
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -94,5 +96,71 @@ func TestS12StatefulPickKeepsTheTestsOwnApartFromTheBackground(t *testing.T) {
 	}
 	if hit, _ := h.pickHit([]*varHit{{mock: own}, {mock: starting}}, isOwn, plain, true); hit.mock != starting {
 		t.Fatalf("today's variable pass picked %s; want bg-starting, as before", hit.mock.Name)
+	}
+}
+
+// s12LearnDb is learnDb serving its set by S12's background rules
+// (integrations.S12Background).
+type s12LearnDb struct {
+	*learnDb
+	bg mockMemDb
+}
+
+func (d *s12LearnDb) BackgroundCursor() (integrations.MockCursor, bool) { return &d.bg, true }
+
+// Under S12's background rules a test learns from its own recordings only
+// (S12 v16 §2.3: own exact, own learn, then background exact): with a test
+// open the background answers a call exactly or not at all, and nothing is
+// learned onto it. A call in a test that a pool recording is closer to (fewer
+// drifted leaves) than the test's own is then a miss, as learn.Pair makes any
+// call whose closest recording it may not learn onto: never learned onto the
+// pool recording, nor paired with the farther own one. The pool recording
+// still answers a call that is it exactly, and between tests the pool is
+// learned from. Under today's rules the closer pool recording is paired, as
+// before.
+func TestS12ATestLearnsOnlyFromItsOwn(t *testing.T) {
+	for _, s12 := range []bool{true, false} {
+		h, n, opts := learnOn(t)
+		opts.LearnPool = true
+		own := learnRecorded("own", 0, "POST", "/a", `{"id":"x","n":1,"m":424242}`, nil, `{}`)
+		pool := learnRecorded("pool", -time.Hour, "POST", "/a", `{"id":"x","n":1,"m":2}`, nil, `{}`)
+		pool.TestModeInfo.Lifetime = models.LifetimeSession
+		ld := &learnDb{perTest: []*models.Mock{own}, mockMemDb: mockMemDb{mocks: []*models.Mock{pool}}}
+		var db integrations.MockMemDb = ld
+		if s12 {
+			db = &s12LearnDb{learnDb: ld}
+		}
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		served, miss, err := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":9,"m":2}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s12 {
+			if served == nil || served.Name != "pool" || len(ld.pooled) != 1 {
+				t.Fatalf("today's rules: served %v, %d learned onto the pool; want the closer pool recording paired, as before", served, len(ld.pooled))
+			}
+			continue
+		}
+		if served != nil || miss == nil || miss.closest != pool || miss.res.Reason != models.MissRequestChanged {
+			t.Fatalf("S12's rules served %v (miss %+v); want a miss naming the pool recording", served, miss)
+		}
+		if len(ld.pooled) != 0 || len(ld.consumed) != 0 {
+			t.Fatalf("S12's rules learned onto the pool %d times and consumed %d of the test's own", len(ld.pooled), len(ld.consumed))
+		}
+		// The pool recording still answers a call that is it exactly.
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":1,"m":2}`, nil), db, n, opts); served == nil || served.Name != "pool" || miss != nil {
+			t.Fatalf("the pool recording did not answer its own call exactly in a test: %v %+v", served, miss)
+		}
+		// The test's own call learns from its own.
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":1,"m":31415}`, nil), db, n, opts); served == nil || served.Name != "own" || miss != nil {
+			t.Fatalf("the test's own call was not learned from its own: %v %+v", served, miss)
+		}
+		// Between tests the pool is learned from.
+		gap := learn.WithTracker(context.Background(), learn.NewTracker())
+		if served, miss, _ := h.learnMatch(gap, live("POST", "/a", `{"id":"x","n":7,"m":2}`, nil), db, n, opts); served == nil || served.Name != "pool" || miss != nil {
+			t.Fatalf("between tests the pool was not learned from: %v %+v", served, miss)
+		}
 	}
 }
