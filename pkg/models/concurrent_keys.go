@@ -78,3 +78,25 @@ func ConcurrentKeysOf(kind Kind) (ConcurrentKeys, bool) {
 	}
 	return k, true
 }
+
+// protocolKinds are the kinds a call of each canonical protocol (a miss's
+// MockMismatchReport.Protocol, as package mismatch names them) is recorded
+// as.
+var protocolKinds = map[string][]Kind{
+	"HTTP":       {HTTP},
+	"HTTP/2":     {HTTP2},
+	"gRPC":       {GRPC_EXPORT},
+	"MySQL":      {MySQL},
+	"PostgreSQL": {Postgres, PostgresV2, PostgresV3},
+	"MongoDB":    {Mongo},
+	"Redis":      {REDIS},
+	"Generic":    {GENERIC},
+	"DNS":        {DNS},
+}
+
+// KindsOfProtocol are the kinds a call of protocol (a miss's
+// UnmatchedCall.Protocol) is recorded as; none for a protocol keploy does not
+// name.
+func KindsOfProtocol(protocol string) []Kind {
+	return protocolKinds[protocol]
+}

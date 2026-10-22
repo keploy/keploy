@@ -382,11 +382,12 @@ type UnconsumedMock struct {
 	// WhyNot says why this replay did not share the mock between those
 	// tests (ConcurrentNotShared*: it lists it under this test by time
 	// alone, or where keploy record's full round left it, unproven), with
-	// Stated for ConcurrentNotSharedStates. Empty, with Concurrent set, only
-	// for the one case keploy proved: keploy record's full round shared it
-	// between them and none of them made its call, so it is charged to each
-	// of them that ran; Closest then names the one whose call came closest
-	// to it (a drifted version of it), when the learn step saw one.
+	// Stated for ConcurrentNotSharedStates. Empty, with Concurrent or Unkept
+	// set, only for the one case keploy proved: keploy record's full round
+	// shared it between them and no call of theirs matched it exactly (it
+	// learns nothing against a recording they share), so it is charged to
+	// each of them that ran; Closest then names the one whose call came
+	// closest to it, when the learn step saw one.
 	WhyNot  string `json:"why_not,omitempty" yaml:"why_not,omitempty"`
 	Stated  string `json:"stated,omitempty" yaml:"stated,omitempty"`
 	Closest string `json:"closest,omitempty" yaml:"closest,omitempty"`
@@ -501,9 +502,19 @@ type ConcurrentNote struct {
 	// those the recording did not keep (deleted, or lost).
 	With   []string `json:"with,omitempty" yaml:"with,omitempty"`
 	Unkept int      `json:"unkept,omitempty" yaml:"unkept,omitempty"`
-	// AttributedTo is the test the recording was attributed to by time
-	// alone (the one whose request came first), when it is not this test.
+	// AttributedTo is the test the recording closest to the call, one made
+	// while this test's request and others' were open, is listed under by
+	// time alone (the one whose request came first), when it is not this
+	// test. WhyNot says why this replay did not share that recording with
+	// this test.
 	AttributedTo string `json:"attributed_to,omitempty" yaml:"attributed_to,omitempty"`
+	// MayBe are, for a call with no closest recording, the other tests that
+	// list a recording of the call's own kind (KindsOfProtocol) made while
+	// their requests and this test's were open, which this replay did not
+	// share with this test: the call's recording may be one of theirs.
+	// WhyNot then says why they were not shared, when it is one reason for
+	// all of them.
+	MayBe []string `json:"may_be,omitempty" yaml:"may_be,omitempty"`
 	// Claimant is the test that answered its call with the recording this
 	// call pairs with, recorded once while both were open.
 	Claimant string `json:"claimant,omitempty" yaml:"claimant,omitempty"`
@@ -588,6 +599,7 @@ func (n *ConcurrentNote) Clone() *ConcurrentNote {
 	}
 	c := *n
 	c.With = append([]string(nil), n.With...)
+	c.MayBe = append([]string(nil), n.MayBe...)
 	c.Class = append([]string(nil), n.Class...)
 	c.Places = append([]string(nil), n.Places...)
 	return &c

@@ -65,8 +65,8 @@ const (
 	// may answer with another test's.
 	MockEntryUnresolvedAmbiguous = "ambiguous"
 	// MockEntryUnresolvedUnproven: every other case keploy could not prove
-	// (no test made it, two pair with it, retries differed, a call drifted
-	// from it): it stays with a test the round charged for it.
+	// (no call matched it exactly, two pair with it, retries differed, a
+	// call drifted from it): it stays with a test the round charged for it.
 	MockEntryUnresolvedUnproven = "unproven"
 )
 

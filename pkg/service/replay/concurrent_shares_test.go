@@ -757,9 +757,10 @@ func servesConcurrent(serves bool) Instrumentation { return servesConcurrentInst
 func (s servesConcurrentInstr) ServesConcurrent() bool { return s.serves }
 
 // In a replay that does not share, a miss and an unconsumed recording of a
-// test recorded beside others say so: whom with, whom the call's recordings
-// were attributed to, and that only the full round shares them. A test that
-// lists a recording the full round could not give to one test is charged.
+// test recorded beside others say so: whom with, whom the recording closest
+// to the call is listed under, and that only the full round shares them. A
+// test that lists a recording the full round could not give to one test is
+// charged.
 func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	registerShareKeys(t)
@@ -771,7 +772,7 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	p := newExactPlan(mappings, nil, []*models.Mock{c, twin})
 	p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, mappings, nil), nil, []*models.Mock{c, twin})
 	results := []models.TestResult{
-		{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL", Kind: models.MissInTest}}}},
+		{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL", Kind: models.MissInTest, ClosestMock: "c"}}}},
 		{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}}}},
 		{TestCaseID: "solo", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL"}}}},
 	}
@@ -1021,4 +1022,201 @@ func TestSettleSharesChargesOnlyWhatSharingCannotProve(t *testing.T) {
 			t.Fatalf("a consumption read in part settled %+v", got)
 		}
 	})
+}
+
+// A miss of a test recorded beside others says only what is true of its call
+// (round-3 review, probes P1 and P2), in every replay shape: the test the
+// recording closest to it is listed under and why this replay did not share
+// it, only when that recording is one made while test's request and others'
+// were open; nothing of the others' recordings when it drifted from one made
+// while its request alone was open, from a recording this replay shared with
+// it, or from one of another group; and, with no closest recording, only the
+// recordings of its own kind, as ones it may be.
+func TestAnnotateConcurrentSaysOnlyWhatIsTrueOfTheCall(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	g1 := models.ConcurrencyGroup{ID: "g1", Tests: []string{"a", "b"}}
+	g2 := models.ConcurrencyGroup{ID: "g2", Tests: []string{"c", "d"}}
+	own := shMock("own-a", 50, "SELECT", "bind.$1=x", "ok")
+	grouped := shMock("mine", 100, "SELECT", "bind.$1=y", "ok")
+	theirs := shMock("theirs", 150, "SELECT", "bind.$1=z", "ok")
+	other := shMock("other", 200, "SELECT", "bind.$1=w", "ok")
+	mg := &models.Mock{Name: "mock-0", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+	h := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+	mocks := []*models.Mock{own, grouped, theirs, other, mg, h}
+	// a lists an Http recording of g1 too, c one of g2, and one of g1 no
+	// kept test lists (Mapping.Shared): none is one a's call may be.
+	ownH := &models.Mock{Name: "mock-a1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+	otherH := &models.Mock{Name: "mock-c1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+	sharedH := &models.Mock{Name: "mock-s1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+	mocks = append(mocks, ownH, otherH, sharedH)
+	mappings := map[string][]models.MockEntry{
+		"a": {shEntry(own, ""), shEntry(grouped, "g1"), {Name: "mock-a1", Kind: string(models.HTTP), Group: "g1"}},
+		"b": {shEntry(theirs, "g1"), {Name: "mock-0", Kind: string(models.Mongo), Group: "g1"}, {Name: "mock-1", Kind: string(models.HTTP), Group: "g1"}},
+		"c": {shEntry(other, "g2"), {Name: "mock-c1", Kind: string(models.HTTP), Group: "g2"}},
+		"d": {},
+	}
+	shared := []models.MockEntry{{Name: "mock-s1", Kind: string(models.HTTP), Group: "g1"}}
+	groups := []models.ConcurrencyGroup{g1, g2}
+	strict := func() *exactPlan {
+		p := newExactPlan(mappings, nil, mocks)
+		p.share = newSharePlan(concurrencyOf(groups, mappings, shared), nil, mocks)
+		return p
+	}
+	miss := func(p *exactPlan, protocol, closest string) *models.ConcurrentNote {
+		t.Helper()
+		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: protocol, Kind: models.MissInTest, ClosestMock: closest}}}}}
+		p.annotateConcurrent(results, nil)
+		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
+		if n == nil || !reflect.DeepEqual(n.With, []string{"b"}) {
+			t.Fatalf("a's miss says %+v; want with b", n)
+		}
+		return n
+	}
+	nothing := func(t *testing.T, n *models.ConcurrentNote) {
+		t.Helper()
+		if n.AttributedTo != "" || n.MayBe != nil || n.WhyNot != "" || n.Kind != "" || n.Stated != "" {
+			t.Fatalf("a's miss says %+v; want only whom with", n)
+		}
+	}
+	t.Run("strict, its own recording drifted (P1)", func(t *testing.T) {
+		nothing(t, miss(strict(), "ShareTest", "own-a"))
+	})
+	t.Run("strict, the recording listed under it by time alone drifted", func(t *testing.T) {
+		n := miss(strict(), "ShareTest", "mine")
+		if n.AttributedTo != "" || n.MayBe != nil || n.WhyNot != models.ConcurrentNotSharedStrict {
+			t.Fatalf("a's miss says %+v; want listed under a itself, not shared by a strict replay", n)
+		}
+	})
+	t.Run("strict, the recording listed under another test of its group", func(t *testing.T) {
+		n := miss(strict(), "ShareTest", "theirs")
+		if n.AttributedTo != "b" || n.WhyNot != models.ConcurrentNotSharedStrict {
+			t.Fatalf("a's miss says %+v; want attributed to b, not shared by a strict replay", n)
+		}
+	})
+	t.Run("strict, a recording of a group it is not in", func(t *testing.T) {
+		nothing(t, miss(strict(), "ShareTest", "other"))
+	})
+	t.Run("strict, a kind keploy shares none of says so, not that only the full round shares", func(t *testing.T) {
+		n := miss(strict(), "HTTP", "mock-1")
+		if n.AttributedTo != "b" || n.WhyNot != models.ConcurrentNotSharedKind || n.Kind != string(models.HTTP) {
+			t.Fatalf("a's miss says %+v; want attributed to b, keploy sharing no Http recording", n)
+		}
+	})
+	t.Run("the full round, a recording it shared with it drifted", func(t *testing.T) {
+		s := newShareSet(t, groups, mappings, shared, nil, mocks...)
+		nothing(t, miss(s.p, "ShareTest", "theirs"))
+	})
+	t.Run("the full round, no closest: only its own kind, as what it may be (P2)", func(t *testing.T) {
+		s := newShareSet(t, groups, mappings, shared, nil, mocks...)
+		n := miss(s.p, "HTTP", "")
+		if n.AttributedTo != "" || !reflect.DeepEqual(n.MayBe, []string{"b"}) || n.WhyNot != models.ConcurrentNotSharedKind || n.Kind != string(models.HTTP) {
+			t.Fatalf("a's HTTP miss says %+v; want it may be b's, keploy sharing no Http recording", n)
+		}
+	})
+	t.Run("the full round, no closest: a recording of its kind it shared with it is none it may be", func(t *testing.T) {
+		keys, _ := models.ConcurrentKeysOf(shareKind)
+		t.Cleanup(models.RegisterConcurrentKeys(models.PostgresV3, keys))
+		pg := shMock("pg-b", 300, "INSERT", "bind.$1=v", "ok")
+		pg.Kind = models.PostgresV3
+		m := map[string][]models.MockEntry{"a": {}, "b": {shEntry(pg, "g1")}}
+		s := newShareSet(t, []models.ConcurrencyGroup{g1}, m, nil, nil, pg)
+		if !s.p.share.candidate("pg-b") {
+			t.Fatal("pg-b is not shared")
+		}
+		nothing(t, miss(s.p, "PostgreSQL", ""))
+	})
+	t.Run("no closest, no recording of its kind beside it", func(t *testing.T) {
+		nothing(t, miss(strict(), "MySQL", ""))
+	})
+	t.Run("no closest, a protocol keploy names no kind for", func(t *testing.T) {
+		nothing(t, miss(strict(), "unknown", ""))
+	})
+	t.Run("no closest, recordings of its kind not shared for different reasons", func(t *testing.T) {
+		// e's recording sorts before b's: the tests are said in their order.
+		h2 := &models.Mock{Name: "mock-02", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+		e := models.MockEntry{Name: "mock-02", Kind: string(models.HTTP), Group: "g3", Unresolved: models.MockEntryUnresolvedUnproven}
+		m := map[string][]models.MockEntry{"a": mappings["a"], "b": mappings["b"], "e": {e}}
+		gs := []models.ConcurrencyGroup{g1, {ID: "g3", Tests: []string{"a", "e"}}}
+		p := newExactPlan(m, nil, append(mocks, h2))
+		p.share = newSharePlan(concurrencyOf(gs, m, nil), nil, append(mocks, h2))
+		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "HTTP", Kind: models.MissInTest}}}}}
+		p.annotateConcurrent(results, nil)
+		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
+		if n == nil || !reflect.DeepEqual(n.MayBe, []string{"b", "e"}) || n.WhyNot != "" || n.Kind != "" {
+			t.Fatalf("a's HTTP miss says %+v; want it may be b's or e's, and no one reason", n)
+		}
+	})
+}
+
+// A test whose only other test open beside it is one the recording did not
+// keep (lost, or deleted) is still recorded beside another: its miss, and a
+// parser's note on its call, say so, and count it (round-3 review, probe P3).
+func TestAnnotateConcurrentCountsTheTestsTheRecordingDidNotKeep(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
+	mappings := map[string][]models.MockEntry{"a": {shEntry(c, "g1")}}
+	p := newExactPlan(mappings, nil, []*models.Mock{c})
+	p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}, Unkept: 1}}, mappings, nil), nil, []*models.Mock{c})
+	parsed := &models.ConcurrentNote{Class: []string{"c"}, Case: models.ConcurrentCaseNotOwn, Places: []string{"bind.$1"}}
+	results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{
+		UnmatchedCalls: []models.UnmatchedCall{
+			{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "c"},
+			{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "c", Reason: models.MissConcurrentAmbiguous, Concurrent: parsed},
+		},
+		UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}},
+	}}}
+	p.annotateConcurrent(results, nil)
+	calls := results[0].FailureInfo.UnmatchedCalls
+	if n := calls[0].Concurrent; n == nil || n.With != nil || n.Unkept != 1 || n.WhyNot != models.ConcurrentNotSharedStrict {
+		t.Fatalf("a's miss says %+v; want 1 test the recording did not keep, not shared by a strict replay", n)
+	}
+	if n := calls[1].Concurrent; n == nil || n.Unkept != 1 || n.Case != models.ConcurrentCaseNotOwn || parsed.Unkept != 0 {
+		t.Fatalf("the parser's note became %+v (its own %+v); want 1 test the recording did not keep, on a copy", n, parsed)
+	}
+	if u := results[0].FailureInfo.UnconsumedMocks[0]; u.Concurrent != "" || u.Unkept != 1 || u.WhyNot != models.ConcurrentNotSharedStrict {
+		t.Fatalf("a's leftover says %+v; want 1 test the recording did not keep, not shared by a strict replay", u)
+	}
+	// A group that names a alone, and no test it did not keep, puts no test
+	// beside a: a's miss and leftover are its own.
+	alone := newExactPlan(mappings, nil, []*models.Mock{c})
+	alone.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}}}, mappings, nil), nil, []*models.Mock{c})
+	solo := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{
+		UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "c"}},
+		UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}},
+	}}}
+	alone.annotateConcurrent(solo, nil)
+	if n, u := solo[0].FailureInfo.UnmatchedCalls[0].Concurrent, solo[0].FailureInfo.UnconsumedMocks[0]; n != nil || u != (models.UnconsumedMock{Name: "c"}) {
+		t.Fatalf("a, recorded alone, says %+v and %+v", n, u)
+	}
+	// The full round's settlement says the same of a recording it shared
+	// with a alone: the note of its not_own charge counts the test not kept.
+	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}, Unkept: 1}}, mappings, nil, nil, c)
+	s.run("a", learned("c", "bind.$1"))
+	s.settle(t)
+	r := s.resultOf("a")
+	if len(r.FailureInfo.UnmatchedCalls) != 1 {
+		t.Fatalf("a charged %+v", r.FailureInfo.UnmatchedCalls)
+	}
+	if n := r.FailureInfo.UnmatchedCalls[0].Concurrent; n == nil || n.Unkept != 1 || n.With != nil || n.Case != models.ConcurrentCaseNotOwn {
+		t.Fatalf("a's charge says %+v; want not_own, 1 test the recording did not keep", n)
+	}
+}
+
+// A mapping entry that names no kind is read as the recording the agent holds:
+// one of a kind that keys its recordings, of a call it does not key, says so
+// and names that kind (not "these").
+func TestAnnotateConcurrentNamesTheHeldKindOfAnEntryThatNamesNone(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	unkeyed := shMock("u", 100, "", "bind.$1=v", "ok")
+	e := shEntry(unkeyed, "g1")
+	e.Kind = ""
+	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, map[string][]models.MockEntry{"a": {e}, "b": {}}, nil, nil, unkeyed)
+	results := []models.TestResult{{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "u"}}}}}
+	s.p.annotateConcurrent(results, nil)
+	if n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent; n == nil || n.WhyNot != models.ConcurrentNotSharedCall || n.Kind != string(shareKind) || n.AttributedTo != "a" {
+		t.Fatalf("b's miss says %+v; want attributed to a, a %s recording keploy does not key", n, shareKind)
+	}
 }
