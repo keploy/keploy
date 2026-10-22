@@ -381,3 +381,113 @@ func TestTheLearnedFilesAreWrittenIgnoredFirst(t *testing.T) {
 		t.Errorf("a set that learned nothing wrote a .gitignore (%v)", err)
 	}
 }
+
+// A learned file is written only when its bytes change: one that holds them
+// already is left as it is (its inode, mode and time stay), so a status, a
+// pull's prune or a copy-back with nothing to change touches nothing; one
+// whose bytes change is replaced with the mode it had, and a new one is
+// 0644. A set whose mocks learn nothing any more loses its learned.yaml
+// without a .gitignore line written for it.
+func TestTheLearnedFilesAreWrittenOnlyWhenTheyChange(t *testing.T) {
+	root := t.TempDir()
+	keploy := filepath.Join(root, "keploy")
+	set := filepath.Join(keploy, "test-set-0")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := NewDriftCache().Words("ORD-1 ref=a1", "ORD-1 ref=b2", nil)
+	mocks := []*models.Mock{{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{"body.note": "ORD-1 ref=a1"}, LearnedWords: map[string]models.WordsEntry{"body.note": e}}}}
+	withSet(t, nil)
+	RegisterSetReader(func(string) ([]*models.Mock, error) { return mocks, nil })
+	t.Setenv(provenswitch.Env, "1")
+
+	if err := WriteLearned(set, []LocalValue{{Mock: "mock-1", Path: "body.note", F: "ORD-1 ref=b2"}}); err != nil {
+		t.Fatal(err)
+	}
+	public, local := filepath.Join(set, models.LearnedFile), filepath.Join(set, models.LearnedLocalFile)
+	for _, p := range []string{public, local} {
+		if info, err := os.Stat(p); err != nil || info.Mode().Perm() != 0o644 {
+			t.Fatalf("a new learned file %s: %v (%v); want 0644", p, info, err)
+		}
+	}
+	if err := os.Chmod(local, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for _, p := range []string{public, local} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stat := func(p string) os.FileInfo {
+		t.Helper()
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	beforePublic, beforeLocal := stat(public), stat(local)
+
+	// Nothing changes: a status's refresh, a pull's prune of the set into
+	// itself, a copy-back of the same entries.
+	if err := WriteLegible(set); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeLocal(set, set); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		path   string
+		before os.FileInfo
+	}{{public, beforePublic}, {local, beforeLocal}} {
+		after := stat(c.path)
+		if !os.SameFile(c.before, after) || !after.ModTime().Equal(old) || after.Mode() != c.before.Mode() {
+			t.Fatalf("%s was written though its bytes did not change: %v -> %v", c.path, c.before, after)
+		}
+	}
+
+	// The bytes change (an entry the mocks no longer learn is pruned): the
+	// file is replaced, its mode kept.
+	have, err := readLearned(local)
+	if err != nil || len(have) != 1 {
+		t.Fatalf("learned.local.yaml %+v (%v)", have, err)
+	}
+	stale := have[0]
+	stale.ID, stale.Path = "0000000000000000", "body.gone"
+	if err := writeLearned(set, models.LearnedLocalFile, []models.LearnedLeaf{have[0], stale}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(local, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeLocal(set, set); err != nil {
+		t.Fatal(err)
+	}
+	if pruned, err := readLearned(local); err != nil || len(pruned) != 1 || pruned[0].ID != have[0].ID {
+		t.Fatalf("pruned learned.local.yaml %+v (%v)", pruned, err)
+	}
+	if info := stat(local); info.Mode().Perm() != 0o600 {
+		t.Fatalf("the replaced learned.local.yaml is %v; want the 0600 it had", info.Mode().Perm())
+	}
+
+	// The mocks learn nothing any more: learned.yaml goes, and no .gitignore
+	// line is written to remove it.
+	if err := os.Remove(filepath.Join(keploy, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	mocks = []*models.Mock{{Name: "mock-1", Kind: models.HTTP}}
+	if err := WriteLegible(set); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(public); !os.IsNotExist(err) {
+		t.Fatalf("learned.yaml is left though the mocks learn nothing (%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(keploy, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("removing learned.yaml wrote a .gitignore (%v)", err)
+	}
+	if entries, _ := os.ReadDir(set); len(entries) != 1 {
+		t.Fatalf("the set holds %v; want learned.local.yaml alone", entries)
+	}
+}

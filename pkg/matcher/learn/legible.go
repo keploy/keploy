@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +18,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,7 +31,10 @@ import (
 // on the machine that recorded. Both are written only under the proven
 // switch, and only once the project's keploy/.gitignore ignores them
 // (EnsureLearnedIgnored): each writer here ensures it first, and writes
-// nothing when it cannot.
+// nothing when it cannot. A file is written only when its bytes change: one
+// that holds them already is left as it is, its mode, owner and inode kept;
+// one replaced keeps its mode; and under sudo every file and folder these
+// writers make is the invoking user's (writeReplacing, mkdirOwned).
 
 // SetReader reads the mocks of a test set's directory (keploy/<set>/, or a
 // staging copy of it), whatever the store writes them as. The yaml mock store
@@ -497,7 +503,7 @@ func EnsureLearnedIgnored(keployDir string) error {
 	if len(missing) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(keployDir, 0o755); err != nil {
+	if err := mkdirOwned(keployDir); err != nil {
 		return fmt.Errorf("create %s: %w", keployDir, err)
 	}
 	out := string(existing)
@@ -526,20 +532,72 @@ func EnsureLearnedIgnored(keployDir string) error {
 }
 
 // writeReplacing writes data to path through a temporary file in dir named
-// with prefix, renamed into place once whole.
+// with prefix, renamed into place once whole. A file at path that holds data
+// already is left as it is: nothing is written, and its mode, owner and
+// inode stay. A file it replaces keeps its permissions; a new one is 0644.
+// Under sudo the file is given to the invoking user, by its descriptor
+// (utils.RestoreFileOwnershipOf), as every file keploy writes in the
+// project is.
 func writeReplacing(dir, prefix, path string, data []byte) error {
+	mode := os.FileMode(0o644)
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+			return nil
+		}
+		mode = info.Mode().Perm()
+	}
 	var rnd [8]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		return fmt.Errorf("name a temporary file: %w", err)
 	}
 	tmp := filepath.Join(dir, prefix+hex.EncodeToString(rnd[:]))
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	_, werr := f.Write(data)
+	if werr == nil {
+		werr = f.Chmod(mode)
+	}
+	if werr == nil {
+		werr = f.Sync()
+	}
+	utils.RestoreFileOwnershipOf(zap.NewNop(), f, tmp)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write %s: %w", tmp, werr)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s into place: %w", path, err)
+	}
+	return nil
+}
+
+// mkdirOwned makes dir and its missing parents, each given under sudo to the
+// invoking user (utils.RestoreFileOwnership), outermost first.
+func mkdirOwned(dir string) error {
+	var missing []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); err == nil {
+			break
+		}
+		missing = append(missing, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		utils.RestoreFileOwnership(zap.NewNop(), missing[i])
 	}
 	return nil
 }
@@ -576,9 +634,12 @@ func readLearned(path string) ([]models.LearnedLeaf, error) {
 }
 
 // writeLearned writes leaves to the learned file name of setDir, whole,
-// through a temporary file renamed into place (models.LearnedTempPrefix). No
-// leaf removes the file: a learned file never says what the mocks no longer
-// hold.
+// through a temporary file renamed into place (models.LearnedTempPrefix),
+// once the project's keploy/.gitignore (setDir's parent) ignores the learned
+// files (EnsureLearnedIgnored; when it cannot, nothing is written), and only
+// when the file's bytes change (writeReplacing). No leaf removes the file: a
+// learned file never says what the mocks no longer hold. Removing one needs
+// no ignore, so the .gitignore is then left as it is.
 func writeLearned(setDir, name string, leaves []models.LearnedLeaf) error {
 	path := filepath.Join(setDir, name)
 	if len(leaves) == 0 {
@@ -590,6 +651,12 @@ func writeLearned(setDir, name string, leaves []models.LearnedLeaf) error {
 	b, err := yaml.Marshal(models.LearnedDocument{Learned: leaves})
 	if err != nil {
 		return err
+	}
+	if err := EnsureLearnedIgnored(filepath.Dir(filepath.Clean(setDir))); err != nil {
+		return fmt.Errorf("keep the learned files out of git: %w", err)
+	}
+	if err := mkdirOwned(setDir); err != nil {
+		return fmt.Errorf("create %s: %w", setDir, err)
 	}
 	return writeReplacing(setDir, models.LearnedTempPrefix, path, append([]byte(learnedHeader(name)), b...))
 }
@@ -607,10 +674,10 @@ func learnedFilesExist(setDir string) bool {
 // WriteLegible writes learned.yaml of the test set in setDir under the proven
 // switch: every leaf its mocks learned (Legible), once the project's
 // keploy/.gitignore (setDir's parent) ignores the learned files
-// (EnsureLearnedIgnored; when it cannot, nothing is written). A set whose
-// mocks learned nothing has none, and one left from an earlier recording is
-// removed; the .gitignore is then left as it is. With the switch off it
-// writes nothing.
+// (EnsureLearnedIgnored; when it cannot, nothing is written), and only when
+// its bytes change. A set whose mocks learned nothing has none, and one left
+// from an earlier recording is removed; the .gitignore is then left as it
+// is. With the switch off it writes nothing.
 func WriteLegible(setDir string) error {
 	if !provenswitch.On() {
 		return nil
@@ -618,12 +685,6 @@ func WriteLegible(setDir string) error {
 	leaves, err := Legible(setDir)
 	if err != nil {
 		return err
-	}
-	if len(leaves) == 0 && !learnedFilesExist(setDir) {
-		return nil
-	}
-	if err := EnsureLearnedIgnored(filepath.Dir(filepath.Clean(setDir))); err != nil {
-		return fmt.Errorf("keep the learned files out of git: %w", err)
 	}
 	return writeLearned(setDir, models.LearnedFile, leaves)
 }
@@ -640,8 +701,10 @@ type LocalValue struct {
 // full round's value (local; of two for one leaf, the least), the earlier
 // entries of leaves the mocks still learn kept, and every other pruned. The
 // project's keploy/.gitignore (setDir's parent) is ensured first
-// (EnsureLearnedIgnored); when it cannot be, neither file is written. With
-// the switch off it writes nothing.
+// (EnsureLearnedIgnored); when it cannot be, neither file is written. A file
+// whose bytes do not change is not written (writeReplacing), and a set whose
+// mocks learn nothing has neither file and gets no .gitignore line. With the
+// switch off it writes nothing.
 func WriteLearned(setDir string, local []LocalValue) error {
 	if !provenswitch.On() {
 		return nil
@@ -650,14 +713,8 @@ func WriteLearned(setDir string, local []LocalValue) error {
 	if err != nil {
 		return err
 	}
-	if len(leaves) == 0 && !learnedFilesExist(setDir) {
-		// Nothing learned, and nothing to prune: no file, and the
-		// .gitignore is left as it is.
-		return nil
-	}
-	if err := EnsureLearnedIgnored(filepath.Dir(filepath.Clean(setDir))); err != nil {
-		return fmt.Errorf("keep the learned files out of git: %w", err)
-	}
+	// Nothing learned removes both files, and needs no .gitignore line:
+	// writeLearned ensures it only before it writes one.
 	if err := writeLearned(setDir, models.LearnedFile, leaves); err != nil {
 		return err
 	}
@@ -724,9 +781,10 @@ func mergeLocalInto(setDir string, current, from []models.LearnedLeaf) error {
 // learn has any longer is pruned (the staging copy holds the mocks the set
 // now has; the project's folder holds none in cloud mode). The file is
 // written whole, under a temporary name renamed into place
-// (models.LearnedTempPrefix), and only once the project's keploy/.gitignore
-// (dstSetDir's parent) ignores it; with nothing to merge and no file to
-// prune, nothing is touched. With the proven switch off nothing is written.
+// (models.LearnedTempPrefix), only once the project's keploy/.gitignore
+// (dstSetDir's parent) ignores it, and only when its bytes change: with
+// nothing to merge and nothing to prune, nothing is touched (the file keeps
+// its mode, owner and inode). With the proven switch off nothing is written.
 func MergeLocal(dstSetDir, srcSetDir string) error {
 	if !provenswitch.On() {
 		return nil
@@ -741,12 +799,6 @@ func MergeLocal(dstSetDir, srcSetDir string) error {
 	current, err := Legible(srcSetDir)
 	if err != nil {
 		return err
-	}
-	if err := EnsureLearnedIgnored(filepath.Dir(filepath.Clean(dstSetDir))); err != nil {
-		return fmt.Errorf("keep the learned files out of git: %w", err)
-	}
-	if err := os.MkdirAll(dstSetDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dstSetDir, err)
 	}
 	return mergeLocalInto(dstSetDir, current, src)
 }
