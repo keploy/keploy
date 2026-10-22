@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -48,5 +49,22 @@ func TestMappingStaleCountsOnAnObsoleteRowOnly(t *testing.T) {
 	unread := FailureInfo{MappingStale: "not judged: stale mapping", TestMocksUnread: true}
 	if why := (TestResult{Status: TestStatusPassed, FailureInfo: unread}).VerdictUnknown(); len(why) != 1 {
 		t.Fatalf("a PASSED row with another reason too: VerdictUnknown %v, want that reason only", why)
+	}
+}
+
+// A ConcurrentNote's Clone shares no list with it: the replay fills a copy
+// of a parser's note, and the parser's is left as it was.
+func TestConcurrentNoteCloneSharesNothing(t *testing.T) {
+	n := &ConcurrentNote{With: []string{"a"}, MayBe: []string{"b"}, Class: []string{"c"}, Places: []string{"bind.$1"}, Unkept: 1, Case: ConcurrentCaseNotOwn}
+	c := n.Clone()
+	if !reflect.DeepEqual(c, n) {
+		t.Fatalf("clone %+v of %+v", c, n)
+	}
+	c.With[0], c.MayBe[0], c.Class[0], c.Places[0] = "x", "x", "x", "x"
+	if n.With[0] != "a" || n.MayBe[0] != "b" || n.Class[0] != "c" || n.Places[0] != "bind.$1" {
+		t.Fatalf("the clone shares a list: %+v", n)
+	}
+	if (*ConcurrentNote)(nil).Clone() != nil {
+		t.Fatal("a nil note clones to one")
 	}
 }

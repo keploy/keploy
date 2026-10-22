@@ -148,3 +148,20 @@ func TestRenderFieldDiffs_AllKinds(t *testing.T) {
 		}
 	}
 }
+
+// Every canonical protocol names the kinds its calls are recorded as
+// (models.KindsOfProtocol), which a miss of a test recorded beside others
+// reads to say which of their recordings its own may be.
+func TestEveryCanonicalProtocolNamesItsKinds(t *testing.T) {
+	for _, p := range []string{ProtocolHTTP, ProtocolHTTP2, ProtocolGRPC, ProtocolMySQL, ProtocolPostgres, ProtocolMongo, ProtocolRedis, ProtocolGeneric, ProtocolDNS} {
+		if len(models.KindsOfProtocol(p)) == 0 {
+			t.Errorf("%s names no kind", p)
+		}
+	}
+	if got := models.KindsOfProtocol(ProtocolHTTP); len(got) != 1 || got[0] != models.HTTP {
+		t.Errorf("HTTP is recorded as %v", got)
+	}
+	if len(models.KindsOfProtocol("unknown")) != 0 {
+		t.Error("a protocol keploy does not name names a kind")
+	}
+}

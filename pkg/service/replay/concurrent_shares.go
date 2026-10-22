@@ -218,9 +218,8 @@ type sharePlan struct {
 	definite map[string][]string
 	// worker are the worker-scope recordings the kinds key.
 	worker []string
-	// unkeyed are the held recordings of a kind that registered its keys
-	// which it does not key (for SQL: not a query it compares by value).
-	unkeyed map[string]bool
+	// held is the kind of every recording the agent holds, by name.
+	held map[string]models.Kind
 	// unserved: keploy record's full round, with an agent that did not say
 	// it serves shared recordings (planShares): the plan shares nothing.
 	unserved bool
@@ -246,10 +245,14 @@ func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*
 	if conc == nil {
 		return nil
 	}
-	sp := &sharePlan{conc: conc, info: map[string]*shareInfo{}, unkeyed: map[string]bool{}, runs: map[string]int{}, served: map[string]bool{}, unread: map[string]bool{}, read: map[string]int{}, uses: map[string][]shareUse{}}
+	sp := &sharePlan{conc: conc, info: map[string]*shareInfo{}, held: map[string]models.Kind{}, runs: map[string]int{}, served: map[string]bool{}, unread: map[string]bool{}, read: map[string]int{}, uses: map[string][]shareUse{}}
 	for _, list := range stored {
 		for _, mk := range list {
-			if mk == nil || mk.Name == "" || sp.info[mk.Name] != nil || mk.IsProtocolPhase() {
+			if mk == nil || mk.Name == "" {
+				continue
+			}
+			sp.held[mk.Name] = mk.Kind
+			if sp.info[mk.Name] != nil || mk.IsProtocolPhase() {
 				continue
 			}
 			keys, ok := models.ConcurrentKeysOf(mk.Kind)
@@ -258,7 +261,6 @@ func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*
 			}
 			st, ok := keys.Statement(mk)
 			if !ok {
-				sp.unkeyed[mk.Name] = true
 				continue
 			}
 			in := &shareInfo{mock: mk, keys: keys, statement: st, positions: keys.Positions(mk)}
@@ -524,7 +526,8 @@ func (s *settlement) charge(test string, call models.UnmatchedCall) {
 	c.calls = append(c.calls, call)
 }
 
-// chargeUnconsumed charges test with a shared recording none of its tests made.
+// chargeUnconsumed charges test with a shared recording no call of its tests
+// matched exactly.
 func (s *settlement) chargeUnconsumed(test string, u models.UnconsumedMock) {
 	c := s.charges[test]
 	if c == nil {
@@ -1058,17 +1061,17 @@ func (p *exactPlan) consumerOf() map[string]string {
 
 // annotateConcurrent says, under the proven switch, on each miss and each
 // unconsumed recording of a test recorded while other tests' requests were
-// open, what keploy knows of that: the tests open beside it, the test its
-// recordings were attributed to, and why this replay did not share them
-// (notShared: time alone listed it under that test and the replay does not
-// share it, or keploy record's full round left it there unproven), instead of
-// a bare "had no recorded answer" or "never called". A test that lists a
-// recording a full round could not give to one test because its recordings
-// cannot be told apart (models.MockEntryUnresolvedAmbiguous) is charged
-// concurrent_ambiguous in every replay that does not share, so no replay can
-// admit it. It returns the tests it charged so. The recordings settleShares
-// charged as made by none of the tests it shared them between say so
-// already, and are left as they are.
+// open (kept by the recording or not), what keploy knows of that: the tests
+// open beside it, and of the recordings made then only what is true of the
+// call (attribute): the test the recording closest to it is listed under and
+// why this replay did not share it, or, for a call with no closest
+// recording, the tests whose recordings of its kind it may be. A test that
+// lists a recording a full round could not give to one test because its
+// recordings cannot be told apart (models.MockEntryUnresolvedAmbiguous) is
+// charged concurrent_ambiguous in every replay that does not share, so no
+// replay can admit it. It returns the tests it charged so. The recordings
+// settleShares charged as matched by no call of the tests it shared them
+// between say so already, and are left as they are.
 func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[string]mockDisplayInfo) []string {
 	if !provenswitch.On() || p == nil || p.share == nil {
 		return nil
@@ -1081,7 +1084,7 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 		with, unkept := sp.conc.with(test)
 		for j := range r.FailureInfo.UnmatchedCalls {
 			c := &r.FailureInfo.UnmatchedCalls[j]
-			if !c.CountsAgainstTest() || len(with) == 0 {
+			if !c.CountsAgainstTest() || (len(with) == 0 && unkept == 0) {
 				continue
 			}
 			if c.Concurrent != nil {
@@ -1097,7 +1100,7 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 				continue
 			}
 			n := &models.ConcurrentNote{With: with, Unkept: unkept}
-			n.AttributedTo, n.WhyNot, n.Kind, n.Stated = sp.attribution(test, c.ClosestMock)
+			sp.attribute(n, test, c.ClosestMock, c.Protocol)
 			c.Concurrent = n
 		}
 		for j := range r.FailureInfo.UnconsumedMocks {
@@ -1114,6 +1117,9 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 				if t != test {
 					with = append(with, t)
 				}
+			}
+			if len(with) == 0 && g.Unkept == 0 {
+				continue
 			}
 			whyNot, _, stated := sp.notShared(u.Name)
 			if whyNot == "" {
@@ -1148,18 +1154,21 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 // between the tests of its group (models.ConcurrentNotShared*), with the kind
 // it names (keploy shares none of that kind yet, or not this one of it) or
 // what its recording states that keploy does not share. "" for a recording
-// this replay shares (a candidate of keploy record's full round).
+// this replay shares (a candidate of keploy record's full round). The
+// recording's own reasons, which hold in every replay, come before the
+// replay's:
 //
 //   - unproven: keploy record's full round shared it and could not tell which
 //     test made its call, and its judging left it with the test that lists
 //     it now (MockEntry.Unresolved), which it charged: not time's choice;
 //   - unkept: no kept test lists it (Mapping.Shared);
-//   - otherwise time alone listed it under its test, and this replay does not
-//     share it: an agent that does not serve shared recordings (agent), a
-//     replay other than keploy record's full round (strict), a kind that
-//     registered no keys (kind) or one of its recordings it does not key
-//     (call), or a recording that states what keploy does not share
-//     (states).
+//   - otherwise time alone listed it under its test, and no replay shares it:
+//     a kind that registered no keys (kind) or one of its recordings it does
+//     not key (call), or a recording that states what keploy does not share
+//     (states);
+//   - or this replay does not share it: an agent that does not serve shared
+//     recordings (agent), a replay other than keploy record's full round
+//     (strict).
 func (sp *sharePlan) notShared(name string) (whyNot, kind, stated string) {
 	e, listed := sp.conc.entries[name]
 	switch {
@@ -1167,10 +1176,6 @@ func (sp *sharePlan) notShared(name string) (whyNot, kind, stated string) {
 		return models.ConcurrentNotSharedUnproven, "", ""
 	case listed && e.listedBy == "":
 		return models.ConcurrentNotSharedUnkept, "", ""
-	case sp.unserved:
-		return models.ConcurrentNotSharedAgent, "", ""
-	case !sp.sharing:
-		return models.ConcurrentNotSharedStrict, "", ""
 	}
 	in := sp.info[name]
 	switch {
@@ -1180,6 +1185,10 @@ func (sp *sharePlan) notShared(name string) (whyNot, kind, stated string) {
 		return models.ConcurrentNotSharedKind, kindOf(sp, name), ""
 	case !in.shareable:
 		return models.ConcurrentNotSharedStates, "", in.whyNot
+	case sp.unserved:
+		return models.ConcurrentNotSharedAgent, "", ""
+	case !sp.sharing:
+		return models.ConcurrentNotSharedStrict, "", ""
 	}
 	return "", "", ""
 }
@@ -1187,45 +1196,89 @@ func (sp *sharePlan) notShared(name string) (whyNot, kind, stated string) {
 // keyedKind reports whether the grouped entry name is of a kind that
 // registered its keys (models.ConcurrentKeysOf).
 func (sp *sharePlan) keyedKind(name string) bool {
-	if sp.unkeyed[name] {
-		return true
-	}
 	_, ok := models.ConcurrentKeysOf(models.Kind(kindOf(sp, name)))
 	return ok
 }
 
-// attribution is, for a miss of test whose closest recording is closest ("" for
-// none), the test the call's recordings were attributed to, and why they were
-// not shared with test (notShared).
-func (sp *sharePlan) attribution(test, closest string) (attributedTo, whyNot, kind, stated string) {
-	if e, ok := sp.conc.entries[closest]; ok && closest != "" {
-		w, k, st := sp.notShared(closest)
-		if e.listedBy != test {
-			return e.listedBy, w, k, st
+// attribute writes onto n, the note of a miss of test whose closest recording
+// is closest ("" for none) and whose protocol is protocol, what keploy can
+// truly say of the recordings made while test's request and others' were
+// open:
+//
+//   - its closest is one of them, of a group test is in, that this replay
+//     did not share with it: the test that lists it (AttributedTo, when it
+//     is another) and why (notShared);
+//   - its closest is one of them this replay shared with it (a candidate),
+//     or a recording of no group test is in: nothing, as the call differs
+//     from a recording that is not why it had no answer;
+//   - it has no closest: the other tests of its groups that list one of them
+//     of the call's own kind (models.KindsOfProtocol) that this replay did
+//     not share with it (MayBe: its recording may be one of theirs), and why
+//     when that is one reason for all of them; nothing when none does.
+func (sp *sharePlan) attribute(n *models.ConcurrentNote, test, closest, protocol string) {
+	if closest != "" {
+		if !sp.inGroupOf(closest, test) {
+			return
 		}
-		return "", w, k, st
+		e := sp.conc.entries[closest]
+		w, k, st := sp.notShared(closest)
+		if w == "" {
+			return
+		}
+		if e.listedBy != test {
+			n.AttributedTo = e.listedBy
+		}
+		n.WhyNot, n.Kind, n.Stated = w, k, st
+		return
 	}
-	// No closest recording: the first grouped recording of another test of
-	// test's groups names whom, and why, its calls were attributed.
-	groups := map[string]bool{}
-	for _, id := range sp.conc.ofTest[test] {
-		groups[id] = true
+	kinds := map[string]bool{}
+	for _, k := range models.KindsOfProtocol(protocol) {
+		kinds[string(k)] = true
 	}
+	var mayBe []string
+	type reason struct{ whyNot, kind, stated string }
+	reasons := map[reason]bool{}
 	for _, name := range keysSorted(sp.conc.entries) {
 		e := sp.conc.entries[name]
-		if e.listedBy == "" || e.listedBy == test || !groups[e.entry.Group] {
+		if e.listedBy == "" || e.listedBy == test || !kinds[kindOf(sp, name)] || !sp.inGroupOf(name, test) {
 			continue
 		}
-		if w, k, st := sp.notShared(name); w != "" {
-			return e.listedBy, w, k, st
+		w, k, st := sp.notShared(name)
+		if w == "" {
+			continue
+		}
+		mayBe = appendOnce(mayBe, e.listedBy)
+		reasons[reason{w, k, st}] = true
+	}
+	if len(mayBe) == 0 {
+		return
+	}
+	sort.Strings(mayBe)
+	n.MayBe = mayBe
+	if len(reasons) == 1 {
+		for r := range reasons {
+			n.WhyNot, n.Kind, n.Stated = r.whyNot, r.kind, r.stated
 		}
 	}
-	return "", "", "", ""
 }
 
-// kindOf is the kind of the grouped entry name.
+// inGroupOf reports whether name is a grouped entry (or a marked one) whose
+// group holds test, or that test lists; false for a recording of no group.
+func (sp *sharePlan) inGroupOf(name, test string) bool {
+	if sp.conc.entries[name].listedBy == test {
+		return true
+	}
+	g, ok := sp.conc.group(name)
+	return ok && slices.Contains(g.Tests, test)
+}
+
+// kindOf is the kind of the grouped entry name: its mapping entry's, else the
+// held recording's.
 func kindOf(sp *sharePlan, name string) string {
-	return sp.conc.entries[name].entry.Kind
+	if k := sp.conc.entries[name].entry.Kind; k != "" {
+		return k
+	}
+	return string(sp.held[name])
 }
 
 // unionFind is a union-find over mock names.
