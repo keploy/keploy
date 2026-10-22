@@ -74,6 +74,51 @@ func ReplaceToken(s, v, with string) (string, bool) {
 	return b.String(), true
 }
 
+// TokenValue is the value that, put in place of each token v of rec
+// (ReplaceToken), makes rec into live, exactly: "1792678752275" of
+// "e2e-role-1792678689546" and "e2e-role-1792678752275" for v
+// "1792678689546". ok is false when rec holds no token v, when no one value
+// does it (live differs from rec elsewhere too, or holds two values in v's
+// places), or when that value is empty or v itself.
+func TokenValue(rec, v, live string) (string, bool) {
+	if v == "" {
+		return "", false
+	}
+	var at []int
+	for i := 0; i <= len(rec)-len(v); {
+		j := strings.Index(rec[i:], v)
+		if j < 0 {
+			break
+		}
+		if tokenAt(rec, v, i+j) {
+			at = append(at, i+j)
+			i += j + len(v)
+			continue
+		}
+		i += j + 1
+	}
+	if len(at) == 0 {
+		return "", false
+	}
+	// Each of the len(at) places grows by the same amount.
+	grow := len(live) - len(rec)
+	if grow%len(at) != 0 {
+		return "", false
+	}
+	n := len(v) + grow/len(at)
+	if n <= 0 || at[0]+n > len(live) {
+		return "", false
+	}
+	w := live[at[0] : at[0]+n]
+	if w == v {
+		return "", false
+	}
+	if with, _ := ReplaceToken(rec, v, w); with != live {
+		return "", false
+	}
+	return w, true
+}
+
 // ReplaceTokens is s with each key of with that stands as a token (tokenAt)
 // replaced by its value, read once over s: what a replacement puts in is not
 // read again, and where two keys begin at one place the longer is taken.

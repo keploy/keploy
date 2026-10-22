@@ -80,6 +80,13 @@ type Leaf struct {
 	// ']'), so nothing can be learned about it, and a drift there is a change
 	// L refuses.
 	Unnamed bool
+	// Form: the leaf is one part of a multipart/form-data body (Path
+	// "body.<part>"), a variable's place by its part name (form.<part>).
+	Form bool
+	// File: a Form leaf that is a text file's content. Its content is
+	// compared whole: a value keploy follows may stand inside it, but it is
+	// never learned as noise.
+	File bool
 }
 
 // Shape is one request as L compares it.

@@ -789,16 +789,21 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 			for _, s := range e.Seen {
 				ed := dc.of(s.Leaf.Value, s.Live)
-				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
+				if recorded && ed.recTok[i][t] && !pieceNotIn(v.rec, t, v.instRec, s.Leaf.Value) ||
+					!recorded && ed.liveTok[i][t] && !pieceNotIn(v.live, t, v.instLive, s.Live) && !liveOnly(i, v, ed) {
 					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
 				}
 			}
+		}
+		side, ins := v.rec, v.instRec
+		if !recorded {
+			side, ins = v.live, v.instLive
 		}
 		for _, x := range raw {
 			if !x.Served && !x.At.Before(at) {
 				continue
 			}
-			if dc.rawTokens(x.Text)[i][t] {
+			if dc.rawTokens(x.Text)[i][t] && !pieceNotIn(side, t, ins, x.Text, dc.rawExtra(x.Text)) {
 				return "a word of it appears earlier in the test, in " + x.Mock + "'s payload: keploy cannot tell whether it came from there"
 			}
 		}
@@ -827,6 +832,26 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		}
 	}
 	return ""
+}
+
+// liveOnly reports whether a live word of v that an earlier place (ed) holds
+// live is a link F alone made: v's recorded value was another one (it lost
+// words in reading i), and no word it lost stood in ed's recorded value.
+// Two values the app made apart when recorded (a role and an app named in
+// two milliseconds) that F made equal (in one) did not come one from the
+// other: the recording says so. A recorded word ed held is a link that held
+// when recorded, and keploy still cannot tell.
+func liveOnly(i int, v, ed *valueDrift) bool {
+	lost := false
+	for _, set := range []map[string]bool{v.lost[i], v.movedRec[i]} {
+		for w := range set {
+			lost = true
+			if ed.recTok[i][w] && !pieceNotIn(v.rec, w, v.instRec, ed.rec) {
+				return false
+			}
+		}
+	}
+	return lost
 }
 
 // allClock reports whether every ASCII word of t is a clock word of c, on

@@ -1,10 +1,15 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"maps"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"slices"
 	"sort"
@@ -140,7 +145,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		}
 		return varPlace{raw: raw, place: p}, ""
 	}
-	seen := map[string]string{}
+	seen := map[string]varDecl{}
 	out := make([]varDecl, 0, len(names))
 	for _, name := range names {
 		mv := m.Spec.Variables[name]
@@ -186,14 +191,26 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 			if vp.place.Part == variables.PartHeader {
 				key = strings.ToLower(key) // a header's name is read in any case
 			}
-			if other, dup := seen[key]; dup {
-				return nil, fmt.Sprintf("the request place %s is declared twice (variables %s and %s)", key, other, name)
+			if other, dup := seen[key]; dup && !wordOf(other, d) {
+				return nil, fmt.Sprintf("the request place %s is declared twice (variables %s and %s)", key, other.name, name)
 			}
-			seen[key] = name
+			seen[key] = d
 		}
 		out = append(out, d)
 	}
 	return out, ""
+}
+
+// wordOf reports whether two variables that declare one request place may
+// both: one's recorded value stands inside the other's as a word of it
+// (learn.ContainsToken), the place holding a value whole and a word of it (a
+// name and the time it was made at, sharedSource). Each is still held there
+// (holdsAt): the whole one as it is, the word inside the place's text.
+func wordOf(a, b varDecl) bool {
+	if a.recorded == b.recorded {
+		return false
+	}
+	return learn.ContainsToken(a.recorded, b.recorded) || learn.ContainsToken(b.recorded, a.recorded)
 }
 
 // reqView is one HTTP request as the variable pass reads it.
@@ -293,6 +310,22 @@ func (v reqView) read(p variables.Place) (held, bool) {
 			return held{}, false
 		}
 		return held{value: vals[0]}, true
+	case variables.PartForm:
+		_, parts, ok := formParts(v.header.Get("Content-Type"), v.body)
+		if !ok {
+			return held{}, false
+		}
+		var data []byte
+		n := 0
+		for _, pt := range parts {
+			if pt.name == p.Name {
+				data, n = pt.data, n+1
+			}
+		}
+		if n != 1 {
+			return held{}, false
+		}
+		return held{value: string(data)}, true
 	}
 	return held{}, false
 }
@@ -325,8 +358,79 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 		h.Del(p.Name)
 		h.Set(p.Name, rec.value)
 		v.header = h
+	case variables.PartForm:
+		body, ok := spliceFormPart(v.header.Get("Content-Type"), v.body, p.Name, rec.value)
+		if !ok {
+			return v, false
+		}
+		v.body = body
 	}
 	return v, true
+}
+
+// rawFormPart is one part of a multipart/form-data body, with its headers.
+type rawFormPart struct {
+	header textproto.MIMEHeader
+	name   string
+	data   []byte
+}
+
+// formParts reads a multipart/form-data body (ct its Content-Type) part by
+// part, by its own boundary, as the comparison reads it (multipartParts); ok
+// is false for any other body, or one it cannot read.
+func formParts(ct, body string) (boundary string, parts []rawFormPart, ok bool) {
+	mediaType, params, err := mime.ParseMediaType(ct)
+	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+		return "", nil, false
+	}
+	mr := multipart.NewReader(strings.NewReader(body), params["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			return params["boundary"], parts, true
+		}
+		if err != nil {
+			return "", nil, false
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return "", nil, false
+		}
+		parts = append(parts, rawFormPart{header: part.Header, name: part.FormName(), data: data})
+	}
+}
+
+// spliceFormPart is body with the part named name holding value, written
+// again by its own boundary, every other part as it was; ok is false when the
+// body holds no single part of that name.
+func spliceFormPart(ct, body, name, value string) (string, bool) {
+	boundary, parts, ok := formParts(ct, body)
+	if !ok {
+		return "", false
+	}
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	if err := w.SetBoundary(boundary); err != nil {
+		return "", false
+	}
+	n := 0
+	for _, pt := range parts {
+		data := pt.data
+		if pt.name == name {
+			data, n = []byte(value), n+1
+		}
+		pw, err := w.CreatePart(pt.header)
+		if err != nil {
+			return "", false
+		}
+		if _, err := pw.Write(data); err != nil {
+			return "", false
+		}
+	}
+	if n != 1 || w.Close() != nil {
+		return "", false
+	}
+	return b.String(), true
 }
 
 func (v reqView) asReq(input *req) *req {
@@ -576,13 +680,15 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 }
 
 // usedWithin reports whether the recorded request holds d's recorded value at
-// the use place vp inside a longer text (r): as a token of it (learn.ContainsToken:
+// the place vp inside a longer text (r): as a token of it (learn.ContainsToken:
 // no letter or digit right before or after it), as "<name>-renamed" holds a
 // name sent whole earlier. The call must then hold there that text with the
-// variable's value in its place, exactly (holdsAt). A variable is bound only
-// where it stands whole, and a number is no text.
+// variable's value in its place, exactly (holdsAt). At its bind place such a
+// variable (a word two values share, sharedSource) takes the value that makes
+// the recorded text the call's (holdVariables); an echo is bound only where it
+// stands whole, and a number is no text.
 func usedWithin(d varDecl, vp varPlace, r held) bool {
-	if d.bind != nil && vp.raw == d.bind.raw {
+	if d.echo && d.bind != nil && vp.raw == d.bind.raw {
 		return false
 	}
 	if r.body && r.kind != templates.LeafString {
@@ -646,6 +752,20 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt, recAt map[string]hel
 			}
 		}
 		v := liveAt[d.bind.place.String()]
+		if r := recAt[d.bind.place.String()]; !variables.SameValue(d.recorded, r.value, r.number()) {
+			// Bound inside the place's longer value (a word of it,
+			// sharedSource): its value is the one that, in its places,
+			// makes the recorded text this call's, exactly.
+			w, ok := learn.TokenValue(r.value, d.recorded, v.value)
+			if !ok {
+				return nil, &varProblem{
+					mock: m.Name, name: d.name, place: d.bind.raw, kind: models.DiffKindVariable, expected: r.value, actual: v.value,
+					why:  fmt.Sprintf("variable %s stands inside %q at %s, and this call sent %q there, which is not that text with one value in the variable's place", d.name, r.value, d.bind.raw, v.value),
+					next: "the application changed more than the value it makes at " + d.bind.raw + ": if that is intended, re-record the test; otherwise fix the application",
+				}
+			}
+			v.value = w
+		}
 		if v.empty() {
 			return nil, emptyBind(m.Name, d, v)
 		}

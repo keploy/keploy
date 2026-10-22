@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -246,9 +247,12 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 }
 
 // multipartLeaves reads a multipart/form-data body by its own boundary: each
-// field part is a leaf (body.<name>), each file part a fixed part (its file
-// name and bytes), so a boundary minted per request is no difference. It
-// reports false for a body it cannot read.
+// field part is a leaf (body.<name>, Form: a variable's place form.<name>),
+// each text file part a leaf too (File: its content compared whole, never
+// learned as noise; a value keploy follows may stand inside it) with its file
+// name fixed, and a binary file part a fixed part (its file name and bytes),
+// so a boundary minted per request is no difference. It reports false for a
+// body it cannot read.
 func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string]string) bool {
 	_, params, err := mime.ParseMediaType(p.header["content-type"])
 	if err != nil || params["boundary"] == "" {
@@ -274,13 +278,25 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 			return false
 		}
 		seen[name] = true
+		path := "body." + name
 		if part.FileName() != "" {
-			fixed["body."+name] = "file " + part.FileName() + "\x00" + string(data)
+			if !textFile(data) {
+				fixed[path] = "file " + part.FileName() + "\x00" + string(data)
+				continue
+			}
+			fixed[path+"{file}"] = part.FileName()
+			leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]"), Form: true, File: true}
 			continue
 		}
-		path := "body." + name
-		leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]")}
+		leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]"), Form: true}
 	}
+}
+
+// textFile reports whether a file part's bytes are text keploy can read
+// words in: valid UTF-8 with no NUL byte. A binary file stays fixed, compared
+// as its bytes.
+func textFile(data []byte) bool {
+	return utf8.Valid(data) && bytes.IndexByte(data, 0) < 0
 }
 
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
@@ -1119,8 +1135,47 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		return out
 	}
 	echoed := map[string]string{} // recorded value -> its echo variable
+	// A text file's content that holds a value this very call sends whole at
+	// another place (an upload's test-set id, in its form field and inside the
+	// file it uploads): the value first appears here, so the call binds it at
+	// that place and uses it inside the file, exactly (sameCallWithin).
+	fileUses := sameCallWithin(learned, jsonReq, respLeavesOf(m))
 	for _, l := range learned {
 		r := l.Recorded
+		if src, ok := fileUses[r.Path]; ok && own {
+			name, ok := tracker.Name(test, m.Name, src.place, reserved)
+			if !ok {
+				return p, "the test ended before " + r.Path + " was learned"
+			}
+			v := p.vars[name]
+			v.Recorded, v.Bind = src.recorded, src.place
+			if use, ok := learn.VarPlace(r, jsonReq); ok {
+				v.Use = appendNew(v.Use, use)
+			}
+			v.Answer = appendNew(v.Answer, src.answers...)
+			p.vars[name] = v
+			p.values[name] = variables.Binding{Name: name, Value: src.live, Recorded: src.recorded, Mock: m.Name, Place: src.place}
+			continue
+		}
+		if src, ok := fileBinds(fileUses, r.Path); ok && own {
+			// The place that binds what the file holds: a variable, not noise.
+			name, ok := tracker.Name(test, m.Name, src.place, reserved)
+			if !ok {
+				return p, "the test ended before " + r.Path + " was learned"
+			}
+			v := p.vars[name]
+			v.Recorded, v.Bind = src.recorded, src.place
+			v.Answer = appendNew(v.Answer, src.answers...)
+			p.vars[name] = v
+			p.values[name] = variables.Binding{Name: name, Value: src.live, Recorded: src.recorded, Mock: m.Name, Place: src.place}
+			p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: src.place, Recorded: src.recorded, Live: src.live, Type: r.Type})
+			continue
+		}
+		if r.File && (l.Kind == learn.KindNoise || l.Kind == learn.KindEcho) {
+			// A file's content is compared whole: what changed in it must be a
+			// value keploy follows, never noise.
+			return p, r.Path + " is a file's content, which keploy compares whole, and it changed by more than a value keploy follows"
+		}
 		if g, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
 			place, placeable := learn.VarPlace(r, jsonReq)
@@ -1150,8 +1205,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindVariable:
 			from := l.From
 			// word is the variable's recorded value: r's own, or the value an
-			// earlier call sent whole that r holds inside a longer one.
-			word := r.Value
+			// earlier call sent whole that r holds inside a longer one, or a
+			// word both hold inside longer values (inside: bound there inside
+			// the earlier call's value, sharedSource).
+			word, inside := r.Value, false
 			switch {
 			case from.Side == "":
 				return p, r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
@@ -1159,6 +1216,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
 			case !from.Whole || from.Var == "":
 				src, w, ok := withinSource(r, l.Live, earlier)
+				if !ok {
+					src, w, ok = sharedSource(r, l.Live, earlier)
+					inside = ok
+				}
 				if !ok {
 					return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 				}
@@ -1177,6 +1238,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
+			if inside {
+				// A word of the earlier place's value: a variable of its own
+				// beside the one the place may hold whole.
+				name, ok = tracker.NameWithin(test, from.Mock, from.Var, word, reserved)
+			}
 			if from.Outside {
 				// The claim key's variable, bound at a call made outside
 				// every test.
@@ -1298,6 +1364,181 @@ func withinSource(r, live learn.Leaf, earlier []learn.Earlier) (from learn.Place
 		}
 	}
 	return learn.Place{}, "", false
+}
+
+// sharedSource is, for a drifted leaf r (live: what F saw there) that withinSource
+// finds no whole value inside, the test's own earlier request place whose value
+// holds, inside a longer value too, a word r's value holds: a token w (at
+// least minWithin long, as learn.ReplaceToken reads tokens) standing in both
+// recorded values, where F's live value of each is its recorded one with one
+// value w' in w's places, exactly (learn.TokenValue, learn.ReplaceToken): the
+// time two names a test made of one Date.now() ("e2e-role-<ts>", then
+// "e2e-case-<ts>"). w is the variable: bound inside the earlier place's value,
+// where it first stands, and used inside r's. Of the test's own calls F served,
+// the earliest; ok is false when none is, and the call is refused, as before.
+// The place's live value (Place.Live) is w', the variable's value.
+func sharedSource(r, live learn.Leaf, earlier []learn.Earlier) (from learn.Place, w string, ok bool) {
+	if r.Type != learn.String || r.Value == "" || live.Value == "" {
+		return learn.Place{}, "", false
+	}
+	served := append([]learn.Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	words := sortedWords(r.Value)
+	for _, e := range served {
+		if !e.Own {
+			continue
+		}
+		for _, s := range e.Seen {
+			v := s.Leaf.Value
+			if s.Side != learn.Request || s.Place == "" || s.Leaf.Unnamed || s.Leaf.Type != learn.String ||
+				s.Live == "" || s.Live == v || v == r.Value {
+				continue
+			}
+			for _, cand := range words {
+				if len(cand) < minWithin || cand == v || !learn.ContainsToken(v, cand) {
+					continue
+				}
+				wl, ok := learn.TokenValue(v, cand, s.Live)
+				if !ok {
+					continue
+				}
+				if with, _ := learn.ReplaceToken(r.Value, cand, wl); with != live.Value {
+					continue
+				}
+				return learn.Place{Mock: e.Mock, Side: learn.Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise, Var: s.Place, Live: wl,
+					Own: e.Own, Run: e.Run, Outside: e.Outside}, cand, true
+			}
+		}
+	}
+	return learn.Place{}, "", false
+}
+
+// sortedWords are the ASCII letter-and-digit words of s, longest first, each
+// once: the words a value may share with another, the most specific first.
+func sortedWords(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for i := 0; i < len(s); {
+		if !isASCIIWord(s[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && isASCIIWord(s[j]) {
+			j++
+		}
+		if w := s[i:j]; !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+		i = j
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
+func isASCIIWord(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// fileSource is the place of a call that sends, whole, a value a text file
+// of the same call holds inside it: the variable's bind place, and the value
+// recorded and in this run.
+type fileSource struct {
+	path, place    string
+	recorded, live string
+	// answers are the call's answer places that hold the value, whole or
+	// inside a longer text (withinAnswers): answered with this run's value.
+	answers []string
+}
+
+// sameCallWithin maps each text file leaf of a call (learned: what F saw drift
+// in it) whose change is exactly one value the same call sends whole at
+// another place, first appearing there (no earlier call sent it), to that
+// place: the file's recorded text with that place's live value in the
+// recorded value's places (learn.ReplaceToken) is the file's live text. The
+// value is at least minWithin long, a string, at a variable's place. Each
+// was learned as noise, as an echo, or refused only because a word of it
+// comes back in the call's answer (Learned.Echoed): when the answer holds it,
+// every answer place holding a word of what changed must hold the value
+// whole or as a token, so that the variable answers it with this run's value
+// (resp: the call's recorded answer).
+func sameCallWithin(learned []learn.Learned, jsonReq bool, resp []learn.Leaf) map[string]fileSource {
+	fresh := func(l learn.Learned) bool {
+		return l.Kind == learn.KindNoise || l.Kind == learn.KindEcho || l.Kind == learn.KindUnaccounted && l.Echoed
+	}
+	echoed := func(l learn.Learned) bool { return l.Kind == learn.KindEcho || l.Echoed }
+	out := map[string]fileSource{}
+	for _, f := range learned {
+		r := f.Recorded
+		if !r.File || r.Value == "" || !fresh(f) {
+			continue
+		}
+		for _, s := range learned {
+			v := s.Recorded
+			if v.Path == r.Path || v.File || !fresh(s) || v.Type != learn.String || len(v.Value) < minWithin ||
+				s.Live.Value == "" || s.Live.Value == v.Value || !learn.ContainsToken(r.Value, v.Value) {
+				continue
+			}
+			place, ok := learn.VarPlace(v, jsonReq)
+			if !ok {
+				continue
+			}
+			if with, _ := learn.ReplaceToken(r.Value, v.Value, s.Live.Value); with != f.Live.Value {
+				continue
+			}
+			if (echoed(f) || echoed(s)) && !answeredWhole(v.Value, s.Live.Value, resp) {
+				continue
+			}
+			out[r.Path] = fileSource{path: v.Path, place: place, recorded: v.Value, live: s.Live.Value, answers: withinAnswers(v.Value, resp)}
+			break
+		}
+	}
+	return out
+}
+
+// answeredWhole reports whether every answer leaf that holds a word the value
+// lost (recorded, not live) holds the value itself, whole or as a token, at a
+// place a variable can answer: so answering the value accounts for every word
+// of it the answer echoes.
+func answeredWhole(recorded, live string, resp []learn.Leaf) bool {
+	liveWords := map[string]bool{}
+	for _, w := range sortedWords(live) {
+		liveWords[w] = true
+	}
+	var lost []string
+	for _, w := range sortedWords(recorded) {
+		if !liveWords[w] {
+			lost = append(lost, w)
+		}
+	}
+	for _, a := range resp {
+		holds := false
+		for _, w := range lost {
+			if learn.ContainsToken(a.Value, w) {
+				holds = true
+				break
+			}
+		}
+		if !holds {
+			continue
+		}
+		if _, ok := learn.VarPlace(a, true); !ok || a.Unnamed || !learn.ContainsToken(a.Value, recorded) && !learn.WholeEcho(learn.Leaf{Value: recorded}, a) {
+			return false
+		}
+	}
+	return true
+}
+
+// fileBinds reports whether the leaf at path is the place that binds a value
+// a file of its call holds (sameCallWithin), and that place.
+func fileBinds(uses map[string]fileSource, path string) (fileSource, bool) {
+	for _, src := range uses {
+		if src.path == path {
+			return src, true
+		}
+	}
+	return fileSource{}, false
 }
 
 // withinAnswers are the places of an answer (leaves) that hold w, a value

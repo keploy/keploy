@@ -51,6 +51,9 @@ type Tracker struct {
 	// drifts keeps what each value drifted, for the running test's
 	// requests.
 	drifts *DriftCache
+	// texts is what the set's payload texts read as, shared by every test's
+	// drifts (newDriftCacheOn) until the next set.
+	texts *textCache
 	// open is whether a test is running (Begin, until End), and began
 	// whether one has begun in this set (Begin, until NewSet).
 	open  bool
@@ -118,7 +121,8 @@ type Minted struct {
 
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
-	return &Tracker{drifts: NewDriftCache()}
+	texts := newTextCache()
+	return &Tracker{drifts: newDriftCacheOn(texts), texts: texts}
 }
 
 // NewSet starts the next test set's replay on the same agent: what was served
@@ -141,7 +145,8 @@ func (t *Tracker) NewSet() {
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
-	t.answered, t.drifts = nil, NewDriftCache()
+	t.texts = newTextCache()
+	t.answered, t.drifts = nil, newDriftCacheOn(t.texts)
 	t.servedAt = nil
 	t.minted = nil
 	t.keyed = false
@@ -167,7 +172,10 @@ func (t *Tracker) Begin() {
 	t.served = nil
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
-	t.drifts = NewDriftCache()
+	if t.texts == nil {
+		t.texts = newTextCache()
+	}
+	t.drifts = newDriftCacheOn(t.texts)
 	t.names, t.taken = nil, nil
 	t.minted = nil
 	t.open, t.began = true, true
@@ -454,6 +462,41 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 		t.setTaken = map[string]bool{}
 	}
 	name = t.free(varName(place), reserved, t.taken, t.outsideTaken)
+	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
+	if t.keyTaken != nil {
+		t.keyTaken[name] = true
+	}
+	return name, true
+}
+
+// NameWithin is Name for a value that stands inside the longer value sent
+// at place of mock (a word of it: the time two names a test made share): a
+// variable of its own beside the place's (a place may hold a value, whole,
+// and a word of it), named for the place and "part", one per word.
+func (t *Tracker) NameWithin(n uint64, mock, place, word string, reserved map[string]bool) (name string, ok bool) {
+	if t == nil {
+		name = varName(place) + "-part"
+		for i := 2; reserved[name]; i++ {
+			name = varName(place) + "-part-" + strconv.Itoa(i)
+		}
+		return name, true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if n < t.setEpoch || t.epoch != n {
+		return "", false
+	}
+	key := mock + "\x00" + place + "\x00" + word
+	if name, ok := t.names[key]; ok {
+		return name, true
+	}
+	if t.names == nil {
+		t.names, t.taken = map[string]string{}, map[string]bool{}
+	}
+	if t.setTaken == nil {
+		t.setTaken = map[string]bool{}
+	}
+	name = t.free(varName(place)+"-part", reserved, t.taken, t.outsideTaken)
 	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
 	if t.keyTaken != nil {
 		t.keyTaken[name] = true

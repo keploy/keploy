@@ -45,6 +45,9 @@ const (
 	PartQuery
 	// PartHeader is the whole value of one header.
 	PartHeader
+	// PartForm is the value of one part of a multipart/form-data body, named
+	// by its part name: a field's text, or a text file's content.
+	PartForm
 )
 
 // Place is where in a call a variable's value is.
@@ -54,8 +57,8 @@ type Place struct {
 	Path []templates.PathSeg
 	// Index is the segment of a PartPath place.
 	Index int
-	// Name is the parameter of a PartQuery place, or the header of a
-	// PartHeader place.
+	// Name is the parameter of a PartQuery place, the header of a
+	// PartHeader place, or the part of a PartForm place.
 	Name string
 }
 
@@ -65,6 +68,7 @@ const (
 	pathPrefix   = "url.path["
 	queryPrefix  = "url.query."
 	headerPrefix = "header."
+	formPrefix   = "form."
 )
 
 // ErrPlace marks a place that is not in the grammar.
@@ -76,6 +80,7 @@ var ErrPlace = errors.New("not a variable place")
 //	url.path[2]           the third segment of the URL path
 //	url.query.page        the value of the query parameter page
 //	header.X-Request-Id   the value of a header (any case)
+//	form.testSetId        the value of a multipart/form-data part (a field, or a text file)
 func Parse(s string) (Place, error) {
 	switch {
 	case s == bodyPrefix:
@@ -96,8 +101,10 @@ func Parse(s string) (Place, error) {
 		return Place{Part: PartQuery, Name: s[len(queryPrefix):]}, nil
 	case strings.HasPrefix(s, headerPrefix) && len(s) > len(headerPrefix):
 		return Place{Part: PartHeader, Name: s[len(headerPrefix):]}, nil
+	case strings.HasPrefix(s, formPrefix) && len(s) > len(formPrefix):
+		return Place{Part: PartForm, Name: s[len(formPrefix):]}, nil
 	}
-	return Place{}, fmt.Errorf("%w: %q (want body.<path>, url.path[<n>], url.query.<name> or header.<name>)", ErrPlace, s)
+	return Place{}, fmt.Errorf("%w: %q (want body.<path>, url.path[<n>], url.query.<name>, header.<name> or form.<name>)", ErrPlace, s)
 }
 
 // String is the place as Parse reads it.
@@ -111,6 +118,8 @@ func (p Place) String() string {
 		return queryPrefix + p.Name
 	case PartHeader:
 		return headerPrefix + p.Name
+	case PartForm:
+		return formPrefix + p.Name
 	}
 	return ""
 }
