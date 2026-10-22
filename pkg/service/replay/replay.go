@@ -5720,14 +5720,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// above, before this set's verdict was known, and enterprise's auto-noise
 	// hook writes the response noise it learned onto the test cases there.
 	// keploy record's judging decides the set only later, on its confirming
-	// round too, and puts back what this round wrote onto the recording (its
-	// mocks and its test cases) of every set it does not decide (enterprise
-	// record_learned.go, recordedFiles, put back by record_judge.go's
-	// judgeKeployRecord): a set this round did not judge, and one it judged
-	// that judging does not, when the confirming round did not complete or
-	// could not run, or judging was interrupted or failed. A record that is
-	// killed before judging ends leaves each set staged on disk, which the
-	// next keploy record or keploy test puts back (recordedFiles.stage).
+	// round too, and puts back every set it does not decide whole, as keploy
+	// record wrote it, from a copy of its folder staged before this round
+	// wrote anything (enterprise record_learned.go, recordedSets, put back by
+	// record_judge.go's judgeKeployRecord): its mocks, its test cases and its
+	// config.yaml alike, whichever writer wrote them. That is a set this
+	// round did not judge, and one it judged that judging does not, when the
+	// confirming round did not complete or could not run, or judging was
+	// interrupted or failed. This round's mock-registry upload of a set it
+	// passed, which would name the mocks it wrote onto in the set's
+	// config.yaml and keep its mocks.yaml out of git, is held until judging
+	// decides the set (enterprise holdUploads), and made only for a set it
+	// decides. A record that is killed before judging ends leaves each set
+	// staged on disk, which the next keploy record or keploy test puts back
+	// (stageRecorded).
 	if r.learning() && r.instrument {
 		if unchecked != "" {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
