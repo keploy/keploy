@@ -242,19 +242,40 @@ func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 // Finalize sorts the index and the answer-placed one by place
 // (models.PlaceOf: the request timestamp, or the answer's for a mock placed
 // at its answer) for binary search, and the carry-over and staged indexes by
-// request timestamp. Idempotent.
+// request timestamp. Mocks that share a time keep the order they were added
+// in (byRecordedTime), the mock file's order: every command of one pipelined
+// write is recorded with that write's read time, and a parser answers a
+// repeated command from its recordings in turn (a Redis INCR, one count
+// after another), so a sort that reorders equal times hands it the counts
+// out of order. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.finalize {
 		return
 	}
-	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].placeTsNano < d.entries[j].placeTsNano })
-	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
-	sort.Slice(d.staged, func(i, j int) bool { return d.staged[i].reqTsNano < d.staged[j].reqTsNano })
-	sort.Slice(d.placed, func(i, j int) bool { return d.placed[i].placeTsNano < d.placed[j].placeTsNano })
+	byTime := func(s []diskEntry, at func(diskEntry) int64) {
+		sort.Slice(s, func(i, j int) bool { return byRecordedTime(s[i], s[j], at) })
+	}
+	byTime(d.entries, placeTime)
+	byTime(d.carry, reqTime)
+	byTime(d.staged, reqTime)
+	byTime(d.placed, placeTime)
 	d.finalize = true
 }
+
+// byRecordedTime orders two entries by at, and two of one time by their
+// offset in the store, the order they were added in (Add appends at a
+// running offset): the mock file's order, the order they were recorded in.
+func byRecordedTime(a, b diskEntry, at func(diskEntry) int64) bool {
+	if x, y := at(a), at(b); x != y {
+		return x < y
+	}
+	return a.off < b.off
+}
+
+func placeTime(e diskEntry) int64 { return e.placeTsNano }
+func reqTime(e diskEntry) int64   { return e.reqTsNano }
 
 // readAt decodes the mock at an entry. The file is immutable after Finalize, so
 // ReadAt is concurrency-safe. Elided responses get a lazy serve-time loader.
@@ -500,7 +521,7 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(sel, func(i, j int) bool { return sel[i].reqTsNano < sel[j].reqTsNano })
+	sort.Slice(sel, func(i, j int) bool { return byRecordedTime(sel[i], sel[j], reqTime) })
 	for _, e := range sel {
 		m, err := d.readAt(e)
 		if err != nil {
@@ -530,12 +551,7 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 		sel = append(sel, e)
 	}
 	d.mu.Unlock()
-	sort.Slice(sel, func(i, j int) bool {
-		if sel[i].reqTsNano != sel[j].reqTsNano {
-			return sel[i].reqTsNano < sel[j].reqTsNano
-		}
-		return sel[i].off < sel[j].off
-	})
+	sort.Slice(sel, func(i, j int) bool { return byRecordedTime(sel[i], sel[j], reqTime) })
 	return d.decodeAll(sel)
 }
 
@@ -554,12 +570,7 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		sel = append(sel, e)
 	}
 	d.mu.Unlock()
-	sort.Slice(sel, func(i, j int) bool {
-		if sel[i].reqTsNano != sel[j].reqTsNano {
-			return sel[i].reqTsNano < sel[j].reqTsNano
-		}
-		return sel[i].off < sel[j].off
-	})
+	sort.Slice(sel, func(i, j int) bool { return byRecordedTime(sel[i], sel[j], reqTime) })
 	return d.decodeAll(sel)
 }
 
@@ -611,7 +622,7 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	sort.Slice(cs, func(i, j int) bool { return byRecordedTime(cs[i].e, cs[j].e, reqTime) })
 	for _, c := range cs {
 		e := c.e
 		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,179 @@ func TestLoadWindow_InclusiveBounds(t *testing.T) {
 			t.Fatalf("decoded mock %s lost its request timestamp", m.Name)
 		}
 	}
+}
+
+// Mocks that share a time keep the order they were added in, the mock file's
+// order: every command of one pipelined write is recorded with that write's
+// read time, and a parser that answers a repeated command from its recordings in
+// turn (Redis's INCR, one count after another) answers in recorded order
+// only if the store hands them over in it. Three connections recorded at
+// once are added interleaved, 60 mocks each, each connection's in chunks of
+// 20 that share a time, the connections' times interleaving, so the times
+// arrive out of order and every sort has ties to keep: the index (the
+// window, start-up, in-flight and whole loads), each declared index
+// (carry-over, staged at staging, placed at its answer), and the recorded
+// and keyed walks. The keyed walk gathers its candidates key by key, and the
+// recorded walk over a store with mocks placed at their answer gathers them
+// from the index, where those sit after the others of their request time:
+// out of the order added, so a sort that keeps the order it was given does
+// not pass them. The recorded walk over a store not finalized yet guards
+// against its sort being dropped.
+func TestDiskMocksKeepTheRecordedOrderOfMocksThatShareATime(t *testing.T) {
+	const conns, perConn, chunk = 3, 60, 20
+	interleaved := func(mark string) []*models.Mock {
+		var added []*models.Mock
+		for j := 0; j < perConn; j++ {
+			for c := 0; c < conns; c++ {
+				at := int64(100 + (j/chunk)*10 + (conns - c))
+				m := perTestMockAt(fmt.Sprintf("c%d-%02d", c, j), at)
+				m.TestModeInfo.LifetimeDerived = true
+				m.Spec.Metadata = map[string]string{mark: "true", "parity": [2]string{"even", "odd"}[j%2]}
+				added = append(added, m)
+			}
+		}
+		return added
+	}
+	// byTime is the order the store must hand added over in: by at, and in
+	// the order added within a time.
+	byTime := func(added []*models.Mock, at func(*models.Mock) time.Time) []string {
+		sorted := append([]*models.Mock(nil), added...)
+		sort.SliceStable(sorted, func(i, j int) bool { return at(sorted[i]).Before(at(sorted[j])) })
+		out := make([]string, len(sorted))
+		for i, m := range sorted {
+			out[i] = m.Name
+		}
+		return out
+	}
+	req := func(m *models.Mock) time.Time { return m.Spec.ReqTimestampMock }
+	res := func(m *models.Mock) time.Time { return m.Spec.ResTimestampMock }
+	inOrder := func(t *testing.T, what string, got []string, want []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d mocks, want %d", what, len(got), len(want))
+		}
+		out, first := 0, -1
+		for i := range got {
+			if got[i] != want[i] {
+				out++
+				if first < 0 {
+					first = i
+				}
+			}
+		}
+		if out > 0 {
+			t.Fatalf("%s: %d of %d mocks out of recorded order; first at %d: %s, want %s", what, out, len(got), first, got[first], want[first])
+		}
+	}
+	namesOf := func(t *testing.T, what string, ms []*models.Mock, err error) []string {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		out := make([]string, len(ms))
+		for i, m := range ms {
+			out[i] = m.Name
+		}
+		return out
+	}
+	from, to := time.Unix(100, 0).UTC(), time.Unix(200, 0).UTC()
+
+	t.Run("index", func(t *testing.T) {
+		defer models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string { return []string{m.Spec.Metadata["parity"]} })()
+		added := interleaved("plain")
+		s := newDiskWith(t, added...)
+		defer s.Close()
+		want := byTime(added, req)
+		got, err := s.LoadWindow(from, to)
+		inOrder(t, "LoadWindow", namesOf(t, "LoadWindow", got, err), want)
+		got, err = s.LoadBefore(to)
+		inOrder(t, "LoadBefore", namesOf(t, "LoadBefore", got, err), want)
+		got, err = s.LoadAll()
+		inOrder(t, "LoadAll", namesOf(t, "LoadAll", got, err), want)
+		// The recorded walk sorts what it reads itself: a store not finalized
+		// yet holds its index in the order added.
+		raw, err := NewDiskMocks(zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		for _, m := range added {
+			if err := raw.Add(m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, store := range []*DiskMocks{s, raw} {
+			var walked []string
+			if err := store.RangeRecordedBefore(to, func(m *models.Mock) bool { walked = append(walked, m.Name); return true }); err != nil {
+				t.Fatal(err)
+			}
+			inOrder(t, "RangeRecordedBefore", walked, want)
+		}
+		var keyed []string
+		// Every odd mock's key first: the walk gathers them before the even ones.
+		if err := s.RangeKeys(models.HTTP, []string{"odd", "even"}, func(name string, _ func() (*models.Mock, error)) bool {
+			keyed = append(keyed, name)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		inOrder(t, "RangeKeys", keyed, want)
+	})
+	t.Run("in flight", func(t *testing.T) {
+		// Every mock answered after the test's start: in flight at it.
+		added := interleaved("flight")
+		for _, m := range added {
+			m.Spec.ResTimestampMock = time.Unix(300, 0).UTC()
+		}
+		s := newDiskWith(t, added...)
+		defer s.Close()
+		got, err := s.LoadInFlight(time.Unix(99, 0).UTC(), time.Unix(250, 0).UTC())
+		inOrder(t, "LoadInFlight", namesOf(t, "LoadInFlight", got, err), byTime(added, req))
+	})
+	t.Run("carry-over", func(t *testing.T) {
+		defer models.RegisterCarryOver(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["carry"] == "true" })()
+		added := interleaved("carry")
+		s := newDiskWith(t, added...)
+		defer s.Close()
+		got, err := s.LoadCarryOver(from, to)
+		inOrder(t, "LoadCarryOver", namesOf(t, "LoadCarryOver", got, err), byTime(added, req))
+	})
+	t.Run("staged at staging", func(t *testing.T) {
+		defer models.RegisterStagingNeed(models.HTTP, models.StagingNeed{
+			Use:   models.StagingWithStartup,
+			Match: func(m *models.Mock) bool { return m.Spec.Metadata["staged"] == "true" },
+		})()
+		added := interleaved("staged")
+		s := newDiskWith(t, added...)
+		defer s.Close()
+		got, err := s.LoadStaged(from, to)
+		inOrder(t, "LoadStaged", namesOf(t, "LoadStaged", got, err), byTime(added, req))
+	})
+	t.Run("placed at its answer", func(t *testing.T) {
+		// The even mocks are placed at their answer, 5s after their request:
+		// the index holds each request time's odd mocks at it and its even
+		// ones after it.
+		defer models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool {
+			return m.Spec.Metadata["placed"] == "true" && m.Spec.Metadata["parity"] == "even"
+		})()
+		added := interleaved("placed")
+		var evens []*models.Mock
+		for _, m := range added {
+			if m.Spec.Metadata["parity"] == "even" {
+				m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(5 * time.Second)
+				evens = append(evens, m)
+			}
+		}
+		s := newDiskWith(t, added...)
+		defer s.Close()
+		got, err := s.LoadAnswerPlaced(from, to)
+		inOrder(t, "LoadAnswerPlaced", namesOf(t, "LoadAnswerPlaced", got, err), byTime(evens, res))
+		var walked []string
+		if err := s.RangeRecordedBefore(to, func(m *models.Mock) bool { walked = append(walked, m.Name); return true }); err != nil {
+			t.Fatal(err)
+		}
+		inOrder(t, "RangeRecordedBefore", walked, byTime(added, req))
+	})
 }
 
 func TestLoadWindow_EmptyAndEdges(t *testing.T) {
