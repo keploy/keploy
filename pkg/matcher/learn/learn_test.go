@@ -659,6 +659,11 @@ func TestSources(t *testing.T) {
 		{"one instant moved by another amount, whole", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, true},
 		{"UUID v7s whose time moved by another amount", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(at.Add(81*time.Second+200*time.Millisecond), "fedcba987654321012"), false, false},
 		{"one UUID v7 whose time moved by another amount, inside a longer value", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(at.Add(81*time.Second), "def0123456789abcde"), true, false},
+		// Both lost only words of their instants (one minute), and both
+		// gained one word outside them: the minute is no word both lost,
+		// so this is no co-drift. Only both losing and both gaining a word
+		// outside their instants is.
+		{"instants of one minute, then one word gained in both", at.Format(time.RFC3339), at.Add(5*time.Minute).Format(time.RFC3339) + " A7K29QXM", at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute+7*time.Second).Format(time.RFC3339) + " A7K29QXM", false, false},
 		// One UUID v7 next to a fresh part in both: its random groups are
 		// shared, a value that flowed.
 		{"one UUID v7 next to a fresh part in both", uuid7(at, "abc123456789abcdef") + ":n1", uuid7(f, "def0123456789abcde") + ":n2", "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(f, "def0123456789abcde"), true, false},
