@@ -4,12 +4,15 @@
 package mockdb
 
 import (
+	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -145,4 +148,62 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+// A registered kind's mock (Postgres v3 and the like: its mapper rebuilds
+// the spec) keeps the words the learn step learned of it, a newer keploy's
+// entry with them, through a write, a read and a switch-off rewrite of its
+// file (compat must-do 1): decodeMocks restores noise.words off the
+// envelope for a mapped kind as it does for a built-in one.
+func TestAMapperKindsWordsSurviveASwitchOffRewrite(t *testing.T) {
+	clearRegistry(t)
+	t.Setenv(provenswitch.Env, "")
+	kind := models.Kind("custom-words")
+	RegisterMockYAMLMapper(kind, MockYAMLMapper{
+		Encode: func(mock *models.Mock, doc *yaml.NetworkTrafficDoc) error {
+			return doc.Spec.Encode(map[string]string{"query": mock.Spec.Metadata["query"]})
+		},
+		Decode: func(doc *yaml.NetworkTrafficDoc, mock *models.Mock) error {
+			var payload map[string]string
+			if err := doc.Spec.Decode(&payload); err != nil {
+				return err
+			}
+			mock.Spec = models.MockSpec{Metadata: payload}
+			return nil
+		},
+	})
+	words := map[string]models.WordsEntry{
+		"body.query": learnedWordsOf(t, "ORD-1 paid 100 ref=a1b2", "ORD-1 paid 100 ref=c3d4"),
+		"body.later": {V: models.WordsVersion + 1, Unknown: `{"digest":"9f2c41d07a3be815","shape":{"k":[1,2]}}`},
+	}
+	dir := t.TempDir()
+	ys := NewWithFormat(zap.NewNop(), dir, "mocks", yaml.FormatYAML)
+	ctx := context.Background()
+	set := "test-set-0"
+	m := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: kind, Spec: models.MockSpec{Metadata: map[string]string{"query": "SELECT 1"}, LearnedWords: words}}
+	if err := ys.InsertMock(ctx, m, set); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.InsertMock(ctx, noiseTestMock(`{"plain":"p"}`), set); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check := func(when string) {
+		t.Helper()
+		got := setMocks(t, dir, set)["mock-0"]
+		if got == nil || got.Kind != kind || got.Spec.Metadata["query"] != "SELECT 1" {
+			t.Fatalf("%s: the mapped mock read back as %+v", when, got)
+		}
+		if !reflect.DeepEqual(got.Spec.LearnedWords, words) {
+			t.Fatalf("%s: words %+v, want %+v", when, got.Spec.LearnedWords, words)
+		}
+	}
+	check("as written")
+	// A noise persist rewrites the file: the other mock learns noise.
+	if err := ys.PersistMockNoise(ctx, set, map[string]models.MockState{"mock-1": {Name: "mock-1", ReqBodyNoise: map[string][]string{"body.plain": {}}}}); err != nil {
+		t.Fatal(err)
+	}
+	check("after a switch-off noise persist")
 }
