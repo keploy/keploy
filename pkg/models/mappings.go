@@ -61,6 +61,49 @@ type MockEntry struct {
 	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
 	// the switch.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
+	// Owner is, on a worker-scope entry record's judging moved out of a
+	// test's list (MappingDb.MoveToWorker, under the proven switch), the test
+	// it was moved from: the test whose window recorded it (S12 v16 §4.2; the
+	// compatibility audit's B4). Empty on every other entry. Read and kept by
+	// each rewrite of mappings.yaml, whatever the switch.
+	Owner string `json:"owner,omitempty" yaml:"owner,omitempty" bson:"owner,omitempty"`
+	// Drift says, on a moved entry, that the move rests on its Owner's
+	// quarantine: the pairing that moved it drifted (S12 v16 §4.1), so the
+	// Owner was quarantined as keploy/unseparable_write, keploy being unable
+	// to tell the Owner's own write from it. record's judging sets it on the
+	// moves it passes MoveToWorker. A replay under the switch that runs the
+	// Owner (its quarantine no longer applies: its test was edited, or
+	// verdicts.yaml lost its entry) gives the entry back to the Owner's own
+	// list: today's rule, failing closed. An exact move (no Drift) keeps its
+	// Owner running beside it, as judging kept it. Read and kept by each
+	// rewrite, whatever the switch.
+	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+}
+
+// RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
+// record recorded under S12's routing and serving (S12 v16): only such a set
+// is served by S12's looser rules (no worker-scope check at the set's end, the
+// pool inside tests, background writes answered by kind), and only by a build
+// whose judging enables them (replay.RegisterS12Serving), under the proven
+// switch. Every other set keeps today's rules (the compatibility audit's B3).
+const RecordedWithS12Routing = "s12-routing"
+
+// MappingDoc is mappings.yaml's document, Mapping, by the name S12's contract
+// gives it (MappingDoc.RecordedWith).
+type MappingDoc = Mapping
+
+// WasRecordedWith reports whether m's set carries feature among the marks
+// keploy record wrote it with (Mapping.RecordedWith). A nil m carries none.
+func (m *Mapping) WasRecordedWith(feature string) bool {
+	if m == nil {
+		return false
+	}
+	for _, f := range m.RecordedWith {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // The MockEntry.Unresolved of a recording keploy record's full round could not
@@ -179,6 +222,14 @@ type Mapping struct {
 	// (MockEntry.Group). Every other replay leaves them unowned, as it does
 	// a mock no test lists.
 	Shared []MockEntry `json:"shared,omitempty" yaml:"shared,omitempty" bson:"shared,omitempty"`
+	// RecordedWith names, set-wide, what keploy record recorded the set with
+	// that changes how it is served: RecordedWithS12Routing for a set an S12
+	// record wrote (routed at record, its background served by S12's rules).
+	// keploy record writes it under the proven switch. Read and kept by each
+	// rewrite of mappings.yaml, whatever the switch, and by a writer that
+	// names none; omitted when empty, so a file without it is written as
+	// before. Only its use is under the switch.
+	RecordedWith []string `json:"recordedWith,omitempty" yaml:"recordedWith,omitempty" bson:"recorded_with,omitempty"`
 }
 
 // Group is the concurrency group id names, nil when there is none.
