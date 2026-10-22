@@ -788,6 +788,18 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	if got := results[0].FailureInfo.UnmatchedCalls[1]; got.Reason != models.MissConcurrentAmbiguous || got.ClosestMock != "twin" {
 		t.Fatalf("b's charge %+v", got)
 	}
+	// The charge's note names the tests open beside b, and never b itself
+	// as the test the recording is listed under: b lists it (verdicts.yaml
+	// carries attributed_to to every reader).
+	if n := results[0].FailureInfo.UnmatchedCalls[1].Concurrent; n == nil || n.Case != models.ConcurrentCaseUnresolved || !reflect.DeepEqual(n.With, []string{"a"}) || n.AttributedTo != "" {
+		t.Fatalf("b's charge says %+v; want case unresolved, with a, attributed to no other test", n)
+	}
+	// A test this replay skips (quarantined, ignored) is not charged for the
+	// unresolved recording it lists: it stays IGNORED, never FAILED.
+	skipped := []models.TestResult{{TestCaseID: "b", Status: models.TestStatusIgnored}}
+	if charged := p.annotateConcurrent(skipped, nil); len(charged) != 0 || skipped[0].Status != models.TestStatusIgnored || len(skipped[0].FailureInfo.UnmatchedCalls) != 0 {
+		t.Fatalf("a skipped test was charged %v: status %s, calls %+v", charged, skipped[0].Status, skipped[0].FailureInfo.UnmatchedCalls)
+	}
 	if got := results[1].FailureInfo.UnconsumedMocks[0]; got.Concurrent != "b" || got.WhyNot != models.ConcurrentNotSharedStrict {
 		t.Fatalf("a's unconsumed %+v; want b, not shared by this replay", got)
 	}
