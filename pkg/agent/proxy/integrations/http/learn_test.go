@@ -146,6 +146,32 @@ func learnOn(t *testing.T) (*HTTP, learnNoise, models.OutgoingOptions) {
 	return h, h.newLearnNoise(opts, nil, nil), opts
 }
 
+// wordPlaces are the places spec learned words at, as a noise map names
+// them; it fails t when spec learned a leaf whole: under the proven switch
+// the HTTP learn step learns only the words of a leaf that changed (r9 §1).
+func wordPlaces(t *testing.T, spec models.MockSpec) map[string][]string {
+	t.Helper()
+	if len(spec.ReqBodyNoise) != 0 {
+		t.Fatalf("a leaf was learned whole: %v", spec.ReqBodyNoise)
+	}
+	out := map[string][]string{}
+	for p := range spec.LearnedWords {
+		out[p] = []string{}
+	}
+	return out
+}
+
+// wordsOf is what F learns of the words of a drifted value (rec, live), by
+// the lead.
+func wordsOf(t *testing.T, rec, live string) *models.WordsEntry {
+	t.Helper()
+	e, why := learn.NewDriftCache().Words(rec, live, nil)
+	if why != "" {
+		t.Fatalf("%q -> %q: no words: %s", rec, live, why)
+	}
+	return &e
+}
+
 func TestLearnMatchLearnsADriftedBodyValueAsNoise(t *testing.T) {
 	h, n, opts := learnOn(t)
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"request_id":"r-1","item":"book"}`, nil, `{"ok":true}`)}}
@@ -153,8 +179,9 @@ func TestLearnMatchLearnsADriftedBodyValueAsNoise(t *testing.T) {
 	if err != nil || miss != nil || served == nil {
 		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
-	if len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.request_id": {}}) {
-		t.Fatalf("the consumed mock carries %v, want body.request_id learned as noise", db.consumed)
+	if len(db.consumed) != 1 || !reflect.DeepEqual(wordPlaces(t, db.consumed[0].Spec), map[string][]string{"body.request_id": {}}) ||
+		!reflect.DeepEqual(db.consumed[0].Spec.LearnedWords["body.request_id"], *wordsOf(t, "r-1", "r-2")) {
+		t.Fatalf("the consumed mock carries %v, want the words of body.request_id that changed", db.consumed)
 	}
 }
 
@@ -168,7 +195,7 @@ func TestLearnMatchLearnsEveryPartOfARequest(t *testing.T) {
 	// The path segment, the query value, the header, and the credential the
 	// static noise list names: it leaves that list in the learn step.
 	want := map[string][]string{"url.path.2": {}, "url.query.at": {}, "header.x-trace": {}, "header.authorization": {}}
-	if got := db.consumed[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, want) {
+	if got := wordPlaces(t, db.consumed[0].Spec); !reflect.DeepEqual(got, want) {
 		t.Fatalf("learned %v, want %v", got, want)
 	}
 }
@@ -195,7 +222,7 @@ func TestLearnMatchLearnsAnEchoAsAVariableOfItsCall(t *testing.T) {
 	if served.Spec.HTTPResp.Body != `{"id":"ch_1","idempotency_key":"k-2","amount":5,"note":"k-1 ok"}` {
 		t.Fatalf("served %s: this run's value is answered where the recorded one was echoed whole", served.Spec.HTTPResp.Body)
 	}
-	want := models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}, Echo: true}}
+	want := models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}, Echo: true, Words: wordsOf(t, "k-1", "k-2")}}
 	if got := db.consumed[0].Spec.Learned(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("variables %+v, want %+v", got, want)
 	}
@@ -245,7 +272,7 @@ func TestLearnMatchFollowsAVariable(t *testing.T) {
 	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Learned(), want) {
 		t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
 	}
-	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
+	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order", Words: wordsOf(t, "o-1", "o-9")}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
 		t.Fatalf("binds %+v, want %+v", use.Spec.LearnedBinds(), want)
 	}
 	if len(use.Spec.ReqBodyNoise) != 0 {
@@ -287,7 +314,7 @@ func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
 	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Learned(), want) {
 		t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
 	}
-	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order.$oid"}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
+	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order.$oid", Words: wordsOf(t, "o-1", "o-9")}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
 		t.Fatalf("binds %+v, want %+v", use.Spec.LearnedBinds(), want)
 	}
 }
@@ -315,7 +342,16 @@ func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
 			learnRecorded("mock-1", time.Second, "GET", "/v1/events?since="+url.QueryEscape(recorded), "", nil, `{}`),
 		}}
 		ctx := learn.WithTracker(context.Background(), tr)
-		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"at":"`+c.live+`"}`, nil), db, n, opts); served == nil || miss != nil {
+		served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"at":"`+c.live+`"}`, nil), db, n, opts)
+		if c.clock == nil {
+			// An instant that moved otherwise than F's clock moves it is no
+			// clock read, and its words are not learned (r9 §2): refused.
+			if served != nil || miss == nil || !strings.Contains(miss.res.Why, "no clock read keploy may learn") {
+				t.Fatalf("%s: served %v miss %+v, want refused", c.name, served, miss)
+			}
+			continue
+		}
+		if served == nil || miss != nil {
 			t.Fatalf("%s: the first call is paired: %+v", c.name, miss)
 		}
 		served, miss, err := h.learnMatch(ctx, live("GET", "/v1/events?since="+url.QueryEscape(c.live), "", nil), db, n, opts)
@@ -378,7 +414,7 @@ func TestLearnMatchPoolOnlyInAFullRecord(t *testing.T) {
 	if served == nil || miss != nil {
 		t.Fatalf("a full record pairs it: miss %+v", miss)
 	}
-	if len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"url.path.1": {}}) {
+	if len(db.pooled) != 1 || !reflect.DeepEqual(wordPlaces(t, db.pooled[0].Spec), map[string][]string{"url.path.1": {}}) {
 		t.Fatalf("the pool mock carries what was learned: %+v", db.pooled)
 	}
 	// The pool keeps it: the next call with yet another value matches exactly.
@@ -508,7 +544,7 @@ func TestLearnMatchNoiseNamesOneElement(t *testing.T) {
 	if served, miss, _ := h.learnMatch(context.Background(), live("POST", "/v1/put", `{"items":[{"k":"a","at":"t-2"},{"k":"b","at":"fixed"}]}`, nil), db, n, opts); served == nil || miss != nil {
 		t.Fatalf("paired: %+v", miss)
 	}
-	if got := db.pooled[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, map[string][]string{"body.items[0].at": {}}) {
+	if got := wordPlaces(t, db.pooled[0].Spec); !reflect.DeepEqual(got, map[string][]string{"body.items[0].at": {}}) {
 		t.Fatalf("learned %v", got)
 	}
 	// The other element's value never drifted: a change there is not excused.
@@ -587,13 +623,13 @@ func TestLearnMatchWithNoWindowsTheScopeTableSaysWhatIsThePools(t *testing.T) {
 		{"in a pool slice, in flight into the store's open test", map[string]bool{"boot-0": true}, true, true, false},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
-			boot := learnRecorded("boot-0", 0, "POST", "/v1/events", `{"kind":"boot","at":"2026-10-19T10:00:00Z"}`, nil, `{"ok":true}`)
+			boot := learnRecorded("boot-0", 0, "POST", "/v1/events", `{"kind":"boot","at":"b-1"}`, nil, `{"ok":true}`)
 			db := &umDb{mockMemDb: mockMemDb{mocks: []*models.Mock{boot}}, pool: tc.pool, known: tc.known, inFlight: map[string]bool{"boot-0": tc.inFlight}}
-			served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"kind":"boot","at":"2026-10-20T11:30:01Z"}`, nil), db, n, opts)
+			served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"kind":"boot","at":"b-2"}`, nil), db, n, opts)
 			if (served != nil) != tc.paired {
 				t.Fatalf("served %v miss %+v; want paired=%v", served, miss, tc.paired)
 			}
-			if tc.paired && (len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.at": {}})) {
+			if tc.paired && (len(db.pooled) != 1 || !reflect.DeepEqual(wordPlaces(t, db.pooled[0].Spec), map[string][]string{"body.at": {}})) {
 				t.Fatalf("the start-up recording carries %+v; want body.at learned", db.pooled)
 			}
 		})
@@ -646,7 +682,7 @@ func TestLearnMatchMultipartBoundary(t *testing.T) {
 	in := live("POST", "/up", body("BBB", "data", "n-2"), map[string]string{"Content-Type": "multipart/form-data; boundary=BBB"})
 	db := &learnDb{perTest: []*models.Mock{rec}}
 	served, miss, _ := h.learnMatch(context.Background(), in, db, n, opts)
-	if served == nil || miss != nil || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.note": {}}) {
+	if served == nil || miss != nil || !reflect.DeepEqual(wordPlaces(t, db.consumed[0].Spec), map[string][]string{"body.note": {}}) {
 		t.Fatalf("served %v miss %+v consumed %+v", served, miss, db.consumed)
 	}
 	db = &learnDb{perTest: []*models.Mock{rec}}
@@ -857,8 +893,8 @@ func TestLearnMatchAnEarlierPlaceThatDidNotDriftIsNoSource(t *testing.T) {
 	if served == nil || miss != nil {
 		t.Fatalf("a drifting timestamp was refused: %+v", miss)
 	}
-	if !reflect.DeepEqual(db.consumed[1].Spec.ReqBodyNoise, map[string][]string{"body.at": {}}) {
-		t.Fatalf("noise %v", db.consumed[1].Spec.ReqBodyNoise)
+	if !reflect.DeepEqual(wordPlaces(t, db.consumed[1].Spec), map[string][]string{"body.at": {}}) {
+		t.Fatalf("words %v", db.consumed[1].Spec.LearnedWords)
 	}
 }
 
@@ -968,7 +1004,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	var out []*models.Mock
 	for _, r := range recs {
 		cp := *r
-		cp.Spec.Variables, cp.Spec.ReqBodyNoise = nil, nil
+		cp.Spec.Variables, cp.Spec.ReqBodyNoise, cp.Spec.LearnedWords = nil, nil, nil
 		byName[cp.Name] = &cp
 		out = append(out, &cp)
 	}
@@ -981,6 +1017,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	for _, c := range consumed {
 		m := byName[c.Name]
 		m.Spec.ReqBodyNoise = mergeReqBodyNoise(m.Spec.ReqBodyNoise, c.Spec.ReqBodyNoise)
+		m.Spec.LearnedWords = models.MergeWords(m.Spec.LearnedWords, c.Spec.LearnedWords)
 		for n, v := range c.Spec.Learned() {
 			vars(m)[n] = v
 		}
@@ -1000,6 +1037,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 				vars(m)[n] = b
 				if leaf, ok := learn.LeafPath(b.Bind); ok {
 					delete(m.Spec.ReqBodyNoise, leaf)
+					delete(m.Spec.LearnedWords, leaf)
 				}
 			}
 		}
@@ -1088,8 +1126,8 @@ func TestWhatFLearnsReplaysWithNoiseBesideAVariable(t *testing.T) {
 			mocks := learnedOnto(tc.recs, consumed)
 			for _, m := range mocks {
 				if m.Name == tc.wantOnMock {
-					if _, ok := m.Spec.ReqBodyNoise[tc.wantNoise]; !ok || len(m.Spec.Variables) == 0 {
-						t.Fatalf("%s: noise %v variables %v", m.Name, m.Spec.ReqBodyNoise, m.Spec.Variables)
+					if _, ok := m.Spec.LearnedWords[tc.wantNoise]; !ok || len(m.Spec.Variables) == 0 || len(m.Spec.ReqBodyNoise) != 0 {
+						t.Fatalf("%s: words %v noise %v variables %v", m.Name, m.Spec.LearnedWords, m.Spec.ReqBodyNoise, m.Spec.Variables)
 					}
 				}
 			}
@@ -1181,7 +1219,7 @@ func TestLearnMatchAPreviousTestsSameSecondIsNoSource(t *testing.T) {
 	ctx := learn.WithTracker(context.Background(), tr)
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/v1/ping", `{"at":1760436000}`, nil, `{}`)},
 		otherTest: map[time.Time]bool{learnAt: true}} // pg-0 was recorded in test 1
-	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/ping", `{"at":1760436093}`, nil), db, n, opts)
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/ping", `{"at":1760436061}`, nil), db, n, opts)
 	if served == nil {
 		t.Fatalf("the previous test's same-second row refused this test's own clock read: %+v", miss)
 	}
@@ -1515,7 +1553,9 @@ func TestLearnMatchAValueBeyondASCIIIsRefusedNotNoise(t *testing.T) {
 func TestLearnMatchARefNextToAFreshBase64SignatureIsRefused(t *testing.T) {
 	U1, U2 := "3f2b8c1e-9a4d-4e7b-8c21-5d6e7f8a9b0c", "a7c4e2d1-0b3f-4a8e-9d12-6f5e4d3c2b1a"
 	S1, S2 := "q3+/Zx9Lk2mN8pQ4rS7tU1vW5xY0zA6bC+dE/fG3hI8=", "Hj2Kl/9Mn4+Op6Qr8St0Uv/Wx1Yz3Ab5Cd7Ef+Gh9Ij="
-	S3, S4 := "Zz9/Yy8+Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0Pp/Oo+Nn9Mm=", "Kk1Ll2Mm3Nn4Oo5Pp6Qq7Rr8Ss9Tt0Uu/Vv1Ww2Xx3Y="
+	// F's signatures keep the recorded ones' '+', '/' and '=' where they
+	// stand (a std base64 whose layout drifts is refused at once, N12).
+	S3, S4 := "Zz+/Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0Pp+Oo/Nn9Mm1=", "Kk1Ll/9Mm3+Nn4Oo5Pp6Qq7Rr/Ss8Tt9Uu0+Vv1Ww2Xx="
 	cb := func(ref, sig string) string { return "https://app.example/cb?ref=" + ref + "&sig=" + sig }
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
@@ -1921,45 +1961,40 @@ func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 		}
 	}
 	for _, m := range db.consumed {
-		if _, ok := m.Spec.ReqBodyNoise["header.x-svc-token"]; !ok {
-			t.Fatalf("%s: noise %v", m.Name, m.Spec.ReqBodyNoise)
+		if _, ok := wordPlaces(t, m.Spec)["header.x-svc-token"]; !ok {
+			t.Fatalf("%s: words %v", m.Name, m.Spec.LearnedWords)
 		}
 	}
 }
 
-// A token minted for the call with the app's clock (jti random, iat now)
-// holds a clock read F's clock moved and more: noise would stop comparing
-// all of it (its subject, its other claims), where F's clock accounts only
-// for its iat. It is refused, and the refusal says which part of it the
-// clock does not account for, never its value.
-func TestLearnMatchRefusesATokenThatIsMoreThanItsClockRead(t *testing.T) {
+// A token minted for the call with the app's clock (jti random, iat now),
+// which b95 refused whole, is learned by its words (r9): only the runs of it
+// that F saw change may change, and every other byte of it is compared, its
+// header and the claims that did not change included.
+func TestLearnMatchLearnsATokenThatIsMoreThanItsClockReadByItsWords(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
 	tr.Begin()
 	ctx := learn.WithTracker(context.Background(), tr)
-	tok := func(jti, iat, sig string) string {
-		return "Bearer " + b64Of(`{"alg":"HS256","typ":"JWT"}`) + "." + b64Of(`{"sub":"svc-a","jti":"`+jti+`","iat":`+iat+`}`) + "." + b64Of("\x01\x02"+sig+"\xfe\xff")
+	tok := func(alg, jti, iat, sig string) string {
+		return "Bearer " + b64Of(`{"alg":"`+alg+`","typ":"JWT"}`) + "." + b64Of(`{"sub":"svc-a","jti":"`+jti+`","iat":`+iat+`}`) + "." + b64Of("\x01\x02"+sig+"\xfe\xff")
 	}
-	db := &learnDb{perTest: []*models.Mock{
-		learnRecorded("mock-0", 0, "GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("k3J9xQ2mW8", "1760436000", "aaa")}, `{}`),
-	}, observe: tr.ServedMock}
-	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("Lp4Zt7Vn1R", "1760436061", "ccc")}), db, n, opts)
-	if err != nil {
-		t.Fatal(err)
+	rec := learnRecorded("mock-0", 0, "GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("HS256", "k3J9xQ2mW8", "1760436000", "aaa")}, `{}`)
+	db := &learnDb{perTest: []*models.Mock{rec}, observe: tr.ServedMock}
+	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/a", "", map[string]string{"X-Svc-Token": tok("HS256", "Lp4Zt7Vn1R", "1760436061", "ccc")}), db, n, opts)
+	if err != nil || served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
-	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged {
-		t.Fatalf("served %v miss %+v", served, miss)
+	words := db.consumed[0].Spec.LearnedWords["header.x-svc-token"]
+	if !reflect.DeepEqual(wordPlaces(t, db.consumed[0].Spec), map[string][]string{"header.x-svc-token": {}}) {
+		t.Fatalf("learned %v", db.consumed[0].Spec.LearnedWords)
 	}
-	if want := "header.x-svc-token changed, and keploy reads no clock read where it changed (it reads one in the text its encoded runs decode to); F's clock accounts only for the clock reads in it, and noise would stop comparing all of it"; miss.res.Why != want {
-		t.Fatalf("refused as %q, want %q", miss.res.Why, want)
+	recorded := rec.Spec.HTTPReq.Header["X-Svc-Token"]
+	if ok, _ := learn.WordsAdmit(recorded, tok("none", "Lp4Zt7Vn1R", "1760436061", "ccc"), words); ok {
+		t.Fatal("a token whose header changed is admitted: its header did not change in F")
 	}
-	for _, v := range []string{"svc-a", "k3J9xQ2mW8", "Lp4Zt7Vn1R", "1760436000", "1760436061"} {
-		if strings.Contains(miss.res.Why, v) {
-			t.Fatalf("refused as %q, which holds %q of the value", miss.res.Why, v)
-		}
-	}
-	if len(db.consumed) != 0 {
-		t.Fatalf("a refused call consumed %v", db.consumed)
+	if ok, _ := learn.WordsAdmit(recorded, "Basic "+tok("HS256", "Lp4Zt7Vn1R", "1760436061", "ccc")[7:], words); ok {
+		t.Fatal("another scheme is admitted")
 	}
 }
 
@@ -2261,8 +2296,8 @@ func TestTheVariablePassLeavesASigV4CredentialToTheStrictMatcher(t *testing.T) {
 	f := []*req{live("POST", "/orders", `{"id":"o-9999Zx3Lm2","item":"pen"}`, hdr(sigV4("AKID", "20261014", "us-east-1", "dynamodb", "host;x-amz-content-sha256", sig(2))))}
 	consumed := fullRound(t, rec(), f)
 	mocks := learnedOnto(rec(), consumed)
-	if _, ok := mocks[0].Spec.ReqBodyNoise["header.authorization"]; !ok || len(mocks[0].Spec.Variables) == 0 {
-		t.Fatalf("F learned noise %v variables %v, want the Authorization's noise and the echo", mocks[0].Spec.ReqBodyNoise, mocks[0].Spec.Variables)
+	if _, ok := wordPlaces(t, mocks[0].Spec)["header.authorization"]; !ok || len(mocks[0].Spec.Variables) == 0 {
+		t.Fatalf("F learned words %v variables %v, want the Authorization's words and the echo", mocks[0].Spec.LearnedWords, mocks[0].Spec.Variables)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -2702,7 +2737,8 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 		{"a 2 s longer boot", 2 * time.Second, true, false, true},
 		{"a 30 s longer boot", 30 * time.Second, true, false, true},
 		{"no app clock", 2 * time.Second, false, false, false},
-		{"a test's own call", 2 * time.Second, true, true, false},
+		// A test's own call is read in its window too (r9 §3).
+		{"a test's own call", 2 * time.Second, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
@@ -2732,8 +2768,8 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.own && read != 0 {
-				t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
+			if tc.own && read == 0 {
+				t.Fatal("a test's own call did not read its window")
 			}
 			if !tc.noise {
 				if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
@@ -2741,8 +2777,15 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) {
-				t.Fatalf("served %v miss %+v pooled %+v; want body.processed_at learned as noise", got, miss, db.pooled)
+			learnedOn := db.pooled
+			if tc.own {
+				learnedOn = nil
+				for i := range db.consumed {
+					learnedOn = append(learnedOn, &db.consumed[i])
+				}
+			}
+			if got == nil || len(learnedOn) != 1 || !reflect.DeepEqual(wordPlaces(t, learnedOn[0].Spec), map[string][]string{"body.processed_at": {}}) {
+				t.Fatalf("served %v miss %+v learned on %+v; want the words of body.processed_at", got, miss, learnedOn)
 			}
 		})
 	}

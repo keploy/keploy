@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -121,13 +120,20 @@ func recordedRequestKeys(m *models.Mock) []string {
 			break
 		}
 	}
-	k := strictKnown{learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
-	learned := hasTarget && (k.learnedAt("header."+strings.ToLower(amzTargetHeader), "") || k.redacted(target))
+	// A path segment or the target whose words the learn step learned
+	// (noise.words) may change where its slots are: a call of another path
+	// or target asks by the learned key, as for one learned whole.
+	k := knownOf(strictNoise{}, m)
+	learnedAt := func(exact string) bool {
+		_, worded := k.words[exact]
+		return worded || k.learnedAt(exact, "")
+	}
+	learned := hasTarget && (learnedAt("header."+strings.ToLower(amzTargetHeader)) || k.redacted(target))
 	for i := range segs {
 		if learned {
 			break
 		}
-		learned = k.learnedAt("url.path."+strconv.Itoa(i), "")
+		learned = learnedAt("url.path." + strconv.Itoa(i))
 	}
 	keys := []string{requestKeyShape(method, len(segs))}
 	if learned {

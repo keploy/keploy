@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -62,7 +63,12 @@ type varDecl struct {
 	// clock: the clock reads the learn step marked at the variable's bind
 	// (models.MockVariable.Clock). It is read only where the call binds the
 	// variable.
-	clock  []models.ClockRead
+	clock []models.ClockRead
+	// words: what the learn step learned of the words of the variable's
+	// value at its bind (models.MockVariable.Words). The call binds it only
+	// to a value they admit (learn.WordsAdmit). nil for a variable learned
+	// before words, whose bind any value takes (N6).
+	words  *models.WordsEntry
 	bind   *varPlace
 	use    []varPlace
 	answer []varPlace
@@ -136,7 +142,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock, words: mv.Words}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -545,6 +551,54 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		}
 	}
 
+	// What it learned of the words of a leaf (noise.words) lets that leaf
+	// change only where its slots are: the recorded value is put back there
+	// when the live one is admitted (learn.WordsAdmit), its presence and JSON
+	// type still required. The values are read as the learn step read them:
+	// a path segment or a query value with keploy.yml's url noise masked.
+	if len(m.Spec.LearnedWords) > 0 {
+		urlMask := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).url
+		places := make([]string, 0, len(m.Spec.LearnedWords))
+		for k := range m.Spec.LearnedWords {
+			places = append(places, k)
+		}
+		sort.Strings(places)
+		for _, k := range places {
+			raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
+			if !ok {
+				continue // a form or multipart field: the strict comparison reads it
+			}
+			place, err := variables.Parse(raw)
+			if err != nil {
+				continue
+			}
+			if _, isVar := liveAt[place.String()]; isVar {
+				continue
+			}
+			r, ok := rec.read(place)
+			if !ok {
+				continue
+			}
+			l, ok := live.read(place)
+			if !ok || l.body && l.kind != r.kind {
+				return nil, nil
+			}
+			rv, lv := r.value, l.value
+			if place.Part == variables.PartPath || place.Part == variables.PartQuery {
+				rv, lv = maskURLNoise(rv, urlMask), maskURLNoise(lv, urlMask)
+			}
+			if admitted, _ := learn.WordsAdmit(rv, lv, m.Spec.LearnedWords[k]); !admitted {
+				// Left as the call sent it: the strict comparison decides
+				// it, by its words (strictKnown.admits) or, of an AWS SigV4
+				// Authorization, by its parts (founder decision 25).
+				continue
+			}
+			if asRecorded, ok = asRecorded.putBack(place, r); !ok {
+				return nil, nil
+			}
+		}
+	}
+
 	// 1. The call, with the recorded values put back, is the recording.
 	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise) {
 		return nil, nil
@@ -572,6 +626,9 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			v := liveAt[d.bind.place.String()]
 			if v.empty() {
 				return nil, emptyBind(m.Name, d, v)
+			}
+			if p := wordsHold(m.Name, d, v); p != nil {
+				return nil, p
 			}
 			if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
 				return nil, p
@@ -615,6 +672,9 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		v := liveAt[d.bind.place.String()]
 		if v.empty() {
 			return nil, emptyBind(m.Name, d, v)
+		}
+		if p := wordsHold(m.Name, d, v); p != nil {
+			return nil, p
 		}
 		if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
 			return nil, p
@@ -670,6 +730,26 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 	return nil
 }
 
+// wordsHold checks that the value v the call binds d to is one the words the
+// learn step learned at its bind admit (learn.WordsAdmit): only the words
+// record's full round saw change may change, and every other byte of the
+// recorded value must stand. A variable learned before words binds any value
+// (nil words, N6).
+func wordsHold(mock string, d varDecl, v held) *varProblem {
+	if d.words == nil {
+		return nil
+	}
+	ok, why := learn.WordsAdmit(d.recorded, v.value, *d.words)
+	if ok {
+		return nil
+	}
+	return &varProblem{
+		mock: mock, name: d.name, place: d.bind.raw, kind: models.DiffKindValueChanged, expected: d.recorded, actual: v.value,
+		why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is not the recorded %q changed only where record's full round saw it change: %s", d.name, d.bind.raw, v.value, d.recorded, why),
+		next: fmt.Sprintf("the application sent a value at %s that differs from the recording in more than the words keploy learned may change: fix the application, or re-record the test if that is intended", d.bind.raw),
+	}
+}
+
 func emptyBind(mock string, d varDecl, v held) *varProblem {
 	text := `""`
 	if v.body && v.kind == templates.LeafNull {
@@ -693,6 +773,16 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 		for _, raw := range append([]string{mv.Bind}, mv.Use...) {
 			if p, err := variables.Parse(raw); err == nil && p.Part == variables.PartPath {
 				declared[p.Index] = true
+			}
+		}
+	}
+	// A segment whose words the learn step learned (noise.words) may change
+	// where its slots are: the call is still on the route, and its evidence
+	// says what changed (only the reason's wording reads this).
+	for k := range m.Spec.LearnedWords {
+		if i, ok := strings.CutPrefix(k, "url.path."); ok {
+			if n, err := strconv.Atoi(i); err == nil {
+				declared[n] = true
 			}
 		}
 	}

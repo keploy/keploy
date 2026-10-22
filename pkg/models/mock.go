@@ -432,8 +432,7 @@ type MockSpec struct {
 	// compare whole). Learned only under the proven switch; nil for a call
 	// that holds none. Every decoder is to read it and every rewrite to
 	// write it back whatever the switch says, as each copy of a mock carries
-	// it: only its use is gated on the switch. Nothing learns words yet, so
-	// the doc's decoders do not fill it yet.
+	// it: only its use is gated on the switch.
 	LearnedWords map[string]WordsEntry `json:"LearnedWords,omitempty" yaml:"learned_words,omitempty" bson:"learned_words,omitempty"`
 
 	// learned and learnedBinds are, on a mock the learn step of record's
@@ -446,6 +445,13 @@ type MockSpec struct {
 	// recording to the next call.
 	learned      MockVariables
 	learnedBinds map[string]MockVariables
+	// learnedF is, on a mock the learn step just paired (agent side, in
+	// memory), record's full round's value at each place it learned words
+	// of, by the mock the place is in (this one, or the earlier mock a
+	// variable binds at) and the place's exact leaf path: what the agent saw
+	// there, for the set's learned.local.yaml (MockState.LearnedF). Never
+	// encoded, never served.
+	learnedF map[string]map[string]string
 
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
@@ -1101,6 +1107,12 @@ type MockState struct {
 	// switch, as ReqBodyNoise carries its whole-leaf noise. Variables' words
 	// ride on Variables and Binds (MockVariable.Words).
 	LearnedWords map[string]WordsEntry `json:"learnedWords,omitempty"`
+	// LearnedF is record's full round's value at each place the learn step
+	// learned words of while answering the mock (MockSpec.LearnedF), by the
+	// mock the place is in, then its exact leaf path: carried back from the
+	// agent under the proven switch for the set's learned.local.yaml, which
+	// stays on the machine that recorded. Never written onto a mock.
+	LearnedF map[string]map[string]string `json:"learnedF,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
@@ -1318,6 +1330,35 @@ func (s *MockSpec) SetLearned(vars MockVariables, binds map[string]MockVariables
 
 // Learned is the variables the learn step learned on s's mock (SetLearned).
 func (s *MockSpec) Learned() MockVariables { return s.learned }
+
+// SetLearnedF records on s, in memory only, record's full round's values at
+// the places the learn step learned words of (MockSpec.learnedF): by mock,
+// then by the place's exact leaf path.
+func (s *MockSpec) SetLearnedF(f map[string]map[string]string) { s.learnedF = f }
+
+// LearnedF is what SetLearnedF recorded.
+func (s *MockSpec) LearnedF() map[string]map[string]string { return s.learnedF }
+
+// MergeLearnedF is a and b as one map of record's full round's values
+// (MockSpec.LearnedF), neither changed: b's value at a place both hold
+// wins. nil when both are empty.
+func MergeLearnedF(a, b map[string]map[string]string) map[string]map[string]string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]string, len(a)+len(b))
+	for _, side := range []map[string]map[string]string{a, b} {
+		for mock, places := range side {
+			if out[mock] == nil {
+				out[mock] = make(map[string]string, len(places))
+			}
+			for place, v := range places {
+				out[mock][place] = v
+			}
+		}
+	}
+	return out
+}
 
 // LearnedBinds is the variables the learn step learned while answering s's
 // mock that are bound at an earlier mock, by its name (SetLearned).

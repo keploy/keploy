@@ -17,7 +17,9 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // The strict comparison of S1 (design v14 §9, rows S1 and §7.2 item 8): under
@@ -74,7 +76,36 @@ func (h *HTTP) newStrictNoise(headerNoise, bodyNoise map[string][]string, urlNoi
 type strictKnown struct {
 	n       strictNoise
 	learned map[string][]string
-	values  *util.NoiseChecker
+	// words are the words the learn step learned of leaves, by exact place
+	// (MockSpec.LearnedWords; read under the proven switch only): a leaf
+	// with an entry may change only where its slots are (admits).
+	words  map[string]models.WordsEntry
+	values *util.NoiseChecker
+}
+
+// knownOf is what a comparison with m excuses: its learned noise, its
+// learned words (under the proven switch), and its obfuscated values.
+func knownOf(n strictNoise, m *models.Mock) strictKnown {
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	if provenswitch.On() {
+		k.words = m.Spec.LearnedWords
+	}
+	return k
+}
+
+// admits reports whether the live value at exact (the learn step's place:
+// url.path.<i>, url.query.<name>, header.<name>, body.<path>) may stand where
+// rec was recorded, by the words the mock learned there (learn.WordsAdmit:
+// every byte outside the slots equal, each slot as its kind says). A place
+// with no words admits nothing here; one whose words are void, unreadable or
+// no longer hold admits nothing either, so the leaf is compared whole.
+func (k strictKnown) admits(exact, rec, live string) bool {
+	e, ok := k.words[exact]
+	if !ok {
+		return false
+	}
+	admitted, _ := learn.WordsAdmit(rec, live, e)
+	return admitted
 }
 
 // learnedAt reports whether the mock learned the field at exact (the learn
@@ -146,7 +177,7 @@ func strictDiff(input *req, live destination, m *models.Mock, n strictNoise) []s
 	if r == nil {
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	k := knownOf(n, m)
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
@@ -212,7 +243,7 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	if len(rs) == len(ls) {
 		same := true
 		for i := range rs {
-			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") {
+			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") && !k.admits("url.path."+strconv.Itoa(i), rs[i], ls[i]) {
 				same = false
 				break
 			}
@@ -262,10 +293,11 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", strings.Join(lv, ", ")))
 			continue
 		}
-		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
+		mr, ml := maskValues(rv, k.n.url), maskValues(lv, k.n.url)
+		if sameMembers(mr, ml) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
+		if len(rv) == 1 && len(lv) == 1 && (k.learnedAt("url.query."+name, "") || k.admits("url.query."+name, mr[0], ml[0])) {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
@@ -338,7 +370,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		if k.learnedAt(path, "") || k.redacted(rv) {
+		if k.learnedAt(path, "") || k.redacted(rv) || k.admits(path, rv, lv) {
 			continue
 		}
 		switch name {
@@ -478,12 +510,20 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
+		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] || k.admits(path, formValue(rv), formValue(lv)) {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
 	}
 	return out
+}
+
+// formValue is a form key's values as the learn step reads them (shape): in
+// sorted order, joined with ", ".
+func formValue(vs []string) string {
+	vs = slices.Clone(vs)
+	sort.Strings(vs)
+	return strings.Join(vs, ", ")
 }
 
 // redactedFormKeys are the keys of a recorded form one of whose "key=value"
@@ -529,7 +569,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data)) || k.admits(path, string(rp[i].data), string(lp[i].data))):
 			continue
 		}
 		out = append(out, shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", ""))
@@ -640,7 +680,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			k.jsonDiffs(rv[i], lv[i], exact+"["+strconv.Itoa(i)+"]", risk+"[]", shape+"[]", learned, out)
 		}
 	default:
-		if learned || sameScalar(r, l) {
+		if learned || sameScalar(r, l) || k.admits(exact, scalarText(r), scalarText(l)) {
 			return
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))

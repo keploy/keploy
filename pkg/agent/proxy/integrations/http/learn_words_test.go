@@ -1,0 +1,370 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"mime/multipart"
+	"net/url"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
+)
+
+// Word-level learn at the HTTP parser (design r9): what the learn step
+// learns of a leaf is the words of it that changed in F, and every serve
+// site reads them through learn.WordsAdmit, so every other byte of the leaf
+// is still compared.
+
+// withWords is m with the words F learns of a leaf at place, recorded rec
+// and seen f in record's full round.
+func withWords(t *testing.T, m *models.Mock, place, rec, f string) *models.Mock {
+	t.Helper()
+	m.Spec.LearnedWords = models.MergeWords(m.Spec.LearnedWords, map[string]models.WordsEntry{place: *wordsOf(t, rec, f)})
+	return m
+}
+
+// multipartNote is a multipart form with one field, note.
+func multipartNote(boundary, note string) (string, string) {
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	_ = w.SetBoundary(boundary)
+	_ = w.WriteField("note", note)
+	_ = w.Close()
+	return "multipart/form-data; boundary=" + boundary, b.String()
+}
+
+// Every strict serve site reads a leaf's words (r9 §1, SF1): the path, a
+// query value, a header, a form field, a multipart field and a JSON body
+// field each let only the learned words change. The founder's case at each:
+// a fresh ref is no difference, "paid 999" is.
+func TestEachStrictSiteReadsTheWords(t *testing.T) {
+	const rec, f, fresh, regressed = "ORD-1 paid 100 ref=a1b2c3", "ORD-1 paid 100 ref=d4e5f6", "ORD-1 paid 100 ref=0f9e8d", "ORD-1 paid 999 ref=0f9e8d"
+	seg := func(s string) string { return strings.NewReplacer(" ", "-", "=", "-").Replace(s) }
+	form := func(s string) string { return "note=" + url.QueryEscape(s) }
+	jsonOf := func(s string) string { return `{"note":"` + s + `"}` }
+	for _, tc := range []struct {
+		name  string
+		place string
+		mock  func(v string) *models.Mock
+		call  func(v string) *req
+		value func(v string) string
+	}{
+		{"a path segment", "url.path.2",
+			func(v string) *models.Mock { return recorded("m", "/v1/orders/"+seg(v), nil, "") },
+			func(v string) *req { return sent("/v1/orders/"+seg(v), nil, "") }, seg},
+		{"a query value", "url.query.note",
+			func(v string) *models.Mock { return recorded("m", "/v1/orders?note="+url.QueryEscape(v), nil, "") },
+			func(v string) *req { return sent("/v1/orders?note="+url.QueryEscape(v), nil, "") }, func(v string) string { return v }},
+		{"a header", "header.x-order-ref",
+			func(v string) *models.Mock {
+				return recorded("m", "/v1/orders", map[string]string{"X-Order-Ref": v}, "")
+			},
+			func(v string) *req { return sent("/v1/orders", map[string]string{"X-Order-Ref": v}, "") }, func(v string) string { return v }},
+		{"a form field", "body.note",
+			func(v string) *models.Mock {
+				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(v))
+			},
+			func(v string) *req {
+				return sent("/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(v))
+			}, func(v string) string { return v }},
+		{"a multipart field", "body.note",
+			func(v string) *models.Mock {
+				ct, body := multipartNote("AAA", v)
+				return recorded("m", "/v1/orders", map[string]string{"Content-Type": ct}, body)
+			},
+			func(v string) *req {
+				ct, body := multipartNote("BBB", v)
+				return sent("/v1/orders", map[string]string{"Content-Type": ct}, body)
+			}, func(v string) string { return v }},
+		{"a JSON body field", "body.note",
+			func(v string) *models.Mock {
+				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/json"}, jsonOf(v))
+			},
+			func(v string) *req {
+				return sent("/v1/orders", map[string]string{"Content-Type": "application/json"}, jsonOf(v))
+			},
+			func(v string) string { return v }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))
+			if served, diag := strictMatch(t, tc.call(fresh), nil, nil, nil, m); served == nil {
+				t.Fatalf("a fresh ref at %s is refused: %+v", tc.place, diag)
+			}
+			if served, _ := strictMatch(t, tc.call(regressed), nil, nil, nil, withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))); served != nil {
+				t.Fatalf("paid 999 at %s is served: a word F did not see change changed", tc.place)
+			}
+			// The words are read only under the switch.
+			t.Setenv(provenswitch.Env, "")
+			if diffs := strictDiff(tc.call(fresh), destination{}, m, strictNoise{}); len(diffs) == 0 {
+				t.Fatalf("the switch off read the words at %s", tc.place)
+			}
+		})
+	}
+}
+
+// A replay after F honours the words F learned before the matcher (the
+// learn step's own pass, learnedMatch): a fresh ref is served, a regressed
+// amount goes on to the matcher, which refuses it too.
+func TestLearnedMatchServesByTheWords(t *testing.T) {
+	h, n, _ := learnOn(t)
+	rec := `{"note":"ORD-1 paid 100 ref=a1b2c3"}`
+	mock := func() *models.Mock {
+		m := learnRecorded("mock-0", 0, "POST", "/v1/charges", rec, nil, `{"ok":true}`)
+		return withWords(t, m, "body.note", "ORD-1 paid 100 ref=a1b2c3", "ORD-1 paid 100 ref=d4e5f6")
+	}
+	db := &learnDb{perTest: []*models.Mock{mock()}}
+	if served, err := h.learnedMatch(context.Background(), live("POST", "/v1/charges", `{"note":"ORD-1 paid 100 ref=0f9e8d"}`, nil), db, n, models.OutgoingOptions{}); err != nil || served == nil {
+		t.Fatalf("a fresh ref: served %v err %v", served, err)
+	}
+	db = &learnDb{perTest: []*models.Mock{mock()}}
+	if served, _ := h.learnedMatch(context.Background(), live("POST", "/v1/charges", `{"note":"ORD-1 paid 999 ref=0f9e8d"}`, nil), db, n, models.OutgoingOptions{}); served != nil {
+		t.Fatal("paid 999 served by the learn step's pass")
+	}
+}
+
+// Excused never reports a words place: Excused sees one value, so a place
+// whose words were learned is decided by ExcusedLive alone, and prune (which
+// reads Excused) never prunes it.
+func TestExcusedNeverSeesAWordsPlace(t *testing.T) {
+	e := wordsOf(t, "ORD-1 ref=a1", "ORD-1 ref=b2")
+	k := httpKnown{words: map[string]models.WordsEntry{"body.note": *e}}
+	if excused, _ := k.Excused(learn.Leaf{Path: "body.note", Noise: "body.note", Type: learn.String, Value: "ORD-1 ref=a1"}); excused {
+		t.Fatal("Excused reported a words place")
+	}
+	rec := learn.Leaf{Path: "body.note", Noise: "body.note", Type: learn.String, Value: "ORD-1 ref=a1"}
+	if ok, typed := k.ExcusedLive(rec, learn.Leaf{Path: "body.note", Type: learn.String, Value: "ORD-1 ref=c3"}); !ok || !typed {
+		t.Fatal("ExcusedLive refused a changed slot")
+	}
+	if ok, _ := k.ExcusedLive(rec, learn.Leaf{Path: "body.note", Type: learn.String, Value: "ORD-2 ref=c3"}); ok {
+		t.Fatal("ExcusedLive admitted a changed fixed word")
+	}
+	if ok, _ := k.ExcusedLive(learn.Leaf{Path: "body.other", Value: "a"}, learn.Leaf{Path: "body.other", Value: "b"}); ok {
+		t.Fatal("ExcusedLive excused a place with no words")
+	}
+	// Compare reads it: one drift, the regressed word.
+	shape := func(v string) learn.Shape {
+		return learn.Shape{Key: "k", Leaves: map[string]learn.Leaf{"body.note": {Path: "body.note", Noise: "body.note", Type: learn.String, Value: v}}}
+	}
+	if d := learn.Compare(shape("ORD-1 ref=z9"), shape("ORD-1 ref=a1"), k); len(d.Drift) != 0 {
+		t.Fatalf("Compare: %+v", d)
+	}
+	if d := learn.Compare(shape("ORD-9 ref=z9"), shape("ORD-1 ref=a1"), k); len(d.Drift) != 1 {
+		t.Fatalf("Compare: %+v", d)
+	}
+}
+
+// A mock that learned the words of a path segment (or of the target) is keyed
+// by its other parts in the not-owned index (r9 §1): a call of another path
+// asks by the learned key, which the recording is under.
+func TestAPathWordMockIsKeyedByItsOtherParts(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := recorded("m", "/v1/orders/ORD-1-a1", nil, "")
+	if keys := recordedRequestKeys(m); !reflect.DeepEqual(keys, []string{requestKeyShape("POST", 3), requestKeyExact("POST", []string{"v1", "orders", "ORD-1-a1"}, "")}) {
+		t.Fatalf("a mock with no words: %v", keys)
+	}
+	withWords(t, m, "url.path.2", "ORD-1-a1", "ORD-1-b2")
+	keys := recordedRequestKeys(m)
+	if !reflect.DeepEqual(keys, []string{requestKeyShape("POST", 3), requestKeyLearned("POST", 3)}) {
+		t.Fatalf("a path-word mock: %v", keys)
+	}
+	live := RequestKeysOf("POST", "/v1/orders/ORD-1-c3", "", false)
+	found := false
+	for _, k := range live {
+		for _, r := range keys {
+			found = found || k == r
+		}
+	}
+	if !found {
+		t.Fatalf("a call of a fresh segment %v asks by no key the recording is under %v", live, keys)
+	}
+}
+
+// The variable pass admits a bind only through the words learned there (r9
+// §4), in both of holdVariables' branches: an echo's, and a variable bound
+// here first. A variable learned before words binds any value (N6).
+func TestAVariableBindsOnlyAValueItsWordsAdmit(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec, f := "ord-1-a1b2", "ord-1-c3d4"
+	for _, echo := range []bool{true, false} {
+		mock := func(words bool) *models.Mock {
+			v := models.MockVariable{Recorded: rec, Bind: "body.id", Echo: echo, Answer: []string{"body.id"}}
+			if words {
+				v.Words = wordsOf(t, rec, f)
+			}
+			return varMock("m", "POST", "/v1/orders", `{"id":"`+rec+`"}`, 200, `{"id":"`+rec+`"}`, models.MockVariables{"id": v})
+		}
+		call := func(v string) *req {
+			return live("POST", "/v1/orders", `{"id":"`+v+`"}`, map[string]string{"Host": ""})
+		}
+		for _, tc := range []struct {
+			live  string
+			words bool
+			ok    bool
+		}{
+			{"ord-1-e5f6", true, true},
+			{"ord-2-e5f6", true, false},
+			{"xyz", true, false},
+			{"ord-2-e5f6", false, true}, // learned before words: any value binds (N6)
+		} {
+			db := &varDb{perTest: []*models.Mock{mock(tc.words)}}
+			ok, stub, diag := matchVar(t, newHTTP(), db, call(tc.live))
+			if ok != tc.ok {
+				t.Errorf("echo %v, words %v: %q served %v (%+v), want %v", echo, tc.words, tc.live, ok, diag, tc.ok)
+				continue
+			}
+			if ok && !strings.Contains(stub.Spec.HTTPResp.Body, tc.live) {
+				t.Errorf("echo %v: the answer %s does not hold the bound value", echo, stub.Spec.HTTPResp.Body)
+			}
+			if !ok && tc.words {
+				if p := wantProblem(t, ok, diag, "changed only where record's full round saw it change"); p.place != "body.id" {
+					t.Errorf("echo %v: the problem names %q", echo, p.place)
+				}
+			}
+		}
+	}
+}
+
+// The learn step's ties between the places it learned words at (r9 §2, §8):
+// twins are one call-local variable, instants are exempt, two values equal
+// only when recorded are two values, and a partial tie, a glued piece, an
+// in-leaf repeat and a test case's value inside a place are refused (N8).
+func TestTheLearnPlansTies(t *testing.T) {
+	later := learnAt.Add(learn.FullRoundLead)
+	v7 := func(at time.Time, r string) string {
+		h := fmt.Sprintf("%012x", at.UnixMilli())
+		return h[:8] + "-" + h[8:12] + "-7" + r[:3] + "-a" + r[3:6] + "-" + r[6:18]
+	}
+	rv7, fv7 := v7(learnAt, "abc123456789abcdef"), v7(later, "def0123456789abcde")
+	for _, tc := range []struct {
+		name     string
+		method   string
+		path     string
+		rec, f   string
+		fpath    string
+		given    []variables.Binding
+		refused  string
+		words    []string
+		variable *models.MockVariable
+	}{
+		{name: "a partial tie", method: "POST", path: "/a", rec: `{"note":"ORD123","id":"123"}`, f: `{"note":"ORD456","id":"456"}`, refused: "(N8)"},
+		{name: "a piece in two places", method: "POST", path: "/a", rec: `{"inv":"INV1042","ord":"ORD1042"}`, f: `{"inv":"INV2077","ord":"ORD2077"}`, refused: "(N8)"},
+		{name: "an end-aligned piece", method: "POST", path: "/a", rec: `{"p":"p12x1042","id":"1042"}`, f: `{"p":"p9x5678","id":"5678"}`, refused: "(N8)"},
+		{name: "glued in one leaf", method: "POST", path: "/a", rec: `{"note":"Invoice INV1042 for order 1042"}`, f: `{"note":"Invoice INV2077 for order 2077"}`, refused: "glued inside another"},
+		{name: "a repeat in one leaf", method: "POST", path: "/a", rec: `{"note":"id=x1 ref=x1"}`, f: `{"note":"id=y2 ref=y2"}`, refused: "repeats"},
+		{name: "a test case's value inside a place", method: "POST", path: "/a", rec: `{"note":"note ORD1042"}`, f: `{"note":"note ORD2077"}`,
+			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "(N8)"},
+		{name: "createdAt = updatedAt", method: "POST", path: "/a",
+			rec:   `{"createdAt":"` + learnAt.Format(time.RFC3339) + `","updatedAt":"` + learnAt.Format(time.RFC3339) + `"}`,
+			f:     `{"createdAt":"` + later.Format(time.RFC3339) + `","updatedAt":"` + later.Format(time.RFC3339) + `"}`,
+			words: []string{"body.createdAt", "body.updatedAt"}},
+		{name: "equal only when recorded", method: "POST", path: "/a", rec: `{"a":"x-1","b":"x-1"}`, f: `{"a":"x-2","b":"x-3"}`, words: []string{"body.a", "body.b"}},
+		{name: "seq beside a fresh hex", method: "POST", path: "/a", rec: `{"note":"seq=17","id":"3f2b8c1e9a4d70a1"}`, f: `{"note":"seq=18","id":"a7c4e2d10b3f4c2e"}`, words: []string{"body.id", "body.note"}},
+		{name: "a UUID v7 in the path and the body", method: "PUT", path: "/items/" + rv7, fpath: "/items/" + fv7, rec: `{"id":"` + rv7 + `"}`, f: `{"id":"` + fv7 + `"}`,
+			variable: &models.MockVariable{Recorded: rv7, Bind: "body.id", Use: []string{"url.path[1]"}, Echo: true, Words: wordsOf(t, rv7, fv7)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			m := learnRecorded("mock-0", 0, tc.method, tc.path, tc.rec, nil, `{"ok":true}`)
+			fpath := tc.fpath
+			if fpath == "" {
+				fpath = tc.path
+			}
+			db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{m}}}
+			if tc.given != nil {
+				db.table.Start(tc.given)
+			}
+			served, miss, err := h.learnMatch(context.Background(), live(tc.method, fpath, tc.f, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refused != "" {
+				if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, tc.refused) {
+					t.Fatalf("served %v miss %+v, want refused saying %q", served, miss, tc.refused)
+				}
+				return
+			}
+			if served == nil || miss != nil {
+				t.Fatalf("refused: %+v", miss)
+			}
+			got := db.consumed[0].Spec
+			places := make([]string, 0, len(got.LearnedWords))
+			for p := range got.LearnedWords {
+				places = append(places, p)
+			}
+			if tc.words != nil && !reflect.DeepEqual(sortedCopyOf(places), tc.words) {
+				t.Fatalf("words at %v, want %v", places, tc.words)
+			}
+			if tc.variable != nil {
+				if len(got.LearnedWords) != 0 || len(got.Learned()) != 1 {
+					t.Fatalf("words %v variables %+v, want one call-local variable", got.LearnedWords, got.Learned())
+				}
+				for _, v := range got.Learned() {
+					if !reflect.DeepEqual(v, *tc.variable) {
+						t.Fatalf("variable %+v, want %+v", v, *tc.variable)
+					}
+				}
+				// Replayed: one fresh v7 at both places is served; two, or a
+				// value that is no v7, is not.
+				mocks := learnedOnto([]*models.Mock{learnRecorded("mock-0", 0, tc.method, tc.path, tc.rec, nil, `{"ok":true}`)}, db.consumed)
+				for _, c := range []struct {
+					path, id string
+					ok       bool
+				}{
+					{v7(later.Add(time.Hour), "0123456789abcdef01"), v7(later.Add(time.Hour), "0123456789abcdef01"), true},
+					{v7(later.Add(time.Hour), "0123456789abcdef01"), v7(later.Add(2*time.Hour), "0123456789abcdef01"), false},
+					{"1b4e28ba-2fa1-41d2-883f-0016d3cca427", "1b4e28ba-2fa1-41d2-883f-0016d3cca427", false},
+				} {
+					vdb := &varDb{perTest: append([]*models.Mock(nil), mocks...)}
+					if ok, _, diag := matchVar(t, newHTTP(), vdb, live(tc.method, "/items/"+c.path, `{"id":"`+c.id+`"}`, nil)); ok != c.ok {
+						t.Errorf("%s / %s: served %v (%+v), want %v", c.path, c.id, ok, diag, c.ok)
+					}
+				}
+			}
+		})
+	}
+}
+
+func sortedCopyOf(ss []string) []string {
+	out := append([]string(nil), ss...)
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+// The variable pass puts a recorded value back at a place whose words were
+// learned only where the live value is admitted (fitVariables): beside a
+// variable, a query value's fresh ref replays, and its "paid 999" does not.
+func TestTheVariablePassReadsTheWordsBesideAVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const note, noteF = "ORD-1 paid 100 ref=a1b2", "ORD-1 paid 100 ref=c3d4"
+	mock := func() *models.Mock {
+		m := varMock("m", "POST", "/v1/orders?note="+url.QueryEscape(note), `{"id":"k-1"}`, 200, `{"id":"k-1"}`,
+			models.MockVariables{"id": {Recorded: "k-1", Bind: "body.id", Echo: true, Answer: []string{"body.id"}, Words: wordsOf(t, "k-1", "k-2")}})
+		m.Spec.HTTPReq.URLParams = map[string]string{"note": note}
+		return withWords(t, m, "url.query.note", note, noteF)
+	}
+	for _, tc := range []struct {
+		note string
+		ok   bool
+	}{
+		{"ORD-1 paid 100 ref=e5f6", true},
+		{"ORD-1 paid 999 ref=e5f6", false},
+		{"ORD-1 paid 100 ref=e5 f6", false},
+	} {
+		db := &varDb{perTest: []*models.Mock{mock()}}
+		in := live("POST", "/v1/orders?note="+url.QueryEscape(tc.note), `{"id":"k-7"}`, map[string]string{"Host": ""})
+		if ok, _, diag := matchVar(t, newHTTP(), db, in); ok != tc.ok {
+			t.Errorf("%q: served %v (%+v), want %v", tc.note, ok, diag, tc.ok)
+		}
+	}
+}

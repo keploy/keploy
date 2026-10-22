@@ -41,6 +41,18 @@ import (
 // are not leaves: the first is in the key, the second is compared by its
 // media type, and the third follows the body.
 
+func init() {
+	// What a set's mocks learned is said leaf by leaf (learn.Legible): an
+	// HTTP mock's recorded leaves are read by their exact place as the learn
+	// step reads them, every header a leaf.
+	learn.RegisterLeafReader(models.HTTP, func(m *models.Mock) map[string]learn.Leaf {
+		if m == nil || m.Spec.HTTPReq == nil {
+			return nil
+		}
+		return learnNoise{headers: map[string]bool{}}.shape(recordedParts(m), sameDest).Leaves
+	})
+}
+
 // credentialHeaders leave the static noise list in the learn step (design
 // §7.2 step 8): a token minted earlier in the test becomes a variable, one
 // that drifts at F becomes noise, and any other is compared.
@@ -285,8 +297,12 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
 // noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
+//
+// What the learn step learned of a leaf's words (MockSpec.LearnedWords) it
+// excuses by the live value alone (httpKnown.ExcusedLive): the leaf's slots
+// may change, and every other byte of it is compared.
 func (n learnNoise) known(m *models.Mock) learn.Known {
-	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, words: m.Spec.LearnedWords, values: util.NewNoiseChecker(m.Noise)}
 }
 
 // knownAsRecorded is known without the noise learned onto m: the recording
@@ -298,7 +314,24 @@ func (n learnNoise) knownAsRecorded(m *models.Mock) learn.Known {
 type httpKnown struct {
 	n       learnNoise
 	learned map[string][]string
-	values  *util.NoiseChecker
+	// words are the words the learn step learned of leaves, by exact place
+	// (MockSpec.LearnedWords): never excused by Excused, which sees one
+	// value; ExcusedLive reads both.
+	words  map[string]models.WordsEntry
+	values *util.NoiseChecker
+}
+
+// ExcusedLive implements learn.KnownLive: a drifted leaf whose words the
+// learn step learned is not compared by value where the live value is
+// admitted by them (learn.WordsAdmit: its slots changed, nothing else), its
+// type kept. Any other leaf is compared.
+func (k httpKnown) ExcusedLive(rec, live learn.Leaf) (bool, bool) {
+	e, ok := k.words[rec.Path]
+	if !ok {
+		return false, false
+	}
+	admitted, _ := learn.WordsAdmit(rec.Value, live.Value, e)
+	return admitted, admitted
 }
 
 // Excused implements learn.Known. Learned noise keeps its type; keploy.yml's
@@ -939,12 +972,11 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			// as well as by the lead. Its previous recorded call is found
 			// among every recording of the set, those on disk too, as the
 			// earlier places streamed them.
-			var w *learn.Window
-			if !own {
-				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
-			}
+			// A call's clock reads are read in its own window too, a test's
+			// own call included (r9 §3).
+			w := tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb), w)
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
@@ -994,37 +1026,60 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 	return 0
 }
 
-// pairing is what the learn step learned on a paired mock: its noise, its
-// variables (an echo included), the variables of the test bound at an earlier
-// mock that it uses (binds, by that mock), and each variable's value in this
-// call, for its answer.
+// pairing is what the learn step learned on a paired mock: the words it
+// learned of the leaves that drifted as noise (by exact place; never a leaf
+// whole, design r9 §1), its variables (an echo and a call-local variable
+// included, each with its words), the variables of the test bound at an
+// earlier mock that it uses (binds, by that mock), each variable's value in
+// this call, for its answer, and record's full round's value at each place
+// whose words it learned (f, by mock, then place: learned.local.yaml).
 type pairing struct {
-	noise  map[string][]string
+	words  map[string]models.WordsEntry
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
+	f      map[string]map[string]string
+}
+
+// slotPlace is a place of the call the learn step learned words at, as the
+// ties between places read it (tiePlaces): noise, an echo, a variable used
+// here.
+type slotPlace struct {
+	l    learn.Learned
+	kind learn.Kind
+	// name is the variable at the place ("" for noise).
+	name string
 }
 
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
 // of the test's own mocks) into what is written onto the recording, or says
-// why the request cannot be answered (request_changed). A value never
-// becomes noise when it flowed from an earlier place of the test (a
-// variable) or comes back in the answer (an echo): when keploy cannot follow
-// it as a variable, the request is refused instead.
+// why the request cannot be answered (request_changed). Of a leaf that is
+// noise, only the words that changed are learned (learn.DriftCache.Words), and
+// every other word of it is still compared; a leaf whose words cannot be
+// learned is refused, never excused whole. A value never becomes noise when it
+// flowed from an earlier place of the test (a variable) or comes back in the
+// answer (an echo): when keploy cannot follow it as a variable, the request is
+// refused instead. w is the call's window its clock reads were made in (nil:
+// by the lead alone).
 //
 //   - A variable is bound at its earlier place, a request place of one of
 //     the test's own HTTP mocks F served, which held the value whole, and is
 //     used here: it holds when the live value here is the one F saw there.
+//     Its words are learned at its bind, of its recorded value and F's there.
 //   - An echo is a variable of this call alone (echo: true), bound here and
-//     answered where the recorded answer holds the value whole. Leaves of
-//     this call that drifted from the same recorded value are one variable.
+//     answered where the recorded answer holds the value whole, its words
+//     learned of R and F. Leaves of this call that drifted from the same
+//     recorded value are one variable.
 //   - A value the test case's request gave (given: its template keys, which
 //     keploy test binds for the test, #4789) is that key's variable, used
 //     here under the key's name with no bind, whatever else Classify found:
 //     the test case is earlier than any call it makes. Its name is the key's
 //     alone in the test: no other variable takes it.
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
-	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
+//
+// Then the ties between the places whose words were learned (tiePlaces).
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding, w *learn.Window) (pairing, string) {
+	p := pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{}}
+	dc := tracker.Drifts()
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))
 	for _, g := range given {
@@ -1042,6 +1097,13 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 		return out
 	}
+	sawF := func(mock, place, live string) {
+		if p.f[mock] == nil {
+			p.f[mock] = map[string]string{}
+		}
+		p.f[mock][place] = live
+	}
+	var slots []slotPlace
 	echoed := map[string]string{} // recorded value -> its echo variable
 	for _, l := range learned {
 		r := l.Recorded
@@ -1063,7 +1125,13 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 		switch l.Kind {
 		case learn.KindNoise:
-			p.noise[r.Path] = []string{}
+			e, why := dc.Words(r.Value, l.Live.Value, w)
+			if why != "" {
+				return p, r.Path + " changed, and keploy cannot tell which of its words changed alone: " + why
+			}
+			p.words[r.Path] = e
+			sawF(m.Name, r.Path, l.Live.Value)
+			slots = append(slots, slotPlace{l: l, kind: learn.KindNoise})
 
 		case learn.KindVariable:
 			from := l.From
@@ -1083,6 +1151,13 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
+			}
+			// Its words, learned where it is bound: of its recorded value and
+			// what F saw there, by the lead (the earlier call's window is not
+			// this one's).
+			words, why := dc.Words(r.Value, from.Live, nil)
+			if why != "" {
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier at " + from.Var + ", and keploy cannot tell which of its words changed alone there: " + why
 			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
 			if !ok {
@@ -1104,9 +1179,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// another one read in the same second in a replay
 			// (models.MockVariable.Clock).
 			bv.Clock = learn.ClockReads(r.Value, from.Live)
+			bv.Words = &words
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
+			if path, ok := learn.LeafPath(from.Var); ok {
+				sawF(from.Mock, path, from.Live)
+			}
+			slots = append(slots, slotPlace{l: l, kind: learn.KindVariable, name: name})
 
 		case learn.KindUnaccounted:
 			return p, r.Path + " changed, and " + l.Why
@@ -1134,18 +1214,137 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				v := p.vars[name]
 				v.Use = appendNew(v.Use, place)
 				p.vars[name] = v
+				slots = append(slots, slotPlace{l: l, kind: learn.KindEcho, name: name})
 				continue
+			}
+			words, why := dc.Words(r.Value, l.Live.Value, w)
+			if why != "" {
+				return p, r.Path + " is echoed in the answer, and keploy cannot tell which of its words changed alone: " + why
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			echoed[r.Value] = name
-			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
+			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true, Words: &words}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
+			sawF(m.Name, r.Path, l.Live.Value)
+			slots = append(slots, slotPlace{l: l, kind: learn.KindEcho, name: name})
 		}
 	}
+	if why := tiePlaces(tracker, test, m, &p, slots, given, jsonReq, reserved, w); why != "" {
+		return p, why
+	}
 	return p, ""
+}
+
+// tiePlaces reads the ties between the places learnPlan learned words at
+// (slots: noise, echoes, variables used here), and between each and the test
+// case's values (given), design r9 §2, the instant check first
+// (learn.DriftCache.TieOf):
+//
+//   - two places whose every changed word lies inside an accepted clock read
+//     other than a UUID's are exempt, and never held equal (N2);
+//   - two places of noise that hold one recorded value whole, and one live
+//     value (twins), are one variable of this call alone (echo: true, no
+//     answer), bound at the first place in sorted order and used at the
+//     others, with the first's words (a UUID in a path and in the body); two
+//     that F saw hold two values are two values that were equal when
+//     recorded, each learned apart, as a value recorded equal to a test
+//     case's is not its;
+//   - anything else that ties two places is refused (N8): a partial tie, a
+//     value glued inside another, a test case's value inside a place.
+//
+// It changes p for a call-local variable: the places' noise words go, and
+// the variable takes the first's.
+func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, slots []slotPlace, given []variables.Binding, jsonReq bool, reserved map[string]bool, w *learn.Window) string {
+	dc := tracker.Drifts()
+	sort.SliceStable(slots, func(i, j int) bool { return slots[i].l.Recorded.Path < slots[j].l.Recorded.Path })
+	value := func(s slotPlace) [2]string { return [2]string{s.l.Recorded.Value, s.l.Live.Value} }
+	// group is, of each place of noise tied whole to an earlier one in
+	// sorted order, that first place's index.
+	group := make([]int, len(slots))
+	for i := range group {
+		group[i] = i
+	}
+	for i := range slots {
+		a := slots[i]
+		for _, g := range given {
+			// A value recorded equal to the key's, and another now, is a
+			// value of its own (two counters both at 1 when recorded are two
+			// values): no tie. One that carries the key's inside it is.
+			if dc.TieOf([2]string{g.Recorded, g.Value}, value(a), w) == learn.TiePartial {
+				return a.l.Recorded.Path + " carries the test case's " + g.Name + " inside it, with more beside it that changed, which keploy cannot follow (N8)"
+			}
+		}
+		for j := i + 1; j < len(slots); j++ {
+			b := slots[j]
+			switch dc.TieOf(value(a), value(b), w) {
+			case learn.TieExempt, learn.TieNone:
+				continue
+			case learn.TiePartial:
+				return a.l.Recorded.Path + " and " + b.l.Recorded.Path + " changed together, the one carried inside the other or glued to it, which keploy cannot follow as one value (N8)"
+			}
+			// One recorded value, whole, at both places: one value of the
+			// call when F saw one value at both (twins), two values that were
+			// equal when recorded otherwise, each learned apart.
+			if !variables.SameValue(a.l.Live.Value, b.l.Live.Value, a.l.Recorded.Type == learn.Number) {
+				continue
+			}
+			switch {
+			case a.kind == learn.KindNoise && b.kind == learn.KindNoise:
+				if group[j] == j {
+					group[j] = group[i]
+				}
+			case a.name != "" && a.name == b.name:
+				// One variable already.
+			default:
+				return a.l.Recorded.Path + " and " + b.l.Recorded.Path + " held one value when recorded and now, and keploy learned them apart, so it cannot follow them as one value"
+			}
+		}
+	}
+	// Each group of places of noise that hold one value: one variable of
+	// this call alone, bound at its first place and used at the others.
+	members := map[int][]int{}
+	for i, g := range group {
+		if g != i {
+			members[g] = append(members[g], i)
+		}
+	}
+	firsts := make([]int, 0, len(members))
+	for g := range members {
+		firsts = append(firsts, g)
+	}
+	sort.Ints(firsts)
+	for _, g := range firsts {
+		first := slots[g].l
+		bind, ok := learn.VarPlace(first.Recorded, jsonReq)
+		if !ok {
+			return first.Recorded.Path + " holds one value with another place of the call, at a place keploy cannot bind it (a form or multipart field)"
+		}
+		words, ok := p.words[first.Recorded.Path]
+		if !ok {
+			return "keploy learned no words of " + first.Recorded.Path
+		}
+		v := models.MockVariable{Recorded: first.Recorded.Value, Bind: bind, Echo: true, Words: &words}
+		for _, i := range members[g] {
+			use, ok := learn.VarPlace(slots[i].l.Recorded, jsonReq)
+			if !ok {
+				return slots[i].l.Recorded.Path + " holds one value with " + first.Recorded.Path + ", at a place keploy cannot follow a variable to (a form or multipart field)"
+			}
+			v.Use = appendNew(v.Use, use)
+			delete(p.words, slots[i].l.Recorded.Path)
+			delete(p.f[m.Name], slots[i].l.Recorded.Path)
+		}
+		delete(p.words, first.Recorded.Path)
+		name, ok := tracker.Name(test, m.Name, bind, reserved)
+		if !ok {
+			return "the test ended before " + first.Recorded.Path + " was learned"
+		}
+		p.vars[name] = v
+		p.values[name] = variables.Binding{Name: name, Value: first.Live.Value, Recorded: first.Recorded.Value, Mock: m.Name, Place: bind}
+	}
+	return ""
 }
 
 // givenBindings are the values the running test case's request gave
@@ -1249,8 +1448,14 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 		served = rendered
 	}
 	claimed = h.consumeWith(context.WithValue(ctx, ownedKey{}, owner), m, mockDb, func(spec *models.MockSpec) {
-		if len(p.noise) > 0 {
-			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, p.noise)
+		// The words learned as noise ride out as noise did, on the consumed
+		// copy's spec (MockSpec.LearnedWords), with F's values beside them
+		// for the set's learned.local.yaml.
+		if len(p.words) > 0 {
+			spec.LearnedWords = models.MergeWords(spec.LearnedWords, p.words)
+		}
+		if len(p.f) > 0 {
+			spec.SetLearnedF(models.MergeLearnedF(spec.LearnedF(), p.f))
 		}
 		// What was learned rides out on the consumed mock's state, never on
 		// what the pool serves next: a reused mock stays the recording the
@@ -1481,7 +1686,7 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 			return nil, nil
 		}
 		hit := group[0]
-		if len(hit.Spec.ReqBodyNoise) == 0 {
+		if len(hit.Spec.ReqBodyNoise) == 0 && len(hit.Spec.LearnedWords) == 0 {
 			return nil, nil
 		}
 		picked, commit := h.cursorPick(hit, group, sc.owner(), mockDb, !opts.DisableStatefulMocks)
