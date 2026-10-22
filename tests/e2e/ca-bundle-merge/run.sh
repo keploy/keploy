@@ -53,7 +53,7 @@ echo "=== pruning any prior state ==="
 # images: see Dockerfile.setup for why not ECR Public.
 # shellcheck source=../../../.github/workflows/test_workflow_scripts/docker-build-retry.sh
 source "${SCRIPT_DIR}/../../../.github/workflows/test_workflow_scripts/docker-build-retry.sh"
-export GOLANG_IMAGE="${GOLANG_IMAGE:-golang:1.27-bookworm}"
+export GOLANG_IMAGE="${GOLANG_IMAGE:-golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5}"
 export DEBIAN_IMAGE="${DEBIAN_IMAGE:-debian:trixie-slim}"
 echo "=== pulling the base images ==="
 docker_pull_retry "${GOLANG_IMAGE}"
