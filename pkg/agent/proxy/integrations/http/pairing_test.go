@@ -28,6 +28,7 @@ type pairingDb struct {
 	others        []*models.Mock
 	bg            []*models.Mock
 	own           map[string]bool
+	inFlight      map[string]bool
 	claimed       map[string]bool
 	offersClaimed bool
 }
@@ -56,11 +57,13 @@ func (d *pairingDb) ClaimPairing(m *models.Mock) bool {
 func (d *pairingDb) KindBackground(models.Kind) (unused, spent []*models.Mock) { return d.bg, nil }
 func (d *pairingDb) SpendByKind(*models.Mock) bool                             { return false }
 func (d *pairingDb) OwnedByOpenTest(m *models.Mock) bool                       { return d.own[m.Name] }
+func (d *pairingDb) InFlightIntoOpenTest(m *models.Mock) bool                  { return d.inFlight[m.Name] }
 
 var (
 	_ integrations.Pairing          = (*pairingDb)(nil)
 	_ integrations.ByKindBackground = (*pairingDb)(nil)
 	_ integrations.TestOwner        = (*pairingDb)(nil)
+	_ integrations.InFlightOwner    = (*pairingDb)(nil)
 )
 
 // answered is m recorded at at, answering status with body.
@@ -176,6 +179,39 @@ func TestHTTPPairsExactlyWithAnotherTestsRecording(t *testing.T) {
 		if sqsPoll(call) {
 			t.Fatal("a GET is a poll")
 		}
+		// The query protocol's ReceiveMessage in the query string: exactly
+		// its recording, it pairs with none; another action of that
+		// protocol, exactly its recording, pairs.
+		for _, action := range []string{"ReceiveMessage", "DeleteMessage"} {
+			q := "Action=" + action + "&QueueUrl=q"
+			rec := answered(onHost("mock-4", "/", host), time.Second, 200, `<ReceiveMessageResponse/>`)
+			rec.Spec.HTTPReq.URL = "/?" + q
+			rec.Spec.HTTPReq.URLParams = map[string]string{"Action": action, "QueueUrl": "q"}
+			db := &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{rec}}
+			get := getTo("/", host)
+			get.url.RawQuery = q
+			_, got := h.pairExactly(ctx, get, db, n)
+			if poll := action == "ReceiveMessage"; sqsPoll(get) != poll || poll && got != nil || !poll && got != rec {
+				t.Fatalf("?%s: a poll %v, paired %v; want a poll and no pairing for ReceiveMessage alone", q, sqsPoll(get), got)
+			}
+		}
+	})
+	t.Run("a recording that declares variables, an async lane's or a protocol phase's never pairs", func(t *testing.T) {
+		for name, mark := range map[string]func(*models.Mock){
+			"none": func(*models.Mock) {},
+			"variables": func(m *models.Mock) {
+				m.Spec.Variables = models.MockVariables{"orderId": {Recorded: "o-1", Answer: []string{"body.id"}}}
+			},
+			"an async lane's":    func(m *models.Mock) { m.Spec.Async = &models.AsyncMeta{} },
+			"a protocol phase's": func(m *models.Mock) { m.Spec.Metadata = map[string]string{"type": "config"} },
+		} {
+			x := x("mock-5", time.Second, `{"id":"o-1"}`)
+			mark(x)
+			db := &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{x}}
+			if _, rec := h.pairExactly(ctx, call, db, n); name == "none" && rec != x || name != "none" && rec != nil {
+				t.Fatalf("%s: paired %v", name, rec)
+			}
+		}
 	})
 	t.Run("the open test's own, or nothing offered", func(t *testing.T) {
 		mine := x("mock-5", time.Second, `{}`)
@@ -185,6 +221,12 @@ func TestHTTPPairsExactlyWithAnotherTestsRecording(t *testing.T) {
 		}
 		if _, rec := h.pairExactly(ctx, call, &mockMemDb{mocks: []*models.Mock{mine}}, n); rec != nil {
 			t.Fatal("a store that offers nothing to pair paired")
+		}
+		// In flight into the open test (sent before it began, answered in
+		// it): the open test's own too, though the store offers it.
+		db = &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{mine}, inFlight: map[string]bool{"mock-5": true}}
+		if _, rec := h.pairExactly(ctx, call, db, n); rec != nil {
+			t.Fatal("a recording in flight into the open test paired")
 		}
 	})
 }
@@ -198,12 +240,14 @@ func TestHTTPPairsExactlyWithAnotherTestsRecording(t *testing.T) {
 func TestAPairedHTTPCallIsAnsweredAndReported(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const addr, host = "127.0.0.1:50001", "localhost:50001"
+	var tracker *learn.Tracker
 	serve := func(t *testing.T, learnOn bool) (int, string, []error, *pairingDb) {
 		t.Helper()
 		rec := answered(onHost("other-test-delete", "/delete", host), time.Second, 200, `{"deleted":1}`)
 		db := &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{rec}}
 		var reported []error
-		ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = append(reported, err) }), learn.NewTracker())
+		tracker = learn.NewTracker()
+		ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = append(reported, err) }), tracker)
 		app, prox := net.Pipe()
 		defer app.Close()
 		done := make(chan error, 1)
@@ -247,6 +291,12 @@ func TestAPairedHTTPCallIsAnsweredAndReported(t *testing.T) {
 	}
 	if !db.claimed["other-test-delete"] || db.deletedFiltered != nil || db.updateUnFilteredMockOld != nil {
 		t.Fatalf("the recording was not claimed, or was consumed: claims %v", db.claimed)
+	}
+	// The learn step's tracker was told the recording was served, as a
+	// consumed one's store tells it: an earlier place of the calls after it,
+	// and the previous call of the next call's window.
+	if _, _, served, _ := tracker.Test(); len(served) != 1 || served[0].Name != "other-test-delete" {
+		t.Fatalf("the tracker saw %v served; want the paired recording", served)
 	}
 
 	status, _, reported, db = serve(t, false)
