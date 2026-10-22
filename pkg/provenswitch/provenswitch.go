@@ -99,7 +99,23 @@ func PlatformDefault(goos string) bool {
 var thisPlatform = PlatformDefault(runtime.GOOS)
 
 // flowBuild is set by a build that runs release 1's flow (RunsTheFlow).
-var flowBuild atomic.Bool
+// readFirst is set by a read of the switch while flowBuild is not set, and
+// readBeforeFlow by RunsTheFlow when such a read came before it
+// (ReadBeforeTheFlow).
+var flowBuild, readFirst, readBeforeFlow atomic.Bool
+
+// flow reports whether this build runs release 1's flow (RunsTheFlow). Every
+// read of the switch goes through it, so a read that comes before
+// RunsTheFlow is seen (ReadBeforeTheFlow).
+func flow() bool {
+	if flowBuild.Load() {
+		return true
+	}
+	if !readFirst.Load() {
+		readFirst.Store(true)
+	}
+	return false
+}
 
 // RunsTheFlow says this build runs release 1's flow: a record's auto-replay
 // judges each test the record wrote and learns what the app changes at each
@@ -112,12 +128,26 @@ var flowBuild atomic.Bool
 // dependency call carries one would fail its replay. There an unset
 // KEPLOY_PROVEN is off on every platform, as in earlier releases, and
 // KEPLOY_PROVEN=1 turns the proven model on.
-func RunsTheFlow() { flowBuild.Store(true) }
+func RunsTheFlow() {
+	if readFirst.Load() {
+		readBeforeFlow.Store(true)
+	}
+	flowBuild.Store(true)
+}
+
+// ReadBeforeTheFlow reports whether this process read the switch before it
+// said it runs release 1's flow (RunsTheFlow). Such a read took the default of
+// a build that does not run it, off on every platform, whatever this
+// platform's is: a verb that exists only under the proven model, say, decided
+// at init, would be missing on Linux. keploy enterprise says it runs the flow
+// as its cli package initializes, and its tests refuse a read that comes
+// first (an init of a package it imports, or a package-level variable).
+func ReadBeforeTheFlow() bool { return readBeforeFlow.Load() }
 
 // Default is this process's switch when KEPLOY_PROVEN does not set it: on in a
 // build that runs release 1's flow (RunsTheFlow) on a platform release 1 flips
 // (PlatformDefault: Linux), off otherwise.
-func Default() bool { return thisPlatform && flowBuild.Load() }
+func Default() bool { return thisPlatform && flow() }
 
 // HowToTurnOn says, for a remedy, how a user runs keploy with the proven model
 // on: in a build that runs release 1's flow, its default on Linux and
@@ -125,7 +155,7 @@ func Default() bool { return thisPlatform && flowBuild.Load() }
 // platform. It speaks of keploy, not of this process: an agent says it to the
 // keploy that started it, which may run on another platform.
 func HowToTurnOn() string {
-	if flowBuild.Load() {
+	if flow() {
 		return "its default on Linux, " + Env + "=1 elsewhere"
 	}
 	return Env + "=1"
@@ -160,6 +190,9 @@ func OnFor(v string) bool {
 	if err != nil || !set {
 		return Default()
 	}
+	// A read all the same, though KEPLOY_PROVEN decides it: the same read
+	// with the variable unset takes the default (ReadBeforeTheFlow).
+	flow()
 	return on
 }
 
@@ -237,7 +270,7 @@ func settingHint() string {
 	switch {
 	case Default():
 		return "set it to 0 to run without the proven model, or unset it: the proven model is on by default on " + platformName(runtime.GOOS)
-	case !flowBuild.Load():
+	case !flow():
 		return "set it to 1 to run the proven model, or unset it: this keploy build runs without it by default"
 	}
 	return "set it to 1 to run the proven model, or unset it: the proven model is off by default on " + platformName(runtime.GOOS)
@@ -268,7 +301,7 @@ func platformName(goos string) string {
 // default is off on every platform, as in earlier releases, so it says
 // nothing it did not say before.
 func PlatformNotice() string {
-	if pinned.Load() != unpinned || !flowBuild.Load() {
+	if pinned.Load() != unpinned || !flow() {
 		return ""
 	}
 	if _, set, err := parse(os.Getenv(Env)); set || err != nil {

@@ -103,6 +103,47 @@ func TestOnlyABuildThatRunsTheFlowTurnsTheProvenModelOnByDefault(t *testing.T) {
 	}
 }
 
+// A read of the switch before the build says it runs release 1's flow took
+// the default of a build that does not, and ReadBeforeTheFlow says so, for
+// each way the switch is read; a read after it does not count. keploy
+// enterprise's tests refuse such a read: its `keploy quarantine` verb was
+// decided by one, at init, and existed on Linux only because of the order of
+// its file names. Mutation: a read does not go through flow; RunsTheFlow does
+// not look.
+func TestAReadBeforeTheFlowIsSeen(t *testing.T) {
+	unpin(t)
+	saved := [3]bool{flowBuild.Load(), readFirst.Load(), readBeforeFlow.Load()}
+	t.Cleanup(func() { flowBuild.Store(saved[0]); readFirst.Store(saved[1]); readBeforeFlow.Store(saved[2]) })
+	reset := func() { flowBuild.Store(false); readFirst.Store(false); readBeforeFlow.Store(false) }
+	for _, r := range []struct {
+		name string
+		read func()
+	}{
+		{"On, the variable unset", func() { t.Setenv(Env, ""); On() }},
+		{"On, the variable set", func() { t.Setenv(Env, "1"); On() }},
+		{"OnFor", func() { OnFor("0") }},
+		{"Default", func() { Default() }},
+		{"State", func() { t.Setenv(Env, ""); State() }},
+		{"AgentArgs", func() { t.Setenv(Env, ""); AgentArgs() }},
+		{"HowToTurnOn", func() { HowToTurnOn() }},
+		{"Validate", func() { t.Setenv(Env, "yes"); _ = Validate() }},
+		{"PlatformNotice", func() { t.Setenv(Env, ""); PlatformNotice() }},
+	} {
+		reset()
+		r.read()
+		RunsTheFlow()
+		if !ReadBeforeTheFlow() {
+			t.Fatalf("%s before RunsTheFlow: ReadBeforeTheFlow() = false, want true", r.name)
+		}
+		reset()
+		RunsTheFlow()
+		r.read()
+		if ReadBeforeTheFlow() {
+			t.Fatalf("%s after RunsTheFlow: ReadBeforeTheFlow() = true, want false", r.name)
+		}
+	}
+}
+
 // An unset KEPLOY_PROVEN is the platform's default, here as in a keploy that
 // nothing configures; 0 and 1 decide on every platform, so a Linux user can
 // still run the old paths and a Windows or macOS user can still opt in, as
