@@ -648,10 +648,17 @@ func TestSources(t *testing.T) {
 		// step 6), a clock read or not (an id from Date.now() sent twice).
 		{"one clock read whole, twice", at.Format(time.RFC3339), f.Format(time.RFC3339), at.Format(time.RFC3339), f.Format(time.RFC3339), true, true},
 		{"UUID v7s of one minute, both moved by the lead", uuid7(at, "abc123456789abcdef"), uuid7(f, "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(f.Add(203*time.Millisecond), "fedcba987654321012"), false, false},
-		// Clock reads that moved by another amount than the lead are no
-		// drift F's clock explains: a shared word is a value that flowed.
-		{"clock reads moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, false},
-		{"UUID v7s whose time moved by another amount", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(at.Add(81*time.Second+200*time.Millisecond), "fedcba987654321012"), true, false},
+		// Instants that moved by another amount than the lead, no drift F's
+		// clock explains, are compared as units too (instants.go): at a
+		// leaf F saw drift, only the same value whole flowed, as for a clock
+		// read (two reads of one second drift alike whatever made them, and
+		// whether one is a clock read turns on the boot and the window); a
+		// shared date or time word, or a UUID's time groups, never.
+		{"clock reads moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), false, false},
+		{"instants of one minute moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute + 7*time.Second).Format(time.RFC3339), false, false},
+		{"one instant moved by another amount, whole", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, true},
+		{"UUID v7s whose time moved by another amount", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(at.Add(81*time.Second+200*time.Millisecond), "fedcba987654321012"), false, false},
+		{"one UUID v7 whose time moved by another amount, inside a longer value", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(at.Add(81*time.Second), "def0123456789abcde"), true, false},
 		// One UUID v7 next to a fresh part in both: its random groups are
 		// shared, a value that flowed.
 		{"one UUID v7 next to a fresh part in both", uuid7(at, "abc123456789abcdef") + ":n1", uuid7(f, "def0123456789abcde") + ":n2", "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(f, "def0123456789abcde"), true, false},

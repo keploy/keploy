@@ -2646,13 +2646,15 @@ func TestLearnMatchAnOwnCallInFlightReadsEveryEarlierRecording(t *testing.T) {
 
 // At start-up F's clock runs the lead past the earliest recording from when
 // keploy froze it, before the app booted: a start-up call's clock read moved
-// by the lead and the boot's difference, which the lead alone does not read
-// (the minute and second that changed, words of the receive's Date header,
-// then read as a value that flowed from the receive, refused). Read in the
-// call's window (the receive served before it, its arrival, on the app's
-// clock) it is a clock read, learned as noise, whether the boot took 2 s or
-// 30 s longer. A test's own call is read by the lead alone, as before: F
-// sets each test's clock.
+// by the lead and the boot's difference, which the lead alone does not read.
+// Read in the call's window (the receive served before it, its arrival, on
+// the app's clock) it is a clock read, whether the boot took 2 s or 30 s
+// longer; read by the lead alone (no app clock, or a test's own call, which
+// is read so: F sets each test's clock) it is none. It is noise either way:
+// the minute and second that changed are words of the receive's Date header,
+// but an instant is compared as one unit (learn's instants.go), and the
+// receive holds no such instant, so whether the read is a clock read decides
+// nothing.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
@@ -2661,12 +2663,11 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 		boot  time.Duration
 		clock bool
 		own   bool
-		noise bool
 	}{
-		{"a 2 s longer boot", 2 * time.Second, true, false, true},
-		{"a 30 s longer boot", 30 * time.Second, true, false, true},
-		{"no app clock", 2 * time.Second, false, false, false},
-		{"a test's own call", 2 * time.Second, true, true, false},
+		{"a 2 s longer boot", 2 * time.Second, true, false},
+		{"a 30 s longer boot", 30 * time.Second, true, false},
+		{"no app clock", 2 * time.Second, false, false},
+		{"a test's own call", 2 * time.Second, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
@@ -2699,9 +2700,9 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 			if tc.own && read != 0 {
 				t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
 			}
-			if !tc.noise {
-				if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
-					t.Fatalf("served %v miss %+v; want refused, a value from mock-0 as the lead reads it", got, miss)
+			if tc.own {
+				if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) {
+					t.Fatalf("served %v miss %+v consumed %+v; want the test's own recording consumed, body.processed_at learned as noise", got, miss, db.consumed)
 				}
 				return
 			}
@@ -2760,18 +2761,20 @@ func TestLearnMatchAWindowIsOneRunOfTheAppsClock(t *testing.T) {
 // the set: those the store stages, those it keeps on disk, and those the
 // replay served (a per-test recording a serve took out of the store): a read
 // made before that previous call, though after the latest one found
-// elsewhere, is no clock read of the call, and is refused.
+// elsewhere, is no clock read of the call. It is noise all the same, as one
+// in the window is: an instant is compared as one unit (learn's
+// instants.go), and the receive's Date header shares only its second, so
+// when the app read its clock against its other calls decides nothing.
 func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	for _, tc := range []struct {
 		name               string
 		disk, staged, gone bool
-		noise              bool
 	}{
-		{"the previous call in memory", false, false, false, true},
-		{"a later previous call on disk", true, false, false, false},
-		{"a later previous call staged", false, true, false, false},
-		{"the previous call served, no longer staged", false, false, true, true},
+		{"the previous call in memory", false, false, false},
+		{"a later previous call on disk", true, false, false},
+		{"a later previous call staged", false, true, false},
+		{"the previous call served, no longer staged", false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
@@ -2804,8 +2807,8 @@ func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if learned := got != nil && len(db.pooled) == 1; learned != tc.noise {
-				t.Fatalf("learned %v (miss %+v); want %v", learned, miss, tc.noise)
+			if got == nil || len(db.pooled) != 1 {
+				t.Fatalf("served %v (miss %+v); want processed_at learned as noise", got, miss)
 			}
 		})
 	}
