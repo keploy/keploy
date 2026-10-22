@@ -37,9 +37,13 @@
 # died, and directories that are not entries (an older layout's), once they
 # are older than -MaxAgeDays. This is a performance policy, not a guarantee:
 # an entry a run still needs can be evicted under load, and costs that run a
-# download, never its job. 16 entries (2.2 GB) and 3 hours cover the gap from
-# a build to its lanes' get, which was 4.8 min median, 76.5 min at most, over
-# 101 runs of 2026-10-14 and 2026-10-16. Nothing may depend on an entry being
+# download, never its job. 16 entries and 3 hours cover the gap from a build
+# to its lanes' get, which was 4.8 min median, 76.5 min at most, over 101 runs
+# of 2026-10-14 and 2026-10-16. An entry younger than -KeepHours is kept
+# whatever the count, so a name holds the 16 newest plus every build of the
+# last 3 hours: up to 37 same-repo runs started in one 3-hour window over
+# 2026-10-14 to 10-17, so about 53 entries, 7.5 GB at 141 MB each, at the
+# busiest. Nothing may depend on an entry being
 # there: if something ever does, eviction needs a lease (an in-use marker that
 # prune skips), not a longer age.
 [CmdletBinding()]
@@ -144,10 +148,21 @@ if ($Put) {
     $sum = Get-Sha256 $File
     $entry = Join-Path $dir $sum
     $have = Join-Path $entry $leaf
-    if ((Test-Path -LiteralPath $have -PathType Leaf) -and (Get-Sha256 $have) -eq $sum) {
-        Write-Host "machine-cache: $Name/$leaf ($sum) is already on this machine"
-        "sha256=$sum"
-        exit 0
+    if (Test-Path -LiteralPath $have -PathType Leaf) {
+        $there = $null
+        try { $there = Get-Sha256 $have } catch {
+            # Held open by another process (a get copying it, say): left as
+            # it is. A get checks what it copies, so one that is not whole is
+            # a miss there, not a binary.
+            Write-Host "machine-cache: $Name/$leaf ($sum) is there, held by another process ($($_.Exception.Message)); leaving it"
+            "sha256=$sum"
+            exit 0
+        }
+        if ($there -eq $sum) {
+            Write-Host "machine-cache: $Name/$leaf ($sum) is already on this machine"
+            "sha256=$sum"
+            exit 0
+        }
     }
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $tmp = Join-Path $dir (".$sum.tmp-" + [guid]::NewGuid().ToString('N'))

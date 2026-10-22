@@ -246,6 +246,24 @@ try {
     $r = Get-Case $c
     if ($r.Out[-1] -ne 'hit=true') { $p += "once the file was free again: $($r.Out[-1])" }
     Report 'an entry that cannot be read once the get has found it is a miss (hit=false, exit 0, said), and leaves nothing at the destination' $p
+
+    # 12. A put of a file whose entry another process holds open (a get
+    # copying it): left as it is, said, and the put succeeds.
+    $c = New-Case 'held'
+    Put-Case $c | Out-Null
+    $cached = Join-Path $c.Root "build-windows\$($c.Sha)\keploy.exe"
+    $held = [IO.File]::Open($cached, 'Open', 'Read', 'None')
+    try {
+        $r = Put-Case $c
+    } finally {
+        $held.Dispose()
+    }
+    $p = @()
+    if ($r.Code -ne 0) { $p += "exit $($r.Code): $($r.Out -join ' | ')" }
+    if ($r.Out[-1] -ne "sha256=$($c.Sha)") { $p += "last line '$($r.Out[-1])', want sha256=$($c.Sha)" }
+    if (-not ($r.Out -match 'held by another process')) { $p += "not said: $($r.Out -join ' | ')" }
+    if ((Get-Sha $cached) -ne $c.Sha) { $p += 'the held entry changed' }
+    Report 'a put over an entry another process holds open leaves it, says so, and succeeds' $p
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }

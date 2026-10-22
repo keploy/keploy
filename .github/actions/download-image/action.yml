@@ -14,7 +14,29 @@ inputs:
 runs:
   using: composite
   steps:
+    # On the self-hosted Windows runners the artifact comes down as byte
+    # ranges at once (.github/scripts/windows/fetch-artifact.ps1): there, one
+    # connection to GitHub's artifact store holds 2-7 Mbit/s, and
+    # download-artifact uses one. Checked against the artifact's SHA-256
+    # before anything uses it. Any other miss (exit 1) is the download below;
+    # bytes that twice were not the artifact's digest (exit 3) fail here.
+    - name: Fetch the image artifact as byte ranges (self-hosted Windows)
+      id: ranged
+      if: runner.os == 'Windows' && runner.environment == 'self-hosted'
+      shell: powershell
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        FETCH_NAME: ${{ inputs.artifact_name }}
+      run: |
+        & (Join-Path $env:GITHUB_ACTION_PATH '..\..\scripts\windows\fetch-artifact.ps1') -Name $env:FETCH_NAME -Destination (Join-Path $env:RUNNER_TEMP 'keploy-image')
+        $code = $LASTEXITCODE
+        if ($code -eq 0) { 'ok=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append; exit 0 }
+        if ($code -eq 3) { exit 3 }
+        Write-Host "fetch-artifact.ps1 exited ${code}: downloading the artifact with actions/download-artifact instead"
+        exit 0
+
     - name: Download image artifact
+      if: steps.ranged.outputs.ok != 'true'
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.artifact_name }}
