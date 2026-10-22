@@ -67,6 +67,13 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Words is what the learn step learned of the words of the variable's
+	// value at its Bind (WordsEntry): of an echo, from the recording and
+	// record's full round; of a variable, from its recorded value and the
+	// full round's at the earlier bind. The bind is admitted only through
+	// it, and each Use place must hold the bound value. Learned only under
+	// the proven switch; nil for none.
+	Words *WordsEntry `json:"words,omitempty" yaml:"words,omitempty" bson:"words,omitempty"`
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -130,6 +137,10 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		if mv.Words != nil {
+			w := mv.Words.Clone()
+			mv.Words = &w
+		}
 		out[name] = mv
 	}
 	return out

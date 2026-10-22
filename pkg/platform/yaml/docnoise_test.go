@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -102,5 +103,46 @@ func TestResolveReqBodyNoise(t *testing.T) {
 	}
 	if ResolveReqBodyNoise(&DocNoise{}) != nil {
 		t.Fatal("empty noise.req must resolve to nil")
+	}
+}
+
+// A leaf's learned words are kept under noise.words, beside noise.req, in
+// YAML and JSON, and read back as they were; a noise block with none is
+// written as before, with no words key.
+func TestDocNoise_WordsRoundTrip(t *testing.T) {
+	in := DocNoise{Req: []string{"body.at"}, Words: map[string]models.WordsEntry{
+		"body.note": {Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []models.WordSlot{
+			{Seg: 3, Kind: models.WordSlotToken},
+			{Seg: 5, Run: 0},
+		}},
+	}}
+	y, err := yamlLib.Marshal(&in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "req:\n    - body.at\nwords:\n    body.note:\n        digest: 9f2c41d07a3be815\n        layout: 4be1c09a5d3e7f21\n        slots:\n            - seg: 3\n              kind: token\n            - seg: 5\n              run: 0\n"
+	if string(y) != want {
+		t.Fatalf("noise with words written as\n%s\nwant\n%s", y, want)
+	}
+	j, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromYAML, fromJSON DocNoise
+	if err := yamlLib.Unmarshal(y, &fromYAML); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(j, &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fromYAML, in) || !reflect.DeepEqual(fromJSON, in) {
+		t.Fatalf("read back %#v (yaml), %#v (json), want %#v", fromYAML, fromJSON, in)
+	}
+
+	plain := NewDocNoise([]string{"^tok-.*$"}, map[string][]string{"body.a": {}})
+	y, _ = yamlLib.Marshal(plain)
+	j, _ = json.Marshal(plain)
+	if string(y) != "req:\n    - body.a\nvalue:\n    - ^tok-.*$\n" || string(j) != `{"req":["body.a"],"value":["^tok-.*$"]}` {
+		t.Fatalf("noise with no words written otherwise than before:\n%s\n%s", y, j)
 	}
 }

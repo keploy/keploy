@@ -422,6 +422,15 @@ type MockSpec struct {
 	// none. Additive / omitempty: an older keploy ignores it.
 	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
 
+	// LearnedWords is, by the leaf's exact place (learn.Leaf.Path:
+	// "body.note", "header.x-order-ref", "url.query.ref", "url.path.2"),
+	// the words of a request leaf the learn step learned as noise
+	// (WordsEntry): only its slots may change, and the rest of the leaf is
+	// still compared. Carried on the doc envelope as noise.words, beside
+	// noise.req, which never holds such a place. Learned only under the
+	// proven switch; nil for a call that holds none.
+	LearnedWords map[string]WordsEntry `json:"LearnedWords,omitempty" yaml:"learned_words,omitempty" bson:"learned_words,omitempty"`
+
 	// learned and learnedBinds are, on a mock the learn step of record's
 	// full round just paired (agent side, in memory), the variables it
 	// learned on the mock and those it learned that are bound at an earlier
@@ -1082,6 +1091,10 @@ type MockState struct {
 	// (ExactServing.Concurrent), not as one of its own: whose call it was is
 	// settled at the set's end. An agent that predates it reports none.
 	Concurrent bool `json:"concurrent,omitempty"`
+	// LearnedWords carries the words the learn step learned on the mock as
+	// noise (MockSpec.LearnedWords) back from the agent under the proven
+	// switch, as ReqBodyNoise carries its whole-leaf noise.
+	LearnedWords map[string]WordsEntry `json:"learnedWords,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
@@ -1161,6 +1174,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	c.Spec.Variables = m.Spec.Variables.Clone()
+	c.Spec.LearnedWords = cloneWords(m.Spec.LearnedWords)
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.

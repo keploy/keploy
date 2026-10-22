@@ -101,6 +101,20 @@ type Known interface {
 	Excused(leaf Leaf) (excused, typed bool)
 }
 
+// KnownLive is what a Known also implements to excuse a leaf by its live
+// value: a place whose learned words (models.WordsEntry) let only some of its
+// words change. Excused sees one value and never reports such a place;
+// ExcusedLive sees the recorded leaf (rec) and the live one (live) and
+// reports, as Excused does, whether the leaf is not compared by value there
+// (WordsAdmit) and whether its type is still enforced (typed). Compare finds
+// it on the Known it is given by a type assertion, so Known is unchanged and
+// every Known outside this package still satisfies Compare.
+//
+// This build declares it only: Compare does not ask it yet.
+type KnownLive interface {
+	ExcusedLive(rec, live Leaf) (excused, typed bool)
+}
+
 // None excuses nothing.
 var None Known = none{}
 

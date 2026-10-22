@@ -83,13 +83,18 @@ type NetworkTrafficDoc struct {
 //     honoured "ignore this whole field", so per-path regex values are not kept.
 //   - Value — exact-match value regexes written by the enterprise obfuscator
 //     (the former top-level `noise:` list, models.Mock.Noise).
+//   - Words — by a request leaf's exact place, the words of it the learn step
+//     learned as noise under the proven switch (models.MockSpec.LearnedWords):
+//     only those may change, and the rest of the leaf is still compared. A
+//     place in Words is never in Req. Absent unless the learn step wrote it.
 //
 // For backward compatibility the custom unmarshalers also accept the OLD shape
 // where `noise:` was a bare string list — that decodes into Value. New writes
 // only emit this unified mapping.
 type DocNoise struct {
-	Req   []string `json:"req,omitempty" yaml:"req,omitempty"`
-	Value []string `json:"value,omitempty" yaml:"value,omitempty"`
+	Req   []string                     `json:"req,omitempty" yaml:"req,omitempty"`
+	Value []string                     `json:"value,omitempty" yaml:"value,omitempty"`
+	Words map[string]models.WordsEntry `json:"words,omitempty" yaml:"words,omitempty"`
 }
 
 // NewDocNoise builds the unified noise block for encoding from the in-memory
