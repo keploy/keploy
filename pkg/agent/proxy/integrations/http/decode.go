@@ -254,6 +254,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// (design v14 §7.2).
 				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 				ok = stub != nil
+				if !ok && err == nil {
+					// Then the pairing, under S12's rules (S12 v16 §4.1):
+					// a call that is exactly another test's recording is
+					// answered with it, reported for judging, not missed.
+					if answer, x := h.pairExactly(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise)); answer != nil {
+						reportPairing(reqCtx, input, x)
+						stub, ok, lmiss = answer, true, nil
+					}
+				}
 			default:
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
