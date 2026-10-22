@@ -2177,6 +2177,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		redisLeftOut = leftOutRedis(skipped.kinds, filtered, unfiltered)
 		agentTestMockMappings = expectedTestMockMappings
 		expectedTestMockMappings, workerScope, redisUnowned = withoutLeftOutRedis(expectedTestMockMappings, workerScope, redisLeftOut)
+		conc = withoutLeftOutConcurrency(conc, redisLeftOut)
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
@@ -2212,11 +2213,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
-			// The plan is of what the agent holds: none of the mocks it
-			// leaves out (redisLeftOut) is the pool's either.
-			r.exact = newExactPlan(expectedTestMockMappings, workerScope, withoutNames(filtered, redisLeftOut), withoutNames(unfiltered, redisLeftOut))
+			// The plan is of what the agent serves: none of the mocks it
+			// leaves out of its pool (redisLeftOut) is the plan's pool's or
+			// a shared one.
+			heldFiltered, heldUnfiltered := withoutNames(filtered, redisLeftOut), withoutNames(unfiltered, redisLeftOut)
+			r.exact = newExactPlan(expectedTestMockMappings, workerScope, heldFiltered, heldUnfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
-			r.exact.share = newSharePlan(conc, workerScope, filtered, unfiltered)
+			r.exact.share = newSharePlan(conc, workerScope, heldFiltered, heldUnfiltered)
 			// keploy record's full round shares the recordings made while
 			// several tests' requests were open between those tests, when
 			// the agent serves them (models.ExactConcurrentHeader, read

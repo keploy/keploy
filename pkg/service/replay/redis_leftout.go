@@ -80,6 +80,33 @@ func withoutLeftOutRedis(mappings map[string][]models.MockEntry, worker []models
 	return kept, keep(worker), fromTests
 }
 
+// withoutLeftOutConcurrency is the set's concurrency (concurrencyOf) less
+// every grouped, marked or shared entry that names a mock this build leaves
+// out of the replay (left), as withoutLeftOutRedis strips the mappings: such
+// a mock's call is made for real, so it is no candidate any test may be
+// served, no other test's miss may be its call (attribute), and an
+// ambiguous mark keploy record's full round left on it
+// (MockEntry.Unresolved, which a replay that does not share charges the test
+// that lists it with: annotateConcurrent) charges no test. The groups stay:
+// they say which tests were open together. conc itself when nothing is left
+// out; nil, as concurrencyOf says a set that states none, when no group and
+// no entry is left.
+func withoutLeftOutConcurrency(conc *setConcurrency, left map[string]bool) *setConcurrency {
+	if conc == nil || len(left) == 0 {
+		return conc
+	}
+	out := &setConcurrency{groups: conc.groups, ofTest: conc.ofTest, entries: make(map[string]groupedEntry, len(conc.entries))}
+	for name, e := range conc.entries {
+		if !left[name] {
+			out.entries[name] = e
+		}
+	}
+	if len(out.groups) == 0 && len(out.entries) == 0 {
+		return nil
+	}
+	return out
+}
+
 // keepLeftOutRedis adds to keep, the mocks --remove-unused-mocks retains
 // (UpdateMocks), each mock this build left out of the replay (left) that keep
 // does not hold. Such a mock goes unconsumed because this build relays its

@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sort"
@@ -151,6 +152,97 @@ func TestUnderTheSwitchTheExactPlanHoldsNoLeftOutRedisMock(t *testing.T) {
 	said := logs.FilterMessageSnippet("no test case of this test set owns a recorded call").All()
 	if len(said) != 1 || !strings.Contains(said[0].Message, "other than Redis") {
 		t.Fatalf("want one warning that the set's Redis calls are relayed, got %+v", said)
+	}
+}
+
+// Under the switch a Redis mock this build leaves out charges no test, not
+// even one keploy record's full round marked ambiguous, a mark a replay that
+// does not share charges the test that lists it with (annotateConcurrent):
+// the call it recorded is made for real, so what the round could not tell of
+// its recording answers nothing. The set's concurrency, like its mappings, is
+// read without the Redis mocks this build leaves out: its groups and its
+// other entries stay.
+func TestALeftOutRedisMockMarkedAmbiguousChargesNoTest(t *testing.T) {
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	pinWindows(h)
+	h.mocks.filtered, _, _ = redisRecording()
+	db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": {
+		{Name: "mock-4", Kind: string(models.GENERIC), Group: "g1", Unresolved: models.MockEntryUnresolvedAmbiguous},
+	}})
+	// The HELLO (Redis) and the memcached boot get were recorded while both
+	// tests were open, and no kept test lists them.
+	if err := db.UpsertConcurrency(context.Background(), "test-set-0",
+		[]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"test-1", "test-2"}}},
+		[]models.MockEntry{{Name: "mock-1", Kind: string(models.GENERIC), Group: "g1"}, {Name: "mock-3", Kind: string(models.GENERIC), Group: "g1"}}); err != nil {
+		t.Fatalf("writing the set's concurrency: %v", err)
+	}
+	_ = h.run(t)
+
+	rep := h.report.report
+	if rep == nil || rep.Success != 2 {
+		var failed []string
+		if rep != nil {
+			for _, r := range rep.Tests {
+				if r.Status != models.TestStatusPassed {
+					failed = append(failed, fmt.Sprintf("%s %s %+v", r.TestCaseID, r.Status, r.FailureInfo.UnmatchedCalls))
+				}
+			}
+		}
+		t.Fatalf("both tests must pass, a Redis mock this build relays charging none: failed %v", failed)
+	}
+	plan := h.replayer.exact
+	if plan == nil || plan.share == nil {
+		t.Fatal("precondition: the run made no share plan, so the set's concurrency was never read")
+	}
+	for _, n := range []string{"mock-4", "mock-1"} {
+		if _, ok := plan.share.conc.entries[n]; ok {
+			t.Errorf("the set's concurrency holds %s, a Redis mock this build leaves out", n)
+		}
+	}
+	if _, ok := plan.share.conc.entries["mock-3"]; !ok {
+		t.Errorf("the set's concurrency lost mock-3, the shared memcached get: only what this build leaves out is stripped")
+	}
+	if _, ok := plan.share.conc.groups["g1"]; !ok {
+		t.Errorf("the set's concurrency lost group g1")
+	}
+}
+
+// The set's concurrency without what this build leaves out: grouped, marked
+// and shared entries naming a left-out mock go, the rest and the groups
+// stay; a set left with nothing states no concurrency (nil); with nothing
+// left out it is returned as it is.
+func TestWithoutLeftOutConcurrency(t *testing.T) {
+	tests := map[string][]models.MockEntry{
+		"test-1": {{Name: "r1", Group: "g1"}, {Name: "m1", Group: "g1"}, {Name: "r2", Unresolved: models.MockEntryUnresolvedUnproven}},
+	}
+	shared := []models.MockEntry{{Name: "r3"}, {Name: "m2"}}
+	conc := concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"test-1", "test-2"}}}, tests, shared)
+	left := map[string]bool{"r1": true, "r2": true, "r3": true}
+	got := withoutLeftOutConcurrency(conc, left)
+	var names []string
+	for n := range got.entries {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "m1,m2" {
+		t.Fatalf("entries %v, want m1,m2", names)
+	}
+	if _, ok := got.groups["g1"]; !ok || len(got.ofTest["test-2"]) != 1 {
+		t.Fatalf("the groups changed: %+v %+v", got.groups, got.ofTest)
+	}
+	if len(conc.entries) != 5 {
+		t.Fatalf("the set's concurrency as read was changed: %d entries, want 5", len(conc.entries))
+	}
+	if same := withoutLeftOutConcurrency(conc, nil); same != conc {
+		t.Fatal("with nothing left out the concurrency is not returned as it is")
+	}
+	onlyRedis := concurrencyOf(nil, map[string][]models.MockEntry{"test-1": {{Name: "r2", Unresolved: models.MockEntryUnresolvedAmbiguous}}}, nil)
+	if onlyRedis == nil {
+		t.Fatal("precondition: a marked entry is concurrency")
+	}
+	if got := withoutLeftOutConcurrency(onlyRedis, left); got != nil {
+		t.Fatalf("a set whose only concurrency is left out states %+v, want none (nil)", got)
 	}
 }
 
