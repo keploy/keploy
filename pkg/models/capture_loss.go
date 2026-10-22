@@ -191,10 +191,11 @@ const (
 	// subtree that a downstream build's capture could not mark as the
 	// application's, its kernel map of the subtree full, so whether their
 	// calls were the application's is left to a /proc walk, which a process
-	// reaped by then fails: their calls may be neither recorded nor
-	// mocked, and at replay reach a real dependency and pass. The test they
-	// were forked in fails (judged), a test's own kind (PerTest). What names
-	// the latest such process. Only under the proven switch.
+	// reaped by then fails: their calls may be neither recorded nor mocked,
+	// and at replay reach a real dependency and pass. Such a process lives on
+	// and may call in any later test, so the test it was forked in and every
+	// later test of the set fail (judged, from then on, as pid_map_refused).
+	// What names the latest such process. Only under the proven switch.
 	CaptureLossAppSubtreeUntracked CaptureLossKind = "app_subtree_untracked"
 )
 
@@ -424,16 +425,21 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 
 // PerTest says a loss of kind k, in the agent's counts, is the test's it
 // happened in, not a taint of every later test (design v14 §3.2's taint,
-// which the agent-life kinds carry): a client whose TLS handshake failed, or
-// was abandoned, lost that one call or may have, and its later calls are
-// captured, or lost, on their own; data the application sent over a
-// server-first protocol keploy relays is that test's call. One between two
-// tests is the next test's, as a miss between tests is.
+// which the agent-life kinds carry): a loss that can only have been that
+// test's own calls. A TLS handshake that failed, or was abandoned, lost that
+// one call or may have, and the client's later calls are captured, or lost,
+// on their own; so do a call over a server-first protocol keploy relays, a
+// call to a destination that refused at accept, a call whose container read
+// stalled, a skipped run of a program that captures one call's data, and a
+// piece of a connection the capture could not read or stopped recording.
+// One between two tests is the next test's, as a miss between tests is. A
+// kind that is not (what keploy cannot capture of a process or a connection
+// that lives on, app_subtree_untracked among them, and a kind this build
+// does not know) taints the test it happened in and every later one.
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded ||
-		k == CaptureLossAppSubtreeUntracked
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -622,7 +628,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
 	case CaptureLossAppSubtreeUntracked:
-		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's (its map of the subtree was full), so their calls may have been neither recorded nor mocked while this test ran", c.Count)
+		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's, its map of the subtree (262144 entries) full, so their calls may have been neither recorded nor mocked while this test or one before it ran; report it to keploy with the agent's log, which names the process", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

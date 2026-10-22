@@ -374,21 +374,32 @@ func TestAProcessKeployCouldNotClassifyLeavesTheTestsFromItNotJudged(t *testing.
 
 // What a downstream build's capture saw and could not read, or stopped
 // recording a connection over, fails the test it happened in (judged), and
-// that test only (PerTest); the text says which.
+// that test only (PerTest); an app process it could not mark, which lives
+// on, fails that test and every later one (agent-life). None is evidence;
+// the text says which.
 func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
 	for _, tc := range []struct {
-		k    CaptureLossKind
-		text string
+		k       CaptureLossKind
+		text    string
+		perTest bool
 	}{
-		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried"},
-		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)"},
+		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried", true},
+		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)", true},
+		{CaptureLossAppSubtreeUntracked, "could not mark 2 process(es) forked in the application's subtree as the application's", false},
 	} {
-		if tc.k.NotJudged() || !tc.k.PerTest() || tc.k.runScoped() {
-			t.Fatalf("%s: a judged loss, the test's own", tc.k)
+		if tc.k.NotJudged() || tc.k.Evidence() || tc.k.PerTest() != tc.perTest || tc.k.runScoped() {
+			t.Fatalf("%s: NotJudged %v, Evidence %v, PerTest %v; want a judged loss, PerTest %v", tc.k, tc.k.NotJudged(), tc.k.Evidence(), tc.k.PerTest(), tc.perTest)
 		}
 		at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: tc.k, Count: n}} }
-		if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, at(2)) {
-			t.Fatalf("%s: Charged = %+v, want the 2 since the previous test", tc.k, got)
+		// From the set's base (1) to now (5), the previous test ending at 3:
+		// a test's own kind is charged the 2 since that test, an agent-life
+		// kind the 4 since the base.
+		want := at(4)
+		if tc.perTest {
+			want = at(2)
+		}
+		if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: Charged = %+v, want %+v", tc.k, got, want)
 		}
 		if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
 			t.Fatalf("%s: Split = %v, %v: judged", tc.k, judged, notJudged)
@@ -399,30 +410,10 @@ func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
 	}
 }
 
-// A process forked in the application's subtree that a downstream build's
-// capture could not mark as the application's fails the test it was forked in
-// (judged), and that test only (PerTest); the text says why.
-func TestAnUntrackedForkOfTheAppFailsItsTest(t *testing.T) {
-	k := CaptureLossAppSubtreeUntracked
-	if k.NotJudged() || k.Evidence() || !k.PerTest() || k.runScoped() {
-		t.Fatalf("%s: a judged loss, the test's own", k)
-	}
-	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n}} }
-	if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, at(2)) {
-		t.Fatalf("Charged = %+v, want the 2 since the previous test", got)
-	}
-	if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
-		t.Fatalf("Split = %v, %v: judged", judged, notJudged)
-	}
-	if txt := at(2).Text(); !strings.Contains(txt, "could not mark 2 process(es) forked in the application's subtree") {
-		t.Fatalf("text %q does not say what happened", txt)
-	}
-}
-
 // A kind this build does not know (a newer agent's) is kept whole when what
-// carries it is read and written again, in YAML and in JSON, and it is judged:
-// an older reader fails the tests it taints rather than drop the loss or pass
-// them.
+// carries it is read and written again, in YAML and in JSON, and it is judged
+// and agent-life: an older reader fails every test from it on rather than
+// drop the loss or pass them.
 func TestAKindThisBuildDoesNotKnowIsKeptAndJudged(t *testing.T) {
 	newer := CaptureLossKind("a_kind_from_a_newer_build")
 	losses := CaptureLosses{{Kind: newer, Count: 2, What: "the latest: pid 7 (app)"}}
@@ -459,5 +450,14 @@ func TestAKindThisBuildDoesNotKnowIsKeptAndJudged(t *testing.T) {
 	}
 	if judged, _ := losses.Split(); len(judged) != 1 {
 		t.Fatalf("Split = %v: an unknown kind must be judged", judged)
+	}
+	// And it is agent-life: charged from the set's base, so it taints the
+	// test it happened in and every later one.
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: newer, Count: n}} }
+	if newer.PerTest() {
+		t.Fatal("an unknown kind is a test's own: an older reader would charge it to one test only")
+	}
+	if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, at(4)) {
+		t.Fatalf("Charged = %+v, want the 4 since the set's base", got)
 	}
 }

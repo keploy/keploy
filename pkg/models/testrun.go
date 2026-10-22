@@ -246,9 +246,14 @@ type FailureInfo struct {
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
-	//   - every kind but real_uncaptured: what the agent lost since the test
-	//     set began, as this test ended. A loss taints the test running when
-	//     it happened and every later test of the set (design v14 §3.2).
+	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
+	//     kind not PerTest): what the agent lost since the test set began, as
+	//     this test ended. Such a loss taints the test running when it
+	//     happened and every later test of the set (design v14 §3.2).
+	//   - a test's own kind (CaptureLossKind.PerTest: tls_handshake_failed,
+	//     capture_unread, connection_unrecorded and the others): what the
+	//     agent lost while this test ran, since the previous test ended, for
+	//     this test alone.
 	//   - real_uncaptured (class e, mock.real): the connections keploy could
 	//     neither capture nor relay as real that were undecided or used while
 	//     this test ran, counted for this test alone. One undecided across
