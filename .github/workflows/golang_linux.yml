@@ -468,7 +468,7 @@ jobs:
   # from are in this repo (test_workflow_scripts/golang/mock_mismatch_streaming);
   # the recorded read of the store is rewritten so the replay's read matches
   # no mock. The lane ran on samples-go sse-redis until Redis became a Keploy
-  # Enterprise dependency.
+  # Enterprise dependency (OSS keploy passes Redis through; redis_skip below).
   # Not record_build_replay_latest: a release replayer predates the feature.
   mock_mismatch_streaming:
     timeout-minutes: 30
@@ -537,6 +537,93 @@ jobs:
             ${{ runner.temp }}/mock_mismatch_streaming/keploy/
             ${{ runner.temp }}/mock_mismatch_streaming/*.txt
             ${{ runner.temp }}/mock_mismatch_streaming/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  # OSS keploy records and mocks no Redis (Keploy Enterprise does): a Redis
+  # connection is relayed to the real server in record and in test mode, and
+  # the agent says so once per destination with the Enterprise URL. The app
+  # (test_workflow_scripts/golang/redis_skip) uses two Redis servers (go-redis,
+  # a pool and a pipeline), a memcached and an echo server it sends a RESP
+  # array naming no Redis command. keploy record writes the test cases and no
+  # Redis mock, Generic still records memcached and the echo server, the
+  # notice is said once per Redis destination and never for the others, and
+  # keploy test passes with Redis live. CLEAN CUT: a test set the latest
+  # release recorded (Generic Redis mocks; the record_latest cell's own, and
+  # the committed fixture in every cell) replays with this build, Redis live,
+  # and passes, by default, under KEPLOY_PROVEN=1 and with
+  # --remove-unused-mocks (which keeps its Redis mocks), and its debug log
+  # proves the Generic parser neither held nor served one of its Redis mocks.
+  # Not record_build_replay_latest: a release that predates the skip mocks
+  # Redis at replay, and this build records none.
+  redis_skip:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: redis-skip (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, replay with Redis live, replay the fixture
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          WORK: ${{ runner.temp }}/redis_skip
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/redis_skip/golang-linux.sh"
+
+      - name: Upload redis_skip recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-skip-${{ matrix.config.job }}
+          path: |
+            ${{ runner.temp }}/redis_skip/keploy/
+            ${{ runner.temp }}/redis_skip/fixture-*/keploy/reports/
+            ${{ runner.temp }}/redis_skip/fixture-*/keploy/test-set-0/mocks.yaml
+            ${{ runner.temp }}/redis_skip/*.log
           if-no-files-found: warn
           retention-days: 7
 

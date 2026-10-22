@@ -60,6 +60,8 @@
 #      session, so no test is required to make them, and every test that uses
 #      the connection is served them.
 #  10. No data race in any log.
+#  11. No log says Redis calls were skipped: the Redis skip (a keploy
+#      without a Redis parser relays Redis) claims no MySQL or HTTP connection.
 #
 # Which binary is this build: download-binary's build/keploy or
 # build-no-race/keploy. A published release replaying a recording that states
@@ -403,6 +405,14 @@ fi
 
 # 10.
 if grep -rl 'WARNING: DATA RACE' --include='*.log' .; then fail "data race in a keploy log"; fi
+# 11. A keploy without a Redis parser passes Redis through and says so
+# (integrations.RedisSkipNotice); this lane has no Redis, so no log may say
+# it: the skip claimed a MySQL or HTTP connection, and nothing of it was
+# recorded or mocked.
+if grep -rl 'Redis calls are skipped' --include='*.log' .; then
+    fail "a keploy log says Redis calls were skipped on a lane whose dependencies are MySQL and HTTP"
+    grep -rn 'Redis calls are skipped' --include='*.log' . | head -5
+fi
 
 if [ "$FAIL" -ne 0 ]; then
     echo "$FAIL check(s) failed"

@@ -1,0 +1,15 @@
+# The redis-skip lane's dependencies (golang-linux.sh): two Redis servers and
+# a memcached, published on loopback. The app runs on the host under keploy.
+services:
+  redis-a:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    ports:
+      - "127.0.0.1:6379:6379"
+  redis-b:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    ports:
+      - "127.0.0.1:6380:6379"
+  memcached:
+    image: ${MEMCACHED_IMAGE:-memcached:1.6-alpine}
+    ports:
+      - "127.0.0.1:11211:11211"
