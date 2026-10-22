@@ -1573,12 +1573,12 @@ func TestStart_TheSwitchsCheckOfATestCaseSavedSlowlyIsMadeWhileTheAgentIsHeld(t 
 }
 
 // A saved test case stays counted as one still to be checked
-// (uncheckedCount) until its read is asked, which takes it off under the
-// lock the drains look under (countReads.askTest), so a drain that looks
-// while the check is being asked holds the agent's streams for it, and the
-// check is made while the agent is up: the recording, which lost nothing,
-// passes. Were the consumer to take it off before the ask, a drain looking
-// in between would find nothing unchecked and no read out, and end the
+// (uncheckedCount) until its read is out: the consumer takes it off once
+// the watch has asked it (countReads.askTest), so a drain that looks while
+// the check is being asked holds the agent's streams for it, and the check
+// is made while the agent is up: the recording, which lost nothing, passes.
+// Were the consumer to take it off before the ask, a drain looking in
+// between would find nothing unchecked and no read out, and end the
 // streams; the agent would go, the check be refused, and test-2 be named not
 // verified (exit 1).
 func TestStart_ADrainThatLooksAsACheckIsAskedHoldsTheAgentsStreamsForIt(t *testing.T) {
@@ -1669,8 +1669,8 @@ func heldChecks(t *testing.T) (*countReads, *tokenReader, *uncheckedCount) {
 
 // What the stop's frame drains hold the agent's streams for, as one look
 // sees it (countReads.holds): a test case handed over is unchecked until its
-// save fails or its check's read is asked, which takes it off as it puts
-// the read out; the read out holds them until it is answered.
+// save fails or its check's read is out, when the consumer takes it off;
+// the read out holds them until it is answered.
 func TestACheckIsTakenOffUncheckedAsItsReadIsAsked(t *testing.T) {
 	reads, reader, unchecked := heldChecks(t)
 	look := func(wantOut, wantUnchecked bool, when string) {
@@ -1686,6 +1686,8 @@ func TestACheckIsTakenOffUncheckedAsItsReadIsAsked(t *testing.T) {
 	unchecked.settled() // test-2's save failed
 	look(false, true, "test-1 still being saved")
 	reads.askTest("test-1")
+	look(true, true, "test-1's check asked, the consumer yet to take it off")
+	unchecked.settled() // as the consumer does once the ask returns
 	look(true, false, "test-1's check asked")
 	reader.answer <- struct{}{}
 	if !reads.wait(false) {
@@ -1695,12 +1697,12 @@ func TestACheckIsTakenOffUncheckedAsItsReadIsAsked(t *testing.T) {
 }
 
 // No look of the stop's drains finds a test case's check taken off unchecked
-// with its read not yet out: askTest does both in one step, under the lock
-// a look is made under. A drain that looks without pause sees each test
-// case handed over unchecked, or its check's read out, until the read is
-// answered. Were the test case taken off first, outside that step, a look in
-// between would find neither, and end the agent's streams with the check yet
-// to be made.
+// with its read not yet out: askTest puts the read out under the lock a look
+// is made under, and the consumer takes the test case off after it returns.
+// A drain that looks without pause sees each test case handed over
+// unchecked, or its check's read out, until the read is answered. Were the
+// test case taken off first, a look in between would find neither, and end
+// the agent's streams with the check yet to be made.
 func TestNoLookFindsACheckTakenOffBeforeItsReadIsOut(t *testing.T) {
 	reads, reader, unchecked := heldChecks(t)
 	const checks = 500
@@ -1722,6 +1724,8 @@ func TestNoLookFindsACheckTakenOffBeforeItsReadIsOut(t *testing.T) {
 			runtime.Gosched()
 		}
 		reads.askTest(fmt.Sprintf("test-%d", i))
+		// As the consumer does, once the ask has returned.
+		unchecked.settled()
 		for n := looks.Load(); looks.Load() == n; { // and looks once it is
 			runtime.Gosched()
 		}
@@ -1776,6 +1780,88 @@ func TestStart_ATestCaseTheDrainCouldNotSaveHoldsNoStream(t *testing.T) {
 	}
 }
 
+// baseReadAgent is a stopHeldAgent whose first read of its count, the
+// switch's base read, fails with base.
+type baseReadAgent struct {
+	*stopHeldAgent
+	base  error
+	first atomic.Bool
+}
+
+func (b *baseReadAgent) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	if b.first.CompareAndSwap(false, true) {
+		return nil, b.base
+	}
+	return b.stopHeldAgent.GetCaptureLosses(ctx)
+}
+
+// Under the switch, a recording whose watch asks no check, because its base
+// read failed or its agent cannot count (models.ErrCaptureLossesUnsupported),
+// holds the agent's streams for none: the consumer takes every test case it
+// saves off unchecked, whatever the watch did with its check, so the stop's
+// drains end the streams once they are through, and no test case is left
+// counted. A base read refused fails the recording, test-1 and its end not
+// verified, for the agent's reason; an agent that cannot count passes it,
+// unchecked. Were a saved test case left counted, a drain that looked at the
+// count would hold the agent's streams for a check that never comes, until
+// the stop gave it up on its stall (this test's drain clock never does).
+func TestStart_AWatchThatAsksNoCheckHoldsNoStream(t *testing.T) {
+	refused := errors.New("failed to ask the agent for its capture losses: unexpected status 500")
+	for _, c := range []struct {
+		name string
+		base error
+	}{
+		{"its base read refused", refused},
+		{"an agent that cannot count", models.ErrCaptureLossesUnsupported},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := &baseReadAgent{stopHeldAgent: newStopHeldAgent(0), base: c.base}
+			r, logs, done := startHeld(t, a, nil, func(r *Recorder) { r.drainClock = &stall.ManualClock{} })
+			select {
+			case a.incoming <- tcAt("test-1", time.Now()):
+			case <-time.After(30 * time.Second): // only turns a hang into a failure
+				t.Fatal("test-1 was never taken")
+			}
+			close(a.appEnd) // the stop
+			a.clear.Store(true)
+			within(t, a.ended, "the agent's streams ended, with no check to make")
+			select {
+			case <-done:
+			case <-time.After(60 * time.Second): // only turns a hang into a failure
+				t.Fatal("Start never returned")
+			}
+			if gaveUp(logs, "record-req")() {
+				t.Fatal("the stop's drain was given up")
+			}
+			if r.unchecked.Load().any() {
+				t.Fatal("test-1, saved, is still counted as a test case whose check is yet to be asked; none is asked")
+			}
+			if n := a.answered.Load() + a.refused.Load(); n != 0 {
+				t.Fatalf("%d reads after the base read; none is made once it failed", n)
+			}
+			db := r.testDB.(*recTestDB)
+			db.mu.Lock()
+			saved := strings.Join(db.inserted, ",")
+			db.mu.Unlock()
+			if saved != "test-1" {
+				t.Fatalf("saved [%s]; want test-1", saved)
+			}
+			if c.base == refused {
+				if utils.ErrCode != utils.ExitKeployError {
+					t.Fatalf("exit code %d, want %d: a test case keploy could not verify fails the recording", utils.ErrCode, utils.ExitKeployError)
+				}
+				if names, why := notVerified(t, logs); names != "[test-1]" || why != refused.Error() {
+					t.Fatalf("named %s for %q; want [test-1] for %q", names, why, refused)
+				}
+				return
+			}
+			if utils.ErrCode != 0 || logs.FilterMessageSnippet("is not verified").Len() != 0 {
+				t.Fatalf("exit code %d, %v; an agent that cannot count leaves the recording unchecked, not failed", utils.ErrCode, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+			}
+		})
+	}
+}
+
 // With the switch off nothing of this holds the agent's streams: the stop's
 // drain ends them with a test case's save still out, as it always has.
 func TestStart_WithTheSwitchOffTheDrainDoesNotWaitForATestCasesSave(t *testing.T) {
@@ -1809,6 +1895,11 @@ func TestStart_WithTheSwitchOffTheDrainDoesNotWaitForATestCasesSave(t *testing.T
 	case <-done:
 	case <-time.After(60 * time.Second): // only turns a hang into a failure
 		t.Fatal("Start never returned")
+	}
+	// The consumer takes each test case off unchecked as it is through with
+	// it, the switch off too: none is left counted.
+	if r.unchecked.Load().any() {
+		t.Fatal("a test case the consumer saved is still counted as one whose check is yet to be asked")
 	}
 }
 

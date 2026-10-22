@@ -635,13 +635,13 @@ type Recorder struct {
 	readHoldSaid atomic.Bool
 	// unchecked is the recording's count of the test cases the test-case
 	// drain has handed to its consumer whose capture watch's check is yet to
-	// be asked (uncheckedCount): with capReads, which takes them off as it
-	// asks their reads, the stop's frame drains hold the agent's streams
-	// open meanwhile too (holdForReads), so the check is asked, and made,
-	// while the agent is up. Start makes a new one. checkHolds counts the
-	// looks at which a drain held them for that alone: not progress for the
-	// stop's outer drains, which a consumer wedged in a save must not keep
-	// from giving up.
+	// be asked (uncheckedCount): the consumer takes each off once it is
+	// through with it, and with capReads the stop's frame drains hold the
+	// agent's streams open meanwhile too (holdForReads), so the check is
+	// asked, and made, while the agent is up. Start makes a new one.
+	// checkHolds counts the looks at which a drain held them for that alone:
+	// not progress for the stop's outer drains, which a consumer wedged in a
+	// save must not keep from giving up.
 	unchecked  atomic.Pointer[uncheckedCount]
 	checkHolds atomic.Uint64
 	// teardown is the recording's own teardown scope (Start): what keploy
@@ -902,7 +902,7 @@ func (r *Recorder) holdForReads() bool {
 	if reads == nil {
 		return false
 	}
-	// One look: a check is taken off unchecked as its read is asked.
+	// One look: a test case is taken off unchecked once its read is out.
 	readOut, unchecked := reads.holds()
 	if !readOut {
 		if unchecked {
@@ -2685,7 +2685,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// After the insert, which is what names an auto-named test case.
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
-				// Not saved: no check is asked for it (holdForReads).
+				// Not saved: no check is asked for it (holdForReads). The
+				// consumer takes every test case it is handed off
+				// unchecked, here or once its check is asked below, so a
+				// look finds none counted that it is through with.
 				unchecked.settled()
 				windowMaps.addLostTest(testCase)
 				if ctx.Err() != nil {
@@ -2723,10 +2726,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
-				// Off unchecked as its read is asked, under the lock the
-				// stop's drains look under (countReads.askTest): its read
-				// out holds them in its turn (holdForReads).
 				capWatch.afterTestCase(ctx, testCase.Name)
+				// Off unchecked once its check is asked, whatever the watch
+				// did with it (asked its read, or none: the switch off, a
+				// base read that failed): its read, if one is out, holds the
+				// stop's drains in its turn (holdForReads). Not before the
+				// ask: a look between the two would find neither.
+				unchecked.settled()
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
