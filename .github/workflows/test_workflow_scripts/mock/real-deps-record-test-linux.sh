@@ -185,11 +185,24 @@ mock:
     - localhost:${REAL_PORT}
 EOF
 
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+  local st
+  case $1 in "" | *[!0-9]*) return 1 ;; esac
+  { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+  st=${st##*) }
+  [ "${st%% *}" != Z ]
+}
+
 # app_up PID: waits until the app accepts a connection, or keploy (PID)
 # ends. A bare connect sends no request, so it records no test case.
 app_up() {
   until (exec 3<>"/dev/tcp/127.0.0.1/${APP_PORT}") 2>/dev/null; do
-    kill -0 "$1" 2>/dev/null || return 1
+    pid_running "$1" || return 1
     sleep 0.2
   done
 }
