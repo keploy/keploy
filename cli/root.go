@@ -70,8 +70,11 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	}
 
 	for _, cmd := range Registered {
-		c := cmd(ctx, logger, conf, svcFactory, cmdConfigurator)
-		rootCmd.AddCommand(c)
+		// A hook whose command does not exist in this process says so with nil
+		// (HookFunc).
+		if c := cmd(ctx, logger, conf, svcFactory, cmdConfigurator); c != nil {
+			rootCmd.AddCommand(c)
+		}
 	}
 
 	// Every binary (OSS and enterprise — enterprise builds its root through this
