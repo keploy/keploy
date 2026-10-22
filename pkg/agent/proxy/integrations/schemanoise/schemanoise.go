@@ -21,10 +21,7 @@
 // mocknoise path and no released artifact still imports this one.
 package schemanoise
 
-import (
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
-	"go.keploy.io/server/v3/pkg/models"
-)
+import "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 
 // Adapter is the per-protocol contract for the mock-noise engine.
 //
@@ -52,13 +49,6 @@ func New(a Adapter, detection, strict bool) *Engine { return mocknoise.New(a, de
 // Deprecated: use mocknoise.MergeLearned.
 func MergeLearned(existing, detected map[string][]string) map[string][]string {
 	return mocknoise.MergeLearned(existing, detected)
-}
-
-// MergeLearnedWords merges newly learned words into a mock's existing words.
-//
-// Deprecated: use mocknoise.MergeLearnedWords.
-func MergeLearnedWords(existing, detected map[string]models.WordsEntry) map[string]models.WordsEntry {
-	return mocknoise.MergeLearnedWords(existing, detected)
 }
 
 // MergeKnown unions two known-noise maps.
