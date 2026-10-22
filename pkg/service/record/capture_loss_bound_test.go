@@ -449,34 +449,43 @@ func TestAPressAtTheSwitchsFinishLeavesTheFinalReadNotVerified(t *testing.T) {
 	}
 }
 
-// A test case asked for as finish began (a consumer of a record drain that
-// gave up saves one after finish's wait), and a final read asked for that no
-// read answered, are not verified: unknown is not none. No order a test can
-// set from outside puts an ask between finish's wait and its lock, so this
-// leaves the watch as such asks do (their read not yet made) and runs finish.
+// Test cases asked for as finish began (a consumer of a record drain that
+// gave up saves them after finish's wait), and a final read asked for that
+// no read answered, are not verified: unknown is not none. Of those test
+// cases, one may be counted by a read already out as finish takes the lock
+// (asked once its wait had returned), the rest not yet taken by any. No
+// order a test can set from outside puts an ask between finish's wait and
+// its lock, so this leaves the watch as such asks do: test-1's read out, its
+// test case taken by the read goroutine (which leaves the read out as the
+// wait found none), test-2 asked and not yet taken, and the final read
+// asked; and runs finish. Their answer, once it comes, changes nothing.
 func TestWhatWasAskedAsTheSwitchsFinishBeganIsNotVerified(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	instr := &countingInstr{answers: []models.CaptureLosses{nil}}
+	h := &heldReader{perTest: make(chan struct{}), release: make(chan struct{}), then: pid(1)}
 	core, logs := observer.New(zapcore.ErrorLevel)
-	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	w := watchCaptureLosses(context.Background(), zap.New(core), h)
 	w.afterTestCase(context.Background(), "test-1")
-	settle(w)
+	<-h.perTest // test-1's read is out, made by the read goroutine
 	w.mu.Lock()
+	idle := w.reads.idle
+	w.reads.reading = false // asked once finish's wait had returned
 	w.reads.pending = append(w.reads.pending, "test-2")
 	w.reads.finalAsked = true
 	w.mu.Unlock()
-	if !w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[test-2]" {
-		t.Fatalf("%s; want test-2 not verified and the recording failed", w)
+	if !w.finish("test-set-0", false) || w.String() != "tainted=[] unverified=[test-1,test-2]" {
+		t.Fatalf("%s; want test-1 and test-2 not verified and the recording failed", w)
 	}
-	if names, why := notVerified(t, logs); names != "[test-2]" || why != errCaptureCountNotRead.Error() {
-		t.Fatalf("named %s for %q; want [test-2] for %q", names, why, errCaptureCountNotRead)
+	if names, why := notVerified(t, logs); names != "[test-1 test-2]" || why != errCaptureCountNotRead.Error() {
+		t.Fatalf("named %s for %q; want [test-1 test-2] for %q", names, why, errCaptureCountNotRead)
 	}
 	errs := logs.FilterMessageSnippet("could not read whether its agent captured every call after the last test case was recorded").All()
 	if len(errs) != 1 || fmt.Sprint(errs[0].ContextMap()["error"]) != errCaptureCountNotRead.Error() {
 		t.Fatalf("ERRORs %v; want one saying the final read was not read, for %q", errs, errCaptureCountNotRead)
 	}
-	if instr.reads != 2 {
-		t.Fatalf("%d reads; want the base and test-1's: finish made none", instr.reads)
+	close(h.release) // test-1's read answers, after finish
+	<-idle
+	if n := h.n.Load(); n != 2 || w.String() != "tainted=[] unverified=[test-1,test-2]" {
+		t.Fatalf("%d reads, %s; want the base and test-1's, finish making none, and the late answer changing nothing", n, w)
 	}
 }
 
@@ -604,6 +613,66 @@ func TestTheSwitchsCheckThatLagsSaysWhatItCannotJudgeForEveryTestCaseItCounts(t 
 	}
 	if got := fmt.Sprint(w.uncapturable); got != "[test-2 test-3]" {
 		t.Fatalf("said %s for the abandoned handshake; want [test-2 test-3]", got)
+	}
+}
+
+// Where a later pass judges each test case (JudgeLossesLater), what a check
+// charges is the only word that pass has of a test case's window
+// (RecordedLosses.ByTestCase), and it keeps a test case it finds nothing
+// against. A check that lags counts every test case saved since the last
+// together, and hands each of them all it charged: a handshake failed, one
+// abandoned, and runs of keploy's programs the kernel skipped, while test-2
+// and test-3 were saved, are on both, in full. Were they on one alone, the
+// pass would keep the other, a test case recorded while a call was lost: a
+// false green.
+func TestALaggingCheckHandsEachTestCaseItCountsAllItCharged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	got := judgeLater(t)
+	lost := models.CaptureLosses{
+		{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to a:443"},
+		{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to b:443"},
+		{Kind: models.CaptureLossKernelSkip, Count: 2},
+	}
+	h := &heldReader{perTest: make(chan struct{}), release: make(chan struct{}), then: lost}
+	w := watchCaptureLosses(context.Background(), zap.NewNop(), h)
+	w.afterTestCase(context.Background(), "test-1")
+	<-h.perTest // test-1's check is out
+	w.afterTestCase(context.Background(), "test-2")
+	w.afterTestCase(context.Background(), "test-3")
+	close(h.release) // test-1's: nothing lost; the next, for test-2 and test-3: lost
+	settle(w)
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0", false) {
+		t.Fatal("the recording failed on what a later pass judges")
+	}
+	if h.n.Load() != 4 {
+		t.Fatalf("%d reads; want the base, test-1's, one for test-2 and test-3, and the final read", h.n.Load())
+	}
+	if len(*got) != 1 {
+		t.Fatalf("handed %d accounts, want 1", len(*got))
+	}
+	l := (*got)[0]
+	if _, ok := l.ByTestCase["test-1"]; ok {
+		t.Fatalf("test-1, whose check saw nothing lost, was charged: ByTestCase=%v", l.ByTestCase)
+	}
+	byKind := func(c models.CaptureLosses) map[models.CaptureLossKind]uint64 {
+		m := map[models.CaptureLossKind]uint64{}
+		for _, x := range c {
+			m[x.Kind] += x.Count
+		}
+		return m
+	}
+	want := fmt.Sprint(byKind(lost))
+	for _, n := range []string{"test-2", "test-3"} {
+		if fmt.Sprint(byKind(l.ByTestCase[n])) != want {
+			t.Fatalf("%s handed %v; want all the check that counted it charged, %v: ByTestCase=%v", n, l.ByTestCase[n], lost, l.ByTestCase)
+		}
+		if judged, _ := l.ByTestCase[n].Split(); len(judged) == 0 {
+			t.Fatalf("%s handed with nothing judged against it: the pass would keep it", n)
+		}
+	}
+	if fmt.Sprint(l.FailingTestCases()) != "[test-2 test-3]" || len(l.Uncharged) != 0 {
+		t.Fatalf("handed failing %v, uncharged %v; want test-2 and test-3, and nothing the set's", l.FailingTestCases(), l.Uncharged)
 	}
 }
 
@@ -1992,4 +2061,38 @@ func TestStart_ARecorderStartedAgainHoldsTheAgentsStreamsForItsOwnReadsAlone(t *
 	}
 	within(t, a.ended, "the agent's streams ended once this recording's reads were answered")
 	passedWhole(t, done, logs, &a.refused)
+}
+
+// What an earlier recording on the same recorder left of its reads is not
+// this one's to hold the agent's streams for either: until this recording's
+// watch has its base read, and its reads are the ones a drain's look sees,
+// a look sees none. Here the earlier recording's read is still out (given up
+// on its bound only later), and a drain's look (made by the test, as one
+// made at a stop that comes as capture begins) comes while this recording's
+// base read is out: were the earlier reads kept, the look would hold the
+// agent's streams for a read this recording never asked, and say it waits
+// for one.
+func TestStart_ALookBeforeARecorderStartedAgainHasItsReadsHoldsForNoEarlierRead(t *testing.T) {
+	a := newStopHeldAgent(1) // the base read is slow
+	a.clear.Store(true)      // nothing held from before the stop
+	earlier := newCountReads(context.Background(), zap.NewNop(), &tokenReader{answer: make(chan struct{})}, &sync.Mutex{}, errCaptureCountSilent, "", "", func(countRead) {})
+	earlier.reading = true // the earlier recording's read, still out
+	r, logs, done := startHeld(t, a, nil, func(r *Recorder) {
+		r.capReads.Store(earlier)
+		r.drainClock = &stall.ManualClock{}
+	})
+	within(t, a.asked, "this recording's base read")
+	if r.holdForReads() {
+		t.Fatal("a look as this recording's base read was out held the agent's streams for the earlier recording's read")
+	}
+	if n := logs.FilterMessage(heldForReads).Len(); n != 0 {
+		t.Fatalf("said %d times that the drains hold the agent's streams for a read, with none of this recording's out", n)
+	}
+	close(a.release)
+	close(a.appEnd) // the stop
+	within(t, a.ended, "the agent's streams ended once this recording's reads were answered")
+	passedWhole(t, done, logs, &a.refused)
+	if n := a.answered.Load(); n != 2 {
+		t.Fatalf("%d reads answered; want the base and the final read", n)
+	}
 }
