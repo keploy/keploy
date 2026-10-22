@@ -117,7 +117,7 @@ func TestAMockLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 		w[0].ContextMap()["mockName"] != "left-out" {
 		t.Fatalf("the mock left out is said %d time(s) at WARN (%v), want once, with why and for which connection", len(w), w)
 	}
-	if next, _ := w[0].ContextMap()["next_step"].(string); next != leftOutNextStep(leftOutOther, true) {
+	if next, _ := w[0].ContextMap()["next_step"].(string); next != leftOutNextStep(leftOutOther, true, models.LossFateLeftOut) {
 		t.Fatalf("the WARN's next_step is %q, want what to do for its reason", next)
 	}
 	if _, ok := w[0].ContextMap()["sameWarningsHeldBack"]; ok {
@@ -162,7 +162,7 @@ func TestAMockLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 		leaveOut(tc.reason)
 		w = warns()
 		last := w[len(w)-1].ContextMap()
-		if len(w) != n+1 || last["reason"] != tc.reason || last["next_step"] != leftOutNextStep(tc.class, true) {
+		if len(w) != n+1 || last["reason"] != tc.reason || last["next_step"] != leftOutNextStep(tc.class, true, models.LossFateLeftOut) {
 			t.Fatalf("a %s mock left out after another cause's WARN is not said at WARN with its own next_step (last WARN: %v)", tc.reason, last)
 		}
 		if _, ok := last["sameWarningsHeldBack"]; ok {
@@ -290,7 +290,7 @@ func TestALeftOutWarnPastTheCausesKeptIsLimitedByItsClass(t *testing.T) {
 		if warned := len(w) == n+1; warned != tc.warned {
 			t.Fatalf("%q said at WARN: %v, want %v", tc.reason, warned, tc.warned)
 		}
-		if tc.warned && w[len(w)-1].ContextMap()["next_step"] != leftOutNextStep(tc.class, true) {
+		if tc.warned && w[len(w)-1].ContextMap()["next_step"] != leftOutNextStep(tc.class, true, models.LossFateLeftOut) {
 			t.Fatalf("%q is said with next_step %v, want its class's", tc.reason, w[len(w)-1].ContextMap()["next_step"])
 		}
 	}
@@ -746,7 +746,7 @@ func TestAMockLeftOutIsSpannedOverItsOwnTimesOnly(t *testing.T) {
 		t.Fatalf("%d left-out WARNs, want 1", len(w))
 	}
 	next, _ := w[0].ContextMap()["next_step"].(string)
-	if next != leftOutNextStep(leftOutOther, false) || !strings.Contains(next, "no span was recorded") ||
+	if next != leftOutNextStep(leftOutOther, false, models.LossFateLeftOut) || !strings.Contains(next, "no span was recorded") ||
 		!strings.Contains(next, "no test case is left out for it") || strings.Contains(next, "not saved yet") {
 		t.Fatalf("the next_step of a mock with no span is %q, want one that says no test case was left out for it", next)
 	}
@@ -814,7 +814,7 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 		}
 		w := warned(t, r)
 		if w["reason"] != "http decode error: response read failed: bad" || w["kind"] != string(models.HTTP) ||
-			w["spanRecorded"] != true || w["next_step"] != leftOutNextStep(leftOutOther, true) {
+			w["spanRecorded"] != true || w["next_step"] != leftOutNextStep(leftOutOther, true, models.LossFateLeftOut) {
 			t.Fatalf("the WARN says %v, want the parser's reason, the HTTP kind, its span and class other's next_step", w)
 		}
 		if r.s.IsMockIncomplete() {
@@ -830,7 +830,7 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 		}
 		w := warned(t, r)
 		if w["reason"] != relay.DropPerConnCap+": mysql exchange not recorded: framing lost" || w["kind"] != string(models.MySQL) ||
-			w["next_step"] != leftOutNextStep(leftOutPerConnCap, true) {
+			w["next_step"] != leftOutNextStep(leftOutPerConnCap, true, models.LossFateLeftOut) {
 			t.Fatalf("the WARN says %v, want the mark's cause and per_conn_cap's next_step, then the parser's reason", w)
 		}
 		if reason, ok := r.s.TakeMockIncomplete(); ok {
@@ -855,7 +855,7 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 		if n := r.mgr.MocksLeftOut(); n != 1 {
 			t.Fatalf("counted %d, want 1", n)
 		}
-		if w := warned(t, r); w["spanRecorded"] != false || w["next_step"] != leftOutNextStep(leftOutOther, false) {
+		if w := warned(t, r); w["spanRecorded"] != false || w["next_step"] != leftOutNextStep(leftOutOther, false, models.LossFateLeftOut) {
 			t.Fatalf("the WARN says %v, want no span recorded and its next_step", w)
 		}
 	})
@@ -1119,7 +1119,7 @@ func TestTheLeftOutWarnPromisesOnlyWhatHolds(t *testing.T) {
 		{"short_write", "--debug"},
 		{"http decode error: response read failed: invalid content-length", "--debug"},
 	} {
-		next := leftOutNextStep(leftOutClass(leftOutCause(tc.reason)), true)
+		next := leftOutNextStep(leftOutClass(leftOutCause(tc.reason)), true, models.LossFateLeftOut)
 		for _, want := range []string{"traffic is unaffected", "not saved yet", "are left out of the recording",
 			"saved before then", "lacks this mock", "no_mocks", tc.knob} {
 			if !strings.Contains(next, want) {
@@ -1130,16 +1130,16 @@ func TestTheLeftOutWarnPromisesOnlyWhatHolds(t *testing.T) {
 			t.Errorf("reason %q: next_step %q promises the test cases over the exchange are never saved without its mock", tc.reason, next)
 		}
 	}
-	if next := leftOutNextStep(leftOutClass(relay.DropPerConnCap), true); !strings.Contains(next, "a full buffer behind") ||
+	if next := leftOutNextStep(leftOutClass(relay.DropPerConnCap), true, models.LossFateLeftOut); !strings.Contains(next, "a full buffer behind") ||
 		!strings.Contains(next, "before the lost chunk") {
 		t.Errorf("per_conn_cap: next_step %q does not say the parser was a full buffer behind, nor that the mock left out can be from before the lost chunk", next)
 	}
-	if strings.Contains(leftOutNextStep(leftOutClass(relay.DropMemoryPressure), true), "--debug") ||
-		strings.Contains(leftOutNextStep(leftOutClass(relay.DropPerConnCap), true), "--memory-limit") ||
-		strings.Contains(leftOutNextStep(leftOutClass(relay.DropDesynced), true), "--debug") {
+	if strings.Contains(leftOutNextStep(leftOutClass(relay.DropMemoryPressure), true, models.LossFateLeftOut), "--debug") ||
+		strings.Contains(leftOutNextStep(leftOutClass(relay.DropPerConnCap), true, models.LossFateLeftOut), "--memory-limit") ||
+		strings.Contains(leftOutNextStep(leftOutClass(relay.DropDesynced), true, models.LossFateLeftOut), "--debug") {
 		t.Error("a reason with its own knob was given another reason's")
 	}
-	if next := leftOutNextStep(leftOutClass(relay.DropDesynced), true); !strings.Contains(next, "lost a chunk earlier") ||
+	if next := leftOutNextStep(leftOutClass(relay.DropDesynced), true, models.LossFateLeftOut); !strings.Contains(next, "lost a chunk earlier") ||
 		!strings.Contains(next, "reason=per_conn_cap or reason=memory_pressure") || !strings.Contains(next, "captured whole before the loss") {
 		t.Errorf("desynced: next_step %q does not say that an earlier per_conn_cap or memory_pressure loss stopped the capture, nor that the mock left out was parsed from before it", next)
 	}
@@ -1161,7 +1161,7 @@ func TestTheLeftOutWarnPromisesOnlyWhatHolds(t *testing.T) {
 	if strings.Contains(w[0].Message, "left out") || strings.Contains(w[0].Message, "test case") {
 		t.Errorf("the WARN %q promises what happens to the test cases: whether they are left out depends on when they were saved", w[0].Message)
 	}
-	if w[0].ContextMap()["next_step"] != leftOutNextStep(leftOutPerConnCap, true) {
+	if w[0].ContextMap()["next_step"] != leftOutNextStep(leftOutPerConnCap, true, models.LossFateLeftOut) {
 		t.Errorf("the WARN's next_step is %v, want per_conn_cap's", w[0].ContextMap()["next_step"])
 	}
 }
@@ -1184,7 +1184,7 @@ func TestAResetStreamIsLeftOutWithItsOwnNextStep(t *testing.T) {
 			t.Errorf("reason %q is of class %q, want %q", tc.reason, got, tc.class)
 		}
 	}
-	next := leftOutNextStep(leftOutReset, true)
+	next := leftOutNextStep(leftOutReset, true, models.LossFateLeftOut)
 	for _, want := range []string{"traffic is unaffected", "reset (RST_STREAM) before it completed", "the capture lost nothing",
 		"which half of it had not ended", "A client's CANCEL is usually its deadline: raise it and re-record"} {
 		if !strings.Contains(next, want) {
@@ -1313,53 +1313,100 @@ func (o managerOrphans) RecordWhy(start, end time.Time, why string) {
 func (o managerOrphans) OpenWhy(start time.Time, why string) func() {
 	return o.m.OpenOrphanWindowWhy(start, why)
 }
+func (o managerOrphans) LossFate() models.LossFate { return o.m.LossFate() }
 
-// Under the proven switch the WARN for a mock left out says what becomes of
-// the test cases recorded over its exchange: keploy record keeps each, with
-// that as what its recording lost, for the auto-replay to judge (the agent
-// streams it with the loss), not that they are left out of the recording,
-// which with the switch on is no longer so. The advice for the cause is the
-// same either way. With the switch off the words are as before; and a mock
-// with no span, which charges no test case, is said the same either way.
+// The WARN for a mock left out says what becomes of the test cases recorded
+// over its exchange, as the session's recording does with them
+// (Session.LossFate): left out (models.LossFateLeftOut: the proven switch
+// off, or no open record stream that charges what a test case lost), kept,
+// each with that as what its recording lost, when every open stream charges
+// it, and both, each for its own clients, when some do. The advice for the
+// cause is the same either way; a mock with no span, which charges no test
+// case and leaves none out, is said the same either way.
 //
 // Not parallel: it sets the switch, and the WARN limit is process-wide.
-func TestUnderTheProvenSwitchALeftOutMocksWarnSaysItsTestCasesAreKept(t *testing.T) {
+func TestALeftOutMocksWarnSaysWhatTheOpenRecordingsDoWithItsTestCases(t *testing.T) {
 	const offHead = "the app's traffic is unaffected. Test cases recorded over this exchange that were not saved yet when the agent " +
 		"parsed it are left out of the recording; one saved before then (this connection's parser was behind the " +
 		"traffic) lacks this mock, and its replay fails with no_mocks. "
-	onHead := "the app's traffic is unaffected. keploy record keeps each test case recorded over this exchange, " + models.KeptToBeJudged + ". "
+	keptHead := "the app's traffic is unaffected. The recording keeps each test case recorded over this exchange, " + models.KeptToBeJudged + ". "
 	for _, class := range []string{leftOutOther, leftOutMemoryPressure, leftOutPerConnCap, leftOutDesynced, leftOutUnansweredCause, leftOutReset} {
-		t.Setenv(provenswitch.Env, "")
-		off, offNoSpan := leftOutNextStep(class, true), leftOutNextStep(class, false)
-		t.Setenv(provenswitch.Env, "1")
-		on, onNoSpan := leftOutNextStep(class, true), leftOutNextStep(class, false)
+		off, offNoSpan := leftOutNextStep(class, true, models.LossFateLeftOut), leftOutNextStep(class, false, models.LossFateLeftOut)
+		kept, keptNoSpan := leftOutNextStep(class, true, models.LossFateKept), leftOutNextStep(class, false, models.LossFateKept)
+		mixed := leftOutNextStep(class, true, models.LossFateMixed)
 		if !strings.HasPrefix(off, offHead) {
-			t.Fatalf("with the switch off, %s's next_step is %q, want it as before", class, off)
+			t.Fatalf("for a recording that leaves them out, %s's next_step is %q, want it as before", class, off)
 		}
-		if !strings.HasPrefix(on, onHead) || strings.Contains(on, "left out of the recording") {
-			t.Fatalf("under the switch, %s's next_step is %q, want that keploy record keeps the test cases over it, for the auto-replay to judge", class, on)
+		if !strings.HasPrefix(kept, keptHead) || strings.Contains(kept, "left out of the recording") {
+			t.Fatalf("for a recording that charges it, %s's next_step is %q, want that it keeps the test cases over it", class, kept)
 		}
-		if strings.TrimPrefix(on, onHead) != strings.TrimPrefix(off, offHead) {
-			t.Fatalf("under the switch, %s's advice is %q, want the same as with it off: %q", class, strings.TrimPrefix(on, onHead), strings.TrimPrefix(off, offHead))
+		if !strings.Contains(mixed, "keeps each test case recorded over this exchange") || !strings.Contains(mixed, "leaves such a test case out") {
+			t.Fatalf("with recordings of both kinds open, %s's next_step is %q, want what each does", class, mixed)
 		}
-		if onNoSpan != offNoSpan {
-			t.Fatalf("a %s mock with no span is said %q under the switch, want as with it off: %q", class, onNoSpan, offNoSpan)
+		if strings.TrimPrefix(kept, keptHead) != strings.TrimPrefix(off, offHead) {
+			t.Fatalf("for a recording that charges it, %s's advice is %q, want the same as for one that does not: %q", class, strings.TrimPrefix(kept, keptHead), strings.TrimPrefix(off, offHead))
+		}
+		if keptNoSpan != offNoSpan {
+			t.Fatalf("a %s mock with no span is said %q for a recording that charges it, want as for one that does not: %q", class, keptNoSpan, offNoSpan)
 		}
 	}
 
-	// And the WARN says it.
+	// The session says what its recording does: its manager's open streams
+	// (Mgr), or, where its spans go to an Orphans of the caller's, what that
+	// says (OrphanSpansFate); one that says nothing leaves them out.
 	t.Setenv(provenswitch.Env, "1")
+	mgr := syncMock.New(nil)
+	viaMgr := &Session{Mgr: mgr}
+	viaFate := &Session{Mgr: syncMock.New(nil), Orphans: managerOrphans{mgr}}
+	silent := &Session{Mgr: mgr, Orphans: &syncMock.Spans{}}
+	for _, s := range []*Session{viaMgr, viaFate, silent} {
+		if f := s.LossFate(); f != models.LossFateLeftOut {
+			t.Fatalf("with no stream open the session says %v, want left out", f)
+		}
+	}
+	closeCharging := mgr.OpenRecordStream(true)
+	if viaMgr.LossFate() != models.LossFateKept || viaFate.LossFate() != models.LossFateKept || silent.LossFate() != models.LossFateLeftOut {
+		t.Fatalf("with a stream that charges open, the sessions say %v, %v, %v; want kept, kept, left out", viaMgr.LossFate(), viaFate.LossFate(), silent.LossFate())
+	}
+	closePlain := mgr.OpenRecordStream(false)
+	if viaMgr.LossFate() != models.LossFateMixed {
+		t.Fatalf("with one stream of each kind open, the session says %v, want mixed", viaMgr.LossFate())
+	}
+	closeCharging()
+	closeCharging() // idempotent
+	if viaMgr.LossFate() != models.LossFateLeftOut {
+		t.Fatalf("with only a stream that does not charge open, the session says %v, want left out", viaMgr.LossFate())
+	}
+	closePlain()
+	var nilSession *Session
+	if nilSession.LossFate() != models.LossFateLeftOut {
+		t.Fatal("a nil session leaves them out")
+	}
+
+	// And the WARN says it, for the session's recording.
+	defer mgr.OpenRecordStream(true)()
 	prev := leftOutWarns
 	leftOutWarns = &WarnLimiters{every: leftOutWarnEvery, now: time.Now}
 	t.Cleanup(func() { leftOutWarns = prev })
-	core, logs := observer.New(zapcore.WarnLevel)
-	s := &Session{Mgr: syncMock.New(nil), Orphans: &syncMock.Spans{}, Logger: zap.New(core), ClientConnID: "conn-9", Ctx: context.Background()}
-	m := &models.Mock{Name: "left-out", Kind: models.MySQL}
-	m.Spec.ReqTimestampMock = time.Now().Add(-time.Minute)
-	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
-	s.ReportLeftOut(m, "mysql exchange not recorded: the COM_QUERY response holds more than one result")
-	w := logs.FilterMessage(LeftOutWarnMsg).All()
-	if len(w) != 1 || w[0].ContextMap()["next_step"] != leftOutNextStep(leftOutOther, true) {
-		t.Fatalf("under the switch the mock left out is said %v, want once, with next_step %q", w, leftOutNextStep(leftOutOther, true))
+	for _, tc := range []struct {
+		s    *Session
+		want models.LossFate
+	}{{viaFate, models.LossFateKept}, {silent, models.LossFateLeftOut}} {
+		leftOutWarns = &WarnLimiters{every: leftOutWarnEvery, now: time.Now}
+		core, logs := observer.New(zapcore.WarnLevel)
+		tc.s.Logger, tc.s.ClientConnID, tc.s.Ctx = zap.New(core), "conn-9", context.Background()
+		m := &models.Mock{Name: "left-out", Kind: models.MySQL}
+		m.Spec.ReqTimestampMock = time.Now().Add(-time.Minute)
+		m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
+		tc.s.ReportLeftOut(m, "mysql exchange not recorded: the COM_QUERY response holds more than one result")
+		w := logs.FilterMessage(LeftOutWarnMsg).All()
+		if len(w) != 1 || w[0].ContextMap()["next_step"] != leftOutNextStep(leftOutOther, true, tc.want) {
+			t.Fatalf("the mock left out is said %v, want once, with next_step %q", w, leftOutNextStep(leftOutOther, true, tc.want))
+		}
+	}
+	// With the switch off a stream that charges changes nothing.
+	t.Setenv(provenswitch.Env, "")
+	if f := viaMgr.LossFate(); f != models.LossFateLeftOut {
+		t.Fatalf("with the switch off the session says %v, want left out", f)
 	}
 }

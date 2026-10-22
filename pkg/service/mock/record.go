@@ -217,6 +217,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	// recordLossesUnread, why that could not be read.
 	var recordLosses models.CaptureLosses
 	var recordLossesUnread string
+	// recordCasesLost is, for a judged record, what the recording of the
+	// app's incoming requests as test cases lost that no test holds
+	// (caseLosses.chargeWindows): the run's, for judging.
+	var recordCasesLost string
 	recordJudged := false
 	defer func() {
 		// Only a build that judges the record reads these results; written
@@ -226,6 +230,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
 				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
+				TestCasesLost: recordCasesLost,
 			}, recordTests)
 		}
 	}()
@@ -517,6 +522,10 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Duration("stalledFor", mockDrainStall))
 	}
 	capture.wait(mockDrainStall)
+	// What the agent's incoming stream said as it ended (proven switch):
+	// what test cases it streamed with nothing lost had lost after all, and
+	// what it left out unnamed (case_losses.go).
+	capture.ended(m.instrumentation)
 
 	// 8a. A process the agent could not track -- the kernel refused it a place
 	//     in its PID map -- made calls the agent never saw, so the recording
@@ -563,6 +572,31 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", t))
+		if parent.Err() == nil {
+			m.propagateExit(appErr, "record")
+		}
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return errors.New("the recording is incomplete: " + t)
+	}
+	// Under the proven switch, what the recording of the app's incoming
+	// requests as test cases lost (case_losses.go): a test case the agent
+	// streamed with what its recording lost (an exchange keploy could not
+	// record as a mock while it ran, mocks let go), one a late loss names,
+	// the test cases the agent left out unnamed, or what its stream could
+	// not tell. Each test case is stored; the recording misses what was
+	// lost, so, as for any other loss of capture, it is not kept unless the
+	// record is judged, where what each test case lost is the evidence of
+	// the test it was recorded in (chargeWindows, below).
+	if t := capture.lossesOf().text(); t != "" && judgedRecord {
+		m.logger.Error("keploy could not record as mocks every call made while these test cases were recorded: each is stored, and what it lost is the evidence of the test it was recorded in, which judging decides; what no test holds is the run's ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.Strings("testCases", capture.lossesOf().names()), zap.String("reason", t))
+	} else if t != "" {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
+		}
+		m.logger.Error("the recording was not kept: keploy could not record as mocks every call made while these test cases were recorded; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
+			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.Strings("testCases", capture.lossesOf().names()), zap.String("reason", t),
+			zap.String("next_step", "fix what the reason names, then record again"))
 		if parent.Err() == nil {
 			m.propagateExit(appErr, "record")
 		}
@@ -727,6 +761,11 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.propagateExit(appErr, "record")
 		m.logger.Error(err.Error())
 		return err
+	}
+	if judgedRecord {
+		// What each test case stored with a loss lost is the evidence of the
+		// test it was recorded in; what no test holds is the run's.
+		recordCasesLost = capture.lossesOf().chargeWindows(windows)
 	}
 	recordTests, recordJudged = windows, true
 	keep = runnerPassed(appErr)

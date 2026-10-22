@@ -222,6 +222,15 @@ type TestsReceipt struct {
 	// test: judging fails the run on it, as on CaptureLosses (a read that
 	// failed is never "none").
 	CaptureLossesUnread string `yaml:"captureLossesUnread,omitempty" json:"captureLossesUnread,omitempty"`
+	// TestCasesLost is, in a record's file under the proven switch, what the
+	// recording of the app's incoming requests as test cases lost that no
+	// test holds (keploy mock record's case_losses.go): a test case recorded
+	// with a loss outside every test, the test cases the agent left out
+	// unnamed, and what its incoming stream could not tell. Judging takes it
+	// as evidence charged to no test. A test case recorded with a loss
+	// inside a test is that test's evidence instead (its
+	// ScopeEvidence.CaptureIncomplete).
+	TestCasesLost string `yaml:"testCasesLost,omitempty" json:"testCasesLost,omitempty"`
 	// Learned is what the learn step of a record's full round wrote onto
 	// mocks no test consumed (the set's start-up and pool), each field as
 	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14

@@ -12,7 +12,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -531,15 +530,11 @@ func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
 // write here and the read there resolve to syncMock.Get(). A multi-app composer
 // that sets a per-app s.Mgr must likewise give its suppressor a per-app reader;
 // there is no global fan-out for orphan windows (unlike memory pressure).
+//
+// It is RecordOrphanWindowWhy with no why: every span a session records goes
+// through that.
 func (s *Session) RecordOrphanWindow(start, end time.Time) {
-	if s == nil {
-		return
-	}
-	if s.Orphans != nil {
-		s.Orphans.Record(start, end)
-		return
-	}
-	s.manager().RecordOrphanWindow(start, end)
+	s.RecordOrphanWindowWhy(start, end, "")
 }
 
 // RecordOrphanWindowWhy is RecordOrphanWindow with why the span was recorded:
@@ -589,6 +584,35 @@ type OrphanSpansWhy interface {
 	OpenWhy(start time.Time, why string) func()
 }
 
+// OrphanSpansFate is an OrphanSpans that says what becomes of the test cases
+// recorded over a span it is given (Session.LossFate): one that hands its
+// spans to the recording's manager says what that manager's record streams
+// do with them (syncMock.SyncMockManager.LossFate).
+type OrphanSpansFate interface {
+	OrphanSpans
+	LossFate() models.LossFate
+}
+
+// LossFate is what becomes of the test cases recorded over a span this
+// session records now (RecordOrphanWindowWhy, ReportLeftOut), for the line
+// that reports it to say: its manager's (syncMock.SyncMockManager.LossFate),
+// or, where its spans go to an Orphans of the caller's, what that one says
+// (OrphanSpansFate). An Orphans that says nothing (a DaemonSet agent's spans,
+// per pod, whose test cases it leaves out itself) leaves them out:
+// models.LossFateLeftOut, as it is with the proven switch off. Nil-safe.
+func (s *Session) LossFate() models.LossFate {
+	if s == nil {
+		return models.LossFateLeftOut
+	}
+	if s.Orphans != nil {
+		if o, ok := s.Orphans.(OrphanSpansFate); ok {
+			return o.LossFate()
+		}
+		return models.LossFateLeftOut
+	}
+	return s.manager().LossFate()
+}
+
 // manager is the SyncMockManager this session's mocks, counts and spans go to:
 // Mgr, the per-app manager a multi-app caller sets, or the package-global one
 // (syncMock.Get) when Mgr is nil, the single-session default. It is the one
@@ -618,14 +642,11 @@ type OrphanSpans interface {
 // is retired the relay raw-forwards the rest of that connection, so it emits no
 // further mock and every test case recorded against it would otherwise ship
 // mock-less and replay as match_phase=no_mocks.
+//
+// It is OpenOrphanWindowWhy with no why: every span a session opens goes
+// through that.
 func (s *Session) OpenOrphanWindow(start time.Time) func() {
-	if s == nil {
-		return func() {}
-	}
-	if s.Orphans != nil {
-		return s.Orphans.Open(start)
-	}
-	return s.manager().OpenOrphanWindow(start)
+	return s.OpenOrphanWindowWhy(start, "")
 }
 
 // EmitMock sends m to the mocks channel. If the session's active mock
@@ -969,7 +990,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if held > 0 {
 		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
 	}
-	s.Logger.Warn(LeftOutWarnMsg, append(fields, zap.String("next_step", leftOutNextStep(class, spanned)))...)
+	s.Logger.Warn(LeftOutWarnMsg, append(fields, zap.String("next_step", leftOutNextStep(class, spanned, s.LossFate())))...)
 }
 
 // ReportStoppedOn reports the exchange a parser stops on, as it returns
@@ -1205,24 +1226,28 @@ func leftOutClass(cause string) string {
 }
 
 // leftOutNextStep is ReportLeftOut's next_step for a mock left out for a
-// cause of class (leftOutClass), whose span was recorded or not (spanned):
-// what was and was not lost, and the knob that fits the class. The WARN is
-// rate-limited per cause, so the reason it carries is one mock's; --debug
-// shows each.
+// cause of class (leftOutClass), whose span was recorded or not (spanned),
+// with fate what the recording does with the test cases over a span
+// (Session.LossFate): what was and was not lost, and the knob that fits the
+// class. The WARN is rate-limited per cause, so the reason it carries is one
+// mock's; --debug shows each.
 //
 // It says only what holds of the test cases over the exchange. With its span
-// recorded, the ones not saved yet are left out, and one saved before the
-// parser got to the exchange lacks the mock. With none (a mock with no request
-// time), none is left out for it, and each one lacks the mock (ReportLeftOut).
-func leftOutNextStep(class string, spanned bool) string {
+// recorded and a recording that leaves them out (models.LossFateLeftOut: the
+// proven switch off, or a client that does not charge what a test case
+// lost), the ones not saved yet are left out, and one saved before the
+// parser got to the exchange lacks the mock; with one that charges it, the
+// recording keeps each, the span as its evidence (models.LossFate.Keeps).
+// With no span (a mock with no request time), none is left out or charged
+// for it, and each one lacks the mock (ReportLeftOut).
+func leftOutNextStep(class string, spanned bool, fate models.LossFate) string {
 	next := "the app's traffic is unaffected. Test cases recorded over this exchange that were not saved yet when the agent " +
 		"parsed it are left out of the recording; one saved before then (this connection's parser was behind the " +
 		"traffic) lacks this mock, and its replay fails with no_mocks. "
-	if provenswitch.On() {
-		// Under the switch none is left out (routes/record.go streams it
-		// with the loss, and the stream's end names one saved before).
-		next = "the app's traffic is unaffected. keploy record keeps each test case recorded over this exchange, " +
-			models.KeptToBeJudged + ". "
+	if keeps := fate.KeepsSentence("each test case recorded over this exchange"); keeps != "" {
+		// routes/record.go streams it with the loss, and the stream's end
+		// names one streamed before.
+		next = "the app's traffic is unaffected. " + keeps + ". "
 	}
 	if !spanned {
 		next = "the app's traffic is unaffected. This mock carries no request time, so no span was recorded for it and no " +

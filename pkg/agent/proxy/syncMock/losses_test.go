@@ -106,9 +106,9 @@ func TestWithTheSwitchOffAnOrphanSpanKeepsNoWhy(t *testing.T) {
 	}
 }
 
-// Past maxOrphanWhys reasons a span is still recorded, and charged, without
-// its why.
-func TestASpanPastTheBoundOnReasonsIsChargedWithoutIt(t *testing.T) {
+// Past maxOrphanWhys reasons a span is still recorded, and charged, its why
+// told as one past the bound (WhyPastBound), not dropped unsaid.
+func TestASpanPastTheBoundOnReasonsIsChargedAsOnePastIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	m := New(zap.NewNop())
 	for i := 0; i < maxOrphanWhys; i++ {
@@ -116,11 +116,98 @@ func TestASpanPastTheBoundOnReasonsIsChargedWithoutIt(t *testing.T) {
 	}
 	past := at(maxOrphanWhys * 10)
 	m.RecordOrphanWindowWhy(past, past, "one too many")
+	m.OpenOrphanWindowWhy(past.Add(time.Millisecond), "two too many")()
 	got := m.TestCaseLosses("test-1", past, past)
-	if want := (models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1}}); fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := (models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: WhyPastBound}}); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("charged %+v, want %+v", got, want)
 	}
 	if got := m.TestCaseLosses("test-1", at(0), at(0)); len(got) != 1 || got[0].What != "cause 0" {
 		t.Fatalf("a span within the bound is charged %+v, want its why", got)
+	}
+	// Both its own why and one past the bound: each named, the bound's last.
+	got = m.TestCaseLosses("test-1", at((maxOrphanWhys-1)*10), past)
+	if len(got) != 1 || got[0].What != fmt.Sprintf("cause %d; %s", maxOrphanWhys-1, WhyPastBound) {
+		t.Fatalf("over a span within the bound and one past it: charged %+v", got)
+	}
+}
+
+// Past their cap the spans are joined over gaps (Spans). A test case checked
+// after a join that overlaps a span only where it was joined over a gap is
+// charged, as the switch-off check leaves it out, but told that it may have
+// run in the gap, beside what the span stands for (JoinedNote): what it is
+// told it lost stays true. One over a span as it was recorded is told no such
+// thing, whatever was joined near it.
+func TestATestCaseOverOnlyAJoinedGapIsToldItMayHaveRunBesideTheSpan(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := New(zap.NewNop())
+	base := at(0)
+	us := func(n int) time.Time { return base.Add(time.Duration(n) * time.Microsecond) }
+	// Two spans 500us apart, a test case in the gap between them, and one
+	// over the first.
+	m.RecordOrphanWindowWhy(us(0), us(100), "X: real")
+	m.RecordOrphanWindowWhy(us(600), us(700), "X: real")
+	gapStart, gapEnd := us(200), us(300)
+	if got := m.TestCaseLosses("", gapStart, gapEnd); len(got) != 0 {
+		t.Fatalf("before any join the gap test case is charged %+v", got)
+	}
+	// Spans far apart past the cap: the nearest gap, the one above, joins.
+	for i := 0; i < maxPressureRanges+10; i++ {
+		s := base.Add(time.Hour + time.Duration(i)*time.Second)
+		m.RecordOrphanWindowWhy(s, s.Add(time.Microsecond), "X: real")
+	}
+	if left, _ := m.WasMockOrphanedInWindow(gapStart, gapEnd); !left {
+		t.Fatal("precondition: the gap was not joined")
+	}
+	got := m.TestCaseLosses("", gapStart, gapEnd)
+	want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "X: real " + JoinedNote}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the gap test case is charged %+v, want %+v", got, want)
+	}
+	if got := m.TestCaseLosses("", us(50), us(60)); len(got) != 1 || got[0].What != "X: real "+JoinedNote {
+		// Its span was joined into the one over the gap: it overlaps that
+		// one alone, which cannot tell the two apart.
+		t.Fatalf("a test case over the first span, joined since: charged %+v", got)
+	}
+	// One over a span the join left alone is told nothing of joins.
+	late := base.Add(time.Hour + time.Duration(maxPressureRanges+9)*time.Second)
+	if got := m.TestCaseLosses("", late, late); len(got) != 1 || got[0].What != "X: real" {
+		t.Fatalf("a test case over a span as it was recorded: charged %+v", got)
+	}
+	// A span with no why, joined: the note alone.
+	n := New(zap.NewNop())
+	n.RecordOrphanWindow(us(0), us(100))
+	n.RecordOrphanWindow(us(600), us(700))
+	for i := 0; i < maxPressureRanges+10; i++ {
+		s := base.Add(time.Hour + time.Duration(i)*time.Second)
+		n.RecordOrphanWindow(s, s.Add(time.Microsecond))
+	}
+	if got := n.TestCaseLosses("", gapStart, gapEnd); len(got) != 1 || got[0].What != JoinedNote {
+		t.Fatalf("the gap test case over a joined span with no why: charged %+v", got)
+	}
+}
+
+// A mock dropped on its way to keploy record that SpanDroppedMock is given
+// (the OSS outChan path with no owner and no hook, or enterprise's OnDrop)
+// charges the test cases recorded over it with mocks let go, its kind named,
+// and nothing with the switch off.
+func TestADroppedMocksSpanNamesItsKind(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := New(zap.NewNop())
+	m.SpanDroppedMock(&models.Mock{Kind: models.MySQL, Spec: models.MockSpec{ReqTimestampMock: at(10), ResTimestampMock: at(12)}})
+	m.SpanDroppedMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: at(20), ResTimestampMock: at(22)}})
+	m.SpanDroppedMock(&models.Mock{Kind: models.HTTP}) // no request time: no window
+	got := m.TestCaseLosses("", at(11), at(21))
+	want := models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 2, What: "MySQL: " + MockDroppedWhileItRan + "; " + MockDroppedWhileItRan}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("charged %+v, want %+v", got, want)
+	}
+	if ok, _ := m.WasMockOrphanedInWindow(at(11), at(21)); ok {
+		t.Fatal("a dropped mock's span is an orphan span")
+	}
+	t.Setenv(provenswitch.Env, "")
+	off := New(zap.NewNop())
+	off.SpanDroppedMock(&models.Mock{Kind: models.MySQL, Spec: models.MockSpec{ReqTimestampMock: at(10), ResTimestampMock: at(12)}})
+	if got := off.TestCaseLosses("", at(11), at(21)); len(got) != 0 {
+		t.Fatalf("with the switch off a dropped mock's span charged %+v", got)
 	}
 }

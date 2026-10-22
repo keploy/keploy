@@ -12,9 +12,10 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newTestTee constructs a tee with reasonable defaults for tests.
@@ -1077,23 +1078,51 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 	}
 }
 
-// Under the proven switch the WARN for a chunk the capture dropped on a
-// connection whose parser stops there says that keploy record keeps every test
-// case recorded while the connection carries traffic, with that as what its
-// recording lost, for the auto-replay to judge (the agent streams it with the
-// loss), not that they are left out of the recording, which with the switch on
-// is no longer so. With the switch off it says what it said before.
-//
-// Not parallel: it sets the switch.
-func TestUnderTheProvenSwitchADroppedChunksWarnSaysItsTestCasesAreKept(t *testing.T) {
+// The WARN for a chunk the capture dropped on a connection whose parser stops
+// there says what becomes of every test case recorded while the connection
+// carries traffic, as the owner's recording does with them (Config.LossFate):
+// left out (none set, or models.LossFateLeftOut: the proven switch off, or no
+// open record stream that charges what a test case lost), kept, each with
+// that as what its recording lost, when every open stream charges it, and
+// both, each for its own clients, when some do.
+func TestADroppedChunksWarnSaysWhatTheOwnersRecordingDoesWithItsTestCases(t *testing.T) {
+	t.Parallel()
 	const off = "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
-	t.Setenv(provenswitch.Env, "")
-	if got := dropNextStep(); got != off {
-		t.Fatalf("with the switch off the dropped chunk's next_step is %q, want it as before: %q", got, off)
+	if got := dropNextStep(models.LossFateLeftOut); got != off {
+		t.Fatalf("for a recording that leaves them out the dropped chunk's next_step is %q, want it as before: %q", got, off)
 	}
-	t.Setenv(provenswitch.Env, "1")
-	if got := dropNextStep(); !strings.Contains(got, "keploy record keeps every test case recorded while this connection carries traffic") ||
+	if got := dropNextStep(models.LossFateKept); !strings.Contains(got, "the recording keeps every test case recorded while this connection carries traffic") ||
 		!strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
-		t.Fatalf("under the switch the dropped chunk's next_step is %q, want that keploy record keeps the test cases, for the auto-replay to judge", got)
+		t.Fatalf("for a recording that charges it the dropped chunk's next_step is %q, want that it keeps the test cases, its evidence", got)
+	}
+	if got := dropNextStep(models.LossFateMixed); !strings.Contains(got, "keeps every test case recorded while this connection carries traffic") || !strings.Contains(got, "leaves such a test case out") {
+		t.Fatalf("with recordings of both kinds open the dropped chunk's next_step is %q, want what each does", got)
+	}
+
+	// The WARN asks the owner, as the hole is lost.
+	for _, tc := range []struct {
+		fate func() models.LossFate
+		want models.LossFate
+	}{{nil, models.LossFateLeftOut}, {func() models.LossFate { return models.LossFateKept }, models.LossFateKept}} {
+		core, logs := observer.New(zapcore.WarnLevel)
+		var r *Relay
+		{
+			src, dst := net.Pipe()
+			t.Cleanup(func() { _ = src.Close(); _ = dst.Close() })
+			r = New(Config{Logger: zap.New(core), PerConnCap: 8, LossFate: tc.fate, OnCaptureDesync: func(string) bool { return true }}, src, connseq.NewUpstream(dst))
+		}
+		tt := r.teeC2D
+		t.Cleanup(tt.close)
+		tt.push(fakeconn.Chunk{Bytes: []byte("12345678")})
+		tt.push(fakeconn.Chunk{Bytes: []byte("past the cap")})
+		var next string
+		for _, e := range logs.All() {
+			if n, ok := e.ContextMap()["next_step"].(string); ok && strings.HasPrefix(e.Message, "relay: capture dropped a chunk") {
+				next = n
+			}
+		}
+		if !strings.HasPrefix(next, dropNextStep(tc.want)) {
+			t.Fatalf("the dropped chunk's WARN says %q, want it to open with %q", next, dropNextStep(tc.want))
+		}
 	}
 }

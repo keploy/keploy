@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -266,6 +267,73 @@ func TestATestCaseOverALossIsStreamedWithItToAClientThatChargesIt(t *testing.T) 
 	}
 }
 
+// Under the proven switch a dropped mock that named no owner keeps a span of
+// its own (syncMock SpanDroppedMock), not an orphan span: to a client that
+// charges what a test case lost, a test case over it is streamed with it (a
+// mock let go); to one that does not (an older keploy, another client of the
+// agent's), it is left out and counted, as over an orphan span, never streamed
+// without the mock unsaid. With the switch off no such span is kept, and the
+// test case is streamed as before.
+func TestATestCaseOverAnOwnerlessDroppedMockIsChargedOrLeftOutNeverStreamedUnsaid(t *testing.T) {
+	// Far from now, so no other test's test case overlaps the span.
+	base := time.Date(2008, 3, 4, 5, 6, 7, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	tc := func(name string, from time.Duration) *models.TestCase {
+		t := &models.TestCase{Name: name}
+		t.HTTPReq.Timestamp = base.Add(from)
+		t.HTTPResp.Timestamp = base.Add(from + time.Millisecond)
+		return t
+	}
+	dropped := &models.Mock{Kind: models.MySQL}
+	dropped.Spec.ReqTimestampMock, dropped.Spec.ResTimestampMock = base, base.Add(time.Millisecond)
+	for _, c := range []struct {
+		proven, charges bool
+		kept            []string
+		suppressed      int
+		keptWithLoss    int
+	}{
+		{proven: true, charges: true, kept: []string{"over", "clear"}, keptWithLoss: 1},
+		{proven: true, charges: false, kept: []string{"clear"}, suppressed: 1},
+		{proven: false, charges: true, kept: []string{"over", "clear"}},
+		{proven: false, charges: false, kept: []string{"over", "clear"}},
+	} {
+		t.Run(fmt.Sprintf("proven=%v charges=%v", c.proven, c.charges), func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			// Its own stretch of time per case: the manager is the agent's,
+			// and keeps what the case before recorded.
+			base = base.Add(10 * time.Hour)
+			dropped.Spec.ReqTimestampMock, dropped.Spec.ResTimestampMock = base, base.Add(time.Millisecond)
+			syncmgr.Get().SpanDroppedMock(dropped)
+			if left, _ := syncmgr.Get().WasDroppedMockInWindow(base, base); left != c.proven {
+				t.Fatalf("a dropped mock's span over its exchange: %v, want %v", left, c.proven)
+			}
+			got, sum := streamIncoming(t, models.IncomingOptions{ChargesLosses: c.charges}, tc("over", 0), tc("clear", time.Hour))
+			var names []string
+			for _, g := range got {
+				names = append(names, g.Name)
+				switch {
+				case g.Name == "over" && c.keptWithLoss > 0:
+					want := models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: "MySQL: " + syncmgr.MockDroppedWhileItRan}}
+					if fmt.Sprint(g.CaptureLost) != fmt.Sprint(want) {
+						t.Fatalf("the test case over the span carries %+v, want %+v", g.CaptureLost, want)
+					}
+				case len(g.CaptureLost) != 0:
+					t.Fatalf("%s carries %+v, want nothing", g.Name, g.CaptureLost)
+				}
+			}
+			if strings.Join(names, ",") != strings.Join(c.kept, ",") {
+				t.Fatalf("streamed %v, want %v", names, c.kept)
+			}
+			if sum.TestCasesSuppressed != c.suppressed || sum.KeptWithLoss != c.keptWithLoss || sum.TestCasesSent != len(c.kept) {
+				t.Fatalf("the summary says %+v, want %d sent, %d suppressed, %d kept with their loss", sum, len(c.kept), c.suppressed, c.keptWithLoss)
+			}
+		})
+	}
+}
+
 // Under the proven switch, to a client that charges the loss, a test case
 // streamed with nothing lost that a span recorded after it went overlaps (a
 // parser reports what it could not record behind the traffic) is named at the
@@ -473,5 +541,142 @@ func TestALateLossAStreamEndingWithoutItsMarkerCouldNotCarryIsSaid(t *testing.T)
 			msgs = append(msgs, e.Message)
 		}
 		t.Fatalf("the late loss the stream could not carry was not said; WARNs: %q", msgs)
+	}
+}
+
+// Under the proven switch, a test case streamed with what its recording lost
+// stays watched for a span recorded after it went (syncMock.LateWatch.Streamed):
+// the marker names it for a source its check did not see, that alone, so its
+// evidence names every source over it, and not for one its check named, so no
+// span is charged to it twice, the one its check read among them. One
+// streamed with nothing lost that a later span overlaps is named with it.
+//
+// Not parallel: the spans are the package-global manager's, and it sets the
+// switch.
+func TestATestCaseStreamedWithItsLossIsNamedAtTheStreamsEndForASourceItsCheckDidNotSee(t *testing.T) {
+	base := time.Date(2006, 7, 8, 9, 10, 11, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	t.Setenv(provenswitch.Env, "1")
+	syncmgr.Get().RecordOrphanWindowWhy(base, base.Add(time.Millisecond), "MySQL: early")
+	syncmgr.Get().SetWatermark(nil)
+	svc := streamsSvc{tc: make(chan *models.TestCase, 2), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	tok := rand.Text()
+	resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{IncomingOptions: models.IncomingOptions{ChargesLosses: true}}, tok)
+	defer done()
+	lossy := &models.TestCase{Name: "lossy"}
+	lossy.HTTPReq.Timestamp, lossy.HTTPResp.Timestamp = base, base.Add(time.Millisecond)
+	clean := &models.TestCase{Name: "clean"}
+	clean.HTTPReq.Timestamp, clean.HTTPResp.Timestamp = base.Add(time.Hour), base.Add(time.Hour+time.Millisecond)
+	svc.tc <- lossy
+	svc.tc <- clean
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := multipart.NewReader(resp.Body, params["boundary"])
+	got := map[string]models.CaptureLosses{}
+	for len(got) < 2 {
+		part, err := mr.NextPart()
+		if err != nil {
+			t.Fatalf("the stream ended before its test cases went: %v", err)
+		}
+		if part.FormName() == "metadata" {
+			var tc models.TestCase
+			if err := json.NewDecoder(part).Decode(&tc); err != nil {
+				t.Fatal(err)
+			}
+			got[tc.Name] = tc.CaptureLost
+		}
+	}
+	if len(got["lossy"]) != 1 || got["lossy"][0].What != "MySQL: early" || len(got["clean"]) != 0 {
+		t.Fatalf("streamed %+v: lossy with the early span, clean with nothing", got)
+	}
+	// After both went: a span over each, as a parser behind the traffic
+	// reports one, and, over lossy, one more of the source its check named.
+	syncmgr.Get().RecordOrphanWindowWhy(base, base.Add(time.Millisecond), "MySQL: early")
+	syncmgr.Get().RecordOrphanWindowWhy(base, base.Add(time.Millisecond), "MySQL: late")
+	syncmgr.Get().RecordOrphanWindowWhy(clean.HTTPReq.Timestamp, clean.HTTPResp.Timestamp, "MySQL: late")
+	endRecordingStreams(tok)
+	var sum models.StreamEndSummary
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			t.Fatalf("the stream ended without its marker: %v", err)
+		}
+		if part.FormName() == models.StreamEndPart {
+			if err := json.NewDecoder(part).Decode(&sum); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	late := map[string]models.CaptureLosses{}
+	for _, l := range sum.LateLosses {
+		late[l.Name] = l.Lost
+	}
+	want := models.CaptureLosses{{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "MySQL: late"}}
+	if len(sum.LateLosses) != 2 || fmt.Sprint(late["lossy"]) != fmt.Sprint(want) || fmt.Sprint(late["clean"]) != fmt.Sprint(want) {
+		t.Fatalf("the marker names %+v, want lossy with the late source alone (its check named the early one) and clean with it", sum.LateLosses)
+	}
+}
+
+// Under the proven switch, to a client that charges it, the marker says how
+// many test cases the stream sent past the most it watches for a span it
+// learns of later (tcs_not_rechecked): the client takes that as what it could
+// not be told, never as nothing lost. Within the bound, and to a client that
+// does not charge it, it says none.
+//
+// Not parallel: it sets the switch and the watch's bound, both process-wide.
+func TestTheMarkerSaysHowManyTestCasesWentPastTheLateWatch(t *testing.T) {
+	base := time.Date(2007, 8, 9, 10, 11, 12, 0, time.UTC).Add(time.Duration(time.Now().UnixNano()%1e9) * time.Microsecond)
+	t.Setenv(provenswitch.Env, "1")
+	defer syncmgr.SetLateWatchBound(1)()
+	tcs := func() []*models.TestCase {
+		var out []*models.TestCase
+		for i := 0; i < 3; i++ {
+			tc := &models.TestCase{Name: fmt.Sprintf("t-%d", i)}
+			tc.HTTPReq.Timestamp = base.Add(time.Duration(i) * time.Hour)
+			tc.HTTPResp.Timestamp = tc.HTTPReq.Timestamp.Add(time.Millisecond)
+			out = append(out, tc)
+		}
+		return out
+	}
+	if _, sum := streamIncoming(t, models.IncomingOptions{ChargesLosses: true}, tcs()...); sum.NotRechecked != 2 {
+		t.Fatalf("the marker says %d went unwatched, want 2 (3 sent, 1 watched)", sum.NotRechecked)
+	}
+	if _, sum := streamIncoming(t, models.IncomingOptions{}, tcs()...); sum.NotRechecked != 0 {
+		t.Fatalf("to a client that does not charge it the marker says %d went unwatched, want none", sum.NotRechecked)
+	}
+}
+
+// The incoming stream is a record stream open on the manager from before its
+// ingress starts until it ends (syncMock.SyncMockManager.OpenRecordStream),
+// charging what its test cases lost or not as its client asked: so the lines
+// that report a span keploy could not record say what this stream does with
+// the test cases over it. Once it ends it says nothing of them.
+//
+// Not parallel: the streams are the package-global manager's, and it sets the
+// switch.
+func TestTheIncomingStreamSaysWhatItDoesWithTheTestCasesOverASpanWhileItIsOpen(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		charges bool
+		want    models.LossFate
+	}{{true, models.LossFateKept}, {false, models.LossFateLeftOut}} {
+		syncmgr.Get().SetWatermark(nil)
+		svc := streamsSvc{tc: make(chan *models.TestCase), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+		a := &Agent{logger: zap.NewNop(), svc: svc}
+		tok := rand.Text()
+		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{IncomingOptions: models.IncomingOptions{ChargesLosses: c.charges}}, tok)
+		if got := syncmgr.Get().LossFate(); got != c.want {
+			done()
+			t.Fatalf("charges=%v: while the stream is open the manager says %v, want %v", c.charges, got, c.want)
+		}
+		endRecordingStreams(tok)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		done()
+		if got := syncmgr.Get().LossFate(); got != models.LossFateLeftOut {
+			t.Fatalf("charges=%v: once the stream ended the manager says %v, want left out", c.charges, got)
+		}
 	}
 }

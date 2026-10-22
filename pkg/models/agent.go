@@ -719,16 +719,30 @@ type StreamEndSummary struct {
 	// (TestCase.CaptureLost) rather than left out, for a client that charges
 	// it (IncomingOptions.ChargesLosses). Under the proven switch only.
 	KeptWithLoss int `json:"tcs_kept_with_loss,omitempty"`
-	// LateLosses: test cases streamed with nothing lost that a span the
-	// agent learnt of after they went overlaps (a parser reports what it
-	// could not record behind the traffic), each with what it lost (LateLoss):
-	// the client charges them as it charges TestCase.CaptureLost. Under the
+	// LateLosses: test cases streamed that a span the agent learnt of after
+	// they went overlaps (a parser reports what it could not record behind
+	// the traffic), each with what it lost (LateLoss): for one streamed with
+	// what it lost (TestCase.CaptureLost), only a source that did not name.
+	// The client charges them as it charges TestCase.CaptureLost. Under the
 	// proven switch only, to a client that charges losses.
 	LateLosses []LateLoss `json:"tcs_late_losses,omitempty"`
+	// NotRechecked: test cases streamed past the most the agent watches
+	// for a span it learns of after they went
+	// (tcs_not_rechecked): a span recorded later that overlaps one is not
+	// in LateLosses. Under the proven switch only, to a client that charges
+	// losses.
+	NotRechecked int `json:"tcs_not_rechecked,omitempty"`
+	// Unmarked is never on the wire: the client's count of the incoming
+	// streams it opened charging losses (IncomingOptions.ChargesLosses) that
+	// ended without this marker (the agent went away, did not take the
+	// request to end them, or the client closed them itself): what each
+	// would have said (its test cases left out, its late losses) is not in
+	// this summary (AgentClient.TakeStreamEnds).
+	Unmarked int `json:"-"`
 }
 
-// LateLoss is what a test case the agent streamed with nothing lost had lost
-// by the stream's end (StreamEndSummary.LateLosses). It names the test case as
+// LateLoss is what a test case the agent streamed had lost by the stream's end
+// besides what it was streamed with (StreamEndSummary.LateLosses). It names the test case as
 // the agent streamed it: by its window, and by its name when the agent named
 // it. The agent streams most test cases unnamed: keploy record names each as
 // it saves it (only a --sync recording's are named by the agent). So keploy
@@ -743,7 +757,8 @@ type LateLoss struct {
 	Request  time.Time `json:"req"`
 	Response time.Time `json:"resp"`
 	// Lost is what the test case lost: the spans its window overlaps that
-	// were recorded after it went, each as it was recorded.
+	// were recorded after it went, each as it was recorded; for one streamed
+	// with what it lost, the sources that did not name, each counted once.
 	Lost CaptureLosses `json:"lost"`
 }
 

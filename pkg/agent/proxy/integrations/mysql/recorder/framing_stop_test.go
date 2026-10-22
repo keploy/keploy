@@ -222,45 +222,81 @@ func TestRecordV2_AResponseLeftOutAloneIsCountedAndStampsNoStop(t *testing.T) {
 	}
 }
 
-// Under the proven switch the MySQL recorder's lines for an exchange it could
-// not record say what becomes of the test cases recorded over it: keploy
-// record keeps each, with that as what its recording lost, for the
-// auto-replay to judge (the agent streams it with the loss), not that they are
-// left out of the recording, which with the switch on is no longer so. That
-// holds of an exchange left out alone (leftOutAloneNextStep), of a connection
-// whose framing is lost (framingLostNextStep, the WARN warnFramingLost logs),
-// and of the legacy recorder's response it could not decode
-// (undecodableDropMsg). With the switch off each says what it said before.
+// The MySQL recorder's lines for an exchange it could not record say what
+// becomes of the test cases recorded over it, as the recording does with
+// them (models.LossFate): left out, with the proven switch off or with no
+// record stream open that charges what a test case lost (an older keploy, a
+// DaemonSet agent's own recording); kept, each with that as what its
+// recording lost, when every open stream charges it; and both, each for its
+// own clients, when some do. That holds of an exchange left out alone
+// (leftOutAloneNextStep), of a connection whose framing is lost
+// (framingLostNextStep, the WARN warnFramingLost logs), and of the legacy
+// recorder's response it could not decode (undecodableDropMsg). With the
+// switch off each says what it said before, whatever streams are open.
 //
 // Not parallel: it sets the switch, and the WARN limit is process-wide.
-func TestUnderTheProvenSwitchTheRecordersLinesSayTheTestCasesOverALostExchangeAreKept(t *testing.T) {
+func TestTheRecordersLinesSayWhatTheOpenRecordingsDoWithTheTestCasesOverALostExchange(t *testing.T) {
 	off := map[string]string{
 		"left out alone": "user traffic is unaffected. The test cases recorded while this exchange ran are left out of the recording rather than saved without its mock; the connection's later queries are recorded",
 		"framing lost":   "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and every test case recorded while it carries traffic is left out of the recording rather than saved without its mocks. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)",
 		"legacy":         "dropping a MySQL response that could not be decoded: its mock is not recorded, and the test cases recorded over it are left out",
 	}
-	lines := func() map[string]string {
-		return map[string]string{"left out alone": leftOutAloneNextStep(), "framing lost": framingLostNextStep(), "legacy": undecodableDropMsg()}
+	lines := func(f models.LossFate) map[string]string {
+		return map[string]string{"left out alone": leftOutAloneNextStep(f), "framing lost": framingLostNextStep(f), "legacy": undecodableDropMsg(f)}
 	}
-	t.Setenv(provenswitch.Env, "")
-	for k, got := range lines() {
+	for k, got := range lines(models.LossFateLeftOut) {
 		if got != off[k] {
-			t.Fatalf("with the switch off the %s line is %q, want it as before: %q", k, got, off[k])
+			t.Fatalf("for a recording that leaves them out the %s line is %q, want it as before: %q", k, got, off[k])
 		}
 	}
-	t.Setenv(provenswitch.Env, "1")
-	for k, got := range lines() {
-		if !strings.Contains(got, "keploy record keeps") || !strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
-			t.Fatalf("under the switch the %s line is %q, want that keploy record keeps the test cases over it, for the auto-replay to judge", k, got)
+	for k, got := range lines(models.LossFateKept) {
+		if !strings.Contains(strings.ToLower(got), "the recording keeps") || !strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
+			t.Fatalf("for a recording that charges it the %s line is %q, want that the recording keeps the test cases over it, its evidence", k, got)
+		}
+	}
+	for k, got := range lines(models.LossFateMixed) {
+		if !strings.Contains(got, "keeps") || !strings.Contains(got, models.KeptToBeJudged) || !strings.Contains(got, "leaves such a test case out") {
+			t.Fatalf("with recordings of both kinds open the %s line is %q, want what each does", k, got)
 		}
 	}
 
+	// The WARN says what the session's recording does: under the switch,
+	// left out while no open stream charges it, kept while one does.
+	t.Setenv(provenswitch.Env, "1")
+	mgr := syncMock.New(nil)
+	sess := &supervisor.Session{ClientConnID: "1", Mgr: mgr}
+	for _, tc := range []struct {
+		name    string
+		charges []bool
+		want    models.LossFate
+	}{
+		{"no stream", nil, models.LossFateLeftOut},
+		{"a stream that does not charge", []bool{false}, models.LossFateLeftOut},
+		{"a stream that charges", []bool{true}, models.LossFateKept},
+		{"one of each", []bool{true, false}, models.LossFateMixed},
+	} {
+		var closers []func()
+		for _, c := range tc.charges {
+			closers = append(closers, mgr.OpenRecordStream(c))
+		}
+		resetWarnLimiters()
+		core, logs := observer.New(zapcore.WarnLevel)
+		warnFramingLost(zap.New(core), sess, "V2: mysql framing lost ("+tc.name+")", ErrFramingLost)
+		w := logs.All()
+		if len(w) != 1 || w[0].ContextMap()["next_step"] != framingLostNextStep(tc.want) {
+			t.Fatalf("%s: the framing loss is said %v, want once, with next_step %q", tc.name, w, framingLostNextStep(tc.want))
+		}
+		for _, c := range closers {
+			c()
+		}
+	}
+	// With the switch off, a stream that charges changes nothing.
+	t.Setenv(provenswitch.Env, "")
+	defer mgr.OpenRecordStream(true)()
 	resetWarnLimiters()
 	core, logs := observer.New(zapcore.WarnLevel)
-	sess := &supervisor.Session{ClientConnID: "1"}
-	warnFramingLost(zap.New(core), sess, "V2: mysql framing lost (TestUnderTheProvenSwitchTheRecordersLinesSayTheTestCasesOverALostExchangeAreKept)", ErrFramingLost)
-	w := logs.All()
-	if len(w) != 1 || w[0].ContextMap()["next_step"] != framingLostNextStep() {
-		t.Fatalf("under the switch the framing loss is said %v, want once, with next_step %q", w, framingLostNextStep())
+	warnFramingLost(zap.New(core), sess, "V2: mysql framing lost (switch off)", ErrFramingLost)
+	if w := logs.All(); len(w) != 1 || w[0].ContextMap()["next_step"] != off["framing lost"] {
+		t.Fatalf("with the switch off the framing loss is said %v, want next_step as before: %q", w, off["framing lost"])
 	}
 }

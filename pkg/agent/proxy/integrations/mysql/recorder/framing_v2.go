@@ -15,7 +15,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -93,16 +92,18 @@ func reportFault(logger *zap.Logger, sess *supervisor.Session, err error, realig
 		warnFramingLost(logger, sess, f.msg+"; the connection is no longer recorded", err)
 		return
 	}
-	warnLimited(logger, sess, f.msg+"; the exchange is left out, and the connection's recording goes on from its next command", err, leftOutAloneNextStep())
+	warnLimited(logger, sess, f.msg+"; the exchange is left out, and the connection's recording goes on from its next command", err, leftOutAloneNextStep(sess.LossFate()))
 }
 
 // leftOutAloneNextStep is the next_step of the WARN for an exchange left out
-// alone: what becomes of the test cases recorded while it ran. With the proven
-// switch off they are left out; under it keploy record keeps each, with that
-// as what its recording lost, for the auto-replay to judge.
-func leftOutAloneNextStep() string {
-	if provenswitch.On() {
-		return "user traffic is unaffected. keploy record keeps each test case recorded while this exchange ran, " + models.KeptToBeJudged + "; the connection's later queries are recorded"
+// alone: what becomes of the test cases recorded while it ran, as the
+// recording does with them (fate, supervisor.Session.LossFate). Where it
+// leaves them out (the proven switch off, or a client that does not charge
+// what a test case lost) they are left out; where it charges it, the
+// recording keeps each, with that as what its recording lost.
+func leftOutAloneNextStep(fate models.LossFate) string {
+	if keeps := fate.KeepsSentence("each test case recorded while this exchange ran"); keeps != "" {
+		return "user traffic is unaffected. " + keeps + "; the connection's later queries are recorded"
 	}
 	return "user traffic is unaffected. The test cases recorded while this exchange ran are left out of the recording rather than saved without its mock; the connection's later queries are recorded"
 }
@@ -292,17 +293,17 @@ func warnFramingLost(logger *zap.Logger, sess *supervisor.Session, msg string, e
 		logger.Debug(msg, append(warnFields(sess, err), zap.Bool("recordingStopping", true))...)
 		return
 	}
-	warnLimited(logger, sess, msg, err, framingLostNextStep())
+	warnLimited(logger, sess, msg, err, framingLostNextStep(sess.LossFate()))
 }
 
 // framingLostNextStep is the next_step of the WARN for a connection whose
 // framing is lost: what becomes of the test cases recorded while it carries
-// traffic. With the proven switch off they are left out; under it keploy
-// record keeps each, with that as what its recording lost, for the
-// auto-replay to judge.
-func framingLostNextStep() string {
-	if provenswitch.On() {
-		return "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and keploy record keeps every test case recorded while it carries traffic, " + models.KeptToBeJudged + ". If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
+// traffic, as the recording does with them (fate,
+// supervisor.Session.LossFate): left out, or kept, each with that as what
+// its recording lost.
+func framingLostNextStep(fate models.LossFate) string {
+	if keeps := fate.Keeps("every test case recorded while it carries traffic"); keeps != "" {
+		return "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and " + keeps + ". If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
 	}
 	return "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and every test case recorded while it carries traffic is left out of the recording rather than saved without its mocks. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
 }

@@ -3,7 +3,9 @@ package manager
 import (
 	"slices"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -27,10 +29,37 @@ import (
 // them at the stream's end would be charged with a span it never overlapped.
 // A LateWatch never reads the spans: each span it is told of is the span as
 // it was recorded.
+//
+// It is told of orphan spans (an exchange keploy could not record) and of the
+// spans of dropped mocks that named no owner, which a parser or a queue can
+// report after the test cases they overlap went. A pressure span is not told
+// to it: the memory guard opens one as it trips, after every test case
+// already streamed ended, so it overlaps none of them; the test cases it
+// overlaps are streamed after it opened, and their check reads it
+// (TestCaseLosses).
+//
+// A test case streamed with what its check found it lost stays watched
+// (Streamed): a span recorded after that check whose source the check did not
+// name is a late loss of its too, so its evidence names every source that
+// overlaps it. One whose source the check named already adds nothing: the
+// test case is charged with that source, and the late loss names sources, not
+// every stretch of one.
 
 // MaxLateWatched bounds how many test cases one stream watches: about 32 MiB
 // of them. One streamed past it is not watched, and counted (Unwatched).
 const MaxLateWatched = 1 << 18
+
+// lateWatchBound is, when not zero, the bound a LateWatch opened from now on
+// keeps in place of MaxLateWatched (SetLateWatchBound).
+var lateWatchBound atomic.Int64
+
+// SetLateWatchBound has each LateWatch opened from now on watch at most n test
+// cases in place of MaxLateWatched, and returns what restores the bound: for
+// a test that streams past it. Never called outside tests.
+func SetLateWatchBound(n int) (restore func()) {
+	prev := lateWatchBound.Swap(int64(n))
+	return func() { lateWatchBound.Store(prev) }
+}
 
 // LateWatch watches one record stream's test cases sent with nothing lost
 // (Watch) for a span recorded after they went (late.go). Nil-safe: a nil
@@ -44,7 +73,10 @@ type LateWatch struct {
 	// test case that starts more than that before it.
 	widest time.Duration
 	seq    int
-	// unwatched is how many test cases Watch was given past MaxLateWatched.
+	// max is how many test cases it watches at most: MaxLateWatched, or
+	// the bound a test set (SetLateWatchBound).
+	max int
+	// unwatched is how many test cases Watch was given past max.
 	unwatched int
 }
 
@@ -57,7 +89,10 @@ type Watched struct {
 	// window a span is checked against.
 	start, end, stop time.Time
 	lost             models.CaptureLosses
-	gone             bool
+	// streamed is what the test case was streamed with (Streamed): Late
+	// names only what it lost besides.
+	streamed models.CaptureLosses
+	gone     bool
 }
 
 // WatchLate opens a watch of the test cases a record stream sends with
@@ -68,7 +103,10 @@ func (m *SyncMockManager) WatchLate() *LateWatch {
 	if m == nil {
 		return nil
 	}
-	w := &LateWatch{m: m}
+	w := &LateWatch{m: m, max: MaxLateWatched}
+	if n := lateWatchBound.Load(); n > 0 {
+		w.max = int(n)
+	}
 	m.lateMu.Lock()
 	m.late = append(m.late, w)
 	m.lateMu.Unlock()
@@ -106,7 +144,7 @@ func (w *LateWatch) Watch(name string, start, end time.Time) *Watched {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.byStart) >= MaxLateWatched {
+	if len(w.byStart) >= w.max {
 		w.unwatched++
 		return nil
 	}
@@ -120,10 +158,22 @@ func (w *LateWatch) Watch(name string, start, end time.Time) *Watched {
 	return t
 }
 
-// Forget stops watching t: it was streamed with what it lost (the check that
-// follows Watch found it), or not streamed at all. What the watch charged it
-// with meanwhile is dropped: the check read every span recorded before it.
-// A no-op on a nil t.
+// Streamed says t was streamed with lost, what the check that follows Watch
+// found it lost: it stays watched, and Late names only what it lost besides,
+// each source the check did not name (late.go). Every span the check read
+// names a source in lost, so none it read is charged to t twice. A no-op on a
+// nil t, or with nothing lost.
+func (w *LateWatch) Streamed(t *Watched, lost models.CaptureLosses) {
+	if w == nil || t == nil || len(lost) == 0 {
+		return
+	}
+	w.mu.Lock()
+	t.streamed = t.streamed.PlusNaming(lost)
+	w.mu.Unlock()
+}
+
+// Forget stops watching t: it was not streamed at all. What the watch charged
+// it with is dropped, and Late never names it. A no-op on a nil t.
 func (w *LateWatch) Forget(t *Watched) {
 	if w == nil || t == nil {
 		return
@@ -162,60 +212,87 @@ func (w *LateWatch) span(kind models.CaptureLossKind, start, end time.Time, why 
 	}
 }
 
-// Late is what each test case watched and streamed with nothing lost has lost
-// since it went, in the order they were watched: each span recorded after it
-// went that overlaps it, and, for one the agent named, a mock of its own
-// dropped on its way to keploy record (WasMockDroppedForTC). Each is named as
-// the agent streamed it (models.LateLoss). Nil for none.
+// Late is what each test case watched has lost since it went, in the order
+// they were watched: each span recorded after it went that overlaps it, and,
+// for one the agent named, a mock of its own dropped on its way to keploy
+// record (WasMockDroppedForTC); for one streamed with what it lost
+// (Streamed), only the sources that names none of (newSources). Each is named
+// as the agent streamed it (models.LateLoss). Nil for none.
 func (w *LateWatch) Late() []models.LateLoss {
 	if w == nil {
 		return nil
 	}
-	w.mu.Lock()
-	type late struct {
-		seq  int
-		loss models.LateLoss
+	type watched struct {
+		name           string
+		start, end     time.Time
+		lost, streamed models.CaptureLosses
+		order          int
 	}
-	var out []late
-	var named []*Watched
+	w.mu.Lock()
+	var all []watched
 	for _, t := range w.byStart {
-		if t.gone {
+		if t.gone || (len(t.lost) == 0 && t.name == "") {
 			continue
 		}
-		if t.name != "" {
-			named = append(named, t)
-		}
-		if len(t.lost) > 0 {
-			out = append(out, late{t.seq, models.LateLoss{Name: t.name, Request: t.start, Response: t.end, Lost: slices.Clone(t.lost)}})
-		}
+		all = append(all, watched{name: t.name, start: t.start, end: t.end, lost: slices.Clone(t.lost), streamed: t.streamed, order: t.seq})
 	}
 	w.mu.Unlock()
 	// By name, outside w.mu: droppedMu is a leaf of its own.
 	dropped := models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: MockDroppedOnItsWay}}
-	for _, t := range named {
-		if !w.m.WasMockDroppedForTC(t.name) {
-			continue
+	var losses []models.LateLoss
+	slices.SortFunc(all, func(a, b watched) int { return a.order - b.order })
+	for _, t := range all {
+		lost := t.lost
+		if t.name != "" && w.m.WasMockDroppedForTC(t.name) {
+			lost = lost.PlusNaming(dropped)
 		}
-		if i := slices.IndexFunc(out, func(l late) bool { return l.seq == t.seq }); i >= 0 {
-			out[i].loss.Lost = out[i].loss.Lost.PlusNaming(dropped)
-			continue
+		if len(t.streamed) > 0 {
+			lost = newSources(lost, t.streamed)
 		}
-		out = append(out, late{t.seq, models.LateLoss{Name: t.name, Request: t.start, Response: t.end, Lost: dropped}})
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	slices.SortFunc(out, func(a, b late) int { return a.seq - b.seq })
-	losses := make([]models.LateLoss, len(out))
-	for i, l := range out {
-		losses[i] = l.loss
+		if len(lost) > 0 {
+			losses = append(losses, models.LateLoss{Name: t.name, Request: t.start, Response: t.end, Lost: lost})
+		}
 	}
 	return losses
 }
 
-// Unwatched is how many test cases Watch was given past MaxLateWatched: each
-// streamed with nothing lost, and saved without what a span recorded after it
-// went says it lost.
+// newSources is what of lost names a source seen does not, kind by kind: each
+// What lost names that seen's What of its kind does not ("; "-joined lists,
+// as PlusNaming keeps them), Count how many such sources; a kind lost names
+// no source of is new only where seen has none of that kind.
+func newSources(lost, seen models.CaptureLosses) models.CaptureLosses {
+	var out models.CaptureLosses
+	for _, l := range lost {
+		i := slices.IndexFunc(seen, func(c models.CaptureLoss) bool { return c.Kind == l.Kind })
+		if i < 0 {
+			out = append(out, l)
+			continue
+		}
+		known := strings.Split(seen[i].What, "; ")
+		var fresh []string
+		for _, what := range strings.Split(l.What, "; ") {
+			if what != "" && !slices.Contains(known, what) {
+				fresh = append(fresh, what)
+			}
+		}
+		if len(fresh) > 0 {
+			out = append(out, models.CaptureLoss{Kind: l.Kind, Count: uint64(len(fresh)), What: strings.Join(fresh, "; ")})
+		}
+	}
+	return out
+}
+
+// Bound is how many test cases w watches at most (MaxLateWatched); 0 for a
+// nil watch.
+func (w *LateWatch) Bound() int {
+	if w == nil {
+		return 0
+	}
+	return w.max
+}
+
+// Unwatched is how many test cases Watch was given past its Bound: each saved
+// without what a span recorded after it went says it lost.
 func (w *LateWatch) Unwatched() int {
 	if w == nil {
 		return 0

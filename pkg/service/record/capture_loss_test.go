@@ -966,7 +966,7 @@ func TestATestCaseChargedTwiceIsNamedOnceWithEverySource(t *testing.T) {
 	}
 	var named []any
 	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "could not capture every call while these test cases were recorded") {
+		if e.Message == taintedMsg(true, true) {
 			named = append(named, e.ContextMap()["testCases"])
 		}
 	}

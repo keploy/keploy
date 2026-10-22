@@ -19,7 +19,6 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -646,7 +645,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 			dropped++
 			fields := []zap.Field{zap.String("command", pendingCommand.Header.Type), zap.Error(undecodable)}
 			if dropped == 1 {
-				logger.Warn(undecodableDropMsg(), fields...)
+				logger.Warn(undecodableDropMsg(syncMock.FromContextOrGlobal(ctx).LossFate()), fields...)
 			} else {
 				logger.Debug("dropping a MySQL response that could not be decoded", fields...)
 			}
@@ -1456,12 +1455,13 @@ func statementOf(msg interface{}) (uint32, bool) {
 }
 
 // undecodableDropMsg is the WARN the legacy recorder says the first response
-// it could not decode with: what becomes of the test cases recorded over it.
-// With the proven switch off they are left out; under it keploy record keeps
-// each, with that as what its recording lost, for the auto-replay to judge.
-func undecodableDropMsg() string {
-	if provenswitch.On() {
-		return "dropping a MySQL response that could not be decoded: its mock is not recorded, and keploy record keeps each test case recorded over it, " + models.KeptToBeJudged
+// it could not decode with: what becomes of the test cases recorded over it,
+// as the recording does with them (fate,
+// syncMock.SyncMockManager.LossFate): left out, or kept, each with that as
+// what its recording lost.
+func undecodableDropMsg(fate models.LossFate) string {
+	if keeps := fate.Keeps("each test case recorded over it"); keeps != "" {
+		return "dropping a MySQL response that could not be decoded: its mock is not recorded, and " + keeps
 	}
 	return "dropping a MySQL response that could not be decoded: its mock is not recorded, and the test cases recorded over it are left out"
 }

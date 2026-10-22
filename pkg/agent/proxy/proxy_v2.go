@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -19,9 +20,16 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+)
+
+// Why a connection's orphan spans were recorded (Session.RecordOrphanWindowWhy),
+// after its parser's kind (spanKind): what it carried once keploy stopped recording it,
+// and requests its parser returned without reading (parserReads).
+const (
+	unrecordedAfterStop = "what a connection carried once keploy stopped recording it"
+	unreadByParser      = "requests its parser returned without reading"
 )
 
 // recordViaSupervisor runs a V2-capable parser's RecordOutgoing inside
@@ -49,14 +57,6 @@ import (
 //
 // The caller remains responsible for closing srcConn/dstConn in its
 // deferred cleanup; this helper never closes them.
-// Why a connection's orphan spans were recorded (Session.RecordOrphanWindowWhy),
-// after its parser's type: what it carried once keploy stopped recording it,
-// and requests its parser returned without reading (parserReads).
-const (
-	unrecordedAfterStop = "what a connection carried once keploy stopped recording it"
-	unreadByParser      = "requests its parser returned without reading"
-)
-
 func (p *Proxy) recordViaSupervisor(
 	ctx context.Context,
 	srcConn, dstConn net.Conn,
@@ -219,7 +219,7 @@ func (p *Proxy) recordViaSupervisor(
 		if svSess.RecordingStopping() {
 			return func() {}
 		}
-		return svSess.OpenOrphanWindowWhy(start, string(parserType)+": "+unrecordedAfterStop)
+		return svSess.OpenOrphanWindowWhy(start, spanKind(parserType)+": "+unrecordedAfterStop)
 	}
 	unrecorded := syncMock.NewUnrecordedConn(openSpan, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
 	defer unrecorded.End()
@@ -229,7 +229,7 @@ func (p *Proxy) recordViaSupervisor(
 	// is not, whenever it was told of. Every stop goes through it,
 	// so the return knows whether one came first, and when.
 	reads := newParserReads(unrecorded, func(start, end time.Time) {
-		svSess.RecordOrphanWindowWhy(start, end, string(parserType)+": "+unreadByParser)
+		svSess.RecordOrphanWindowWhy(start, end, spanKind(parserType)+": "+unreadByParser)
 	}, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
 	svSess.OnStop = reads.stop
 	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
@@ -283,6 +283,9 @@ func (p *Proxy) recordViaSupervisor(
 			svSess.StoppedAt()
 			return !svSess.RecordingStopping()
 		},
+		// What the recording does with the test cases over the span such a
+		// hole opens, for the tee's WARN to say.
+		LossFate: svSess.LossFate,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -468,7 +471,7 @@ func (p *Proxy) recordViaSupervisor(
 				zap.String("parser", string(parserType)),
 				zap.String("status", result.Status.String()),
 				zap.String("clientConnID", svSess.ClientConnID),
-				zap.String("next_step", retiredNextStep()),
+				zap.String("next_step", retiredNextStep(svSess.LossFate())),
 			)
 		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
@@ -907,12 +910,45 @@ func parserCanEndAtHole(parser integrations.Integrations) bool {
 
 // retiredNextStep is the next_step of the WARN a parser retired mid-recording
 // logs: what becomes of the test cases recorded while its connection carries
-// traffic. With the proven switch off they are left out; under it keploy
-// record keeps each, with that as what its recording lost, for the auto-replay
-// to judge.
-func retiredNextStep() string {
-	if provenswitch.On() {
-		return "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, keploy record keeps every test case recorded while this connection carries traffic, not only the ones that used it, " + models.KeptToBeJudged + ". Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
+// traffic, as the recording does with them (fate,
+// supervisor.Session.LossFate): left out, or kept, each with that as what its
+// recording lost.
+func retiredNextStep(fate models.LossFate) string {
+	if keeps := fate.Keeps("every test case recorded while this connection carries traffic, not only the ones that used it"); keeps != "" {
+		return "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, " + keeps + ". Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
 	}
 	return "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
+}
+
+// spanKind is how a span's why names the parser of parserType: as the mocks
+// it records name their kind (models.Kind: "Http", "MySQL"), so one reason
+// that lists a parser's span and a mock's left-out exchange names them alike.
+// A parser this does not list is named by its type, its first letter
+// upper-cased ("redis" is "Redis", models.REDIS).
+func spanKind(parserType integrations.IntegrationType) string {
+	switch parserType {
+	case integrations.HTTP:
+		return string(models.HTTP)
+	case integrations.HTTP2:
+		return string(models.HTTP2)
+	case integrations.GRPC:
+		return string(models.GRPC_EXPORT)
+	case integrations.MYSQL:
+		return string(models.MySQL)
+	case integrations.POSTGRES_V1:
+		return string(models.Postgres)
+	case integrations.POSTGRES_V2:
+		return string(models.PostgresV2)
+	case integrations.POSTGRES_V3:
+		return string(models.PostgresV3)
+	case integrations.MONGO_V1, integrations.MONGO_V2:
+		return string(models.Mongo)
+	case integrations.AEROSPIKE:
+		return string(models.Aerospike)
+	}
+	s := string(parserType)
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

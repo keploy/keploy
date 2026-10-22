@@ -56,8 +56,8 @@ func TestALateSpanChargesTheTestCasesItOverlapsAndNoneInAJoinedGap(t *testing.T)
 
 // What a watch finds: an open span charges every test case watched that ends
 // at or after it opened; a closed one the test cases it overlaps, its bounds
-// included; a span that overlaps none charges none. A test case streamed with
-// its loss (Forget) is not named, nor one never watched. Each is named as it
+// included; a span that overlaps none charges none. A test case forgotten (not
+// streamed: Forget) is not named, nor one never watched. Each is named as it
 // was watched, in the order it was, its What naming every source.
 func TestALateWatchNamesWhatEachTestCaseLostAfterItWent(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -120,7 +120,7 @@ func TestALateWatchNamesTheMocksLetGoAfterATestCaseWent(t *testing.T) {
 	}
 	want := []string{
 		fmt.Sprintf("%q %v", "test-1", dropped(MockDroppedOnItsWay)),
-		fmt.Sprintf("%q %v", "test-2", dropped(MockDroppedWhileItRan)),
+		fmt.Sprintf("%q %v", "test-2", dropped("Http: "+MockDroppedWhileItRan)),
 	}
 	if got := lateText(w.Late()); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("late:\n%v\nwant\n%v", got, want)
@@ -184,7 +184,7 @@ func TestADroppedMockWithNoOwnerChargesTheTestCasesItWasRecordedOver(t *testing.
 			got := m.TestCaseLosses("test-1", at(11), at(20))
 			want := models.CaptureLosses(nil)
 			if c.wantCharged {
-				want = models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: MockDroppedWhileItRan}}
+				want = models.CaptureLosses{{Kind: models.CaptureLossMockDropped, Count: 1, What: "Http: " + MockDroppedWhileItRan}}
 			}
 			if fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("charged %+v, want %+v", got, want)
@@ -197,4 +197,42 @@ func TestADroppedMockWithNoOwnerChargesTheTestCasesItWasRecordedOver(t *testing.
 			}
 		})
 	}
+}
+
+// A test case streamed with what its check found it lost (Streamed) stays
+// watched: a span recorded after that names it for a source the check did
+// not see, that source alone, counted once; one of a source the check named
+// (the span the check read, told to the watch after it, among them) names it
+// with nothing. A kind the check did not see is named whole.
+func TestALateWatchNamesOnlyTheSourcesATestCaseStreamedWithItsLossLacked(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := New(zap.NewNop())
+	w := m.WatchLate()
+	defer w.Close()
+	lossy := w.Watch("lossy", at(100), at(110))
+	m.RecordOrphanWindowWhy(at(100), at(101), "MySQL: early") // read by the check, told to the watch too
+	checked := m.TestCaseLosses("lossy", at(100), at(110))
+	w.Streamed(lossy, checked)
+	m.RecordOrphanWindowWhy(at(102), at(103), "MySQL: early") // the same source again
+	m.RecordOrphanWindowWhy(at(104), at(105), "Http: late")
+	m.RecordOrphanWindowWhy(at(106), at(107), "Http: late")
+	m.SpanDroppedMock(&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: at(108), ResTimestampMock: at(109)}})
+	want := []string{fmt.Sprintf("%q %v", "lossy", models.CaptureLosses{
+		{Kind: models.CaptureLossExchangeUnrecorded, Count: 1, What: "Http: late"},
+		{Kind: models.CaptureLossMockDropped, Count: 1, What: "Mongo: " + MockDroppedWhileItRan},
+	})}
+	if got := lateText(w.Late()); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("late:\n%v\nwant\n%v", got, want)
+	}
+	// Only the source its check named: not named.
+	only := w.Watch("only", at(200), at(210))
+	m.RecordOrphanWindowWhy(at(200), at(201), "MySQL: early")
+	w.Streamed(only, m.TestCaseLosses("only", at(200), at(210)))
+	m.RecordOrphanWindowWhy(at(205), at(206), "MySQL: early")
+	if got := lateText(w.Late()); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("a test case whose later spans its check named is named: %v", got)
+	}
+	var nilWatch *LateWatch
+	nilWatch.Streamed(nil, checked)
+	w.Streamed(nil, checked)
 }

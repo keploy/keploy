@@ -25,6 +25,8 @@ type runnerInstr struct {
 	mu           sync.Mutex
 	setupOpts    models.SetupOptions
 	incomingRead bool
+	// incomingOpts is what the record asked of the incoming stream.
+	incomingOpts models.IncomingOptions
 }
 
 func (r *runnerInstr) Setup(_ context.Context, _ string, opts models.SetupOptions) error {
@@ -34,9 +36,10 @@ func (r *runnerInstr) Setup(_ context.Context, _ string, opts models.SetupOption
 	return nil
 }
 
-func (r *runnerInstr) GetIncoming(_ context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (r *runnerInstr) GetIncoming(_ context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	r.mu.Lock()
 	r.incomingRead = true
+	r.incomingOpts = opts
 	r.mu.Unlock()
 	out := make(chan *models.TestCase, len(r.incoming))
 	for _, tc := range r.incoming {

@@ -239,6 +239,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// positional signature, which is already at seven arguments.
 	r.teeC2D.onDesync = cfg.OnCaptureDesync
 	r.teeD2C.onDesync = cfg.OnCaptureDesync
+	r.teeC2D.lossFate, r.teeD2C.lossFate = cfg.LossFate, cfg.LossFate
 	if cfg.stallClock != nil {
 		r.teeC2D.clock, r.teeD2C.clock = cfg.stallClock, cfg.stallClock
 	}

@@ -97,7 +97,7 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 		// Unnamed, as the agent streams a test case keploy record names.
 		{Request: at.Add(time.Second), Response: at.Add(time.Second + time.Nanosecond), Lost: lost},
 	}
-	sum := models.StreamEndSummary{TestCasesSent: 2, TestCasesSuppressed: 3, LeftOutInFlight: 4, LateLosses: late}
+	sum := models.StreamEndSummary{TestCasesSent: 2, TestCasesSuppressed: 3, LeftOutInFlight: 4, LateLosses: late, NotRechecked: 5}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mw := multipart.NewWriter(w)
 		w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
@@ -133,7 +133,7 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 		}
 		cancel()
 		ends := client.TakeStreamEnds()
-		if ends.TestCasesSent != 2 || ends.TestCasesSuppressed != 3 || ends.LeftOutInFlight != 4 {
+		if ends.TestCasesSent != 2 || ends.TestCasesSuppressed != 3 || ends.LeftOutInFlight != 4 || ends.NotRechecked != 5 || ends.Unmarked != 0 {
 			t.Fatalf("started %v: the client kept %+v, want the marker's counts", started, ends)
 		}
 		got := ends.LateLosses
@@ -149,5 +149,59 @@ func TestTheClientKeepsTheLateLossesTheMarkerCarriesForTheRecording(t *testing.T
 		if again := client.TakeStreamEnds(); len(again.LateLosses) != 0 || again.TestCasesSuppressed != 0 {
 			t.Fatalf("started %v: taken twice: %+v", started, again)
 		}
+	}
+}
+
+// A stream asked to charge what its test cases lost
+// (models.IncomingOptions.ChargesLosses) that ends without its marker leaves
+// its account untold: the client counts it (Unmarked), for the recording to
+// take as what it could not be told, never as nothing lost. A stream that does
+// not charge it, or one that ends at its marker, counts nothing.
+func TestTheClientCountsAStreamThatChargesLossesAndEndsWithoutItsMarker(t *testing.T) {
+	for _, c := range []struct {
+		charges, marker bool
+		unmarked        int
+	}{
+		{charges: true, marker: false, unmarked: 1},
+		{charges: true, marker: true, unmarked: 0},
+		{charges: false, marker: false, unmarked: 0},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+			if c.marker {
+				h := textproto.MIMEHeader{}
+				h.Set("Content-Disposition", `form-data; name="`+models.StreamEndPart+`"`)
+				p, _ := mw.CreatePart(h)
+				_ = json.NewEncoder(p).Encode(models.StreamEndSummary{})
+			}
+			_ = mw.Close()
+		}))
+		cfg := &config.Config{}
+		cfg.Agent.AgentURI = srv.URL
+		client := New(zap.NewNop(), nil, cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		grp, gctx := errgroup.WithContext(ctx)
+		gctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+		tcs, err := client.GetIncoming(gctx, models.IncomingOptions{ChargesLosses: c.charges})
+		if err != nil {
+			t.Fatal(err)
+		}
+		drained := make(chan struct{})
+		go func() {
+			for range tcs {
+			}
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("the stream did not end")
+		}
+		if got := client.TakeStreamEnds().Unmarked; got != c.unmarked {
+			t.Fatalf("charges=%v marker=%v: the client counted %d streams ended without their marker, want %d", c.charges, c.marker, got, c.unmarked)
+		}
+		cancel()
+		srv.Close()
 	}
 }

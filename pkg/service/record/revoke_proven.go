@@ -83,6 +83,24 @@ func windowOf(tc *models.TestCase) streamedWindow {
 	return streamedWindow{req: req.UnixNano(), resp: resp.UnixNano()}
 }
 
+// StreamedWindowOf is tc's window as the agent streamed it (windowOf), in
+// Unix nanoseconds: what a late loss names the test case by
+// (LateLossWindowOf), for keploy mock record. Zero for a test case with no
+// request time.
+func StreamedWindowOf(tc *models.TestCase) (req, resp int64) {
+	w := windowOf(tc)
+	return w.req, w.resp
+}
+
+// LateLossWindowOf is the window late loss l names its test case by, as
+// StreamedWindowOf gives it; zero for one with no window.
+func LateLossWindowOf(l models.LateLoss) (req, resp int64) {
+	if l.Request.IsZero() {
+		return 0, 0
+	}
+	return l.Request.UnixNano(), l.Response.UnixNano()
+}
+
 // savedTestCases is, under the proven switch, the test cases keploy record
 // saved, by the window the agent streamed each with: the agent streams most
 // test cases unnamed, and the name each is saved under is keploy record's own
@@ -118,7 +136,8 @@ func (s savedTestCases) savedFor(l models.LateLoss, inserted func(string) bool) 
 // chargeLateLosses charges, under the proven switch, each test case keploy
 // record saved with what the agent found it had lost after all, by the
 // stream's end (late, takeStreamEnds): a span a parser reported behind the
-// traffic overlaps it, after it was streamed with nothing lost. saved names
+// traffic overlaps it, after it was streamed (with nothing lost, or with a
+// loss from another source). saved names
 // the test cases saved that a late loss names (savedTestCases.savedFor); one
 // keploy record did not save is charged nothing. Without this such a test
 // case was saved without that as its evidence. Called once the frame streams
@@ -160,7 +179,7 @@ func mocksDroppedMsg() string {
 // evidence, under the proven switch: the auto-replay judges it where one runs
 // (enterprise's), and without one the recording fails naming it
 // (models.KeptToBeJudged).
-const judgedOrFailed = "the auto-replay judges it where one follows the record (kept if it replays, quarantined with that in its reason if it does not), and without one the recording fails, naming it (" + provenswitch.Env + "=1)"
+const judgedOrFailed = "the auto-replay judges it where one follows the record (kept if it replays, quarantined with that in its entry's calls if it does not), and without one the recording fails, naming it (" + provenswitch.Env + "=1)"
 
 // maxUnsavedMockSpans bounds how many unsaved mocks' spans a recording keeps
 // apart (unsavedMocks): past it, the rest are kept as one span over them all,
@@ -312,22 +331,49 @@ type streamEndTaker interface {
 // tcs_suppressed_total), and test cases left out because each stayed in
 // flight while mocks it may have made had to be let go
 // (tcs_left_out_in_flight). Neither has a name keploy record could charge:
-// what the recording lost of the set, said in a sentence; "" for none.
+// what the recording lost of the set, said in a sentence that names where
+// each came from; "" for none. LeftOutUnsaid exports it for keploy mock
+// record.
 func leftOutUnsaid(sum models.StreamEndSummary) string {
 	var parts []string
 	if sum.TestCasesSuppressed > 0 {
-		parts = append(parts, fmt.Sprintf("the keploy agent left %d test case(s) out of the recording, unnamed, for a call of theirs it could not record (tcs_suppressed_total: an agent that does not stream such a test case with its loss)", sum.TestCasesSuppressed))
+		parts = append(parts, fmt.Sprintf("the keploy agent left %d test case(s) out of the recording, unnamed, for a call of theirs it could not record (tcs_suppressed_total: an agent that does not stream such a test case with its loss, one older than keploy)", sum.TestCasesSuppressed))
 	}
 	if sum.LeftOutInFlight > 0 {
-		parts = append(parts, fmt.Sprintf("the keploy agent left %d test case(s) out of the recording, unnamed: each stayed in flight while mocks it may have made had to be let go (tcs_left_out_in_flight)", sum.LeftOutInFlight))
+		parts = append(parts, fmt.Sprintf("the keploy agent left %d test case(s) out of the recording, unnamed: each stayed in flight (a slow endpoint, a long poll, a stream) while the agent let go of the mocks it held for the requests in flight, past its bound on them or under memory pressure (tcs_left_out_in_flight)", sum.LeftOutInFlight))
 	}
 	return strings.Join(parts, "; ")
 }
 
+// LeftOutUnsaid is leftOutUnsaid, for keploy mock record.
+func LeftOutUnsaid(sum models.StreamEndSummary) string { return leftOutUnsaid(sum) }
+
+// streamsUntold is, under the proven switch, what the agent's incoming streams
+// could not tell the recording (sum): streams that charge what their test
+// cases lost and ended without their end marker (Unmarked), and test cases
+// streamed past the most the agent watches for a span it learns of later
+// (NotRechecked). Either leaves a test case saved over such a span without
+// that as its evidence, unsaid: the set's recording is not verified. "" for
+// none. StreamsUntold exports it for keploy mock record.
+func streamsUntold(sum models.StreamEndSummary) string {
+	var parts []string
+	if sum.Unmarked > 0 {
+		parts = append(parts, fmt.Sprintf("%d of the keploy agent's incoming streams ended without their end marker (the agent went away, did not take keploy's request to end them, or keploy closed them itself), so what the agent found its test cases had lost after they were streamed, and how many it left out of the recording, is not known", sum.Unmarked))
+	}
+	if sum.NotRechecked > 0 {
+		parts = append(parts, fmt.Sprintf("the keploy agent streamed %d test case(s) past the most it watches for an exchange it learns later it could not record (tcs_not_rechecked), so such an exchange over one of them is not in its evidence", sum.NotRechecked))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// StreamsUntold is streamsUntold, for keploy mock record.
+func StreamsUntold(sum models.StreamEndSummary) string { return streamsUntold(sum) }
+
 // takeStreamEnds notes on w, under the proven switch, what the agent's
 // incoming streams' end markers said it left out of the recording unnamed
-// (leftOutUnsaid), and is the late losses they carried, for
-// chargeLateLosses. Called once the frame streams drained.
+// (leftOutUnsaid), and what the streams could not tell (streamsUntold), and
+// is the late losses they carried, for chargeLateLosses. Called once the
+// frame streams drained.
 func (r *Recorder) takeStreamEnds(w *captureWatch) []models.LateLoss {
 	t, ok := r.instrumentation.(streamEndTaker)
 	if !ok || !provenswitch.On() {
@@ -335,5 +381,6 @@ func (r *Recorder) takeStreamEnds(w *captureWatch) []models.LateLoss {
 	}
 	sum := t.TakeStreamEnds()
 	w.leftOutOfSet(leftOutUnsaid(sum))
+	w.untoldOfSet(streamsUntold(sum))
 	return sum.LateLosses
 }

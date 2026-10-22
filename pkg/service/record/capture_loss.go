@@ -107,6 +107,10 @@ type captureWatch struct {
 	// of the recording that it could not name (leftOutOfSet): the set's
 	// loss, which no test case holds.
 	leftOut []string
+	// untold is, under the proven switch, what the agent's incoming streams
+	// could not tell the recording (untoldOfSet): the set's recording is not
+	// verified for it.
+	untold []string
 	// agent watches which agent process answers (models.AgentInstanceWatch):
 	// the counts are the process's, from when it started, and the test cases
 	// and mocks it captured are in its memory until it hands them over. An
@@ -282,6 +286,20 @@ func (w *captureWatch) leftOutOfSet(why string) {
 	w.leftOut = append(w.leftOut, why)
 }
 
+// untoldOfSet notes, under the proven switch, why the agent's incoming
+// streams could not tell the recording all they would have (streamsUntold):
+// the set's recording is not verified (RecordedLosses.NotVerified), the
+// recording failing on it, or handed to the pass that judges each test case.
+// "" notes nothing.
+func (w *captureWatch) untoldOfSet(why string) {
+	if w == nil || why == "" || !provenswitch.On() {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.untold = append(w.untold, why)
+}
+
 // saved notes a mock as it is saved: one whose stamp says the Docker daemon
 // did not answer keploy's read of its container's configuration is its own
 // test case's to charge, once a mapping names it (mapped). Called before the
@@ -448,10 +466,10 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 	}()
 	if len(w.tainted) > 0 && judge == nil {
 		failed = true
-		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks ("+provenswitch.Env+"=1)",
+		w.logger.Error(taintedMsg(len(w.lost) > 0, len(w.chargedOwn) > 0),
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.tainted),
-			zap.String("reason", w.lost.Plus(w.chargedOwn).Text()),
+			zap.String("reason", w.lost.PlusNaming(w.chargedOwn).Text()),
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
 	}
 	if len(w.leftOut) > 0 && judge == nil {
@@ -460,6 +478,13 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 			zap.String("testSetID", testSetID),
 			zap.String("reason", strings.Join(w.leftOut, "; ")),
 			zap.String("next_step", "run keploy record with an agent of the same version as keploy, and fix what the reason names; then re-record"))
+	}
+	if len(w.untold) > 0 && judge == nil {
+		failed = true
+		w.logger.Error("the recording is not verified: keploy's agent could not tell it everything its test cases lost ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", strings.Join(w.untold, "; ")),
+			zap.String("next_step", "check the agent's log for why its stream ended without its marker, then re-record"))
 	}
 	if len(w.uncapturable) > 0 {
 		notJudged := w.notJudged.Plus(w.unreadLost)
@@ -777,6 +802,7 @@ func (w *captureWatch) recordedLocked(testSetID string, realUncaptured bool, rea
 	if restarted != "" {
 		why = append(why, restarted)
 	}
+	why = append(why, w.untold...)
 	l.NotVerified = strings.Join(why, "; ")
 	l.LeftOut = strings.Join(w.leftOut, "; ")
 	return l
@@ -797,13 +823,14 @@ func (w *captureWatch) chargedWith(name string, k models.CaptureLossKind) bool {
 	return false
 }
 
-// chargedAny says charge charged a test case with something, or the agent
-// left test cases out unnamed (leftOutOfSet): what a watch that is off (an
-// agent that cannot count) still has to say. Called before w.mu is taken.
+// chargedAny says charge charged a test case with something, the agent left
+// test cases out unnamed (leftOutOfSet), or its streams could not tell all
+// they would have (untoldOfSet): what a watch that is off (an agent that
+// cannot count) still has to say. Called before w.mu is taken.
 func (w *captureWatch) chargedAny() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return len(w.byTestCase) > 0 || len(w.leftOut) > 0
+	return len(w.byTestCase) > 0 || len(w.leftOut) > 0 || len(w.untold) > 0
 }
 
 // String is a one-line account, for tests.
@@ -811,4 +838,19 @@ func (w *captureWatch) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return fmt.Sprintf("tainted=[%s] unverified=[%s]", strings.Join(w.tainted, ","), strings.Join(w.unverified, ","))
+}
+
+// taintedMsg is the ERROR a recording judged on its own fails with for the
+// test cases it names, by what they lost: what the agent could not capture
+// (agent, its counts), what keploy could not record as mocks (own: an
+// exchange a parser left out, a hole, mocks let go: captureWatch.charge), or
+// both.
+func taintedMsg(agent, own bool) string {
+	switch {
+	case agent && own:
+		return "the recording is incomplete: keploy's agent could not capture every call, and keploy could not record every call it captured as a mock, while these test cases were recorded, so their calls may be missing from the mocks (" + provenswitch.Env + "=1)"
+	case own:
+		return "the recording is incomplete: keploy could not record every call it captured as a mock while these test cases were recorded (an exchange its parser left out, a hole in a connection's capture, a connection it stopped recording, or mocks it let go), so their calls may be missing from the mocks (" + provenswitch.Env + "=1)"
+	}
+	return "the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks (" + provenswitch.Env + "=1)"
 }

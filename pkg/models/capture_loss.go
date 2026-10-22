@@ -218,12 +218,60 @@ const (
 
 // KeptToBeJudged ends what a line that reports an exchange keploy could not
 // record as a mock says, under the proven switch, of a test case recorded over
-// it, where the switch-off line says the test case is left out of the
-// recording: keploy record keeps it, charged with the exchange
-// (CaptureLossExchangeUnrecorded). Where an auto-replay follows the record
-// (enterprise's), it judges the test case; without one (keploy's own record,
-// or the auto-replay turned off) the recording fails, naming it.
-const KeptToBeJudged = "with that as what its recording lost: where the auto-replay follows the record it judges the test case (kept if it replays, quarantined with that in its reason if it does not), and without one the recording fails, naming it (" + provenswitch.Env + "=1)"
+// it that a recording keeps (LossFate.Keeps), where the switch-off line says
+// the test case is left out of the recording: it is kept, charged with the
+// exchange (CaptureLossExchangeUnrecorded). Where a judge follows the record
+// (enterprise's auto-replay, or its judging of a keploy mock record), it
+// decides on that evidence; without one (keploy's own record, or the
+// auto-replay turned off) the recording fails, naming the test case.
+const KeptToBeJudged = "with that as what its recording lost, its evidence: where a judge follows the record (enterprise's auto-replay, or its judging of a keploy mock record) it decides on that evidence (a test case that replays is kept, and one that does not is quarantined with that in its entry's calls), and without one the recording fails, naming it (" + provenswitch.Env + "=1)"
+
+// LossFate is what becomes, under the proven switch, of the test cases a
+// recording streams over a span keploy could not record as a mock (an
+// exchange a parser left out, a hole, a connection keploy stopped recording,
+// mocks let go), as the agent's open record streams say (the mock manager's
+// LossFate): the line that reports the span says it (Keeps). The zero value
+// is LossFateLeftOut.
+type LossFate int
+
+const (
+	// LossFateLeftOut: no open record stream charges what a test case lost
+	// (IncomingOptions.ChargesLosses): the switch is off, its client does
+	// not (an older keploy, or a DaemonSet agent's own per-pod recording),
+	// or no stream is open. A test case over the span is left out of the
+	// recording, as the switch-off line says.
+	LossFateLeftOut LossFate = iota
+	// LossFateKept: every open record stream charges it: a test case over
+	// the span is streamed with it as what its recording lost.
+	LossFateKept
+	// LossFateMixed: some open record streams charge it, and some do not.
+	LossFateMixed
+)
+
+// Keeps is what a line says becomes, under f, of subject (the test cases the
+// line names, as "each test case recorded while this exchange ran"), as a
+// clause that ends the line's sentence; "" for LossFateLeftOut, whose line
+// keeps its switch-off words.
+func (f LossFate) Keeps(subject string) string {
+	switch f {
+	case LossFateKept:
+		return "the recording keeps " + subject + ", " + KeptToBeJudged
+	case LossFateMixed:
+		return "a recording whose client takes what a test case lost as its evidence (keploy record, keploy mock record) keeps " + subject + ", " + KeptToBeJudged +
+			"; one whose client does not (an older keploy, or another client of the agent's) leaves such a test case out rather than save it without its mocks"
+	}
+	return ""
+}
+
+// KeepsSentence is Keeps, its first letter upper-cased, to open a sentence;
+// "" for LossFateLeftOut.
+func (f LossFate) KeepsSentence(subject string) string {
+	k := f.Keeps(subject)
+	if k == "" {
+		return ""
+	}
+	return strings.ToUpper(k[:1]) + k[1:]
+}
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
 // with when the Docker daemon did not answer keploy's read of its
@@ -677,7 +725,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossExchangeUnrecorded:
 		return fmt.Sprintf("keploy could not record as mocks %d stretch(es) of what the application's connections carried while this test was recorded (an exchange its parser left out, a hole in a connection's capture, or a connection keploy had stopped recording), so a call of this test's may be missing from its mocks", c.Count)
 	case CaptureLossMockDropped:
-		return fmt.Sprintf("keploy let go of mocks %d time(s) while this test was recorded (memory pressure, a full queue on their way to keploy record, or a mock keploy record could not save), so a call of this test's may be missing from its mocks", c.Count)
+		return fmt.Sprintf("keploy let go of mocks while this test was recorded, %d time(s), each a stretch the agent's memory guard paused recording in, a mock dropped on a full or closed queue on its way to keploy record, or a mock keploy record could not save, so a call of this test's may be missing from its mocks", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
 	default:

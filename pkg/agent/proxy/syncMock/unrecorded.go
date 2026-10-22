@@ -70,7 +70,9 @@ const (
 // room, those test cases were saved without their mocks. Past the cap, spans
 // are joined until a quarter of the room is free again, which only widens what
 // is covered: it can leave out a test case that fell in a joined gap, never
-// let one through that overlaps a span. What is joined is chosen to cover the
+// let one through that overlaps a span. A span joined over a gap says so
+// (OverlapsJoined), so that, under the proven switch, a test case charged for
+// one only is told it may have run in the gap (TestCaseLosses). What is joined is chosen to cover the
 // least of the test cases still to be checked:
 //   - first, the spans that end before every test case the consumer still
 //     holds (CheckedBefore), into one: no test case it holds overlaps them;
@@ -125,13 +127,15 @@ func (s *Spans) Record(start, end time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recorded++
-	s.addClosedLocked(start, end)
+	s.addClosedLocked(start, end, false)
 }
 
 // addClosedLocked adds the closed span [start, end], on the wall clock, ending
-// no earlier than it starts.
-func (s *Spans) addClosedLocked(start, end time.Time) {
-	r := pressureRange{start: wallTime(start), end: wallTime(end)}
+// no earlier than it starts; joined says it covers a gap already. One it
+// overlaps or touches joins it, and is joined if either was: that join covers
+// no gap of its own.
+func (s *Spans) addClosedLocked(start, end time.Time, joined bool) {
+	r := pressureRange{start: wallTime(start), end: wallTime(end), joined: joined}
 	if r.end.Before(r.start) {
 		r.end = r.start
 	}
@@ -146,6 +150,7 @@ func (s *Spans) addClosedLocked(start, end time.Time) {
 		if s.closed[j].end.After(r.end) {
 			r.end = s.closed[j].end
 		}
+		r.joined = r.joined || s.closed[j].joined
 	}
 	s.closed = slices.Replace(s.closed, i, j, r)
 	if len(s.closed) > maxPressureRanges {
@@ -185,7 +190,7 @@ func joinForRoom(spans []pressureRange, keep int, checked time.Time) []pressureR
 	done := sort.Search(len(spans), func(k int) bool { return !spans[k].end.Before(checked) })
 	if done >= 2 {
 		out := make([]pressureRange, 0, len(spans)-done+1)
-		out = append(out, pressureRange{start: spans[0].start, end: spans[done-1].end})
+		out = append(out, pressureRange{start: spans[0].start, end: spans[done-1].end, joined: true})
 		spans = append(out, spans[done:]...)
 	}
 	return joinNearest(spans, keep)
@@ -217,6 +222,7 @@ func joinNearest(spans []pressureRange, keep int) []pressureRange {
 				atLimit--
 			}
 			cur.end = spans[k+1].end
+			cur.joined = true
 			continue
 		}
 		out = append(out, cur)
@@ -276,7 +282,10 @@ func (s *Spans) Open(start time.Time) func() {
 					break
 				}
 			}
-			s.addClosedLocked(root.start, time.Now())
+			// Joined past the cap or not, it is what its spans covered:
+			// each was open when they joined, so until the later
+			// closer it covers no gap.
+			s.addClosedLocked(root.start, time.Now(), false)
 		})
 	}
 }
@@ -292,24 +301,35 @@ func absDuration(d time.Duration) time.Duration {
 // An open span extends to now. Zero bounds make no claim: (false, 0). Spans
 // that were joined count as one.
 func (s *Spans) Overlaps(start, end time.Time) (bool, int) {
+	ok, n, _ := s.OverlapsJoined(start, end)
+	return ok, n
+}
+
+// OverlapsJoined is Overlaps, and whether each span that overlaps [start, end]
+// was joined over a gap past the cap (joinedOnly: pressureRange's joined).
+// Then the overlap may be with a gap no span recorded rather than with what a
+// span stands for, which a caller that says what [start, end] lost says.
+func (s *Spans) OverlapsJoined(start, end time.Time) (ok bool, n int, joinedOnly bool) {
 	if s == nil || start.IsZero() || end.IsZero() {
-		return false, 0
+		return false, 0, false
 	}
 	start, end = wallTime(start), wallTime(end)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	count := 0
+	count, exact := 0, false
 	i := sort.Search(len(s.closed), func(k int) bool { return !s.closed[k].end.Before(start) })
 	for ; i < len(s.closed) && !s.closed[i].start.After(end); i++ {
 		count++
+		exact = exact || !s.closed[i].joined
 	}
 	now := wallTime(time.Now())
 	for _, r := range s.open { // still open: to now
 		if !r.start.After(end) && !now.Before(start) {
 			count++
+			exact = true
 		}
 	}
-	return count > 0, count
+	return count > 0, count, count > 0 && !exact
 }
 
 // Counts reports how many spans are closed and how many are still open, after

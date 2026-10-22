@@ -579,14 +579,21 @@ type SyncMockManager struct {
 	orphanWhys orphanWhys
 	// dropped is, under the proven switch only, the spans of the mocks
 	// dropped on their way to keploy record that named no owner and that no
-	// OnDrop hook took (spanDroppedMock): the test cases recorded over one
-	// are charged with it (losses.go).
-	dropped Spans
+	// OnDrop hook took, or that one handed back (SpanDroppedMock): the test
+	// cases recorded over one are charged with it (losses.go). droppedWhys
+	// keeps them again by the mock's kind.
+	dropped     Spans
+	droppedWhys orphanWhys
 	// late is the record streams' watches of the test cases they sent with
 	// nothing lost (late.go), told of each span as it is recorded. Under
 	// lateMu, a leaf.
 	lateMu sync.Mutex
 	late   []*LateWatch
+	// streamsCharging and streamsPlain count the record streams open
+	// (OpenRecordStream), by whether each charges what its test cases
+	// lost: what a line that reports a span says becomes of the test cases
+	// over it (LossFate).
+	streamsCharging, streamsPlain atomic.Int64
 
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
@@ -618,9 +625,13 @@ type SyncMockManager struct {
 	logger   *zap.Logger
 }
 
-// pressureRange is one closed [start, end] span of a Spans.
+// pressureRange is one closed [start, end] span of a Spans. joined says it
+// covers a gap no span recorded did: past the cap, Spans joined it over one
+// (joinForRoom), so a test case it overlaps may have run beside what it
+// stands for rather than over it.
 type pressureRange struct {
 	start, end time.Time
+	joined     bool
 }
 
 // ownedMock pairs a buffered mock with the name of the test case that owns it,
@@ -1368,7 +1379,7 @@ func (m *SyncMockManager) outCloseStallBound() time.Duration {
 
 // toldDropped tells OnDrop's fn of a dropped mock, whose owner is owner (""
 // for none named). With no fn, under the proven switch, a mock that names no
-// owner keeps its span (spanDroppedMock): the test cases that ran while it
+// owner keeps its span (SpanDroppedMock): the test cases that ran while it
 // was recorded are charged with it, as an OnDrop hook leaves out or charges
 // them itself. Called with no lock held: the hook may take locks of its own.
 func (m *SyncMockManager) toldDropped(mock *models.Mock, owner string) {
@@ -1377,7 +1388,7 @@ func (m *SyncMockManager) toldDropped(mock *models.Mock, owner string) {
 		return
 	}
 	if owner == "" {
-		m.spanDroppedMock(mock)
+		m.SpanDroppedMock(mock)
 	}
 }
 
@@ -1419,7 +1430,7 @@ func (m *SyncMockManager) dropOut(mock *models.Mock, owner string, epoch uint64,
 // DaemonSet) cannot find them by owner, as WasMockDroppedForTC does, and
 // leaves out those that ran while the mock was requested instead. With no fn,
 // under the proven switch, the manager keeps the span of such a mock itself
-// (spanDroppedMock), and charges those test cases with it. fn must not block.
+// (SpanDroppedMock), and charges those test cases with it. fn must not block.
 // nil: nothing is told.
 func (m *SyncMockManager) OnDrop(fn func(*models.Mock)) {
 	if m == nil {
@@ -3559,14 +3570,11 @@ func (m *SyncMockManager) WasMockOrphanedInWindow(start, end time.Time) (bool, i
 // resynced and therefore knows the hole's width.
 //
 // A zero start is ignored and yields a no-op closer, mirroring
-// RecordOrphanWindow's refusal to make a claim on a degenerate input.
+// RecordOrphanWindow's refusal to make a claim on a degenerate input. It is
+// OpenOrphanWindowWhy with no why: every orphan span is opened there, so a
+// rule for them belongs there.
 func (m *SyncMockManager) OpenOrphanWindow(start time.Time) func() {
-	if m == nil {
-		return func() {}
-	}
-	closeSpan := m.orphans.Open(start)
-	m.noteLate(models.CaptureLossExchangeUnrecorded, start, time.Time{}, "")
-	return closeSpan
+	return m.OpenOrphanWindowWhy(start, "")
 }
 
 // RecordOrphanWindow records a [start,end] interval over which a connection
@@ -3586,13 +3594,10 @@ func (m *SyncMockManager) OpenOrphanWindow(start time.Time) func() {
 // that method's name and signature are an API across the two repositories
 // (Session.RecordOrphanWindow lists the session methods the integrations
 // parsers call). A zero start is dropped (no wire ts to attribute); an end
-// before start is clamped.
+// before start is clamped. It is RecordOrphanWindowWhy with no why: every
+// orphan span is recorded there, so a rule for them belongs there.
 func (m *SyncMockManager) RecordOrphanWindow(start, end time.Time) {
-	if m == nil {
-		return
-	}
-	m.orphans.Record(start, end)
-	m.noteLate(models.CaptureLossExchangeUnrecorded, start, end, "")
+	m.RecordOrphanWindowWhy(start, end, "")
 }
 
 // CheckedBefore says that every test case of this recording still to be
@@ -3606,6 +3611,8 @@ func (m *SyncMockManager) CheckedBefore(t time.Time) {
 	m.pressure.CheckedBefore(t)
 	m.orphans.CheckedBefore(t)
 	m.orphanWhys.checkedBefore(t)
+	m.dropped.CheckedBefore(t)
+	m.droppedWhys.checkedBefore(t)
 }
 
 // pressureActiveAtLocked reports whether instant t fell inside any recorded
@@ -3675,7 +3682,6 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 
 	var clearedFromBuffer, heldDropped int
 	var pressureGaveUp []*Window
-	opened := false
 	if enabled {
 		if !wasEnabled {
 			// false→true transition: open a new pressure span.
@@ -3684,7 +3690,6 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			// transition; subsequent ticks while pressure is held are no-ops
 			// for span tracking — they would otherwise spam the spans.
 			m.closePressure = m.pressure.Open(now)
-			opened = true
 		}
 		// Don't wipe the whole buffer. Two classes of mock must survive:
 		//   1. Startup-window mocks (IsStartup) — boot traffic and everything
@@ -3734,11 +3739,6 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		}
 	}
 	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
-	if opened {
-		// Opened at now: a test case streamed already ended before it, so
-		// this charges none but one that ended at this very instant.
-		m.noteLate(models.CaptureLossMockDropped, now, time.Time{}, MockDroppedUnderPressure)
-	}
 	m.reportGivenUp(pressureGaveUp, LostToMemoryPressure)
 	if heldDropped > 0 {
 		// On every tick that drops some, not only the transition below: the

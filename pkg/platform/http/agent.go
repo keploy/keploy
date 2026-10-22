@@ -359,6 +359,14 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	go func() {
 		defer func() {
+			// A stream asked to charge what its test cases lost that ends
+			// without its marker leaves its account untold (its late
+			// losses, the test cases it left out): noted before the
+			// channel closes, so a recording that takes the markers once
+			// its stream drained reads it (TakeStreamEnds).
+			if opts.ChargesLosses && !ended.Load() {
+				a.noteUnmarked()
+			}
 			close(tcChan)
 			stream.close()
 		}()
@@ -438,13 +446,26 @@ func (a *AgentClient) noteStreamEnd(s models.StreamEndSummary) {
 	e.MassSuppressed = e.MassSuppressed || s.MassSuppressed
 	e.KeptWithLoss += s.KeptWithLoss
 	e.LateLosses = append(e.LateLosses, s.LateLosses...)
+	e.NotRechecked += s.NotRechecked
+}
+
+// noteUnmarked counts an incoming stream that charges what its test cases
+// lost and ended without its marker (models.StreamEndSummary.Unmarked), for
+// the recording to take.
+func (a *AgentClient) noteUnmarked() {
+	a.markersMu.Lock()
+	defer a.markersMu.Unlock()
+	a.markers.Unmarked++
 }
 
 // TakeStreamEnds is what the incoming streams' end markers said since it was
-// last taken, added up (models.StreamEndSummary), and forgets it: keploy
-// record charges the late losses (models.StreamEndSummary.LateLosses), each
-// named as the agent streamed it, and, under the proven switch, says what the
-// agent left out unnamed. Read once the streams have drained.
+// last taken, added up (models.StreamEndSummary), with how many of the
+// streams that charge losses ended without one (Unmarked), and forgets it:
+// keploy record and keploy mock record charge the late losses
+// (models.StreamEndSummary.LateLosses), each named as the agent streamed it,
+// and, under the proven switch, say what the agent left out unnamed, and
+// what they could not learn of a stream that ended unmarked. Read once the
+// streams have drained.
 func (a *AgentClient) TakeStreamEnds() models.StreamEndSummary {
 	a.markersMu.Lock()
 	defer a.markersMu.Unlock()

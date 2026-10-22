@@ -407,7 +407,7 @@ func TestARecordsOwnChargeFailsItsTestCase(t *testing.T) {
 		text string
 	}{
 		{CaptureLossExchangeUnrecorded, "could not record as mocks 2 stretch(es) of what the application's connections carried while this test was recorded"},
-		{CaptureLossMockDropped, "let go of mocks 2 time(s) while this test was recorded"},
+		{CaptureLossMockDropped, "let go of mocks while this test was recorded, 2 time(s), each a stretch the agent's memory guard paused recording in"},
 	} {
 		if tc.k.NotJudged() || tc.k.Evidence() || !tc.k.PerTest() || tc.k.runScoped() || !tc.k.recordCharged() {
 			t.Fatalf("%s: a judged loss, the test case's own, charged by the record", tc.k)
@@ -455,12 +455,40 @@ func TestPlusNamingKeepsEverySourceOnce(t *testing.T) {
 }
 
 // What a line says of a test case kept with an exchange keploy could not
-// record holds for every record: the auto-replay judges it where one follows,
-// and without one the recording fails.
-func TestKeptToBeJudgedSaysWhatBecomesOfItWithoutAnAutoReplay(t *testing.T) {
-	for _, want := range []string{"where the auto-replay follows the record it judges the test case", "without one the recording fails, naming it"} {
+// record holds for every record: a judge that follows it (enterprise's
+// auto-replay, or its judging of a keploy mock record) decides on that
+// evidence, and without one the recording fails.
+func TestKeptToBeJudgedSaysWhatBecomesOfItWithoutAJudge(t *testing.T) {
+	for _, want := range []string{"where a judge follows the record (enterprise's auto-replay, or its judging of a keploy mock record) it decides on that evidence", "quarantined with that in its entry's calls", "without one the recording fails, naming it"} {
 		if !strings.Contains(KeptToBeJudged, want) {
 			t.Fatalf("%q lacks %q", KeptToBeJudged, want)
+		}
+	}
+}
+
+// What a line says becomes of the test cases over a span follows what the
+// open recordings do with them: nothing for a recording that leaves them out
+// (its line keeps its words), that the recording keeps them for one that
+// charges what a test case lost, and what each does when both are open.
+func TestALossFateSaysWhatTheRecordingDoesWithTheTestCasesOverASpan(t *testing.T) {
+	const subject = "each test case recorded over it"
+	if got := LossFateLeftOut.Keeps(subject); got != "" {
+		t.Fatalf("left out: Keeps = %q, want nothing", got)
+	}
+	if got := LossFateLeftOut.KeepsSentence(subject); got != "" {
+		t.Fatalf("left out: KeepsSentence = %q, want nothing", got)
+	}
+	kept := LossFateKept.Keeps(subject)
+	if kept != "the recording keeps "+subject+", "+KeptToBeJudged {
+		t.Fatalf("kept: Keeps = %q", kept)
+	}
+	if got := LossFateKept.KeepsSentence(subject); got != "T"+kept[1:] {
+		t.Fatalf("kept: KeepsSentence = %q, want %q upper-cased", got, kept)
+	}
+	mixed := LossFateMixed.Keeps(subject)
+	for _, want := range []string{"keeps " + subject + ", " + KeptToBeJudged, "one whose client does not", "leaves such a test case out"} {
+		if !strings.Contains(mixed, want) {
+			t.Fatalf("mixed: Keeps = %q lacks %q", mixed, want)
 		}
 	}
 }

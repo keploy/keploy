@@ -404,15 +404,16 @@ func TestJoinNearestJoinsTheSmallestGaps(t *testing.T) {
 	t.Parallel()
 	base := time.Now().Round(0)
 	ms := func(i int) time.Time { return base.Add(time.Duration(i) * time.Millisecond) }
-	// Gaps: 1, 1, 5, 1, 9 (ms), six spans.
-	spans := []pressureRange{{ms(0), ms(1)}, {ms(2), ms(3)}, {ms(4), ms(5)}, {ms(10), ms(11)}, {ms(12), ms(13)}, {ms(22), ms(23)}}
+	// Gaps: 1, 1, 5, 1, 9 (ms), six spans. A span joined over a gap says so
+	// (joined); one left as it was does not.
+	spans := []pressureRange{{ms(0), ms(1), false}, {ms(2), ms(3), false}, {ms(4), ms(5), false}, {ms(10), ms(11), false}, {ms(12), ms(13), false}, {ms(22), ms(23), false}}
 	got := joinNearest(slices.Clone(spans), 4)
-	want := []pressureRange{{ms(0), ms(5)}, {ms(10), ms(11)}, {ms(12), ms(13)}, {ms(22), ms(23)}}
+	want := []pressureRange{{ms(0), ms(5), true}, {ms(10), ms(11), false}, {ms(12), ms(13), false}, {ms(22), ms(23), false}}
 	if !slices.Equal(got, want) {
 		t.Fatalf("joinNearest(keep 4) = %v, want %v (the first two of the three 1 ms gaps)", got, want)
 	}
 	got = joinNearest(slices.Clone(spans), 2)
-	want = []pressureRange{{ms(0), ms(13)}, {ms(22), ms(23)}}
+	want = []pressureRange{{ms(0), ms(13), true}, {ms(22), ms(23), false}}
 	if !slices.Equal(got, want) {
 		t.Fatalf("joinNearest(keep 2) = %v, want %v", got, want)
 	}
@@ -429,16 +430,16 @@ func TestJoinForRoomJoinsWhatIsCheckedFirst(t *testing.T) {
 	base := time.Now().Round(0)
 	ms := func(i int) time.Time { return base.Add(time.Duration(i) * time.Millisecond) }
 	// Gaps: 9, 9, 1, 1, 1 (ms); checked from 21 ms: the first three end before.
-	spans := []pressureRange{{ms(0), ms(1)}, {ms(10), ms(11)}, {ms(20), ms(21)}, {ms(22), ms(23)}, {ms(24), ms(25)}, {ms(26), ms(27)}}
+	spans := []pressureRange{{ms(0), ms(1), false}, {ms(10), ms(11), false}, {ms(20), ms(21), false}, {ms(22), ms(23), false}, {ms(24), ms(25), false}, {ms(26), ms(27), false}}
 	got := joinForRoom(slices.Clone(spans), 4, ms(22))
-	want := []pressureRange{{ms(0), ms(21)}, {ms(22), ms(23)}, {ms(24), ms(25)}, {ms(26), ms(27)}}
+	want := []pressureRange{{ms(0), ms(21), true}, {ms(22), ms(23), false}, {ms(24), ms(25), false}, {ms(26), ms(27), false}}
 	if !slices.Equal(got, want) {
 		t.Fatalf("joinForRoom(keep 4, checked 22ms) = %v, want %v", got, want)
 	}
 	// Not room enough: then the smallest gaps, here all 1 ms, the oldest
 	// first.
 	got = joinForRoom(slices.Clone(spans), 2, ms(22))
-	want = []pressureRange{{ms(0), ms(25)}, {ms(26), ms(27)}}
+	want = []pressureRange{{ms(0), ms(25), true}, {ms(26), ms(27), false}}
 	if !slices.Equal(got, want) {
 		t.Fatalf("joinForRoom(keep 2, checked 22ms) = %v, want %v", got, want)
 	}

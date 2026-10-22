@@ -308,6 +308,13 @@ type Config struct {
 	// it. It must not block.
 	OnCaptureDesync func(reason string) bool
 
+	// LossFate says what becomes of the test cases recorded while a
+	// connection keploy stopped recording carries traffic, for the WARN a
+	// hole that stops it logs (supervisor.Session.LossFate): left out of the
+	// recording, or kept, each with what its recording lost. Nil says left
+	// out (models.LossFateLeftOut), as with the proven switch off.
+	LossFate func() models.LossFate
+
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire
 	// this to the supervisor's MarkPendingWork so the activity

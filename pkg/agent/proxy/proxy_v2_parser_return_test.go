@@ -371,7 +371,7 @@ func TestUnderTheProvenSwitchAConnectionsSpansSayWhyTheyWereRecorded(t *testing.
 		h := newDesyncFeedHarnessCtx(t, syncMock.NewContext(context.Background(), mgr), parser, newFeedProbe(), 1<<20)
 		h.writeApp(t, []byte("first"))
 		waitFor(t, parser.returned, "the parser never returned")
-		want := "test: " + unrecordedAfterStop
+		want := spanKind("test") + ": " + unrecordedAfterStop
 		waitUntilT(t, 10*time.Second, "no span over the traffic after the parser returned says why it was recorded", func() bool {
 			h.writeApp(t, []byte("after"))
 			now := time.Now()
@@ -388,28 +388,91 @@ func TestUnderTheProvenSwitchAConnectionsSpansSayWhyTheyWereRecorded(t *testing.
 		waitFor(t, parser.returned, "the parser never returned")
 		waitFor(t, stream.Done(), "the dispatcher never closed the parser's streams")
 		waitUntilT(t, 10*time.Second, "no span over the request the parser returned without reading names why it was recorded", func() bool {
-			return strings.Contains(whyOver(h.mgr, two.sent, two.arrived), string(integrations.HTTP)+": "+unreadByParser)
+			return strings.Contains(whyOver(h.mgr, two.sent, two.arrived), spanKind(integrations.HTTP)+": "+unreadByParser)
 		})
 	})
 }
 
-// Under the proven switch the WARN for a parser retired mid-recording says
-// that keploy record keeps every test case recorded while its connection
-// carries traffic, with that as what its recording lost, for the auto-replay
-// to judge (the agent streams it with the loss), not that they are left out of
-// the recording, which with the switch on is no longer so. With the switch off
-// it says what it said before.
-//
-// Not parallel: it sets the switch.
-func TestUnderTheProvenSwitchARetiredParsersWarnSaysItsTestCasesAreKept(t *testing.T) {
+// The WARN for a parser retired mid-recording says what becomes of every test
+// case recorded while its connection carries traffic, as the session's
+// recording does with them (supervisor.Session.LossFate): left out
+// (models.LossFateLeftOut: the proven switch off, or no open record stream
+// that charges what a test case lost), kept, each with that as what its
+// recording lost, when every open stream charges it, and both, each for its
+// own clients, when some do.
+func TestARetiredParsersWarnSaysWhatTheRecordingDoesWithItsTestCases(t *testing.T) {
 	const off = "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
-	t.Setenv(provenswitch.Env, "")
-	if got := retiredNextStep(); got != off {
-		t.Fatalf("with the switch off the retired parser's next_step is %q, want it as before: %q", got, off)
+	if got := retiredNextStep(models.LossFateLeftOut); got != off {
+		t.Fatalf("for a recording that leaves them out the retired parser's next_step is %q, want it as before: %q", got, off)
 	}
-	t.Setenv(provenswitch.Env, "1")
-	if got := retiredNextStep(); !strings.Contains(got, "keploy record keeps every test case recorded while this connection carries traffic") ||
+	if got := retiredNextStep(models.LossFateKept); !strings.Contains(got, "the recording keeps every test case recorded while this connection carries traffic") ||
 		!strings.Contains(got, models.KeptToBeJudged) || strings.Contains(got, "left out") {
-		t.Fatalf("under the switch the retired parser's next_step is %q, want that keploy record keeps the test cases, for the auto-replay to judge", got)
+		t.Fatalf("for a recording that charges it the retired parser's next_step is %q, want that it keeps the test cases, its evidence", got)
+	}
+	if got := retiredNextStep(models.LossFateMixed); !strings.Contains(got, "keeps every test case recorded while this connection carries traffic") || !strings.Contains(got, "leaves such a test case out") {
+		t.Fatalf("with recordings of both kinds open the retired parser's next_step is %q, want what each does", got)
+	}
+}
+
+// recordViaSupervisor hands the lines that report a span what its session's
+// recording does with the test cases over it (supervisor.Session.LossFate):
+// the relay's, for a chunk the capture dropped (relay.Config.LossFate), and
+// the retired parser's WARN, read as it is logged. Without it each says the
+// test cases are left out while, under the proven switch, a recording that
+// charges what a test case lost keeps them.
+func TestRecordViaSupervisorTellsItsLinesWhatTheRecordingDoesWithTheTestCasesOverASpan(t *testing.T) {
+	t.Parallel()
+	fields, _ := relayConfigLiteral(t)
+	if got := fields["LossFate"]; got != "svSess.LossFate" {
+		t.Errorf("relay.Config's LossFate is %q, want svSess.LossFate", got)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy_v2.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy_v2.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "recordViaSupervisor" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("recordViaSupervisor not found in proxy_v2.go")
+	}
+	var calls []string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "retiredNextStep" {
+				var buf bytes.Buffer
+				_ = printer.Fprint(&buf, fset, c)
+				calls = append(calls, buf.String())
+			}
+		}
+		return true
+	})
+	if len(calls) != 1 || calls[0] != "retiredNextStep(svSess.LossFate())" {
+		t.Errorf("recordViaSupervisor calls %q, want retiredNextStep(svSess.LossFate()) once", calls)
+	}
+}
+
+// A span's why names its parser as the mocks it records name their kind
+// (models.Kind), so one reason that lists a parser's span beside a mock's
+// left-out exchange names them alike ("Http: ...; Http: ..."), never "http"
+// beside "Http". A parser not listed is named by its type, its first letter
+// upper-cased.
+func TestASpansWhyNamesItsParserAsItsMocksKind(t *testing.T) {
+	for in, want := range map[integrations.IntegrationType]models.Kind{
+		integrations.HTTP: models.HTTP, integrations.HTTP2: models.HTTP2, integrations.GRPC: models.GRPC_EXPORT,
+		integrations.MYSQL: models.MySQL, integrations.POSTGRES_V1: models.Postgres, integrations.POSTGRES_V2: models.PostgresV2,
+		integrations.POSTGRES_V3: models.PostgresV3, integrations.MONGO_V1: models.Mongo, integrations.MONGO_V2: models.Mongo,
+		integrations.AEROSPIKE: models.Aerospike, "redis": models.REDIS, "kafka": models.KAFKA, "generic": models.GENERIC,
+	} {
+		if got := spanKind(in); got != string(want) {
+			t.Errorf("spanKind(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := spanKind(""); got != "" {
+		t.Errorf("spanKind(\"\") = %q, want \"\"", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -20,6 +21,10 @@ type caseCapture struct {
 	// handled counts the cases taken off the stream and dealt with (stored,
 	// or failed to be): the capture's progress, which wait bounds.
 	handled atomic.Uint64
+	// losses is, under the proven switch, what each stored case lost, and
+	// what the agent's stream said of the recording it could not name
+	// (case_losses.go).
+	losses caseLosses
 }
 
 func (m *mockService) requests() bool {
@@ -41,7 +46,7 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 	if !on {
 		return nil
 	}
-	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, m.incomingOptions())
 	if err != nil {
 		m.logger.Warn("the app's incoming requests are not recorded: could not read them from the agent", zap.Error(err))
 		return nil
@@ -52,6 +57,9 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 		defer close(c.done)
 		for tc := range incoming {
 			seen.Add(1)
+			// The window the agent streamed it with, before anything here
+			// touches it: what a late loss names it by (caseLosses.ended).
+			req, resp := rec.StreamedWindowOf(tc)
 			if err := m.hooks.BeforeTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
 				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
@@ -64,10 +72,33 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 				m.logger.Debug("AfterTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			c.add(tc)
+			c.losses.stored(tc.Name, [2]int64{req, resp}, caseTime(tc), tc.CaptureLost)
 			c.handled.Add(1)
 		}
 	}()
 	return c
+}
+
+// ended takes, under the proven switch, what the agent's incoming streams'
+// end markers said (taker's TakeStreamEnds), once the stream drained
+// (caseLosses.ended). A nil capture, or an instrumentation that cannot say,
+// takes nothing.
+func (c *caseCapture) ended(taker any) {
+	t, ok := taker.(interface {
+		TakeStreamEnds() models.StreamEndSummary
+	})
+	if c == nil || !ok || !provenswitch.On() {
+		return
+	}
+	c.losses.ended(t.TakeStreamEnds())
+}
+
+// lossesOf is c's losses (caseLosses); nil for a nil capture.
+func (c *caseCapture) lossesOf() *caseLosses {
+	if c == nil {
+		return nil
+	}
+	return &c.losses
 }
 
 func (c *caseCapture) add(tc *models.TestCase) {

@@ -15,7 +15,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A response the recorder cannot decode must not be recorded, whole or in
@@ -549,6 +551,9 @@ func TestUnderTheProvenSwitchAnUndecodableResponseChargesItsTestCases(t *testing
 	mocks := make(chan *models.Mock, 16)
 	mgr := syncMock.New(zaptest.NewLogger(t))
 	mgr.SetOutputChannel(mocks)
+	// A recording whose client charges what a test case lost is open: the
+	// WARN says the test cases over the response are kept.
+	defer mgr.OpenRecordStream(true)()
 	ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "undecodable-proven"), mgr)
 	base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	items := make(chan mysqlDecodeItem, 32)
@@ -563,9 +568,13 @@ func TestUnderTheProvenSwitchAnUndecodableResponseChargesItsTestCases(t *testing
 		send(false, p)
 	}
 	close(items)
-	asyncMySQLDecode(ctx, zaptest.NewLogger(t), items, mocks, decodeCtx, clientConn, models.OutgoingOptions{})
+	core, logs := observer.New(zapcore.WarnLevel)
+	asyncMySQLDecode(ctx, zap.New(core), items, mocks, decodeCtx, clientConn, models.OutgoingOptions{})
 	got := mgr.TestCaseLosses("test-1", exchange, exchange)
 	if len(got) != 1 || got[0].Kind != models.CaptureLossExchangeUnrecorded || got[0].What != "MySQL: a response that could not be decoded" {
 		t.Fatalf("%s: the test case over the dropped exchange is charged %+v, want the MySQL response that could not be decoded", c.name, got)
+	}
+	if w := logs.FilterMessage(undecodableDropMsg(models.LossFateKept)).All(); len(w) != 1 {
+		t.Fatalf("%s: the drop is said %v, want once, that the recording keeps the test cases over it", c.name, logs.All())
 	}
 }

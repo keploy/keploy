@@ -7,7 +7,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -147,6 +146,10 @@ type tee struct {
 	// owner's recording anything, and the tee warns of the hole only then
 	// (see [Config.OnCaptureDesync]).
 	onDesync func(reason string) bool
+	// lossFate says what the recording does with the test cases over the
+	// span the owner opens at a hole (Config.LossFate), for the WARN to say;
+	// nil says they are left out.
+	lossFate func() models.LossFate
 	// desynced is the latch push consults for [DropDesynced], and a stream
 	// ended at its hole ends on (drain): it is set for good on the first
 	// desyncing drop, once onDesync has returned, and never cleared, which
@@ -493,7 +496,11 @@ func (t *tee) drop(reason string) {
 			// Also for a parser that re-aligns: when it re-aligns is known
 			// only once it gets there, and it can be a full queue behind.
 			msg := "relay: capture dropped a chunk; this direction is no longer fed to the parser, so the connection records no further mocks"
-			next := dropNextStep()
+			fate := models.LossFateLeftOut
+			if t.lossFate != nil {
+				fate = t.lossFate()
+			}
+			next := dropNextStep(fate)
 			if t.parserCanResync {
 				msg = "relay: capture dropped a chunk; the parser re-aligns on the next message it can frame, and the exchanges the hole cut are not recorded"
 			}
@@ -773,12 +780,12 @@ func (t *tee) endsAtHole() bool { return t.endAtHole != nil && !t.parserCanResyn
 
 // dropNextStep is the next_step of the WARN for a chunk the capture dropped on
 // a connection whose parser stops there: what becomes of the test cases
-// recorded while it carries traffic. With the proven switch off they are left
-// out; under it keploy record keeps each, with that as what its recording
-// lost, for the auto-replay to judge.
-func dropNextStep() string {
-	if provenswitch.On() {
-		return "the app's traffic is unaffected. From here on, keploy record keeps every test case recorded while this connection carries traffic, not only the ones that used it (on a busy pooled connection, every later test case), " + models.KeptToBeJudged
+// recorded while it carries traffic, as the recording does with them (fate,
+// Config.LossFate): left out, or kept, each with that as what its recording
+// lost.
+func dropNextStep(fate models.LossFate) string {
+	if keeps := fate.Keeps("every test case recorded while this connection carries traffic, not only the ones that used it (on a busy pooled connection, every later test case)"); keeps != "" {
+		return "the app's traffic is unaffected. From here on, " + keeps
 	}
 	return "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
 }
