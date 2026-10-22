@@ -60,6 +60,11 @@ type Earlier struct {
 	// at it is the run's, which every later test uses (Tracker.RunName).
 	Run  bool
 	Seen []Seen
+	// Window is when the mock's call made its clock reads, as the learn
+	// step read that call (Tracker.CallWindowFrom); nil: by the lead alone.
+	// A variable bound at one of its places learns its words in it: its
+	// value was read for that call, never for a later one that uses it.
+	Window *Window
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
@@ -115,6 +120,9 @@ type Place struct {
 	// names the rule that refuses it (models.RefusedContainment). Never with
 	// Whole.
 	Glued bool
+	// Window is when the mock's call made its clock reads (Earlier.Window);
+	// nil: by the lead alone.
+	Window *Window
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -1157,7 +1165,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 			if r < rank {
 				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name, Glued: glued}, r
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name, Glued: glued, Window: e.Window}, r
 			}
 			if rank == 0 {
 				return best, true

@@ -132,6 +132,54 @@ func TestLearnedMatchServesByTheWords(t *testing.T) {
 	}
 }
 
+// A variable's words are learned in the window of the call that sent its
+// value at its bind (learn.Place.Window), as that call learned its own
+// there: a clock read made in the bind call's window is an instant slot of
+// the variable, though the lead does not read it, nor does the later call's
+// window (it was read before that call's previous one).
+func TestAVariableLearnsItsWordsInItsBindCallsWindow(t *testing.T) {
+	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
+	h, n, opts := learnOn(t)
+	prev := learnRecorded("mock-p", 0, "GET", "/v1/health", "", nil, `{}`)
+	recRead := learnAt.Add(time.Millisecond) // in the bind's recorded span, before the use's
+	bind := learnRecorded("mock-0", 2*time.Millisecond, "POST", "/v1/orders", `{"placed_at":"`+iso(recRead)+`"}`, nil, `{}`)
+	use := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/receipts", `{"order_at":"`+iso(recRead)+`"}`, nil, `{}`)
+	db := &learnDb{perTest: []*models.Mock{bind, use}, staged: []*models.Mock{prev}}
+	tr := learn.NewTracker()
+	tr.Begin()
+	offset := learn.FullRoundLead + 2*time.Second - 40*time.Second // F's clock: not moved by the lead
+	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+	servedPrev := learnAt.Add(40 * time.Second)
+	tr.ServedMockAt(prev, servedPrev)
+	fRead := servedPrev.Add(offset + time.Millisecond) // in the bind's F span, before the use's
+	ctx := learn.WithTracker(context.Background(), tr)
+
+	first := live("POST", "/v1/orders", `{"placed_at":"`+iso(fRead)+`"}`, nil)
+	first.arrived = servedPrev.Add(2 * time.Millisecond)
+	if served, miss, err := h.learnMatch(ctx, first, db, n, opts); err != nil || served == nil {
+		t.Fatalf("the bind's call: served %v miss %+v err %v", served, miss, err)
+	}
+	tr.ServedMockAt(bind, first.arrived.Add(time.Millisecond))
+	then := live("POST", "/v1/receipts", `{"order_at":"`+iso(fRead)+`"}`, nil)
+	then.arrived = first.arrived.Add(3 * time.Millisecond)
+	served, miss, err := h.learnMatch(ctx, then, db, n, opts)
+	if err != nil || served == nil {
+		t.Fatalf("the call that uses it: served %v miss %+v err %v", served, miss, err)
+	}
+	var got *models.WordsEntry
+	for i := range db.consumed {
+		if db.consumed[i].Name != "mock-1" {
+			continue
+		}
+		for _, v := range db.consumed[i].Spec.LearnedBinds()["mock-0"] {
+			got = v.Words
+		}
+	}
+	if got == nil || len(got.Slots) != 1 || got.Slots[0].Kind != models.WordSlotInstant {
+		t.Fatalf("the variable's words %+v, want one instant slot", got)
+	}
+}
+
 // Excused never reports a words place: Excused sees one value, so a place
 // whose words were learned is decided by ExcusedLive alone, and prune (which
 // reads Excused) never prunes it.

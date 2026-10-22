@@ -1007,6 +1007,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", plan.learnedAs(l)))
 			}
 			if e, ok := n.servedExchange(m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
+				// A variable a later call binds at a place of this one
+				// learns its words in this call's window.
+				e.Window = w
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -1109,7 +1112,8 @@ type slotPlace struct {
 //   - A variable is bound at its earlier place, a request place of one of
 //     the test's own HTTP mocks F served, which held the value whole, and is
 //     used here: it holds when the live value here is the one F saw there.
-//     Its words are learned at its bind, of its recorded value and F's there.
+//     Its words are learned at its bind, of its recorded value and F's there,
+//     in the window of the call that sent it there (learn.Place.Window).
 //   - An echo is a variable of this call alone (echo: true), bound here and
 //     answered where the recorded answer holds the value whole, its words
 //     learned of R and F. Leaves of this call that drifted from the same
@@ -1206,9 +1210,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
 			// Its words, learned where it is bound: of its recorded value and
-			// what F saw there, by the lead (the earlier call's window is not
-			// this one's).
-			words, why := dc.Words(r.Value, from.Live, nil)
+			// what F saw there, in the window of the call that sent it there
+			// (Place.Window), never this one's: its value was read for that
+			// call.
+			words, why := dc.Words(r.Value, from.Live, from.Window)
 			if why != "" {
 				p.refused = learn.RefusalClass(why)
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier at " + from.Var + ", and keploy cannot tell which of its words changed alone there: " + why
