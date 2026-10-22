@@ -1,0 +1,163 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 413B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/python:3.9
+#2 DONE 0.7s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/4] FROM docker.io/library/python:3.9@sha256:da5aee29682d12a6649f51c8d6f15b87deb3e6c524b923c41d0cb3304d07c913
+#4 resolve docker.io/library/python:3.9@sha256:da5aee29682d12a6649f51c8d6f15b87deb3e6c524b923c41d0cb3304d07c913 done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 407.82kB done
+#5 DONE 0.0s
+
+#6 [2/4] WORKDIR /app
+#6 CACHED
+
+#7 [3/4] COPY . .
+#7 DONE 0.0s
+
+#8 [4/4] RUN pip3 install -r requirements.txt
+#8 1.196 Collecting Flask==3.1.2
+#8 1.356   Downloading flask-3.1.2-py3-none-any.whl (103 kB)
+#8 1.609      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 103.3/103.3 kB 373.8 kB/s eta 0:00:00
+#8 1.678 Collecting flask_cors==6.0.1
+#8 1.725   Downloading flask_cors-6.0.1-py3-none-any.whl (13 kB)
+#8 1.946 Collecting keploy==2.0.0a39
+#8 1.996   Downloading keploy-2.0.0a39-py3-none-any.whl (10 kB)
+#8 3.499 Collecting pymongo==4.15.1
+#8 3.551   Downloading pymongo-4.15.1-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (944 kB)
+#8 26.22      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 944.6/944.6 kB 41.8 kB/s eta 0:00:00
+#8 26.35 Collecting pytest==8.4.2
+#8 26.40   Downloading pytest-8.4.2-py3-none-any.whl (365 kB)
+#8 34.70      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 365.8/365.8 kB 43.5 kB/s eta 0:00:00
+#8 34.77 Collecting werkzeug>=3.1.0
+#8 34.82   Downloading werkzeug-3.1.9-py3-none-any.whl (228 kB)
+#8 41.42      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 228.7/228.7 kB 34.6 kB/s eta 0:00:00
+#8 41.58 Collecting markupsafe>=2.1.1
+#8 41.62   Downloading markupsafe-3.0.4-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (21 kB)
+#8 42.30 Collecting click>=8.1.3
+#8 42.36   Downloading click-8.1.8-py3-none-any.whl (98 kB)
+#8 44.28      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 98.2/98.2 kB 58.5 kB/s eta 0:00:00
+#8 44.39 Collecting importlib-metadata>=3.6.0
+#8 44.50   Downloading importlib_metadata-8.7.1-py3-none-any.whl (27 kB)
+#8 45.34 Collecting blinker>=1.9.0
+#8 45.39   Downloading blinker-1.9.0-py3-none-any.whl (8.5 kB)
+#8 46.02 Collecting jinja2>=3.1.2
+#8 46.07   Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+#8 63.30      ━━━━━━━━━━━━━━━━━━━━━━━━━━╸             92.2/134.9 kB 49.5 kB/s eta 0:00:01
+#8 63.30 ERROR: Exception:
+#8 63.30 Traceback (most recent call last):
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 438, in _error_catcher
+#8 63.30     yield
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 561, in read
+#8 63.30     data = self._fp_read(amt) if not fp_closed else b""
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 527, in _fp_read
+#8 63.30     return self._fp.read(amt) if amt is not None else self._fp.read()
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/cachecontrol/filewrapper.py", line 90, in read
+#8 63.30     data = self.__fp.read(amt)
+#8 63.30   File "/usr/local/lib/python3.9/http/client.py", line 463, in read
+#8 63.30     n = self.readinto(b)
+#8 63.30   File "/usr/local/lib/python3.9/http/client.py", line 507, in readinto
+#8 63.30     n = self.fp.readinto(b)
+#8 63.30   File "/usr/local/lib/python3.9/socket.py", line 716, in readinto
+#8 63.30     return self._sock.recv_into(b)
+#8 63.30   File "/usr/local/lib/python3.9/ssl.py", line 1277, in recv_into
+#8 63.30     return self.read(nbytes, buffer)
+#8 63.30   File "/usr/local/lib/python3.9/ssl.py", line 1135, in read
+#8 63.30     return self._sslobj.read(len, buffer)
+#8 63.30 socket.timeout: The read operation timed out
+#8 63.30 
+#8 63.30 During handling of the above exception, another exception occurred:
+#8 63.30 
+#8 63.30 Traceback (most recent call last):
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/cli/base_command.py", line 160, in exc_logging_wrapper
+#8 63.30     status = run_func(*args)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/cli/req_command.py", line 247, in wrapper
+#8 63.30     return func(self, options, args)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/commands/install.py", line 419, in run
+#8 63.30     requirement_set = resolver.resolve(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/resolver.py", line 92, in resolve
+#8 63.30     result = self._result = resolver.resolve(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/resolvelib/resolvers.py", line 481, in resolve
+#8 63.30     state = resolution.resolve(requirements, max_rounds=max_rounds)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/resolvelib/resolvers.py", line 373, in resolve
+#8 63.30     failure_causes = self._attempt_to_pin_criterion(name)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/resolvelib/resolvers.py", line 213, in _attempt_to_pin_criterion
+#8 63.30     criteria = self._get_updated_criteria(candidate)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/resolvelib/resolvers.py", line 204, in _get_updated_criteria
+#8 63.30     self._add_to_criteria(criteria, requirement, parent=candidate)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/resolvelib/resolvers.py", line 172, in _add_to_criteria
+#8 63.30     if not criterion.candidates:
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/resolvelib/structs.py", line 151, in __bool__
+#8 63.30     return bool(self._sequence)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 155, in __bool__
+#8 63.30     return any(self)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 143, in <genexpr>
+#8 63.30     return (c for c in iterator if id(c) not in self._incompatible_ids)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 47, in _iter_built
+#8 63.30     candidate = func()
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 206, in _make_candidate_from_link
+#8 63.30     self._link_candidate_cache[link] = LinkCandidate(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 297, in __init__
+#8 63.30     super().__init__(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 162, in __init__
+#8 63.30     self.dist = self._prepare()
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 231, in _prepare
+#8 63.30     dist = self._prepare_distribution()
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 308, in _prepare_distribution
+#8 63.30     return preparer.prepare_linked_requirement(self._ireq, parallel_builds=True)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/operations/prepare.py", line 491, in prepare_linked_requirement
+#8 63.30     return self._prepare_linked_requirement(req, parallel_builds)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/operations/prepare.py", line 536, in _prepare_linked_requirement
+#8 63.30     local_file = unpack_url(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/operations/prepare.py", line 166, in unpack_url
+#8 63.30     file = get_http_url(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/operations/prepare.py", line 107, in get_http_url
+#8 63.30     from_path, content_type = download(link, temp_dir.path)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/network/download.py", line 147, in __call__
+#8 63.30     for chunk in chunks:
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/cli/progress_bars.py", line 53, in _rich_progress_bar
+#8 63.30     for chunk in iterable:
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_internal/network/utils.py", line 63, in response_chunks
+#8 63.30     for chunk in response.raw.stream(
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 622, in stream
+#8 63.30     data = self.read(amt=amt, decode_content=decode_content)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 587, in read
+#8 63.30     raise IncompleteRead(self._fp_bytes_read, self.length_remaining)
+#8 63.30   File "/usr/local/lib/python3.9/contextlib.py", line 137, in __exit__
+#8 63.30     self.gen.throw(typ, value, traceback)
+#8 63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 443, in _error_catcher
+#8 63.30     raise ReadTimeoutError(self._pool, None, "Read timed out.")
+#8 63.30 pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org', port=443): Read timed out.
+#8 ERROR: process "/bin/sh -c pip3 install -r requirements.txt" did not complete successfully: exit code: 2
+------
+ > [4/4] RUN pip3 install -r requirements.txt:
+63.30     for chunk in response.raw.stream(
+63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 622, in stream
+63.30     data = self.read(amt=amt, decode_content=decode_content)
+63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 587, in read
+63.30     raise IncompleteRead(self._fp_bytes_read, self.length_remaining)
+63.30   File "/usr/local/lib/python3.9/contextlib.py", line 137, in __exit__
+63.30     self.gen.throw(typ, value, traceback)
+63.30   File "/usr/local/lib/python3.9/site-packages/pip/_vendor/urllib3/response.py", line 443, in _error_catcher
+63.30     raise ReadTimeoutError(self._pool, None, "Read timed out.")
+63.30 pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org', port=443): Read timed out.
+------
+Dockerfile:11
+--------------------
+   9 |     
+  10 |     # Install the required packages
+  11 | >>> RUN pip3 install -r requirements.txt
+  12 |     
+  13 |     # Expose the port that the Flask app will run on
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c pip3 install -r requirements.txt" did not complete successfully: exit code: 2

@@ -1,0 +1,4 @@
+  File "fetch.py", line 7
+    except urllib3.exceptions.ReadTimeoutError: as err:
+                                                ^^
+SyntaxError: invalid syntax

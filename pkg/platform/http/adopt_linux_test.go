@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,12 +35,16 @@ const adoptHelperEnv = "KEPLOY_TEST_ADOPT_HELPER"
 
 // inOwnProcess runs t in a process of its own and reports whether this is
 // that process; in the test's own, it fails or skips t as that process did.
+// The test's own process ends every process it still runs as the test ends
+// (endWhatItStarted), so one that ends early leaves none behind.
 func inOwnProcess(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(adoptHelperEnv) == t.Name() {
 		if err := goUsesPidfds(); err != nil {
 			t.Skipf("keploy adopts nothing here: %v", err)
 		}
+		// The first cleanup, so the last to run.
+		t.Cleanup(endWhatItStarted)
 		return true
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
@@ -59,6 +64,318 @@ func inOwnProcess(t *testing.T) bool {
 		t.Skipf("skipped in its own process:\n%s", out)
 	}
 	return false
+}
+
+// endWhatItStarted kills every process this one still runs: each it started,
+// and each those started (sweep). A test in its own process that ends before
+// the stop it judges (failed, or skipped) leaves none: an application keploy
+// runs writes to this process's output, which the test binary that started
+// it reads to its end, and one left behind would hold that open, the test
+// binary waiting on its end (an app's `exec sleep 600`) instead of the
+// test's.
+func endWhatItStarted() {
+	self := os.Getpid()
+	sweep(func() []utils.Reached {
+		var procs []utils.Reached
+		for _, p := range utils.TreeOf(self) {
+			if p.PID != self {
+				procs = append(procs, p)
+			}
+		}
+		return procs
+	})
+}
+
+// sweep kills every process tree finds, each named by its pid and start time.
+// Each found is stopped first (SIGSTOP), before tree is looked at again, until
+// a look finds none not found, so none starts another or leaves its children
+// to init meanwhile; then each is killed. Each is signalled through a pidfd
+// of it as it was found: a pid that names another process by the time it is
+// opened (or none) is signalled nothing. A process killed is not waited for.
+func sweep(tree func() []utils.Reached) {
+	found := map[utils.Reached]int{}
+	defer func() {
+		for _, fd := range found {
+			if fd >= 0 {
+				_ = unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+				_ = unix.Close(fd)
+			}
+		}
+	}()
+	for {
+		fresh := false
+		for _, p := range tree() {
+			if _, ok := found[p]; ok {
+				continue
+			}
+			fresh = true
+			fd, err := unix.PidfdOpen(p.PID, 0)
+			if now, ok := utils.ProcOf(p.PID); err != nil || !ok || now != p {
+				// Gone, or another process by its pid now.
+				if err == nil {
+					_ = unix.Close(fd)
+				}
+				found[p] = -1
+				continue
+			}
+			found[p] = fd
+			_ = unix.PidfdSendSignal(fd, unix.SIGSTOP, nil, 0)
+		}
+		if !fresh {
+			return
+		}
+	}
+}
+
+// leftoverDirEnv names the directory TestOwnProcessLeftoverHelper writes in.
+const leftoverDirEnv = "KEPLOY_TEST_LEFTOVER_DIR"
+
+// TestOwnProcessLeftoverHelper is not a test: with leftoverDirEnv set it is a
+// test's own process (inOwnProcess) that starts an application as keploy
+// runs a native one, a shell ignoring SIGHUP that starts a child it leaves
+// running and then starts one after another for as long as it runs; writes
+// the pid and start time of each of the two once it runs; and fails while
+// they do, before any stop of them.
+func TestOwnProcessLeftoverHelper(t *testing.T) {
+	dir := os.Getenv(leftoverDirEnv)
+	if dir == "" {
+		t.Skip("a process of TestATestInItsOwnProcessLeavesNothingBehind")
+	}
+	if !inOwnProcess(t) {
+		return
+	}
+	// The app and its child ignore SIGHUP, as a daemon does: the hangup the
+	// kernel sends a process group orphaned with members stopped does not end
+	// them, so only a kill does.
+	client := newRunClient(fmt.Sprintf("trap '' HUP; sleep 600 & echo $! > %s; echo $$ > %s; while :; do sleep 0.01; done",
+		filepath.Join(dir, "child.pid"), filepath.Join(dir, "app.pid")))
+	ran := make(chan struct{})
+	go func() {
+		defer close(ran)
+		_ = client.Run(context.Background(), models.RunOptions{})
+	}()
+	// The app writes its child's pid, then its own.
+	var procs []utils.Reached
+	for {
+		if b, err := os.ReadFile(filepath.Join(dir, "app.pid")); err == nil && bytes.HasSuffix(b, []byte("\n")) {
+			break
+		}
+		select {
+		case <-ran:
+			t.Fatal("the run ended before its app wrote its pid")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	var said []byte
+	for _, name := range []string{"app", "child"} {
+		b, err := os.ReadFile(filepath.Join(dir, name+".pid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(string(bytes.TrimSpace(b)))
+		if err != nil {
+			t.Fatalf("the app wrote %q, not its %s's pid", b, name)
+		}
+		p, ok := utils.ProcOf(pid)
+		if !ok {
+			t.Fatalf("the %s (%d) was gone once the app ran", name, pid)
+		}
+		procs = append(procs, p)
+		said = fmt.Appendf(said, "%d %d\n", p.PID, p.Start)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "procs"), said, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("failing while the app (%d) runs", procs[0].PID)
+}
+
+// A test run in its own process (inOwnProcess) that ends before the stop it
+// judges (failed, or skipped: a hold the kernel refuses) leaves nothing it
+// started running. An application keploy runs writes to keploy's own output,
+// which the test binary that started the test's process reads to its end:
+// one left behind (an app's `exec sleep 600`) holds it open, and the test
+// binary waits on the app's end, not the test's, until its own timeout, and
+// says only that it timed out, not why the test failed.
+func TestATestInItsOwnProcessLeavesNothingBehind(t *testing.T) {
+	if err := goUsesPidfds(); err != nil {
+		t.Skipf("keploy adopts nothing here: %v", err)
+	}
+	dir := t.TempDir()
+	// A file, not a pipe: the wait for the process ends with it, whatever
+	// it left holding the file.
+	out, err := os.Create(filepath.Join(dir, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessLeftoverHelper$", "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessLeftoverHelper", leftoverDirEnv+"="+dir)
+	cmd.Stdout, cmd.Stderr = out, out
+	runErr := cmd.Run()
+	said, _ := os.ReadFile(filepath.Join(dir, "out"))
+	b, err := os.ReadFile(filepath.Join(dir, "procs"))
+	if err != nil {
+		t.Fatalf("the helper did not say its app's pids (%v): %v\n%s", runErr, err, said)
+	}
+	if runErr == nil || !bytes.Contains(said, []byte("failing while the app")) {
+		t.Fatalf("the helper did not fail as it should (%v):\n%s", runErr, said)
+	}
+	for i, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		name := []string{"app", "app's child"}[min(i, 1)]
+		var p utils.Reached
+		if _, err := fmt.Sscanf(line, "%d %d", &p.PID, &p.Start); err != nil {
+			t.Fatalf("the helper said %q, not a pid and start", line)
+		}
+		if !killedSince(p) {
+			_ = syscall.Kill(p.PID, syscall.SIGKILL)
+			t.Errorf("the %s (%d) the test's own process started outlived it, on its way to no end: whatever reads that process's output to its end would wait on its end", name, p.PID)
+		}
+	}
+}
+
+// killedSince reports whether process p, named by its pid and start time, has
+// had a SIGKILL sent before the call: it is gone, a zombie, on its way out of
+// the kernel's exit, or has the SIGKILL pending. A SIGKILL wakes the process
+// it is sent to before the send returns, and a process so woken runs to its
+// exit, never asleep (S) or stopped (T) again: one seen so after the send was
+// not killed. One seen running, or in the kernel, may have taken the SIGKILL
+// and not yet begun its exit; it is looked at again once its pidfd says it
+// exited, or after a pause, until one of the above tells.
+func killedSince(p utils.Reached) bool {
+	fd, err := unix.PidfdOpen(p.PID, 0)
+	if err != nil {
+		return true
+	}
+	defer unix.Close(fd)
+	for {
+		if now, ok := utils.ProcOf(p.PID); !ok || now != p {
+			return true
+		}
+		if killedOrGone(p.PID) {
+			return true
+		}
+		st, ok := utils.ReadProcStat(p.PID)
+		if !ok || st.StartTime != p.Start {
+			return true
+		}
+		switch st.State {
+		case 'S', 'T', 't':
+			return false
+		}
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		if n, _ := unix.Poll(fds, 10); n > 0 {
+			return true
+		}
+	}
+}
+
+// sigstopSent reports whether process pid is stopped, or has a SIGSTOP on its
+// way: its status is read first, its pending signals under the lock the
+// kernel holds as it takes the SIGSTOP and stops the process, and then its
+// state, so one of the two shows a SIGSTOP sent before the reads.
+func sigstopSent(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok || (k != "SigPnd" && k != "ShdPnd") {
+			continue
+		}
+		if mask, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64); err == nil && mask&(1<<(syscall.SIGSTOP-1)) != 0 {
+			return true
+		}
+	}
+	st, ok := utils.ReadProcStat(pid)
+	return ok && st.State == 'T'
+}
+
+// startTree starts command (sh -c) as a group leader of its own and returns
+// its pid once it runs n processes in all; the test kills the group as it
+// ends.
+func startTree(t *testing.T, command string, n int) int {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-reaped
+	})
+	for len(utils.TreeOf(cmd.Process.Pid)) < n {
+		select {
+		case <-reaped:
+			t.Fatalf("%q exited before it ran %d processes", command, n)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return cmd.Process.Pid
+}
+
+// The sweep of a test's own process (endWhatItStarted) stops each process it
+// finds before it looks again: one not stopped could start another after the
+// look, or exit and leave its children to init, out of the sweep's sight.
+// Then it kills each. Here a shell ignoring SIGHUP and its two children:
+// each found by a look has a SIGSTOP sent by the next, and each is killed by
+// the sweep's end.
+func TestTheSweepStopsWhatItFindsBeforeItLooksAgainThenKillsIt(t *testing.T) {
+	if err := goUsesPidfds(); err != nil {
+		t.Skipf("no pidfds here: %v", err)
+	}
+	leader := startTree(t, "trap '' HUP; sleep 600 & sleep 600 & wait", 3)
+	var found []utils.Reached
+	looks := 0
+	sweep(func() []utils.Reached {
+		looks++
+		for _, p := range found {
+			if !sigstopSent(p.PID) {
+				t.Errorf("look %d: process %d, found by an earlier look, was not stopped before it", looks, p.PID)
+			}
+		}
+		procs := utils.TreeOf(leader)
+		found = append(found, procs...)
+		return procs
+	})
+	if looks < 2 {
+		t.Fatalf("the sweep looked %d times, want a look after the first finds none new", looks)
+	}
+	if len(found) < 3 {
+		t.Fatalf("the sweep found %v, want the shell and its two children", found)
+	}
+	for _, p := range found {
+		if !killedSince(p) {
+			t.Errorf("process %d, which the sweep found, outlived it", p.PID)
+		}
+	}
+}
+
+// A process the sweep found is signalled through a pidfd of it as it was
+// found (its pid and start time): a pid that names another process by the
+// time the sweep opens it is signalled nothing. Here a live process is found
+// by its pid with another start, as one that exited and left its pid to it:
+// the sweep neither stops nor kills it.
+func TestTheSweepSignalsNoProcessOtherThanTheOneItFound(t *testing.T) {
+	if err := goUsesPidfds(); err != nil {
+		t.Skipf("no pidfds here: %v", err)
+	}
+	pid := startTree(t, "trap '' HUP; exec sleep 600", 1)
+	p, ok := utils.ProcOf(pid)
+	if !ok {
+		t.Fatalf("process %d is gone", pid)
+	}
+	gone := utils.Reached{PID: p.PID, Start: p.Start + 1}
+	sweep(func() []utils.Reached { return []utils.Reached{gone} })
+	if killedSince(p) {
+		t.Fatalf("the sweep killed process %d, which by then was not the one it found", pid)
+	}
+	if sigstopSent(pid) {
+		t.Fatalf("the sweep stopped process %d, which by then was not the one it found", pid)
+	}
 }
 
 // daemonize starts command (sh -c) in a session of its own from a child that
@@ -239,9 +556,12 @@ func TestAdoptedDaemonsEndWithTheApplication(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	// Two quiet seconds escalate; the slow daemon's way out takes two, in
-	// steps a seventh as long.
-	stopCheck, stopStallChecks = 20*time.Millisecond, 100
+	// One quiet second escalates; the slow daemon's way out takes two, in
+	// steps of 0.3 s: twice the bound, so a stop that did not restart the
+	// stall at each of its steps would kill it, even counting the stall
+	// at half the wall time (a host so loaded that its daemons wait for a
+	// CPU half of it).
+	stopCheck, stopStallChecks = 20*time.Millisecond, 50
 
 	own := exec.Command("/bin/sh", "-c", "exec sleep 120")
 	if err := own.Start(); err != nil {
@@ -451,5 +771,21 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	}
 	if before > 1 {
 		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", before)
+	}
+}
+
+// The stall a stop of the daemons kills on is stopStallChecks checks of
+// stopCheck, and the longest Duration where that is longer: a test's "only a
+// press ends it" never wraps to a short one.
+func TestTheDaemonsStallIsItsChecksAndNeverWraps(t *testing.T) {
+	check, checks := stopCheck, stopStallChecks
+	t.Cleanup(func() { stopCheck, stopStallChecks = check, checks })
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	if got := stopStall(); got != 200*time.Millisecond {
+		t.Fatalf("10 checks of 20ms are %v, want 200ms", got)
+	}
+	stopCheck, stopStallChecks = 3, math.MaxUint64/2
+	if got := stopStall(); got != math.MaxInt64 {
+		t.Fatalf("a stall past the longest Duration is %v, want the longest", got)
 	}
 }

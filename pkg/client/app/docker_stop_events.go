@@ -25,10 +25,11 @@ import (
 // which an attached client does once its container stops. While it waits the container's processes make
 // progress on their way out (utils.ExitMark); once they are all gone the
 // container has stopped. It kills only when they made none for
-// utils.StopStallBudget of keploy's runnable time, or at the user's Ctrl+C,
-// which it offers: docker's own stop and removal on a starved host take as
-// long as they take, and are no kill (P101-b-k). killed says why it had to
-// kill, "" when it did not. The drains wait for it (utils.BeginAppStop).
+// utils.StopStallBudget of the time both they and keploy could run
+// (utils.ExitClock), or at the user's Ctrl+C, which it offers: docker's own
+// stop and removal on a starved host take as long as they take, and are no
+// kill (P101-b-k). killed says why it had to kill, "" when it did not. The
+// drains wait for it (utils.BeginAppStop).
 //
 // What it cannot read it does not take for a stall of the app's. A container
 // whose processes keploy cannot see (the daemon in another PID namespace:
@@ -98,7 +99,8 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	}()
 
 	var why string
-	switch utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load()) {
+	stop, bound := utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load())
+	switch stop {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:
@@ -109,7 +111,7 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	default:
 		switch {
 		case readable:
-			why = fmt.Sprintf("its container made no progress on its way out for %s of keploy's runnable time after keploy interrupted it, so keploy killed it", utils.StopStallBudget)
+			why = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		case seen:
 			why = fmt.Sprintf("keploy could not read its container's processes, and neither the docker daemon nor its docker client said it had stopped, for %s of keploy's runnable time after keploy interrupted it, so keploy killed it", utils.StopStallBudget)
 		default:

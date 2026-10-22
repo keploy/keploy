@@ -17,16 +17,23 @@ import (
 type chunkEvent struct {
 	dir   fakeconn.Direction
 	bytes []byte
+	// connSeq is the chunk's capture number (fakeconn.Chunk.ConnSeq): what
+	// says which of two chunks, one from each direction, was captured
+	// first, and so whether a response can answer a request (order). The
+	// times below are the mock's window, and order's only when the numbers
+	// do not tell the two chunks apart.
+	connSeq uint32
 	// readAt is the timestamp at which the relay read this chunk off the
 	// source socket. Used as ReqTimestampMock for the first client chunk
 	// of each exchange.
 	readAt time.Time
-	// writtenAt is the timestamp at which the relay wrote this chunk to
-	// the opposite socket. Used as ResTimestampMock for the response
-	// head chunk of each exchange — it reflects when the client actually
-	// observed the bytes, which matches the "last dest chunk WrittenAt"
-	// rule from the migration spec (there is only one response chunk per
-	// mock by construction in the generic parser, so "last" == "this").
+	// writtenAt is the timestamp at which the relay's write of this chunk
+	// to the opposite socket returned (the client may have acted on the
+	// bytes before it: exchangeSplit). Used as ResTimestampMock for the
+	// response head chunk of each exchange, which matches the "last dest
+	// chunk WrittenAt" rule from the migration spec (there is only one
+	// response chunk per mock by construction in the generic parser, so
+	// "last" == "this").
 	writtenAt time.Time
 	err       error
 }
@@ -61,8 +68,8 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	// here (relay.go), and the two directions are drained by separate
 	// goroutines, so a reply the client has already acted on can reach
 	// this loop behind the request it unblocked. The pairing rules
-	// below read the relay's timestamps instead of trusting the order
-	// these events turn up in.
+	// below read the chunks' capture numbers (fakeconn.Chunk.ConnSeq,
+	// order) instead of trusting the order these events turn up in.
 	events := make(chan chunkEvent, 16)
 
 	initial, err := sess.ClientStream.ReadChunk()
@@ -81,6 +88,7 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 		events <- chunkEvent{
 			dir:       fakeconn.FromClient,
 			bytes:     initial.Bytes,
+			connSeq:   initial.ConnSeq,
 			readAt:    initial.ReadAt,
 			writtenAt: initial.WrittenAt,
 		}
@@ -120,13 +128,18 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	var (
 		genericRequests  []models.Payload
 		genericResponses []models.Payload
-		// reqReadAt carries the relay's ReadAt for each buffer in
+		// reqSeq carries the capture number of each buffer in
 		// genericRequests, same index. It is what lets a late-pushed
 		// response be attributed to the request it actually answered
 		// rather than to whatever happened to arrive first.
+		reqSeq []uint32
+		// reqReadAt carries the relay's ReadAt for each buffer in
+		// genericRequests, same index: the times of the exchanges a split
+		// makes of them.
 		reqReadAt []time.Time
-		// resHeadWrittenAt is the WrittenAt of the first response chunk
-		// currently held — the moment the client could first see a reply.
+		// resHeadSeq and resHeadWrittenAt are the capture number and the
+		// WrittenAt of the first response chunk currently held.
+		resHeadSeq       uint32
 		resHeadWrittenAt time.Time
 		reqTimestampMock time.Time
 		resTimestampMock time.Time
@@ -197,7 +210,9 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		reset := func() {
 			genericRequests = nil
 			genericResponses = nil
+			reqSeq = nil
 			reqReadAt = nil
+			resHeadSeq = 0
 			resHeadWrittenAt = time.Time{}
 			reqTimestampMock = time.Time{}
 			resTimestampMock = time.Time{}
@@ -315,8 +330,8 @@ drain:
 			continue
 		}
 
-		// Ignore spurious empty chunks — they carry no payload and
-		// their timestamps would bias the pairing logic.
+		// Ignore spurious empty chunks — they carry no payload, and
+		// a response with none would pair with a request.
 		if len(ev.bytes) == 0 {
 			continue
 		}
@@ -353,27 +368,28 @@ drain:
 			// record when bytes actually hit the relay rather than
 			// when the parser got around to pairing them.
 			//
-			// Orphaned is decided on the wire clock, not on arrival.
-			// A single held response the client could not have seen
-			// until AFTER this request was read is not the leftover of
-			// an earlier reply — on the wire it comes second — so the
-			// two are one exchange, teed out of order (the relay
-			// forwards bytes before it tees them, so either direction
-			// can overtake the other). Dropping it here would leave
-			// this request to pair with the NEXT response instead.
+			// Orphaned is decided by capture order, not on arrival. A
+			// single held response captured AFTER this request is not
+			// the leftover of an earlier reply — on the wire it comes
+			// second — so the two are one exchange, teed out of order
+			// (the relay forwards bytes before it tees them, so either
+			// direction can overtake the other). Dropping it here would
+			// leave this request to pair with the NEXT response instead.
+			reqFirst, _ := order(stamp{ev.connSeq, ev.readAt}, stamp{resHeadSeq, resHeadWrittenAt})
 			answersThis := len(genericRequests) == 0 &&
 				len(genericResponses) > 0 &&
-				!ev.readAt.IsZero() &&
-				ev.readAt.Before(resHeadWrittenAt)
+				reqFirst
 			if len(genericRequests) == 0 {
 				if !answersThis {
 					genericResponses = nil
+					resHeadSeq = 0
 					resHeadWrittenAt = time.Time{}
 				}
 				reqTimestampMock = ev.readAt
 				carriedBySplit = false
 			}
 			genericRequests = append(genericRequests, encodePayload(ev.bytes, models.FromClient))
+			reqSeq = append(reqSeq, ev.connSeq)
 			reqReadAt = append(reqReadAt, ev.readAt)
 			prevChunkWasReq = true
 			if answersThis {
@@ -393,6 +409,8 @@ drain:
 				resTimestampMock = resHeadWrittenAt
 				if logger != nil {
 					logger.Debug("generic v2: paired a request with the response that arrived ahead of it",
+						zap.Uint32("requestConnSeq", ev.connSeq),
+						zap.Uint32("responseConnSeq", resHeadSeq),
 						zap.Time("requestReadAt", ev.readAt),
 						zap.Time("responseWrittenAt", resHeadWrittenAt),
 						zap.Int("responseChunksHeld", heldChunks),
@@ -405,34 +423,40 @@ drain:
 		case fakeconn.FromDest:
 			// The half a split carried forward is an exchange this
 			// parser created, so it owes the same precondition the
-			// split itself is held to: a response written before the
-			// request was read cannot be its answer. In wire order
-			// that chunk is the tail of the PREVIOUS reply and is
-			// dropped; pairing it here instead records an answer this
+			// split itself is held to: a response captured before the
+			// request cannot be its answer. In wire order that chunk
+			// is the tail of the PREVIOUS reply and is dropped;
+			// pairing it here instead records an answer this
 			// request never got — and generic mocks are session-scoped
 			// (Metadata type "config"), so replay's window filter short
 			// -circuits them into the unfiltered pool BEFORE its
 			// response-precedes-request check. Nothing downstream
 			// catches this; it replays.
-			if carriedBySplit && len(reqReadAt) > 0 &&
-				!ev.writtenAt.IsZero() && !reqReadAt[0].IsZero() &&
-				ev.writtenAt.Before(reqReadAt[0]) {
-				if logger != nil {
-					logger.Debug("generic v2: dropped a response older than the request a split carried forward",
-						zap.Time("responseWrittenAt", ev.writtenAt),
-						zap.Time("requestReadAt", reqReadAt[0]))
+			if carriedBySplit && len(reqSeq) > 0 {
+				if resFirst, _ := order(stamp{ev.connSeq, ev.writtenAt}, stamp{reqSeq[0], reqReadAt[0]}); resFirst {
+					if logger != nil {
+						logger.Debug("generic v2: dropped a response older than the request a split carried forward",
+							zap.Uint32("responseConnSeq", ev.connSeq),
+							zap.Uint32("requestConnSeq", reqSeq[0]),
+							zap.Time("responseWrittenAt", ev.writtenAt),
+							zap.Time("requestReadAt", reqReadAt[0]))
+					}
+					continue
 				}
-				continue
 			}
-			// A client cannot have sent a request until after it saw
-			// this response, so on the wire the two are in different
-			// exchanges however they reached us. Cut there: keep the
-			// requests that precede the response, carry the rest
-			// forward. Without this, a reply teed after the request it
-			// unblocked merges two commands into one mock and drops
-			// the second reply — and replay, which matches on the
-			// NUMBER of request buffers, then finds nothing for either
-			// command, which is how a recorded app dies at startup.
+			// A request captured after this response is not what it
+			// answers: the destination sent the response before it
+			// could have had the request (connseq.Upstream numbers a
+			// client chunk after every byte the destination had sent
+			// when it was read, before the relay writes it on). So on
+			// the wire the two are in different exchanges however they
+			// reached us. Cut there: keep the requests that precede the
+			// response, carry the rest forward. Without this, a reply
+			// teed after the request it unblocked merges two commands
+			// into one mock and drops the second reply — and replay,
+			// which matches on the NUMBER of request buffers, then
+			// finds nothing for either command, which is how a
+			// recorded app dies at startup.
 			//
 			// This restores wire order; it does not make an opaque
 			// stream understood. The parser still pairs by direction
@@ -442,16 +466,18 @@ drain:
 			// were before any of this (TestV2_ServerPushIsPairedThe
 			// SameEitherWay walks one such stream both ways). Fixing
 			// THAT needs a parser that frames the protocol, not a
-			// clock.
+			// capture order.
 			//
 			// A connection that lost a chunk drops its whole in-flight
 			// exchange (flushMock below). Splitting first would keep
 			// the tail half of a capture already known to be holed.
 			if len(genericRequests) > 1 {
-				if i := exchangeSplit(reqReadAt, ev.writtenAt); i > 0 {
+				if i := exchangeSplit(reqSeq, reqReadAt, stamp{ev.connSeq, ev.writtenAt}); i > 0 {
 					heldReqs := append([]models.Payload(nil), genericRequests[i:]...)
+					heldSeq := append([]uint32(nil), reqSeq[i:]...)
 					heldAt := append([]time.Time(nil), reqReadAt[i:]...)
 					genericRequests = genericRequests[:i]
+					reqSeq = reqSeq[:i]
 					reqReadAt = reqReadAt[:i]
 					genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
 					resTimestampMock = ev.writtenAt
@@ -482,6 +508,7 @@ drain:
 						continue
 					}
 					genericRequests = heldReqs
+					reqSeq = heldSeq
 					reqReadAt = heldAt
 					reqTimestampMock = heldAt[0]
 					carriedBySplit = true
@@ -489,6 +516,8 @@ drain:
 						logger.Debug("generic v2: split an exchange the response arrived behind",
 							zap.Int("splitAfterRequests", i),
 							zap.Int("requestsCarriedForward", len(heldReqs)),
+							zap.Uint32("responseConnSeq", ev.connSeq),
+							zap.Uint32("nextRequestConnSeq", heldSeq[0]),
 							zap.Time("responseWrittenAt", ev.writtenAt),
 							zap.Time("nextRequestReadAt", heldAt[0]))
 					}
@@ -496,6 +525,7 @@ drain:
 				}
 			}
 			if len(genericResponses) == 0 {
+				resHeadSeq = ev.connSeq
 				resHeadWrittenAt = ev.writtenAt
 			}
 			genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
@@ -532,37 +562,84 @@ drain:
 
 // exchangeSplit reports where a response's arrival proves that the
 // requests held in flight are really two exchanges: the index of the
-// first request the client cannot have sent until after resWrittenAt,
-// the moment that response reached it. It returns 0 for "no evidence",
-// which is also the answer whenever any timestamp needed for the
-// comparison is missing — an untimestamped chunk cannot be placed on
-// either side of a response, and guessing is how a recorder starts
-// emitting mocks nobody can explain.
+// first request captured after the response (res), which the response
+// therefore does not answer. reqSeq and reqReadAt are the requests'
+// capture numbers and times, same index. It returns 0 for "no evidence",
+// which is also the answer whenever nothing orders a request and the
+// response (order) — such a chunk cannot be placed on either side of a
+// response, and guessing is how a recorder starts emitting mocks nobody
+// can explain.
 //
-// Index 0 is never a split point. A response that predates even the
+// The capture numbers decide it where they order the two (the relay's
+// always do). A response's WrittenAt is stamped once the relay's write of
+// it to the application returns, and the application can act on the bytes
+// before that: the write wakes it, and the forwarder may get its CPU back
+// only after the application has sent its next request and the other
+// forwarder has read it. A comparison of the two stamps then puts that
+// request before the response that unblocked it, the split does not
+// happen, and the two commands land in one mock that replay cannot match
+// (go-redis's CLIENT SETINFO and PING, CI's mock-mismatch-streaming lane).
+//
+// It also splits off a pipelined request the relay read only after the
+// response had reached it, though the client sent the request before it
+// saw the response: the response cannot answer what the destination did
+// not have yet. Replay, where the client sends the two together, then
+// finds no mock with both; before, a reply had also to be written back to
+// the client before such a request was read, and that pipeline's second
+// reply was lost instead. A parser that frames the protocol is what records
+// a pipeline whole.
+//
+// Index 0 is never a split point. A response captured before even the
 // FIRST held request is not this exchange's answer, and cutting there
 // would emit a pair that never happened on the wire. Replay will not
 // catch it: generic mocks are recorded session-scoped, and the window
 // filter routes those to the unfiltered pool before it ever compares
 // their two timestamps.
-func exchangeSplit(reqReadAt []time.Time, resWrittenAt time.Time) int {
-	if len(reqReadAt) == 0 {
+func exchangeSplit(reqSeq []uint32, reqReadAt []time.Time, res stamp) int {
+	if len(reqSeq) == 0 {
 		return 0
 	}
-	// Covers an unstamped response too: every real instant is After the
-	// zero time, so a zero resWrittenAt returns here.
-	if reqReadAt[0].IsZero() || reqReadAt[0].After(resWrittenAt) {
+	if resFirst, known := order(res, stamp{reqSeq[0], reqReadAt[0]}); !known || resFirst {
 		return 0
 	}
-	for i := 1; i < len(reqReadAt); i++ {
-		if reqReadAt[i].IsZero() {
+	for i := 1; i < len(reqSeq); i++ {
+		resFirst, known := order(res, stamp{reqSeq[i], reqReadAt[i]})
+		if !known {
 			return 0
 		}
-		if reqReadAt[i].After(resWrittenAt) {
+		if resFirst {
 			return i
 		}
 	}
 	return 0
+}
+
+// stamp is what places a chunk against a chunk of the other direction:
+// its capture number (fakeconn.Chunk.ConnSeq) and its time (a request's
+// ReadAt, a response's WrittenAt).
+type stamp struct {
+	seq uint32
+	at  time.Time
+}
+
+// order reports whether x was captured before y (first), and whether
+// anything says (known). The capture numbers say, when both chunks are
+// numbered and the numbers differ (fakeconn.Chunk.CapturedBefore): the relay
+// numbers a client chunk after every byte the destination had sent when it
+// read it, before it writes it on, so a response numbered below a request
+// was sent before the destination could have had the request. Otherwise
+// the times say, compared strictly, when both are stamped: a producer that
+// does not number its two directions apart (a capture that gives both one
+// number) is ordered as it was before the numbers existed, with the times'
+// fault (exchangeSplit). Equal times say nothing is first.
+func order(x, y stamp) (first, known bool) {
+	if x.seq != 0 && y.seq != 0 && x.seq != y.seq {
+		return fakeconn.Chunk{ConnSeq: x.seq}.CapturedBefore(y.seq), true
+	}
+	if x.at.IsZero() || y.at.IsZero() {
+		return false, false
+	}
+	return x.at.Before(y.at), true
 }
 
 // readStream pumps Chunks from one FakeConn onto the shared events
@@ -590,6 +667,7 @@ func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkE
 		out <- chunkEvent{
 			dir:       dir,
 			bytes:     c.Bytes,
+			connSeq:   c.ConnSeq,
 			readAt:    c.ReadAt,
 			writtenAt: c.WrittenAt,
 		}

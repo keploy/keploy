@@ -240,9 +240,11 @@ func TestV2AConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 				}
 				clientCh := make(chan fakeconn.Chunk, 4)
 				destCh := make(chan fakeconn.Chunk, 4)
+				// Numbered as the relay numbers them: each answer after
+				// its request, the second request after the first answer.
 				for i, x := range []string{"publish 1", "publish 2"} {
-					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at(i)}
-					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: at(i).Add(time.Millisecond)}
+					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ConnSeq: uint32(2*i + 1), ReadAt: at(i)}
+					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: at(i).Add(time.Millisecond)}
 				}
 				close(clientCh)
 				close(destCh)

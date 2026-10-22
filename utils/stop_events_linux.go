@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"go.keploy.io/server/v3/utils/stall"
@@ -24,19 +25,25 @@ import (
 // (the daemon's wait, or its main process exiting). It kills only when the
 // app made no progress on its way out (ExitMark: a process or thread of it
 // ending, a file or socket closed, storage read or written while it waits on
-// it) for StopStallBudget of keploy's own runnable time (stall.Process), or
-// at the user's Ctrl+C, which it offers. A starved host, keploy with it,
-// takes as long as it takes. An app starved alone (a container's --cpus) has
-// the stall bound to show progress in: a shutdown that only computes, with
-// no process, thread or file of it ending for that long, is killed.
+// it) for StopStallBudget of the time both it and keploy could run
+// (ExitClock: its threads' own time on and waiting for a CPU, and on storage
+// that serves, and keploy's runnable time, stall.Process), or at the user's
+// Ctrl+C, which it offers. A starved host takes as long as it takes, and so
+// does an app starved alone (a container's --cpus, a cgroup whose quota its
+// siblings spent) or one whose way out waits on a disk the host keeps busy:
+// the stall accrues only as fast as it gets to run. A shutdown that only
+// computes, with no process, thread or file of it ending while it has had the
+// bound to run, is killed; so is one that only waits in the kernel, once its
+// waits there since its last progress outlast the kernel's hung-task time.
 
-// StopStallBudget is how long, in keploy's runnable time, an app keploy
-// stopped may make no progress on its way out before keploy kills it: the
-// watchdog's stall bound (stall.HangBudget). A test sets it shorter.
+// StopStallBudget is how long, in the time both it and keploy could run
+// (ExitClock), an app keploy stopped may make no progress on its way out
+// before keploy kills it: the watchdog's stall bound (stall.HangBudget). A
+// test sets it shorter.
 var StopStallBudget = stall.HangBudget
 
-// StopStallSaid is how a kill names the bound it killed on: keploy's runnable
-// time.
+// StopStallSaid is how a kill names the bound it killed on where the app's
+// processes could not be read: keploy's runnable time.
 func StopStallSaid() string { return StopStallBudget.String() + " of keploy's runnable time" }
 
 // ExitMark is how far processes are on their way out: how many still run,
@@ -154,28 +161,32 @@ func TreeOf(pid int) []Reached {
 // WaitExitByEvents waits for exited to fire, while procs make progress on
 // their way out (ExitMark), looking at them at the stall meter's pace. When
 // every one of procs is gone the app has exited too. It ends StopStalled when
-// they made no progress for StopStallBudget of keploy's runnable time first;
-// with no procs to read, that is the bound on no news at all. It ends
-// StopPressed at the user's Ctrl+C, which it offers StopOffer after the run's
-// interrupt (StopNowNotice), so a stop that waits as long as the app makes
+// they made no progress for StopStallBudget of the time both they and keploy
+// could run (ExitClock) first; with no procs to read, that is keploy's
+// runnable time, the bound on no news at all. It ends StopPressed at the
+// user's Ctrl+C, which it offers StopOffer after the run's interrupt
+// (StopNowNotice), so a stop that waits as long as the app makes
 // progress can always be ended. A kill is due on either. Each step they take
 // on their way out is a movement of moved, the teardown scope of the run
-// whose app it stops (nil: none).
-func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope) StopEnd {
-	meter := stall.NewMeter(nil, StopStallBudget)
-	defer meter.Stop()
+// whose app it stops (nil: none). bound is how a kill names the stall bound,
+// as it was measured (ExitClock.Said).
+func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope) (end StopEnd, bound string) {
+	clock, meter, stop := NewExitMeter(procs, StopStallBudget)
+	defer stop()
 	notice := NewStopNowNotice(StopOffer)
 	defer notice.Withdraw()
 	offering := false
-	var mark ExitRatchet
-	mark.Advance(MarkExit(procs))
+	meter.Advance(MarkExit(procs))
 	for {
 		select {
 		case <-exited:
-			return StopExited
+			return StopExited, clock.Said(StopStallBudget)
 		case <-notice.Interrupt():
-			return StopPressed
+			return StopPressed, clock.Said(StopStallBudget)
 		case <-meter.Wait():
+		}
+		if looked := exitLooked.Load(); looked != nil {
+			(*looked)()
 		}
 		if !offering && notice.Next() {
 			offering = true
@@ -183,18 +194,22 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 		}
 		m := MarkExit(procs)
 		if len(procs) > 0 && m.Running == 0 {
-			return StopExited
+			return StopExited, clock.Said(StopStallBudget)
 		}
-		if mark.Advance(m) {
-			meter.Reset()
+		if meter.Advance(m) {
 			moved.Note()
 			continue
 		}
 		if meter.Expired() {
-			return StopStalled
+			return StopStalled, clock.Said(StopStallBudget)
 		}
 	}
 }
+
+// exitLooked, where a test sets it, is called at each look of
+// WaitExitByEvents at the processes it waits for (the tests count the looks);
+// atomic, as a test may reset it while a stop it left runs on.
+var exitLooked atomic.Pointer[func()]
 
 // ProcOf is process pid as it runs now, named by its pid and start time; false
 // when it is gone (or a zombie).
@@ -261,13 +276,13 @@ func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved 
 	exited, release := leaderExited(leader, members)
 	defer release()
 	var why string
-	switch WaitExitByEvents(logger, exited, members, moved) {
+	switch end, bound := WaitExitByEvents(logger, exited, members, moved); end {
 	case StopExited:
 		return ""
 	case StopPressed:
 		why = "keploy killed a process of it at the press of Ctrl+C, before it had exited"
 	default:
-		why = fmt.Sprintf("a process of it made no progress on its way out for %s of keploy's runnable time after keploy interrupted it, so keploy killed it", StopStallBudget)
+		why = fmt.Sprintf("a process of it made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		logger.Debug("a process group made no progress on its way out after its interrupt", zap.Int("pgid", leader), zap.Duration("stall", StopStallBudget))
 	}
 	switch err := syscall.Kill(-leader, syscall.SIGKILL); {

@@ -10,7 +10,8 @@ const (
 	// was watched by is gone.
 	StopExited StopEnd = iota
 	// StopStalled: it made no progress on its way out for StopStallBudget
-	// of keploy's runnable time. A kill is due, and is said.
+	// of the time both it and keploy could run (ExitClock; off Linux, of
+	// wall time). A kill is due, and is said.
 	StopStalled
 	// StopPressed: the user pressed Ctrl+C at the stop's offer to end it
 	// at once. A kill is due, and is said as the user's.
