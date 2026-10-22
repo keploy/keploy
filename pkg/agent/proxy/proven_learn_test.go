@@ -515,7 +515,7 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	p.ContinueTestErrorCapture() // test 1 (nothing called)
 	_, _ = p.GetMockErrors(context.Background())
 	p.ContinueTestErrorCapture() // test 2
-	body := `{"at":1760436061}` // moved by F's lead: a clock read
+	body := `{"at":1760436061}`  // moved by F's lead: a clock read
 	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
 		"POST /pong HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
 	if code != http.StatusOK {
