@@ -187,6 +187,15 @@ const (
 	// it: each test it carries traffic in fails (judged), a test's own kind
 	// (PerTest). Only under the proven switch.
 	CaptureLossUnrecorded CaptureLossKind = "connection_unrecorded"
+	// CaptureLossAppSubtreeUntracked: processes forked in the application's
+	// subtree that a downstream build's capture could not mark as the
+	// application's, its kernel map of the subtree full, so whether their
+	// calls were the application's is left to a /proc walk, which a process
+	// reaped by then fails: their calls may be neither recorded nor
+	// mocked, and at replay reach a real dependency and pass. The test they
+	// were forked in fails (judged), a test's own kind (PerTest). What names
+	// the latest such process. Only under the proven switch.
+	CaptureLossAppSubtreeUntracked CaptureLossKind = "app_subtree_untracked"
 )
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
@@ -423,7 +432,8 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded ||
+		k == CaptureLossAppSubtreeUntracked
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -611,6 +621,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and %d piece(s) of its traffic, its stops included, were neither recorded nor mocked", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
+	case CaptureLossAppSubtreeUntracked:
+		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's (its map of the subtree was full), so their calls may have been neither recorded nor mocked while this test ran", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

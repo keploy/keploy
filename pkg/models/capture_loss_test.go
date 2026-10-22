@@ -1,9 +1,12 @@
 package models
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestCaptureLossesSinceIsWhatGrew(t *testing.T) {
@@ -393,5 +396,68 @@ func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
 		if txt := at(2).Text(); !strings.Contains(txt, tc.text) {
 			t.Fatalf("%s: text %q lacks %q", tc.k, txt, tc.text)
 		}
+	}
+}
+
+// A process forked in the application's subtree that a downstream build's
+// capture could not mark as the application's fails the test it was forked in
+// (judged), and that test only (PerTest); the text says why.
+func TestAnUntrackedForkOfTheAppFailsItsTest(t *testing.T) {
+	k := CaptureLossAppSubtreeUntracked
+	if k.NotJudged() || k.Evidence() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("%s: a judged loss, the test's own", k)
+	}
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n}} }
+	if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, at(2)) {
+		t.Fatalf("Charged = %+v, want the 2 since the previous test", got)
+	}
+	if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
+		t.Fatalf("Split = %v, %v: judged", judged, notJudged)
+	}
+	if txt := at(2).Text(); !strings.Contains(txt, "could not mark 2 process(es) forked in the application's subtree") {
+		t.Fatalf("text %q does not say what happened", txt)
+	}
+}
+
+// A kind this build does not know (a newer agent's) is kept whole when what
+// carries it is read and written again, in YAML and in JSON, and it is judged:
+// an older reader fails the tests it taints rather than drop the loss or pass
+// them.
+func TestAKindThisBuildDoesNotKnowIsKeptAndJudged(t *testing.T) {
+	newer := CaptureLossKind("a_kind_from_a_newer_build")
+	losses := CaptureLosses{{Kind: newer, Count: 2, What: "the latest: pid 7 (app)"}}
+	for _, codec := range []struct {
+		name      string
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}{
+		{"yaml", yaml.Marshal, yaml.Unmarshal},
+		{"json", json.Marshal, json.Unmarshal},
+	} {
+		b, err := codec.marshal(FailureInfo{CaptureIncomplete: losses})
+		if err != nil {
+			t.Fatalf("%s: write: %v", codec.name, err)
+		}
+		var back FailureInfo
+		if err := codec.unmarshal(b, &back); err != nil {
+			t.Fatalf("%s: read: %v", codec.name, err)
+		}
+		again, err := codec.marshal(back)
+		if err != nil {
+			t.Fatalf("%s: write again: %v", codec.name, err)
+		}
+		var twice FailureInfo
+		if err := codec.unmarshal(again, &twice); err != nil {
+			t.Fatalf("%s: read again: %v", codec.name, err)
+		}
+		if !reflect.DeepEqual(twice.CaptureIncomplete, losses) {
+			t.Fatalf("%s: read and written twice: %+v, want %+v", codec.name, twice.CaptureIncomplete, losses)
+		}
+	}
+	if newer.NotJudged() || newer.Evidence() {
+		t.Fatal("an unknown kind is not judged, or is evidence: an older reader would pass a test it taints")
+	}
+	if judged, _ := losses.Split(); len(judged) != 1 {
+		t.Fatalf("Split = %v: an unknown kind must be judged", judged)
 	}
 }
