@@ -880,7 +880,12 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	// Ensure every non-ignored expected key exists in the request
 	for k := range expected {
 		if shouldIgnore(k) {
-			h.Logger.Debug("header key is ignored", zap.String("header key", k))
+			// Checked first: it runs for every candidate mock, and a logurl
+			// field costs a line whose level is off an allocation that
+			// zap.String's does not.
+			if ce := h.Logger.Check(zap.DebugLevel, "header key is ignored"); ce != nil {
+				ce.Write(logurl.PlaceField("header key", k))
+			}
 			continue
 		}
 		if _, ok := actualKeys[strings.ToLower(k)]; !ok {
@@ -1071,7 +1076,7 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				// logcontent field costs a line whose level is off an
 				// allocation that zap.String's does not.
 				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
-					ce.Write(zap.String("param", key),
+					ce.Write(logurl.PlaceField("param", key),
 						logcontent.NamedString("mock value", key, rv[i]),
 						logcontent.NamedString("request value", key, av[i]),
 						zap.String("type class", c))

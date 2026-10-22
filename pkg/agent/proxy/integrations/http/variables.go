@@ -902,7 +902,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 				continue
 			}
 			h.Logger.Warn("a variable changed the body of a recorded answer, and keploy serves this header as recorded: it cannot tell how the value was computed",
-				zap.String("mock", served.Name), zap.String("header", k))
+				zap.String("mock", served.Name), logurl.PlaceField("header", k))
 		}
 	}
 	out := served.ShallowCopy()

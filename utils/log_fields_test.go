@@ -30,6 +30,27 @@ func TestSortedKeys_LogsTheKeysSorted(t *testing.T) {
 	}
 }
 
+// A key is a name a client chose: with the switch off one that reads as no
+// name is written {} (models.PlaceShape), as URLShape writes a query's names,
+// a bare ?<token> and a map keyed by an email address among them; with it on
+// each is whole.
+func TestSortedKeys_WritesAKeyByItsShape(t *testing.T) {
+	const token = "a7f3c9e1b2d4"
+	params := map[string]string{"page": "2", token: "", "users.alice@example.com": "1"}
+	logtest.Each(t, func(t *testing.T, on bool) {
+		logger, logs := logtest.Observe()
+		logger.Debug("params", zap.Array("params", SortedKeys(params)))
+		got := logs.All()[0].ContextMap()["params"]
+		want := []interface{}{"{}", "page", "users.{}.com"}
+		if on {
+			want = []interface{}{token, "page", "users.alice@example.com"}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("params = %v, want %v", got, want)
+		}
+	})
+}
+
 // A line whose level is off costs nothing for the keys: they are read when
 // the line is encoded.
 func TestSortedKeys_CostsADisabledLineNothing(t *testing.T) {

@@ -197,10 +197,8 @@ pkg/agent/containerkey/push.go | field | set pkg/agent/containerkey.entry.image(
 pkg/agent/containerkey/push.go | field | zap.String(s.Err) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/agent/containerkey/push.go | field | zap.Strings(names) <- make([]string, 0, len(s.Containers)) & append(names, c.Name) | 1 | a container's, a compose service's or project's, an image's, a network's or a volume's name, or the daemon's error about them: the user's setup, not the app's traffic
 pkg/agent/hooks/conn/util.go | error | utils.LogError(err) <- regexp.Compile | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic
-pkg/agent/hooks/conn/util.go | field | set pkg/models.FormData.Key(key) <- part.FormName() | 1 | a multipart form field's name, not its value
 pkg/agent/hooks/conn/util.go | field | set pkg/models.TestCase.Name(http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]) | 1 | the Keploy-Test-Name header's value: the name the user's test client gives the test case for keploy, a control header of keploy's that keploy names the test case by, not the app's data
 pkg/agent/hooks/conn/util.go | field | set pkg/models.TestCase.Name(pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"]) | 1 | the Keploy-Test-Name header's value: the name the user's test client gives the test case for keploy, a control header of keploy's that keploy names the test case by, not the app's data
-pkg/agent/hooks/conn/util.go | field | zap.String(fd.Key) | 1 | a query parameter's name, not its value
 pkg/agent/hooks/conn/util.go | field | zap.String(path) <- range form.Paths | 3 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/agent/hooks/conn/util.go | field | zap.String(tempPath) <- file.Name() | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/agent/hooks/conn/util.go | field | zap.Strings(fd.Paths) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
@@ -365,8 +363,6 @@ pkg/agent/proxy/integrations/http/match.go | field | variableMismatchReport(dest
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(bestC.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(bestMatch.Name) | 2 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(bodyMatched[0].Name) | 1 | mocks' names, which keploy gives them (mock-N)
-pkg/agent/proxy/integrations/http/match.go | field | zap.String(k) <- range expected key | 1 | a header's name, not its value
-pkg/agent/proxy/integrations/http/match.go | field | zap.String(key) <- range mockParams key | 1 | a query parameter's name, not its value
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(m.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(mock.Name) | 13 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/match.go | field | zap.String(pat) <- range urlNoise | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic
@@ -389,7 +385,6 @@ pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/int
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/agent/proxy/integrations/http.varProblem.mock(served.Name) | 5 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | set pkg/variables.Binding.Mock(m.Name) | 2 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/http/variables.go | field | zap.String(b.Mock) | 1 | mocks' names, which keploy gives them (mock-N)
-pkg/agent/proxy/integrations/http/variables.go | field | zap.String(k) <- range resp.Header key | 1 | a header's name, not its value
 pkg/agent/proxy/integrations/http/variables.go | field | zap.String(served.Name) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/mismatch/mismatch.go | field | set b.report.ClosestMock(mockName) | 1 | mocks' names, which keploy gives them (mock-N)
 pkg/agent/proxy/integrations/mismatch/mismatch.go | field | set b.report.Destination(dest) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
@@ -818,17 +813,11 @@ pkg/matcher/http/match.go | field | WarnUnmatchableBodyNoise(tc.Name) | 1 | a te
 pkg/matcher/http/match.go | field | zap.String("error parsing regexp: " + string(se.Code)) | 1 | an error's kind (its type's name, or the sentinel it ends in), not its text
 pkg/matcher/http/match.go | field | zap.String(actualClass) <- fmtSprintf234("%dxx", actualResponse.StatusCode/100) | 1 | an HTTP status's class (2xx, 4xx): a status code's first digit
 pkg/matcher/http/match.go | field | zap.String(class) <- toString(value) | 1 | an HTTP status's class (2xx, 4xx): a status code's first digit
-pkg/matcher/http/match.go | field | zap.String(hdr) <- fmtSprint234(item) | 1 | a header's name, not its value
-pkg/matcher/http/match.go | field | zap.String(hdr) <- range v key | 1 | a header's name, not its value
-pkg/matcher/http/match.go | field | zap.String(header) <- range hm key | 4 | a header's name, not its value
-pkg/matcher/http/match.go | field | zap.String(name) <- hr.Expected.Key | 1 | a header's name, not its value
-pkg/matcher/http/match.go | field | zap.String(name) <- hr.Expected.Key & hr.Actual.Key | 2 | a header's name, not its value
 pkg/matcher/http/match.go | field | zap.String(tc.Name) | 2 | a test case's name, which keploy gives it (test-N)
 pkg/matcher/http/match.go | print | newLogger.Printf(log2) <- newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name) | 1 | a failed test's diff as keploy prints it after the test (its expected and actual status, headers and bodies): what of a test's content a user sees there is the report gate's to decide (R1N-REPORT-CONTENT), as for the mock-mismatch report, not this print's
 pkg/matcher/http/match.go | print | newLogger.Printf(logs) <- newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name) | 1 | a failed test's diff as keploy prints it after the test (its expected and actual status, headers and bodies): what of a test's content a user sees there is the report gate's to decide (R1N-REPORT-CONTENT), as for the mock-mismatch report, not this print's
 pkg/matcher/http/match.go | print | newLogger.Printf(newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)) | 1 | a test case's name, which keploy gives it (test-N), in keploy's own words
 pkg/matcher/http/schema_match.go | field | NewSchemaDiffPrinter(tc.Name) | 1 | a test case's name, which keploy gives it (test-N)
-pkg/matcher/http/schema_match.go | field | set pkg/models.Header.Key(k) <- range tc.HTTPResp.Header key | 2 | a header's name, not its value
 pkg/matcher/http/schema_match.go | field | zap.String(tc.Name) | 2 | a test case's name, which keploy gives it (test-N)
 pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Mock(e.Mock) | 2 | mocks' names, which keploy gives them (mock-N)
 pkg/matcher/learn/classify.go | field | set pkg/matcher/learn.Place.Mock(x.Mock) | 2 | mocks' names, which keploy gives them (mock-N)
@@ -839,8 +828,6 @@ pkg/matcher/schema/match.go | print | newLogger.Printf(logs) | 1 | a failed test
 pkg/matcher/utils.go | error | warnInvalidPattern(err) <- pkg/matcher.getCompiledE | 1 | the noise configuration's own error: a pattern the user configured, as regexp quotes it
 pkg/matcher/utils.go | field | NewSchemaDiffPrinterOut(testCase) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/matcher/utils.go | field | set pkg/matcher.SchemaDiffPrinter.testCase(testCase) | 1 | a test case's name, which keploy gives it (test-N)
-pkg/matcher/utils.go | field | set pkg/models.Header.Key(k) <- range h1 key | 8 | a header's name, not its value
-pkg/matcher/utils.go | field | set pkg/models.Header.Key(k) <- range h2 key | 4 | a header's name, not its value
 pkg/matcher/utils.go | field | warnIfRegexShaped(name) <- range values | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic
 pkg/matcher/utils.go | field | warnIfRegexShaped(path) <- range values | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic
 pkg/matcher/utils.go | field | warnInvalidPattern(p) <- range patterns | 1 | the noise the user configured: field names, header names and patterns from keploy's config, not the traffic
@@ -1261,7 +1248,6 @@ pkg/platform/yaml/testdb/db.go | field | zap.String(bodyPath) <- ts.TcsPath | 2 
 pkg/platform/yaml/testdb/db.go | field | zap.String(contentType) <- tc.HTTPResp.Header["Content-Type"] | 1 | a media type (Content-Type's): it names a format, not what the body holds
 pkg/platform/yaml/testdb/db.go | field | zap.String(destPath) <- ts.TcsPath & form.Key | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/platform/yaml/testdb/db.go | field | zap.String(destPath) <- ts.TcsPath & form.Key & range form.FileNames | 5 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
-pkg/platform/yaml/testdb/db.go | field | zap.String(form.Key) | 2 | a multipart form field's name, not its value
 pkg/platform/yaml/testdb/db.go | field | zap.String(placeholder) <- yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests")) & ts.claimName(tcsPath, tc) & tc.Name | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/platform/yaml/testdb/db.go | field | zap.String(srcPath) <- form.Paths[j] | 3 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/platform/yaml/testdb/db.go | field | zap.String(testCaseID) <- range testCaseIDs | 1 | a test case's name, which keploy gives it (test-N)
@@ -1288,8 +1274,6 @@ pkg/platform/yaml/testdb/util.go | message | set pkg/platform/yaml.NetworkTraffi
 pkg/platform/yaml/utils.go | errorf | fmt.Errorf(prefix) | 1 | names keploy gives: a mock's, a test case's or a test set's
 pkg/platform/yaml/utils.go | field | FileExistsF(fileName) | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/platform/yaml/utils.go | field | FileExistsF(path) | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
-pkg/platform/yaml/utils.go | field | set pkg/models.Header.Key(k) <- range h1 key | 8 | a header's name, not its value
-pkg/platform/yaml/utils.go | field | set pkg/models.Header.Key(k) <- range h2 key | 4 | a header's name, not its value
 pkg/platform/yaml/utils.go | field | zap.String(dstFile.Name()) | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/platform/yaml/utils.go | field | zap.String(fileName) | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/platform/yaml/utils.go | field | zap.String(filePath) <- param filePath & param fileName | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
@@ -1449,7 +1433,6 @@ pkg/service/export/export.go | field | zap.String(keployDir) <- os.Getwd() | 2 |
 pkg/service/export/export.go | field | zap.String(testFile.Name()) | 3 | a test case's name, which keploy gives it (test-N)
 pkg/service/export/export.go | field | zap.String(testsDir) <- os.Getwd() & v.Name() | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/service/import/import.go | error | zap.Error(logurl.Error(err)) <- logurl.Error(net/http.NewRequest) | 1 | net/http.NewRequest's error as logurl.Error writes it: url.Parse's *url.Error by its op, its URL's shape and its cause's kind, or net/http's word that the collection request's method is no token, which it quotes: an HTTP method, the API's verb a route is dispatched by, not a value the request carries
-pkg/service/import/import.go | field | set pkg/models.FormData.Key(formData["key"].(string)) <- range body | 1 | a multipart form field's name, not its value
 pkg/service/import/import.go | field | set pkg/platform/yaml.NetworkTrafficDoc.Name(testItem.Name) | 1 | a Postman collection's own name for an item or a variable, or its schema's version, which the user's collection gives, not a request's value
 pkg/service/import/import.go | field | validatePostmanSchema(postmanCollection.Info.Schema) | 1 | a Postman collection's own name for an item or a variable, or its schema's version, which the user's collection gives, not a request's value
 pkg/service/import/import.go | field | writeTestData(testsPath) <- os.Getwd() | 1 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
@@ -2138,8 +2121,6 @@ pkg/service/tools/tools.go | print | fmt.Println(changelog) <- renderer.Render(c
 pkg/templates/check.go | field | set pkg/templates.Place.TestCase(c.tc.Name) | 2 | a test case's name, which keploy gives it (test-N)
 pkg/templates/check.go | field | set pkg/templates.Refusal.TestCase(c.tc.Name) | 1 | a test case's name, which keploy gives it (test-N)
 pkg/templates/check.go | field | set pkg/templates.Undefined.TestCase(c.tc.Name) | 3 | a test case's name, which keploy gives it (test-N)
-pkg/templates/render.go | field | set out.Form[i].Key(renderRaw(out.Form[i].Key, r.secretOnly, r)) | 1 | a multipart form field's name, not its value
-pkg/templates/render.go | field | set pkg/models.FormData.Key(fd.Key) | 1 | a multipart form field's name, not its value
 pkg/util.go | error | utils.LogError(LoggedError(err)) <- pkg.LoggedError(net/http.NewRequestWithContext) | 1 | a test request's net/http.NewRequestWithContext error as pkg.LoggedError writes it (logurl.Error): url.Parse's *url.Error by its op, its URL's shape and its cause's kind, or net/http's word that the test's recorded method is no token, which it quotes: an HTTP method, the API's verb a route is dispatched by, not a value the request carries
 pkg/util.go | error | utils.LogError(LoggedError(err)) <- pkg.LoggedError(utils.ReplaceGrpcHost) | 1 | an address (host:port, an endpoint, a socket's ends): a gRPC test's authority net.SplitHostPort could not split, which it quotes, or keploy's own text about replacing its host: where the request goes, not what it carries
 pkg/util.go | error | utils.LogError(LoggedError(errHTTPReq)) <- pkg.LoggedError(pkg.doRequestWithConnRefusedRetry) | 2 | a test request's error as pkg.LoggedError writes it (logurl.Error): client.Do's *url.Error by its op, its URL's shape and its cause's kind, or keploy's own UnreachableAppPortError, which names the app's port and why it cannot be reached
@@ -2168,8 +2149,6 @@ pkg/util.go | field | zap.Any(models.HighlightString(testSet)) | 2 | a test set'
 pkg/util.go | field | zap.String(bodyRefPath) <- tc.HTTPReq.BodyRef.Path & cfg.KeployPath | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/util.go | field | zap.String(configHost) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/util.go | field | zap.String(contentType) <- tc.HTTPReq.Header["Content-Type"] | 1 | a media type (Content-Type's): it names a format, not what the body holds
-pkg/util.go | field | zap.String(field.Key) | 8 | a multipart form field's name, not its value
-pkg/util.go | field | zap.String(form.Key) | 2 | a multipart form field's name, not its value
 pkg/util.go | field | zap.String(formPath) <- form.Paths[j] & cfg.KeployPath | 2 | a path keploy chose or the user configured: a file's or a directory's, not what the app sent or received
 pkg/util.go | field | zap.String(hostHeader) <- tc.HTTPReq.Header["Host"] | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 pkg/util.go | field | zap.String(httpResp.Header.Get("Content-Type")) | 1 | a media type (Content-Type's): it names a format, not what the body holds
@@ -2252,7 +2231,6 @@ utils/utils.go | errorf | fmt.Errorf(originalPath) <- param p | 3 | a gRPC servi
 utils/utils.go | errorf | fmt.Errorf(part, originalPath) <- range serviceParts & param p | 1 | a gRPC service's or method's name (/package.Service/Method): the API's, as a route is
 utils/utils.go | errorf | fmt.Errorf(resp.Status, apiURL) | 1 | keploy's own release metadata from GitHub: a tag, an asset's name, its URL and digest
 utils/utils.go | errorf | fmt.Errorf(serviceFull, originalPath) <- p | 3 | a gRPC service's or method's name (/package.Service/Method): the API's, as a route is
-utils/utils.go | field | enc.AppendString(k) <- range keys | 1 | a header's name, not its value
 utils/utils.go | field | set parsedURL.Host(newBaseURL.Host) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 utils/utils.go | field | set parsedURL.Host(parsedURL.Host + ":" + port) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries
 utils/utils.go | field | set parsedURL.Host(strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)) | 1 | an address (host:port, an endpoint, a socket's ends): where a connection goes, not what it carries

@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -1253,7 +1254,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 						tc.HTTPReq.Form[i].Paths[j] = relPath
 						ts.logger.Debug("offloaded large form value to assets",
 							zap.String("testcase", tcsName),
-							zap.String("key", form.Key),
+							logurl.PlaceField("key", form.Key),
 							zap.Int("size", len(value)),
 							zap.String("path", destPath))
 					}
@@ -1358,7 +1359,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					// cause replay failures when the system tries to read them.
 					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
 						logcontent.NamedString("fileName", form.Key, form.FileNames[j]),
-						zap.String("key", form.Key))
+						logurl.PlaceField("key", form.Key))
 				}
 			}
 

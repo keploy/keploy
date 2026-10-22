@@ -661,12 +661,12 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 					if readErr != nil {
 						utils.LogError(logger, readErr, "failed to read form value from asset file",
 							zap.String("path", formPath),
-							zap.String("key", form.Key))
+							logurl.PlaceField("key", form.Key))
 						return nil, readErr
 					}
 					tc.HTTPReq.Form[i].Values[j] = string(valData)
 					logger.Debug("loaded form value from asset file",
-						zap.String("key", form.Key),
+						logurl.PlaceField("key", form.Key),
 						zap.String("path", formPath),
 						zap.Int("size", len(valData)))
 				}
@@ -688,7 +688,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		)
 		for _, field := range tc.HTTPReq.Form {
 			logger.Debug("multipart field",
-				zap.String("key", field.Key),
+				logurl.PlaceField("key", field.Key),
 				zap.Int("values", len(field.Values)),
 				zap.Int("paths", len(field.Paths)),
 			)
@@ -698,7 +698,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
 					resolvedPath = filepath.Join(cfg.KeployPath, path)
 				}
-				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
+				logger.Debug("multipart file path", zap.String("path", resolvedPath), logurl.PlaceField("field", field.Key))
 				file, ferr := os.Open(resolvedPath)
 				if ferr != nil {
 					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
@@ -707,12 +707,12 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
 				if perr != nil {
 					file.Close()
-					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+					utils.LogError(logger, perr, "failed to create multipart file part", logurl.PlaceField("field", field.Key))
 					return nil, perr
 				}
 				if _, cerr := io.Copy(part, file); cerr != nil {
 					file.Close()
-					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					utils.LogError(logger, cerr, "failed to write multipart file part", logurl.PlaceField("field", field.Key))
 					return nil, cerr
 				}
 				if cerr := file.Close(); cerr != nil {
@@ -722,7 +722,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			}
 			for valueIndex, value := range field.Values {
 				logger.Debug("multipart field value",
-					zap.String("field", field.Key),
+					logurl.PlaceField("field", field.Key),
 					zap.Int("value_len", len(value)),
 					zap.Bool("looks_binary", looksBinary(value)),
 				)
@@ -747,17 +747,17 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 					}
 					part, perr := writer.CreateFormFile(field.Key, fileName)
 					if perr != nil {
-						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+						utils.LogError(logger, perr, "failed to create multipart file part", logurl.PlaceField("field", field.Key))
 						return nil, perr
 					}
 					if _, werr := part.Write([]byte(value)); werr != nil {
-						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", field.Key))
+						utils.LogError(logger, werr, "failed to write multipart file content", logurl.PlaceField("field", field.Key))
 						return nil, werr
 					}
 					continue
 				}
 				if werr := writer.WriteField(field.Key, value); werr != nil {
-					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", field.Key))
+					utils.LogError(logger, werr, "failed to write multipart field", logurl.PlaceField("field", field.Key))
 					return nil, werr
 				}
 			}

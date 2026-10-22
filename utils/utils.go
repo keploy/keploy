@@ -201,9 +201,14 @@ func (m ReqMeta) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 
 // SortedKeys is m's keys, sorted, as a log field (zap.Array): what a line
 // says of headers or query params whose values it may not carry
-// (logcontent). The keys are read and sorted when a core encodes the line,
-// so a Debug line on a hot path whose level is off pays nothing for them: a
-// map is one pointer, which the field holds without an allocation.
+// (logcontent). Each key is a name a client chose, a query parameter's
+// (?<token>) or a body field's among them, so it is written as logurl.Place
+// writes a place: whole with KEPLOY_LOG_CONTENT on, and with it off each
+// part that reads as no name {} (models.PlaceShape), as URLShape writes a
+// query's names. The keys are read, sorted and shaped when a core encodes
+// the line, so a Debug line on a hot path whose level is off pays nothing
+// for them: a map is one pointer, which the field holds without an
+// allocation.
 func SortedKeys[V any](m map[string]V) zapcore.ArrayMarshaler { return sortedKeys[V](m) }
 
 type sortedKeys[V any] map[string]V
@@ -215,7 +220,7 @@ func (m sortedKeys[V]) MarshalLogArray(enc zapcore.ArrayEncoder) error {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		enc.AppendString(k)
+		enc.AppendString(logurl.Place(k))
 	}
 	return nil
 }

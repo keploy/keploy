@@ -205,7 +205,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	for _, fd := range formData {
 		if len(fd.Paths) > 0 {
 			hasBinaryFile = true
-			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
+			logger.Debug("Detected binary file in request form data", logurl.PlaceField("key", fd.Key), zap.Strings("paths", fd.Paths))
 			break
 		}
 	}

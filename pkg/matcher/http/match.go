@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/logcontent"
+	"go.keploy.io/server/v3/utils/logcontent/logurl"
 )
 
 // Assignable global variables for system and utility functions
@@ -314,7 +315,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				if models.IsVolatileResponseHeader(name) {
 					logger.Debug("ignoring value drift on a per-request-volatile response header",
-						zap.String("header", name))
+						logurl.PlaceField("header", name))
 					hr.Normal = true
 				}
 			}
@@ -400,7 +401,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				if isBodyDigestHeader(strings.ToLower(name)) {
 					logger.Debug("ignoring a body-digest header whose body passed only via noise",
-						zap.String("header", name))
+						logurl.PlaceField("header", name))
 					hr.Normal = true
 				}
 			}
@@ -817,7 +818,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				if !ok || act != exp {
 					pass = false
 					logger.Error("header_equal assertion failed",
-						zap.String("header", header),
+						logurl.PlaceField("header", header),
 						logcontent.NamedString("expected", header, exp),
 						logcontent.NamedString("actual", header, act),
 					)
@@ -836,7 +837,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				if !ok || !strings.Contains(act, exp) {
 					pass = false
 					logger.Error("header_contains assertion failed",
-						zap.String("header", header),
+						logurl.PlaceField("header", header),
 						logcontent.NamedString("expected_substr", header, exp),
 						logcontent.NamedString("actual", header, act),
 					)
@@ -852,7 +853,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					hdr := fmtSprint234(item)
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
-						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+						logger.Error("header_exists assertion failed", logurl.PlaceField("header", hdr))
 					}
 				}
 
@@ -861,7 +862,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				for hdr := range v {
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
-						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+						logger.Error("header_exists assertion failed", logurl.PlaceField("header", hdr))
 					}
 				}
 
@@ -870,7 +871,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					hdr := string(kt)
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
-						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+						logger.Error("header_exists assertion failed", logurl.PlaceField("header", hdr))
 					}
 				}
 
@@ -891,13 +892,13 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				act, ok := actualResponse.Header[header]
 				if !ok {
 					pass = false
-					logger.Error("header_matches: header not found", zap.String("header", header))
+					logger.Error("header_matches: header not found", logurl.PlaceField("header", header))
 					continue
 				}
 				if matched, err := regexp.MatchString(pattern, act); err != nil || !matched {
 					pass = false
 					logger.Error("header_matches assertion failed",
-						zap.String("header", header),
+						logurl.PlaceField("header", header),
 						logcontent.NamedString("pattern", header, pattern),
 						logcontent.NamedString("actual", header, act),
 						patternError(err),
@@ -1040,6 +1041,6 @@ func assertRenderedDigests(res *models.Result, recordedBody, answerBody string, 
 		want := form(answerBody)
 		hr.Normal = strings.Join(hr.Actual.Value, ",") == want
 		logger.Debug("a digest header of a templated body is asserted over the answer's body",
-			zap.String("header", name), logcontent.NamedString("want", name, want), zap.Bool("normal", hr.Normal))
+			logurl.PlaceField("header", name), logcontent.NamedString("want", name, want), zap.Bool("normal", hr.Normal))
 	}
 }

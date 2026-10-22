@@ -19,9 +19,11 @@
 // gate it, or list it with its reason), and so does one with fewer (lower
 // the count: the list only ever shrinks). An entry with no reason fails too,
 // and so does a url site's (a value made from a request's URL) whose reason
-// does not say whose URL it is (urlReason), and one whose reason names when
+// does not say whose URL it is (urlReason), one whose reason names when
 // its value does carry content ("..., unless the API keys a map by its
-// data": hedge).
+// data": hedge), and one whose reason says its value is the name of a part
+// of a request or a response, which a client chooses ("a header's name, not
+// its value": requestName).
 //
 // Scope: every package of keploy's module that a binary is built from:
 // ./pkg/..., ./utils/..., ./cli/..., ./config/... and main, which hold the
@@ -108,6 +110,19 @@ const constructedReason = "constructed:"
 // (PlaceField, MethodField), or through logcontent, instead. A content
 // reason (contentReason) says the value is content, and is no excuse.
 var hedge = regexp.MustCompile(`(?i)\b(unless|except (when|where|if))\b`)
+
+// requestName is a reason's claim that a value is the name of a part of a
+// request or a response the application sent or received ("a header's name,
+// not its value", "a query parameter's name", "a multipart form field's
+// name", "a body field's path", "an object's key"): a client chooses such a
+// name as it chooses a path's segments, a bare ?<token> and a map keyed by
+// an email address among them, so the claim says no more than a hedged
+// reason does, and excuses nothing. The value goes through logurl's shapes
+// (PlaceField, PlacesField, Place: models.PlaceShape, which keeps each part
+// that reads as a name, as URLShape keeps a query's names) or through
+// logcontent instead. A content reason (contentReason) says the value is
+// content, and is no excuse.
+var requestName = regexp.MustCompile(`(?i)\b(header's name|parameter's name|form field's name|field's path|object's key)\b`)
 
 // urlReason starts the reason of a url site (kindURL), a value made from a
 // request's URL, its path or its query: it says whose URL it is, keploy's
@@ -407,6 +422,9 @@ func TestNoLogLineCarriesContentUngated(t *testing.T) {
 		if have > 0 && hedge.MatchString(may.reason) && !strings.HasPrefix(may.reason, contentReason) {
 			t.Errorf("%q is listed with a reason that names when it carries content (%q): a reason says why a value never does; gate it (logurl.PlaceField, logurl.MethodField, logcontent)", k, hedge.FindString(may.reason))
 		}
+		if have > 0 && requestName.MatchString(may.reason) && !strings.HasPrefix(may.reason, contentReason) {
+			t.Errorf("%q is listed as the name of a part of a request or a response (%q), which a client chooses as it does a path's segments: gate it (logurl.PlaceField, logurl.PlacesField, logurl.Place)", k, requestName.FindString(may.reason))
+		}
 		if have > 0 && may.count > 0 && may.reason == "" {
 			noReason++
 			t.Errorf("%q is listed with no reason: say why it carries no customer content", k)
@@ -623,6 +641,36 @@ func TestAHedgedReasonExcusesNothing(t *testing.T) {
 	} {
 		if hedge.MatchString(r) && !strings.HasPrefix(r, contentReason) {
 			t.Errorf("%q is read as a hedge", r)
+		}
+	}
+}
+
+// A reason that says a value is the name of a part of a request or a
+// response excuses nothing (requestName): a client chooses the name, and the
+// reasons the allowlist held for headers', query parameters' and form
+// fields' names before it was a rule are its case. A name of keploy's own,
+// or of the user's configuration, is read as it is.
+func TestARequestNameReasonExcusesNothing(t *testing.T) {
+	for _, r := range []string{
+		"a header's name, not its value",
+		"a query parameter's name, not its value",
+		"a multipart form field's name, not its value",
+		"a request's place: a body field's path (body.user.id)",
+		"a JSON object's key: the API's name",
+	} {
+		if !requestName.MatchString(r) {
+			t.Errorf("%q excuses its site", r)
+		}
+	}
+	for _, r := range []string{
+		"a test case's name, which keploy gives it (test-N)",
+		"the noise the user configured: field names, header names and patterns from keploy's config, not the traffic",
+		"a field's name or an enum's value in keploy's own mock format",
+		"a column's name: the schema the app's database declares, not a row's value",
+		"content: a variable's place as a mock or a test case writes it (body.<path>, url.query.<name>), quoted by the error; a JSON object's key in it may be an application's value, so every line that logs the error gates it",
+	} {
+		if requestName.MatchString(r) && !strings.HasPrefix(r, contentReason) {
+			t.Errorf("%q is read as a request's name", r)
 		}
 	}
 }
