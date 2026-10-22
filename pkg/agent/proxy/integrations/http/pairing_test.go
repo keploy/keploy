@@ -21,19 +21,21 @@ import (
 // rules: it offers other tests' recordings to pair (integrations.Pairing),
 // claims each once, and holds a background (integrations.ByKindBackground).
 // own are the recordings it says are the open test's own
-// (integrations.TestOwner).
+// (integrations.TestOwner). offersClaimed: it offers claimed recordings too,
+// as a store does whose offer another connection's call claimed from since.
 type pairingDb struct {
 	*mockMemDb
-	others  []*models.Mock
-	bg      []*models.Mock
-	own     map[string]bool
-	claimed map[string]bool
+	others        []*models.Mock
+	bg            []*models.Mock
+	own           map[string]bool
+	claimed       map[string]bool
+	offersClaimed bool
 }
 
 func (d *pairingDb) PairingCandidates(kind models.Kind) []*models.Mock {
 	var out []*models.Mock
 	for _, m := range d.others {
-		if m.Kind == kind && !d.claimed[m.Name] {
+		if m.Kind == kind && (d.offersClaimed || !d.claimed[m.Name]) {
 			out = append(out, m)
 		}
 	}
@@ -103,6 +105,19 @@ func TestHTTPPairsExactlyWithAnotherTestsRecording(t *testing.T) {
 		// Every recording of the call claimed: none.
 		if _, rec := h.pairExactly(ctx, call, db, n); rec != nil {
 			t.Fatalf("a third call paired %s", rec.Name)
+		}
+	})
+	t.Run("a recording another call claimed after the store offered it", func(t *testing.T) {
+		// Another connection's call claimed mock-5 between the store's offer
+		// and this call's claim: the claim alone decides, and mock-5 is
+		// passed over.
+		first, later := x("mock-5", time.Second, `{"ok":true}`), x("mock-9", 2*time.Second, `{"ok":true}`)
+		db := &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{later, first}, offersClaimed: true, claimed: map[string]bool{"mock-5": true}}
+		if _, rec := h.pairExactly(ctx, call, db, n); rec != later {
+			t.Fatalf("paired %v; want mock-9: mock-5 was another call's claim", rec)
+		}
+		if _, rec := h.pairExactly(ctx, call, db, n); rec != nil {
+			t.Fatalf("paired %s; every recording of the call was claimed", rec.Name)
 		}
 	})
 	t.Run("drift never pairs", func(t *testing.T) {
