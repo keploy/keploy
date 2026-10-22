@@ -3,6 +3,7 @@ package learn
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +19,10 @@ import (
 func withSet(t *testing.T, mocks []*models.Mock) {
 	t.Helper()
 	readersMu.RLock()
-	prevSet, prevLeaf := setReader, leafReaders[models.HTTP]
+	prevSet, prevLeaf, prevWords := setReader, leafReaders[models.HTTP], wordsKinds[models.HTTP]
 	readersMu.RUnlock()
 	RegisterSetReader(func(string) ([]*models.Mock, error) { return mocks, nil })
+	RegisterWordsKind(models.HTTP)
 	RegisterLeafReader(models.HTTP, func(m *models.Mock) map[string]Leaf {
 		out := map[string]Leaf{}
 		for _, p := range []string{"body.note", "header.x-ref", "body.id"} {
@@ -33,6 +35,9 @@ func withSet(t *testing.T, mocks []*models.Mock) {
 	t.Cleanup(func() {
 		RegisterSetReader(prevSet)
 		RegisterLeafReader(models.HTTP, prevLeaf)
+		readersMu.Lock()
+		wordsKinds[models.HTTP] = prevWords
+		readersMu.Unlock()
 	})
 }
 
@@ -121,14 +126,26 @@ func TestLegibleSaysWhatEachMockLearned(t *testing.T) {
 			"old": {Recorded: "o-1111", Bind: "url.query.old"},
 		},
 	}}
-	withSet(t, []*models.Mock{m})
+	// A Postgres mock: its kind's learn step learns a leaf only whole
+	// (r9 §5), and no reader of its leaves is registered here.
+	pg := &models.Mock{Name: "mock-2", Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqBodyNoise: map[string][]string{"bind.$1": {}},
+		Variables:    models.MockVariables{"id": {Recorded: "7", Bind: "bind.$2", Echo: true}},
+	}}
+	withSet(t, []*models.Mock{m, pg})
 	leaves, err := Legible(filepath.Join(t.TempDir(), "test-set-0"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	by := map[string]models.LearnedLeaf{}
 	for _, l := range leaves {
-		by[l.Path+"/"+l.Variable] = l
+		by[l.Mock+":"+l.Path+"/"+l.Variable] = l
+	}
+	for k, l := range by {
+		if strings.HasPrefix(k, "mock-1:") {
+			delete(by, k)
+			by[strings.TrimPrefix(k, "mock-1:")] = l
+		}
 	}
 	n := by["body.note/"]
 	if n.Rule != models.RuleNoise || n.Recorded != note || n.F != "" || len(n.Slots) != 2 ||
@@ -144,11 +161,29 @@ func TestLegibleSaysWhatEachMockLearned(t *testing.T) {
 	if v := by["body.id/id"]; v.Rule != models.RuleEcho || len(v.Slots) == 0 || v.Basis[0] != models.BasisEcho || v.Rendered != "body.id = o-⟨changes⟩" {
 		t.Errorf("the echo: %+v", v)
 	}
-	if v := by["url.query.old/old"]; v.Rule != models.RuleVariable || len(v.Slots) != 0 || !strings.Contains(v.Why, "re-record to tighten") {
+	if v := by["url.query.old/old"]; v.Rule != models.RuleVariable || len(v.Slots) != 0 || !strings.Contains(v.Why, "re-record to tighten") ||
+		len(v.Basis) != 2 || v.Basis[1] != models.BasisBeforeWords {
 		t.Errorf("a variable learned before words: %+v", v)
 	}
-	if w := by["body.at/"]; w.Rule != models.RuleWholeNoise || w.Basis[0] != models.BasisWhole {
-		t.Errorf("whole noise: %+v", w)
+	if v := by["body.id/id"]; slices.Contains(v.Basis, models.BasisBeforeWords) {
+		t.Errorf("an echo with words is no echo bound before words: %+v", v)
+	}
+	// body.at is no leaf the HTTP reader reads of the mock: said unread.
+	if w := by["body.at/"]; w.Rule != models.RuleWholeNoise || len(w.Basis) != 1 || w.Basis[0] != models.BasisBeforeWords ||
+		!strings.Contains(w.Why, "before keploy learned words. Re-record to tighten") || w.Recorded != notALeaf {
+		t.Errorf("HTTP whole noise: %+v", w)
+	}
+	// The Postgres mock's leaves: learned whole as keploy learns them today,
+	// never "re-record to tighten", their recorded values said unread.
+	w := by["mock-2:bind.$1/"]
+	if w.Rule != models.RuleWholeNoise || len(w.Basis) != 1 || w.Basis[0] != models.BasisWhole || w.Recorded != notRead ||
+		strings.Contains(strings.ToLower(w.Why), "re-record to tighten") || !strings.Contains(w.Why, "only whole, when record's full round saw every word of it change") ||
+		!strings.Contains(w.Why, "a re-record learns it whole again") || w.Rendered != "bind.$1 = ⟨changes⟩" {
+		t.Errorf("Postgres whole noise: %+v", w)
+	}
+	if e := by["mock-2:bind.$2/id"]; e.Rule != models.RuleEcho || len(e.Basis) != 1 || e.Basis[0] != models.BasisEcho ||
+		strings.Contains(strings.ToLower(e.Why), "re-record to tighten") || !strings.Contains(e.Why, "binds a leaf of a "+string(models.PostgresV3)+" mock only whole") {
+		t.Errorf("Postgres echo: %+v", e)
 	}
 	again, _ := Legible(filepath.Join(t.TempDir(), "test-set-0"))
 	for i := range leaves {
@@ -158,8 +193,12 @@ func TestLegibleSaysWhatEachMockLearned(t *testing.T) {
 	}
 	t.Setenv(provenswitch.Env, "1")
 	lines := RetightenLines(leaves, true)
-	if len(lines) != 2 || RetightenLines(leaves, false) != nil {
-		t.Errorf("N6 lines %v", lines)
+	want := []string{
+		"mock-1 url.query.old: re-record to tighten (bound whole, before keploy learned words)",
+		"mock-1 body.at: re-record to tighten (learned whole, before keploy learned words)",
+	}
+	if !slices.Equal(lines, want) || RetightenLines(leaves, false) != nil {
+		t.Errorf("N6 lines %q, want %q", lines, want)
 	}
 	t.Setenv(provenswitch.Env, "")
 	if RetightenLines(leaves, true) != nil {

@@ -51,6 +51,9 @@ func init() {
 		}
 		return learnNoise{headers: map[string]bool{}}.shape(recordedParts(m), sameDest).Leaves
 	})
+	// The learn step learns an HTTP leaf by its words (learnPlan): one an
+	// HTTP mock holds whole was learned before it did.
+	learn.RegisterWordsKind(models.HTTP)
 }
 
 // credentialHeaders leave the static noise list in the learn step (design
@@ -1001,7 +1004,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			}
 			for _, l := range learned {
 				h.Logger.Info("learned a field that changed between record and replay",
-					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
+					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", plan.learnedAs(l)))
 			}
 			if e, ok := n.servedExchange(m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
 				tracker.Served(test, e)
@@ -1043,6 +1046,43 @@ type pairing struct {
 	values  map[string]variables.Binding
 	f       map[string]map[string]string
 	refused string
+}
+
+// learnedAs is what the plan learned the drifted leaf l as, as the learn
+// step's log says it: "noise" when its words are noise, "echo" or
+// "variable" when it is a variable's place (a leaf Classify found noise
+// becomes one when another place of the call holds its value whole, r9 §2),
+// and else what Classify found it (l.Kind).
+func (p pairing) learnedAs(l learn.Learned) string {
+	path := l.Recorded.Path
+	if _, ok := p.words[path]; ok {
+		return string(learn.KindNoise)
+	}
+	at := func(vars models.MockVariables) string {
+		names := make([]string, 0, len(vars))
+		for n := range vars {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			v := vars[n]
+			for _, place := range append([]string{v.Bind}, v.Use...) {
+				if lp, ok := learn.LeafPath(place); ok && lp == path {
+					if v.Echo {
+						return string(learn.KindEcho)
+					}
+					return string(learn.KindVariable)
+				}
+			}
+		}
+		return ""
+	}
+	// This call's variables: an echo bound here, and every variable used
+	// here (p.binds are bound at earlier mocks, at their places).
+	if as := at(p.vars); as != "" {
+		return as
+	}
+	return string(l.Kind)
 }
 
 // slotPlace is a place of the call the learn step learned words at, as the

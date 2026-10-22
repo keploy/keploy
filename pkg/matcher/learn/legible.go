@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +44,9 @@ var (
 	readersMu   sync.RWMutex
 	setReader   SetReader
 	leafReaders = map[models.Kind]LeafReader{}
+	// wordsKinds are the kinds whose learn step learns words
+	// (RegisterWordsKind).
+	wordsKinds = map[models.Kind]bool{}
 )
 
 // RegisterSetReader makes f the reader of a test set's mocks.
@@ -57,6 +61,22 @@ func RegisterSetReader(f SetReader) {
 func RegisterLeafReader(k models.Kind, f LeafReader) {
 	readersMu.Lock()
 	leafReaders[k] = f
+	readersMu.Unlock()
+}
+
+// RegisterWordsKind says the learn step of mocks of kind k learns a drifted
+// leaf by its words (models.WordsEntry): of such a mock, a leaf learned whole
+// (noise.req) and a variable bound whole (no words) were learned before
+// keploy learned words, and a re-record learns them word by word ("re-record
+// to tighten", RetightenLines). Of a kind no adapter registers, keploy learns
+// a leaf only whole (design r9 §5: Mongo's and Postgres's learners, which
+// learn a leaf only when every word of it changed, learn.WholeDrift), so its
+// whole noise is what a record learns today, and a re-record does not
+// tighten it. The protocol adapter registers it, as it registers its leaf
+// reader: what it declares, never read off a mock.
+func RegisterWordsKind(k models.Kind) {
+	readersMu.Lock()
+	wordsKinds[k] = true
 	readersMu.Unlock()
 }
 
@@ -235,13 +255,32 @@ func renderSlots(rec string, e models.WordsEntry) string {
 // its mock's kind is registered in this keploy.
 const notRead = "(not read: keploy reads no leaves of this mock's kind here)"
 
+// notALeaf stands for a recorded value Legible could not read because the
+// mock's recorded request, as its kind's reader reads it, holds no leaf at
+// the place.
+const notALeaf = "(not read: the recorded request holds no leaf at this place)"
+
+// recordedAt is the recorded value at path of a mock whose recorded leaves
+// are leaves (nil: its kind has no leaf reader), and whether it was read;
+// what stands in a learned file for one that was not (notRead, notALeaf).
+func recordedAt(leaves map[string]Leaf, path string) (value string, read bool, unread string) {
+	if leaves == nil {
+		return "", false, notRead
+	}
+	l, ok := leaves[path]
+	if !ok {
+		return "", false, notALeaf
+	}
+	return l.Value, true, ""
+}
+
 // rendered is a learned leaf's Rendered: its path = its recorded value with
 // each slot marked, as a learned file may hold it (read: whether the recorded
 // value could be read). An entry that does not hold of the recorded value is
 // said to be compared whole, and why.
-func rendered(path, rec string, read bool, noise []string, e *models.WordsEntry) string {
+func rendered(path, rec string, read bool, unread string, noise []string, e *models.WordsEntry) string {
 	if !read {
-		return path + " = " + notRead
+		return path + " = " + unread
 	}
 	if r := RedactLearnedValue(path, rec, noise); r == redacted {
 		return path + " = " + redacted
@@ -282,20 +321,26 @@ func Legible(setDir string) ([]models.LearnedLeaf, error) {
 			continue
 		}
 		readersMu.RLock()
-		leavesOf := leafReaders[m.Kind]
+		leavesOf, words := leafReaders[m.Kind], wordsKinds[m.Kind]
 		readersMu.RUnlock()
 		var leaves map[string]Leaf
 		if leavesOf != nil {
-			leaves = leavesOf(m)
+			if leaves = leavesOf(m); leaves == nil {
+				// A reader that reads nothing of the mock read it.
+				leaves = map[string]Leaf{}
+			}
 		}
-		out = append(out, legibleOf(set, m, leaves)...)
+		out = append(out, legibleOf(set, m, leaves, words)...)
 	}
 	return out, nil
 }
 
 // legibleOf are the learned leaves of mock m of set, its recorded leaves by
-// place (leaves; nil when its kind has no leaf reader).
-func legibleOf(set string, m *models.Mock, leaves map[string]Leaf) []models.LearnedLeaf {
+// place (leaves; nil when its kind has no leaf reader). words says the learn
+// step of m's kind learns words (RegisterWordsKind): only then is a leaf of m
+// learned whole, or a variable of m bound whole, one learned before keploy
+// learned words (models.BasisBeforeWords), which a re-record tightens.
+func legibleOf(set string, m *models.Mock, leaves map[string]Leaf, words bool) []models.LearnedLeaf {
 	var out []models.LearnedLeaf
 	places := make([]string, 0, len(m.Spec.LearnedWords))
 	for p := range m.Spec.LearnedWords {
@@ -304,7 +349,7 @@ func legibleOf(set string, m *models.Mock, leaves map[string]Leaf) []models.Lear
 	sort.Strings(places)
 	for _, p := range places {
 		e := m.Spec.LearnedWords[p]
-		rec := leaves[p].Value
+		rec, read, unread := recordedAt(leaves, p)
 		why := "record's full round saw only the marked words of " + p + " change, so only they may change, and every other byte of it is still compared. To compare it whole again, delete its entry under noise.words of " + m.Name + "; to stop comparing it, declare it in keploy.yml (test.globalNoise.global.requestbody)."
 		slots := append([]models.WordSlot(nil), e.Slots...)
 		switch u := e.Unreadable(); {
@@ -314,14 +359,14 @@ func legibleOf(set string, m *models.Mock, leaves map[string]Leaf) []models.Lear
 		case e.Void():
 			why = "record's full round read " + p + " in two ways, so its learned words are void, and it is compared whole. Record again to learn it anew."
 		}
-		recorded := RedactLearnedValue(p, rec, m.Noise)
-		if leaves == nil {
-			recorded = notRead
+		recorded := unread
+		if read {
+			recorded = RedactLearnedValue(p, rec, m.Noise)
 		}
 		out = append(out, models.LearnedLeaf{
 			ID: learnedID(set, m.Name, p, e.Digest), Mock: m.Name, Path: p,
 			Recorded: recorded, Basis: slotBases(e), Rule: models.RuleNoise,
-			Why: why, Slots: slots, Rendered: rendered(p, rec, leaves != nil, m.Noise, &e),
+			Why: why, Slots: slots, Rendered: rendered(p, rec, read, unread, m.Noise, &e),
 		})
 	}
 	names := make([]string, 0, len(m.Spec.Variables))
@@ -336,7 +381,9 @@ func legibleOf(set string, m *models.Mock, leaves map[string]Leaf) []models.Lear
 		}
 		p, ok := LeafPath(v.Bind)
 		if !ok {
-			continue
+			// A place in the kind's own notation (a Postgres echo's
+			// bind.$N): said as the mock spells it.
+			p = v.Bind
 		}
 		rule, bases := models.RuleVariable, []models.LearnBasis{models.BasisEarlier}
 		what := "the variable " + n + ", bound here and asserted at its every use"
@@ -346,17 +393,21 @@ func legibleOf(set string, m *models.Mock, leaves map[string]Leaf) []models.Lear
 		}
 		digest := ""
 		var slots []models.WordSlot
-		why := p + " holds " + what + "; any value may bind it, as it was learned before keploy learned words: re-record to tighten."
+		why := p + " holds " + what + "; any value may bind it, as keploy binds a leaf of a " + string(m.Kind) + " mock only whole: it learns no words of one yet, so a re-record binds it whole again."
+		if words {
+			bases = append(bases, models.BasisBeforeWords)
+			why = p + " holds " + what + "; any value may bind it, as it was learned before keploy learned words: re-record to tighten."
+		}
 		if v.Words != nil {
 			digest = v.Words.Digest
 			slots = append([]models.WordSlot(nil), v.Words.Slots...)
-			bases = append(bases, slotBases(*v.Words)...)
+			bases = append(bases[:1], slotBases(*v.Words)...)
 			why = p + " holds " + what + "; only its marked words may change where it binds. To bind it as recorded only, delete its words entry under variables." + n + " of " + m.Name + "."
 		}
 		out = append(out, models.LearnedLeaf{
 			ID: learnedID(set, m.Name, p, digest), Mock: m.Name, Variable: n, Path: p,
 			Recorded: RedactLearnedValue(p, v.Recorded, m.Noise), Basis: bases, Rule: rule,
-			Why: why, Slots: slots, Rendered: rendered(p, v.Recorded, true, m.Noise, v.Words),
+			Why: why, Slots: slots, Rendered: rendered(p, v.Recorded, true, "", m.Noise, v.Words),
 		})
 	}
 	whole := make([]string, 0, len(m.Spec.ReqBodyNoise))
@@ -365,31 +416,53 @@ func legibleOf(set string, m *models.Mock, leaves map[string]Leaf) []models.Lear
 	}
 	sort.Strings(whole)
 	for _, p := range whole {
-		rec := leaves[p].Value
+		rec, read, unread := recordedAt(leaves, p)
+		recorded := unread
+		if read {
+			recorded = RedactLearnedValue(p, rec, m.Noise)
+		}
+		// Of a kind keploy learns only whole, a leaf is learned whole only
+		// when record's full round saw every word of it change: what a
+		// record learns today. Of one it learns words of, a leaf learned
+		// whole was learned before keploy learned words.
+		basis := models.BasisWhole
+		why := p + " is not compared at all, its type still is: keploy learns a leaf of a " + string(m.Kind) + " mock only whole, when record's full round saw every word of it change, and learns no words of one yet, so a re-record learns it whole again. To compare it again, delete it from noise.req of " + m.Name + "."
+		if words {
+			basis = models.BasisBeforeWords
+			why = p + " is not compared at all, its type still is: it was learned whole before keploy learned words. Re-record to tighten; to compare it again now, delete it from noise.req of " + m.Name + "."
+		}
 		out = append(out, models.LearnedLeaf{
 			ID: learnedID(set, m.Name, p, ""), Mock: m.Name, Path: p,
-			Recorded: RedactLearnedValue(p, rec, m.Noise), Basis: []models.LearnBasis{models.BasisWhole}, Rule: models.RuleWholeNoise,
-			Why:      p + " is not compared at all, its type still is: it was learned whole before keploy learned words. Re-record to tighten; to compare it again now, delete it from noise.req of " + m.Name + ".",
-			Rendered: p + " = ⟨changes⟩",
+			Recorded: recorded, Basis: []models.LearnBasis{basis}, Rule: models.RuleWholeNoise,
+			Why: why, Rendered: p + " = ⟨changes⟩",
 		})
 	}
 	return out
 }
 
 // RetightenLines are the lines a status prints (N6) of a set's learned leaves
-// that were learned before keploy learned words (noise.req, and a variable
-// or echo with none), "<mock> <path>: re-record to tighten": none with the
+// that were learned before keploy learned words (models.BasisBeforeWords: a
+// leaf of a kind keploy learns words of, learned whole into noise.req, or a
+// variable or echo of one bound whole, with no words), in the leaves' order:
+// "<mock> <path>: re-record to tighten (learned whole, before keploy learned
+// words)", or "(bound whole, ...)" of a variable or echo. None with the
 // proven switch off, or for a set whose latest report does not say proven
-// (proven false).
+// (proven false). A leaf of a kind keploy learns only whole (Mongo,
+// Postgres) has none: a re-record learns it whole again.
 func RetightenLines(leaves []models.LearnedLeaf, proven bool) []string {
 	if !provenswitch.On() || !proven {
 		return nil
 	}
 	var out []string
 	for _, l := range leaves {
-		if l.Rule == models.RuleWholeNoise || (l.Rule == models.RuleEcho || l.Rule == models.RuleVariable) && len(l.Slots) == 0 {
-			out = append(out, l.Mock+" "+l.Path+": re-record to tighten")
+		if !slices.Contains(l.Basis, models.BasisBeforeWords) {
+			continue
 		}
+		how := "learned whole"
+		if l.Rule == models.RuleEcho || l.Rule == models.RuleVariable {
+			how = "bound whole"
+		}
+		out = append(out, l.Mock+" "+l.Path+": re-record to tighten ("+how+", before keploy learned words)")
 	}
 	return out
 }

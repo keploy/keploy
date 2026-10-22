@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,8 +14,10 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.uber.org/zap"
 )
 
 // Word-level learn at the HTTP parser (design r9): what the learn step
@@ -415,5 +418,59 @@ func TestTheVariablePassReadsTheWordsBesideAVariable(t *testing.T) {
 		if ok, _, diag := matchVar(t, newHTTP(), db, in); ok != tc.ok {
 			t.Errorf("%q: served %v (%+v), want %v", tc.note, ok, diag, tc.ok)
 		}
+	}
+}
+
+// The learn step's log says what each drifted leaf became: noise when its
+// words are, the echo or the variable when the plan made the place one (a
+// leaf Classify found noise is an echo's place when another place of the
+// call holds its value whole), and HTTP registers itself as a kind whose
+// leaves are learned by their words, so a leaf an HTTP mock holds whole is
+// one learned before keploy learned words.
+func TestTheLearnLogSaysWhatEachLeafBecame(t *testing.T) {
+	leaf := func(path string, k learn.Kind) learn.Learned {
+		return learn.Learned{Kind: k, Recorded: learn.Leaf{Path: path}}
+	}
+	p := pairing{
+		words: map[string]models.WordsEntry{"body.note": {}},
+		vars: models.MockVariables{
+			"order_ref": {Bind: "body.order_ref", Use: []string{"header.X-Order-Ref"}, Echo: true},
+			"id":        {Bind: "body.from", Use: []string{"url.path[1]"}},
+		},
+		binds: map[string]models.MockVariables{"mock-0": {"other": {Bind: "body.elsewhere"}}},
+	}
+	for _, tc := range []struct {
+		l    learn.Learned
+		want string
+	}{
+		{leaf("body.note", learn.KindNoise), "noise"},
+		{leaf("body.order_ref", learn.KindNoise), "echo"},
+		{leaf("header.x-order-ref", learn.KindNoise), "echo"},
+		{leaf("url.path.1", learn.KindNoise), "variable"},
+		{leaf("body.elsewhere", learn.KindNoise), "noise"},
+		{leaf("body.k", learn.KindEcho), "echo"},
+	} {
+		if got := p.learnedAs(tc.l); got != tc.want {
+			t.Errorf("%s: logged as %q, want %q", tc.l.Recorded.Path, got, tc.want)
+		}
+	}
+	// A mock on disk holding an HTTP leaf whole, read as learned.yaml reads
+	// it (the mock store's set reader, the HTTP leaf reader).
+	dir := t.TempDir()
+	ys := mockdb.New(zap.NewNop(), dir, "")
+	m := learnRecorded("", 0, "POST", "/v1/orders", `{"at":"x"}`, nil, `{"ok":true}`)
+	m.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+	if err := ys.InsertMock(context.Background(), m, "test-set-0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	leaves, err := learn.Legible(filepath.Join(dir, "test-set-0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaves) != 1 || leaves[0].Basis[0] != models.BasisBeforeWords || leaves[0].Recorded != "x" {
+		t.Errorf("an HTTP mock's whole noise: %+v", leaves)
 	}
 }
