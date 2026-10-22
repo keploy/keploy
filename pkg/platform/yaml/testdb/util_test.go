@@ -1,11 +1,17 @@
 package testdb
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
+	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -148,5 +154,157 @@ func TestEncodeTestcaseKeepsRecordedHeaderLines(t *testing.T) {
 		if back.HTTPReq.Body != body {
 			t.Fatalf("read back request body %q, want %q", back.HTTPReq.Body, body)
 		}
+	}
+}
+
+// timeShapedTestCase is a recorded GET /projects whose answer carries every
+// value shape pkg.IsTime reads as a time: RFC 3339 instants (created_at and
+// updated_at, as a database returns a timestamptz), a date alone (since), a
+// number IsTime reads as an epoch in nanoseconds within a day of now (seq),
+// and the HTTP Date header. Nothing else in it reads as a time.
+func timeShapedTestCase(now time.Time) models.TestCase {
+	tc := httpTestCase()
+	tc.Name = "get-projects-1"
+	tc.HTTPReq.URL = "http://localhost:8080/projects"
+	tc.HTTPResp.Header = map[string]string{"Content-Type": "application/json", "Date": now.UTC().Format(http.TimeFormat)}
+	tc.HTTPResp.Body = projectsBody(now.Add(-350*time.Millisecond), now, now.UnixNano())
+	return tc
+}
+
+func projectsBody(created, updated time.Time, seq int64) string {
+	return fmt.Sprintf(`[{"id":"b3dae852-82a0-49b7-b9db-123c79dcabd6","name":"Alpha Project","status":"completed","created_at":%q,"updated_at":%q,"since":"2024-01-02","seq":%d}]`,
+		created.UTC().Format(time.RFC3339Nano), updated.UTC().Format(time.RFC3339Nano), seq)
+}
+
+// timeShapedNoise is the noise keploy writes onto timeShapedTestCase with the
+// proven switch off: every field whose value reads as a time.
+var timeShapedNoise = map[string][]string{
+	"body.created_at": {},
+	"body.seq":        {},
+	"body.since":      {},
+	"body.updated_at": {},
+	"header.Date":     {},
+}
+
+// writeAndReadBack writes tc the way keploy writes a test case file, in the
+// given format, and reads the file back the way a replay loads it.
+func writeAndReadBack(t *testing.T, tc models.TestCase, format string) *models.TestCase {
+	t.Helper()
+	logger := zap.NewNop()
+	switch format {
+	case "yaml":
+		doc, err := EncodeTestcase(tc, logger)
+		if err != nil {
+			t.Fatalf("EncodeTestcase: %v", err)
+		}
+		out, err := yamlLib.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var read yaml.NetworkTrafficDoc
+		if err := yamlLib.Unmarshal(out, &read); err != nil {
+			t.Fatalf("the test case does not load: %v\n%s", err, out)
+		}
+		back, err := Decode(&read, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return back
+	case "json":
+		doc, err := EncodeTestcaseJSON(tc, logger)
+		if err != nil {
+			t.Fatalf("EncodeTestcaseJSON: %v", err)
+		}
+		out, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var read yaml.NetworkTrafficDocJSON
+		if err := json.Unmarshal(out, &read); err != nil {
+			t.Fatalf("the test case does not load: %v\n%s", err, out)
+		}
+		back, err := DecodeJSON(&read, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return back
+	}
+	t.Fatalf("no format %q", format)
+	return nil
+}
+
+// Under the proven switch keploy writes no noise onto a test case for what a
+// value looks like. A field is noise there only when it is declared or when
+// the learn step of record's full round F saw it drift, so a date-shaped value
+// that replays the same (a created_at a mocked database answers) is asserted.
+// With the switch off every time-looking field is noise, as before. Both
+// encoders are the ones record (InsertTestCase) and the learn step
+// (UpdateTestCase) write test case files with.
+func TestTimeShapedNoiseIsWrittenOnlyWithTheProvenSwitchOff(t *testing.T) {
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format+", switch on", func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			tc := timeShapedTestCase(time.Now())
+			back := writeAndReadBack(t, tc, format)
+			if len(back.Noise) != 0 {
+				t.Fatalf("the test case was written with noise %v; under the switch no field is noise for its look", back.Noise)
+			}
+			if _, ok := back.Assertions[models.NoiseAssertion]; ok {
+				t.Fatalf("the test case was written with a noise assertion: %v", back.Assertions)
+			}
+			if len(tc.Noise) != 0 {
+				t.Fatalf("encoding added %v to the caller's test case", tc.Noise)
+			}
+		})
+		t.Run(format+", switch off", func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			back := writeAndReadBack(t, timeShapedTestCase(time.Now()), format)
+			if !reflect.DeepEqual(back.Noise, timeShapedNoise) {
+				t.Fatalf("with the switch off the test case was written with noise %v, want every time-looking field %v", back.Noise, timeShapedNoise)
+			}
+		})
+	}
+}
+
+// The false green the switch closes, end to end through the matcher a replay
+// judges with: a test case whose created_at replays the same is kept, and a
+// replay whose created_at changed must fail it. With the switch off the same
+// change passes, the field noised for its look. The Date header, which the
+// server mints on every answer, still passes when it changes: the replayer
+// forgives a per-request response header by its name (WithAutoHeaderNoise, on
+// unless --disableAutoHeaderNoise), never by its value.
+func TestUnderTheProvenSwitchAStableTimeShapedFieldIsAsserted(t *testing.T) {
+	now := time.Now()
+	replayed := func(created time.Time) *models.HTTPResp {
+		return &models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{"Content-Type": "application/json", "Date": now.Add(62 * time.Second).UTC().Format(http.TimeFormat)},
+			Body:       projectsBody(created, now, now.UnixNano()),
+		}
+	}
+	same, changed := replayed(now.Add(-350*time.Millisecond)), replayed(now.Add(-2*time.Hour))
+	match := func(t *testing.T, tc *models.TestCase, actual *models.HTTPResp) bool {
+		t.Helper()
+		pass, _ := httpMatcher.Match(tc, actual, nil, false, false, zap.NewNop(), false, httpMatcher.WithAutoHeaderNoise(true))
+		return pass
+	}
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format+", switch on", func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			tc := writeAndReadBack(t, timeShapedTestCase(now), format)
+			if !match(t, tc, same) {
+				t.Fatal("a replay that answered the recorded created_at (and a new Date) failed")
+			}
+			if match(t, tc, changed) {
+				t.Fatal("a replay whose created_at changed passed: the field is not asserted")
+			}
+		})
+		t.Run(format+", switch off", func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			tc := writeAndReadBack(t, timeShapedTestCase(now), format)
+			if !match(t, tc, changed) {
+				t.Fatal("with the switch off a changed created_at must pass as it always has (noised for its look)")
+			}
+		})
 	}
 }
