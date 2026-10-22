@@ -342,6 +342,15 @@ func MergeLearned(existing, detected map[string][]string) map[string][]string {
 	return out
 }
 
+// MergeLearnedWords is MergeLearned for the words the learn step learned of
+// leaves (models.MockSpec.LearnedWords): a fresh map in which a place both
+// hold unions the two entries' slots when they share a digest and a layout,
+// and is void otherwise (models.MergeWords), so a leaf two runs read apart is
+// compared whole. Neither input is changed; nil when both are empty.
+func MergeLearnedWords(existing, detected map[string]models.WordsEntry) map[string]models.WordsEntry {
+	return models.MergeWords(existing, detected)
+}
+
 // MergeKnown unions two read-only noise sets into a fresh map; entries in a win
 // on key collision. Either input may be empty; nil is returned when both are.
 // Used to build the "known noise" set (global/user ∪ already-learned) consulted

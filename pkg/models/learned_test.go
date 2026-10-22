@@ -131,3 +131,59 @@ func TestACopyOfWordsSharesNoSlot(t *testing.T) {
 		t.Error("a clone of an entry with an empty slot list holds none, and is written otherwise")
 	}
 }
+
+// Two entries of one leaf in one layout union their slots: what either run
+// saw change may change. Any other pair is void, and stays void through
+// every later merge, so the leaf is compared whole.
+func TestMergeWordsEntryUnionsOrVoids(t *testing.T) {
+	a := WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 5, Run: 0}, {Seg: 1, Run: 2}}}
+	b := WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 1, Run: 2}, {Seg: 3, Kind: WordSlotToken}, {Seg: 3, Run: 1}}}
+	got := MergeWordsEntry(a, b)
+	want := []WordSlot{{Seg: 1, Run: 2}, {Seg: 3, Kind: WordSlotToken}, {Seg: 5, Run: 0}}
+	if got.Void() || !reflect.DeepEqual(got.Slots, want) || got.Digest != a.Digest || got.Layout != a.Layout {
+		t.Fatalf("union = %+v, want slots %+v", got, want)
+	}
+	if a.Slots[0].Seg != 5 || len(a.Slots) != 2 || len(b.Slots) != 3 {
+		t.Fatalf("the merge changed its inputs: %+v %+v", a, b)
+	}
+
+	for _, c := range []struct {
+		name string
+		b    WordsEntry
+	}{
+		{"another digest", WordsEntry{Digest: "0000000000000000", Layout: a.Layout, Slots: a.Slots}},
+		{"another layout", WordsEntry{Digest: a.Digest, Layout: "0000000000000000", Slots: a.Slots}},
+		{"a void one", VoidWords(a.Digest)},
+	} {
+		v := MergeWordsEntry(a, c.b)
+		if why := v.Unreadable(); why != "" {
+			t.Errorf("%s: the void entry is unreadable (%s): it is this version's, and void", c.name, why)
+		}
+		if !v.Void() || len(v.Slots) != 0 {
+			t.Errorf("%s: merged %+v, want void", c.name, v)
+		}
+		if again := MergeWordsEntry(v, a); !again.Void() {
+			t.Errorf("%s: a void entry merged with a sound one is %+v, want void still", c.name, again)
+		}
+	}
+}
+
+// MergeWords keeps a place either side holds, merges a place both hold, and
+// shares no slot with its inputs.
+func TestMergeWordsKeepsEveryPlace(t *testing.T) {
+	if MergeWords(nil, map[string]WordsEntry{}) != nil {
+		t.Error("two empty maps merge to a map")
+	}
+	e := wordsFixture()
+	a := map[string]WordsEntry{"body.note": e}
+	b := map[string]WordsEntry{"header.x-ref": {Digest: "1111111111111111", Layout: "2222222222222222", Slots: []WordSlot{{Seg: 0, Run: 0}}},
+		"body.note": {Digest: e.Digest, Layout: e.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}}}
+	got := MergeWords(a, b)
+	if len(got) != 2 || len(got["body.note"].Slots) != len(e.Slots)+1 || got["header.x-ref"].Digest != "1111111111111111" {
+		t.Fatalf("merged %+v", got)
+	}
+	got["body.note"].Slots[0].Seg = 77
+	if a["body.note"].Slots[0].Seg == 77 || len(a) != 1 {
+		t.Error("the merged map shares its slots with an input")
+	}
+}

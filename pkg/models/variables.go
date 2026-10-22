@@ -151,7 +151,10 @@ func (v MockVariables) Clone() MockVariables {
 // both keeps a's bind and both's uses and answers, and is an echo only when
 // both say so. Clock goes with the bind it was read at: a's bind keeps a's,
 // one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// when both say so. Words go with the bind too: a's bind keeps a's, one taken
+// from b takes b's, and a variable both bind at one place holds both's
+// (MergeWordsEntry: one side's when the other has none, as a side without
+// words never strips them; void when the two disagree).
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -163,10 +166,19 @@ func MergeVariables(a, b MockVariables) MockVariables {
 			out[name] = MockVariables{name: v}.Clone()[name]
 			continue
 		}
-		if cur.Bind == "" {
+		switch {
+		case cur.Bind == "":
 			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
-		} else if v.Bind != "" && len(v.Clock) == 0 {
-			cur.Clock = nil
+			if v.Words != nil {
+				cur.Words = mergeVariableWords(nil, v.Words)
+			}
+		case v.Bind != "":
+			if len(v.Clock) == 0 {
+				cur.Clock = nil
+			}
+			if v.Bind == cur.Bind {
+				cur.Words = mergeVariableWords(cur.Words, v.Words)
+			}
 		}
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)

@@ -424,3 +424,18 @@ func TestLearnedFieldTypeStrict(t *testing.T) {
 		t.Fatalf("a user-ignored camelCase field must keep full-ignore (case-insensitive exclusion)")
 	}
 }
+
+// Learned words merge as the models say: a place both learned unions its
+// slots, and two layouts of one place void it.
+func TestMergeLearnedWordsUnionsAndVoids(t *testing.T) {
+	e := models.WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []models.WordSlot{{Seg: 1}}}
+	f := models.WordsEntry{Digest: e.Digest, Layout: e.Layout, Slots: []models.WordSlot{{Seg: 3}}}
+	got := MergeLearnedWords(map[string]models.WordsEntry{"body.note": e}, map[string]models.WordsEntry{"body.note": f})
+	if len(got["body.note"].Slots) != 2 || got["body.note"].Void() {
+		t.Fatalf("merged %+v, want both slots", got)
+	}
+	g := models.WordsEntry{Digest: e.Digest, Layout: "0000000000000000", Slots: f.Slots}
+	if v := MergeLearnedWords(map[string]models.WordsEntry{"body.note": e}, map[string]models.WordsEntry{"body.note": g}); !v["body.note"].Void() {
+		t.Fatalf("merged %+v, want void", v)
+	}
+}

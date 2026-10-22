@@ -1,5 +1,7 @@
 package models
 
+import "sort"
+
 // WHAT THE LEARN STEP LEARNED OF A LEAF'S WORDS (word-level learn).
 //
 // Under the proven switch, record's full round F learns of a drifted request
@@ -175,6 +177,127 @@ func (e WordsEntry) Clone() WordsEntry {
 		e.Slots = append(make([]WordSlot, 0, len(e.Slots)), e.Slots...)
 	}
 	return e
+}
+
+// WordsVoidLayout is the layout guard of a void entry (VoidWords): the learn
+// step learned the leaf twice, of two values or two layouts, so neither
+// entry's slots say what may change, and the leaf is compared whole.
+const WordsVoidLayout = "void"
+
+// VoidWords is the void entry of a leaf whose recorded value's digest is
+// digest: it admits nothing, so the leaf is compared whole (fails closed),
+// and stays void through every later merge (MergeWordsEntry).
+func VoidWords(digest string) WordsEntry {
+	return WordsEntry{V: WordsVersion, Digest: digest, Layout: WordsVoidLayout, Slots: []WordSlot{}}
+}
+
+// Void reports whether e is a void entry (VoidWords).
+func (e WordsEntry) Void() bool { return e.Layout == WordsVoidLayout }
+
+// MergeWordsEntry is two entries the learn step learned of one leaf as one
+// (neither is changed). Entries of one recorded value in one layout (the same
+// digest and the same layout guard) union their slots: what either saw change
+// may change. Any other pair, or a pair of which either is void, is void
+// (VoidWords): the two runs did not read the leaf alike, and its slots would
+// say nothing reliable of it, so it is compared whole.
+func MergeWordsEntry(a, b WordsEntry) WordsEntry {
+	if a.Void() || b.Void() || a.Digest != b.Digest || a.Layout != b.Layout {
+		digest := a.Digest
+		if digest == "" {
+			digest = b.Digest
+		}
+		return VoidWords(digest)
+	}
+	out := a.Clone()
+	out.Slots = SortWordSlots(append(out.Slots, b.Slots...))
+	return out
+}
+
+// SortWordSlots is slots sorted by Seg, then Run, then Kind, without repeats,
+// and with a segment's run slots left out where a token or an instant slot
+// takes the whole segment: the order and form WordsEntry.Slots are written
+// in. slots is reused.
+func SortWordSlots(slots []WordSlot) []WordSlot {
+	whole := map[int]bool{}
+	for _, s := range slots {
+		if s.Kind == WordSlotToken {
+			whole[s.Seg] = true
+		}
+	}
+	out := slots[:0]
+	for _, s := range slots {
+		if s.Kind == WordSlotRun && whole[s.Seg] {
+			continue
+		}
+		out = append(out, s)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Seg != b.Seg {
+			return a.Seg < b.Seg
+		}
+		if a.Run != b.Run {
+			return a.Run < b.Run
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Layout != b.Layout {
+			return a.Layout < b.Layout
+		}
+		return a.Skeleton < b.Skeleton
+	})
+	dedup := out[:0]
+	for i, s := range out {
+		if i > 0 && s == out[i-1] {
+			continue
+		}
+		dedup = append(dedup, s)
+	}
+	if dedup == nil {
+		dedup = []WordSlot{}
+	}
+	return dedup
+}
+
+// MergeWords is two leaves-to-words maps (MockSpec.LearnedWords) as one
+// (neither is changed): a place in both is MergeWordsEntry of the two, a
+// place in one keeps its entry. nil when both are empty.
+func MergeWords(a, b map[string]WordsEntry) map[string]WordsEntry {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[string]WordsEntry, len(a)+len(b))
+	for place, e := range a {
+		out[place] = e.Clone()
+	}
+	for place, e := range b {
+		if cur, ok := out[place]; ok {
+			out[place] = MergeWordsEntry(cur, e)
+			continue
+		}
+		out[place] = e.Clone()
+	}
+	return out
+}
+
+// mergeVariableWords is the words of one variable two blocks declare (a, b:
+// either nil), as MergeVariables keeps them for a variable both bind at one
+// place: one side's when the other has none (a side without words never
+// strips them), else MergeWordsEntry of the two.
+func mergeVariableWords(a, b *WordsEntry) *WordsEntry {
+	switch {
+	case a == nil && b == nil:
+		return nil
+	case a == nil:
+		w := b.Clone()
+		return &w
+	case b == nil:
+		w := a.Clone()
+		return &w
+	}
+	w := MergeWordsEntry(*a, *b)
+	return &w
 }
 
 // cloneWords returns a copy of words that shares no map or slice with it;

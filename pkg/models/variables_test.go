@@ -125,3 +125,47 @@ func TestAVariablesClockReadsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// Words go with the bind they were learned at, as a clock read does: a's bind
+// keeps a's, a bind taken from b takes b's, a variable both bind at one place
+// holds both's slots (void when they disagree), and a side without words
+// never strips them.
+func TestMergeVariablesKeepsWordsWithTheirBind(t *testing.T) {
+	w := func(slots ...WordSlot) *WordsEntry {
+		return &WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: slots}
+	}
+	other := &WordsEntry{Digest: "9f2c41d07a3be815", Layout: "0000000000000000", Slots: []WordSlot{{Seg: 0}}}
+	for _, c := range []struct {
+		name string
+		a, b MockVariable
+		want *WordsEntry
+	}{
+		{"a's bind keeps a's", MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 1})}, MockVariable{Recorded: "r", Use: []string{"url.query.id"}}, w(WordSlot{Seg: 1})},
+		{"a bind taken from b takes b's", MockVariable{Recorded: "r", Use: []string{"url.query.id"}}, MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 2})}, w(WordSlot{Seg: 2})},
+		{"both bind: the union", MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 1})}, MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 2})}, w(WordSlot{Seg: 1}, WordSlot{Seg: 2})},
+		{"b has none: a's stay", MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 1})}, MockVariable{Recorded: "r", Bind: "body.id"}, w(WordSlot{Seg: 1})},
+		{"a has none: b's are taken", MockVariable{Recorded: "r", Bind: "body.id"}, MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 2})}, w(WordSlot{Seg: 2})},
+		{"both bind, two layouts: void", MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 1})}, MockVariable{Recorded: "r", Bind: "body.id", Words: other}, &WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: WordsVoidLayout, Slots: []WordSlot{}}},
+		{"another bind of b's is not a's", MockVariable{Recorded: "r", Bind: "body.id", Words: w(WordSlot{Seg: 1})}, MockVariable{Recorded: "r", Bind: "header.x-id", Words: w(WordSlot{Seg: 2})}, w(WordSlot{Seg: 1})},
+	} {
+		in := MockVariables{"id": c.a}
+		got := MergeVariables(in, MockVariables{"id": c.b})["id"]
+		if !reflect.DeepEqual(got.Words, c.want) {
+			t.Errorf("%s: merged words %+v, want %+v", c.name, got.Words, c.want)
+			continue
+		}
+		if got.Words != nil && len(got.Words.Slots) > 0 {
+			got.Words.Slots[0].Seg = 99
+			for _, side := range []MockVariable{c.a, c.b} {
+				if side.Words != nil && len(side.Words.Slots) > 0 && side.Words.Slots[0].Seg == 99 {
+					t.Errorf("%s: the merged block shares its words with an input", c.name)
+				}
+			}
+		}
+		// MergeBinds merges as MergeVariables does.
+		bound := MergeBinds(map[string]MockVariables{"mock-1": {"id": c.a}}, map[string]MockVariables{"mock-1": {"id": c.b}})
+		if c.want != nil && c.want.Void() != bound["mock-1"]["id"].Words.Void() {
+			t.Errorf("%s: MergeBinds merged words %+v", c.name, bound["mock-1"]["id"].Words)
+		}
+	}
+}
