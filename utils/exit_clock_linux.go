@@ -31,8 +31,9 @@ import (
 //
 // ExitClock measures the stall on the processes' own account in the kernel
 // instead: each thread's schedstat (the time it ran on a CPU, the time it
-// waited for one, the times it was given one) and its state. Between two
-// looks w of wall time apart, the processes could run
+// waited for one, the times it was given one) and its state. Of the w of
+// wall time between two looks' reads of that account (see below), the
+// processes could run
 //
 //	max(w - waited, ran), at most w
 //
@@ -51,7 +52,38 @@ import (
 // is counted as it goes, and taken off its account's wait once that wait
 // ends, so no wait counts twice. A thread runnable at a look that slept for
 // part of w is so counted as waiting for that part too: the stall accrues no
-// faster than the processes could run, at times slower.
+// faster than the processes could run, at times slower. When a stall starts
+// again (ExitMeter), the clock forgets what of the waits it counted as they
+// went: a wait so counted before the stall began counts again in it once the
+// account books it (the stall the slower for it), and the part of a look a
+// thread runnable at it slept for, counted as its wait and never booked, is
+// not taken off a later look as a wait counted already, which would count
+// it, after the stall began, as time the thread could run.
+//
+// The kernel takes a thread's account at some moment inside the read of it,
+// which the clock knows only to lie between the wall times it reads just
+// before and just after reading that thread; keploy held off the CPU between
+// them (as on the loaded hosts this clock is for) reads the account
+// milliseconds after the wall time before it. So w is, of the threads read at
+// both looks, the least time from the end of one's read at the last look to
+// the start of its read at this one (where none was, from the end of the last
+// look's read of them all to the start of this one's): never longer than the
+// time between the moments the kernel took any one thread's two accounts.
+// Measured from the wall time before one read to the wall time before the
+// next, the look after a read that came late was longer than that by the
+// delay: a thread asleep at it was counted the delay as time it could run;
+// one runnable at it, as a wait its account never books, which a later look
+// took off the waits the account did book, as counted already, and so counted
+// a wait of the thread as time it could run. The time the reads take counts
+// as none the processes could run, up to the time the read of them all takes:
+// the stall accrues slower by it, never faster. The kernel books a thread's
+// time on a CPU as it goes at each scheduler tick (and as the thread leaves
+// the CPU), so an account read while the thread runs lacks the run since the
+// last tick, which the next look counts: the time from a clock's first look,
+// or from a stall's start, may hold up to a tick of each thread's run from
+// before it (more on a CPU the kernel runs without its tick, nohz_full), and,
+// of a process whose threads that look read apart, the run of those read
+// earlier in the time its read of them took.
 //
 // A stall is counted only in time both they and keploy could run (the least
 // of the two, at each look): what a shutdown waits on may be keploy's own (its
@@ -68,7 +100,11 @@ import (
 // completed I/O, or has I/O in flight, had I/O in flight) is its wait. A
 // process whose way out goes through a disk a loaded host keeps busy (a file
 // closed and flushed, a page of its program read back, an fsync at shutdown)
-// is so not judged for the time the disk served others first.
+// is so not judged for the time the disk served others first. A thread held
+// there on no storage (on a page of it the kernel is migrating, in
+// migration_entry_wait: microseconds, at times over ten milliseconds) counts
+// as time it could run for what of it storage did not serve, as the rest
+// below does: a few at a time, against a stall bound of a minute.
 //
 // A device with I/O in flight that completed none since the last look, nor
 // did any device it is stacked on (storageBelow: a device-mapper or md
@@ -182,11 +218,13 @@ type ExitClock struct {
 	// nil where none is read.
 	below func(name string) []string
 
-	mu       sync.Mutex
-	looked   bool
-	lastWall time.Time
-	lastOwn  time.Duration
-	last     map[int]taskTime
+	mu     sync.Mutex
+	looked bool
+	// lastFrom and lastTo are the wall times the last look's read of the
+	// processes' account began and ended at (see Runnable).
+	lastFrom, lastTo time.Time
+	lastOwn          time.Duration
+	last             map[int]taskTime
 	// lastDisks is the host's block devices at the last look; nil where it
 	// read none.
 	lastDisks diskMark
@@ -219,8 +257,16 @@ type ExitClock struct {
 // one, whether it is runnable (running, or waiting to: state R), whether it
 // is held in the kernel (an uninterruptible sleep: state D) and, if so,
 // whether every filesystem it can reach is on storage the host's block
-// devices show (mountsSeen), and how long it had lived when it was read, at
-// most (0: not known).
+// devices show (mountsSeen), how long it had lived when it was read, at most
+// (0: not known), and the wall times just before and just after it was read
+// (zero: not known). For one its state shows not runnable, read again after
+// its state (readTaskTimesIn): missed is the waits for a CPU its account
+// booked between the two reads of it, turned whether it was given a CPU
+// meanwhile, and ranAgain its time on a CPU as the second read found it,
+// where that moved (0: it did not), which the next look sets its run
+// against: the run the first read lacked, which this look counted, and what
+// it ran up to the second, which so counts in no look (slower, never
+// faster).
 type taskTime struct {
 	ran, waited time.Duration
 	slices      uint64
@@ -228,6 +274,10 @@ type taskTime struct {
 	blocked     bool
 	seen        bool
 	age         time.Duration
+	from, to    time.Time
+	missed      time.Duration
+	turned      bool
+	ranAgain    time.Duration
 }
 
 // NewExitClock is the ExitClock of procs, each named by its pid and start
@@ -252,18 +302,28 @@ func NewExitClock(procs []Reached, bound time.Duration) (*ExitClock, func()) {
 // for that bound for dead. stop stops the meter and releases the clock.
 func NewExitMeter(procs []Reached, bound time.Duration) (clock *ExitClock, meter *ExitMeter, stop func()) {
 	clock, release := NewExitClock(procs, bound)
-	meter = &ExitMeter{Meter: stall.NewMeter(clock, bound), clock: clock}
+	meter = newExitMeter(clock, bound)
 	return clock, meter, func() {
 		meter.Stop()
 		release()
 	}
 }
 
+// newExitMeter is the ExitMeter of a stop on clock that judges on bound,
+// its stall started (Reset).
+func newExitMeter(clock *ExitClock, bound time.Duration) *ExitMeter {
+	m := &ExitMeter{Meter: stall.NewMeter(clock, bound), clock: clock}
+	clock.restarted()
+	return m
+}
+
 // ExitMeter is the stall meter of a stop (NewExitMeter): a stall.Meter on the
 // stop's ExitClock, which reads the processes' progress itself (Advance), so
 // that the clock's credit of their waits in the kernel starts again with the
 // stall. Its Reset starts the stall again alone (a stop that killed them
-// gives them the bound again to be gone), the credit spent as it was.
+// gives them the bound again to be gone), the credit spent as it was; each
+// start of the stall forgets the waits the clock counted as they went
+// (ExitClock).
 type ExitMeter struct {
 	*stall.Meter
 	clock *ExitClock
@@ -282,6 +342,14 @@ func (m *ExitMeter) Advance(r ExitMark) bool {
 	m.Reset()
 	m.clock.progressed()
 	return true
+}
+
+// Reset starts the stall again (stall.Meter), the clock's credit of their
+// waits in the kernel spent as it was, and its count of their waits as they
+// go forgotten (ExitClock).
+func (m *ExitMeter) Reset() {
+	m.Meter.Reset()
+	m.clock.restarted()
 }
 
 // newExitClock is an ExitClock on the given clocks and readers (the tests'),
@@ -304,19 +372,31 @@ func (c *ExitClock) progressed() {
 	c.mu.Unlock()
 }
 
+// restarted says a stall starts again at the last look: what of the threads'
+// waits was counted as it went, and not booked yet, is forgotten (see above).
+func (c *ExitClock) restarted() {
+	c.mu.Lock()
+	clear(c.unbooked)
+	c.mu.Unlock()
+}
+
 // Runnable is how long the processes and keploy could both run since the
 // clock was made. Each call looks at them: what they could run since the
 // last look is added.
 func (c *ExitClock) Runnable() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	wall, own := c.now(), c.own.Runnable()
+	own := c.own.Runnable()
+	// The look is from the end of the last read of their account to the
+	// start of this one (lookSpan).
+	from := c.now()
 	tasks, ok := c.read(c.procs)
+	to := c.now()
 	disks, disksOK := c.disks()
 	still := map[string]time.Duration{}
 	inKernel := map[int]time.Duration{}
 	if c.looked {
-		w := max(wall.Sub(c.lastWall), 0)
+		w := c.lookSpan(from, to, tasks)
 		ownRan := max(own-c.lastOwn, 0)
 		could := w // no account of theirs: keploy's runnable time alone
 		if ok {
@@ -358,7 +438,7 @@ func (c *ExitClock) Runnable() time.Duration {
 		}
 		c.ran += min(ownRan, could)
 	}
-	c.looked, c.lastWall, c.lastOwn, c.accounted = true, wall, own, ok
+	c.looked, c.lastFrom, c.lastTo, c.lastOwn, c.accounted = true, from, to, own, ok
 	c.lastDisks, c.still, c.inKernel = nil, still, inKernel
 	if disksOK {
 		c.lastDisks = disks
@@ -373,6 +453,35 @@ func (c *ExitClock) Runnable() time.Duration {
 		c.last = nil
 	}
 	return c.ran
+}
+
+// lookSpan is a look's w (see ExitClock), read from from to to: of the
+// threads read, timed within each look's read of them all, at both this look
+// and the last (and not renewed: the same thread), the least time from the
+// end of the read of one's account at the last to the start of its read at
+// this one; where none was, from the end of the last look's read of them all
+// to the start of this one's. Called with c.mu held.
+func (c *ExitClock) lookSpan(from, to time.Time, tasks map[int]taskTime) time.Duration {
+	w := from.Sub(c.lastTo)
+	least, timed := time.Duration(0), false
+	for tid, t := range tasks {
+		b, ok := c.last[tid]
+		if !ok || renewed(b, t) || !readWithin(t, from, to) || !readWithin(b, c.lastFrom, c.lastTo) {
+			continue
+		}
+		if d := t.from.Sub(b.to); !timed || d < least {
+			least, timed = d, true
+		}
+	}
+	if timed {
+		w = least
+	}
+	return max(w, 0)
+}
+
+// readWithin says whether the read of t was timed, from from to to.
+func readWithin(t taskTime, from, to time.Time) bool {
+	return !t.from.IsZero() && !t.from.Before(from) && !t.to.Before(t.from) && !t.to.After(to)
 }
 
 // After is keploy's own timer.
@@ -463,14 +572,14 @@ func (l lookTimes) could(served time.Duration) time.Duration {
 // its account added, less what of that was counted already. One held in the
 // kernel now (D) whose filesystems are all on the host's block devices may
 // have waited on storage too, for the time it neither ran nor waited for a
-// CPU; held there at the last look too, with no turn on a CPU since, it
-// stood there throughout. unbooked is, by thread, the part of its waits
-// counted and not yet in its account, which lookAt keeps. A thread new since the last look (or a
-// thread id given to another meanwhile, its account below the last) counts
-// with all of its account, which it gathered since, but one older than the
-// look (a process read from now on): of the CPU it had in its life, only what
-// it cannot have had before the look. One gone counts with none, its exit
-// being progress the stop reads on its own.
+// CPU; held there at the last look too, with no turn on a CPU since, it stood
+// there throughout. unbooked is, by thread, the part of its waits counted and
+// not yet in its account, which lookAt keeps. A thread new since the last
+// look (or a thread id given to another meanwhile, its account below the
+// last) counts with all of its account, which it gathered since, but one
+// older than the look (a process read from now on): of the CPU it had in its
+// life, only what it cannot have had before the look. One gone counts with
+// none, its exit being progress the stop reads on its own.
 func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time.Duration) lookTimes {
 	l := lookTimes{w: w}
 	var ran, waited time.Duration
@@ -481,7 +590,7 @@ func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time
 	}
 	for tid, t := range now {
 		b, ok := before[tid]
-		fresh := !ok || t.ran < b.ran || t.waited < b.waited || t.slices < b.slices
+		fresh := !ok || renewed(b, t)
 		if fresh {
 			b = taskTime{}
 			delete(unbooked, tid)
@@ -493,7 +602,15 @@ func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time
 			// no more of its time on a CPU than it cannot have had before.
 			dRan = max(dRan-(t.age-w), 0)
 		}
-		ran += dRan
+		// Of its run, what the last look read again after its state there
+		// (ranAgain): the run its first read lacked, which that look
+		// counted as time the thread could run, and what it ran up to the
+		// second read, which so counts in no look (slower, never faster).
+		ranHere := dRan
+		if !fresh && b.ranAgain > b.ran {
+			ranHere = max(dRan-(b.ranAgain-b.ran), 0)
+		}
+		ran += ranHere
 		// Of w, the time it was there: a thread new since the last look,
 		// no longer than it has lived.
 		lived := w
@@ -502,8 +619,10 @@ func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time
 		}
 		if !t.runnable {
 			// Every wait of it for a CPU ended: what of them was not
-			// counted.
-			cpu := max(dWaited-unbooked[tid], 0)
+			// counted, and any its account booked only after it was read
+			// (missed), which the next look counts again (as the last may
+			// have counted part of it: slower, never faster).
+			cpu := max(dWaited-unbooked[tid], 0) + t.missed
 			waited += cpu
 			delete(unbooked, tid)
 			if t.blocked && t.seen {
@@ -511,16 +630,16 @@ func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time
 				// waited for a CPU, what storage served is a wait on it.
 				// Held there at the last look too, and given no CPU since,
 				// it stood there throughout.
-				l.held = append(l.held, heldTime{tid: tid, d: max(lived-dRan-cpu, 0),
-					standing: !fresh && b.blocked && t.slices == b.slices})
+				l.held = append(l.held, heldTime{tid: tid, d: max(lived-ranHere-cpu, 0),
+					standing: !fresh && b.blocked && t.slices == b.slices && !t.turned})
 			}
 			continue
 		}
 		// Waiting for a CPU, or running: all of w it did not run, of
-		// which its account has what ended.
-		wait := max(lived-dRan, 0)
-		waited += wait
-		if u := unbooked[tid] + wait - dWaited; u > 0 {
+		// which its account has what ended; of what it ran that the last
+		// look counted, none is kept for a wait to come.
+		waited += max(lived-ranHere, 0)
+		if u := unbooked[tid] + max(lived-dRan, 0) - dWaited; u > 0 {
 			unbooked[tid] = u
 		} else {
 			delete(unbooked, tid)
@@ -528,6 +647,13 @@ func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time
 	}
 	l.ran, l.waited = ran, waited
 	return l
+}
+
+// renewed says whether thread account now, of a thread id accounted for as b
+// at the last look, is another thread's: below b (the id given to another
+// meanwhile).
+func renewed(b, now taskTime) bool {
+	return now.ran < b.ran || now.waited < b.waited || now.slices < b.slices
 }
 
 // readTaskTimes reads the account of every thread of procs (ExitClock), by
@@ -567,13 +693,31 @@ const startTick = 10 * time.Millisecond
 // (a shell's trap, a stop command) is as far as that child gets. A process
 // whose leader has exited (a zombie) while other threads of it still run is
 // read too: those threads are on their way out, and need the CPU to get
-// there. Each thread's age is boot, read once every thread has been, less
-// its start time, which /proc gives in whole ticks, rounded down: it is never
-// less than the time the thread had lived. For a thread held in the kernel
-// (D), seen tells, given its directory, whether every filesystem it can
-// reach is on storage the host's block devices show (mountsSeen): read once
-// for each mount namespace (its ns/mnt) at each read, as threads mostly share
-// one, and for each thread whose namespace cannot be told.
+// there. Each thread's age is boot, read once every thread has been, less its
+// start time, which /proc gives in whole ticks, rounded down: it is never
+// less than the time the thread had lived. The read of each thread's account
+// (its schedstat) is timed on the wall clock (time.Now), which an ExitClock
+// reading this must read too, as NewExitClock's does: times off its own
+// look's read it does not take (readWithin). A thread's state (its stat) is
+// read after its account, and one its stat shows not runnable may have been
+// waiting for a CPU when its account was read: such a one has been given the
+// CPU since, which booked that wait. So the account of one not runnable is
+// read again after its state: the waits it booked by then (missed) count in
+// the look as well, a turn on a CPU meanwhile (turned) ends a stretch in the
+// kernel, and its time on a CPU then (ranAgain) holds the run since the last
+// tick of one that was on a CPU as its account was first read (which the look
+// counts as time it could run, and the next look so does not count again, nor
+// what it ran up to the second read). One whose account cannot be read again
+// is taken for runnable. Two cases a read of state cannot tell, and the clock
+// counts as time the thread could run (or a wait on storage that serves): one
+// exiting shows Z from before its last turn on a CPU, and on a kernel that
+// preempts its own code, one preempted as it was about to sleep shows S or D
+// while it waits for a CPU, a wait the kernel does not book. For a thread
+// held in the kernel (D), seen tells, given its directory, whether every
+// filesystem it can reach is on storage the host's block devices show
+// (mountsSeen): read once for each mount namespace (its ns/mnt) at each read,
+// as threads mostly share one, and for each thread whose namespace cannot be
+// told.
 func readTaskTimesIn(proc string, procs []Reached, boot func() time.Duration, seen func(task string) bool) (map[int]taskTime, bool) {
 	tasks := map[int]taskTime{}
 	born := map[int]time.Duration{}
@@ -616,17 +760,31 @@ func readTaskTimesIn(proc string, procs []Reached, boot func() time.Duration, se
 			}
 			// A thread that has neither run nor waited yet shows zeros;
 			// one that exited meanwhile, no file.
-			b, err := os.ReadFile(task + "/schedstat")
+			from := time.Now()
+			account, err := os.ReadFile(task + "/schedstat")
 			if err != nil {
 				continue
 			}
-			ran, waited, slices, _ := parseSchedstat(b)
-			t := taskTime{ran: durationOf(ran, time.Nanosecond), waited: durationOf(waited, time.Nanosecond), slices: slices}
+			ran, waited, slices, _ := parseSchedstat(account)
+			t := taskTime{ran: durationOf(ran, time.Nanosecond), waited: durationOf(waited, time.Nanosecond), slices: slices, from: from, to: time.Now()}
 			if b, err := os.ReadFile(task + "/stat"); err == nil {
 				if st, ok := ParseProcStat(b); ok {
 					t.runnable = st.State == 'R'
 					t.blocked = st.State == 'D'
 					born[tid] = durationOf(st.StartTime, startTick)
+				}
+			}
+			if !t.runnable {
+				// Not runnable as its state was read: what its account
+				// booked since it was read (see above).
+				again, err := os.ReadFile(task + "/schedstat")
+				if err != nil {
+					t.runnable, t.blocked = true, false
+				} else if !bytes.Equal(again, account) {
+					ranAgain, waitedAgain, slicesAgain, _ := parseSchedstat(again)
+					t.missed = max(durationOf(waitedAgain, time.Nanosecond)-t.waited, 0)
+					t.turned = slicesAgain != slices
+					t.ranAgain = durationOf(ranAgain, time.Nanosecond)
 				}
 			}
 			if t.blocked {
