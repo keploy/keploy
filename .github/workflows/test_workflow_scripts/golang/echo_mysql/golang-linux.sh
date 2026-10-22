@@ -3,6 +3,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 # safer bash. -e also arrives from the step shell: golang_linux.yml SOURCES
 # this file from a `run:` step with no `shell:` key, i.e. GitHub's `bash -e {0}`.
 set -Eeuo pipefail
+# The proven switch, stated for every keploy this lane runs: the replay that
+# says KEPLOY_PROVEN=1 runs under it, and every other one with it off
+# (KEPLOY_PROVEN=0, the open-source build's default), as this lane always ran
+# them.
+export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 git fetch origin
@@ -394,6 +399,58 @@ if [[ "$all_passed" != "true" || $REPLAY_RC -ne 0 ]]; then
   echo "::error::Some yaml tests failed or replay exited non-zero"
   exit 1
 fi
+
+# The same recording, replayed under the proven model (KEPLOY_PROVEN=1), is
+# green too: every MySQL read is answered by its own recording. The seed
+# handler reads each seeded row back by short_code, in recorded order, and
+# returns the rows, so a read answered with another row's recording fails
+# post-seed-dates-1. Under the proven model's exact serving no time window is
+# active, and the FIFO pick (the first other recording of the same query)
+# outranked the exact one: each pair of reads swapped rows, both recordings
+# consumed, which the per-test mock check passed (FLIP-LANE-MYSQL-FIFO). Only
+# this build's replay carries the fix: a published release replaying is not
+# checked here. The recording is this lane's, made with the switch off: the
+# upgrade's replay of an earlier recording.
+case "$REPLAY_BIN" in
+  */build/keploy|*/build-no-race/keploy)
+    section "Replay under the proven model"
+    sudo rm -f /tmp/keploy-logs.txt
+    # Same shape and same reasons as REPLAY_RC above.
+    if KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
+      2>&1 | tee test_logs_proven.txt
+    then
+      REPLAY_RC_PROVEN=0
+    else
+      REPLAY_RC_PROVEN=${PIPESTATUS[0]}
+    fi
+    echo "Replay under the proven model exit code: $REPLAY_RC_PROVEN"
+    # Its test run is the one written after the first replay's (RUN_DIR).
+    PROVEN_RUN=""
+    for _d in ./keploy/reports/test-run-*; do
+      [[ -d "$_d" && "$_d" != "$RUN_DIR" ]] || continue
+      if [[ -z "$PROVEN_RUN" || "$_d" -nt "$PROVEN_RUN" ]]; then PROVEN_RUN="$_d"; fi
+    done
+    proven_passed=true
+    proven_any=false
+    if [[ -n "$PROVEN_RUN" ]]; then
+      for rpt in "$PROVEN_RUN"/test-set-*-report.yaml; do
+        [[ -f "$rpt" ]] || continue
+        proven_any=true
+        status=$(awk '/^status:/{print $2; exit}' "$rpt")
+        echo "Under the proven model, $(basename "$rpt"): ${status:-<missing>}"
+        if [[ "$status" != "PASSED" ]]; then
+          proven_passed=false
+        fi
+      done
+    fi
+    endsec
+    if [[ "$proven_any" != "true" || "$proven_passed" != "true" || $REPLAY_RC_PROVEN -ne 0 ]]; then
+      echo "::error::Under the proven model some yaml tests failed, or none were read, or the replay exited non-zero (rc=$REPLAY_RC_PROVEN)"
+      cat test_logs_proven.txt || true
+      exit 1
+    fi
+    ;;
+esac
 
 if json_pass_supported; then
   section "Replay (json)"
