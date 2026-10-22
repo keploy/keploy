@@ -4506,6 +4506,20 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 
 var _ agent.AppClockSetter = (*Proxy)(nil)
 
+// ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
+func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
+	return p.openExact(func(m *MockManager) { m.ServeExactTestConcurrent(test, owned, cands) })
+}
+
+// OpenExactTestConcurrent implements agent.ExactConcurrentServer:
+// ServeExactTestConcurrent, with the test's variables begun with given bound
+// in the same step (MockManager.OpenExactTestConcurrent).
+func (p *Proxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error {
+	return p.openExact(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) })
+}
+
+var _ agent.ExactConcurrentServer = (*Proxy)(nil)
+
 // ServeExactPool implements agent.ExactServer (exact.go).
 func (p *Proxy) ServeExactPool(key string, names []string) error {
 	m := p.getMockManager()
@@ -5124,7 +5138,8 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
-					Reason: parserErr.MismatchReport.Reason,
+					Reason:     parserErr.MismatchReport.Reason,
+					Concurrent: parserErr.MismatchReport.Concurrent,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach

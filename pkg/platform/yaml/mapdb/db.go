@@ -44,7 +44,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	finalMappings := make(map[string][]models.MockEntry)
-	var existingStartup, existingWorker []models.MockEntry
+	var existingStartup, existingWorker, existingShared []models.MockEntry
+	var existingGroups []models.ConcurrencyGroup
 	var existingSource string
 
 	// Detect whether a mappings file already exists in either format,
@@ -75,6 +76,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		}
 		existingStartup = existingConfig.Startup
 		existingWorker = existingConfig.Worker
+		existingGroups, existingShared = existingConfig.Groups, existingConfig.Shared
 		existingSource = existingConfig.Source
 	}
 
@@ -120,6 +122,15 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Worker = mapping.Worker
 	case len(existingWorker) > 0:
 		newMapping.Worker = existingWorker
+	}
+	// The concurrency groups and shared calls (models.Mapping.Groups,
+	// Shared), replace-or-keep as the worker scope: the entries carry the
+	// group ids they name, which would otherwise name nothing.
+	switch {
+	case len(mapping.Groups) > 0 || len(mapping.Shared) > 0:
+		newMapping.Groups, newMapping.Shared = mapping.Groups, mapping.Shared
+	default:
+		newMapping.Groups, newMapping.Shared = existingGroups, existingShared
 	}
 	// Who wrote the test entries: a writer that names itself, else the
 	// file's (models.Mapping.Source).
@@ -744,4 +755,81 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 		zap.Bool("hasMeaningfulMappings", hasMeaningfulMappings))
 
 	return testMockMappings, hasMeaningfulMappings, nil
+}
+
+// UpsertConcurrency writes the set's concurrency groups and shared calls
+// (models.Mapping.Groups, Shared), whole, creating the file if absent and
+// keeping every other section as it is: the recording derives them whole from
+// its test windows, so what is written replaces what was there. Empty ones
+// clear them. A file whose groups and shared calls are what it would write is
+// left as it is, byte for byte, and a missing one is not created for none.
+func (db *MappingDb) UpsertConcurrency(ctx context.Context, testSetID string, groups []models.ConcurrencyGroup, shared []models.MockEntry) error {
+	return db.rewrite(ctx, testSetID, len(groups) > 0 || len(shared) > 0, false, func(m *models.Mapping) bool {
+		if len(m.Groups) == 0 && len(m.Shared) == 0 && len(groups) == 0 && len(shared) == 0 {
+			return false
+		}
+		m.Groups, m.Shared = groups, shared
+		return true
+	})
+}
+
+// ApplyShares writes onto the set's mappings.yaml what keploy record's full
+// round settled of the calls it shared between tests that were open together
+// while they were recorded (models.Mapping.ApplyShares): pins, moves and the
+// shared calls, keeping every other section and recorded order, and dropping
+// the groups no entry names any more. Idempotent. A set with no mapping file
+// is an error: there is nothing to pin onto. It reports whether it wrote.
+func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models.SetShares) (bool, error) {
+	wrote := false
+	err := db.rewrite(ctx, testSetID, false, true, func(m *models.Mapping) bool {
+		wrote = m.ApplyShares(s)
+		return wrote
+	})
+	return wrote, err
+}
+
+// rewrite reads the set's mapping file, applies change, and writes it back
+// in the format it was in when change reports a change. A missing file is
+// created (as an empty mapping) when create; otherwise it is an error when
+// mustExist, and left missing when not.
+func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, mustExist bool, change func(*models.Mapping) bool) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists && !create {
+		if !mustExist {
+			return nil
+		}
+		return fmt.Errorf("the test set %s has no mappings file", testSetID)
+	}
+	if !exists {
+		effFormat = db.Format
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	if !change(mapping) {
+		return nil
+	}
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }

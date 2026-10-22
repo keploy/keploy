@@ -40,6 +40,46 @@ type MockEntry struct {
 	// A replay requires it only once keploy has stopped the set's
 	// application, and never waits for it before.
 	AtStop bool `json:"atStop,omitempty" yaml:"atStop,omitempty" bson:"at_stop,omitempty"`
+	// Group is, under the proven switch, the concurrency group of a mock
+	// recorded while several tests' requests were open (Mapping.Groups):
+	// the test that lists it is the one whose request came first, which
+	// time alone cannot tell made it. keploy record's full round shares it
+	// between the group's tests and gives it to the one that made its call
+	// (dropping its group); every other replay serves it to the test that
+	// lists it. Empty for a mock recorded while one test's request was
+	// open, or none.
+	Group string `json:"group,omitempty" yaml:"group,omitempty" bson:"group,omitempty"`
+	// Unresolved says, under the proven switch, that keploy record's full
+	// round could not tell which test of its group made this mock's call,
+	// and charged the test that lists it now (it placed it there, not time):
+	// MockEntryUnresolvedAmbiguous, which every replay charges a test that
+	// lists it with, or MockEntryUnresolvedUnproven.
+	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
+}
+
+// The MockEntry.Unresolved of a recording keploy record's full round could not
+// give to the test of its group that made its call.
+const (
+	// MockEntryUnresolvedAmbiguous: its recordings that keploy cannot tell
+	// apart got different answers, so a replay that answers a test with it
+	// may answer with another test's.
+	MockEntryUnresolvedAmbiguous = "ambiguous"
+	// MockEntryUnresolvedUnproven: every other case keploy could not prove
+	// (no call matched it exactly, two pair with it, retries differed, a
+	// call drifted from it): it stays with a test the round charged for it.
+	MockEntryUnresolvedUnproven = "unproven"
+)
+
+// ConcurrencyGroup is one set of tests whose requests were open together
+// while a mock was recorded (Mapping.Groups): the windows that contained the
+// mock's place, from the recorded request and answer times alone.
+type ConcurrencyGroup struct {
+	ID string `json:"id" yaml:"id" bson:"id"`
+	// Tests are the group's tests the recording kept, in window order.
+	Tests []string `json:"tests" yaml:"tests" bson:"tests"`
+	// Unkept counts the group's tests the recording did not keep (deleted,
+	// or lost): one of them may have made the call.
+	Unkept int `json:"unkept,omitempty" yaml:"unkept,omitempty" bson:"unkept,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -120,6 +160,32 @@ type Mapping struct {
 	// only keploy record wrote, in one keploy test wrote before it said so,
 	// and in one a cloud store handed back (which keeps no source).
 	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
+	// Groups are, under the proven switch, the concurrency groups the
+	// entries name (MockEntry.Group): the sets of tests whose requests were
+	// open together while a mock was recorded. Omitted for a set recorded
+	// one request at a time; a reader that predates it ignores the key, and
+	// serves every entry to the test that lists it.
+	Groups []ConcurrencyGroup `json:"groups,omitempty" yaml:"groups,omitempty" bson:"groups,omitempty"`
+	// Shared are, under the proven switch, the mocks recorded while several
+	// tests' requests were open whose first-opened test the recording did
+	// not keep (deleted, or lost): no kept test lists them, and keploy
+	// record's full round shares them between the kept tests of their group
+	// (MockEntry.Group). Every other replay leaves them unowned, as it does
+	// a mock no test lists.
+	Shared []MockEntry `json:"shared,omitempty" yaml:"shared,omitempty" bson:"shared,omitempty"`
+}
+
+// Group is the concurrency group id names, nil when there is none.
+func (m *Mapping) Group(id string) *ConcurrencyGroup {
+	if m == nil || id == "" {
+		return nil
+	}
+	for i := range m.Groups {
+		if m.Groups[i].ID == id {
+			return &m.Groups[i]
+		}
+	}
+	return nil
 }
 
 type BootSpec struct {

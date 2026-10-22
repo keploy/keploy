@@ -361,3 +361,116 @@ func TestDeriveWindowMappingsPlacesWhatNoTestOwnsInTheWorkerScope(t *testing.T) 
 		t.Fatalf("with no window the worker scope is %v; want [a@ b@]", w)
 	}
 }
+
+// groupsOf is each mock's concurrency group, by name ("" for none), and the
+// derived groups by id, each its tests in window order.
+func groupsOf(m WindowMappings) (map[string]string, map[string][]string) {
+	byMock := map[string]string{}
+	for _, tc := range m.Tests {
+		for _, e := range tc.Mocks {
+			byMock[e.Name] = e.Group
+		}
+	}
+	groups := map[string][]string{}
+	for _, g := range m.Groups {
+		groups[g.ID] = g.Tests
+	}
+	return byMock, groups
+}
+
+// A mock recorded while several windows were open names them, its
+// concurrency group: the windows that contain its place, in window order,
+// from the recorded times alone. The window that opened first still lists
+// it. One group per distinct set of windows, numbered in order of first use.
+func TestDeriveWindowMappingsNamesTheConcurrencyGroupOfAMockRecordedWhileSeveralWindowsWereOpen(t *testing.T) {
+	t.Run("windows open together", func(t *testing.T) {
+		// c opens first in time but is listed last: groups name windows in
+		// window (start) order, not in the order they were handed over.
+		got := DeriveWindowMappings(
+			[]TestWindow{wmWindow("b", 1100, 1600), wmWindow("c", 1050, 1500), wmWindow("a", 1000, 1700)},
+			[]WindowedMock{wmMock("m1", 1200), wmMock("m2", 1300), wmMock("m3", 1550), wmMock("m4", 1650)},
+		)
+		if names := mappedNames(got); !reflect.DeepEqual(names, map[string][]string{"a": {"m1", "m2", "m3", "m4"}, "b": {}, "c": {}}) {
+			t.Fatalf("mapped %v; want every mock listed by a, the window that opened first", names)
+		}
+		byMock, groups := groupsOf(got)
+		wantMock := map[string]string{"m1": "g1", "m2": "g1", "m3": "g2", "m4": ""}
+		wantGroups := map[string][]string{"g1": {"a", "c", "b"}, "g2": {"a", "b"}}
+		if !reflect.DeepEqual(byMock, wantMock) || !reflect.DeepEqual(groups, wantGroups) {
+			t.Fatalf("groups %v %v; want %v %v", byMock, groups, wantMock, wantGroups)
+		}
+		if got.Groups[0].ID != "g1" || got.Groups[1].ID != "g2" {
+			t.Fatalf("groups not numbered in order of first use: %+v", got.Groups)
+		}
+	})
+	t.Run("nested windows", func(t *testing.T) {
+		got := DeriveWindowMappings(
+			[]TestWindow{wmWindow("outer", 1000, 2000), wmWindow("inner", 1300, 1500)},
+			[]WindowedMock{wmMock("before-inner", 1200), wmMock("inside-both", 1400), wmMock("after-inner", 1800)},
+		)
+		byMock, groups := groupsOf(got)
+		if want := map[string]string{"before-inner": "", "inside-both": "g1", "after-inner": ""}; !reflect.DeepEqual(byMock, want) {
+			t.Fatalf("groups %v; want %v", byMock, want)
+		}
+		if !reflect.DeepEqual(groups, map[string][]string{"g1": {"outer", "inner"}}) {
+			t.Fatalf("groups %v", groups)
+		}
+	})
+	t.Run("a chain: A with B, B with C, never A with C", func(t *testing.T) {
+		got := DeriveWindowMappings(
+			[]TestWindow{wmWindow("A", 1000, 1200), wmWindow("B", 1100, 1400), wmWindow("C", 1300, 1500)},
+			[]WindowedMock{wmMock("ab", 1150), wmMock("b", 1250), wmMock("bc", 1350)},
+		)
+		byMock, groups := groupsOf(got)
+		if want := map[string]string{"ab": "g1", "b": "", "bc": "g2"}; !reflect.DeepEqual(byMock, want) {
+			t.Fatalf("groups %v; want %v", byMock, want)
+		}
+		if want := map[string][]string{"g1": {"A", "B"}, "g2": {"B", "C"}}; !reflect.DeepEqual(groups, want) {
+			t.Fatalf("groups %v; want %v: a mock in A and B is not C's", groups, want)
+		}
+	})
+	t.Run("an end is inclusive", func(t *testing.T) {
+		// b's request came at a's answer: a mock placed at that instant was
+		// recorded while both were open.
+		got := DeriveWindowMappings(
+			[]TestWindow{wmWindow("a", 1000, 1200), wmWindow("b", 1200, 1400)},
+			[]WindowedMock{wmMock("at-the-edge", 1200)},
+		)
+		byMock, groups := groupsOf(got)
+		if byMock["at-the-edge"] != "g1" || !reflect.DeepEqual(groups["g1"], []string{"a", "b"}) {
+			t.Fatalf("groups %v %v; want at-the-edge in a group of a and b", byMock, groups)
+		}
+	})
+	t.Run("one window open names no group", func(t *testing.T) {
+		got := DeriveWindowMappings(
+			[]TestWindow{wmWindow("a", 1000, 1200), wmWindow("b", 1300, 1400)},
+			[]WindowedMock{wmMock("a-only", 1100), wmMock("b-only", 1350)},
+		)
+		if len(got.Groups) != 0 {
+			t.Fatalf("groups %+v for windows that never overlap", got.Groups)
+		}
+		for _, tc := range got.Tests {
+			for _, e := range tc.Mocks {
+				if e.Group != "" {
+					t.Fatalf("%s has group %q", e.Name, e.Group)
+				}
+			}
+		}
+	})
+	t.Run("in-flight, idle and worker mocks name no group", func(t *testing.T) {
+		inflight := WindowedMock{Name: "in-flight", Kind: HTTP, At: wmAt(900), Res: wmAt(1150), TestMock: true, InFlight: true}
+		idle := WindowedMock{Name: "idle", Kind: HTTP, At: wmAt(1150), Res: wmAt(1151), TestMock: true, Idle: true}
+		got := DeriveWindowMappings(
+			[]TestWindow{wmWindow("a", 1000, 1300), wmWindow("b", 1100, 1300)},
+			[]WindowedMock{inflight, idle, wmMock("gap", 1500)},
+		)
+		if len(got.Groups) != 0 {
+			t.Fatalf("groups %+v; want none", got.Groups)
+		}
+		for _, e := range got.Worker {
+			if e.Group != "" {
+				t.Fatalf("worker-scope %s has group %q", e.Name, e.Group)
+			}
+		}
+	})
+}
