@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,6 +35,10 @@ type clockRig struct {
 	// counts the reads of it.
 	below     map[string][]string
 	belowRead map[string]int
+	// readTakes is how long a read of the threads' accounts takes: the
+	// wall clock moves on by it as they are read, as it does for a keploy
+	// held off the CPU between reading the wall clock and reading them.
+	readTakes time.Duration
 	c         *ExitClock
 	last      time.Duration
 }
@@ -62,7 +68,10 @@ func newClockRigCredited(tasks map[int]taskTime, bound, wedge, credit time.Durat
 	r := &clockRig{wall: time.Unix(1000, 0), own: &stall.ManualClock{}, tasks: tasks, ok: true,
 		disks: disks, disksOK: true, below: map[string][]string{}, belowRead: map[string]int{}}
 	r.c = newExitClock(nil, bound, wedge, credit, r.own, func() time.Time { return r.wall },
-		func([]Reached) (map[int]taskTime, bool) { return maps.Clone(r.tasks), r.ok },
+		func([]Reached) (map[int]taskTime, bool) {
+			r.wall = r.wall.Add(r.readTakes)
+			return maps.Clone(r.tasks), r.ok
+		},
 		func() (diskMark, bool) { return maps.Clone(r.disks), r.disksOK },
 		func(name string) []string { r.belowRead[name]++; return r.below[name] })
 	return r
@@ -188,6 +197,198 @@ func TestTheExitClockCountsOnlyTheTimeTheProcessesCouldRun(t *testing.T) {
 		// sleeps on its own: it could run the 70 ms after its wait.
 		if got := r.look(w, w, adds(1, 5*ms, 85*ms, 1, false)); got != 70*ms {
 			t.Fatalf("the look it went to sleep in added %v, want 70ms", got)
+		}
+	})
+	t.Run("a look after a read held up is no longer than the time since that read", func(t *testing.T) {
+		// A thread spinning on a CPU it shares. keploy, held off the CPU
+		// between reading the wall clock and reading the thread's account,
+		// reads it 6 ms late: of the 106 ms since the last read, the thread
+		// ran 53 and waited 53, given the CPU just then.
+		r := newClockRig(map[int]taskTime{1: {slices: 1, runnable: true}})
+		r.readTakes = 6 * ms
+		got := r.look(w, w, adds(1, 53*ms, 53*ms, 5, true))
+		r.readTakes = 0
+		// 94 ms after that read, it ran 47 and waited 47 since, and has
+		// just gone to sleep: it could run only the 47 ms it ran.
+		got += r.look(94*ms, w, adds(1, 47*ms, 47*ms, 5, false))
+		if got != 100*ms {
+			t.Fatalf("added %v of a thread that ran 100ms and waited 100ms of the 200ms between the reads of it, want the 100ms it ran", got)
+		}
+	})
+	t.Run("a wait counted as it goes past a read held up is counted no longer than it was", func(t *testing.T) {
+		// The same, read 6 ms late: of the 106 ms since the last read, it
+		// ran 53 and waited 53, given the CPU just then.
+		r := newClockRig(map[int]taskTime{1: {slices: 1, runnable: true}})
+		r.readTakes = 6 * ms
+		got := r.look(w, w, adds(1, 53*ms, 53*ms, 5, true))
+		r.readTakes = 0
+		// 94 ms after that read, it ran 40 and waited 44 since, and has
+		// waited again for 10 ms, a wait the kernel has not booked yet.
+		got += r.look(94*ms, w, adds(1, 40*ms, 44*ms, 4, true))
+		// That wait ends 10 ms into the next look (20 ms long), and the
+		// thread runs the 90 ms after it and has just gone to sleep: of the
+		// wait its account books now, the look takes off as counted before
+		// only the 10 ms the last look counted, not 16: the 6 ms the read
+		// before it was held up are no wait of the thread's.
+		got += r.look(w, w, adds(1, 90*ms, 20*ms, 1, false))
+		if got != 183*ms {
+			t.Fatalf("added %v of a thread that ran 183ms and never slept, want the 183ms it ran", got)
+		}
+	})
+	t.Run("a look is the least time between the reads of a thread at both looks", func(t *testing.T) {
+		// Two threads asleep, each read in 1 ms: at the first look from 0
+		// to 1 ms and from 1 to 2 ms; at the next, held up 6 ms first, from
+		// 106 to 107 and 107 to 108; at the last, the second held up 5 ms,
+		// from 200 to 201 and 206 to 207. The look is 105 ms, then 93 ms,
+		// the least time between a thread's two reads: neither waited at all.
+		base := time.Unix(1000, 0)
+		var wall time.Duration
+		reads := [][2]time.Duration{{0, 0}, {6 * ms, 0}, {0, 5 * ms}}
+		look := 0
+		read := func([]Reached) (map[int]taskTime, bool) {
+			m := map[int]taskTime{}
+			for i, tid := range []int{1, 2} {
+				wall += reads[look][i]
+				from := base.Add(wall)
+				wall += ms
+				m[tid] = taskTime{slices: 3, from: from, to: base.Add(wall)}
+			}
+			look++
+			return m, true
+		}
+		own := &stall.ManualClock{}
+		c := newExitClock(nil, time.Hour, time.Hour, time.Hour, own, func() time.Time { return base.Add(wall) }, read,
+			func() (diskMark, bool) { return nil, false }, nil)
+		for _, at := range []time.Duration{100 * ms, 200 * ms} {
+			wall = at
+			own.Advance(time.Hour)
+			c.Runnable()
+		}
+		if c.ran != 198*ms {
+			t.Fatalf("counted %v of two threads asleep, want 198ms: the least time between each one's two reads, 105ms and 93ms", c.ran)
+		}
+	})
+	t.Run("the waits a thread's account booked after it was read count in the look", func(t *testing.T) {
+		// Asleep at the look, it waited 20 ms and ran 10 since the last;
+		// and as its state was read its account booked 15 ms more.
+		r := newClockRig(map[int]taskTime{1: {slices: 3}})
+		got := r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 10*ms, 20*ms, 1, false)(m)
+			th := m[1]
+			th.missed = 15 * ms
+			m[1] = th
+		})
+		if got != 65*ms {
+			t.Fatalf("added %v, want 65ms: neither the 20ms nor the 15ms it waited", got)
+		}
+	})
+	t.Run("a run a look counted as a thread went to sleep is not counted again", func(t *testing.T) {
+		// On a CPU since its last tick, 4 ms, as its account is read, and
+		// asleep as its state is: the look counts all of it as time it
+		// could run, and its account read again holds those 4 ms.
+		r := newClockRig(map[int]taskTime{1: {slices: 3}})
+		got := r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 10*ms, 20*ms, 1, false)(m)
+			th := m[1]
+			th.ranAgain = th.ran + 4*ms
+			m[1] = th
+		})
+		if got != 80*ms {
+			t.Fatalf("the look it went to sleep in added %v, want the 80ms it did not wait", got)
+		}
+		// Waiting for a CPU since, given none: its account books the 4 ms
+		// now, which are no part of this look.
+		got = r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 4*ms, 0, 0, true)(m)
+			th := m[1]
+			th.ranAgain = 0
+			m[1] = th
+		})
+		if got != 0 {
+			t.Fatalf("the look after added %v of a thread waiting for a CPU throughout, want none", got)
+		}
+	})
+	t.Run("a look takes no read times it cannot vouch for", func(t *testing.T) {
+		// Two threads asleep, each read in 1 ms, at four looks. At the
+		// second, 100 ms on and held up 6 ms first, the second thread's
+		// read is not timed: the first's alone makes the look, 106 - 1. At
+		// the third, 200 ms on, the first is held up 4 ms and its id names
+		// another thread now (its account below the last), and the second
+		// was not timed at the last look: none makes it, so it is from the
+		// end of the last read of them all to the start of this one, 200 -
+		// 107. At the fourth, 300 ms on, the first's read is timed at 250
+		// ms, before the look began: not taken; the second's makes it, 300
+		// - 206.
+		base := time.Unix(1000, 0)
+		var wall time.Duration
+		at := func(d time.Duration) time.Time { return base.Add(d) }
+		look := 0
+		read := func([]Reached) (map[int]taskTime, bool) {
+			one, two := taskTime{ran: 9, slices: 3}, taskTime{slices: 3}
+			switch look {
+			case 0:
+				one.from, one.to, two.from, two.to = at(0), at(ms), at(ms), at(2*ms)
+				wall = 2 * ms
+			case 1:
+				one.from, one.to = at(106*ms), at(107*ms)
+				wall = 107 * ms
+			case 2:
+				one.ran = 1
+				one.from, one.to, two.from, two.to = at(204*ms), at(205*ms), at(205*ms), at(206*ms)
+				wall = 206 * ms
+			case 3:
+				one.ran = 1
+				one.from, one.to, two.from, two.to = at(250*ms), at(251*ms), at(300*ms), at(301*ms)
+				wall = 301 * ms
+			}
+			look++
+			return map[int]taskTime{1: one, 2: two}, true
+		}
+		own := &stall.ManualClock{}
+		c := newExitClock(nil, time.Hour, time.Hour, time.Hour, own, func() time.Time { return base.Add(wall) }, read,
+			func() (diskMark, bool) { return nil, false }, nil)
+		for _, start := range []time.Duration{100 * ms, 200 * ms, 300 * ms} {
+			wall = start
+			own.Advance(time.Hour)
+			c.Runnable()
+		}
+		if want := (106-1)*ms + (200-107)*ms + (300-206)*ms; c.ran != want {
+			t.Fatalf("counted %v of two threads asleep, want %v", c.ran, want)
+		}
+	})
+	t.Run("a stall started again counts no sleep taken for a wait before it", func(t *testing.T) {
+		// Asleep for 95 ms of a look, then woken and waiting for a CPU: all
+		// of the look is taken for its wait. The processes make progress
+		// there, and the stall starts again.
+		r := newClockRig(map[int]taskTime{1: {slices: 3}})
+		m := newExitMeter(r.c, time.Hour)
+		m.Advance(ExitMark{Running: 2})
+		r.look(w, w, adds(1, 0, 0, 0, true))
+		if !m.Advance(ExitMark{Running: 1}) {
+			t.Fatal("a process gone was no progress")
+		}
+		// Its 10 ms wait ends 5 ms into the next look; it runs 5 ms and
+		// sleeps the 90 ms left: it could run 95 ms of it. Of its wait, the
+		// 5 ms before the stall began count in it too, as a wait.
+		r.look(w, w, adds(1, 5*ms, 10*ms, 1, false))
+		if got := m.Stalled(); got != 90*ms {
+			t.Fatalf("the stall counted %v of a thread that could run 95ms of it, want 90ms: none of its sleep before the stall began", got)
+		}
+	})
+	t.Run("a stop's first stall counts no sleep taken for a wait before it", func(t *testing.T) {
+		// Asleep at the clock's first look; 2 ms on, as the stop's meter is
+		// made, woken and waiting for a CPU: both are taken for its wait.
+		r := newClockRig(map[int]taskTime{1: {slices: 3}})
+		r.wall = r.wall.Add(2 * ms)
+		r.own.Advance(2 * ms)
+		adds(1, 0, 0, 0, true)(r.tasks)
+		m := newExitMeter(r.c, time.Hour)
+		// Its 2 ms wait ends; it runs 4 ms and sleeps 95: it could run 99
+		// ms of the look. Of its wait, the 1 ms before the stall began
+		// counts in it too, as a wait.
+		r.look(w, w, adds(1, 4*ms, 2*ms, 1, false))
+		if got := m.Stalled(); got != 98*ms {
+			t.Fatalf("the first stall counted %v of a thread that could run 99ms of it, want 98ms: none of its sleep before the stall began", got)
 		}
 	})
 	t.Run("a thread on a loaded host could run what it did not wait", func(t *testing.T) {
@@ -348,6 +549,176 @@ func TestTheExitClockCountsOnlyTheTimeTheProcessesCouldRun(t *testing.T) {
 			t.Fatalf("a sleeping thread 300ms old with 250ms on a CPU added %v, want the 60ms it did not wait", got)
 		}
 	})
+}
+
+// However late keploy reads a thread's account after the wall time it read
+// before it, and however long the read takes, the clock counts no more of the
+// time than the thread could run, from its first look or from any start of a
+// stall (ExitMeter.Reset). Of a thousand random timelines of a thread taking
+// turns on a CPU it shares, and now and then asleep, each read 41 times (at
+// the clock's start, then at 40 looks), the read held up before and after it
+// by as much as 8 ms one time in ten and inside it by as much as 3 ms one
+// time in twenty, timed, or not, for the thread alone, and its state read
+// after its account (and its account again after that, where its state shows
+// it not runnable), each held up as much, the clock counted none more than
+// the thread ran and slept from the read at the start, or a stall's start, to
+// the read at any look after, but for what it ran before that read that the
+// kernel booked only after it (the run since the last scheduler tick: a tick
+// at most). Measured from the wall time before one read to the wall time
+// before the next, with what it counted of the waits as they went kept across
+// a stall's start, and no account read again after the state (the clock
+// before), the clock counted 158 of them more from its start, by up to 10.1
+// ms, and 262 from its start or a stall's, by up to 13.3 ms; with that count
+// kept alone, 67 from a stall's start, by up to 8.6 ms; with no account read
+// again alone, 6, by up to 4.8 ms.
+func TestTheExitClockCountsNoMoreThanAThreadCouldRunHoweverLateItsReadsCome(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	held := func(n int, most time.Duration) time.Duration {
+		if rng.Intn(n) == 0 {
+			return time.Duration(rng.Int63n(int64(most)))
+		}
+		return time.Duration(rng.Intn(20)) * time.Microsecond
+	}
+	for trial := range 1000 {
+		life := randomTimeline(rng, 2*time.Second)
+		timed := rng.Intn(2) == 0
+		base := time.Unix(1000, 0)
+		var wall, at, sinceTick time.Duration
+		read := func([]Reached) (map[int]taskTime, bool) {
+			wall += held(10, 8*time.Millisecond)
+			from := wall
+			wall += held(20, 3*time.Millisecond)
+			at = wall
+			tt, lag := life.account(at)
+			sinceTick = lag
+			wall += held(20, 3*time.Millisecond)
+			to := wall
+			// Its state, read after its account, and where that shows it
+			// not runnable, its account again after that (readTaskTimesIn).
+			wall += held(20, 3*time.Millisecond)
+			state, _ := life.account(wall)
+			tt.runnable = state.runnable
+			if !tt.runnable {
+				wall += held(20, 3*time.Millisecond)
+				if again, _ := life.account(wall); again.ran != tt.ran || again.waited != tt.waited || again.slices != tt.slices {
+					tt.missed = max(again.waited-tt.waited, 0)
+					tt.turned = again.slices != tt.slices
+					tt.ranAgain = again.ran
+				}
+			}
+			if timed {
+				tt.from, tt.to = base.Add(from), base.Add(to)
+			}
+			wall += held(10, 8*time.Millisecond)
+			return map[int]taskTime{1: tt}, true
+		}
+		own := &stall.ManualClock{}
+		c := newExitClock(nil, time.Hour, time.Hour, time.Hour, own, func() time.Time { return base.Add(wall) }, read,
+			func() (diskMark, bool) { return nil, false }, nil)
+		// The stall's starts: the clock's, and those after a look the test
+		// starts it again at (as ExitMeter.Reset does), each with its count
+		// so far, the moment its read took the account, and the run it held
+		// that the kernel booked only after.
+		type start struct {
+			ran, at, sinceTick time.Duration
+		}
+		starts := []start{{c.ran, at, sinceTick}}
+		for range 40 {
+			wall += time.Duration(rng.Intn(25000)+500) * time.Microsecond
+			own.Advance(time.Hour)
+			c.Runnable()
+			for _, st := range starts {
+				if counted, could := c.ran-st.ran, life.could(st.at, at)+st.sinceTick; counted > could {
+					t.Fatalf("timeline %d (reads timed: %v): from %v to %v the clock counted %v, more than the %v the thread could run", trial, timed, st.at, at, counted, could)
+				}
+			}
+			if rng.Intn(8) == 0 {
+				c.restarted()
+				starts = append(starts, start{c.ran, at, sinceTick})
+			}
+		}
+	}
+}
+
+// timeline is a thread's life as spans in which it is on a CPU ('R'),
+// waiting for one ('W'), or asleep ('S').
+type timeline []lifeSpan
+
+// lifeSpan is a span of a thread's life (timeline).
+type lifeSpan struct {
+	state    byte
+	from, to time.Duration
+}
+
+// timelineTick is the scheduler's tick (HZ=250), at which the kernel books a
+// thread's time on a CPU so far.
+const timelineTick = 4 * time.Millisecond
+
+// randomTimeline is a thread that takes turns on a CPU it shares for d and
+// more: turns and waits of up to 6 ms, and after one turn in twenty a sleep
+// of up to 3 ms, after which it waits for the CPU or is given it at once.
+func randomTimeline(rng *rand.Rand, d time.Duration) timeline {
+	var l timeline
+	state := byte('R')
+	for at := time.Duration(0); at < d+time.Second; {
+		n := 6000
+		if state == 'S' {
+			n = 3000
+		}
+		to := at + time.Duration(rng.Intn(n)+1)*time.Microsecond
+		l = append(l, lifeSpan{state, at, to})
+		at = to
+		switch {
+		case state == 'R' && rng.Intn(20) == 0:
+			state = 'S'
+		case state == 'R':
+			state = 'W'
+		case state == 'W' || rng.Intn(2) == 0:
+			state = 'R'
+		default:
+			state = 'W'
+		}
+	}
+	return l
+}
+
+// account is the kernel's account of the thread at t: each wait booked once
+// it ends, as the thread is given the CPU, and its time on one at each tick
+// and at the end of each turn; and what it has run since the last tick, on a
+// CPU at t, that the account does not show yet.
+func (l timeline) account(t time.Duration) (tt taskTime, sinceTick time.Duration) {
+	for _, s := range l {
+		if s.from >= t {
+			break
+		}
+		if t < s.to {
+			tt.runnable = s.state != 'S'
+		}
+		switch {
+		case s.state == 'R':
+			tt.slices++
+			if s.to <= t {
+				tt.ran += s.to - s.from
+				break
+			}
+			tick := max(t/timelineTick*timelineTick, s.from)
+			tt.ran += tick - s.from
+			sinceTick = t - tick
+		case s.state == 'W' && s.to <= t:
+			tt.waited += s.to - s.from
+		}
+	}
+	return tt, sinceTick
+}
+
+// could is how long, from a to b, the thread ran or slept.
+func (l timeline) could(a, b time.Duration) (d time.Duration) {
+	for _, s := range l {
+		if s.state != 'W' {
+			d += max(min(s.to, b)-max(s.from, a), 0)
+		}
+	}
+	return d
 }
 
 // A thread held in the kernel (D) waits for no CPU, and the kernel does not
@@ -557,6 +928,48 @@ func TestTheExitClockTakesAWaitInTheKernelOnStorageThatServesForAWait(t *testing
 		r.serves(w)
 		if got := r.look(w, w, nil); got != 0 {
 			t.Fatalf("the look after its turn added %v, want none: its stretch began again", got)
+		}
+	})
+	t.Run("a turn on a CPU as its state is read ends its stretch too", func(t *testing.T) {
+		// Held in the kernel at each look, its account the same at each,
+		// but given a CPU as its state was read (turned): it stands in the
+		// kernel at no look, and storage that serves holds all of it.
+		r := serving()
+		for i := range 6 {
+			r.serves(w)
+			got := r.look(w, w, func(m map[int]taskTime) {
+				th := m[1]
+				th.turned = true
+				m[1] = th
+			})
+			if got != 0 {
+				t.Fatalf("look %d of a thread given a CPU as its state was read added %v, want none", i, got)
+			}
+		}
+	})
+	t.Run("a run a look counted as a thread went into the kernel is no time it neither ran nor waited after", func(t *testing.T) {
+		// On a CPU since its last tick, 4 ms, as its account is read, and
+		// held in the kernel as its state is, storage serving none of the
+		// look: the look counts all it did not wait.
+		r := newClockRig(map[int]taskTime{1: {slices: 3}})
+		r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 10*ms, 20*ms, 1, false)(m)
+			th := m[1]
+			th.ranAgain, th.blocked, th.seen = th.ran+4*ms, true, true
+			m[1] = th
+		})
+		// Held in the kernel since, storage serving throughout: its
+		// account books those 4 ms now, which are no part of this look,
+		// all of which was a wait on storage.
+		r.serves(w)
+		got := r.look(w, w, func(m map[int]taskTime) {
+			adds(1, 4*ms, 0, 0, false)(m)
+			th := m[1]
+			th.ranAgain, th.blocked, th.seen = 0, true, true
+			m[1] = th
+		})
+		if got != 0 {
+			t.Fatalf("the look it was held in the kernel throughout, storage serving, added %v, want none", got)
 		}
 	})
 	t.Run("one is taken for wedged no sooner than the kernel reports a task hung, where that is longer than the bound", func(t *testing.T) {
@@ -1189,9 +1602,20 @@ func TestTheExitClockReadsEveryThreadOfItsProcesses(t *testing.T) {
 	// Read 2 s after the system booted: a thread started at tick 7 (of
 	// 10ms) is 1.93 s old.
 	boot := func() time.Duration { return 2 * time.Second }
+	from := time.Now()
 	got, ok := readTaskTimesIn(root, []Reached{{PID: 100, Start: 7}, {PID: 200, Start: 8}, {PID: 300, Start: 1}}, boot, mountsSeen)
+	to := time.Now()
 	if !ok {
 		t.Fatal("the zombie-led process was not read")
+	}
+	// Each thread's read is timed within the read of them all; the rest of
+	// its account is as the files say.
+	for tid, th := range got {
+		if !readWithin(th, from, to) {
+			t.Errorf("thread %d was read from %v to %v, not within the read of them all, from %v to %v", tid, th.from, th.to, from, to)
+		}
+		th.from, th.to = time.Time{}, time.Time{}
+		got[tid] = th
 	}
 	ms := time.Millisecond
 	want := map[int]taskTime{
@@ -1213,14 +1637,109 @@ func TestTheExitClockReadsEveryThreadOfItsProcesses(t *testing.T) {
 	}
 }
 
-// startProc starts command under sh for the test, which kills it at its end.
+// A thread's state is read after its account, and one its state shows not
+// runnable may have been waiting for a CPU when its account was read: then
+// it has been given the CPU since, which booked the whole wait. Its account
+// is read again after its state: the waits it booked since count too
+// (missed), a turn on a CPU since ends a stretch in the kernel (turned), its
+// time on a CPU then is kept (ranAgain), and one whose account is gone by
+// then is taken for runnable.
+func TestAThreadNotRunnableIsReadAgainForTheWaitsItBookedAsItsStateWasRead(t *testing.T) {
+	type proc = struct {
+		state   byte
+		start   uint64
+		threads []fakeThread
+	}
+	root := fakeProc(t, map[int]proc{
+		500: {state: 'S', start: 7, threads: []fakeThread{{500, 'S', 5, 1, 2, "", "", ""}, {501, 'D', 3, 1, 1, "", "", ""}, {502, 'S', 4, 4, 4, "", "", ""}, {503, 'S', 2, 2, 2, "", "", ""}}},
+	})
+	// Threads 500, 501 and 503 move on as their state is read: their stat
+	// is a FIFO whose writer, once it is opened, moves their account on (or,
+	// for 503, which exits, removes it) and only then gives the stat.
+	for tid, moved := range map[string]string{"500": "6 3 3\n", "501": "4 2 2\n", "503": ""} {
+		dir := filepath.Join(root, "500", "task", tid)
+		stat, err := os.ReadFile(filepath.Join(dir, "stat"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fifo := filepath.Join(dir, "stat")
+		if err := os.Remove(fifo); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mkfifo(fifo, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		end := make(chan struct{})
+		go func() {
+			defer close(end)
+			f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+			if err != nil {
+				return
+			}
+			defer func() { _ = f.Close() }()
+			account := filepath.Join(dir, "schedstat")
+			if moved == "" {
+				_ = os.Remove(account)
+			} else if os.WriteFile(account+".moved", []byte(moved), 0o644) == nil {
+				_ = os.Rename(account+".moved", account)
+			}
+			_, _ = f.Write(stat)
+		}()
+		t.Cleanup(func() {
+			// A writer still waiting for its reader is let go.
+			if f, err := os.OpenFile(fifo, os.O_RDONLY|unix.O_NONBLOCK, 0); err == nil {
+				_ = f.Close()
+			}
+			<-end
+		})
+	}
+	got, ok := readTaskTimesIn(root, []Reached{{PID: 500, Start: 7}}, func() time.Duration { return 0 }, func(string) bool { return true })
+	if !ok {
+		t.Fatal("the process was not read")
+	}
+	for tid, th := range got {
+		th.from, th.to = time.Time{}, time.Time{}
+		got[tid] = th
+	}
+	want := map[int]taskTime{
+		500: {ran: 5, waited: 1, slices: 2, missed: 2, turned: true, ranAgain: 6},
+		501: {ran: 3, waited: 1, slices: 1, blocked: true, seen: true, missed: 1, turned: true, ranAgain: 4},
+		502: {ran: 4, waited: 4, slices: 4},
+		503: {ran: 2, waited: 2, slices: 2, runnable: true},
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("read %+v, want %+v (500 and 501 booked waits and turns as their state was read, 502 did not, 503 exited)", got, want)
+	}
+}
+
+// startProc starts command under sh for the test.
 func startProc(t *testing.T, command string) []Reached {
 	t.Helper()
-	cmd := exec.Command("sh", "-c", command)
+	return startCmd(t, exec.Command("sh", "-c", command))
+}
+
+// startSleeper starts a process that sleeps until the test's process is
+// gone, however that ends: a shell reading its stdin, a pipe no one writes
+// to, whose write end the test's process alone holds, so the shell reads the
+// pipe's end once that process is gone.
+func startSleeper(t *testing.T) []Reached {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "read -r line")
+	if _, err := cmd.StdinPipe(); err != nil {
+		t.Fatal(err)
+	}
+	return startCmd(t, cmd)
+}
+
+// startCmd starts cmd for the test, in a process group of its own, which the
+// test kills, whole, at its end.
+func startCmd(t *testing.T, cmd *exec.Cmd) []Reached {
+	t.Helper()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Cleanup(func() { _ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL); _ = cmd.Wait() })
 	p, ok := ProcOf(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("the process is gone")
@@ -1228,36 +1747,130 @@ func startProc(t *testing.T, command string) []Reached {
 	return []Reached{p}
 }
 
-// liveRig makes ExitClocks of live processes on a wall clock and a keploy
-// runnable clock the test moves (looks), so what they count is the
-// processes' own account alone.
+// liveRig makes ExitClocks of live processes on the wall clock, each with
+// its reads of them kept (readSpans), on a keploy runnable clock the test
+// moves (looks) by more than any look, and on storage that serves throughout
+// (servingDisks), so what they count is the processes' own account of the
+// CPU alone. A process that only spins is held in the kernel too, now and
+// then: on a page of it the kernel is migrating (a fault that waits in
+// migration_entry_wait, uninterruptible), which the CPU it had does not show,
+// and which the clock counts as time it could run where the host's disks
+// serve less (ExitClock). On .142 under memory load, the two spinners of 150
+// runs of a test like TestTheExitClockOfAProcessSharingACPU were so held 176
+// times, for 8 µs to 16 ms. With storage serving throughout, the clock takes
+// each such hold a look finds for a wait.
 type liveRig struct {
-	wall time.Time
-	own  *stall.ManualClock
+	own   *stall.ManualClock
+	spans map[*ExitClock]*readSpans
 }
 
-func newLiveRig() *liveRig { return &liveRig{wall: time.Now(), own: &stall.ManualClock{}} }
+func newLiveRig() *liveRig {
+	return &liveRig{own: &stall.ManualClock{}, spans: map[*ExitClock]*readSpans{}}
+}
 
 func (r *liveRig) clock(procs []Reached) *ExitClock {
-	return newExitClock(procs, time.Hour, time.Hour, time.Hour, r.own, func() time.Time { return r.wall }, readTaskTimes, hostStorage.disks, hostStorage.below)
+	s := &readSpans{}
+	c := newExitClock(procs, time.Hour, time.Hour, time.Hour, r.own, time.Now, s.read, servingDisks(), nil)
+	r.spans[c] = s
+	return c
 }
 
-// looks looks at clocks n times, each after a pause, moving wall time and
-// keploy's runnable time by the time the pause took, and returns the time
-// that passed.
-func (r *liveRig) looks(n int, clocks ...*ExitClock) (total time.Duration) {
+// looks looks at clocks n times, each after a pause, moving keploy's
+// runnable time on by an hour each time (so that it bounds no look), and
+// returns the wall time that passed.
+func (r *liveRig) looks(n int, clocks ...*ExitClock) time.Duration {
+	start := time.Now()
 	for range n {
 		time.Sleep(20 * time.Millisecond)
-		now := time.Now()
-		d := now.Sub(r.wall)
-		r.wall = now
-		total += d
-		r.own.Advance(d)
+		r.own.Advance(time.Hour)
 		for _, c := range clocks {
 			c.Runnable()
 		}
 	}
-	return total
+	return time.Since(start)
+}
+
+// readSpans is an ExitClock's reader of live processes, which keeps what
+// each read of them read. Each read is held up first, by as much as 5 ms, as
+// a loaded host holds keploy off the CPU between reading the wall clock and
+// reading the processes (ExitClock).
+type readSpans struct {
+	reads []map[int]taskTime
+}
+
+// read reads procs' account, taking every filesystem a thread held in the
+// kernel can reach for one on the host's block devices (mountsSeen), as
+// servingDisks are.
+func (s *readSpans) read(procs []Reached) (map[int]taskTime, bool) {
+	time.Sleep(time.Duration(rand.Int63n(int64(5 * time.Millisecond))))
+	m, ok := readTaskTimesSeen(procs, func(string) bool { return true })
+	s.reads = append(s.reads, maps.Clone(m))
+	return m, ok
+}
+
+// window is the time from the start of the first read of thread tid's
+// account to the end of the last, which holds every moment the kernel took
+// one at.
+func (s *readSpans) window(t *testing.T, tid int) time.Duration {
+	t.Helper()
+	first, last := s.reads[0][tid], s.reads[len(s.reads)-1][tid]
+	if first.from.IsZero() || last.to.IsZero() {
+		t.Fatalf("thread %d was not read, timed, at the first read and the last", tid)
+	}
+	return last.to.Sub(first.from)
+}
+
+// still says whether read i found threads, none of them runnable, nor any
+// whose account moved as its state was read.
+func (s *readSpans) still(i int) bool {
+	m := s.reads[i]
+	for _, th := range m {
+		if th.runnable || th.missed > 0 || th.turned || th.ranAgain > 0 {
+			return false
+		}
+	}
+	return len(m) > 0
+}
+
+// asleep is how many reads found threads, and none of them runnable.
+func (s *readSpans) asleep() (n int) {
+	for _, m := range s.reads {
+		if len(m) > 0 && !slices.ContainsFunc(slices.Collect(maps.Values(m)), func(th taskTime) bool { return th.runnable }) {
+			n++
+		}
+	}
+	return n
+}
+
+// servingDisks is the host's block devices as one disk that serves I/O
+// throughout every look: it completes some, and has I/O in flight, between
+// any two reads of it.
+func servingDisks() func() (diskMark, bool) {
+	var d diskCount
+	return func() (diskMark, bool) {
+		d.done++
+		d.busy += time.Hour
+		return diskMark{"259:0": d}, true
+	}
+}
+
+// between is the time between the reads of the one thread of the clock's
+// process: from the end of each read of it to the start of the next.
+func (s *readSpans) between(t *testing.T) (d time.Duration) {
+	t.Helper()
+	for i := 1; i < len(s.reads); i++ {
+		if len(s.reads[i-1]) != 1 || len(s.reads[i]) != 1 {
+			t.Fatalf("read %d threads, then %d: want the one", len(s.reads[i-1]), len(s.reads[i]))
+		}
+		for tid, th := range s.reads[i] {
+			b, ok := s.reads[i-1][tid]
+			if !ok {
+				t.Fatalf("thread %d is new to read %d", tid, i)
+			}
+			d += th.from.Sub(b.to)
+		}
+	}
+	return d
 }
 
 // cpuSince is the CPU time the threads of an account had since an earlier
@@ -1296,8 +1909,8 @@ func spinning(t *testing.T, p Reached) {
 	}
 }
 
-// asleep waits until process p runs program comm and sleeps: an exec'd
-// sleep(1) that waits on its timer, with no more to run.
+// asleep waits until process p runs program comm and sleeps, with no more
+// to run.
 func asleep(t *testing.T, p Reached, comm string) {
 	t.Helper()
 	for {
@@ -1324,8 +1937,8 @@ func TestTheExitClockOfAProcessHeldOffTheCPU(t *testing.T) {
 	if !schedAccountKept() {
 		t.Skip("this kernel keeps no account of a thread's time on and waiting for a CPU")
 	}
-	spinner, sleeper := startProc(t, starvetest.ShellSpin("")), startProc(t, "exec sleep 600")
-	asleep(t, sleeper[0], "sleep")
+	spinner, sleeper := startProc(t, starvetest.ShellSpin("")), startSleeper(t)
+	asleep(t, sleeper[0], "sh")
 	spinning(t, spinner[0])
 	release := starvetest.Hold(t, spinner[0].PID)
 	defer release()
@@ -1336,19 +1949,32 @@ func TestTheExitClockOfAProcessHeldOffTheCPU(t *testing.T) {
 	if ran, _ := cpuSince(first, held.last); held.ran > ran {
 		t.Errorf("a process held off the CPU could run %v of %v by the clock, more than the %v of CPU it had", held.ran, total, ran)
 	}
-	if sleeping.ran != total {
-		t.Errorf("a process that sleeps could run %v of %v by the clock; want all of it", sleeping.ran, total)
+	if between := rig.spans[sleeping].between(t); sleeping.ran != between {
+		t.Errorf("a process that sleeps could run %v of the %v between the reads of it (of %v) by the clock; want all of it", sleeping.ran, between, total)
 	}
 }
 
-// On the kernel's own account: a process that spins on a CPU it shares could
-// run only the CPU it had, wherever its slices fall between the looks. The
-// kernel books a wait for a CPU only once it ends, so a look that finds it
-// waiting again after a slice does not show that wait yet.
+// On the kernel's own account: a process that spins and sleeps in turn, on
+// a CPU it shares, could run only what it ran and slept, however its turns
+// and sleeps fall between the looks, and however late keploy reads it. Read
+// first while asleep, its account unmoved as its state was read (so with no
+// wait for a CPU going on, nor run the kernel has not booked), it ran and
+// slept, from the moment the kernel took that account to the moment it took
+// the last, all of that time but its waits for a CPU: those its account
+// booked by the last read, and the one it may be in then. So the clock counts
+// no more than the time from the start of the first read of its account to
+// the end of the last (readSpans.window), less those its account booked. A
+// look that finds it asleep counts all of its time but the waits its account
+// booked since the last look, less what of them the clock counted as they
+// went: what the test looks at, so the looks go on until ten found it asleep.
 func TestTheExitClockOfAProcessSharingACPU(t *testing.T) {
 	starvetest.TakesACPU(t)
 	if !schedAccountKept() {
 		t.Skip("this kernel keeps no account of a thread's time on and waiting for a CPU")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("no bash, whose read times out, to sleep in without starting a process")
 	}
 	var mine unix.CPUSet
 	if err := unix.SchedGetaffinity(0, &mine); err != nil {
@@ -1365,24 +1991,63 @@ func TestTheExitClockOfAProcessSharingACPU(t *testing.T) {
 	}
 	var one unix.CPUSet
 	one.Set(cpu)
-	spinner, other := startProc(t, starvetest.ShellSpin("")), startProc(t, starvetest.ShellSpin(""))
-	for _, p := range []Reached{spinner[0], other[0]} {
+	fifo := filepath.Join(t.TempDir(), "unwritten")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharer, other := startCmd(t, exec.Command(bash, "-c", spinSleep(fifo))), startProc(t, starvetest.ShellSpin(""))
+	for _, p := range []Reached{sharer[0], other[0]} {
 		if err := unix.SchedSetaffinity(p.PID, &one); err != nil {
 			t.Skipf("cannot pin process %d to CPU %d: %v", p.PID, cpu, err)
 		}
 	}
-	for _, p := range []Reached{spinner[0], other[0]} {
+	for _, p := range []Reached{sharer[0], other[0]} {
 		spinning(t, p)
 	}
 	rig := newLiveRig()
-	c := rig.clock(spinner)
-	first := maps.Clone(c.last)
-	total := rig.looks(40, c)
+	var c *ExitClock
+	for tries := 0; ; tries++ {
+		if c = rig.clock(sharer); rig.spans[c].still(0) {
+			break
+		}
+		if now, ok := ProcOf(sharer[0].PID); !ok || now != sharer[0] {
+			t.Fatalf("process %d is gone", sharer[0].PID)
+		}
+		if tries == 5000 {
+			t.Fatalf("process %d was found asleep at none of %d reads: it does not sleep", sharer[0].PID, tries)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	first, reads := maps.Clone(c.last), rig.spans[c]
+	var total time.Duration
+	for looks := 0; looks < 40 || reads.asleep() < 11; looks++ {
+		if looks == 5000 {
+			t.Fatalf("the process was asleep at %d of %d looks: it hardly sleeps", reads.asleep()-1, looks)
+		}
+		total += rig.looks(1, c)
+		if now, ok := ProcOf(sharer[0].PID); !ok || now != sharer[0] {
+			t.Fatalf("process %d is gone", sharer[0].PID)
+		}
+	}
 	ran, waited := cpuSince(first, c.last)
 	if waited == 0 {
-		t.Fatalf("the spinner waited for no CPU in %v: the test shared none", total)
+		t.Fatalf("the process waited for no CPU in %v: the test shared none", total)
 	}
-	if c.ran > ran {
-		t.Errorf("a process sharing a CPU could run %v of %v by the clock, more than the %v of CPU it had (it waited %v for one)", c.ran, total, ran, waited)
+	window := reads.window(t, sharer[0].PID)
+	if could := window - waited; c.ran > could {
+		t.Errorf("a process sharing a CPU, spinning and sleeping in turn, could run %v of %v by the clock, more than the %v it could: of the %v from its first read to its last, it waited %v for a CPU (and ran %v; %d of %d looks found it asleep)",
+			c.ran, total, could, window, waited, ran, reads.asleep()-1, len(reads.reads)-1)
 	}
+}
+
+// spinSleep is a bash loop that, while this process (the test's) runs, as
+// ShellSpin, counts to three thousand and sleeps 10 ms, in turn: the count
+// takes bash milliseconds of CPU, as a rule more than the scheduler gives it
+// in one turn on a CPU it shares, so it waits for one, as well as sleeping
+// (the test fails where it waited for none). The sleep is a read's timeout
+// on fifo, which no one writes, so the shell starts no process to sleep in,
+// and its look for the test's process is a kill(2) of no signal, which never
+// sleeps.
+func spinSleep(fifo string) string {
+	return fmt.Sprintf("exec 3<>'%s'; while kill -0 %d; do i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; read -t 0.01 -u 3; done", fifo, os.Getpid())
 }
