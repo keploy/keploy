@@ -215,6 +215,14 @@ type Agent struct {
 	// replay, under the proven switch: the start time of the process that
 	// opened each window in workerOpen (procStartTime), where it is known.
 	openProc map[scopeKey]string
+
+	// unsettled counts, in a record, the settles at a test's begin or end
+	// that could not tell that every call had reached the proxy, with why
+	// the latest could not (models.CaptureLossUnsettled): the test's
+	// evidence, in CaptureLosses.
+	unsettledMu   sync.Mutex
+	unsettledN    uint64
+	unsettledWhat string
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {

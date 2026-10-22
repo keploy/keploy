@@ -12,7 +12,7 @@ import (
 
 // WaitPairedBytes cannot tell here: the kernel's count of the connections to
 // the proxy, and the sockets it reads, are Linux's.
-func (p *Proxy) WaitPairedBytes(context.Context, uint64) error {
+func (p *Proxy) WaitPairedBytes(context.Context, uint64, models.Mode) error {
 	return fmt.Errorf("%w: the bytes on the proxy's connections are counted on Linux only", models.ErrProxyConnsUnsupported)
 }
 
@@ -37,3 +37,7 @@ func readUnread(*net.TCPConn) (int, error) {
 func readProxySide(*net.TCPConn) proxySide {
 	return proxySide{err: fmt.Errorf("%w: the proxy's sockets are read on Linux only", models.ErrProxyConnsUnsupported)}
 }
+
+// appEndGone cannot tell here: the proxy's sockets' state is read on Linux
+// only. "" (the application may still send).
+func (p *Proxy) appEndGone(*trackedConn) string { return "" }

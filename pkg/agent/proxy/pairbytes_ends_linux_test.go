@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -39,11 +41,100 @@ func TestAResetAfterTheBytesArrivedIsNoLoss(t *testing.T) {
 	if _, err := reader.Read(buf); !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("the proxy's read after the reset: %v, want ECONNRESET", err)
 	}
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+	if err := p.WaitPairedBytes(context.Background(), 1, models.MODE_TEST); err != nil {
 		t.Fatalf("WaitPairedBytes: %v, want settled", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
 		t.Fatalf("%d app_bytes_lost for a connection whose every byte reached the proxy before its reset, want 0", l)
+	}
+}
+
+// The application's reset reaches the proxy's held side with its call still
+// unsent, and then the handler closes with the bytes that did arrive unread:
+// the close charges the loss (they were never captured), and the wait settles
+// on it, rather than leaving the reset's unsent rest unknown.
+func TestAResetThenACloseWithBytesUnreadSettlesOnTheLoss(t *testing.T) {
+	p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	queue(t, app)
+	targets, err := p.pairTargets(1)
+	if err != nil || len(targets) != 1 || targets[0].sent >= targets[0].want {
+		t.Fatalf("pairTargets = %+v, %v; want one connection with bytes not sent yet", targets, err)
+	}
+	// Everything it sent acknowledged first, so its reset cannot overtake a
+	// byte on its way: what is missing was never sent.
+	awaitAcked(t, app)
+	if err := app.SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close()
+	for {
+		ps := readProxySide(proxySide)
+		if ps.err != nil {
+			t.Fatal(ps.err)
+		}
+		if ps.state == tcpClose {
+			break
+		}
+		runtime.Gosched()
+	}
+	_ = reader.Close() // bytes unread: a loss, charged at the close
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
+		t.Fatalf("waitPairTargets: %v, want settled on the loss its close charged", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+		t.Fatalf("%d app_bytes_lost, want 1", l)
+	}
+}
+
+// A loss being charged on a connection (its close tossing bytes unread) and a
+// wait that finds a reset there with bytes it had sent missing: the wait
+// charges the same loss, finds it being charged, and waits for its count, so
+// it settles only once the test's read of its losses would see it. Without
+// that, the wait would settle with the loss not yet counted: a test judged
+// without it.
+func TestAWaitSettlesOnALossOnlyOnceItIsCounted(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	pc := &pairedConn{done: make(chan struct{})}
+	counting, release, waits, waited := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1), make(chan struct{}, 1)
+	var countingOnce sync.Once
+	// Idempotent: a second charge of the same loss (a once-only check
+	// lost) is counted again, not a panic, and the count says it.
+	pairLostCounting = func() { countingOnce.Do(func() { close(counting); <-release }) }
+	pairLostWaits = func() { waits <- struct{}{} }
+	pairLostWaited = func() { waited <- struct{}{} }
+	t.Cleanup(func() { pairLostCounting, pairLostWaits, pairLostWaited = nil, nil, nil })
+	closed := make(chan struct{})
+	go func() { p.pairLost(pc, "the close tossed bytes unread"); close(closed) }()
+	<-counting // the close's charge, not yet counted
+	type answer struct {
+		ok  bool
+		err error
+		n   uint64
+	}
+	done := make(chan answer, 1)
+	go func() {
+		ok, err := p.pairReset(&pairTarget{pc: pc, want: 20, sent: 20}, 10)
+		done <- answer{ok, err, lossesOf(p, models.CaptureLossAppBytesLost)}
+	}()
+	select {
+	case a := <-done:
+		close(release)
+		t.Fatalf("the wait answered %v, %v with %d losses counted while the close's charge was still being counted", a.ok, a.err, a.n)
+	case <-waits:
+	}
+	close(release)
+	a := <-done
+	<-closed
+	select {
+	case <-waited:
+	default:
+		t.Fatal("the wait returned without having waited for the close's charge to be counted")
+	}
+	if !a.ok || a.err != nil || a.n != 1 {
+		t.Fatalf("the wait = %v, %v with %d losses counted as it returned; want settled with the 1 loss counted", a.ok, a.err, a.n)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+		t.Fatalf("%d app_bytes_lost, want 1: once per connection", l)
 	}
 }
 
@@ -69,7 +160,7 @@ func TestAResetAfterTheTargetWasReadIsNoLoss(t *testing.T) {
 	if _, err := reader.Read(buf); !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("the proxy's read after the reset: %v, want ECONNRESET", err)
 	}
-	if err := p.waitPairTargets(context.Background(), targets); err != nil {
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 		t.Fatalf("waitPairTargets: %v", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -96,7 +187,7 @@ func TestTheProxysResetAfterTheBytesArrivedIsNoLoss(t *testing.T) {
 	_ = proxySide.SetLinger(0)
 	_ = reader.Close()
 	p.paired.remove(proxySide)
-	if err := p.waitPairTargets(context.Background(), targets); err != nil {
+	if err := p.waitPairTargets(context.Background(), targets, false); err != nil {
 		t.Fatalf("waitPairTargets: %v", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
@@ -193,7 +284,7 @@ func TestTheWaitIsParkedUntilTheLastByteArrives(t *testing.T) {
 				t.Fatalf("the proxy's side received %d of %d at once: the fixture holds nothing back", got, want)
 			}
 			done := make(chan error, 1)
-			go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+			go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
 			// Parked: it took the registry's change channel (only it takes
 			// one here) before the first read below.
 			for {
@@ -230,28 +321,49 @@ func TestTheWaitIsParkedUntilTheLastByteArrives(t *testing.T) {
 	}
 }
 
-// The application resets the connection with its call still unsent: its own
-// abort dropped those bytes, as it would have without keploy (the kernel took
-// the reset only at the sequence number it expected next, so every byte it
-// had sent had arrived): settled, no capture loss.
-func TestTheApplicationsOwnResetIsNoLoss(t *testing.T) {
+// The application resets the connection with its call still unsent behind the
+// proxy's window. Its abort may have dropped those bytes unsent, as it would
+// have without keploy, or sent them later and lost them: a reset the kernel
+// takes says nothing of bytes still on their way (pairReset), so it is
+// unknown, and charges nothing.
+func TestTheApplicationsResetWithItsCallUnsentIsUnknown(t *testing.T) {
 	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
 	queue(t, app)
 	targets, err := p.pairTargets(1)
-	if err != nil || len(targets) != 1 {
-		t.Fatalf("pairTargets = %v, %v", targets, err)
+	if err != nil || len(targets) != 1 || targets[0].sent >= targets[0].want {
+		t.Fatalf("pairTargets = %+v, %v; want one connection with bytes not sent yet", targets, err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+	go func() { done <- p.waitPairTargets(context.Background(), targets, false) }()
+	// Everything it sent acknowledged first, so its reset cannot overtake
+	// a byte on its way: what is missing was never sent.
+	awaitAcked(t, app)
 	if err := app.SetLinger(0); err != nil {
 		t.Fatal(err)
 	}
 	_ = app.Close()
 	go func() { _, _ = io.Copy(io.Discard, reader) }()
-	if err := <-done; err != nil {
-		t.Fatalf("waitPairTargets: %v", err)
+	if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "not yet sent") {
+		t.Fatalf("waitPairTargets: %v; want unknown: the abort may have dropped the call unsent, or it was sent and lost", err)
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
-		t.Fatalf("%d app_bytes_lost for the application's own abort, want 0", l)
+		t.Fatalf("%d app_bytes_lost for an unknown, want 0", l)
+	}
+}
+
+// awaitAcked returns once everything the application's socket has sent is
+// acknowledged (tcpi_unacked 0).
+func awaitAcked(t *testing.T, app *net.TCPConn) {
+	t.Helper()
+	local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
+	for {
+		d, err := lookupTCP(local, remote)
+		if err != nil {
+			t.Fatalf("the application's socket: %v", err)
+		}
+		if d.info != nil && d.info.Unacked == 0 {
+			return
+		}
+		runtime.Gosched()
 	}
 }

@@ -35,11 +35,8 @@ import (
 //
 // Each step waits on an event: an accept, a read beginning or returning, a
 // request held or released, an idle wait marked or released, a connection
-// closing; and, for a connection the proxy closed whose orphaned socket the
-// application's FIN has not reached yet, which no event tells, the orphan's
-// state, looked at again until it takes the FIN or is gone
-// (proxy.WaitPairedBytes). No wall clock decides: only a hang budget measured
-// in time the agent could run ends that look as unknown. A test
+// closing, and what comes to a connection's socket the proxy keeps open past
+// its close (proxy.WaitPairedBytes). No clock decides. A test
 // whose calls keploy cannot count (models.ErrProxyConnsUnsupported, or hooks
 // not loaded) is not settled: "unknown" is never "none in flight". Nor is one
 // with a connection whose parser reads ahead and does not say what it holds,
@@ -47,7 +44,10 @@ import (
 // the kernel dropped packets at the proxy's listener (dropped): its end
 // leaves it not verified. The run's read
 // of its misses settles the same way, so a call after the last test's end is
-// read, never filed after it.
+// read, never filed after it. A record never fails a test for what its
+// settle cannot tell: at a begin or an end it is the test's evidence
+// (models.CaptureLossUnsettled), which a strict replay of the test decides,
+// and its wait for the bytes goes on past a connection it cannot tell.
 //
 // The wait has a minimal watchdog (design v14 §8.4): it wakes once a second
 // and counts, for each thing the wait waits on, the wake-ups in a row at which
@@ -115,8 +115,10 @@ func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
 // settle waits until the test's calls are all in the proxy's hands, and, in a
 // replay (answers), answered. It returns the proxy listener's drops read once
 // settled (models.ProxyConnCounts.ListenDrops), which a test's end compares
-// with its begin's (settledDrops). An error says keploy cannot tell: the test
-// is not judged. holdsUnknown comes with the drops.
+// with its begin's (settledDrops). An error says keploy cannot tell: a
+// replay's test is not judged, and a record's is charged it as its evidence
+// (unsettledIsEvidence). holdsUnknown comes with the drops, and so does, in
+// a record, pairedBytesUnknown (dropsRead).
 func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
 	if !ok || a.Proxy == nil {
@@ -146,7 +148,21 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	// are what must move; once it is for the connections' work, each
 	// connection that still holds some must.
 	var working atomic.Bool
-	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
+	// A record's wait for the calls in flight looks again, at each of the
+	// watchdog's wake-ups, for connections holding bytes no reader will take
+	// (coreAgent.InFlightStuckReader), which no event tells: the wake only
+	// makes it look, and their state alone decides.
+	stuckR, looksStuck := a.stuckReader()
+	recheck := make(chan struct{}, 1)
+	woke := func() {
+		if looksStuck && working.Load() {
+			select {
+			case recheck <- struct{}{}:
+			default:
+			}
+		}
+	}
+	stop := a.watchSettle(ctx, cancel, woke, func() map[string]uint64 {
 		c, err := a.ProxyConns(ctx)
 		if !working.Load() {
 			if err != nil {
@@ -167,15 +183,38 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		return out
 	})
 	defer stop()
+	// A record that could not tell the bytes on a connection goes on to the
+	// requests in flight, and answers what it could not tell (bytesErr) once
+	// none is: a call the proxy holds is the test's, and the next test's
+	// window is not where it lands. A replay's answers at once, as the
+	// proxy's error.
+	var bytesErr error
 	if err := a.WaitProxySettled(ctx, counts); err != nil {
 		if cause := context.Cause(ctx); cause != nil {
 			return 0, cause
 		}
-		return 0, err
+		var bu pairedBytesUnknown
+		switch {
+		case !errors.As(err, &bu):
+			return 0, err
+		case !a.recording():
+			return 0, bu.err
+		}
+		bytesErr = bu
 	}
 	working.Store(true)
+	// The connections this settle found holding bytes no reader will take
+	// (InFlightStuckReader): marked, they are no work of its wait, and what
+	// it could not tell once the rest settle, while their marks hold.
+	var stuck []coreAgent.StuckConn
 	for {
 		changed := ir.InFlightChanged()
+		// What it marked that still holds, read before the connections'
+		// state: a mark only ever ends, by a read that took a byte of its
+		// connection. One that ends before the state is read is work there
+		// again; one that ends after is still answered, as what the settle
+		// could not tell.
+		held := stillStuck(stuck)
 		// One view of the connections (InFlightState): read apart, a parser
 		// that ended a state it could not tell between the two reads would be
 		// seen neither busy nor unknown.
@@ -188,18 +227,73 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			// Settled, but for a connection whose parser reads ahead and does
 			// not say which requests it holds, or says that for now it cannot
 			// tell: it may hold one.
+			// (A record's, which alone has bytesErr, reads no held
+			// requests: answers is a replay's.)
 			if len(unknown) > 0 {
 				return c.ListenDrops, holdsUnknown(unknown)
 			}
-			return c.ListenDrops, nil
+			if len(held) > 0 {
+				return c.ListenDrops, stuckUnread{conns: held, also: bytesErr}
+			}
+			return c.ListenDrops, bytesErr
 		}
 		select {
 		case <-changed:
+		case <-recheck:
+			// Marked, they leave the wait's count: it is read again.
+			stuck = append(stuck, stuckR.InFlightStuck()...)
 		case <-ctx.Done():
 			return 0, context.Cause(ctx)
 		}
 	}
 }
+
+// stuckReader is the proxy's read of the connections holding bytes no reader
+// will take (coreAgent.InFlightStuckReader), which a record's settle looks
+// at: ok only in a record (recording), and with a proxy that tells it.
+func (a *Agent) stuckReader() (coreAgent.InFlightStuckReader, bool) {
+	r, ok := a.Proxy.(coreAgent.InFlightStuckReader)
+	if !ok || !a.recording() {
+		return nil, false
+	}
+	return r, true
+}
+
+// stillStuck says what each of stuck holds whose mark still holds
+// (coreAgent.StuckConn.Holds): no read has taken a byte of it since the
+// settle found it.
+func stillStuck(stuck []coreAgent.StuckConn) []string {
+	var out []string
+	for _, s := range stuck {
+		if s.Holds() {
+			out = append(out, s.String())
+		}
+	}
+	return out
+}
+
+// stuckUnread is a record's settle's answer when, once the rest settled, the
+// connections it found holding bytes no reader will take
+// (coreAgent.InFlightStuckReader) still hold them: whether they carry a call
+// of the test cannot be told, so the record charges it
+// (unsettledIsEvidence), and does not wait for good on bytes nothing will
+// read. also is what else the wait could not tell (pairedBytesUnknown), if
+// anything.
+type stuckUnread struct {
+	conns []string
+	also  error
+}
+
+func (s stuckUnread) Error() string {
+	msg := "keploy cannot tell whether a call of the test is among " + strings.Join(s.conns, "; ")
+	if s.also != nil {
+		// One line: what else it could not tell may join several.
+		return strings.ReplaceAll(s.also.Error(), "\n", "; ") + "; and " + msg
+	}
+	return msg
+}
+
+func (s stuckUnread) Unwrap() error { return s.also }
 
 // droppedWhile is the error for a test (or a run's tail) during which the
 // kernel dropped packets at the proxy's listener: from its drops at the start,
@@ -235,8 +329,10 @@ func (d dropped) Is(target error) bool { return target == errDropped }
 // connection that still holds work). It cancels ctx with errNoProgress once
 // one of them has not moved for settleStallLimit wake-ups in a row: a wait is
 // stuck when what it waits on does not move, whatever moves elsewhere. One
-// that stops being waited on drops out; a new one starts its count.
-func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc, progress func() map[string]uint64) (stop func()) {
+// that stops being waited on drops out; a new one starts its count. woke,
+// when set, runs at each wake-up it weighed and did not fire on, never at
+// its start: what a wait looks at only when the watchdog wakes.
+func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc, woke func(), progress func() map[string]uint64) (stop func()) {
 	wake, stopWake := settleWake(ctx)
 	quit, done := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -269,6 +365,8 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 			last = now
 			if fire {
 				cancel(errNoProgress)
+			} else if woke != nil {
+				woke()
 			}
 			if settleWoken != nil {
 				settleWoken()
@@ -285,11 +383,28 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 	}
 }
 
+// dropsRead reports whether a settle that answered err read the proxy
+// listener's drops (settle): it settled, or found only what it could not
+// tell once every connection was in the proxy's hands.
+func dropsRead(err error) bool {
+	var bu pairedBytesUnknown
+	var su stuckUnread
+	return err == nil || errors.Is(err, errHoldsUnknown) || errors.As(err, &bu) || errors.As(err, &su)
+}
+
 // markDrops notes the proxy listener's drops read as a window began (a
 // test's begin, or the settling that ended the window before).
 func (a *Agent) markDrops(drops uint64) {
 	a.provenMu.Lock()
 	a.proven.drops, a.proven.dropsKnown = drops, true
+	a.provenMu.Unlock()
+}
+
+// forgetDrops says the drops a window began with are not known (a record's
+// begin whose settle could not tell): its end compares nothing with them.
+func (a *Agent) forgetDrops() {
+	a.provenMu.Lock()
+	a.proven.dropsKnown = false
 	a.provenMu.Unlock()
 }
 

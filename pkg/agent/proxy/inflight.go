@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sort"
@@ -88,6 +89,13 @@ type trackedConn struct {
 	raw syscall.RawConn
 	// forgotten: its handler is done with it (forget).
 	forgotten atomic.Bool
+	// stuckAt marks it as a record's settle found it: holding bytes no
+	// reader will take (Proxy.InFlightStuck), the test's evidence. It is
+	// what its reads had returned then (delivered), plus one; 0 for none.
+	// The mark holds while no read returns more (stuckHolds), and while it
+	// holds no record's wait waits on it. A read that returns bytes ends
+	// it: its handler took them after all, and it is work again.
+	stuckAt atomic.Uint64
 	// beforeClose, when set (by the accept, before the handler runs), runs
 	// once as Close begins, while the socket can still be read
 	// (pairbytes.go).
@@ -203,6 +211,9 @@ func (t *inflight) Pending(answers bool) int {
 // instant (view), then its socket (untaken), as State reads it.
 func (c *trackedConn) pending(answers bool) bool {
 	v := c.view()
+	if !answers && c.stuckHolds(v) {
+		return false
+	}
 	return busy(c.untaken(v), answers, v.reading, v.held, v.idle, c.closing.Load())
 }
 
@@ -244,6 +255,9 @@ func (t *inflight) State(answers bool) (pending int, unknown []string) {
 		// it. Then the parser the proxy noted, which it notes before that
 		// parser's first read (servedBy).
 		v := tc.view()
+		if !answers && tc.stuckHolds(v) {
+			continue
+		}
 		if busy(tc.untaken(v), answers, v.reading, v.held, v.idle, tc.closing.Load()) {
 			pending++
 		}
@@ -536,6 +550,75 @@ func (p *Proxy) InFlightState(answers bool) (pending int, unknown []string) {
 	return p.inflight.State(answers)
 }
 
+// stuckHolds reports whether c's stuck mark holds at v: it was marked, and no
+// read has returned a byte since (stuckAt).
+func (c *trackedConn) stuckHolds(v connView) bool {
+	at := c.stuckAt.Load()
+	return at != 0 && at == v.delivered+1
+}
+
+// InFlightStuck implements agent.InFlightStuckReader: a record's look at the
+// connections it waits on for those holding bytes no reader will take, each
+// marked as it is found (stuckAt) and returned. Such a connection holds
+// bytes the application sent that no read has taken (untaken); its handler
+// has read from it before, so it is past its start, and is not reading now
+// (a handler that never read, still detecting the protocol or dialling the
+// destination, is still to read); and the application's end of it is gone
+// (appEndGone), so no more will come. One already marked is not said again:
+// the settle that marked it holds it (agent.StuckConn).
+func (p *Proxy) InFlightStuck() []agent.StuckConn {
+	t := &p.inflight
+	t.mu.Lock()
+	conns := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		conns = append(conns, tc)
+	}
+	t.mu.Unlock()
+	var out []agent.StuckConn
+	for _, tc := range conns {
+		if tc.forgotten.Load() {
+			continue
+		}
+		v := tc.view()
+		if tc.stuckHolds(v) || v.reading != 0 || v.delivered == 0 {
+			continue
+		}
+		untaken := tc.untaken(v)
+		if untaken == 0 {
+			continue
+		}
+		why := p.appEndGone(tc)
+		if why == "" {
+			continue
+		}
+		// A read that returned since the view ends the mark at once
+		// (stuckHolds). (A settle's looks run one at a time, under the wire
+		// lock.)
+		at := v.delivered + 1
+		tc.stuckAt.Store(at)
+		out = append(out, stuckConn{tc: tc, at: at,
+			what: fmt.Sprintf("%d byte(s) from %s that keploy's proxy has not read, its handler not reading them, and the application's end of that connection is gone (%s)", untaken, tc.RemoteAddr(), why)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// stuckConn is a connection InFlightStuck marked (agent.StuckConn).
+type stuckConn struct {
+	tc   *trackedConn
+	at   uint64
+	what string
+}
+
+// Holds reports whether this mark still holds: no read has returned a byte
+// of the connection since (a later mark comes only after one). A connection
+// whose handler closed it with its bytes unread still holds it.
+func (s stuckConn) Holds() bool {
+	return s.tc.delivered.Load()+1 == s.at
+}
+
+func (s stuckConn) String() string { return s.what }
+
 // InFlightPendingProgress implements agent.InFlightReader.
 func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
 	return p.inflight.PendingProgress(answers)
@@ -543,6 +626,7 @@ func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
 
 var (
 	_ agent.InFlightReader       = (*Proxy)(nil)
+	_ agent.InFlightStuckReader  = (*Proxy)(nil)
 	_ integrations.RequestHolder = (*trackedConn)(nil)
 	_ integrations.UnknownMarker = (*trackedConn)(nil)
 	_ integrations.IdleMarker    = (*trackedConn)(nil)

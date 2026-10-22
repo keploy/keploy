@@ -1977,8 +1977,18 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
 		// One attempt keploy could not read leaves the test unread, with
 		// that attempt's reason.
-		if w.Evidence.Unread && !ev.Unread {
-			ev.Unread, ev.Reason = true, w.Evidence.Reason
+		// Unsettled only if every attempt keploy could not read was so
+		// only because its settle could not tell.
+		switch {
+		case w.Evidence.Unread && !ev.Unread:
+			ev.Unread, ev.Reason, ev.Unsettled = true, w.Evidence.Reason, w.Evidence.Unsettled
+		case w.Evidence.Unread:
+			if ev.Unsettled && !w.Evidence.Unsettled {
+				// Unread for something else too: that is the line's
+				// reason now.
+				ev.Reason = w.Evidence.Reason
+			}
+			ev.Unsettled = ev.Unsettled && w.Evidence.Unsettled
 		}
 		// Counts since the run began: each attempt carries the run's, so
 		// keep one per kind, the latest (largest); a test's own kinds,

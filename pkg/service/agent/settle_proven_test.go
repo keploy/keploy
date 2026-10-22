@@ -83,12 +83,13 @@ func (h *countHooks) setApp(conns, settled uint64) {
 // The doubles are what the agent reads: a change to the counters'
 // interfaces breaks this build, not a test's count at run time.
 var (
-	_ coreAgent.ProxyConnsReporter = &countHooks{}
-	_ coreAgent.ProxyConnsReporter = countingHooks{}
-	_ coreAgent.ProxyConnsReporter = uncountedHooks{}
-	_ coreAgent.AcceptCounter      = &settledProxy{}
-	_ coreAgent.InFlightReader     = &settledProxy{}
-	_ coreAgent.PairedBytesWaiter  = &settledProxy{}
+	_ coreAgent.ProxyConnsReporter  = &countHooks{}
+	_ coreAgent.ProxyConnsReporter  = countingHooks{}
+	_ coreAgent.ProxyConnsReporter  = uncountedHooks{}
+	_ coreAgent.AcceptCounter       = &settledProxy{}
+	_ coreAgent.InFlightReader      = &settledProxy{}
+	_ coreAgent.PairedBytesWaiter   = &settledProxy{}
+	_ coreAgent.InFlightStuckReader = &settledProxy{}
 )
 
 // settledProxy is the part of a proxy a test's settling reads
@@ -112,6 +113,113 @@ type settledProxy struct {
 	// connections' work: its wait for the counts (WaitProxySettled) is over.
 	inWork   chan struct{}
 	workOnce sync.Once
+	// looks, when set, hears each look at the connections' work after the
+	// first, without holding it up.
+	looks chan struct{}
+	first bool
+	// stuck are the connections it holds that no reader will take, as the
+	// proxy's InFlightStuck finds them: work until a look marks them, and
+	// no record's work while the mark holds. A read of one ends its mark:
+	// all of it (readStuck), and it is done; part (readStuckPartly), and it
+	// is work again. stuckLooks counts the looks.
+	stuck      []*fakeStuck
+	stuckLooks atomic.Int32
+	// looked, when set, hears each look.
+	looked chan struct{}
+	// onDrops, when set, runs once as the listener's drops are next read
+	// (ProxyConns).
+	onDrops func()
+}
+
+// fakeStuck is a connection settledProxy holds that no reader will take.
+type fakeStuck struct {
+	what string
+	// marked: a look marked it; ended: a read ended the mark; done: it
+	// holds no work. gen counts its marks.
+	marked, ended, done bool
+	gen                 int
+}
+
+// stuckHandle is a fakeStuck as InFlightStuck returns it, for its mark gen.
+type stuckHandle struct {
+	s   *settledProxy
+	c   *fakeStuck
+	gen int
+}
+
+func (h stuckHandle) Holds() bool {
+	h.s.smu.Lock()
+	defer h.s.smu.Unlock()
+	return h.c.marked && !h.c.ended && h.c.gen == h.gen
+}
+
+func (h stuckHandle) String() string { return h.c.what }
+
+// addStuck holds one more connection no reader will take.
+func (s *settledProxy) addStuck(what string) *fakeStuck {
+	c := &fakeStuck{what: what}
+	s.smu.Lock()
+	s.stuck = append(s.stuck, c)
+	s.smu.Unlock()
+	s.set(s.counts())
+	return c
+}
+
+// readStuck is c's handler taking its bytes after all: its mark ends, and it
+// holds no work.
+func (s *settledProxy) readStuck(c *fakeStuck) {
+	s.smu.Lock()
+	c.ended, c.done = true, true
+	s.smu.Unlock()
+	s.set(s.counts())
+}
+
+// readStuckPartly is c's handler taking some of its bytes: its mark ends, and
+// the rest are work again.
+func (s *settledProxy) readStuckPartly(c *fakeStuck) {
+	s.smu.Lock()
+	c.ended = true
+	s.smu.Unlock()
+	s.set(s.counts())
+}
+
+func (s *settledProxy) counts() (uint64, int) {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	return s.accepted, s.pending
+}
+
+// InFlightStuck marks each connection no reader will take that no look
+// marked yet, and returns it, as the proxy's does.
+func (s *settledProxy) InFlightStuck() []coreAgent.StuckConn {
+	s.stuckLooks.Add(1)
+	s.smu.Lock()
+	var out []coreAgent.StuckConn
+	for _, c := range s.stuck {
+		if !c.done && (!c.marked || c.ended) {
+			c.marked, c.ended = true, false
+			c.gen++
+			out = append(out, stuckHandle{s, c, c.gen})
+		}
+	}
+	looked := s.looked
+	s.smu.Unlock()
+	if looked != nil {
+		looked <- struct{}{}
+	}
+	return out
+}
+
+// stuckWork is the work its stuck connections hold: each not done, and, but
+// in a replay's wait, whose mark does not hold.
+func (s *settledProxy) stuckWork(answers bool) int {
+	n := 0
+	for _, c := range s.stuck {
+		if !c.done && (answers || !c.marked || c.ended) {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *settledProxy) InFlightState(answers bool) (int, []string) {
@@ -135,6 +243,13 @@ func (s *settledProxy) Accepted() (uint64, error) {
 
 func (s *settledProxy) ListenDrops() (uint64, error) {
 	s.smu.Lock()
+	hook := s.onDrops
+	s.onDrops = nil
+	s.smu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	s.smu.Lock()
 	defer s.smu.Unlock()
 	return s.drops, nil
 }
@@ -155,7 +270,7 @@ func (s *settledProxy) WaitAccepted(ctx context.Context, n uint64) error {
 
 // WaitPairedBytes: it holds no paired connection with bytes still on their
 // way, unless the test set bytesWait.
-func (s *settledProxy) WaitPairedBytes(ctx context.Context, n uint64) error {
+func (s *settledProxy) WaitPairedBytes(ctx context.Context, n uint64, _ models.Mode) error {
 	if s.bytesWait != nil {
 		return s.bytesWait(ctx, n)
 	}
@@ -165,13 +280,20 @@ func (s *settledProxy) WaitPairedBytes(ctx context.Context, n uint64) error {
 // PairedBytesProgress is what the test set bytesProgress to.
 func (s *settledProxy) PairedBytesProgress() uint64 { return s.bytesProgress.Load() }
 
-func (s *settledProxy) InFlightPending(bool) int {
+func (s *settledProxy) InFlightPending(answers bool) int {
 	s.smu.Lock()
 	defer s.smu.Unlock()
 	if s.inWork != nil {
 		s.workOnce.Do(func() { close(s.inWork) })
 	}
-	return s.pending
+	if s.looks != nil && s.first {
+		select {
+		case s.looks <- struct{}{}:
+		default:
+		}
+	}
+	s.first = true
+	return s.pending + s.stuckWork(answers)
 }
 
 func (s *settledProxy) InFlightChanged() <-chan struct{} {
@@ -183,10 +305,10 @@ func (s *settledProxy) InFlightChanged() <-chan struct{} {
 	return s.sig
 }
 
-func (s *settledProxy) InFlightPendingProgress(bool) map[uint64]uint64 {
+func (s *settledProxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	if s.pending == 0 {
+	if s.pending+s.stuckWork(answers) == 0 {
 		return map[uint64]uint64{}
 	}
 	// One connection holds the work; its progress is the proxy's.
@@ -397,6 +519,30 @@ func TestSettleWaitsForTheApplicationsConnectionsFirst(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+// The watchdog runs what a wait looks at only when it wakes (woke): never at
+// its start, which reads the counts it weighs from, and once at each
+// wake-up it weighs and does not fire on.
+func TestTheSettleWatchdogLooksOnlyWhenItWakes(t *testing.T) {
+	wake := manualWake(t)
+	a, _, _ := settleAgent()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(nil) })
+	started := make(chan struct{})
+	var once sync.Once
+	var woke atomic.Int32
+	stop := a.watchSettle(ctx, cancel, func() { woke.Add(1) }, func() map[string]uint64 {
+		once.Do(func() { close(started) })
+		return map[string]uint64{"w": uint64(woke.Load())}
+	})
+	defer stop()
+	<-started
+	require.Zero(t, woke.Load(), "the watchdog's start is no wake-up")
+	wake()
+	require.Equal(t, int32(1), woke.Load())
+	wake()
+	require.Equal(t, int32(2), woke.Load())
+}
+
 // The watchdog judges each thing the wait waits on apart: a connection that
 // holds work and does not move fails the wait at settleStallLimit wake-ups,
 // though another one moves at every wake-up (review S1: one stuck connection
@@ -413,7 +559,7 @@ func TestTheSettleWatchdogFiresForTheOneThatDoesNotMove(t *testing.T) {
 	waiting := map[string]bool{"stuck": true, "busy": true, "gone": true}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
+	stop := a.watchSettle(ctx, cancel, nil, func() map[string]uint64 {
 		mu.Lock()
 		defer mu.Unlock()
 		busy++

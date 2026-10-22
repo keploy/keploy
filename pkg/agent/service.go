@@ -240,6 +240,31 @@ type InFlightReader interface {
 	InFlightState(answers bool) (pending int, unknown []string)
 }
 
+// InFlightStuckReader is the optional extension of an InFlightReader that
+// tells, for a record, the pending connections that hold bytes no reader will
+// take: bytes the application sent that no read has taken, a handler that has
+// read before and is not reading now, and the application's end of the
+// connection gone (its reset or its FIN came to the proxy's socket, or
+// sock_diag finds its socket gone). Such a connection raises no event: nothing
+// reads its bytes, and the kernel's change of its state wakes no one. A
+// record's settle looks at the watchdog's wake-ups, and the state alone
+// decides, never a clock. InFlightStuck marks each such connection it finds and
+// returns it, once: a marked connection is no work of a record's wait while its
+// mark holds (StuckConn.Holds). (A replay's proxy reads all the application
+// sends itself, so it holds none.)
+type InFlightStuckReader interface {
+	InFlightStuck() []StuckConn
+}
+
+// StuckConn is a connection InFlightStuckReader marked. Holds reports
+// whether the mark still holds: no read has taken a byte of it since. A
+// read that does ends it, and the connection is work again. String says
+// what it holds, and why no reader will take it.
+type StuckConn interface {
+	Holds() bool
+	String() string
+}
+
 // PairedBytesWaiter is the optional extension of a proxy that holds the
 // connections the kernel paired with the application's (under the proven
 // switch) and can wait for the bytes on them: WaitPairedBytes returns once
@@ -248,17 +273,18 @@ type InFlightReader interface {
 // written to it when the wait began. Bytes that can no longer arrive (the
 // connection was reset, or the proxy closed it, first) are a capture loss
 // (models.CaptureLossAppBytesLost). No deadline of its own: each read the
-// proxy makes on such a connection, and its close, wakes it; so do looks of
-// its own at the orphaned socket of one the proxy closed while the
-// application's FIN is still on its way to it, which nothing else wakes it
-// for, and it answers unknown only once the agent could run for a hang
-// budget with nothing it waits on moving. A proxy that cannot tell answers
-// an error wrapping models.ErrProxyConnsUnsupported.
+// proxy makes on such a connection, and its close, wakes it; so does what
+// comes to one the proxy closed, whose socket it keeps open past the close
+// until the application's FIN, its reset or a byte of data. A proxy that
+// cannot tell answers an error wrapping models.ErrProxyConnsUnsupported.
 type PairedBytesWaiter interface {
-	WaitPairedBytes(ctx context.Context, appConns uint64) error
+	// mode is the agent's (models.MODE_RECORD, MODE_TEST): a record's wait
+	// goes on waiting for every other connection past one it cannot tell,
+	// and answers all it could not tell; a replay's ends at the first.
+	WaitPairedBytes(ctx context.Context, appConns uint64, mode models.Mode) error
 	// PairedBytesProgress counts the waits' progress (a waited-for
-	// connection received more, saw its orphan change state, or was
-	// resolved), for a watchdog: it only ever grows.
+	// connection received more, or was resolved), for a watchdog: it only
+	// ever grows.
 	PairedBytesProgress() uint64
 }
 
