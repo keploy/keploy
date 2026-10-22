@@ -2,6 +2,7 @@ package replay
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -941,6 +942,48 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 		r.planShares("test-set-0", mappings)
 		u, n := annotate(r.exact, "c")
 		want(t, u, n, models.ConcurrentNotSharedAgent, "")
+	})
+	// The recording's own reason holds in every replay, so it comes before
+	// the agent's: a same-version agent would not share these either.
+	unserved := func(m *models.Mock, entry models.MockEntry) *exactPlan {
+		mappings := map[string][]models.MockEntry{"a": {entry}, "b": {}}
+		r := &Replayer{logger: zap.NewNop(), config: &config.Config{Test: config.Test{Learn: true, ShareConcurrent: true}}, instrumentation: servesConcurrent(false)}
+		r.exact = newExactPlan(mappings, nil, []*models.Mock{m})
+		r.exact.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{m})
+		r.planShares("test-set-0", mappings)
+		return r.exact
+	}
+	t.Run("the full round, an agent that does not serve shared recordings, of a kind that registered no keys", func(t *testing.T) {
+		h := &models.Mock{Name: "h", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: shareT0}}
+		u, n := annotate(unserved(h, models.MockEntry{Name: "h", Kind: string(models.HTTP), Group: "g1"}), "h")
+		want(t, u, n, models.ConcurrentNotSharedKind, "")
+		if n.Kind != string(models.HTTP) {
+			t.Fatalf("b's miss names kind %q", n.Kind)
+		}
+	})
+	t.Run("the full round, an agent that does not serve shared recordings, of a recording that states noise", func(t *testing.T) {
+		noisy := shMock("n", 100, "INSERT", "bind.$1=v", "ok")
+		noisy.Spec.Metadata["share"] = "no"
+		u, n := annotate(unserved(noisy, shEntry(noisy, "g1")), "n")
+		want(t, u, n, models.ConcurrentNotSharedStates, "noise")
+	})
+	t.Run("a strict replay, the closest recording kept by no test", func(t *testing.T) {
+		// keploy test, and keploy test --judge: the recording closest to
+		// a's call is one only Mapping.Shared lists (made while a test the
+		// recording did not keep was open). It is in no kept test's
+		// mapping, so it is not "listed under this test by time alone".
+		s := shMock("s", 100, "INSERT", "bind.$1=v", "ok")
+		mappings := map[string][]models.MockEntry{"a": {}, "b": {}}
+		p := newExactPlan(mappings, nil, []*models.Mock{s})
+		p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}, Unkept: 1}}, mappings, []models.MockEntry{shEntry(s, "g1")}), nil, []*models.Mock{s})
+		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "s"}}}}}
+		if charged := p.annotateConcurrent(results, nil); len(charged) != 0 {
+			t.Fatalf("charged %v", charged)
+		}
+		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
+		if n == nil || !slices.Equal(n.With, []string{"b"}) || n.Unkept != 1 || n.WhyNot != models.ConcurrentNotSharedUnkept || n.AttributedTo != "" || len(n.MayBe) != 0 {
+			t.Fatalf("a's miss says %+v; want with b and 1 test the recording did not keep, its closest kept by no test, attributed to none", n)
+		}
 	})
 }
 
