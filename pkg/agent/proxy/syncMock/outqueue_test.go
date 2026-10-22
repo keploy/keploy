@@ -32,7 +32,7 @@ func sendOwnedAndWait(t *testing.T, m *SyncMockManager, mock *models.Mock, owner
 }
 
 // waitOutQueue waits for m's out queues, every lane's, to be delivered or
-// given up.
+// given up with each drop told.
 func waitOutQueue(t *testing.T, m *SyncMockManager) {
 	t.Helper()
 	deadline := time.After(time.Minute) // only turns a hang into a failure
@@ -200,6 +200,56 @@ func TestTheOutQueueIsBoundedByBytes(t *testing.T) {
 	}
 }
 
+// What waits behind the drainer's mock in hand is bounded too, with nothing
+// queued: the mock in hand is out of the queue, not counted, but a mock sent
+// now waits behind it, and is dropped at once, its owner recorded, once the
+// process's queue holds its bound. Not parallel: the process's bound
+// (processOutQueued) is every manager's.
+func TestAMockBehindTheDrainersHandIsBoundedByBytes(t *testing.T) {
+	ch := make(chan *models.Mock, 1)
+	ch <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{}
+	m := New(nil)
+	m.outClock, m.outStall = clk, time.Hour
+	m.SetOutputChannel(ch)
+	processOutQueued.Add(outQueueMaxBytes) // the process's queue is at its bound
+	defer processOutQueued.Add(-outQueueMaxBytes)
+	aDone := make(chan bool, 1)
+	m.send(&models.Mock{Name: "a"}, "test-a", func(d bool) { aDone <- d }) // nothing before it: queued
+	waitClockPending(t, clk)                                               // its drainer has a in hand, nothing queued
+	behind := make(chan bool, 1)
+	m.send(&models.Mock{Name: "x"}, "test-x", func(d bool) { behind <- d })
+	select {
+	case d := <-behind:
+		if d {
+			t.Fatal("a mock past the process's byte bound was delivered")
+		}
+	default:
+		t.Fatal("a mock behind the drainer's hand was queued past the process's byte bound")
+	}
+	if !m.WasMockDroppedForTC("test-x") {
+		t.Fatal("the owner of a mock dropped for the process's byte bound was not recorded")
+	}
+	<-ch // the consumer takes again: the filler, then a
+	select {
+	case d := <-aDone:
+		if !d {
+			t.Fatal("the mock in the drainer's hand was dropped")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the mock in the drainer's hand never came")
+	}
+	select {
+	case got := <-ch:
+		if got.Name != "a" {
+			t.Fatalf("the channel carried %q, want a", got.Name)
+		}
+	default:
+		t.Fatal("a mock said to be delivered is not on the channel")
+	}
+	waitOutQueue(t, m)
+}
+
 // A new session's channel does not give the old one's queue up: the old
 // session's consumer may still read (its stop drains its stream), and gets
 // every mock queued for it, in order, while the new channel gets the new
@@ -282,13 +332,13 @@ func TestAControlFrameDoesNotOvertakeTheQueue(t *testing.T) {
 	m := New(nil)
 	m.SetOutputChannel(ch)
 	m.outQueueMu.Lock()
-	m.out.draining = true // a drainer with mocks in hand
+	m.out.draining, m.out.inHand = true, true // a drainer with mocks in hand
 	m.outQueueMu.Unlock()
 	if m.trySendControlFrame(&models.Mock{Name: "revoke"}) {
 		t.Fatal("a control frame was sent before the mocks queued ahead of it")
 	}
 	m.outQueueMu.Lock()
-	m.out.draining = false
+	m.out.draining, m.out.inHand = false, false
 	m.outQueueMu.Unlock()
 	if !m.trySendControlFrame(&models.Mock{Name: "revoke"}) {
 		t.Fatal("a control frame with nothing queued before it was not sent")
@@ -620,6 +670,185 @@ func TestAReplacedLanesClaimedDropRevokesNothingOnTheNewStream(t *testing.T) {
 		t.Fatalf("the new session's stream carried a %s frame %v for the old session's drop", f.Kind, f.Spec.Metadata)
 	default:
 	}
+}
+
+// A drainer that gives up on its consumer tells every drop (its owner
+// recorded, OnDrop and the send's done told) before its lane reads done: a
+// reader that waits for the mocks to be no longer on their way (OutQueued,
+// OutQueuedTo; CloseOutChan waits on the same flag, lane.draining), as a
+// stream's drain does before it stops reading, finds each drop told. The
+// current channel's lane and a replaced one's alike. Before, the give-up
+// marked the lane done first and told its drops after, so such a reader could
+// go on with a drop still to be told.
+func TestAGivenUpLaneIsDoneOnlyOnceItsDropsAreTold(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		name := "current channel"
+		if replaced {
+			name = "replaced channel"
+		}
+		t.Run(name, func(t *testing.T) {
+			ch := make(chan *models.Mock, 1)
+			ch <- &models.Mock{Name: "filler"}
+			clk := &stall.ManualClock{}
+			m := New(nil)
+			m.outClock, m.outStall = clk, time.Hour
+			m.SetOutputChannel(ch)
+			var mu sync.Mutex
+			var told, early []string // early: told while the lane read done
+			// look is what a reader sees while a drop is being told.
+			look := func(what string) {
+				mu.Lock()
+				defer mu.Unlock()
+				told = append(told, what)
+				if !m.OutQueued() || !m.OutQueuedTo(ch) {
+					early = append(early, what)
+				}
+			}
+			m.OnDrop(func(mk *models.Mock) { look("the drop of " + mk.Name) })
+			outcome := make(chan bool, 2)
+			for _, n := range []string{"a", "b"} {
+				m.send(&models.Mock{Name: n}, "test-"+n, func(d bool) { look("the done of " + n); outcome <- d })
+			}
+			waitClockPending(t, clk) // its drainer has a in hand, b queued
+			if replaced {
+				m.SetOutputChannel(make(chan *models.Mock, 1))
+			}
+			clk.Advance(time.Hour) // the consumer took nothing for the bound
+			for i := 0; i < 2; i++ {
+				select {
+				case d := <-outcome:
+					if d {
+						t.Fatal("a mock no consumer took was said to be delivered")
+					}
+				case <-time.After(time.Minute): // only turns a hang into a failure
+					t.Fatal("the mocks of a consumer stalled for the bound were not given up")
+				}
+			}
+			waitOutQueue(t, m)
+			if m.OutQueued() || m.OutQueuedTo(ch) {
+				t.Fatal("a lane whose drops are all told still reads queued")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(told) != 4 {
+				t.Fatalf("told %v, want each mock's drop and done", told)
+			}
+			if len(early) != 0 {
+				t.Fatalf("%v told while the lane already read done", early)
+			}
+			if !m.WasMockDroppedForTC("test-a") || !m.WasMockDroppedForTC("test-b") {
+				t.Fatal("the owners of a given-up lane's mocks were not recorded")
+			}
+		})
+	}
+}
+
+// A mock sent while a drainer tells the drops of its give-up waits behind
+// nothing: it is queued past the process's byte bound, as one with no drainer
+// before it is, and delivered once the consumer takes again, with a stall
+// bound of its own rather than the rest of the one the give-up spent; and once
+// the drainer has ended, a mock sent to the lane waits behind nothing either.
+// Not parallel: the process's bound (processOutQueued) is every manager's.
+func TestAMockSentWhileAGiveUpIsToldWaitsBehindNothing(t *testing.T) {
+	ch := make(chan *models.Mock, 1)
+	ch <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{}
+	m := New(nil)
+	m.outClock, m.outStall = clk, time.Hour
+	m.SetOutputChannel(ch)
+	processOutQueued.Add(outQueueMaxBytes) // the process's queue is at its bound
+	defer processOutQueued.Add(-outQueueMaxBytes)
+	late := make(chan bool, 1)
+	first := make(chan struct{}, 1) // the first drop told sends b: a drop of b tells this too
+	first <- struct{}{}
+	m.OnDrop(func(*models.Mock) {
+		select {
+		case <-first:
+			m.send(&models.Mock{Name: "b"}, "test-b", func(d bool) { late <- d })
+		default:
+		}
+	})
+	lost := make(chan bool, 1)
+	m.send(&models.Mock{Name: "a"}, "test-a", func(d bool) { lost <- d })
+	waitClockPending(t, clk) // its drainer has a in hand
+	clk.Advance(time.Hour)   // given up: a's drop is told, and b sent meanwhile
+	select {
+	case d := <-lost:
+		if d {
+			t.Fatal("a mock no consumer took was said to be delivered")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the mock of a consumer stalled for the bound was not given up")
+	}
+	select {
+	case d := <-late:
+		t.Fatalf("a mock with nothing before it was decided (delivered %v) before its consumer took", d)
+	default:
+	}
+	waitClockPending(t, clk) // the drainer has b in hand, its look armed
+	clk.Pass()               // a look, with none of b's own bound gone by
+	// The drainer arms its next look (b waits on) or decides b.
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() == 0 {
+		select {
+		case d := <-late:
+			t.Fatalf("a mock sent while a give-up was told was decided (delivered %v) on a look before its own bound", d)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the drainer neither looked again nor decided b")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	<-ch // the consumer takes again: the filler, then b
+	select {
+	case d := <-late:
+		if !d {
+			t.Fatal("a mock the consumer could take was dropped")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("a mock sent while a give-up was told was never decided")
+	}
+	select {
+	case got := <-ch:
+		if got.Name != "b" {
+			t.Fatalf("the channel carried %q, want b", got.Name)
+		}
+	default:
+		t.Fatal("a mock said to be delivered is not on the channel")
+	}
+	if m.WasMockDroppedForTC("test-b") {
+		t.Fatal("the owner of a delivered mock was recorded as dropped")
+	}
+	waitOutQueue(t, m) // its drainer has ended
+	// It left nothing in its hand: a mock sent now, to a full channel with the
+	// process's bound still reached, waits behind nothing either.
+	ch <- &models.Mock{Name: "filler"}
+	next := make(chan bool, 1)
+	m.send(&models.Mock{Name: "c"}, "test-c", func(d bool) { next <- d })
+	select {
+	case d := <-next:
+		t.Fatalf("a mock sent to a lane with no drainer was decided (delivered %v) before its consumer took", d)
+	default:
+	}
+	<-ch // the consumer takes again: the filler, then c
+	select {
+	case d := <-next:
+		if !d {
+			t.Fatal("a mock the consumer could take was dropped")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("a mock sent to a lane with no drainer was never decided")
+	}
+	select {
+	case got := <-ch:
+		if got.Name != "c" {
+			t.Fatalf("the channel carried %q, want c", got.Name)
+		}
+	default:
+		t.Fatal("a mock said to be delivered is not on the channel")
+	}
+	waitOutQueue(t, m)
 }
 
 // A channel set again while its replaced lane still delivers to it gets that
