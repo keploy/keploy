@@ -237,9 +237,19 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 		s.Fixed["body"] = "form"
 		for k, vs := range form {
-			vs = append([]string(nil), vs...)
-			sort.Strings(vs)
-			add("body."+k, strings.Join(vs, ", "), strings.ContainsAny(k, ".[]"))
+			if len(vs) > 1 {
+				// A repeated key's values come in any order (formDiffs
+				// reads them as members), so no one of them has a place a
+				// learned entry could name; and joined, they would read as
+				// one value holding ", ", whose words would admit one value
+				// sent as two: compared whole, as a repeated query
+				// parameter is.
+				vs = append([]string(nil), vs...)
+				sort.Strings(vs)
+				s.Fixed["body."+k] = strings.Join(vs, "\x00")
+				continue
+			}
+			add("body."+k, vs[0], strings.ContainsAny(k, ".[]"))
 		}
 	case p.mediaType == "multipart/form-data":
 		if !multipartLeaves(p, s.Leaves, s.Fixed) {

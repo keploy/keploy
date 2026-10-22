@@ -112,6 +112,47 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 	}
 }
 
+// A form key sent once is one value, and one sent twice is two: the words of
+// a key recorded once ("ORD-1 paid, ref=a1b2c3") admit only one value, by
+// the matcher's strict serve and by the learn step's own pass, so the same
+// text sent as two values ("ORD-1 paid" and "ref=..."), its ref fresh or as
+// recorded, is refused, as with no words. A key recorded twice is compared
+// whole: the learn step learns no words of it.
+func TestAFormKeySentTwiceIsNotOneValue(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	const note, noteF = "ORD-1 paid, ref=a1b2c3", "ORD-1 paid, ref=d4e5f6"
+	one := func(v string) string { return "note=" + url.QueryEscape(v) }
+	two := func(a, b string) string { return one(a) + "&" + one(b) }
+	for _, tc := range []struct {
+		name, body string
+		ok         bool
+	}{
+		{"one value, a fresh ref", one("ORD-1 paid, ref=0f9e8d"), true},
+		{"two values, a fresh ref", two("ORD-1 paid", "ref=0f9e8d"), false},
+		{"two values, as recorded", two("ORD-1 paid", "ref=a1b2c3"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := withWords(t, recorded("m", "/v1/orders", ct, one(note)), "body.note", note, noteF)
+			if served, diag := strictMatch(t, sent("/v1/orders", ct, tc.body), nil, nil, nil, m); (served != nil) != tc.ok {
+				t.Errorf("strict serve: served %v (%+v), want %v", served != nil, diag, tc.ok)
+			}
+			h, n, _ := learnOn(t)
+			lm := withWords(t, learnRecorded("mock-0", 0, "POST", "/v1/orders", one(note), ct, `{"ok":true}`), "body.note", note, noteF)
+			served, err := h.learnedMatch(context.Background(), live("POST", "/v1/orders", tc.body, ct), &learnDb{perTest: []*models.Mock{lm}}, n, models.OutgoingOptions{})
+			if err != nil || (served != nil) != tc.ok {
+				t.Errorf("the learn step's pass: served %v (%v), want %v", served != nil, err, tc.ok)
+			}
+		})
+	}
+	// Recorded twice and drifted in F: compared whole, so refused, and no
+	// words are learned of it.
+	h, n, opts := learnOn(t)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/orders", two("ORD-1", "ref-a1"), ct, `{"ok":true}`)}}
+	if served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/orders", two("ORD-1", "ref-b2"), ct), db, n, opts); err != nil || served != nil || miss == nil {
+		t.Fatalf("a key recorded twice: served %v miss %+v err %v, want refused", served, miss, err)
+	}
+}
+
 // A replay after F honours the words F learned before the matcher (the
 // learn step's own pass, learnedMatch): a fresh ref is served, a regressed
 // amount goes on to the matcher, which refuses it too.

@@ -510,20 +510,18 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] || k.admits(path, formValue(rv), formValue(lv)) {
+		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
+			continue
+		}
+		// Words are learned only of a key sent once (the learn step reads a
+		// repeated one whole), and admit only a key sent once: one value
+		// holding ", " is never two values, nor two values one.
+		if len(rv) == 1 && len(lv) == 1 && k.admits(path, rv[0], lv[0]) {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
 	}
 	return out
-}
-
-// formValue is a form key's values as the learn step reads them (shape): in
-// sorted order, joined with ", ".
-func formValue(vs []string) string {
-	vs = slices.Clone(vs)
-	sort.Strings(vs)
-	return strings.Join(vs, ", ")
 }
 
 // redactedFormKeys are the keys of a recorded form one of whose "key=value"
