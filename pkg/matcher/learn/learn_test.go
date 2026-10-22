@@ -1585,3 +1585,24 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 		t.Fatalf("an answer that cannot be read back: err %v; want the store's", err)
 	}
 }
+
+// excuseAll is a KnownLive whose words admit every live value.
+type excuseAll struct{}
+
+func (excuseAll) Excused(Leaf) (bool, bool)          { return false, false }
+func (excuseAll) ExcusedLive(Leaf, Leaf) (bool, bool) { return true, true }
+
+// Compare asks a KnownLive of a leaf only once both sides hold it in one
+// type: a leaf whose type changed (the string "100" sent as the number 300)
+// is a structural difference, whatever its learned words admit.
+func TestCompareReadsATypeChangeBeforeTheWords(t *testing.T) {
+	shape := func(typ Type, v string) Shape {
+		return Shape{Key: "k", Leaves: map[string]Leaf{"body.amt": {Path: "body.amt", Noise: "body.amt", Type: typ, Value: v}}}
+	}
+	if d := Compare(shape(Number, "300"), shape(String, "100"), excuseAll{}); d.Structural != "body.amt changed type" {
+		t.Fatalf("a type change: %+v", d)
+	}
+	if d := Compare(shape(String, "300"), shape(String, "100"), excuseAll{}); d.Structural != "" || len(d.Drift) != 0 {
+		t.Fatalf("one type, admitted by its words: %+v", d)
+	}
+}

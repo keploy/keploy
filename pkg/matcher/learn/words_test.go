@@ -89,6 +89,11 @@ func TestWhatEachSlotAdmits(t *testing.T) {
 		{"a run among others", "id ab-12-cd", "id ab-34-cd", "s1r1", map[string]bool{
 			"id ab-99-cd": true, "id ab-x9Y-cd": true, "id ab-9.9-cd": false, "id ab-9-9-cd": false, "id ab--cd": false, "id ab-99-ce": false, "id ab_99-cd": false,
 		}},
+		// The segment's runs are counted: a run added after the slot, or
+		// before it, is a word that was not there, never compared.
+		{"a run among others, its segment's runs counted", "ORD-1 paid", "ORD-2 paid", "s0r1", map[string]bool{
+			"ORD-9 paid": true, "ORD-9X paid": true, "ORD-9-X paid": false, "X-ORD-9 paid": false, "ORD paid": false,
+		}},
 		{"a run alone in its segment", "k=v1", "k=v2", "s1r0", map[string]bool{
 			"k=v3": true, "k=a-b.c": true, "k=": false, "k=a b": false, "k=é": false, "j=v3": false,
 		}},
@@ -376,6 +381,14 @@ func TestTieOf(t *testing.T) {
 		{"1042A and ORD1042", [2]string{"1042A", "2077A"}, [2]string{"ORD1042", "ORD2077"}, TiePartial, models.RefusedContainment},
 		{"p12x1042 beside 1042", [2]string{"p12x1042", "p9x5678"}, [2]string{"1042", "5678"}, TiePartial, models.RefusedContainment},
 		{"a template key INV1042 and a slot ORD1042", [2]string{"INV1042", "INV2077"}, [2]string{"note ORD1042", "note ORD2077"}, TiePartial, models.RefusedContainment},
+		// Beside an accepted clock read, a changed word is no instant: the
+		// two are not exempt, and the glued piece ties them.
+		{"INV1042 and ORD1042, each beside an instant", [2]string{"at " + wAt.Format(time.RFC3339) + " INV1042", "at " + later.Format(time.RFC3339) + " INV2077"},
+			[2]string{"at " + wAt.Format(time.RFC3339) + " ORD1042", "at " + later.Format(time.RFC3339) + " ORD2077"}, TiePartial, models.RefusedContainment},
+		// A glue only the decoded form shows: "INV10%3442" is "INV10442",
+		// whose changed piece is "10442"; as it stands its changed piece is
+		// "10", inside no class boundary of "10442".
+		{"an over-encoded INV10442 and 10442", [2]string{"INV10%3442", "INV20%3442"}, [2]string{"10442", "20442"}, TiePartial, models.RefusedContainment},
 		{"ORD 12347 beside 1234 (N17)", [2]string{"ORD 12347", "ORD 56785"}, [2]string{"1234", "5678"}, TieNone, ""},
 		{"seq=17 beside a fresh hex", [2]string{"seq=17", "seq=18"}, [2]string{"3f2b8c1e9a4d70a1", "a7c4e2d10b3f4c2e"}, TieNone, ""},
 		{"createdAt and updatedAt", [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt, ""},
