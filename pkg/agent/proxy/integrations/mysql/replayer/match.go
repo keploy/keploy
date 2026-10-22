@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -557,6 +558,19 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	if opts.fullScan {
 		keyReader = nil
 	}
+	// definitiveFirst: under the proven model a COM_STMT_EXECUTE's recording
+	// (its query and every bound parameter exact: defExecMock) answers it
+	// whenever the pool holds one, above every fallback that answers with
+	// another recording (the FIFO pick, a match on the parameters alone).
+	// Under exact serving no time window is active (CurrentTestWindow), so
+	// every recording ranked as out of the window: the test's own recording
+	// of the command was outranked by the first other recording of the same
+	// query, which answered the command with another bound value's row
+	// (echo_mysql: the sentinel's SELECT answered with the max row's, and the
+	// max's with the sentinel's; the per-test check counted both consumed and
+	// passed). An app that does not echo what it read passed with the wrong
+	// row. With the proven model off the ranking is as it was.
+	definitiveFirst := provenswitch.On()
 	windowPass := !opts.fullScan && windowActive &&
 		(req.Header.Type == sCOM_QUERY || req.Header.Type == sCOM_STMT_EXEC)
 	keyedPass := keyReader != nil &&
@@ -1358,8 +1372,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		settled := queryMatched || stmtMatched ||
 			// See firstPass: the window's FIFO candidate, and its match on the
-			// parameters alone, outrank every other fallback.
-			(windowPass && req.Header.Type == sCOM_STMT_EXEC && (fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
+			// parameters alone, outrank every other fallback, but under the
+			// proven model, where the recording of the command outranks them
+			// (definitiveFirst), the rest of the pool may hold it.
+			(windowPass && !definitiveFirst && req.Header.Type == sCOM_STMT_EXEC && (fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
 			// The CLOSE pass scored every recorded CLOSE.
 			(req.Header.Type == sCOM_STMT_CLOSE && matchedMock != nil)
 		if !firstPass || settled {
@@ -1426,7 +1442,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// stale earlier-test exact match; it ranks above the score-based
 		// pick because exact query+params is strictly stronger evidence
 		// than partial-shape scoring.
+		//
+		// Under the proven model the definitive match ranks first
+		// (definitiveFirst).
 		chosenResp, chosenMock := paramsOnlyRespWindow, paramsOnlyMockWindow
+		if definitiveFirst && defExecMock != nil {
+			chosenResp, chosenMock = defExecResp, defExecMock
+		}
 		if chosenMock == nil {
 			chosenResp, chosenMock = fifoExecRespWindow, fifoExecMockWindow
 		}
@@ -1441,7 +1463,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		if chosenMock != nil {
 			if matchedMock == nil || matchedMock != chosenMock {
-				logger.Debug("COM_STMT_EXECUTE FIFO fallback selected next unconsumed mock in recorded order",
+				what := "COM_STMT_EXECUTE FIFO fallback selected next unconsumed mock in recorded order"
+				if definitiveFirst && chosenMock == defExecMock {
+					what = "COM_STMT_EXECUTE answered by its recording (the query and every parameter exact)"
+				}
+				logger.Debug(what,
 					zap.String("mock_name", chosenMock.Name),
 					zap.Bool("in_window", chosenMock == fifoExecMockWindow || chosenMock == paramsOnlyMockWindow),
 					zap.String("score_based_mock", func() string {

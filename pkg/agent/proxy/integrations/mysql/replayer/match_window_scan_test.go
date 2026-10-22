@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -255,36 +256,42 @@ func TestMatchCommand_InWindowPassServesWhatTheFullScanServes(t *testing.T) {
 		}
 		wins = append(wins, win{name: "no-window"})
 
-		for engName, mk := range engines {
-			for _, wnd := range wins {
-				var reqs []mysql.Request
-				var names []string
-				for _, q := range liveQueries {
-					reqs = append(reqs, comQueryReq(q))
-					names = append(names, q)
-				}
-				for _, p := range []string{"k0", "k1", "k2", "k3", "k9"} {
-					reqs = append(reqs, liveExecReq(7, p))
-					names = append(names, "EXECUTE "+p)
-				}
-				for _, q := range []string{execQuery, otherExecQuery, "SELECT never FROM prepared WHERE id = ?"} {
-					reqs = append(reqs, stmtPrepareReq(q))
-					names = append(names, "PREPARE "+q)
-				}
-				for _, id := range []uint32{7, 8, 9} {
-					reqs = append(reqs, liveCloseReq(id))
-					names = append(names, fmt.Sprintf("CLOSE %d", id))
-				}
-				for i, req := range reqs {
-					prep := func(s *mysqlDecodeCtxShim) {
-						s.stmtIDToQuery[7] = execQuery
-						s.stmtIDToQuery[8] = otherExecQuery
+		// With the proven model off and under it: under it the window's FIFO
+		// candidate does not settle the first pass (definitiveFirst), and the
+		// pass must still serve what the full scan serves.
+		for _, sw := range []string{"0", "1"} {
+			t.Setenv(provenswitch.Env, sw)
+			for engName, mk := range engines {
+				for _, wnd := range wins {
+					var reqs []mysql.Request
+					var names []string
+					for _, q := range liveQueries {
+						reqs = append(reqs, comQueryReq(q))
+						names = append(names, q)
 					}
-					want := runScan(t, modeFullScan, req, perTest, session, wnd.start, wnd.end, mk(), prep)
-					for _, mode := range []scanMode{modeIndexed, modeFiltered} {
-						got := runScan(t, mode, req, perTest, session, wnd.start, wnd.end, mk(), prep)
-						if fmt.Sprintf("%+v", want) != fmt.Sprintf("%+v", got) {
-							t.Errorf("seed %d, %s, %s, %q:\n full scan: %+v\n %s: %+v", seed, engName, wnd.name, names[i], want, mode.name, got)
+					for _, p := range []string{"k0", "k1", "k2", "k3", "k9"} {
+						reqs = append(reqs, liveExecReq(7, p))
+						names = append(names, "EXECUTE "+p)
+					}
+					for _, q := range []string{execQuery, otherExecQuery, "SELECT never FROM prepared WHERE id = ?"} {
+						reqs = append(reqs, stmtPrepareReq(q))
+						names = append(names, "PREPARE "+q)
+					}
+					for _, id := range []uint32{7, 8, 9} {
+						reqs = append(reqs, liveCloseReq(id))
+						names = append(names, fmt.Sprintf("CLOSE %d", id))
+					}
+					for i, req := range reqs {
+						prep := func(s *mysqlDecodeCtxShim) {
+							s.stmtIDToQuery[7] = execQuery
+							s.stmtIDToQuery[8] = otherExecQuery
+						}
+						want := runScan(t, modeFullScan, req, perTest, session, wnd.start, wnd.end, mk(), prep)
+						for _, mode := range []scanMode{modeIndexed, modeFiltered} {
+							got := runScan(t, mode, req, perTest, session, wnd.start, wnd.end, mk(), prep)
+							if fmt.Sprintf("%+v", want) != fmt.Sprintf("%+v", got) {
+								t.Errorf("%s=%s, seed %d, %s, %s, %q:\n full scan: %+v\n %s: %+v", provenswitch.Env, sw, seed, engName, wnd.name, names[i], want, mode.name, got)
+							}
 						}
 					}
 				}
