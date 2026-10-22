@@ -111,16 +111,18 @@ const (
 // CountsAgainstTest reports whether a miss is evidence against the test it was
 // made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
 // itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
-// call was made, and a dependency's TCP health check closes the same way).
-// Every verdict, count and evidence line that judges misses reads this.
+// call was made, and a dependency's TCP health check closes the same way). An
+// answered call (Answer, under the proven switch) is no miss, and counts
+// against nothing. Every verdict, count and evidence line that judges misses
+// reads this.
 func (c UnmatchedCall) CountsAgainstTest() bool {
-	return !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
 // is made from, for the places that hold the report and not the call.
 func (r *MockMismatchReport) CountsAgainstTest() bool {
-	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase}.CountsAgainstTest()
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase, Answer: r.Answer}.CountsAgainstTest()
 }
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
@@ -284,7 +286,32 @@ type MockMismatchReport struct {
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
 	// the tests the call's recordings were made beside.
 	Concurrent *ConcurrentNote
+	// Answer, under the proven switch, says the call WAS answered, and how;
+	// "" for a miss. AnswerProvisional: record's full round answered it with
+	// ClosestMock, a recording RecordedIn owns (a pairing, S12 v16 §4.1);
+	// Drift says it drifted, Differs naming the leaves learned as noise.
+	// AnswerByKind: a background write answered by its kind (§3), unchecked;
+	// Reused says the kind's recordings were used up. An answer never counts
+	// against a test and never lands in a miss list. The proxy's sink copies
+	// these to the UnmatchedCall it makes of the report, as it copies the
+	// miss fields.
+	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
+	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
+	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
+	WriteKind string `json:"write_kind,omitempty" yaml:"write_kind,omitempty"`
+	// Source is the process that made the call (Origin's Comm and Exe; Clock
+	// unused), which the proxy's sink fills from the connection's pid, for a
+	// miss and an answer alike.
+	Source *Origin `json:"source,omitempty" yaml:"source,omitempty"`
+	// RecordedIn is, on an answer (AnswerProvisional), the test that owns
+	// ClosestMock, the recording the call was answered with
+	// (UnmatchedCall.RecordedIn).
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
 }
+
+// ErrAnswered is what an answer report travels as (ReportAnswer): no miss;
+// nothing returns it.
+var ErrAnswered = errors.New("keploy: an answered call, reported for judging")
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
 // for which no recorded mock matched. Protocol parsers wrap it (errors.Is)

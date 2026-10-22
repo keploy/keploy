@@ -593,9 +593,11 @@ type Replayer struct {
 	// setEnd is how the final report of the test set RunTestSet is running
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd); setEndCalls, the calls it charged to the set
-	// (SetCallsHook). Reset before each run of a set.
-	setEnd      *models.SetEnd
-	setEndCalls []models.UnmatchedCall
+	// (SetCallsHook); setEndAnswers, the answered calls it charged to the
+	// set (SetAnswersHook). Reset before each run of a set.
+	setEnd        *models.SetEnd
+	setEndCalls   []models.UnmatchedCall
+	setEndAnswers []models.UnmatchedCall
 	// setCalls are the calls of the set RunTestSet is running that no mock
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
@@ -1126,7 +1128,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// the app entirely unstarted. With this gate the
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
-			r.setEnd, r.setEndCalls = nil, nil
+			r.setEnd, r.setEndCalls, r.setEndAnswers = nil, nil, nil
 			// The set's exact plan is this run's: a run that ends before it
 			// makes one tells its end hooks no earlier set's shares.
 			r.exact = nil
@@ -5102,6 +5104,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// they fail the set (unclaimed_calls.go).
 	var unclaimed []models.UnmatchedCall
 	unclaimedReason := ""
+	// setAnswers are the answered calls the set's end charges to the set, no
+	// test (proven switch): made before its first test or after its last.
+	// They fail nothing (TestReport.SetAnswers, SetAnswersHook). They are
+	// read where the set's own misses are, at the end of a set that is
+	// judged; a set that ends otherwise has neither.
+	var setAnswers []models.UnmatchedCall
 	// workerMissing: under the proven switch, the set's worker-scope calls
 	// its run reached the place of that the application never made
 	// (awaitWorkerScope); workerUnread, why keploy could not read what they
@@ -5285,7 +5293,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.logger.Warn("keploy reads the set's end with its application still running: a call it makes after this read is not judged ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.String("reason", appNotStopped))
 			}
-			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
+			calls, answeredAfter, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
+			setAnswers = append(r.setCalls.answers(), answeredAfter...)
 			if workerUnread != nil {
 				notJudged = alsoNotJudged(notJudged, "keploy could not read what the test set's worker scope (the calls no test owns) answered: "+workerUnread.Error())
 				r.logger.Error("test-set is not judged: keploy could not read from its agent what the calls no test owns answered; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
@@ -5821,6 +5830,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		UnclaimedCalls:      unclaimed,
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
+		SetAnswers:          setAnswers,
 	}
 	r.noteSetEnd(testReport)
 
@@ -8305,8 +8315,12 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 // to ask (a base path).
 type testMisses struct {
 	calls []models.UnmatchedCall
-	err   error
-	asked bool
+	// answers are the calls of the read that were answered
+	// (models.UnmatchedCall.Answer, proven switch), split from calls at
+	// intake: the test's Answers, never a miss.
+	answers []models.UnmatchedCall
+	err     error
+	asked   bool
 	// lost and lostErr are, under the proven switch, what the agent could not
 	// capture that the test is charged (testCaptureLosses: a taint since the
 	// test set began, a failed TLS handshake since the previous test), and
@@ -8368,7 +8382,9 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 	// What was missed before the set's first test is the set's, not this
 	// test's (before_set_calls.go).
 	calls = r.setCalls.take(calls)
-	read := testMisses{calls: calls, err: err, asked: true}
+	// An answered call is no miss: it is the test's answer (TestResult.Answers).
+	calls, answers := splitAnswers(calls)
+	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)
 	}
@@ -8420,6 +8436,9 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
 		}
 		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
+	}
+	if result != nil && len(read.answers) > 0 {
+		result.Answers = append(result.Answers, read.answers...)
 	}
 	switch {
 	case read.lostErr != nil:

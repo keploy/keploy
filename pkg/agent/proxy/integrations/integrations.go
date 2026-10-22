@@ -417,6 +417,71 @@ type VariableScopes interface {
 	InAheadScope(m *models.Mock) bool
 }
 
+// ExactBackground is exact serving's background (S12 v16 §2.3), which a
+// parser answers from after the open test's own: the worker scope the run
+// reached (a no-sibling recording from the set's start) and the pool.
+// An optional MockMemDb capability, under the proven switch: the agent's
+// MockManager implements it, and every MockMemDb wrapper must forward it.
+type ExactBackground interface {
+	// Background is kind's background recordings the view shows unused, in
+	// recorded order. A parser consumes one through its usual delete door.
+	Background(kind models.Kind) []*models.Mock
+	// SpentBackground is kind's background recordings this staging consumed,
+	// read-only, in recorded order: what a by-kind reuse answers with (§3).
+	SpentBackground(kind models.Kind) []*models.Mock
+}
+
+// Pairing is record's full round's pairing (S12 v16 §4.1). It answers only
+// while the session pairs: OutgoingOptions.Learn under the proven switch.
+// An optional MockMemDb capability: the agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it.
+type Pairing interface {
+	// PairingCandidates is kind's data-plane recordings other tests own that
+	// their owners have not consumed and no pairing has claimed, in recorded
+	// order; nil when the session does not pair.
+	PairingCandidates(kind models.Kind) []*models.Mock
+	// ClaimPairing claims m for one pairing in this staging. It is false
+	// when another call claimed it, its owner consumed it, or the session
+	// does not pair. A claim is no consumption: m stays its owner's.
+	ClaimPairing(m *models.Mock) bool
+}
+
+// Background is db's background recordings of kind (ExactBackground); nil
+// when db does not implement it.
+func Background(db MockMemDb, kind models.Kind) []*models.Mock {
+	if b, ok := db.(ExactBackground); ok {
+		return b.Background(kind)
+	}
+	return nil
+}
+
+// SpentBackground is the background recordings of kind db's staging consumed
+// (ExactBackground); nil when db does not implement it.
+func SpentBackground(db MockMemDb, kind models.Kind) []*models.Mock {
+	if b, ok := db.(ExactBackground); ok {
+		return b.SpentBackground(kind)
+	}
+	return nil
+}
+
+// PairingCandidates is db's pairing candidates of kind (Pairing); nil when db
+// does not implement it.
+func PairingCandidates(db MockMemDb, kind models.Kind) []*models.Mock {
+	if p, ok := db.(Pairing); ok {
+		return p.PairingCandidates(kind)
+	}
+	return nil
+}
+
+// ClaimPairing claims m for one pairing in db's staging (Pairing); false when
+// db does not implement it.
+func ClaimPairing(db MockMemDb, m *models.Mock) bool {
+	if p, ok := db.(Pairing); ok {
+		return p.ClaimPairing(m)
+	}
+	return false
+}
+
 // InFlightOwner is an optional MockMemDb capability: whether a mock was in
 // flight when the test the replay runs now began, sent in the gap before that
 // test's recorded window and answered inside it (models.SentInGapAnsweredBy),

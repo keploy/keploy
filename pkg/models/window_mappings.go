@@ -20,7 +20,7 @@ func RecordedWindow(tc *TestCase) TestWindow {
 	if tc == nil {
 		return TestWindow{}
 	}
-	w := TestWindow{TestCase: tc.Name}
+	w := TestWindow{TestCase: tc.Name, Clock: tc.Origin.clock()}
 	switch tc.Kind {
 	case HTTP:
 		w.Start, w.End = tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
@@ -52,11 +52,19 @@ type WindowedMock struct {
 	// an answer a worker's poll gets while its dependency has nothing, which
 	// no test owns wherever it was recorded.
 	Idle bool
+	// Clock names the clock At is on: the mock's Origin.Clock, "" for an
+	// untrusted stamp (S12 v16 §2.2). WriteKind is its write kind, by its
+	// parser's registration (WriteKindOf): "" for no by-kind write. Both come
+	// with the mock's origin, which only a record under the proven switch
+	// writes: a mock without one has neither, and its parser is not asked.
+	// Only the switch acts on either.
+	Clock     string
+	WriteKind string
 }
 
 // NewWindowedMock is m as the window derivation reads it.
 func NewWindowedMock(m *Mock) WindowedMock {
-	return WindowedMock{
+	w := WindowedMock{
 		Name:     m.Name,
 		Kind:     m.Kind,
 		At:       m.Spec.ReqTimestampMock,
@@ -65,7 +73,12 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
 		InFlight: InFlightEligible(m),
 		Idle:     IsIdleAnswer(m),
+		Clock:    m.Origin.clock(),
 	}
+	if m.Origin != nil {
+		w.WriteKind, _ = WriteKindOf(m)
+	}
+	return w
 }
 
 // placed is where m sits: its Place, or At for one built without it.

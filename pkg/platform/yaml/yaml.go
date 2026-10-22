@@ -73,6 +73,13 @@ type NetworkTrafficDoc struct {
 	// its recording (models.TestCase.Real); written and read only under the
 	// proven switch.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty"`
+
+	// Origin is, under the proven switch, where the recorded call or test
+	// came from (models.Mock.Origin, models.TestCase.Origin): the clock its
+	// opening stamp is on and, on a mock, the process that made it. Read and
+	// written whatever the switch, so a rewrite keeps it (models.Origin); nil,
+	// so omitted, for a record that has none.
+	Origin *models.Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under

@@ -5140,6 +5140,14 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					// step decided it: judging's evidence.
 					Reason:     parserErr.MismatchReport.Reason,
 					Concurrent: parserErr.MismatchReport.Concurrent,
+					// An answered call's report (models.ReportAnswer, proven
+					// switch): how it was answered, never a miss.
+					Answer:     parserErr.MismatchReport.Answer,
+					Drift:      parserErr.MismatchReport.Drift,
+					Reused:     parserErr.MismatchReport.Reused,
+					WriteKind:  parserErr.MismatchReport.WriteKind,
+					Source:     parserErr.MismatchReport.Source,
+					RecordedIn: parserErr.MismatchReport.RecordedIn,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach

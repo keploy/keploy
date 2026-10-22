@@ -6,6 +6,9 @@ package fakeconn
 
 import (
 	"math"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +44,11 @@ func (d Direction) String() string {
 // ConnSeq's to say (CapturedBefore), never theirs.
 type Chunk struct {
 	Dir Direction
+	// ReadClock is the clock ReadAt is on (S12 v16 §2.2): set only by a
+	// producer that took the stamp itself, ClockUnset on every other chunk,
+	// which is never trusted. It sits in the padding after Dir, so a chunk
+	// costs no more memory for it (TestChunkSize).
+	ReadClock Clock
 	// ConnSeq is the connection-wide capture sequence: the producer numbers
 	// the chunks of BOTH directions of a connection from one counter, once,
 	// where the bytes enter the capture, with ConnSeqOf, by one rule: a
@@ -63,6 +71,103 @@ type Chunk struct {
 	WrittenAt time.Time // when the relay's Write() returned on the opposite socket
 	SeqNo     uint64    // monotonic, scoped to (connection, direction)
 }
+
+// Clock is the clock a chunk's ReadAt is on (S12 v16 §2.2). Only a producer
+// that took the stamp itself sets one; every other chunk is ClockUnset, which
+// is never trusted.
+type Clock uint8
+
+const (
+	ClockUnset Clock = iota
+	// ClockProxy: the relay's time.Now as Read returned on the source socket.
+	ClockProxy
+	// ClockKtime: CLOCK_MONOTONIC stamped by the producer at capture (a BPF
+	// event, JSSE's System.nanoTime), converted by the run's shared anchor.
+	ClockKtime
+
+	// clockCount is one past the last clock: a clock below it may be named.
+	clockCount
+)
+
+// String is c's short name: "unset", "proxy", "ktime", or the number of a
+// clock this keploy does not know.
+func (c Clock) String() string {
+	switch c {
+	case ClockUnset:
+		return "unset"
+	case ClockProxy:
+		return "proxy"
+	case ClockKtime:
+		return "ktime"
+	default:
+		return "clock(" + strconv.Itoa(int(c)) + ")"
+	}
+}
+
+// clockIDs are this run's clock names (SetClockID), read on every stamp a
+// record names (ClockID): a slot per clock, written once.
+var (
+	clockIDsMu sync.Mutex // serialises SetClockID
+	clockIDs   [clockCount]atomic.Pointer[string]
+)
+
+// SetClockID names c for this agent run: the relay sets ClockProxy's
+// ("proxy:<run>") at start, the proxyless anchor ClockKtime's
+// ("ktime:<boot id>.<anchor>") when it is taken. An id never changes within a
+// run: a second, different one panics. Setting the one it has again does
+// nothing. ClockUnset is never named, and no id is empty: either panics, as
+// does a clock this keploy does not know. The run is the process's: the names
+// are process-wide and never cleared, so a producer picks its id once per
+// process (a relay that starts again in the same agent sets the same id).
+//
+// Equal non-empty ids are one clock (models.Origin.Clock): two stamps whose
+// clocks' ids are equal may be ordered against each other, and no others.
+func SetClockID(c Clock, id string) {
+	if c == ClockUnset || c >= clockCount {
+		panic("fakeconn.SetClockID: " + c.String() + " cannot be named")
+	}
+	if id == "" {
+		panic("fakeconn.SetClockID(" + c.String() + "): an empty id")
+	}
+	clockIDsMu.Lock()
+	defer clockIDsMu.Unlock()
+	if cur := clockIDs[c].Load(); cur != nil {
+		if *cur != id {
+			panic("fakeconn.SetClockID(" + c.String() + "): named " + strconv.Quote(*cur) + " already, not " + strconv.Quote(id))
+		}
+		return
+	}
+	clockIDs[c].Store(&id)
+}
+
+// ClockID is c's name for this run: "" for ClockUnset or a clock not named.
+func ClockID(c Clock) string {
+	if c == ClockUnset || c >= clockCount {
+		return ""
+	}
+	if id := clockIDs[c].Load(); id != nil {
+		return *id
+	}
+	return ""
+}
+
+// The stamped-request line (S12 v16 §3.7), the contract between a parser
+// that fixes a request's stamp and a lane that waits on it. keploy/integrations'
+// Mongo v2 recorder logs it, at debug, once it has fixed a complete client
+// message's start (clientMessageStartReadAt), for every op, handshakes
+// included:
+//
+//	logger.Debug("mongo v2 request stamped",
+//		zap.String("op", op),            // "insert", "update", "aggregate", "hello", ...
+//		zap.String("ns", db+"."+coll),   // "" for a command with no collection
+//		zap.String("conn", sess.ClientConnID),
+//		zap.String("clock", fakeconn.ClockID(startChunk.ReadClock)))
+//
+// The message text and the field names are the contract; no value of the
+// request is logged. A lane (keploy/enterprise's sqs-s12-chain.sh) records
+// with --debug and greps "mongo v2 request stamped" with "op": "<op>" and
+// "ns": "<ns>", and treats a conn it had not seen before its send as a new
+// connection.
 
 // ConnSeqOf is the ConnSeq of the n-th chunk (n from 1) a producer captures on
 // a connection, counted across both of its directions: n itself, wrapped to 32

@@ -55,6 +55,12 @@ type MockEntry struct {
 	// MockEntryUnresolvedAmbiguous, which every replay charges a test that
 	// lists it with, or MockEntryUnresolvedUnproven.
 	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
+	// Reason says why keploy placed this entry where it is (a routing at
+	// record, a move by record's judging), in words with its undo; written
+	// under the proven switch only (S12 v16 §4.4). Like every field of an
+	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
+	// the switch.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
 }
 
 // The MockEntry.Unresolved of a recording keploy record's full round could not

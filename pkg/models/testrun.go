@@ -62,6 +62,11 @@ type TestReport struct {
 	// every report a set run under the switch writes; absent for a set run
 	// without it.
 	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
+	// SetAnswers are, under the proven switch, the answered calls
+	// (UnmatchedCall.Answer) the set's end charged to the set, no test: made
+	// before its first test or after its last (S12 v16 §4.1). They never fail
+	// the set, nor land in UnclaimedCalls. Absent when there is none.
+	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -169,6 +174,13 @@ type TestResult struct {
 	// A later call that sent another value failed the test case as a miss.
 	// Absent when none was bound.
 	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
+	// Answers are, under the proven switch, the answered calls
+	// (UnmatchedCall.Answer) charged to this test's window, or to the gap
+	// before it, as misses are (S12 v16 §4.1): a pairing record's full round
+	// made, a background write answered by its kind. They never fail the
+	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
+	// none.
+	Answers []UnmatchedCall `json:"answers,omitempty" yaml:"answers,omitempty"`
 }
 
 // TemplateFailure is one template variable place a test case failed on, or
@@ -491,6 +503,21 @@ type UnmatchedCall struct {
 	// (Mapping.Groups): with whom, and which of them its recording was
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// Answer, under the proven switch, says the call WAS answered, and how;
+	// "" for a miss. AnswerProvisional: record's full round answered it with
+	// ClosestMock, a recording RecordedIn owns (a pairing, S12 v16 §4.1);
+	// Drift says it drifted, Differs naming the leaves learned as noise.
+	// AnswerByKind: a background write answered by its kind (§3), unchecked;
+	// Reused says the kind's recordings were used up. An answer never counts
+	// against a test and never lands in a miss list.
+	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
+	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
+	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
+	WriteKind string `json:"write_kind,omitempty" yaml:"write_kind,omitempty"`
+	// Source is the process that made the call (Origin's Comm and Exe; Clock
+	// unused), which the proxy's sink fills from the connection's pid, for a
+	// miss and an answer alike.
+	Source *Origin `json:"source,omitempty" yaml:"source,omitempty"`
 }
 
 // ConcurrentNote is what keploy knows of a call made by a test that was
@@ -620,6 +647,17 @@ const (
 	// that was open beside it already answered with: one of the two made a
 	// call it did not record.
 	MissConcurrentConflict = "concurrent_conflict"
+)
+
+// The answers an answered call reports (UnmatchedCall.Answer,
+// MockMismatchReport.Answer, ReportAnswer), under the proven switch.
+const (
+	// AnswerProvisional: record's full round paired the call with a recording
+	// another test owns and answered it with that recording (S12 v16 §4.1).
+	AnswerProvisional = "provisional"
+	// AnswerByKind: a background write answered by its write kind (S12 v16
+	// §3), unchecked.
+	AnswerByKind = "by_kind"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

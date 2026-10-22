@@ -142,6 +142,14 @@ type Mock struct {
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
 	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
 	StartRef  string `json:"-" yaml:"-" bson:"-"`
+	// Origin is, under the proven switch, where the call came from: the clock
+	// its ReqTimestampMock is on, and the process that made it (S12 v16 §2.2,
+	// §4.4). Only a record under the switch sets it; a file's is read and
+	// carried whatever the switch (models.Origin). A recording's file holds it
+	// as its document's origin block (yaml.NetworkTrafficDoc.Origin), so it is
+	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares
+	// it, as it shares Spec's pointers.
+	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -1118,6 +1126,10 @@ func (m *Mock) DeepCopy() *Mock {
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
+
+	// Where the call came from (proven switch): the copy's own, so a copy
+	// written later (the async gob writer's) holds what the mock held.
+	c.Origin = m.Origin.clone()
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

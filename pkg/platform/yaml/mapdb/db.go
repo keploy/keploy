@@ -355,6 +355,10 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 //
 // The caller decides each place: judging only ever moves a place earlier
 // than the one recorded, never later.
+//
+// Each move's Reason (MockEntry.Reason, under the proven switch: why judging
+// moved it, and its undo) is written on the entry as given: the entry's line
+// is the last placement's.
 func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
 	if len(moves) == 0 {
 		return nil, nil
@@ -405,6 +409,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	for i := range mapping.Worker {
 		if mapping.Worker[i].Name == mv.Name {
 			mapping.Worker[i].Place = mv.Place
+			mapping.Worker[i].Reason = mv.Reason
 			return true
 		}
 	}
@@ -429,6 +434,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 		return false
 	}
 	entry.Place = mv.Place
+	entry.Reason = mv.Reason
 	mapping.Worker = append(mapping.Worker, *entry)
 	return true
 }

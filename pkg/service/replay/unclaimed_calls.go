@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -27,16 +28,38 @@ import (
 
 // unclaimedCalls reads the calls the application made since the set's last
 // test that no mock answered, data-plane only (dataPlaneCalls): those count
-// against the set. err says the read could not vouch for every such call.
-func (r *Replayer) unclaimedCalls(ctx context.Context) ([]models.UnmatchedCall, error) {
+// against the set. answered are the calls of that read that were answered
+// (models.UnmatchedCall.Answer, proven switch), which count against nothing
+// and are the set's (TestReport.SetAnswers). err says the read could not
+// vouch for every such call.
+func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models.UnmatchedCall, err error) {
 	// A miss is the agent's to report. A base path has none, and no mocks.
 	if r.noAgent {
-		return nil, nil
+		return nil, nil, nil
 	}
-	calls, err := r.instrumentation.GetMockErrors(ctx)
+	read, err := r.instrumentation.GetMockErrors(ctx)
 	// A set whose first test's read did not take what was missed before it
 	// (the read was cut short) hands it over here: still the set's.
-	return dataPlaneCalls(r.setCalls.take(calls)), err
+	calls, answered = splitAnswers(r.setCalls.take(read))
+	return dataPlaneCalls(calls), answered, err
+}
+
+// splitAnswers splits a read of the calls the agent reports into the misses
+// and the answered calls (models.UnmatchedCall.Answer, proven switch), each in
+// read order: an answer never lands in a miss list, nor changes a status
+// (S12 v16 §3.3). A read with no answer is returned as it is.
+func splitAnswers(read []models.UnmatchedCall) (misses, answers []models.UnmatchedCall) {
+	if !slices.ContainsFunc(read, func(c models.UnmatchedCall) bool { return c.Answer != "" }) {
+		return read, nil
+	}
+	for _, c := range read {
+		if c.Answer != "" {
+			answers = append(answers, c)
+			continue
+		}
+		misses = append(misses, c)
+	}
+	return misses, answers
 }
 
 // unclaimedWhy says why the calls fail the set, naming each.
