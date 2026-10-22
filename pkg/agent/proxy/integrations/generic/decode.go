@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -17,8 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
-	genericRequests := [][]byte{reqBuf}
+func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	// The replay pod's own identity becomes the recorded pod's in what is
+	// matched (identity package); the bytes forwarded on a miss are the
+	// client's own.
+	alias := identity.For(opts)
+	genericRequests := [][]byte{alias.Bytes(reqBuf)}
 	logger.Debug("Into the generic parser in test mode")
 	// The requests it has read are held from the read on: it reads on with
 	// a deadline before it matches them, blocked reading while it holds them
@@ -67,7 +72,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					if !holding {
 						release, holding = integrations.HoldRequest(ctx), true
 					}
-					genericRequests = append(genericRequests, buffer)
+					genericRequests = append(genericRequests, alias.Bytes(buffer))
 				}
 				if timeout || atEOF {
 					logger.Debug("the timeout for the client read in generic or EOF")

@@ -103,11 +103,17 @@ type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
-	Synchronous   bool
+	// Identity is the recorded pod identity the agent aliases its own to
+	// while matching, and the switch that turns the aliasing off; nil when a
+	// set carries none (IdentityAliasing). A pointer in the slot a bool's
+	// padding left, so these options, which every connection's Session
+	// holds, stay in their size class (supervisor's exchange_test).
+	Identity *IdentityAliasing
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay time.Duration // This is the same as Application delay.
-	Mocking  bool          // used to enable/disable mocking
-	SwapIDs  bool
+	SQLDelay    time.Duration // This is the same as Application delay.
+	Mocking     bool          // used to enable/disable mocking
+	SwapIDs     bool
+	Synchronous bool
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or

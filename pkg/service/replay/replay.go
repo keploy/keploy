@@ -1936,6 +1936,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		conf = &models.TestSet{}
 	}
 
+	// The identity of the pod that recorded this set (its config.yaml
+	// metadata, written by the recorder), for the agent to alias its own to.
+	recordedPods := recordedPodsOf(conf)
+
 	// The set's template state for this run: each key at its config.yaml
 	// value (rule 5 of pkg/templates). The run's own values live here and
 	// nowhere else; config.yaml is never written back.
@@ -2375,6 +2379,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
+			Identity:                  models.NewIdentityAliasing(recordedPods, r.config.Test.DisableIdentityAliasing, r.config.Test.IdentityAliasResponses),
 		}
 		err = r.mockOutgoingForTestSet(runTestSetCtx, outgoingOpts)
 		if err != nil {
@@ -2526,6 +2531,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
+			Identity:                  models.NewIdentityAliasing(recordedPods, r.config.Test.DisableIdentityAliasing, r.config.Test.IdentityAliasResponses),
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -8800,4 +8806,20 @@ func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.Mo
 		names[i] = m.Name
 	}
 	return streamingTest{testCase: &tcCopy, expectedMocks: names}
+}
+
+// recordedPodsOf is the identity of the pod that recorded a test set, from
+// its config.yaml metadata (models.PodIdentityFromMetadata), as the list the
+// agent aliases its own identity to (models.OutgoingOptions.RecordedPods).
+// Nil for a set that carries none: one recorded before the identity was
+// written, or outside Kubernetes.
+func recordedPodsOf(conf *models.TestSet) []models.PodIdentity {
+	if conf == nil {
+		return nil
+	}
+	pod, ok := models.PodIdentityFromMetadata(conf.Metadata)
+	if !ok {
+		return nil
+	}
+	return []models.PodIdentity{pod}
 }

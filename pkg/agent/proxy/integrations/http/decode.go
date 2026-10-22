@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
@@ -106,14 +107,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				arrived: arrived,
 			}
 
-			// Under the proven switch the request's destination is read once,
-			// as it comes: a use of its connection's container in the scope
-			// open now (containerkey), which every match of it then reads.
-			reqCtx := ctx
-			if provenswitch.On() {
-				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
-			}
-
 			if input.header.Get("Content-Encoding") != "" {
 				input.encoded = input.body
 				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
@@ -122,6 +115,26 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- err
 					return
 				}
+			}
+
+			// The replay pod's own identity becomes the recorded pod's, in the
+			// URL, the headers (the Host among them, so the destination read
+			// below sees it) and the body, before any pass compares the call
+			// (identity package). The served response gets the live identity
+			// back only when the replay asked for it (IdentityAliasing.Responses).
+			alias := identity.For(opts)
+			aliasIdentity(alias, input)
+			var aliasBack *identity.Rewriter
+			if opts.Identity.ReverseResponses() {
+				aliasBack = alias.Reverse()
+			}
+
+			// Under the proven switch the request's destination is read once,
+			// as it comes: a use of its connection's container in the scope
+			// open now (containerkey), which every match of it then reads.
+			reqCtx := ctx
+			if provenswitch.On() {
+				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
 			}
 
 			h.Logger.Debug("decodeHTTP debug logs for input",
@@ -405,7 +418,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Serialize the matched mock's response to wire bytes (hydrates a
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
-			respBytes, err := h.buildMockResponseBytes(stub)
+			respBytes, err := h.buildMockResponseBytesAliased(stub, aliasBack)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -471,6 +484,15 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 // Content-Length it was recorded with: a HEAD's is the size of the body a GET
 // gets, which the client takes for that size (an S3 client's Stat).
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
+	return h.buildMockResponseBytesAliased(stub, nil)
+}
+
+// buildMockResponseBytesAliased is buildMockResponseBytes with the recorded
+// pod's identity in a textual body and the headers put back to the replay
+// pod's own (reverse, from identity.For(opts).Reverse(); nil leaves the
+// response as recorded). An app that lists pods and drops itself, or reads
+// a lease's holder and compares it with its own name, then sees itself.
+func (h *HTTP) buildMockResponseBytesAliased(stub *models.Mock, reverse *identity.Rewriter) ([]byte, error) {
 	name := ""
 	if stub != nil {
 		name = stub.Name
@@ -492,6 +514,7 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 	body := stub.Spec.HTTPResp.Body
 	header := pkg.ToWireHTTPHeader(stub.Spec.HTTPResp.Header, stub.Spec.HTTPResp.HeaderLineLengths)
+	body, header = aliasResponse(reverse, header, body)
 	var respBody string
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
 		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
