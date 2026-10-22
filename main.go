@@ -251,8 +251,12 @@ func start(ctx context.Context) {
 	svcProvider := provider.NewServiceProvider(logger, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
-	if err := rootCmd.Execute(); err != nil {
-		utils.ErrCode = finalExitCode(err, utils.ErrCode, os.Stderr)
+	// ExecuteC's command is the one cobra was running when it failed (the
+	// root at worst): a usage error points at its --help, so a flag record
+	// does not have points at `keploy record --help`, where record's flags
+	// are, not at the root's, which lists only commands.
+	if cmd, err := rootCmd.ExecuteC(); err != nil {
+		utils.ErrCode = finalExitCode(err, utils.ErrCode, cmd.CommandPath(), os.Stderr)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
@@ -432,14 +436,14 @@ func printEnterpriseUpgradeBanner() {
 // on which of two racing paths reported it. The contract every caller relies
 // on is unchanged: an error still exits non-zero, because a mirrored code is
 // never 0.
-func finalExitCode(err error, current int, w io.Writer) int {
+func finalExitCode(err error, current int, cmdPath string, w io.Writer) int {
 	if err == nil {
 		return current
 	}
 	if current != 0 {
 		return current
 	}
-	return exitCodeForCmdErr(err, w)
+	return exitCodeForCmdErr(err, cmdPath, w)
 }
 
 // isFlagError reports whether err is one of pflag's command-line parse errors.
@@ -456,7 +460,7 @@ func isFlagError(err error) bool {
 
 // exitCodeForCmdErr maps an error returned by the root command onto the
 // process exit code, writing the error (unless it was printed where it was
-// raised) and the --help hint to w for a usage error.
+// raised) and the hint to run cmdPath's --help to w for a usage error.
 //
 // Any non-nil error means the command did not run successfully, so the
 // process must not report success. This used to convert only "unknown
@@ -465,7 +469,7 @@ func isFlagError(err error) bool {
 // flag-parsing errors - CmdConfigurator.AddFlags sets SilenceErrors and
 // prints them through SetFlagErrorFunc, so `keploy test --typo` showed a red
 // error message and still reported success to the shell and to CI.
-func exitCodeForCmdErr(err error, w io.Writer) int {
+func exitCodeForCmdErr(err error, cmdPath string, w io.Writer) int {
 	if err == nil {
 		return 0
 	}
@@ -480,9 +484,9 @@ func exitCodeForCmdErr(err error, w io.Writer) int {
 		// flag-error func; nothing has printed anything else yet (every
 		// command silences cobra's own printing), so say it here.
 		if !isFlagError(err) {
-			fmt.Fprintln(w, "Error: ", err.Error())
+			fmt.Fprintln(w, "Error:", err.Error())
 		}
-		fmt.Fprintln(w, "Run 'keploy --help' for usage.")
+		fmt.Fprintf(w, "Run '%s --help' for usage.\n", cmdPath)
 		return utils.ExitUsageError
 	}
 	return utils.ExitKeployError
