@@ -10,7 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -19,6 +22,9 @@ import (
 // out have to remain readable. If it stops printing them, the short file just
 // moves the question somewhere nobody can answer it.
 func TestConfigDefaults_PrintsEverySetting(t *testing.T) {
+	// With the proven model off: under it the settings it deletes are left
+	// out (TestConfigDefaults_LeavesOutWhatTheProvenModelDeletes).
+	t.Setenv(provenswitch.Env, "0")
 	cmd := configDefaults(zap.NewNop())
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -74,6 +80,15 @@ func TestConfigDefaults_PrintsEverySetting(t *testing.T) {
 // must produce the same bytes, and what it produces must be what Keploy
 // applies -- i.e. stripping it against the defaults leaves nothing.
 func TestConfigDefaults_OutputFileMatchesStdout(t *testing.T) {
+	for _, v := range []string{"0", "1"} {
+		t.Run(provenswitch.Env+"="+v, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, v)
+			outputFileMatchesStdout(t)
+		})
+	}
+}
+
+func outputFileMatchesStdout(t *testing.T) {
 	var out bytes.Buffer
 	printed := configDefaults(zap.NewNop())
 	printed.SetOut(&out)
@@ -403,4 +418,110 @@ func TestConfigDefaults_ForceLeavesTheFileReadableOnly(t *testing.T) {
 	if mode := info.Mode().Perm(); mode&0o022 != 0 {
 		t.Errorf("keploy.yml is still group/world-writable (%04o) after --force", mode)
 	}
+}
+
+// settingPaths are the dotted paths of every setting in a config document,
+// mappings included.
+func settingPaths(t *testing.T, doc string) map[string]bool {
+	t.Helper()
+	var node yamlLib.Node
+	if err := yamlLib.Unmarshal([]byte(doc), &node); err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]bool{}
+	var walk func(n *yamlLib.Node, at string)
+	walk = func(n *yamlLib.Node, at string) {
+		if n.Kind != yamlLib.MappingNode {
+			return
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			p := n.Content[i].Value
+			if at != "" {
+				p = at + "." + p
+			}
+			paths[p] = true
+			walk(n.Content[i+1], p)
+		}
+	}
+	if len(node.Content) > 0 {
+		walk(node.Content[0], "")
+	}
+	return paths
+}
+
+// Under the proven model `keploy config defaults` leaves out the settings the
+// proven model deletes (design v14 U18): keploy ignores them there, so a
+// default it prints, or saves with -o, must not offer one; every other
+// setting is printed as before. With it off the listing is byte for byte
+// what it was. Mutation: strip whatever the switch; strip nothing; leave the
+// passthrough keys or test.healthPollTimeout out of the deleted keys.
+func TestConfigDefaults_LeavesOutWhatTheProvenModelDeletes(t *testing.T) {
+	full, err := config.DefaultsYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := settingPaths(t, full)
+	deleted := provider.DeletedKeys()
+	for _, k := range []string{"disableMapping", "test.updateTestMapping", "test.removeUnusedMocks", "test.preserveFailedMocks", "test.disableStatefulMocks", "test.healthPollTimeout", "test.mocking", "record.globalPassthrough", "bypassRules"} {
+		if !all[k] {
+			t.Fatalf("%s is not in keploy's defaults: this test no longer checks it", k)
+		}
+		found := false
+		for _, d := range deleted {
+			found = found || d == k
+		}
+		if !found {
+			t.Fatalf("%s is not among the settings the proven model deletes (provider.DeletedKeys): %q", k, deleted)
+		}
+	}
+	run := func(args ...string) (string, string) {
+		cmd := configDefaults(zap.NewNop())
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		return out.String(), cmd.Long
+	}
+	t.Run("with the proven model off", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "0")
+		got, long := run()
+		if want := utils.GetVersionAsComment() + full; got != want {
+			t.Fatalf("with the proven model off the listing changed:\n%s", got)
+		}
+		if strings.Contains(long, ProvenDefaultsNote) {
+			t.Fatalf("with the proven model off --help says what the proven model leaves out: %s", long)
+		}
+	})
+	t.Run("under the proven model", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		printed, long := run()
+		saved := filepath.Join(t.TempDir(), "keploy.defaults.yml")
+		run("-o", saved)
+		body, err := os.ReadFile(saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for what, doc := range map[string]string{"printed": printed, "saved with -o": string(body)} {
+			got := settingPaths(t, doc)
+			for _, k := range deleted {
+				if got[k] {
+					t.Errorf("the defaults %s offer %s, which the proven model deletes", what, k)
+				}
+			}
+			for k := range all {
+				gone := false
+				for _, d := range deleted {
+					gone = gone || k == d || strings.HasPrefix(k, d+".")
+				}
+				if !gone && !got[k] {
+					t.Errorf("the defaults %s leave out %s, which the proven model keeps", what, k)
+				}
+			}
+		}
+		if !strings.Contains(long, ProvenDefaultsNote) {
+			t.Fatalf("under the proven model --help does not say what it leaves out: %s", long)
+		}
+	})
 }

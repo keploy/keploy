@@ -479,3 +479,39 @@ func TestDefaultsYAML_CommentsLandOnTheSettingTheyExplain(t *testing.T) {
 		}
 	}
 }
+
+// WithoutSettings drops exactly the settings it is given, at any depth, and a
+// mapping it leaves empty with them; everything else keeps its order, its
+// value and its comment, and a path the document does not hold is no error.
+// Mutation: stop at the top level; keep an emptied mapping; drop a sibling.
+func TestWithoutSettings_DropsOnlyThePathsNamed(t *testing.T) {
+	doc := `# the head
+path: ""
+disableMapping: false
+test:
+    # the delay
+    delay: 5
+    removeUnusedMocks: false
+    host: localhost
+record:
+    autoReplay:
+        healthPollTimeout: 1m0s
+`
+	got, err := WithoutSettings(doc, []string{"disableMapping", "test.removeUnusedMocks", "record.autoReplay.healthPollTimeout", "test.absent", "absent.too"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `# the head
+path: ""
+test:
+    # the delay
+    delay: 5
+    host: localhost
+`
+	if got != want {
+		t.Fatalf("WithoutSettings =\n%s\nwant\n%s", got, want)
+	}
+	if same, err := WithoutSettings(doc, nil); err != nil || same != doc {
+		t.Fatalf("WithoutSettings with no paths = %q, %v; want the document as it was", same, err)
+	}
+}

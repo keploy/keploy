@@ -94,6 +94,20 @@ func RegisterDeletedSettings(rows ...DeletedSetting) {
 	deleted = append(deleted, rows...)
 }
 
+// DeletedKeys are the keploy.yml settings, dotted, that the proven model
+// deletes (U18) and keploy ignores under it: every deleted row's keys
+// (RegisterDeletedSettings' included), the settings that made calls live
+// (passthroughKeys) and test.healthPollTimeout (dropHealthPollTimeout).
+// `keploy config defaults` leaves them out under the proven model.
+func DeletedKeys() []string {
+	var keys []string
+	for _, row := range deletedSettings() {
+		keys = append(keys, row.Keys...)
+	}
+	keys = append(keys, passthroughKeys...)
+	return append(keys, healthPollTimeoutKey)
+}
+
 func deletedSettings() []DeletedSetting {
 	deletedMu.RLock()
 	defer deletedMu.RUnlock()

@@ -22,6 +22,11 @@ import (
 // passthroughFlags are the deleted flags of record and test.
 var passthroughFlags = []string{"global-passthrough", "opportunistic-tls-intercept", "mocking", "pass-through-ports"}
 
+// passthroughKeys are the keploy.yml keys of the same settings, which
+// dropPassthroughKeys ignores (agent's are keploy's own, never in a
+// keploy.yml it writes).
+var passthroughKeys = []string{"record.globalPassthrough", "record.opportunisticTlsIntercept", "test.mocking", "record.passThroughPorts", "record.passThroughHosts", "bypassRules"}
+
 // passthroughHint is what every refusal and notice tells the user to do.
 const passthroughHint = "list the destinations keploy reaches for real in keploy.yml mock.real (localhost:5432, auth.example.com:443, container:redis); every other call is recorded and mocked"
 

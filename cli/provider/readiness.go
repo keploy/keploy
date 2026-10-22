@@ -35,6 +35,10 @@ func refuseHealthPollTimeout(cmd *cobra.Command) error {
 	return nil
 }
 
+// healthPollTimeoutKey is keploy.yml's readiness ceiling, which the proven
+// model deletes (U18) with --health-poll-timeout.
+const healthPollTimeoutKey = "test.healthPollTimeout"
+
 // dropHealthPollTimeout ignores, under the proven switch, keploy.yml's
 // test.healthPollTimeout, saying so when it was set to anything but the
 // default.

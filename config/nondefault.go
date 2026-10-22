@@ -107,6 +107,60 @@ func copyComments(dst, src *yamlLib.Node) {
 // and which therefore has no business in a repository's file.
 func WithoutKey(doc, key string) (string, error) { return withoutKey(doc, key) }
 
+// WithoutSettings drops the settings at paths (dotted, as keploy.yml nests
+// them: "test.removeUnusedMocks") from a config document, preserving the
+// order of the rest and the comments on them; a mapping it leaves empty goes
+// with them, and a path the document does not hold is no error. `keploy
+// config defaults` uses it, under the proven model, to leave out the settings
+// the proven model deletes (design v14 U18): keploy ignores them there, so
+// the defaults must not offer them.
+func WithoutSettings(doc string, paths []string) (string, error) {
+	if len(paths) == 0 {
+		return doc, nil
+	}
+	if err := singleDocument(doc); err != nil {
+		return "", err
+	}
+	var node yamlLib.Node
+	if err := yamlLib.Unmarshal([]byte(doc), &node); err != nil {
+		return "", fmt.Errorf("failed to parse the config: %w", err)
+	}
+	if len(node.Content) == 0 || node.Content[0].Kind != yamlLib.MappingNode {
+		return doc, nil
+	}
+	root := node.Content[0]
+	for _, p := range paths {
+		dropSetting(root, strings.Split(p, "."))
+	}
+	out, err := yamlLib.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("failed to write the config: %w", err)
+	}
+	return string(out), nil
+}
+
+// dropSetting removes the setting at path from mapping, and a mapping the
+// removal leaves empty with it.
+func dropSetting(mapping *yamlLib.Node, path []string) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value != path[0] {
+			continue
+		}
+		val := mapping.Content[i+1]
+		if len(path) > 1 {
+			if val.Kind != yamlLib.MappingNode || len(val.Content) == 0 {
+				return
+			}
+			dropSetting(val, path[1:])
+			if len(val.Content) > 0 {
+				return
+			}
+		}
+		mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+		return
+	}
+}
+
 // withoutKey drops one top-level key, preserving the order of the rest.
 func withoutKey(doc, key string) (string, error) {
 	if err := singleDocument(doc); err != nil {

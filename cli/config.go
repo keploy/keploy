@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 
 	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
@@ -149,6 +151,23 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 	return cmd
 }
 
+// ProvenDefaultsNote is what `keploy config defaults --help` says under the
+// proven model of the settings it leaves out (provenDefaults); keploy's
+// enterprise build says it of its own.
+const ProvenDefaultsNote = `Under the proven model the settings it deletes are not included: keploy
+ignores them there, and says so when your keploy.yml sets one.`
+
+// provenDefaults is the defaults document as `keploy config defaults` prints
+// it in this process: under the proven model, without the settings the
+// proven model deletes (provider.DeletedKeys), which keploy ignores there; as
+// it is otherwise.
+func provenDefaults(doc string) (string, error) {
+	if !provenswitch.On() {
+		return doc, nil
+	}
+	return config.WithoutSettings(doc, provider.DeletedKeys())
+}
+
 // configDefaults builds `keploy config defaults`.
 //
 // A generated keploy.yml now carries only what a developer chose, which is
@@ -160,17 +179,21 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 //	keploy config defaults -o keploy.yml    # start from them
 //	keploy config defaults | grep -i proxy  # find one
 func configDefaults(logger *zap.Logger) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "defaults",
-		Short: "Print Keploy's default configuration",
-		Long: `Print the settings Keploy applies when your keploy.yml does not mention them.
+	long := `Print the settings Keploy applies when your keploy.yml does not mention them.
 
 The internally-managed ` + "`agent`" + ` block is not included: Keploy resolves it per
 run, and a copy of it in a repository would only go stale.
 
 A generated keploy.yml holds only the settings that differ from these, so this
 is where to look for the rest -- and where to start if you would rather edit a
-complete file by hand.`,
+complete file by hand.`
+	if provenswitch.On() {
+		long += "\n\n" + ProvenDefaultsNote
+	}
+	cmd := &cobra.Command{
+		Use:   "defaults",
+		Short: "Print Keploy's default configuration",
+		Long:  long,
 		Example: `  keploy config defaults
   keploy config defaults -o keploy.defaults.yml
   keploy config defaults | grep -i port`,
@@ -180,6 +203,10 @@ complete file by hand.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			defaults, err := config.DefaultsYAML()
 			if err != nil {
+				utils.LogError(logger, err, "failed to read the default config")
+				return err
+			}
+			if defaults, err = provenDefaults(defaults); err != nil {
 				utils.LogError(logger, err, "failed to read the default config")
 				return err
 			}
