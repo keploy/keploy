@@ -286,6 +286,16 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
+	// A set's staging is answered with the background rules it is served by
+	// (models.BackgroundRulesHeader): the replay relaxes today's checks for
+	// it only when the agent says it serves it by S12's.
+	if ex := updateParamsReq.FilterParams.Exact; ex != nil && ex.Stage {
+		if s, ok := a.svc.(interface{ ServedBackground() string }); ok {
+			if rules := s.ServedBackground(); rules != "" {
+				w.Header().Set(models.BackgroundRulesHeader, rules)
+			}
+		}
+	}
 	respondAgent(w, r, http.StatusOK, nil)
 }
 

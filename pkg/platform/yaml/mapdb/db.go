@@ -467,14 +467,50 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	return true
 }
 
-// workerAt is when a worker-scope entry's request was recorded, for its
-// order: its recorded time, else its timestamp in seconds.
-func workerAt(e models.MockEntry) time.Time {
-	if at, err := models.ParseMockTimestamp(e.ReqTimestampMock); err == nil && !at.IsZero() {
-		return at
+// MarkRecordedWith adds feature to what the set's mappings.yaml says keploy
+// record recorded it with (models.Mapping.RecordedWith), keeping every other
+// section as it is: keploy record marks a set an S12 record wrote
+// (models.RecordedWithS12Routing). A mark the file carries already writes
+// nothing. A set with no mapping file marks none, and says so: a recording
+// that wrote none has nothing to serve by the mark.
+func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature string) error {
+	if feature == "" {
+		return fmt.Errorf("mark what %s was recorded with: an empty mark", testSetID)
 	}
-	return time.Unix(e.Timestamp, 0)
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("mark %s as recorded with %s: the set has no mappings file", testSetID, feature)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, err := DecodeMappingF(fileData, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if mapping.WasRecordedWith(feature) {
+		return nil
+	}
+	mapping.RecordedWith = append(mapping.RecordedWith, feature)
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
+
+// workerAt is when a worker-scope entry's request was recorded, for its
+// order (models.MockEntry.RecordedAt).
+func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
 	mappingPath := filepath.Join(db.path, testSetID)

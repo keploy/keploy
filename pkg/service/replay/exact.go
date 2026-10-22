@@ -3,9 +3,12 @@ package replay
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -88,6 +91,13 @@ type exactPlan struct {
 	// share is the set's shares (concurrent_shares.go): nil for a set whose
 	// mapping states no concurrency.
 	share *sharePlan
+	// background says S12's serving serves the set (s12Serves): its
+	// staging says so to the agent, and its end does not require its worker
+	// scope answered (unansweredWorker).
+	background bool
+	// returned is, by mock, the owner a drift move's recording was given
+	// back to (returnStaleMoves): its quarantine no longer applies.
+	returned map[string]string
 }
 
 // noteAhead fills p.ahead from what each test case of cases owns: its mapped
@@ -197,6 +207,20 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
 // application and read what it consumed as it stopped (stopped).
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
+	// Under S12's background rules the set's end requires none (S12 v16
+	// §2.3): what a background call answered is judged by record's judging,
+	// and a background call that stops happening is a limit the run says
+	// (unansweredBackground) and NEXT names.
+	if p == nil || p.background {
+		return nil
+	}
+	return p.unansweredWorkerOf(consumed, stopped)
+}
+
+// unansweredWorkerOf is the worker-scope recordings today's rule requires by
+// the set's end that consumed holds none of (unansweredWorker), whatever rules
+// serve the set.
+func (p *exactPlan) unansweredWorkerOf(consumed map[string]models.MockState, stopped bool) []string {
 	if p == nil {
 		return nil
 	}
@@ -230,45 +254,245 @@ func (r *Replayer) exactServing() bool {
 // mappings.yaml with no source is trusted as recorded: one keploy test wrote
 // before it said so cannot be told from keploy record's.
 func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, string, error) {
-	mappings, worker, _, why, err := r.provenMappingsOf(ctx, testSetID)
+	mappings, worker, _, _, why, err := r.provenMappingsOf(ctx, testSetID)
 	return mappings, worker, why, err
 }
 
-// provenMappingsOf is provenMappings, and the set's concurrency as its
-// mappings.yaml states it (models.Mapping.Groups, Shared): nil for none.
-func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, *setConcurrency, string, error) {
+// provenMappingsOf is provenMappings, the set's concurrency as its
+// mappings.yaml states it (models.Mapping.Groups, Shared: nil for none),
+// and what it says keploy record recorded the set with
+// (models.Mapping.RecordedWith): none for a set with no such mark, and for
+// one whose ownership its test windows give.
+func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, *setConcurrency, []string, string, error) {
 	const absent = "the test set has no mappings.yaml"
 	if r.mappingDB == nil {
-		return map[string][]models.MockEntry{}, nil, nil, absent, nil
+		return map[string][]models.MockEntry{}, nil, nil, nil, absent, nil
 	}
 	if mr, ok := r.mappingDB.(mappingReader); ok {
 		m, err := mr.GetMapping(ctx, testSetID)
 		if err != nil {
-			return nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+			return nil, nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 		}
 		if m != nil && m.Source == models.MappingSourceKeployTest {
-			return map[string][]models.MockEntry{}, nil, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
+			return map[string][]models.MockEntry{}, nil, nil, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
 		}
 		mappings := map[string][]models.MockEntry{}
 		var worker []models.MockEntry
 		var conc *setConcurrency
+		var recordedWith []string
 		if m != nil {
 			for _, tc := range m.TestCases {
 				mappings[tc.ID] = tc.Mocks
 			}
 			worker = m.Worker
 			conc = concurrencyOf(m.Groups, mappings, m.Shared)
+			recordedWith = m.RecordedWith
 		}
-		return mappings, worker, conc, absent, nil
+		return mappings, worker, conc, recordedWith, absent, nil
 	}
 	mappings, _, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+		return nil, nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 	}
 	if mappings == nil {
 		mappings = map[string][]models.MockEntry{}
 	}
-	return mappings, nil, nil, absent, nil
+	return mappings, nil, nil, nil, absent, nil
+}
+
+// s12Serves reports, under the proven switch (the caller's), whether S12's
+// serving serves testSetID (s12_serving.go): its mappings.yaml carries an S12
+// record's mark (recordedWith holds models.RecordedWithS12Routing) and a
+// registered func enables it (S12Serving). A marked set this build does not
+// enable it for is served by today's rules, said once per set: every
+// recorded background call answered exactly, and required by its end.
+func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
+	if !(&models.Mapping{RecordedWith: recordedWith}).WasRecordedWith(models.RecordedWithS12Routing) {
+		return false
+	}
+	if S12Serving() {
+		return true
+	}
+	r.logger.Info("this test set was recorded under S12's routing and serving (mappings.yaml recordedWith: "+models.RecordedWithS12Routing+"), which this keploy does not enable: its worker scope and pool are served by the rules of a set recorded before S12, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
+		zap.String("testSetID", testSetID),
+		zap.String("next_step", "replay it with the keploy build that recorded it (keploy enterprise), whose judging S12's serving rests on"))
+	return false
+}
+
+// confirmBackground keeps S12's serving for the staged set only when the agent
+// says, answering its staging, that it serves the set by those rules
+// (pkg.BackgroundRulesReader, models.BackgroundRulesHeader): an agent that
+// predates them, or that runs without the proven switch, serves by today's,
+// and the replay then keeps today's checks (its worker scope required by its
+// end), never looser than how the set was served. Said once, as a warning.
+func (r *Replayer) confirmBackground(asked string) {
+	if r.exact == nil || !r.exact.background {
+		return
+	}
+	served := ""
+	if br, ok := r.instrumentation.(pkg.BackgroundRulesReader); ok {
+		served = br.AgentServesBackground()
+	}
+	if served == asked {
+		return
+	}
+	r.exact.background = false
+	r.logger.Warn("keploy's agent does not serve this test set's background by S12's rules, which it was recorded under: the set is judged by today's checks, every recorded background call answered exactly and required by its end ("+provenswitch.Env+"=1)",
+		zap.String("asked", asked),
+		zap.String("served", served),
+		zap.String("next_step", "run the keploy agent of this keploy build, with "+provenswitch.Env+"=1"))
+}
+
+// returnStaleMoves gives each drift move whose owner this run runs back to
+// that owner (S12 v16 §4.2; the compatibility audit's B4): record's judging
+// moved the recording to the worker scope on a drifted pairing
+// (models.MockEntry.Drift) and quarantined its owner (MockEntry.Owner) as
+// keploy/unseparable_write, keploy being unable to tell the owner's own write
+// from it. An owner the run runs (runs) is not quarantined now: its test was
+// edited since, so its entry no longer applies, or verdicts.yaml lost it. Run
+// beside the moved write, its own write could be answered unchecked, so the
+// recording is the owner's own again, in recorded order: today's rule, failing
+// closed. A call the recording answered elsewhere then misses, and the miss
+// names the owner (markRecordedIn). An exact move, and one whose owner the run
+// skips or the set no longer has (cases), stays where judging put it.
+//
+// It returns mappings and worker as they are when nothing is given back, else
+// copies with each returned recording moved, and, by recording, the owner it
+// went back to. Under the proven switch, whatever serves the set: it only
+// tightens.
+func returnStaleMoves(mappings map[string][]models.MockEntry, worker []models.MockEntry, cases []*models.TestCase, runs func(name string) bool) (map[string][]models.MockEntry, []models.MockEntry, map[string]string) {
+	has := make(map[string]bool, len(cases))
+	for _, tc := range cases {
+		if tc != nil {
+			has[tc.Name] = true
+		}
+	}
+	var returned map[string]string
+	for _, e := range worker {
+		if e.Drift && e.Owner != "" && has[e.Owner] && runs(e.Owner) {
+			if returned == nil {
+				returned = map[string]string{}
+			}
+			returned[e.Name] = e.Owner
+		}
+	}
+	if len(returned) == 0 {
+		return mappings, worker, nil
+	}
+	outMappings := make(map[string][]models.MockEntry, len(mappings)+1)
+	for id, entries := range mappings {
+		outMappings[id] = entries
+	}
+	outWorker := make([]models.MockEntry, 0, len(worker))
+	for _, e := range worker {
+		owner, back := returned[e.Name]
+		if !back {
+			outWorker = append(outWorker, e)
+			continue
+		}
+		if slices.ContainsFunc(outMappings[owner], func(o models.MockEntry) bool { return o.Name == e.Name }) {
+			continue
+		}
+		// Back as recorded: no place, no line, no move.
+		e.Place, e.Reason, e.Owner, e.Drift = "", "", "", false
+		outMappings[owner] = insertByRecordedTime(outMappings[owner], e)
+	}
+	return outMappings, outWorker, returned
+}
+
+// insertByRecordedTime is entries with e inserted before the first entry
+// recorded after it (its request time), entries left as they are: a copy.
+func insertByRecordedTime(entries []models.MockEntry, e models.MockEntry) []models.MockEntry {
+	at := e.RecordedAt()
+	i := len(entries)
+	for j, o := range entries {
+		if o.RecordedAt().After(at) {
+			i = j
+			break
+		}
+	}
+	out := make([]models.MockEntry, 0, len(entries)+1)
+	out = append(out, entries[:i]...)
+	out = append(out, e)
+	return append(out, entries[i:]...)
+}
+
+// returnedWhy says, for the calls of calls whose closest recording
+// (models.UnmatchedCall.ClosestMock) returnStaleMoves gave back to its owner,
+// why that recording answered none of them: "" for none. A set's failure
+// reason ends with it, so the miss names the owner and the remedy.
+func (p *exactPlan) returnedWhy(calls []models.UnmatchedCall) string {
+	if p == nil || len(p.returned) == 0 {
+		return ""
+	}
+	var parts []string
+	seen := map[string]bool{}
+	for _, c := range calls {
+		owner, ok := p.returned[c.ClosestMock]
+		if !ok || seen[c.ClosestMock] {
+			continue
+		}
+		seen[c.ClosestMock] = true
+		parts = append(parts, fmt.Sprintf("%s is %s's own again: record's judging moved it to the background on %s's quarantine (keploy/unseparable_write), which no longer applies, as this run runs %s", c.ClosestMock, owner, owner, owner))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "; " + strings.Join(parts, "; ") + "; record the test set again"
+}
+
+// returnedMissed names, for each test of results with a call no mock answered
+// whose closest recording returnStaleMoves gave back to another test, the call
+// and that owner: "test: call (mock, given back to owner)".
+func (p *exactPlan) returnedMissed(results []models.TestResult) []string {
+	if p == nil || len(p.returned) == 0 {
+		return nil
+	}
+	var out []string
+	for _, r := range lastResultOfEachTest(results) {
+		for _, c := range r.FailureInfo.UnmatchedCalls {
+			if owner, ok := p.returned[c.ClosestMock]; ok && owner != r.TestCaseID {
+				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, owner))
+			}
+		}
+	}
+	return out
+}
+
+// lastResultOfEachTest is results with only each test's last row (a test
+// retried in another cycle has one row per cycle), in the order each test
+// first appears.
+func lastResultOfEachTest(results []models.TestResult) []models.TestResult {
+	at := make(map[string]int, len(results))
+	out := make([]models.TestResult, 0, len(results))
+	for _, r := range results {
+		if i, seen := at[r.TestCaseID]; seen {
+			out[i] = r
+			continue
+		}
+		at[r.TestCaseID] = len(out)
+		out = append(out, r)
+	}
+	return out
+}
+
+// logReturnedMoves says, at WARN, each recording returnStaleMoves gave back to
+// its owner, and what follows.
+func (r *Replayer) logReturnedMoves(testSetID string, returned map[string]string) {
+	names := make([]string, 0, len(returned))
+	for n := range returned {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		owner := returned[n]
+		r.logger.Warn("a recording record's judging moved to the test set's background is its test's own again: the move rested on "+owner+"'s quarantine (keploy/unseparable_write), and this run runs "+owner+", so that quarantine no longer applies ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("mock", n),
+			zap.String("owner", owner),
+			zap.String("why", owner+"'s test was edited since the judging, or verdicts.yaml lost its entry; run beside the moved write, its own write could be answered unchecked, so "+n+" answers only as "+owner+"'s own, as recorded, and a call it answered elsewhere misses"),
+			zap.String("next_step", "record the test set again: a recording re-derives what each test owns, and its judging what moves"))
+	}
 }
 
 // mappingReader is the part of a mapping store that reads a set's whole

@@ -2098,14 +2098,40 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// conc: under the proven switch, the set's concurrency as its
 		// mapping states it (models.Mapping.Groups, Shared).
 		var conc *setConcurrency
+		// s12Background: S12's serving serves the set (s12Serves), from its
+		// mappings.yaml's mark. returnedMoves: the drift moves given back to
+		// an owner this run runs (returnStaleMoves).
+		var s12Background bool
+		var returnedMoves map[string]string
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
 			// case owns, and a mapping that cannot be read refuses the set.
-			if expectedTestMockMappings, workerScope, conc, windowsWhy, err = r.provenMappingsOf(ctx, testSetID); err != nil {
+			var recordedWith []string
+			if expectedTestMockMappings, workerScope, conc, recordedWith, windowsWhy, err = r.provenMappingsOf(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
+			s12Background = r.s12Serves(testSetID, recordedWith)
 			useMappingBased = true
 			fromWindows = len(expectedTestMockMappings) == 0
+			// A drift move whose owner this run runs goes back to the owner
+			// (the compatibility audit's B4), whatever serves the set. A set
+			// whose windows give what each test owns derives its worker
+			// scope from them too: no move of the file's is read.
+			if !fromWindows {
+				ignored := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
+				// What the loop opens: selected, neither ignored nor refused
+				// (a refused test fails unsent, and never opens).
+				runs := func(name string) bool {
+					if _, skip := ignored[name]; skip || len(refusedTests[name]) > 0 {
+						return false
+					}
+					_, chosen := selectedTests[name]
+					return chosen || len(selectedTests) == 0
+				}
+				if expectedTestMockMappings, workerScope, returnedMoves = returnStaleMoves(expectedTestMockMappings, workerScope, testCases, runs); len(returnedMoves) > 0 {
+					r.logReturnedMoves(testSetID, returnedMoves)
+				}
+			}
 		}
 		mocksThatHaveMappings := make(map[string]bool)
 		mocksWeNeed := make(map[string]bool)
@@ -2208,6 +2234,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// or an agent that does not say it serves them, keeps the
 			// recorded ownership whole.
 			expectedTestMockMappings = r.planShares(testSetID, expectedTestMockMappings)
+			r.exact.background = s12Background
+			r.exact.returned = returnedMoves
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
 			// set, or one keploy does not start, booted before this set.
@@ -5045,6 +5073,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
 	}
+	// The text report's line for each test's background writes answered by
+	// their kind, unchecked (S12 v16 §4.4), from its last result as the set
+	// ends: once per test, whatever cycles it took.
+	for _, res := range lastResultOfEachTest(testCaseResults) {
+		if line := models.UncheckedLine(res.TestCaseID, res.Answers); line != "" {
+			fmt.Println(line)
+		}
+	}
+	// A call no mock answered whose closest recording was given back to its
+	// owner (returnStaleMoves): the owner's quarantine no longer applies.
+	if back := r.exact.returnedMissed(testCaseResults); len(back) > 0 {
+		r.logger.Error("tests made a call that a recording moved to the background answered at record's judging, now its owner's own again: the move rested on the owner's quarantine, which no longer applies (KEPLOY_PROVEN=1)",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", back[:min(len(back), 20)]),
+			zap.String("next_step", "record the test set again: a recording re-derives what each test owns, and its judging what moves"))
+	}
 	// Under the proven switch a test whose call got no recorded answer fails,
 	// before the hook, so the hook sees the verdicts it is to act on. The loop
 	// failed each already (earlyMissed, streamMissed); this finds one only if a
@@ -5153,7 +5197,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// coming; one never made fails the set below.
 		// A set that already failed is red whatever its worker scope did:
 		// nothing waits for it.
-		checkWorker := r.exact != nil && captureOpened && testSetStatus == models.TestSetStatusPassed
+		// Under S12's background rules the set's end requires none of it
+		// (exactPlan.background): nothing waits for it.
+		checkWorker := r.exact != nil && !r.exact.background && captureOpened && testSetStatus == models.TestSetStatusPassed
 		if checkWorker {
 			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks, func(read []models.MockState) {
 				for _, m := range read {
@@ -5219,6 +5265,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// keploy did not stop requires none of those.
 		if checkWorker && workerUnread == nil {
 			workerMissing = r.exact.unansweredWorker(totalConsumedMocks, stopDrained)
+		}
+		// Under S12's serving what today's rule would require is said, not
+		// required, from what the set's end read (its stop's drain
+		// included): a background call the application stopped making is
+		// not caught (S12 v16 §4.4), and nothing waits for one still to
+		// come.
+		if r.exact != nil && r.exact.background && captureOpened {
+			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks, stopDrained); len(unanswered) > 0 {
+				r.logger.Info("background recordings of this test set that its end had not read answered: S12's serving neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID),
+					zap.Int("count", len(unanswered)),
+					zap.Strings("mocks", unanswered[:min(len(unanswered), 20)]),
+					zap.Bool("appStoppedAndDrained", stopDrained),
+					zap.String("next_step", "if the application is meant to make these calls on its own, check that it still does"))
+			}
 		}
 		// stoppedByUser records, once the run's user has stopped it (Ctrl+C,
 		// SIGTERM), that the set is USER_ABORT, and reports it. The app
@@ -5315,7 +5376,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if unclaimedReason != "" {
 					unclaimedReason += "; "
 				}
-				unclaimedReason += setCallsWhy(own)
+				unclaimedReason += setCallsWhy(own) + r.exact.returnedWhy(own)
 				r.logSetCalls(testSetID, own)
 				if testSetStatus == models.TestSetStatusPassed {
 					testSetStatus = models.TestSetStatusFailed
@@ -5326,7 +5387,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if unclaimedReason != "" {
 					unclaimedReason += "; "
 				}
-				unclaimedReason += unclaimedWhy(calls)
+				unclaimedReason += unclaimedWhy(calls) + r.exact.returnedWhy(calls)
 				r.logUnclaimed(testSetID, calls)
 				switch {
 				case conf.RecordStopKilled != "":
@@ -6648,6 +6709,9 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// (exact.go).
 	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
 		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged()}
+		if r.exact.background {
+			params.Exact.Background = models.RecordedWithS12Routing
+		}
 	}
 
 	// Send parameters to agent for filtering and mock updates
@@ -6655,6 +6719,9 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 		return err
+	}
+	if ex := params.Exact; ex != nil && ex.Stage && ex.Background != "" {
+		r.confirmBackground(ex.Background)
 	}
 
 	r.logger.Debug("Successfully sent mock filter parameters to agent",

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 )
 
@@ -55,6 +56,43 @@ func observedReadAt(conn net.Conn, fallback time.Time) time.Time {
 		}
 	}
 	return fallback
+}
+
+// observedRead is observedReadAt, and the clock its stamp is on (S12 v16
+// §2.2: trust is decided at the producer): the proxy's (fakeconn.ClockProxy)
+// when the stamp is this relay's own time.Now, taken as the bytes were read
+// (the fallback, or a read time one of the relay's own wrappers took so:
+// proxyStamped); unset for a read time another producer stamped, which this
+// relay cannot vouch for, so it never routes.
+func observedRead(conn net.Conn, fallback time.Time) (time.Time, fakeconn.Clock) {
+	clock := fakeconn.ClockUnset
+	if proxyStamped(conn) {
+		clock = fakeconn.ClockProxy
+	}
+	// A teller that told no time yet gives the fallback, on the clock the
+	// teller's own stamps are on: another producer's bytes, read here late,
+	// are not stamped by this relay as they were sent.
+	return observedReadAt(conn, fallback), clock
+}
+
+// proxyStamped reports whether conn's read time (readTimeProvider) is the
+// proxy's time.Now: a conn that tells none, or one of the relay's own
+// wrappers whose stamps are its time.Now over a conn that is so in turn
+// (readTrackingConn, prependingConn, whose prefix's time a relay stash took,
+// and readTimeReportingConn over such a source). Any other teller (a capture
+// fed from elsewhere, a FakeConn) is another producer's.
+func proxyStamped(conn net.Conn) bool {
+	switch c := conn.(type) {
+	case *readTrackingConn:
+		return proxyStamped(c.Conn)
+	case *prependingConn:
+		return proxyStamped(c.Conn)
+	case *readTimeReportingConn:
+		src, ok := c.source.(net.Conn)
+		return ok && proxyStamped(src)
+	}
+	_, tells := conn.(readTimeProvider)
+	return !tells
 }
 
 type readTrackingConn struct {

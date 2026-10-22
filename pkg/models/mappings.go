@@ -131,6 +131,15 @@ type ConcurrencyGroup struct {
 	Unkept int `json:"unkept,omitempty" yaml:"unkept,omitempty" bson:"unkept,omitempty"`
 }
 
+// RecordedAt is when the entry's request was recorded: its recorded time
+// (ReqTimestampMock), else its timestamp in seconds.
+func (e MockEntry) RecordedAt() time.Time {
+	if t, err := ParseMockTimestamp(e.ReqTimestampMock); err == nil && !t.IsZero() {
+		return t
+	}
+	return time.Unix(e.Timestamp, 0)
+}
+
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
 // mappings.yaml remains portable across YAML/JSON/BSON encoders while still
 // omitting zero values.

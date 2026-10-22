@@ -236,6 +236,10 @@ type Proxy struct {
 	// incomplete (ErrUnmatchedCallsUnread), naming the cause, instead of
 	// returning a list a miss is missing from.
 	missLoss atomic.Pointer[string]
+	// answersDropped counts the reports of background writes answered by
+	// their kind that were dropped for room (noteAnswerDropped): no read is
+	// incomplete for them, and each hundredth is said.
+	answersDropped atomic.Int64
 	// pendingLost is set, under captureMu, when a miss made with no test's
 	// window open was dropped because pendingMockErrors was full. The next
 	// window decides whose loss it is: a set's first discards those misses
@@ -1324,7 +1328,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-		p.sendMockNotFoundError(err)
+		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid)
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
 		}
@@ -2639,6 +2643,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var ctrKey, containerRepo string
 	if proven {
 		connID := fmt.Sprint(clientConnID)
+		// The process the connection came from, which each mock its parsers
+		// record names (starts.Registry.StampOrigin, S12 v16 §4.4): kept
+		// until they are done, as the container key is.
+		starts.Default.NoteOrigin(connID, destInfo.KernelPid)
+		defer starts.Default.ForgetOrigin(connID)
 		if c, _, isContainer := containerkey.Default.Name(p.logger, connID, dstAddr); isContainer {
 			// Its key, or, while its configuration is unread, its
 			// repository and port: a container either way, never a host
@@ -3597,7 +3606,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// keep the connection alive (a close makes pulsar-client-go
 			// reconnect the producer and crash on a nil schema); such a parser
 			// reports via this hook, replies normally, and keeps serving.
-			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
+			// The reporter names the process the connection came from on
+			// each miss and answer it takes (UnmatchedCall.Source).
+			srcPid := outgoingOpts.SrcPid
+			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid) })
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).
@@ -3608,7 +3620,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.countParserPanic(err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
-				return p.mockFailed(logger, err)
+				return p.mockFailedFrom(logger, err, srcPid)
 			}
 		}
 	}
@@ -3719,7 +3731,7 @@ func (p *Proxy) mockGenericOutgoing(
 	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		// Send specific error type to error channel for external monitoring
-		return p.mockFailed(logger, err)
+		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid)
 	}
 	return nil
 }
@@ -4170,6 +4182,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// and answer the next set's calls as another mock's: a false pass,
 		// where forgetting at a repair is a false fail.
 		p.getMockManager().NewVariableSet()
+		// Record's full round pairs a call nothing answered with a recording
+		// another test owns (S12 v16 §4.1): only its session sets Learn.
+		p.getMockManager().SetPairing(opts.Learn)
 	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
@@ -4550,6 +4565,32 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
+// ServeExactBackground implements agent.ExactBackgroundServer
+// (exact_background.go).
+func (p *Proxy) ServeExactBackground(rules string, pool, worker []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactBackground(rules, pool, worker)
+	return nil
+}
+
+var _ agent.ExactBackgroundServer = (*Proxy)(nil)
+
+// SetRecordedOfKind implements agent.RecordedOfKindSetter
+// (exact_background.go).
+func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordedOfKind(src)
+	return nil
+}
+
+var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
+
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	m := p.getMockManager()
@@ -4632,6 +4673,10 @@ func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
 type testErrorAccumulator struct {
 	mu   sync.Mutex
 	errs []error
+	// answers is how many of errs are answered calls' reports
+	// (models.ReportAnswer, S12 v16 §4.1): they have room of their own
+	// (addBounded), so no number of answers crowds out a miss.
+	answers int
 	// read is set, under Proxy.captureMu, when GetMockErrors has read a window
 	// it could not close (the degenerate path): what is filed into it after
 	// that was made after its test's misses were taken, between two tests.
@@ -4641,13 +4686,16 @@ type testErrorAccumulator struct {
 func (a *testErrorAccumulator) add(err error) {
 	a.mu.Lock()
 	a.errs = append(a.errs, err)
+	if isAnswerReport(err) {
+		a.answers++
+	}
 	a.mu.Unlock()
 }
 
 func (a *testErrorAccumulator) drain() []error {
 	a.mu.Lock()
 	e := a.errs
-	a.errs = nil
+	a.errs, a.answers = nil, 0
 	a.mu.Unlock()
 	return e
 }
@@ -4658,15 +4706,26 @@ func (a *testErrorAccumulator) drain() []error {
 // practice.
 const maxPendingMockErrors = 512
 
-// addBounded appends err unless the accumulator already holds max entries.
+// addBounded appends err unless the accumulator already holds max entries
+// of its class: misses (and every other error) and answered calls' reports
+// (models.ReportAnswer) each have room for max, so a background writer
+// answered by its kind, as often as it writes, never takes a miss's room.
 // Returns false when the entry was dropped.
 func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.errs) >= max {
+	answer := isAnswerReport(err)
+	held := len(a.errs) - a.answers
+	if answer {
+		held = a.answers
+	}
+	if held >= max {
 		return false
 	}
 	a.errs = append(a.errs, err)
+	if answer {
+		a.answers++
+	}
 	return true
 }
 
@@ -4734,10 +4793,64 @@ func (b beforeSetMiss) Unwrap() error { return b.error }
 // be missing from, and whose differences auto-noise must not learn. Only a
 // miss that counts against a test is a loss (missCounts): a DNS lookup's,
 // which the proxy answers itself, is not.
+//
+// An answered call's report (models.ReportAnswer) lost for room is no miss.
+// One record's judging reads (a pairing, AnswerProvisional, which it bakes)
+// makes the read incomplete as a miss's loss does, the cause saying it was
+// no miss. One answered by kind (AnswerByKind) changes no verdict: only the
+// count of background writes a report says were answered unchecked is short
+// of it, which is said (noteAnswerDropped), and the read stays complete.
 func (p *Proxy) noteMissLost(err error, cause string) {
-	if isMockNotFoundErr(err) && missCounts(err) {
+	if !isMockNotFoundErr(err) {
+		return
+	}
+	if isByKindAnswer(err) {
+		p.noteAnswerDropped(err)
+		return
+	}
+	if missCounts(err) {
+		if isAnswerReport(err) {
+			// No miss: an answered call's report, which record's judging
+			// reads, lost where a miss would be (S12 v16 §4.1).
+			cause = "an answered call's report (no miss) was lost: " + cause
+		}
 		p.missLoss.CompareAndSwap(nil, &cause)
 	}
+}
+
+// isAnswerReport reports whether err is an answered call's report
+// (models.ReportAnswer), not a miss.
+func isAnswerReport(err error) bool {
+	var pe models.ParserError
+	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.Answer != ""
+}
+
+// isByKindAnswer reports whether err is the report of a background write
+// answered by its kind (models.AnswerByKind, S12 v16 §3): unchecked, read by
+// no judging, only counted in the reports.
+func isByKindAnswer(err error) bool {
+	var pe models.ParserError
+	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.Answer == models.AnswerByKind
+}
+
+// noteAnswerDropped says that the report of a background write answered by
+// its kind was dropped for room (its window's answers, or those waiting for
+// the next test, were full): the first, then every 100th. No read is
+// incomplete for it, as no verdict reads it; what is short is the count of
+// unchecked writes a report gives. Under Proxy.captureMu, or with no window.
+func (p *Proxy) noteAnswerDropped(err error) {
+	n := p.answersDropped.Add(1)
+	if p.logger == nil || (n != 1 && n%100 != 0) {
+		return
+	}
+	var pe models.ParserError
+	kind := ""
+	if errors.As(err, &pe) && pe.MismatchReport != nil {
+		kind = pe.MismatchReport.WriteKind
+	}
+	p.logger.Warn("a background write answered by its kind was not kept for its test's report: no verdict reads it, but the count of writes the report says were answered unchecked is short of it",
+		zap.String("write_kind", kind), zap.Int64("dropped", n),
+		zap.Int("kept", maxPendingMockErrors))
 }
 
 // missDroppedForRoom notes that a miss was dropped because its test's list is
@@ -4748,18 +4861,30 @@ func (p *Proxy) missDroppedForRoom(err error) { p.noteMissLost(err, missLostList
 // open was dropped because pendingMockErrors is full; the next window decides
 // whose loss it is (pendingLost).
 func (p *Proxy) pendingDroppedForRoom(err error) {
-	if isMockNotFoundErr(err) && missCounts(err) {
+	if !isMockNotFoundErr(err) {
+		return
+	}
+	if isByKindAnswer(err) {
+		p.noteAnswerDropped(err)
+		return
+	}
+	if missCounts(err) {
 		p.pendingLost = true
 	}
 }
 
 // missCounts reports whether a miss counts against a test
 // (models.MockMismatchReport.CountsAgainstTest): one without a report is
-// taken to, as nothing says it does not.
+// taken to, as nothing says it does not. So does, for what is lost, an
+// answered call's report (models.ReportAnswer, S12 v16 §4.1) other than one
+// answered by kind: it counts against nothing, but record's judging reads it
+// (a pairing it bakes), and a read short of one is incomplete. One answered
+// by kind is read by no judging (noteMissLost).
 func missCounts(err error) bool {
 	var pe models.ParserError
 	if errors.As(err, &pe) && pe.MismatchReport != nil {
-		return pe.MismatchReport.CountsAgainstTest()
+		r := pe.MismatchReport
+		return r.CountsAgainstTest() || (r.Answer != "" && r.Answer != models.AnswerByKind)
 	}
 	return true
 }
@@ -5267,6 +5392,12 @@ func isMockMiss(err error) bool {
 // and returned as reportedMiss; anything else, and every run with the switch
 // off, keeps the error log it always had.
 func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
+	return p.mockFailedFrom(logger, err, 0)
+}
+
+// mockFailedFrom is mockFailed for a connection from process pid (0 when the
+// redirect gave none), whom its miss names (sendMockNotFoundErrorFrom).
+func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32) error {
 	if errors.Is(err, util.ErrParserPanicked) {
 		// keploy's failure, counted as a capture loss where the parser
 		// returned it (countParserPanic): no miss, so neither the mismatch
@@ -5284,7 +5415,7 @@ func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
 	// queued for its test already; queued again it would count twice, the
 	// second time possibly against the next test.
 	if !models.IsMismatchReported(err) {
-		p.sendMockNotFoundError(err)
+		p.sendMockNotFoundErrorFrom(err, pid)
 	}
 	if quiet {
 		return reportedMiss{err}
@@ -5306,6 +5437,17 @@ func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
 // sendMockNotFoundError builds a ParserError from a mock-miss error,
 // extracting the MismatchReport if the error carries one.
 func (p *Proxy) sendMockNotFoundError(err error) {
+	p.sendMockNotFoundErrorFrom(err, 0)
+}
+
+// sendMockNotFoundErrorFrom is sendMockNotFoundError for a call from process
+// pid (0 when the redirect gave none). Under the proven switch the report,
+// a miss's or an answer's (models.ReportAnswer), names that process
+// (MockMismatchReport.Source, S12 v16 §4.4) when its parser named none. An
+// answered call (models.ErrAnswered) is stamped as a miss is, and kept for
+// the test's read with the misses, but it is no miss: it is not logged as
+// one.
+func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
@@ -5325,6 +5467,15 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		stamped := *r
 		stamped.At = proxyErr.At
 		proxyErr.MismatchReport = &stamped
+	}
+	// The process that made the call (proven switch): its comm and argv[0],
+	// no more of its command line. A copy, as above.
+	if r := proxyErr.MismatchReport; r != nil && r.Source == nil && pid != 0 && provenswitch.On() {
+		if comm, exe, ok := starts.Default.ProcessOf(pid); ok {
+			stamped := *r
+			stamped.Source = &models.Origin{Comm: comm, Exe: exe}
+			proxyErr.MismatchReport = &stamped
+		}
 	}
 	// Under exact serving (the proven switch) a miss says where it was made:
 	// in the open test, outside every test, or, as its matcher found, as one
@@ -5351,7 +5502,18 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	// gRPC, etc. uniformly — it names WHICH upstream missed and how far matching
 	// got, instead of each parser logging it differently (or not at all). The
 	// per-parser decode loggers stay at Debug to avoid double-logging.
-	if r := proxyErr.MismatchReport; r != nil {
+	if r := proxyErr.MismatchReport; r != nil && r.Answer != "" {
+		// An answered call (models.ReportAnswer): no mismatch.
+		p.logger.Debug("an answered call, reported for judging",
+			zap.String("answer", r.Answer),
+			zap.String("protocol", r.Protocol),
+			zap.String("destination", r.Destination),
+			zap.String("write_kind", r.WriteKind),
+			zap.String("recorded", r.ClosestMock),
+			zap.String("recorded_in", r.RecordedIn),
+			zap.Bool("drift", r.Drift),
+			zap.Bool("reused", r.Reused))
+	} else if r != nil {
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
 			zap.String("destination", r.Destination),

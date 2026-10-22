@@ -140,3 +140,41 @@ func TestTheMarkAndAMovesOwnerSurviveARewriteWithoutTheSwitch(t *testing.T) {
 		})
 	}
 }
+
+// MarkRecordedWith adds a mark to the set's, once, keeping every other
+// section; a set with no mapping file, and an empty mark, are errors.
+func TestMarkRecordedWithAddsTheSetsMarkOnce(t *testing.T) {
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(format.FileExtension(), func(t *testing.T) {
+			ctx := context.Background()
+			db := NewWithFormat(zap.NewNop(), t.TempDir(), "mappings", format)
+			if err := db.MarkRecordedWith(ctx, "test-set-0", models.RecordedWithS12Routing); err == nil {
+				t.Fatal("a set with no mapping file was marked")
+			}
+			if err := db.Insert(ctx, goldenMapping()); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.MarkRecordedWith(ctx, "test-set-0", ""); err == nil {
+				t.Fatal("an empty mark was written")
+			}
+			for range 2 {
+				if err := db.MarkRecordedWith(ctx, "test-set-0", models.RecordedWithS12Routing); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.MarkRecordedWith(ctx, "test-set-0", "another"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := db.GetMapping(ctx, "test-set-0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.RecordedWith, []string{models.RecordedWithS12Routing, "another"}) {
+				t.Fatalf("the set's marks are %v; want [%s another]", got.RecordedWith, models.RecordedWithS12Routing)
+			}
+			if len(got.TestCases) != 2 || len(got.Worker) != 2 || len(got.Startup) != 1 {
+				t.Fatalf("the mark lost a section: %+v", got)
+			}
+		})
+	}
+}

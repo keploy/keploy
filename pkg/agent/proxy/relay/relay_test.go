@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -217,6 +218,14 @@ func TestTimestampsStampedAtRealBoundary(t *testing.T) {
 	}
 	if c.SeqNo == 0 {
 		t.Fatalf("expected non-zero SeqNo, got 0")
+	}
+	// The relay took the stamp itself: it is on the proxy's clock, which
+	// is named for the run (S12 v16 §2.2).
+	if c.ReadClock != fakeconn.ClockProxy {
+		t.Fatalf("the chunk's clock is %s; want proxy", c.ReadClock)
+	}
+	if id := fakeconn.ClockID(c.ReadClock); !strings.HasPrefix(id, "proxy:") {
+		t.Fatalf("the proxy's clock is named %q; want proxy:<run>", id)
 	}
 }
 
@@ -1331,5 +1340,41 @@ func TestAFailedTLSUpgradeIsACaptureLoss(t *testing.T) {
 	defer mu.Unlock()
 	if len(kinds) != 1 || kinds[0] != models.CaptureLossSTARTTLS {
 		t.Fatalf("capture losses %v, want one %s", kinds, models.CaptureLossSTARTTLS)
+	}
+}
+
+// A chunk is on the proxy's clock only when the relay took its stamp itself:
+// its time.Now, or a read time one of the relay's own wrappers took so, over
+// a conn that tells none. A read time another producer stamped (a conn that
+// tells its own) is on no clock the relay can name, however it is wrapped.
+func TestObservedReadTrustsOnlyTheRelaysOwnStamp(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	now := time.Unix(100, 0)
+	foreignAt := time.Unix(50, 0)
+	foreign := fixedReadAtConn{Conn: a, readAt: foreignAt}
+	tracked := newReadTrackingConn(a)
+	tracked.lastReadNano.Store(time.Unix(90, 0).UnixNano())
+	trackedForeign := newReadTrackingConn(foreign)
+	trackedForeign.lastReadNano.Store(foreignAt.UnixNano())
+	for _, tc := range []struct {
+		name  string
+		conn  net.Conn
+		at    time.Time
+		clock fakeconn.Clock
+	}{
+		{"a conn that tells no read time", a, now, fakeconn.ClockProxy},
+		{"the relay's tracker over it", tracked, time.Unix(90, 0), fakeconn.ClockProxy},
+		{"a reporter over the tracker", newReadTimeReportingConn(a, tracked), time.Unix(90, 0), fakeconn.ClockProxy},
+		{"a prefix over the tracker", newPrependingConnWithReadAt(tracked, []byte("x"), time.Unix(80, 0)), now, fakeconn.ClockProxy},
+		{"a conn that tells its own", foreign, foreignAt, fakeconn.ClockUnset},
+		{"the relay's tracker over that", trackedForeign, foreignAt, fakeconn.ClockUnset},
+		{"a reporter over a foreign source", newReadTimeReportingConn(a, foreign), foreignAt, fakeconn.ClockUnset},
+		{"a foreign teller that told no time yet", fixedReadAtConn{Conn: a}, now, fakeconn.ClockUnset},
+	} {
+		at, clock := observedRead(tc.conn, now)
+		if !at.Equal(tc.at) || clock != tc.clock {
+			t.Errorf("%s: observedRead = %v, %v; want %v, %v", tc.name, at, clock, tc.at, tc.clock)
+		}
 	}
 }

@@ -78,4 +78,20 @@ func (sysProc) Program(pid uint32) string {
 	return strings.TrimSpace(string(b))
 }
 
+// Command reads process pid's comm (/proc/<pid>/comm) and command line
+// (/proc/<pid>/cmdline, NUL-separated).
+func (sysProc) Command(pid uint32) (comm string, argv []string, ok bool) {
+	c, cerr := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if cerr == nil {
+		comm = strings.TrimSpace(string(c))
+	}
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		argv = strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+		if len(argv) == 1 && argv[0] == "" {
+			argv = nil
+		}
+	}
+	return comm, argv, cerr == nil || len(argv) > 0
+}
+
 var Default = New(sysProc{}, 20*time.Millisecond)

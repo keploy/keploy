@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,6 +105,13 @@ type exactView struct {
 	cand []bool
 	// claims is the manager's claims on the shared recordings.
 	claims *exactClaims
+	// bg is the set's background under S12's rules (ServeExactBackground)
+	// when the view was installed; nil for today's rules.
+	bg *backgroundState
+	// workerOrder is, under S12's rules, each shown worker-scope mock's
+	// position in the order ServeExactWorker gave (its place's order, then
+	// delivering before idle, then recorded order).
+	workerOrder map[string]int
 
 	mu sync.Mutex
 	// closed: another view replaced this one; nothing consumes in it after
@@ -144,8 +152,22 @@ type exactState struct {
 	// current staging (outsideAnswers).
 	outside outsideAnswers
 	// worker is the worker scope's reachable mocks (ServeExactWorker), which
-	// each view installed after it shows.
-	worker atomic.Pointer[map[string]struct{}]
+	// each view installed after it shows, with their order in it: one value,
+	// so a view never pairs one call's set with another's order.
+	worker atomic.Pointer[reachedWorker]
+	// bg is the staged set's background under S12's rules
+	// (ServeExactBackground), nil for today's (exact_background.go).
+	bg atomic.Pointer[backgroundState]
+	// poolCursor is the key of the pool view installed last: the cursors
+	// the calls between tests advance are under it (exactCursorKey), and so
+	// are the background's (BackgroundCursor).
+	poolCursor atomic.Pointer[string]
+	// pairs says the session pairs (SetPairing); claimed, the recordings a
+	// pairing claimed in the current staging; ofKind, where the pairing
+	// reads recordings of a kind the trees do not hold.
+	pairs   atomic.Bool
+	claimed stagingNames
+	ofKind  recordedOfKindSource
 	// begun is the mocks the tests begun in the current staging own
 	// (StagedOwnerBegun); named, those a miss's diagnosis named
 	// (FindStagedNotOwned), each once.
@@ -225,6 +247,13 @@ func (c *exactClaims) takenByOther(epoch uint64, name, test string) bool {
 	}
 	t, ok := c.claimant(epoch, name)
 	return ok && t != test
+}
+
+// reachedWorker is what ServeExactWorker last said: the worker-scope mocks
+// the run has reached, and each one's position in the order it gave.
+type reachedWorker struct {
+	set   map[string]struct{}
+	order map[string]int
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -912,12 +941,17 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 // installs no view itself: the next ServeExactTest or ServeExactPool does.
 func (m *MockManager) ServeExactWorker(names []string) {
 	set := make(map[string]struct{}, len(names))
+	order := make(map[string]int, len(names))
 	for _, n := range names {
-		if n != "" {
-			set[n] = struct{}{}
+		if n == "" {
+			continue
 		}
+		if _, dup := set[n]; !dup {
+			order[n] = len(order)
+		}
+		set[n] = struct{}{}
 	}
-	m.exact.worker.Store(&set)
+	m.exact.worker.Store(&reachedWorker{set: set, order: order})
 }
 
 // installExact makes v the view, then tells every parser that keeps an index
@@ -925,8 +959,21 @@ func (m *MockManager) ServeExactWorker(names []string) {
 // and so does the window signal.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
-	if w := m.exact.worker.Load(); w != nil {
-		v.worker = *w
+	if v.test == "" {
+		key := v.poolKey
+		m.exact.poolCursor.Store(&key)
+	}
+	w := m.exact.worker.Load()
+	if w != nil {
+		v.worker = w.set
+	}
+	// Under S12's background rules the view orders its worker scope as the
+	// agent placed it, and shows the pool in a test (exact_background.go).
+	if bg := m.exact.bg.Load(); bg != nil {
+		v.bg = bg
+		if w != nil {
+			v.workerOrder = w.order
+		}
 	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
@@ -1094,8 +1141,10 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 // shows reports whether the view shows mk among the staged mocks: a
 // protocol-phase mock always; a worker-scope mock the run has reached the
 // place of, whether a test is open or not; any other data-plane mock only
-// between tests, and only in the pool slice served. The open test's own mocks are read from the view
-// itself (unanswered), never from the staged trees.
+// between tests, and only in the pool slice served, or, under S12's
+// background rules, in a test too when it is the pool's. The open test's own
+// mocks are read from the view itself (unanswered), never from the staged
+// trees.
 func (v *exactView) shows(mk *models.Mock) bool {
 	if mk == nil {
 		return false
@@ -1113,10 +1162,19 @@ func (v *exactView) shows(mk *models.Mock) bool {
 		return true
 	}
 	if v.test != "" {
-		return false
+		// Under S12's background rules the pool answers in a test too,
+		// after the test's own and the worker scope (keep); an async
+		// lane's recording keeps today's rules (S12 v16 §2.1).
+		return v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
 	_, ok := v.pool[mk.Name]
 	return ok
+}
+
+// inBackgroundPool reports whether mk, consumed in an open test, is one of
+// the pool's data-plane recordings S12's background rules show there.
+func (v *exactView) inBackgroundPool(mk *models.Mock) bool {
+	return v.test != "" && v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
 }
 
 // isWorker reports whether name is one of the set's worker-scope mocks the
@@ -1160,12 +1218,44 @@ func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
 
 func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 	out := make([]*models.Mock, 0, len(in))
+	if v.bg != nil {
+		return v.backgroundOrder(out, in)
+	}
 	for _, mk := range in {
 		if v.shows(mk) {
 			out = append(out, mk)
 		}
 	}
 	return out
+}
+
+// backgroundOrder appends to out what the view shows of in, in S12's
+// background order (S12 v16 §2.3): what is not background first (the
+// protocol-phase mocks), in their order; then the worker scope, the earlier
+// place first, delivering before idle, then recorded order (workerOrder);
+// then the pool, in recorded order, whichever trees in came from.
+func (v *exactView) backgroundOrder(out, in []*models.Mock) []*models.Mock {
+	var worker, pool []*models.Mock
+	for _, mk := range in {
+		if !v.shows(mk) {
+			continue
+		}
+		switch {
+		case mk.IsProtocolPhase():
+			out = append(out, mk)
+		case v.isWorker(mk.Name):
+			worker = append(worker, mk)
+		default:
+			pool = append(pool, mk)
+		}
+	}
+	sort.SliceStable(worker, func(i, j int) bool {
+		return v.workerOrder[worker[i].Name] < v.workerOrder[worker[j].Name]
+	})
+	sort.SliceStable(pool, func(i, j int) bool {
+		return pool[i].Spec.ReqTimestampMock.Before(pool[j].Spec.ReqTimestampMock)
+	})
+	return append(append(out, worker...), pool...)
 }
 
 // perTest is a per-test read under exact serving: the open test's unanswered
@@ -1187,6 +1277,20 @@ func (v *exactView) reusable(kind models.Kind, staged ...[]*models.Mock) []*mode
 	// reads only the reusable tiers while no test is open.
 	out := v.unanswered(kind, v.test != "")
 	seen := make(map[*models.Mock]struct{}, len(out))
+	if v.bg != nil {
+		// One order across the tiers (backgroundOrder), each mock once.
+		var all []*models.Mock
+		for _, list := range staged {
+			for _, mk := range list {
+				if _, dup := seen[mk]; dup || (kind != "" && mk.Kind != kind) {
+					continue
+				}
+				seen[mk] = struct{}{}
+				all = append(all, mk)
+			}
+		}
+		return v.backgroundOrder(out, all)
+	}
 	for _, list := range staged {
 		for _, mk := range v.keep(list) {
 			if _, dup := seen[mk]; dup || (kind != "" && mk.Kind != kind) {
@@ -1277,8 +1381,10 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	}
 	// A data-plane recording consumed through a delete door with no test
 	// open, and one of the worker scope's whether a test is open or not, is
-	// spent for the staging: it answers at most one request in the set.
-	if (v.test == "" || worker) && !mk.IsProtocolPhase() {
+	// spent for the staging: it answers at most one request in the set. So
+	// is one of the pool's a test consumes under S12's background rules:
+	// the background is the set's, whoever's call it answers.
+	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
 		m.prepareOutside()
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
@@ -1388,7 +1494,10 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 // exactCursorKey is the stateful cursor a key names under exact serving: the
 // served pool slice's own, so two keys' calls never share a sequence. In a
 // test no cursor is used (ok false): the test's mocks answer once each, in
-// recorded order, and the pool serves no data-plane mock there.
+// recorded order, and under today's rules the pool serves no data-plane mock
+// there. Under S12's background rules a background recording that answers a
+// call in a test is picked with the background's cursor (BackgroundCursor),
+// the one this gives the calls between tests.
 func (m *MockManager) exactCursorKey(key string) (string, bool) {
 	v := m.exactView()
 	if v == nil {

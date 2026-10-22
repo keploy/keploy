@@ -60,6 +60,9 @@ type WindowedMock struct {
 	// Only the switch acts on either.
 	Clock     string
 	WriteKind string
+	// Comm and Exe are the process that made the call (Origin.Comm, Exe), for
+	// the line that says why it was routed; "" when its origin names none.
+	Comm, Exe string
 }
 
 // NewWindowedMock is m as the window derivation reads it.
@@ -77,6 +80,7 @@ func NewWindowedMock(m *Mock) WindowedMock {
 	}
 	if m.Origin != nil {
 		w.WriteKind, _ = WriteKindOf(m)
+		w.Comm, w.Exe = m.Origin.Comm, m.Origin.Exe
 	}
 	return w
 }
@@ -140,6 +144,42 @@ type WindowMappings struct {
 	// its recording holds it (MockEntry.Place): the test whose window began
 	// last before it, or the set's start before every window.
 	Worker []MockEntry
+	// Routed is, under DeriveOptions.RouteInFlightWrites, the in-flight
+	// writes the derivation routed to the worker scope rather than to the
+	// test they were in flight into (S12 v16 §2.2), in recorded order: each
+	// is also in Worker, at the set's start.
+	Routed []RoutedWrite
+}
+
+// RoutedWrite is one write DeriveWindowMappingsWith routed to the worker
+// scope: the mock as the derivation read it, and the test it was in flight
+// into when that test began.
+type RoutedWrite struct {
+	Mock WindowedMock
+	Test string
+}
+
+// DeriveOptions are the window derivation's options.
+type DeriveOptions struct {
+	// RouteInFlightWrites is S12's routing at record (S12 v16 §2.2): a call
+	// the in-flight rule gives to the test it was in flight into that is a
+	// by-kind write (WindowedMock.WriteKind) whose request was stamped on the
+	// clock that test's window start was (equal non-empty Clock), is no
+	// test's: it was sent before the test began, so the test did not make it.
+	// It goes to the worker scope at the set's start (by-kind answers ignore
+	// a place), and is listed in Routed. A call on an untrusted or another
+	// clock, a call of any other kind (a long poll among them), and one in
+	// flight into the first test (which no gap precedes: it is the start's,
+	// the worker scope's, already) are derived as without it. keploy record
+	// sets it only for a set it marks for S12's background rules
+	// (RecordedWithS12Routing), which only those rules serve.
+	RouteInFlightWrites bool
+}
+
+// routes reports whether m, in flight into w, is routed to the worker scope
+// (DeriveOptions.RouteInFlightWrites): a by-kind write stamped on w's clock.
+func (o DeriveOptions) routes(m WindowedMock, w TestWindow) bool {
+	return o.RouteInFlightWrites && m.WriteKind != "" && m.Clock != "" && m.Clock == w.Clock
 }
 
 // DeriveWindowMappings gives each test the test mocks recorded inside its
@@ -175,6 +215,11 @@ type WindowMappings struct {
 // A window with no Start is left out; one whose End is missing or before its
 // Start ends at its Start. Mocks that are not test mocks are skipped.
 func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMappings {
+	return DeriveWindowMappingsWith(windows, mocks, DeriveOptions{})
+}
+
+// DeriveWindowMappingsWith is DeriveWindowMappings with opts.
+func DeriveWindowMappingsWith(windows []TestWindow, mocks []WindowedMock, opts DeriveOptions) WindowMappings {
 	ws := make([]TestWindow, 0, len(windows))
 	for _, w := range windows {
 		if w.Start.IsZero() {
@@ -238,6 +283,13 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			// WindowSchedule.InFlightInto has it. Any other is the worker
 			// scope's, the app's start included.
 			if m.InFlight && next < len(ws) && sched.InFlightInto(m.At, m.Res, ws[next].Start) {
+				if opts.routes(m, ws[next]) {
+					// Sent before the test began, on its window's clock:
+					// not the test's (S12 v16 §2.2).
+					out.Worker = append(out.Worker, m.entry())
+					out.Routed = append(out.Routed, RoutedWrite{Mock: m, Test: ws[next].TestCase})
+					continue
+				}
 				out.Tests[next].Mocks = append(out.Tests[next].Mocks, m.entry())
 				continue
 			}

@@ -470,6 +470,13 @@ type ExactServing struct {
 	// before them. Sent only to an agent that says it serves them
 	// (ExactConcurrentHeader); an agent that predates it ignores it.
 	Concurrent []string `json:"concurrent,omitempty"`
+	// Background names, on the staging call, the rules the set's background
+	// (Worker and Pool) is served by: RecordedWithS12Routing for S12's, which
+	// the replay sends only for a set marked so (Mapping.RecordedWith), under
+	// the proven switch, in a build whose judging enables them
+	// (replay.RegisterS12Serving); empty for today's. An agent that predates
+	// it ignores it, and serves by today's rules: never looser.
+	Background string `json:"background,omitempty"`
 }
 
 // ExactConcurrentHeader is the /storemocks response header in which an agent
@@ -525,6 +532,16 @@ const (
 	ConsumedScopeHeader  = "X-Keploy-Consumed-Scope"
 	ConsumedScopePerTest = "per-test"
 )
+
+// BackgroundRulesHeader is the /updatemockparams response header in which an
+// agent says, answering a set's staging call (ExactServing.Stage), the rules
+// it serves the set's background by: RecordedWithS12Routing when it applied
+// S12's (ExactServing.Background), absent for today's. An agent that does not
+// send it, every agent released before S12 among them, serves by today's
+// rules, and the replay then keeps today's checks for the set (its worker
+// scope required by its end) whatever it asked for: never looser than the
+// rules the set was served by.
+const BackgroundRulesHeader = "X-Keploy-Background-Rules"
 
 // UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
 // agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with

@@ -191,6 +191,8 @@ type Agent struct {
 	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
 	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
+	testBegunAt  map[string]int       // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
+	testBg       *testBackground      // keploy test, proven switch: the set's background under S12's rules, nil for today's (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -647,6 +649,7 @@ func (a *Agent) resetScopeState() {
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
 	a.testWorker, a.testBegun = nil, nil
+	a.testBegunAt, a.testBg = nil, nil
 	a.scopeMu.Unlock()
 }
 

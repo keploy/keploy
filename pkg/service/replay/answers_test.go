@@ -2,6 +2,7 @@ package replay
 
 import (
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -144,5 +145,28 @@ func TestSplitAnswersKeepsReadOrder(t *testing.T) {
 	only := []models.UnmatchedCall{m1, m2}
 	if gotMisses, gotAnswers := splitAnswers(only); len(gotAnswers) != 0 || &gotMisses[0] != &only[0] {
 		t.Fatal("a read with no answer is not returned as it is")
+	}
+}
+
+// The text report says, once per test as its set ends, the background writes
+// its window answered by their kind, unchecked (S12 v16 §4.4): a test whose
+// answers are provisional (a pairing) or none has no line.
+func TestRunTestSet_ATestsUncheckedWritesAreSaidOnce(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	inFirst := answered("insert in test-1", models.AnswerByKind, false)
+	paired := answered("insert in test-2", models.AnswerProvisional, false)
+	h.instr.mockErrorsFor = misses(reads(inFirst), reads(paired), reads())
+	var status models.TestSetStatus
+	out := captureStdout(t, func() { status = h.run(t) })
+	if status != models.TestSetStatusPassed {
+		t.Fatalf("status %s", status)
+	}
+	const line = "test-1: 1 background write answered inside its window, unchecked (Mongo insert keploy.events)"
+	if n := strings.Count(out, line); n != 1 {
+		t.Fatalf("the line %q was said %d times; want once in:\n%s", line, n, out)
+	}
+	if strings.Contains(out, "test-2: ") && strings.Contains(out, "unchecked") {
+		t.Fatalf("a test with only a provisional answer has an unchecked line:\n%s", out)
 	}
 }

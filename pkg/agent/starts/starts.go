@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type Proc interface {
@@ -74,6 +75,9 @@ type Registry struct {
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
+	// origin is, under the proven switch, the process each recorded
+	// connection came from (origin.go).
+	origin origins
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -95,6 +99,7 @@ func (r *Registry) Reset() {
 	r.sets = nil
 	r.universe = nil
 	r.marked = false
+	r.resetOrigins()
 }
 
 func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time) {
@@ -269,6 +274,11 @@ func (r *Registry) Dependency(pid uint32) bool {
 func (r *Registry) Stamp(m *models.Mock) {
 	if m == nil {
 		return
+	}
+	// The process its call came from (proven switch, S12 v16 §4.4): the
+	// sync manager stamped it as its parser handed it over, else here.
+	if provenswitch.On() {
+		r.StampOrigin(m)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

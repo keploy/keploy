@@ -289,6 +289,43 @@ func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
 // on it must see that MarkMockAsUsed's false for a named mock is a refusal.
 func (s *scopedMockDb) ExactServing() bool { return integrations.ExactServing(s.MockMemDb) }
 
+// Background, SpentBackground, PairingCandidates and ClaimPairing forward the
+// store's S12 background serving (integrations.ExactBackground, Pairing): a
+// view made before exact serving began reads the bare manager's, nil and
+// false from a store that has none.
+func (s *scopedMockDb) Background(kind models.Kind) []*models.Mock {
+	return integrations.Background(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) SpentBackground(kind models.Kind) []*models.Mock {
+	return integrations.SpentBackground(s.MockMemDb, kind)
+}
+
+// KindBackground and SpendByKind forward the store's by-kind background
+// (integrations.ByKindBackground).
+func (s *scopedMockDb) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
+	return integrations.KindBackground(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) SpendByKind(m *models.Mock) bool {
+	return integrations.SpendByKind(s.MockMemDb, m)
+}
+
+var _ integrations.ByKindBackground = (*scopedMockDb)(nil)
+
+func (s *scopedMockDb) PairingCandidates(kind models.Kind) []*models.Mock {
+	return integrations.PairingCandidates(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) ClaimPairing(m *models.Mock) bool {
+	return integrations.ClaimPairing(s.MockMemDb, m)
+}
+
+var (
+	_ integrations.ExactBackground = (*scopedMockDb)(nil)
+	_ integrations.Pairing         = (*scopedMockDb)(nil)
+)
+
 // FindStagedNotOwned forwards the store's lookup of a staged mock the open
 // test does not own (integrations.StagedFinder), "" from a store that has
 // none: under exact serving a Generic miss on a view made before it began is
@@ -560,14 +597,7 @@ func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
 	if !ok {
 		return -1
 	}
-	switch {
-	case s.passThrough():
-		s.lastScope = ""
-	case s.live:
-		s.lastScope = starts.Default.Scope(s.pid)
-	default:
-		s.lastScope = s.current().scope
-	}
+	s.resolveCursorScope()
 	return c.MockCursorIndex(s.cursorKey(key), n)
 }
 
@@ -576,6 +606,48 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
 	}
 }
+
+// resolveCursorScope resolves, for a peek, the scope its cursor key is in
+// (cursorKey), which the commit after it reuses.
+func (s *scopedMockDb) resolveCursorScope() {
+	switch {
+	case s.passThrough():
+		s.lastScope = ""
+	case s.live:
+		s.lastScope = starts.Default.Scope(s.pid)
+	default:
+		s.lastScope = s.current().scope
+	}
+}
+
+// BackgroundCursor forwards the store's background cursor under S12's rules
+// (integrations.BackgroundCursor), its keys in this view's scope as every
+// other cursor key of it is (cursorKey): false from a store that has none.
+func (s *scopedMockDb) BackgroundCursor() (integrations.MockCursor, bool) {
+	inner, ok := integrations.BackgroundCursorOf(s.MockMemDb)
+	if !ok {
+		return nil, false
+	}
+	return scopedBackgroundCursor{s: s, inner: inner}, true
+}
+
+// scopedBackgroundCursor is the store's background cursor through a scoped
+// view (scopedMockDb.BackgroundCursor).
+type scopedBackgroundCursor struct {
+	s     *scopedMockDb
+	inner integrations.MockCursor
+}
+
+func (c scopedBackgroundCursor) MockCursorIndex(key string, n int) int {
+	c.s.resolveCursorScope()
+	return c.inner.MockCursorIndex(c.s.cursorKey(key), n)
+}
+
+func (c scopedBackgroundCursor) AdvanceMockCursor(key string, servedIdx, n int) {
+	c.inner.AdvanceMockCursor(c.s.cursorKey(key), servedIdx, n)
+}
+
+var _ integrations.BackgroundCursor = (*scopedMockDb)(nil)
 
 // InTestWindow forwards integrations.TestWindows.
 func (s *scopedMockDb) InTestWindow(t time.Time) bool {

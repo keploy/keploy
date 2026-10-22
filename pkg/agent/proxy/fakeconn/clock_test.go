@@ -106,3 +106,21 @@ func TestAZeroChunksClockIsUnset(t *testing.T) {
 		}
 	}
 }
+
+// The proxy's clock is named once per process, "proxy:" and a random run
+// id, and every call names it the same: the relay's chunks and the ingress's
+// windows are one clock.
+func TestNameProxyClockNamesOneClockPerProcess(t *testing.T) {
+	resetClockIDs(t)
+	id := NameProxyClock()
+	if !strings.HasPrefix(id, "proxy:") || len(id) <= len("proxy:") {
+		t.Fatalf("the proxy's clock is named %q; want proxy:<run>", id)
+	}
+	if got := ClockID(ClockProxy); got != id {
+		t.Fatalf("ClockID(ClockProxy) = %q after NameProxyClock named it %q", got, id)
+	}
+	if again := NameProxyClock(); again != id {
+		t.Fatalf("a second call named the proxy's clock %q; want %q", again, id)
+	}
+	mustPanic(t, "already", func() { SetClockID(ClockProxy, "proxy:another-run") })
+}

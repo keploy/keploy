@@ -5,7 +5,11 @@
 package fakeconn
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"math"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -139,6 +143,31 @@ func SetClockID(c Clock, id string) {
 	}
 	clockIDs[c].Store(&id)
 }
+
+// NameProxyClock names ClockProxy for this agent run, once per process, and
+// returns its id: "proxy:<run>", with run a random id the process draws the
+// first time it is called. Every producer that stamps on the proxy's clock
+// (the relay, as it reads a chunk; the ingress, as it opens a test's window)
+// calls it before its first stamp, so a stamp on that clock is named.
+func NameProxyClock() string {
+	id := proxyRunID()
+	if ClockID(ClockProxy) != id {
+		SetClockID(ClockProxy, id)
+	}
+	return id
+}
+
+// proxyRunID is this process's proxy clock id, drawn once.
+var proxyRunID = sync.OnceValue(func() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// No randomness: the process's id and start still name this run
+		// apart from another agent's.
+		binary.BigEndian.PutUint32(b[:4], uint32(os.Getpid()))
+		binary.BigEndian.PutUint32(b[4:], uint32(time.Now().UnixNano()))
+	}
+	return "proxy:" + hex.EncodeToString(b[:])
+})
 
 // ClockID is c's name for this run: "" for ClockUnset or a clock not named.
 func ClockID(c Clock) string {

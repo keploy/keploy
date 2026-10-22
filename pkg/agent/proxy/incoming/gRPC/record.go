@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -86,8 +87,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 
 	// captureStream closes over ctx, t, appPort, synchronous, and mapping so
 	// emitCompleteStreams does not need to carry those as parameters.
+	// The forwarder stamps each client chunk with the proxy's time.Now
+	// before it writes it on (forwardAndTee), so a call's request stamp,
+	// its window's start, is taken before the app sees it, on the proxy's
+	// clock (S12 v16 §2.2).
+	windowCtx := Utils.WithWindowClock(ctx, fakeconn.NameProxyClock())
 	captureStream := func(stream *pkg.HTTP2Stream) {
-		Utils.CaptureGRPC(ctx, logger, t, stream, appPort, synchronous, mapping)
+		Utils.CaptureGRPC(windowCtx, logger, t, stream, appPort, synchronous, mapping)
 	}
 
 	// Single emitter goroutine to avoid duplicate test case emission. Each

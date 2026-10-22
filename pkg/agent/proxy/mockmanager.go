@@ -626,8 +626,14 @@ func (m *MockManager) ResetForReplaySession() {
 	// source: names are unique only within a set, and the next set names its
 	// own.
 	m.exact.worker.Store(nil)
+	// And so do the rules its set's background is served by: the next
+	// session's staging names its own (ServeExactBackground), and until it
+	// does, today's serve.
+	m.exact.bg.Store(nil)
+	m.exact.poolCursor.Store(nil)
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
+	m.SetRecordedOfKind(nil)
 	// Nor its scope table's pool names (SetPoolNames): until the next
 	// session sends its own, whose mock is the pool's is not known.
 	m.exact.poolNames.Store(nil)
@@ -1981,6 +1987,12 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 // interface; parsers that do not type-assert it are unaffected.
 func (m *MockManager) MockCursorIndex(key string, n int) int {
 	key, cursored := m.exactCursorKey(key)
+	return m.cursorIndexAt(key, cursored, n)
+}
+
+// cursorIndexAt is MockCursorIndex at a cursor key already resolved
+// (exactCursorKey, backgroundCursorKey); cursored false keeps no cursor.
+func (m *MockManager) cursorIndexAt(key string, cursored bool, n int) int {
 	if n <= 1 || !cursored {
 		// Zero or one recorded response: always the first (only) one — identical
 		// to the legacy reuse behaviour, no cursor state needed.
@@ -2001,6 +2013,12 @@ func (m *MockManager) MockCursorIndex(key string, n int) int {
 // after the chosen response was actually served.
 func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
 	key, cursored := m.exactCursorKey(key)
+	m.advanceCursorAt(key, cursored, servedIdx, n)
+}
+
+// advanceCursorAt is AdvanceMockCursor at a cursor key already resolved
+// (exactCursorKey, backgroundCursorKey); cursored false keeps no cursor.
+func (m *MockManager) advanceCursorAt(key string, cursored bool, servedIdx, n int) {
 	if n <= 1 || !cursored {
 		return
 	}

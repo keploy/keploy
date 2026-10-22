@@ -3417,6 +3417,15 @@ type ConsumedScopeReader interface {
 	AgentReadsConsumedPerTestOnly() bool
 }
 
+// BackgroundRulesReader is an optional extension of the instrumentation a
+// replay talks to the agent through: the background rules the agent said, in
+// its answer to the last staging call, it serves the staged set by
+// (models.BackgroundRulesHeader). Without it, or with "", the agent serves by
+// today's rules.
+type BackgroundRulesReader interface {
+	AgentServesBackground() string
+}
+
 // PerTestRegion is the set of names of the per-test mocks a test set hands the
 // agent: the filtered half of its StoreMocks.
 func PerTestRegion(filtered []*models.Mock) map[string]struct{} {

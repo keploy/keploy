@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -59,6 +60,12 @@ type DiskMocks struct {
 	// on disk under each key its parser declares, in the order Add took them
 	// (LoadKeys).
 	byKey map[string][]string
+
+	// byKind names, by kind, every mock on disk, in the order Add took them
+	// (RangeKind), each name once under the kind it was last added as
+	// (kindOf); kept under the proven switch only.
+	byKind map[models.Kind][]string
+	kindOf map[string]models.Kind
 }
 
 // diskEntry locates one on-disk mock: 48 B, held in entries and byName and in
@@ -192,6 +199,20 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		placeTsNano: models.PlaceOf(m).UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
+	// Record's full round pairs by kind (RangeKind), under the proven
+	// switch: every replay under the switch keeps the index (a name per
+	// on-disk mock), so that one can; none without the switch.
+	if provenswitch.On() {
+		if d.byKind == nil {
+			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
+		}
+		// A mock added again under its name is listed once; added as another
+		// kind, it is that kind's (RangeKind skips the stale listing).
+		if prev, again := d.kindOf[m.Name]; !again || prev != m.Kind {
+			d.byKind[m.Kind] = append(d.byKind[m.Kind], m.Name)
+			d.kindOf[m.Name] = m.Kind
+		}
+	}
 	for _, k := range models.RequestKeys(m) {
 		if d.byKey == nil {
 			d.byKey = make(map[string][]string)
@@ -608,6 +629,44 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 			if e, ok := d.byName[name]; ok {
 				cs = append(cs, candidate{name: name, e: e})
 			}
+		}
+	}
+	d.mu.Unlock()
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	for _, c := range cs {
+		e := c.e
+		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// RangeKind calls visit, in recorded order (request time), with each on-disk
+// mock of kind, once each, until visit returns false: its name, and load,
+// which decodes it. Only what visit loads is decoded. What record's full
+// round's pairing reads of the recordings of a test not begun yet
+// (MockManager.PairingCandidates's source).
+func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	type candidate struct {
+		name string
+		e    diskEntry
+	}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	names := d.byKind[kind]
+	cs := make([]candidate, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] || d.kindOf[name] != kind {
+			continue
+		}
+		seen[name] = true
+		if e, ok := d.byName[name]; ok {
+			cs = append(cs, candidate{name: name, e: e})
 		}
 	}
 	d.mu.Unlock()

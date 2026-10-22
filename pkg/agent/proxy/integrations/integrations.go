@@ -424,11 +424,84 @@ type VariableScopes interface {
 // MockManager implements it, and every MockMemDb wrapper must forward it.
 type ExactBackground interface {
 	// Background is kind's background recordings the view shows unused, in
-	// recorded order. A parser consumes one through its usual delete door.
+	// the view's order: the worker scope's by place (the set's start, a
+	// no-sibling recording among them, then each test's in the order the
+	// tests began), within one place a delivering answer before an idle one,
+	// then recorded order; then the pool's, in recorded order. A parser takes
+	// the first that answers, without re-sorting, and consumes it through
+	// its usual delete door.
 	Background(kind models.Kind) []*models.Mock
 	// SpentBackground is kind's background recordings this staging consumed,
 	// read-only, in recorded order: what a by-kind reuse answers with (§3).
 	SpentBackground(kind models.Kind) []*models.Mock
+}
+
+// ByKindBackground is an optional MockMemDb capability under S12's background
+// rules: a kind's whole background as answering by kind reads it (S12 v16
+// §2.3, §3). By-kind answers ignore Place. So whether a kind may be answered
+// by kind (every background reply of the kind equal) is decided over all of
+// the kind's background, and a by-kind answer may spend a recording placed
+// after a test the run has not begun yet: neither depends on which places
+// the run has reached when the call lands. Background, which exact serving
+// reads, keeps identical siblings gated by their places, and its consume
+// doors refuse one the view hides. The agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it.
+type ByKindBackground interface {
+	// KindBackground is kind's background recordings (data-plane, no async
+	// lane's), the worker scope at every place and the pool: those unused,
+	// and those this staging spent, each in recorded order. nil, nil for a
+	// set served by today's rules.
+	KindBackground(kind models.Kind) (unused, spent []*models.Mock)
+	// SpendByKind spends m, one of KindBackground's unused, for the staging:
+	// a by-kind answer's consumption, whatever m's place. False when m is
+	// none (spent already, no background recording, or today's rules); the
+	// parser then answers nothing with it.
+	SpendByKind(m *models.Mock) bool
+}
+
+// KindBackground is db's ByKindBackground.KindBackground: nil, nil when db
+// does not implement it.
+func KindBackground(db MockMemDb, kind models.Kind) (unused, spent []*models.Mock) {
+	if b, ok := db.(ByKindBackground); ok {
+		return b.KindBackground(kind)
+	}
+	return nil, nil
+}
+
+// SpendByKind is db's ByKindBackground.SpendByKind: false when db does not
+// implement it.
+func SpendByKind(db MockMemDb, m *models.Mock) bool {
+	if b, ok := db.(ByKindBackground); ok {
+		return b.SpendByKind(m)
+	}
+	return false
+}
+
+// BackgroundCursor is an optional MockMemDb capability under S12's background
+// rules (S12 v16 §2.3: the pool keeps its recorded reuse and cursor-saturate,
+// its cursor shared with background callers): the stateful cursor of the
+// staged set's background, its worker scope and its pool, the one its calls
+// between tests advance. Inside a test the store's own MockCursor keeps no
+// cursor, as a test's own recordings answer once each, in recorded order; a
+// call inside a test that a background recording answers reads and advances
+// this one instead, so the background's recorded sequence, and each of its
+// recordings' served or delivered mark, is one whether its calls land inside
+// a test or between tests. ok is false for a set served by today's rules: a
+// parser then uses MockCursor as before. A test's own recordings and the
+// background are never one sequence: a parser picks among the open test's
+// own first. The agent's MockManager implements it, and every MockMemDb
+// wrapper must forward it.
+type BackgroundCursor interface {
+	BackgroundCursor() (MockCursor, bool)
+}
+
+// BackgroundCursorOf is db's BackgroundCursor: false when db does not
+// implement it, or serves its set by today's rules.
+func BackgroundCursorOf(db MockMemDb) (MockCursor, bool) {
+	if b, ok := db.(BackgroundCursor); ok {
+		return b.BackgroundCursor()
+	}
+	return nil, false
 }
 
 // Pairing is record's full round's pairing (S12 v16 §4.1). It answers only

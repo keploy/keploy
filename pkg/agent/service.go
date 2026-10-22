@@ -523,6 +523,27 @@ type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
 }
 
+// ExactBackgroundServer is implemented by a proxy that serves a test set's
+// background (its worker scope and its pool) by S12's background rules under
+// exact serving (models.RecordedWithS12Routing, replay.RegisterS12Serving):
+// ServeExactBackground sets, at each set's staging, the rules the set is
+// served by, with its pool and its whole worker scope by name; any rules but
+// S12's are today's. A proxy that does not implement it serves every set by
+// today's rules, and the agent says so to the replay
+// (models.BackgroundRulesHeader), which then keeps today's checks.
+type ExactBackgroundServer interface {
+	ServeExactBackground(rules string, pool, worker []string) error
+}
+
+// RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
+// round, S12 v16 §4.1) reads, beside what is staged, the set's recordings of
+// a kind the agent keeps on disk: a test's own are staged only as it opens.
+// SetRecordedOfKind sets where (src visits the on-disk mocks of a kind, in
+// recorded order, decoding one only as visit loads it; nil for none).
+type RecordedOfKindSetter interface {
+	SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error
+}
+
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
 // exact serving (a call that is a recording made elsewhere) can read, beside
 // what is staged, the set's recordings the agent keeps on disk: a test's own

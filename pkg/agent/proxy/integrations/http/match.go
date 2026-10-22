@@ -259,7 +259,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 					return false, nil, nil, err
 				}
 				if len(hits) > 0 {
-					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+					hit, commitCursor := h.pickHit(hits, ownedBy(ctx), mockDb, statefulMocks)
 					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
 					if err != nil {
 						return false, nil, nil, err

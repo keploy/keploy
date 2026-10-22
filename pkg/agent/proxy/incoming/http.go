@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -1083,7 +1084,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(syncMock.WithWindow(ctx, capturedWin), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+			hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(ctx, capturedWin)), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
@@ -1864,7 +1865,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				defer parsedReq.Body.Close()
 				defer parsedResp.Body.Close()
-				hooksUtils.CaptureHook(syncMock.WithWindow(ctx, capturedWin), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+				hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(ctx, capturedWin)), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 			}()
 		}
 		// Not captured: nothing will decide it.
@@ -1950,4 +1951,13 @@ func isIngressExpectedCloseErr(err error) bool {
 		strings.Contains(errStr, "wsarecv") ||
 		strings.Contains(errStr, "wsasend") ||
 		strings.Contains(errStr, "forcibly closed by the remote host")
+}
+
+// proxyWindowClock is ctx carrying the clock an exchange's window start is on
+// (hooksUtils.WithWindowClock, S12 v16 §2.2): the proxy's. Both HTTP loops
+// stamp a request with the proxy's time.Now as its bytes arrived, and open its
+// window at that stamp before they forward it to the app (OpenWindow), so an
+// egress call the app makes for it is stamped no earlier on that same clock.
+func proxyWindowClock(ctx context.Context) context.Context {
+	return hooksUtils.WithWindowClock(ctx, fakeconn.NameProxyClock())
 }

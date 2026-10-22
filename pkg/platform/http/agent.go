@@ -109,6 +109,10 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+	// stagedBackground holds the background rules the agent's answer to the
+	// last staging call said it serves the set by
+	// (models.BackgroundRulesHeader): "" until one says S12's.
+	stagedBackground atomic.Pointer[string]
 
 	// concurrentServing holds what the agent's last /storemocks answer said
 	// of serving a test the recordings it shares with the tests that ran
@@ -269,6 +273,17 @@ func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
 // and from the start of every StoreMocks.
 func (a *AgentClient) ServesConcurrent() bool {
 	return a.concurrentServing.Load()
+}
+
+// AgentServesBackground is the background rules the agent's answer to the
+// last staging call said it serves the staged set by
+// (models.BackgroundRulesHeader): "" for today's, and until a staging is
+// answered.
+func (a *AgentClient) AgentServesBackground() string {
+	if r := a.stagedBackground.Load(); r != nil {
+		return *r
+	}
+	return ""
 }
 
 // var initStopScript []byte
@@ -1498,6 +1513,12 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
+	// Nor does it believe a staging's background rules (stagedBackground)
+	// until the agent's answer to it says them.
+	if ex := params.Exact; ex != nil && ex.Stage {
+		none := ""
+		a.stagedBackground.Store(&none)
+	}
 	requestBody := models.UpdateMockParamsReq{
 		FilterParams: params,
 	}
@@ -1535,6 +1556,10 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 		return err
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
+	if ex := params.Exact; ex != nil && ex.Stage {
+		rules := res.Header.Get(models.BackgroundRulesHeader)
+		a.stagedBackground.Store(&rules)
+	}
 	return nil
 }
 

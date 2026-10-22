@@ -8,7 +8,9 @@ import (
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -249,7 +251,12 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// the same reason, before that view is installed.
 		a.scopeMu.Lock()
 		a.testWorker, a.testBegun = nil, nil
+		a.testBegunAt, a.testBg = nil, nil
 		a.scopeMu.Unlock()
+		// The previous set's background rules go too (S12 v16 §2.3).
+		if err := a.serveBackgroundExactly(es, "", nil, nil); err != nil {
+			return err
+		}
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err
 		}
@@ -288,11 +295,35 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 				return fmt.Errorf("set the test set's recordings before an instant: %w", err)
 			}
 		}
+		// Record's full round pairs with the recordings of tests not begun
+		// yet too, which the on-disk store keeps (S12 v16 §4.1).
+		if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
+			if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
+				return fmt.Errorf("set the test set's recordings of a kind: %w", err)
+			}
+		}
+		bg := a.settleBackground(ex)
+		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {
+			// A proxy that cannot serve S12's rules serves the set by
+			// today's, and the agent says so (ServedBackground): the replay
+			// keeps today's checks.
+			a.logger.Info("this keploy agent's proxy cannot serve a test set's background by the S12 rules it was recorded under; the set is served by today's rules, which check its worker scope at the set's end")
+			bg = nil
+		}
 		a.scopeMu.Lock()
 		a.testPool = append([]string(nil), ex.Pool...)
 		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
 		a.testBegun = map[string]bool{}
+		a.testBegunAt = map[string]int{}
+		a.testBg = bg
 		a.scopeMu.Unlock()
+		// S12's rules with the set's pool and whole worker scope; today's
+		// with neither (they name nothing).
+		if bg != nil {
+			if err := a.serveBackgroundExactly(es, models.RecordedWithS12Routing, ex.Pool, entryNames(ex.Worker)); err != nil {
+				return err
+			}
+		}
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err
 		}
@@ -309,6 +340,12 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.scopeMu.Lock()
 		if a.testBegun == nil {
 			a.testBegun = map[string]bool{}
+		}
+		if a.testBegunAt == nil {
+			a.testBegunAt = map[string]int{}
+		}
+		if _, again := a.testBegunAt[ex.Test]; !again {
+			a.testBegunAt[ex.Test] = len(a.testBegunAt) + 1
 		}
 		a.testBegun[ex.Test] = true
 		a.scopeMu.Unlock()
@@ -394,32 +431,31 @@ func (a *Agent) servePoolAhead(es coreAgent.ExactServer, pool, ahead []string) e
 // under request keys (DiskMocks.RangeKeys); nil when the set's mocks are all
 // resident, and so all staged in the proxy's trees.
 func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
-	v, ok := a.clientMocks.Load(uint64(0))
-	s, _ := v.(*ClientMockStorage)
-	if !ok || s == nil {
-		return nil
-	}
-	s.mu.RLock()
-	disk := s.diskMocks
-	s.mu.RUnlock()
+	disk := a.stagedDisk()
 	if disk == nil {
 		return nil
 	}
 	return disk.RangeKeys
 }
 
-// diskRecordedBefore is the on-disk store's reader of the staged set's
-// recordings made before an instant (DiskMocks.RangeRecordedBefore), nil
-// when the set keeps none on disk.
-func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) bool) error {
+// stagedDisk is the on-disk store of the staged set's per-test mocks, nil
+// when it keeps none on disk.
+func (a *Agent) stagedDisk() *proxyPkg.DiskMocks {
 	v, ok := a.clientMocks.Load(uint64(0))
 	s, _ := v.(*ClientMockStorage)
 	if !ok || s == nil {
 		return nil
 	}
 	s.mu.RLock()
-	disk := s.diskMocks
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
+	return s.diskMocks
+}
+
+// diskRecordedBefore is the on-disk store's reader of the staged set's
+// recordings made before an instant (DiskMocks.RangeRecordedBefore), nil
+// when the set keeps none on disk.
+func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) bool) error {
+	disk := a.stagedDisk()
 	if disk == nil {
 		return nil
 	}
@@ -432,14 +468,17 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 // staging (testBegun). It is said before each view is installed, so the view
 // shows them. A proxy that has no worker scope (coreAgent.ExactWorkerServer)
 // cannot serve a set that has one.
+//
+// Under S12's background rules (testBg, S12 v16 §2.3) a worker-scope mock
+// with no identical sibling among the set's background answers from the set's
+// start, wherever it is placed (testBackground.noSibling), and the reachable
+// ones are said in the order the view serves them in: the earlier place first
+// (the set's start, then each test case's in the order they began), within
+// one place a delivering answer before an idle one, then recorded order.
+// Identical siblings stay gated by their places.
 func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 	a.scopeMu.Lock()
-	var reachable []string
-	for _, e := range a.testWorker {
-		if e.Place == "" || a.testBegun[e.Place] {
-			reachable = append(reachable, e.Name)
-		}
-	}
+	reachable := reachableWorker(a.testWorker, a.testBegun, a.testBegunAt, a.testBg)
 	has := len(a.testWorker) > 0
 	a.scopeMu.Unlock()
 	ws, ok := es.(coreAgent.ExactWorkerServer)
@@ -502,4 +541,167 @@ func (a *Agent) notReal(id string, owned []*models.Mock) []*models.Mock {
 		}
 	}
 	return out
+}
+
+// ServedBackground is the rules the staged set's background is served by
+// (models.BackgroundRulesHeader): models.RecordedWithS12Routing when its
+// staging settled S12's, "" for today's.
+func (a *Agent) ServedBackground() string {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.testBg == nil {
+		return ""
+	}
+	return models.RecordedWithS12Routing
+}
+
+// testBackground is a set's background as its staging settled it under S12's
+// background rules (models.RecordedWithS12Routing): which of its worker-scope mocks
+// have no identical sibling among the set's background (its worker scope and
+// its pool) by their kind's exact key (models.ExactKeyOf), and which answer
+// idle (models.IsIdleAnswer).
+type testBackground struct {
+	noSibling map[string]bool
+	idle      map[string]bool
+}
+
+// settleBackground settles the staged set's background under S12's rules, for
+// a staging that names them (models.ExactServing.Background) under the proven
+// switch; nil for today's rules. A mock it cannot read counts as having a
+// sibling: it stays gated by its place.
+func (a *Agent) settleBackground(ex *models.ExactServing) *testBackground {
+	if ex == nil || ex.Background != models.RecordedWithS12Routing || !provenswitch.On() {
+		return nil
+	}
+	if len(ex.Worker) == 0 {
+		return &testBackground{noSibling: map[string]bool{}, idle: map[string]bool{}}
+	}
+	names := append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...)
+	byName, err := a.mocksByName(names)
+	if err != nil {
+		a.logger.Warn("could not read the test set's background to tell which worker-scope recordings have no identical sibling: each answers only from its place, and a call made before it misses",
+			zap.Error(err),
+			zap.String("next_step", "fix the error above, or record the test set again if its mocks cannot be read"))
+		byName = nil
+	}
+	return backgroundOf(ex.Worker, ex.Pool, byName)
+}
+
+// backgroundOf is the background of a set whose worker scope is worker and
+// whose pool is pool, its recordings by name in byName (testBackground): a
+// worker-scope recording whose kind keys it (models.ExactKeyOf) and that no
+// other data-plane recording of the background shares the key of has no
+// sibling; one byName lacks, or its kind cannot key, has (it stays gated).
+func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*models.Mock) *testBackground {
+	bg := &testBackground{noSibling: map[string]bool{}, idle: map[string]bool{}}
+	names := append(append([]string(nil), pool...), entryNames(worker)...)
+	// How many of the background's data-plane recordings share each exact
+	// key, by kind.
+	keys := map[string]int{}
+	keyOf := func(mk *models.Mock) (string, bool) {
+		if mk == nil || mk.IsProtocolPhase() {
+			return "", false
+		}
+		k, ok := models.ExactKeyOf(mk)
+		if !ok {
+			return "", false
+		}
+		return string(mk.Kind) + "\x00" + k, true
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		if k, ok := keyOf(byName[n]); ok {
+			keys[k]++
+		}
+	}
+	for _, e := range worker {
+		mk := byName[e.Name]
+		if mk == nil {
+			continue
+		}
+		if models.IsIdleAnswer(mk) {
+			bg.idle[e.Name] = true
+		}
+		if k, ok := keyOf(mk); ok && keys[k] == 1 {
+			bg.noSibling[e.Name] = true
+		}
+	}
+	return bg
+}
+
+// reachableWorker is the worker-scope mocks of worker (in recorded order) the
+// set's run has reached: placed at the set's start, or after a test case that
+// has begun (begun); and, under S12's background rules (bg), each with no
+// identical sibling (testBackground.noSibling), wherever it is placed, in the
+// view's order: by place (the set's start for one with no sibling, else the
+// order its place's test case began in, begunAt), then a delivering answer
+// before an idle one, then recorded order. With bg nil, in recorded order.
+func reachableWorker(worker []models.MockEntry, begun map[string]bool, begunAt map[string]int, bg *testBackground) []string {
+	type reached struct {
+		name string
+		rank int
+		idle bool
+		at   int
+	}
+	var rs []reached
+	for i, e := range worker {
+		early := bg != nil && bg.noSibling[e.Name]
+		if e.Place != "" && !begun[e.Place] && !early {
+			continue
+		}
+		r := reached{name: e.Name, at: i}
+		if bg != nil {
+			if e.Place != "" && !early {
+				r.rank = begunAt[e.Place]
+			}
+			r.idle = bg.idle[e.Name]
+		}
+		rs = append(rs, r)
+	}
+	if bg != nil {
+		sort.SliceStable(rs, func(i, j int) bool {
+			if rs[i].rank != rs[j].rank {
+				return rs[i].rank < rs[j].rank
+			}
+			if rs[i].idle != rs[j].idle {
+				return !rs[i].idle
+			}
+			return rs[i].at < rs[j].at
+		})
+	}
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.name)
+	}
+	return out
+}
+
+// serveBackgroundExactly tells the proxy the rules the staged set's background
+// is served by (coreAgent.ExactBackgroundServer): S12's when rules is
+// models.RecordedWithS12Routing, with the set's pool and its whole worker
+// scope, else today's. A proxy that cannot serve S12's rules serves every set
+// by today's, which need nothing of it: the staging settles no S12 background
+// for it (testBg nil), so the agent says it serves today's and the replay
+// keeps today's checks.
+func (a *Agent) serveBackgroundExactly(es coreAgent.ExactServer, rules string, pool, worker []string) error {
+	bs, ok := es.(coreAgent.ExactBackgroundServer)
+	if !ok {
+		return nil
+	}
+	return bs.ServeExactBackground(rules, pool, worker)
+}
+
+// diskRecordedOfKind is the on-disk store's reader of the staged set's
+// recordings of a kind (DiskMocks.RangeKind), nil when the set keeps none on
+// disk.
+func (a *Agent) diskRecordedOfKind() func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeKind
 }

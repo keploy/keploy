@@ -228,7 +228,7 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		}
 		return nil, diag, false, nil
 	}
-	picked, commit := h.strictCursorPick(fits, mockDb, statefulMocks)
+	picked, commit := h.strictCursorPick(fits, ownedBy(ctx), mockDb, statefulMocks)
 	served, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 	if err != nil {
 		return nil, nil, false, err
@@ -300,9 +300,10 @@ func routeMatches(diffs []strictField) bool {
 // last once all were (servedPick, the variable pass's rule). Each recording
 // carries its own served mark, so another caller's calls (other credentials:
 // other recordings) never move it, and a call whose set of recordings grows
-// carries on. commit marks it served once the answer is; nil when no mark
-// applies.
-func (h *HTTP) strictCursorPick(fits []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
+// carries on. Under S12's background rules the open test's own recordings
+// (own) and the set's background are two bands (statefulBand). commit marks
+// it served once the answer is; nil when no mark applies.
+func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
 	first := fits[0]
 	if !statefulMocks || first.TestModeInfo.Consume != models.ConsumeCursorSaturate {
 		return first, nil
@@ -317,9 +318,39 @@ func (h *HTTP) strictCursorPick(fits []*models.Mock, mockDb integrations.MockMem
 			group = append(group, m)
 		}
 	}
+	group, cs = statefulBand(first, group, own, mockDb, cs)
 	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i], group[j]) })
 	i, commit := servedPick(group, cs)
 	return group[i], commit
+}
+
+// statefulBand is, of group (the stateful recordings that are a call, first
+// among them, the one the pool's order puts first), those of first's band, and
+// the cursor their served marks are kept in. Under S12's background rules
+// (integrations.BackgroundCursorOf) the open test's own recordings (own) and
+// the set's background are two bands, never one sequence (S12 v16 §2.3): when
+// first is the test's own, only its own answer, with cs as before (which keeps
+// no cursor in a test: each answers once, in recorded order), so no
+// background recording recorded earlier answers the test's own call; else
+// only the background's, with the background's cursor, the one its calls
+// between tests advance, so its sequence is one wherever its calls land.
+// Under today's rules, and with no owner known, group and cs are as given.
+func statefulBand(first *models.Mock, group []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, cs integrations.MockCursor) ([]*models.Mock, integrations.MockCursor) {
+	bg, s12 := integrations.BackgroundCursorOf(mockDb)
+	if !s12 || own == nil {
+		return group, cs
+	}
+	firstOwn := own(first)
+	band := make([]*models.Mock, 0, len(group))
+	for _, m := range group {
+		if own(m) == firstOwn {
+			band = append(band, m)
+		}
+	}
+	if firstOwn {
+		return band, cs
+	}
+	return band, bg
 }
 
 // strictMismatchReport is the miss report of a call the strict comparison

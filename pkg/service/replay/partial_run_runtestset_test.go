@@ -252,6 +252,12 @@ type prInstr struct {
 	// the last answer, cleared by a store as the real client clears it.
 	perTestScope bool
 	scopeSaid    bool
+	// oldAgent makes the stand-in agent answer a staging as one that predates
+	// S12 does: saying no background rules (models.BackgroundRulesHeader);
+	// otherwise it says it serves the rules the staging named. backgroundSaid
+	// is what the client took from the last staging's answer.
+	oldAgent       bool
+	backgroundSaid string
 	// storedFiltered and storedUnfiltered are the pools of the last store.
 	storedFiltered, storedUnfiltered []*models.Mock
 	// release, when set, holds the stand-in application after the run's
@@ -264,6 +270,12 @@ type prInstr struct {
 	// read of the calls no mock answered during the test that just ran. The
 	// replayer reads them once per test, in test order.
 	mockErrorsFor func() ([]models.UnmatchedCall, error)
+}
+
+func (f *prInstr) AgentServesBackground() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.backgroundSaid
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -347,6 +359,12 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 	f.allParams = append(f.allParams, params)
 	f.updateCalls++
 	f.scopeSaid = f.perTestScope
+	if ex := params.Exact; ex != nil && ex.Stage {
+		f.backgroundSaid = ""
+		if !f.oldAgent {
+			f.backgroundSaid = ex.Background
+		}
+	}
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than
