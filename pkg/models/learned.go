@@ -195,21 +195,44 @@ func VoidWords(digest string) WordsEntry {
 func (e WordsEntry) Void() bool { return e.Layout == WordsVoidLayout }
 
 // MergeWordsEntry is two entries the learn step learned of one leaf as one
-// (neither is changed). Entries of one recorded value in one layout (the same
-// digest and the same layout guard) union their slots: what either saw change
-// may change. Any other pair, or a pair of which either is void, is void
-// (VoidWords): the two runs did not read the leaf alike, and its slots would
-// say nothing reliable of it, so it is compared whole.
+// (neither is changed).
+//
+// An entry this build cannot read (Unreadable: a newer keploy's, or one with
+// no version) is kept as written, on whichever side it is: this build cannot
+// tell what its slots say, so it merges nothing into it and drops nothing of
+// it (its unknown keys, its Seen), and it admits nothing, so its leaf is
+// compared whole, until a keploy that reads it does. Of two such entries,
+// a's is kept. A merge never makes an unreadable entry readable.
+//
+// Entries of one recorded value in one layout (the same digest and the same
+// layout guard) union their slots: what either saw change may change. Any
+// other pair, or a pair of which either is void, is void (VoidWords): the two
+// runs did not read the leaf alike, and its slots would say nothing reliable
+// of it, so it is compared whole. Either way Seen, never read, is a's, else
+// b's.
 func MergeWordsEntry(a, b WordsEntry) WordsEntry {
+	switch {
+	case a.Unreadable() != "":
+		return a.Clone()
+	case b.Unreadable() != "":
+		return b.Clone()
+	}
+	seen := a.Seen
+	if seen == "" {
+		seen = b.Seen
+	}
 	if a.Void() || b.Void() || a.Digest != b.Digest || a.Layout != b.Layout {
 		digest := a.Digest
 		if digest == "" {
 			digest = b.Digest
 		}
-		return VoidWords(digest)
+		out := VoidWords(digest)
+		out.Seen = seen
+		return out
 	}
 	out := a.Clone()
 	out.Slots = SortWordSlots(append(out.Slots, b.Slots...))
+	out.Seen = seen
 	return out
 }
 
@@ -361,8 +384,16 @@ const (
 	// BasisEarlier: the value appeared earlier in the test, and is followed
 	// from there.
 	BasisEarlier LearnBasis = "earlier"
-	// BasisWhole: every run of the leaf changed, so the whole leaf is noise.
+	// BasisWhole: every run of the leaf changed, so the whole leaf is noise:
+	// how keploy learns a leaf of a kind it learns no words of yet (Mongo,
+	// Postgres; design r9 §5).
 	BasisWhole LearnBasis = "whole"
+	// BasisBeforeWords: the leaf was learned whole (noise.req), or the
+	// variable bound whole (no words), before keploy learned words, of a
+	// kind it now learns words of: a re-record learns only the words that
+	// change ("re-record to tighten", design r9 N6). What changed of it then
+	// is not known.
+	BasisBeforeWords LearnBasis = "before-words"
 )
 
 // LearnRule is the rule that decided a learned leaf. The set is closed.
@@ -373,8 +404,9 @@ const (
 	// RuleNoise: the leaf's slots are not compared; every other byte is.
 	RuleNoise LearnRule = "noise"
 	// RuleWholeNoise: the whole leaf is not compared, its type kept
-	// (noise.req). A leaf learned whole before keploy learned words reads
-	// "re-record to tighten".
+	// (noise.req). A leaf learned whole before keploy learned words
+	// (BasisBeforeWords) reads "re-record to tighten"; one of a kind keploy
+	// learns only whole (BasisWhole) does not.
 	RuleWholeNoise LearnRule = "whole-noise"
 	// RuleEcho: a variable of this call alone, bound at its request and
 	// answered with the live value; its slots may change at the bind.

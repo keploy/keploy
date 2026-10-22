@@ -136,8 +136,8 @@ func TestACopyOfWordsSharesNoSlot(t *testing.T) {
 // saw change may change. Any other pair is void, and stays void through
 // every later merge, so the leaf is compared whole.
 func TestMergeWordsEntryUnionsOrVoids(t *testing.T) {
-	a := WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 5, Run: 0}, {Seg: 1, Run: 2}}}
-	b := WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 1, Run: 2}, {Seg: 3, Kind: WordSlotToken}, {Seg: 3, Run: 1}}}
+	a := WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 5, Run: 0}, {Seg: 1, Run: 2}}}
+	b := WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 1, Run: 2}, {Seg: 3, Kind: WordSlotToken}, {Seg: 3, Run: 1}}}
 	got := MergeWordsEntry(a, b)
 	want := []WordSlot{{Seg: 1, Run: 2}, {Seg: 3, Kind: WordSlotToken}, {Seg: 5, Run: 0}}
 	if got.Void() || !reflect.DeepEqual(got.Slots, want) || got.Digest != a.Digest || got.Layout != a.Layout {
@@ -151,8 +151,8 @@ func TestMergeWordsEntryUnionsOrVoids(t *testing.T) {
 		name string
 		b    WordsEntry
 	}{
-		{"another digest", WordsEntry{Digest: "0000000000000000", Layout: a.Layout, Slots: a.Slots}},
-		{"another layout", WordsEntry{Digest: a.Digest, Layout: "0000000000000000", Slots: a.Slots}},
+		{"another digest", WordsEntry{V: WordsVersion, Digest: "0000000000000000", Layout: a.Layout, Slots: a.Slots}},
+		{"another layout", WordsEntry{V: WordsVersion, Digest: a.Digest, Layout: "0000000000000000", Slots: a.Slots}},
 		{"a void one", VoidWords(a.Digest)},
 	} {
 		v := MergeWordsEntry(a, c.b)
@@ -168,6 +168,64 @@ func TestMergeWordsEntryUnionsOrVoids(t *testing.T) {
 	}
 }
 
+// A merge never makes an entry this build cannot read readable (compat
+// must-do 2): of a readable entry and an unreadable one (a newer keploy's,
+// with a key or a version this build does not know; or one with no
+// version), in either order, the unreadable one is kept as written, its
+// unknown keys and Seen with it, and nothing of the other is merged into it,
+// in an entry, in a map of them and in a variable's words. Seen, never read,
+// is carried by every other merge too.
+func TestAMergeKeepsAnEntryThisBuildCannotRead(t *testing.T) {
+	readable := wordsFixture()
+	for _, c := range []struct {
+		name    string
+		foreign WordsEntry
+	}{
+		{"an unknown key", WordsEntry{V: WordsVersion, Digest: readable.Digest, Layout: readable.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}, Seen: `"ORD-1 ref=d4"`, Unknown: `{"max":2}`}},
+		{"an unknown slot key", WordsEntry{V: WordsVersion, Digest: readable.Digest, Layout: readable.Layout, Slots: []WordSlot{{Seg: 9, Run: 1, Unknown: `{"class":"hex"}`}}}},
+		{"a newer version", WordsEntry{V: WordsVersion + 1, Unknown: `{"digest":"9f2c41d07a3be815","grammar":"g2"}`}},
+		{"no version", WordsEntry{Digest: readable.Digest, Layout: readable.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.foreign.Unreadable() == "" {
+				t.Fatal("precondition: this build reads the foreign entry")
+			}
+			for _, got := range []WordsEntry{MergeWordsEntry(readable, c.foreign), MergeWordsEntry(c.foreign, readable)} {
+				if !reflect.DeepEqual(got, c.foreign) {
+					t.Errorf("merged %+v, want the unreadable entry as written %+v", got, c.foreign)
+				}
+			}
+			for _, got := range []map[string]WordsEntry{
+				MergeWords(map[string]WordsEntry{"body.note": readable}, map[string]WordsEntry{"body.note": c.foreign}),
+				MergeWords(map[string]WordsEntry{"body.note": c.foreign}, map[string]WordsEntry{"body.note": readable}),
+			} {
+				if !reflect.DeepEqual(got["body.note"], c.foreign) {
+					t.Errorf("MergeWords: %+v, want the unreadable entry as written", got["body.note"])
+				}
+			}
+			r, f := readable, c.foreign
+			v := func(w *WordsEntry) MockVariables {
+				return MockVariables{"id": {Recorded: "r", Bind: "body.id", Words: w}}
+			}
+			for _, got := range []MockVariables{MergeVariables(v(&r), v(&f)), MergeVariables(v(&f), v(&r))} {
+				if w := got["id"].Words; w == nil || !reflect.DeepEqual(*w, c.foreign) {
+					t.Errorf("MergeVariables: %+v, want the unreadable entry as written", w)
+				}
+			}
+		})
+	}
+	// Seen rides through a union and a void, from either side.
+	seen := readable
+	seen.Seen = `"ORD-1 ref=d4"`
+	for _, other := range []WordsEntry{readable, {V: WordsVersion, Digest: readable.Digest, Layout: "0000000000000000", Slots: []WordSlot{}}} {
+		for _, got := range []WordsEntry{MergeWordsEntry(seen, other), MergeWordsEntry(other, seen)} {
+			if got.Seen != seen.Seen || got.Unreadable() != "" {
+				t.Errorf("merged %+v, want Seen %s carried", got, seen.Seen)
+			}
+		}
+	}
+}
+
 // MergeWords keeps a place either side holds, merges a place both hold, and
 // shares no slot with its inputs.
 func TestMergeWordsKeepsEveryPlace(t *testing.T) {
@@ -176,8 +234,8 @@ func TestMergeWordsKeepsEveryPlace(t *testing.T) {
 	}
 	e := wordsFixture()
 	a := map[string]WordsEntry{"body.note": e}
-	b := map[string]WordsEntry{"header.x-ref": {Digest: "1111111111111111", Layout: "2222222222222222", Slots: []WordSlot{{Seg: 0, Run: 0}}},
-		"body.note": {Digest: e.Digest, Layout: e.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}}}
+	b := map[string]WordsEntry{"header.x-ref": {V: WordsVersion, Digest: "1111111111111111", Layout: "2222222222222222", Slots: []WordSlot{{Seg: 0, Run: 0}}},
+		"body.note": {V: WordsVersion, Digest: e.Digest, Layout: e.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}}}
 	got := MergeWords(a, b)
 	if len(got) != 2 || len(got["body.note"].Slots) != len(e.Slots)+1 || got["header.x-ref"].Digest != "1111111111111111" {
 		t.Fatalf("merged %+v", got)

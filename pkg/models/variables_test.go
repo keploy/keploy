@@ -132,9 +132,9 @@ func TestAVariablesClockReadsRoundTrip(t *testing.T) {
 // never strips them.
 func TestMergeVariablesKeepsWordsWithTheirBind(t *testing.T) {
 	w := func(slots ...WordSlot) *WordsEntry {
-		return &WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: slots}
+		return &WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: slots}
 	}
-	other := &WordsEntry{Digest: "9f2c41d07a3be815", Layout: "0000000000000000", Slots: []WordSlot{{Seg: 0}}}
+	other := &WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: "0000000000000000", Slots: []WordSlot{{Seg: 0}}}
 	for _, c := range []struct {
 		name string
 		a, b MockVariable
