@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"gopkg.in/yaml.v3"
 )
 
 // withSet registers a set reader that reads mocks for every set folder, and
@@ -214,6 +215,15 @@ func TestTheLearnedFilesAreWrittenIgnoredFirst(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(set, models.LearnedFile)); !strings.HasPrefix(string(b), "# ") || strings.Contains(string(b), "ref=b2") {
 		t.Errorf("learned.yaml holds F's value or no header:\n%s", b)
+	}
+	// Both files are one document shape (models.LearnedDocument), the one
+	// the enterprise verbs write too: the leaves under learned, nothing else.
+	for _, name := range []string{models.LearnedFile, models.LearnedLocalFile} {
+		b, _ := os.ReadFile(filepath.Join(set, name))
+		var doc map[string][]map[string]interface{}
+		if err := yaml.Unmarshal(b, &doc); err != nil || len(doc) != 1 || len(doc["learned"]) != 1 {
+			t.Errorf("%s is not {learned: [one leaf]}: %v (%v)\n%s", name, doc, err, b)
+		}
 	}
 
 	// The copy-back: the staging copy's value wins, and a stale entry goes.

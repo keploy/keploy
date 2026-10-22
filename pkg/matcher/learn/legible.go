@@ -495,11 +495,11 @@ func readLearned(path string) ([]models.LearnedLeaf, error) {
 	if err != nil {
 		return nil, err
 	}
-	var leaves []models.LearnedLeaf
-	if err := yaml.Unmarshal(b, &leaves); err != nil {
+	var doc models.LearnedDocument
+	if err := yaml.Unmarshal(b, &doc); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	return leaves, nil
+	return doc.Learned, nil
 }
 
 // writeLearned writes leaves to the learned file name of setDir, whole,
@@ -514,7 +514,7 @@ func writeLearned(setDir, name string, leaves []models.LearnedLeaf) error {
 		}
 		return nil
 	}
-	b, err := yaml.Marshal(leaves)
+	b, err := yaml.Marshal(models.LearnedDocument{Learned: leaves})
 	if err != nil {
 		return err
 	}

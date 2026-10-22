@@ -332,6 +332,14 @@ const (
 	LearnedTempPrefix = ".learned-"
 )
 
+// LearnedDocument is a learned file (LearnedFile, LearnedLocalFile) as it is
+// written and read: the set's learned leaves, in matcher/learn.Legible's
+// order, under one key, so every writer (keploy's record, and the enterprise
+// verbs' pull, status and copy-back) writes one shape.
+type LearnedDocument struct {
+	Learned []LearnedLeaf `json:"learned" yaml:"learned"`
+}
+
 // LearnBasis is one piece of evidence a learned leaf rests on. The set is
 // closed: a reader (a person, an LLM) acts on its values.
 type LearnBasis string
