@@ -95,12 +95,25 @@ volumes:
   flaky: {}
 EOF
 
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+  local st
+  case $1 in "" | *[!0-9]*) return 1 ;; esac
+  { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+  st=${st##*) }
+  [ "${st%% *}" != Z ]
+}
+
 # requests: three requests once the app answers, while keploy runs as $1.
 requests() {
   local pid=$1 i
   for i in $(seq 1 120); do
     if curl -s -m 2 -o /dev/null http://localhost:8080/ 2>/dev/null; then break; fi
-    kill -0 "$pid" 2>/dev/null || return
+    pid_running "$pid" || return
     sleep 1
   done
   for i in 1 2 3; do curl -s -m 5 -o /dev/null "http://localhost:8080/?r=$i" 2>/dev/null; done
