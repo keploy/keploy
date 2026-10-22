@@ -250,7 +250,7 @@ type Record struct {
 // leg is an ordinary Go TLS client, so verifying the real server costs nothing
 // extra: crypto/tls uses the host's system root pool when RootCAs is nil, and
 // the agent additionally embeds the Mozilla NSS roots
-// (pkg/agent/proxy/tls/data/mozilla_roots.pem) for images with no trust store.
+// (from golang.org/x/crypto/x509roots/fallback) for images with no trust store.
 //
 // Verify nevertheless defaults to FALSE, and the reason is fidelity, not a
 // missing CA bundle: a recording proxy must never be stricter than the

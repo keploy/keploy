@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	_ "embed"
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
@@ -32,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
 )
 
 // The MITM signing CA is no longer a committed, //go:embed-ed static cert+key
@@ -83,11 +83,13 @@ func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
 	hookMu.Unlock()
 }
 
-// embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
-// https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
-// certdata.txt). Compiled into the binary via go:embed so the agent always
-// has a valid trust store regardless of the runtime image's filesystem
-// state. See pkg/agent/proxy/tls/data/REFRESH.md for the refresh procedure.
+// embeddedFallbackRoots is the Mozilla NSS root bundle as PEM, built at startup
+// from golang.org/x/crypto/x509roots/fallback/bundle (the Go team's extract of
+// Mozilla's certdata.txt) so the agent always has a valid trust store
+// regardless of the runtime image's filesystem state. It is refreshed by
+// bumping that module (.github/workflows/refresh-nss-roots.yml proposes a bump
+// weekly), not by hand: a vendored copy went stale and kept trusting roots
+// Mozilla had distrusted (the October 2026 eMudhra/emSign compromise).
 //
 // This bundle is the safety net that prevents the failure mode in
 // keploy/k8s-proxy#375: even if /etc/ssl/certs/ca-certificates.crt is
@@ -98,9 +100,19 @@ func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
 // becomes (system_or_embedded_roots ∪ keploy_mitm_ca) instead of
 // (keploy_mitm_ca alone), which is what made the customer's pods fail
 // CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call.
-//
-//go:embed data/mozilla_roots.pem
-var embeddedFallbackRoots []byte
+var embeddedFallbackRoots = nssRootsPEM()
+
+// nssRootsPEM encodes every root of the NSS bundle as PEM. A few roots carry a
+// "distrust after" constraint that X.509 cannot express; PEM consumers (the
+// recorded app's TLS stack) trust them unconstrained, exactly as they would
+// with curl's cacert.pem or a distro ca-certificates package.
+func nssRootsPEM() []byte {
+	var buf bytes.Buffer
+	for root := range nssbundle.Roots() {
+		_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: root.Certificate})
+	}
+	return buf.Bytes()
+}
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -557,8 +569,8 @@ const (
 //     locations where `ca-certificates` (Debian/Ubuntu/Alpine) or
 //     equivalent (RHEL/Fedora/openSUSE/FreeBSD) installs the OS trust
 //     store. First readable, non-empty file wins.
-//  2. embeddedFallbackRoots — Mozilla NSS roots vendored from curl.se,
-//     compiled into the agent binary via go:embed. Used when every disk
+//  2. embeddedFallbackRoots — Mozilla NSS roots from x509roots/fallback,
+//     compiled into the agent binary. Used when every disk
 //     path was missing/empty.
 //
 // This function used to return (nil, "") on miss, leaving the merged
@@ -697,7 +709,7 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 	}
 	// fallback==nil only happens via the disk-only test entry point.
 	// Production callers always pass embeddedFallbackRoots which is
-	// non-empty by build-time go:embed.
+	// always non-empty (built from the compiled-in NSS bundle).
 	return nil, ""
 }
 
