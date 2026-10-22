@@ -260,6 +260,10 @@ type MockMismatchReport struct {
 	// made. Empty without the switch.
 	MissKind string
 	Recorded int
+	// Read says, on an extra call (MissExtraCall), that its parser declares
+	// the call a read (RegisterReadCall's terms): a test whose own checks
+	// passed does not fail for it (count-free reads).
+	Read bool
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven

@@ -318,6 +318,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+					// Whether the extra call is a read, by HTTP's terms
+					// (read_call.go): the test's end counts no read alone.
+					report.Read = readCall(input.method, input.header.Get("Content-Type"), input.body)
 				}
 				// A call that is a recording made elsewhere (another test's,
 				// or a worker-scope one not reached yet) is named as that

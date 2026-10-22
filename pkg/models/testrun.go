@@ -443,6 +443,9 @@ type UnmatchedCall struct {
 	// extra call, how many times the test recorded that call.
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// Read mirrors MockMismatchReport.Read: the parser declares the call a
+	// read (RegisterReadCall's terms). Set on an extra call only.
+	Read bool `json:"read,omitempty" yaml:"read,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
 	// application's startup. Its Kind is MissOutsideTest. It is the set's,
