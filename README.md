@@ -125,7 +125,7 @@ keploy record -c "python main.py"
 
 ### 3. Run Tests
 
-Run tests offline without external dependencies.
+Run tests offline without external dependencies. (With the open-source build, Redis is the exception: keep it running and reachable from keploy. See the note under Languages & Frameworks.)
 
 ```bash
 keploy test -c "CMD_TO_RUN_APP" --delay 10
@@ -142,7 +142,7 @@ keploy test -c "CMD_TO_RUN_APP" --delay 10
 ## Languages &amp; Frameworks (Any stack)
 
 Because Keploy intercepts at the **network layer (eBPF)**, it works with **any language, framework, or runtime**—no SDK required. 
-> Note: Some of the dependencies are not open-source by nature because their protocols and parsings are not open-sourced. It's not supported in Keploy enterprise. 
+> Note: Redis is recorded and mocked only by [Keploy Enterprise](https://keploy.io/docs/keploy-cloud/cloud-installation/). The open-source build (`install.sh --oss`) passes the application's Redis calls through to the real Redis server in `keploy record` and in `keploy test` instead of recording them, and does not serve the Redis mocks a test set already holds (such as those an earlier open-source keploy recorded). It logs a warning once per Redis server. With the open-source build, keep Redis running and reachable from keploy when you run `keploy test`.
 
 <p align="center">
 
