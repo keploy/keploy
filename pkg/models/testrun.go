@@ -62,6 +62,14 @@ type TestReport struct {
 	// every report a set run under the switch writes; absent for a set run
 	// without it.
 	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
+	// Learn says the set ran record's full round's learn step (under the
+	// proven switch, config.Test.Learn) in a keploy whose learners class a
+	// call they refuse by a word-level learn rule (UnmatchedCall.Refused):
+	// LearnWords. A reader that counts those refusals (enterprise's
+	// E-measure) reads a report that says so, and no other: a report
+	// without it is another round's, or one a keploy that classes no
+	// refusal wrote. Absent otherwise.
+	Learn string `json:"learn,omitempty" yaml:"learn,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -641,6 +649,12 @@ const (
 	// no other rule ties the two.
 	RefusedContainment = "containment"
 )
+
+// LearnWords is TestReport.Learn of a set that ran record's full round's
+// learn step in a keploy that classes the calls its word-level learn rules
+// refuse (UnmatchedCall.Refused): every such refusal of the round is on its
+// report.
+const LearnWords = "words"
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
 // as the learn step decides them (package matcher/learn).

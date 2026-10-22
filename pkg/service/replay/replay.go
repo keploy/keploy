@@ -1857,6 +1857,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			TimeTaken: time.Since(startTime).String(),
 			CmdUsed:   r.config.Test.CmdUsed,
 			Proven:    provenswitch.On(),
+			Learn:     r.learnMark(),
 		}
 		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -1878,6 +1879,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			TimeTaken: timeTaken.String(),
 			CmdUsed:   r.config.Test.CmdUsed,
 			Proven:    provenswitch.On(),
+			Learn:     r.learnMark(),
 		}
 		// Under the proven switch the report names each skipped test, with its
 		// reason, instead of counting them.
@@ -2672,6 +2674,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		TimeTaken: time.Since(startTime).String(),
 		CmdUsed:   r.config.Test.CmdUsed,
 		Proven:    provenswitch.On(),
+		Learn:     r.learnMark(),
 	}
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -5821,6 +5824,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		UnclaimedCalls:      unclaimed,
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
+		Learn:               r.learnMark(),
 	}
 	r.noteSetEnd(testReport)
 

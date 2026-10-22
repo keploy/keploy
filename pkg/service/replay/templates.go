@@ -658,6 +658,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		TimeTaken:     timeTaken.String(),
 		CmdUsed:       r.config.Test.CmdUsed,
 		Proven:        provenswitch.On(),
+		Learn:         r.learnMark(),
 	}
 	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {

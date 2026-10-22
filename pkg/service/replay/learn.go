@@ -17,6 +17,16 @@ func (r *Replayer) learning() bool {
 	return provenswitch.On() && r.config.Test.Learn
 }
 
+// learnMark is what a report of this replay says of its learn step
+// (TestReport.Learn): models.LearnWords when it runs it (learning), the
+// rules of which class every call they refuse; "" otherwise.
+func (r *Replayer) learnMark() string {
+	if r.learning() {
+		return models.LearnWords
+	}
+	return ""
+}
+
 // learningPool reports whether the learn step may pair the set's pool mocks
 // too: only in a full record (config.Test.LearnPool).
 func (r *Replayer) learningPool() bool {
