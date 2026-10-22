@@ -10,7 +10,7 @@ import (
 )
 
 func wordsFixture() WordsEntry {
-	return WordsEntry{Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{
+	return WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{
 		{Seg: 0, Run: 0},
 		{Seg: 3, Kind: WordSlotToken},
 		{Seg: 5, Run: 2},

@@ -427,8 +427,13 @@ type MockSpec struct {
 	// the words of a request leaf the learn step learned as noise
 	// (WordsEntry): only its slots may change, and the rest of the leaf is
 	// still compared. Carried on the doc envelope as noise.words, beside
-	// noise.req, which never holds such a place. Learned only under the
-	// proven switch; nil for a call that holds none.
+	// noise.req, which never holds such a place (no word-learned place is
+	// written into noise.req too: an older keploy reads it as a leaf to
+	// compare whole). Learned only under the proven switch; nil for a call
+	// that holds none. Every decoder is to read it and every rewrite to
+	// write it back whatever the switch says, as each copy of a mock carries
+	// it: only its use is gated on the switch. Nothing learns words yet, so
+	// the doc's decoders do not fill it yet.
 	LearnedWords map[string]WordsEntry `json:"LearnedWords,omitempty" yaml:"learned_words,omitempty" bson:"learned_words,omitempty"`
 
 	// learned and learnedBinds are, on a mock the learn step of record's
@@ -1093,7 +1098,8 @@ type MockState struct {
 	Concurrent bool `json:"concurrent,omitempty"`
 	// LearnedWords carries the words the learn step learned on the mock as
 	// noise (MockSpec.LearnedWords) back from the agent under the proven
-	// switch, as ReqBodyNoise carries its whole-leaf noise.
+	// switch, as ReqBodyNoise carries its whole-leaf noise. Variables' words
+	// ride on Variables and Binds (MockVariable.Words).
 	LearnedWords map[string]WordsEntry `json:"learnedWords,omitempty"`
 }
 

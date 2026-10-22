@@ -87,6 +87,11 @@ type NetworkTrafficDoc struct {
 //     learned as noise under the proven switch (models.MockSpec.LearnedWords):
 //     only those may change, and the rest of the leaf is still compared. A
 //     place in Words is never in Req. Absent unless the learn step wrote it.
+//     This block's codec reads and writes it whatever the proven switch says
+//     (an older or a newer keploy's entry, versioned, included:
+//     models.WordsEntry); only its use is gated on the switch. The mock's
+//     decoders and encoders do not carry it to and from
+//     models.MockSpec.LearnedWords yet, as nothing learns words yet.
 //
 // For backward compatibility the custom unmarshalers also accept the OLD shape
 // where `noise:` was a bare string list — that decodes into Value. New writes

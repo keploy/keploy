@@ -72,7 +72,8 @@ type MockVariable struct {
 	// record's full round; of a variable, from its recorded value and the
 	// full round's at the earlier bind. The bind is admitted only through
 	// it, and each Use place must hold the bound value. Learned only under
-	// the proven switch; nil for none.
+	// the proven switch; nil for none. Read and written back with the
+	// variable whatever the switch says, as the variable itself is.
 	Words *WordsEntry `json:"words,omitempty" yaml:"words,omitempty" bson:"words,omitempty"`
 }
 

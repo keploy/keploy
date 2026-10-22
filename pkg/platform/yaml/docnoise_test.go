@@ -111,7 +111,7 @@ func TestResolveReqBodyNoise(t *testing.T) {
 // written as before, with no words key.
 func TestDocNoise_WordsRoundTrip(t *testing.T) {
 	in := DocNoise{Req: []string{"body.at"}, Words: map[string]models.WordsEntry{
-		"body.note": {Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []models.WordSlot{
+		"body.note": {V: models.WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []models.WordSlot{
 			{Seg: 3, Kind: models.WordSlotToken},
 			{Seg: 5, Run: 0},
 		}},
@@ -120,7 +120,7 @@ func TestDocNoise_WordsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "req:\n    - body.at\nwords:\n    body.note:\n        digest: 9f2c41d07a3be815\n        layout: 4be1c09a5d3e7f21\n        slots:\n            - seg: 3\n              kind: token\n            - seg: 5\n              run: 0\n"
+	want := "req:\n    - body.at\nwords:\n    body.note:\n        v: 1\n        digest: 9f2c41d07a3be815\n        layout: 4be1c09a5d3e7f21\n        slots:\n            - seg: 3\n              kind: token\n            - seg: 5\n              run: 0\n"
 	if string(y) != want {
 		t.Fatalf("noise with words written as\n%s\nwant\n%s", y, want)
 	}

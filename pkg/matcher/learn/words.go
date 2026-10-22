@@ -27,13 +27,18 @@ const notRead = "keploy does not read learned words yet, so the leaf is compared
 // words e learned of the leaf: both values are split again, every byte outside
 // e's slots must be equal, and each slot is checked as its kind says
 // (models.WordSlot). An entry that does not hold is void and admits nothing:
-// its digest or layout no longer matches rec, a guard is missing or
-// malformed, a slot's seg or run is out of range, a kind or a layout is one
-// this build does not know, or an instant's skeleton is not rec's match at
-// its segment. why says, for a person to read, what did not hold; "" when ok.
+// this build cannot read it (models.WordsEntry.Unreadable: written by a newer
+// keploy, or with no version), its digest or layout no longer matches rec, a
+// guard is missing or malformed, a slot's seg or run is out of range, a kind
+// or a layout is one this build does not know, or an instant's skeleton is
+// not rec's match at its segment. why says, for a person to read, what did
+// not hold; "" when ok.
 //
 // This build reads no words: it admits nothing.
 func WordsAdmit(rec, live string, e models.WordsEntry) (ok bool, why string) {
+	if why := e.Unreadable(); why != "" {
+		return false, why
+	}
 	return false, notRead
 }
 

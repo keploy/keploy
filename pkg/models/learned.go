@@ -1,7 +1,5 @@
 package models
 
-import "encoding/json"
-
 // WHAT THE LEARN STEP LEARNED OF A LEAF'S WORDS (word-level learn).
 //
 // Under the proven switch, record's full round F learns of a drifted request
@@ -10,12 +8,13 @@ import "encoding/json"
 // the mock: as noise, under the noise block's words (MockSpec.LearnedWords,
 // on disk noise.words.<place>), and for an echo or a variable on the variable
 // itself (MockVariable.Words, on disk variables.<name>.words). Nothing here
-// is written with the switch off, and a mock that carries none of it encodes
+// is learned with the switch off, and a mock that carries none of it encodes
 // as before.
 //
 //	noise:
 //	    words:
 //	        body.note:
+//	            v: 1
 //	            digest: 9f2c41d07a3be815
 //	            layout: 4be1c09a5d3e7f21
 //	            slots:
@@ -29,6 +28,15 @@ import "encoding/json"
 // closed class applied byte by byte), and a segment into runs at every other
 // byte that is neither a letter nor a digit, and wherever the character class
 // changes. An accepted clock read is one segment and one run.
+//
+// The format is versioned (WordsEntry.V, WordsVersion). Its rule for every
+// decoder, encoder and rewrite (a prune, a noise persist, an edit), whatever
+// the switch says: read an entry and write it back, a key this build does not
+// know included (learned_codec.go); only its use is gated on the switch. A
+// variable's words already ride with the variable; noise.words is not yet
+// read into MockSpec.LearnedWords nor written from it, as nothing learns
+// words yet. An entry this build cannot read admits nothing
+// (WordsEntry.Unreadable), so its leaf is compared whole: it fails closed.
 
 // The kinds of a WordSlot.
 const (
@@ -45,6 +53,34 @@ const (
 	WordSlotInstant = "instant"
 )
 
+// WordsVersion is the version of the words format this build writes and
+// reads (WordsEntry.V). How a value splits into words (the structural
+// characters, the run classes, the clock layouts and the zone table, all of
+// which the layout guard hashes) is the version's: a build that splits
+// otherwise writes a new version and keeps reading this one as it was, so an
+// upgrade never voids what an older keploy learned.
+const WordsVersion = 1
+
+// Why an entry this build cannot read admits nothing (WordsEntry.Unreadable).
+const (
+	// WordsWrittenByNewer: the entry is of a version other than
+	// WordsVersion, or it (or one of its slots) holds a key this build does
+	// not know.
+	WordsWrittenByNewer = "written by a newer keploy; upgrade"
+	// WordsUnversioned: the entry has no version (no v, or v: 0), so it was
+	// not written as keploy writes words.
+	WordsUnversioned = "the learned words have no version (v); delete the entry or re-record"
+)
+
+// WordsRaw is a value the words format carries without reading it, as
+// compact JSON (which YAML reads too): the reserved seen's value
+// (WordsEntry.Seen), or, as one JSON object by key, the keys of an entry or a
+// slot this build does not know (WordsEntry.Unknown, WordSlot.Unknown). ""
+// is none. It is a string, so a WordSlot stays comparable, and YAML, JSON and
+// gob each carry it whole: a rewrite by this build writes back what a newer
+// keploy wrote, after the keys it knows (learned_codec.go).
+type WordsRaw string
+
 // WordSlot is one place of a leaf where the learn step saw words change, and
 // the only place a later replay lets them change (WordsEntry).
 type WordSlot struct {
@@ -52,7 +88,10 @@ type WordSlot struct {
 	// value, after its accepted clock reads collapse.
 	Seg int `json:"seg" yaml:"seg" bson:"seg"`
 	// Run is the run within segment Seg, counted from 0, for a slot of one
-	// run (WordSlotRun); 0 for every other kind.
+	// run (WordSlotRun); 0 for every other kind. It is written only where
+	// it names one: for a slot of one run always (run 0 too), and on
+	// another kind only when it is set (a malformed slot keeps it, so the
+	// entry stays void when read back).
 	Run int `json:"run" yaml:"run" bson:"run"`
 	// Kind is WordSlotRun, WordSlotToken or WordSlotInstant. A kind this
 	// build does not know voids the entry.
@@ -66,43 +105,25 @@ type WordSlot struct {
 	// N for a zone's name from the declared list, and every other character
 	// as itself. "" for every other kind.
 	Skeleton string `json:"skeleton,omitempty" yaml:"skeleton,omitempty" bson:"skeleton,omitempty"`
+	// Unknown is the slot's keys this build does not know, carried as
+	// written (WordsRaw); "" for none. A slot with any voids its entry
+	// (WordsWrittenByNewer).
+	Unknown WordsRaw `json:"-" yaml:"-" bson:"unknown,omitempty"`
 }
-
-// wordSlotDoc is a WordSlot as it is written: the run only for a slot of one
-// run, or when it is set on another kind (a malformed slot keeps it, so the
-// entry stays void when read back).
-type wordSlotDoc struct {
-	Seg      int    `json:"seg" yaml:"seg"`
-	Run      *int   `json:"run,omitempty" yaml:"run,omitempty"`
-	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Layout   string `json:"layout,omitempty" yaml:"layout,omitempty"`
-	Skeleton string `json:"skeleton,omitempty" yaml:"skeleton,omitempty"`
-}
-
-func (s WordSlot) doc() wordSlotDoc {
-	d := wordSlotDoc{Seg: s.Seg, Kind: s.Kind, Layout: s.Layout, Skeleton: s.Skeleton}
-	if s.Kind == WordSlotRun || s.Run != 0 {
-		run := s.Run
-		d.Run = &run
-	}
-	return d
-}
-
-// MarshalYAML writes the slot with its run only where the run names one
-// (wordSlotDoc).
-func (s WordSlot) MarshalYAML() (interface{}, error) { return s.doc(), nil }
-
-// MarshalJSON writes the slot as MarshalYAML does.
-func (s WordSlot) MarshalJSON() ([]byte, error) { return json.Marshal(s.doc()) }
 
 // WordsEntry is what the learn step learned of one leaf's words: the words
 // that changed between the recording and record's full round, as slots, and
 // the two guards that tie the slots to the value they were learned of. A
 // replay compares every byte of the leaf outside the slots, and each slot as
 // its kind says (matcher/learn.WordsAdmit). An entry whose guards no longer
-// hold, or that is malformed in any way, is void, and the leaf is compared
-// whole: it fails closed.
+// hold, that this build cannot read (Unreadable), or that is malformed in any
+// way, is void, and the leaf is compared whole: it fails closed.
 type WordsEntry struct {
+	// V is the version of the words format the entry is written in:
+	// WordsVersion for every entry this build writes. Of an entry of any
+	// other version only V is read; the rest is carried whole in Unknown,
+	// and the entry admits nothing (WordsWrittenByNewer).
+	V int `json:"v" yaml:"v" bson:"v"`
 	// Digest is the first 16 hex digits of the sha256 of the recorded leaf
 	// in its learn form.
 	Digest string `json:"digest" yaml:"digest" bson:"digest"`
@@ -112,6 +133,40 @@ type WordsEntry struct {
 	// Slots are the places that may change, sorted by Seg, then Run. A
 	// segment holds one token or instant slot, or slots of its runs.
 	Slots []WordSlot `json:"slots" yaml:"slots" bson:"slots"`
+	// Seen is reserved for what record's full round saw of the leaf, which
+	// a later keploy writes once, at F, for its UI to show. This build
+	// writes none, carries one as written (WordsRaw), and never compares
+	// it: it voids nothing and admits nothing.
+	Seen WordsRaw `json:"seen,omitempty" yaml:"seen,omitempty" bson:"seen,omitempty"`
+	// Unknown is the entry's keys this build does not know, carried as
+	// written (WordsRaw): of an entry of this version, a key beside the
+	// known ones (which voids it, WordsWrittenByNewer); of an entry of any
+	// other version, every key but v. "" for none.
+	Unknown WordsRaw `json:"-" yaml:"-" bson:"unknown,omitempty"`
+}
+
+// Unreadable is why this build cannot read e, so that e admits nothing and
+// its leaf is compared whole: WordsWrittenByNewer when e is of a version
+// other than WordsVersion or holds a key, its own or a slot's, this build
+// does not know; WordsUnversioned when it has no version. "" when this build
+// reads it. Seen is never read, so it makes no entry unreadable. Whether a
+// readable entry's guards and slots hold is matcher/learn's (WordsAdmit).
+func (e WordsEntry) Unreadable() string {
+	if e.V != WordsVersion {
+		if e.V == 0 && !e.Unknown.has("v") {
+			return WordsUnversioned
+		}
+		return WordsWrittenByNewer
+	}
+	if e.Unknown != "" {
+		return WordsWrittenByNewer
+	}
+	for _, s := range e.Slots {
+		if s.Unknown != "" {
+			return WordsWrittenByNewer
+		}
+	}
+	return ""
 }
 
 // Clone returns a copy of e that shares no slice with it.

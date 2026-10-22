@@ -39,8 +39,10 @@ func RedactLearnedValue(path, value string, noise []string) string {
 // (keploy/<set>/, or a staging copy of it), as learned.yaml says it: each
 // leaf's words learned as noise (noise.words), each variable's and echo's
 // words, and each leaf learned whole (noise.req), with the recorded value
-// redacted (RedactLearnedValue) and no value of record's full round. It reads
-// the mocks only, so it says the same of the same mocks wherever it runs.
+// redacted (RedactLearnedValue) and no value of record's full round. An entry
+// this build cannot read (models.WordsEntry.Unreadable) is listed with no
+// slots, its Why saying so, as a leaf compared whole. It reads the mocks
+// only, so it says the same of the same mocks wherever it runs.
 //
 // This build reads no learned leaf: it returns an error.
 func Legible(setDir string) ([]models.LearnedLeaf, error) {
