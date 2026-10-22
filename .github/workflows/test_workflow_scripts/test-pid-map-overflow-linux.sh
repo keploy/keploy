@@ -27,8 +27,8 @@
 # recording is stopped with Ctrl+C once every request has had its answer.
 # Each half records and replays on its own (MOCK_LANE_SWITCH,
 # mock/lane_switch.sh; CI runs each in a job of its own):
-#   - with the proven model off (KEPLOY_PROVEN=0, the default on Windows and
-#     macOS), keploy test --remove-unused-mocks:
+#   - with the proven model off (KEPLOY_PROVEN=0, the open-source build's
+#     default), keploy test --remove-unused-mocks:
 #     1. no overflow: PASSED, every recorded mock still there, the dependency
 #        not called;
 #     2. overflow: FAILED as capture incomplete, exit non-zero, the prune

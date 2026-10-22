@@ -35,8 +35,9 @@
 set -uo pipefail
 # This lane guards the switch-off prune (--remove-unused-mocks), which the
 # proven switch ignores (design v14 U18). So it runs keploy with the switch
-# off (KEPLOY_PROVEN=0), where that still works: the default on Windows and
-# macOS. Unset, a Linux keploy runs the proven model.
+# off (KEPLOY_PROVEN=0), where that still works: the open-source build's
+# default, and keploy enterprise's on Windows and macOS. Unset, keploy
+# enterprise runs the proven model on Linux.
 export KEPLOY_PROVEN=0
 
 # docker_pull_retry: a registry hiccup is retried and named, not taken for a

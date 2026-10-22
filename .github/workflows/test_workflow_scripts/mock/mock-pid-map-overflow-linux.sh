@@ -23,10 +23,9 @@
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
 # This lane guards OSS keploy mock record and replay with the proven switch
-# off (KEPLOY_PROVEN=0, the default on Windows and macOS): under it OSS keploy
-# mock replay refuses to run without a build that judges each test, and
-# record keeps nothing it cannot read per test. Unset, a Linux keploy runs the
-# proven model.
+# off (KEPLOY_PROVEN=0, the open-source build's default): under the switch
+# OSS keploy mock replay refuses to run without a build that judges each
+# test, and record keeps nothing it cannot read per test.
 export KEPLOY_PROVEN=0
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true

@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Sourced by the mock lanes: which half of a lane this run runs.
 #   MOCK_LANE_SWITCH=off   only its runs with the proven switch off
-#                          (KEPLOY_PROVEN=0: the default on Windows and macOS)
+#                          (KEPLOY_PROVEN=0: the open-source build's default)
 #   MOCK_LANE_SWITCH=on    only its runs under KEPLOY_PROVEN=1 (keploy enterprise's
 #                          default on Linux)
 #   unset, or both         both, as a run on a developer's machine does

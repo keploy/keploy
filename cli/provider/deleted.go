@@ -15,10 +15,10 @@ import (
 )
 
 // DeletedSetting is a setting the proven model deletes (design v14 U18). A
-// row is deleted by the change that lands what replaces it: under the switch,
-// the default on Linux, its flags are unknown flags, which the command
-// refuses, and its keploy.yml keys are ignored, with one notice for all of
-// them.
+// row is deleted by the change that lands what replaces it: under the switch
+// (keploy enterprise's default on Linux, KEPLOY_PROVEN=1 otherwise), its flags
+// are unknown flags, which the command refuses, and its keploy.yml keys are
+// ignored, with one notice for all of them.
 // Ignoring one never makes keploy looser: each deleted setting weakened
 // matching, skipped tests, or changed nothing keploy reads.
 type DeletedSetting struct {
@@ -44,11 +44,12 @@ var (
 	// (RegisterDeletedSettings). The other rows are their own changes'.
 	//
 	// The S12 rows were ignored under the switch, each said once per run,
-	// while the switch was a staging gate. Linux runs the proven model by
-	// default now, so there they are deleted as U18 says: unknown flags and
-	// ignored keys. The code that reads them stays for the platforms that
-	// keep the switch off (Windows and macOS, P221) and for KEPLOY_PROVEN=0,
-	// where they work as before.
+	// while the switch was a staging gate. keploy enterprise runs the proven
+	// model by default on Linux now, so under the switch they are deleted as
+	// U18 says: unknown flags and ignored keys. The code that reads them stays
+	// for every run with the switch off (keploy's open-source build unless
+	// KEPLOY_PROVEN=1, keploy enterprise on Windows and macOS, P221, and
+	// KEPLOY_PROVEN=0), where they work as before.
 	deleted = []DeletedSetting{{
 		Row:     "read by nothing",
 		Flags:   []string{"fallBack-on-miss", "in-ci"},

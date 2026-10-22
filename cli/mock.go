@@ -47,10 +47,10 @@ Examples:
 		long = `Record the real outgoing calls your test suite makes, then replay them so the
 suite runs without the real dependencies, at the network layer.
 
-Under the proven model, keploy's default on Linux, keploy judges each test of
-a Go suite. Replaying under it needs a keploy build that judges each test
-(keploy enterprise); this build replays with ` + provenswitch.Env + `=0, without the proven
-model.
+Under the proven model (` + provenswitch.Env + `=1 in this build; keploy enterprise runs
+it by default on Linux), keploy judges each test of a Go suite. Replaying
+under it needs a keploy build that judges each test (keploy enterprise); this
+build replays with ` + provenswitch.Env + `=0, without the proven model.
 
 Examples:
   # Record the dependency calls go test makes into the "default" mock set

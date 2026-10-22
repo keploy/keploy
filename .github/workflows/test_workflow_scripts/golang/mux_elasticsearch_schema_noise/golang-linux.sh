@@ -37,8 +37,9 @@ set -o pipefail
 # This lane guards --schema-noise-detection and --mock-noise-strict, which the
 # proven switch replaces (record's learn step learns drifting fields) (design
 # v14 U18). So it runs keploy with the switch off (KEPLOY_PROVEN=0), where
-# that still works: the default on Windows and macOS. Unset, a Linux keploy
-# runs the proven model.
+# that still works: the open-source build's default, and keploy enterprise's
+# on Windows and macOS. Unset, keploy enterprise runs the proven model on
+# Linux.
 export KEPLOY_PROVEN=0
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"

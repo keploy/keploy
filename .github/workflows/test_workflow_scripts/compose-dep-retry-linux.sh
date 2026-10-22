@@ -36,8 +36,9 @@
 set -uo pipefail
 # The proven switch, stated for every keploy this lane runs: the steps that
 # say KEPLOY_PROVEN=1 run under it, and every other one with it off
-# (KEPLOY_PROVEN=0, the default on Windows and macOS), as this lane always ran
-# them. Unset, a Linux keploy runs the proven model.
+# (KEPLOY_PROVEN=0, the open-source build's default, and keploy enterprise's
+# on Windows and macOS), as this lane always ran them. Unset, keploy
+# enterprise runs the proven model on Linux.
 export KEPLOY_PROVEN=0
 
 RECORD_BIN="$(command -v "${RECORD_BIN:-keploy}" || echo "${RECORD_BIN:-keploy}")"
