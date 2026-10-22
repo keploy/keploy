@@ -69,7 +69,7 @@ keploy record -c "python main.py"
 ```
 
 ## 🧪 テストの実行
-データベース、Redis、Kafka、またはアプリケーションが使用する他のサービスをシャットダウンします。Keployはテスト中にそれらを必要としません。
+データベース、Redis、Kafka、またはアプリケーションが使用する他のサービスをシャットダウンします。Keployはテスト中にそれらを必要としません。（`install.sh --oss` でインストールするオープンソース版のKeployでは、Redisは例外です。Redisを記録もモックもしないため、テスト中も起動しておく必要があります。）
 ```zsh
 keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```

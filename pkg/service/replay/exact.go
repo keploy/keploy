@@ -576,9 +576,18 @@ func (r *Replayer) noteIgnored(setting, why string) {
 
 // noteOwnsNothing says once per set, under the switch, that no test case of
 // testSetID owns a test mock: every call a test case makes to a dependency
-// misses.
-func (r *Replayer) noteOwnsNothing(testSetID string) {
+// misses, but to a Redis, which this build relays to the real server when it
+// leaves the set's Redis mocks out (redis_leftout.go): redisUnowned is how
+// many of the set's per-test mapping entries named one.
+func (r *Replayer) noteOwnsNothing(testSetID string, redisUnowned int) {
 	if r.exact == nil || r.exact.ownsTestMocks {
+		return
+	}
+	if redisUnowned > 0 {
+		r.logger.Warn("under KEPLOY_PROVEN no test case of this test set owns a recorded call: its mappings.yaml, or with none its test windows, list no data-plane mock the agent holds but Redis mocks, which this keploy leaves out (it relays Redis to the real server), so every call a test case makes to a dependency other than Redis misses",
+			zap.String("testSetID", testSetID),
+			zap.Int("redisEntries", redisUnowned),
+			zap.String("next_step", "nothing, if the test cases call no dependency but Redis; otherwise record the test set again with this keploy (keploy record writes mappings.yaml)"))
 		return
 	}
 	r.logger.Warn("under KEPLOY_PROVEN no test case of this test set owns a recorded call: its mappings.yaml, or with none its test windows, list no data-plane mock the agent holds, so every call a test case makes to a dependency misses",

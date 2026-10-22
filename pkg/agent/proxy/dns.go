@@ -192,6 +192,8 @@ type dnsCacheEntry struct {
 	// true if the response came from upstream resolution or a recorded mock.
 	// false if we synthesized defaults (fallback).
 	FromUpstream bool
+	// Mocked: the response is a recorded mock's (findDNSMock).
+	Mocked bool
 }
 
 const (
@@ -367,12 +369,18 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
 			if shouldCacheDNSResponse(mode, resp) {
-				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
+				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream, Mocked: resp.Mocked}
 				p.dnsCache.Add(key, cached)
 			}
 		}
 		if rd != nil {
 			rd.bookDNSAnswer(question, resp.Answer)
+		}
+		// In a replay, every answer handed out, cached or not, says whose
+		// its addresses are: a mocked name's or their own (dns_live.go),
+		// for the Redis skip's dial, when it is installed.
+		if mode == models.MODE_TEST && p.redisSkipOn.Load() {
+			p.dnsAnswered.answered(question.Name, resp)
 		}
 
 		// Apply flags from the first response (DNS messages normally contain a single question)
@@ -835,6 +843,7 @@ func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger
 				},
 			},
 			FromUpstream: true,
+			Mocked:       true,
 		}
 
 		if mock.Spec.DNSResp != nil {

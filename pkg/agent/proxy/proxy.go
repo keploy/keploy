@@ -174,6 +174,12 @@ type Proxy struct {
 	// session, it cannot record: a server-first protocol it relays
 	// (relayServerFirst).
 	serverFirstSaid saidOnce
+	// redisSaid is what the Redis skip has said once per destination, for
+	// the whole process (redis_skip.go).
+	redisSaid *redisSkipSaid
+	// redisSkipOn says the Redis skip is installed (installRedisSkip): only
+	// then does a replay's DNS note whose its answers are (dns_live.go).
+	redisSkipOn atomic.Bool
 	// serverFirstDests is the destinations found to speak a server-first
 	// protocol: a later record connection to one, its port learned not to
 	// be MySQL, is probed again rather than skipped (probeMysql), so it is
@@ -442,6 +448,9 @@ type Proxy struct {
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
+	// dnsAnswered is, in a replay, the name each address keploy's DNS
+	// answered from a recorded mock was the answer for (dns_live.go).
+	dnsAnswered dnsAnswered
 	// recordedDNSMocks tracks DNS queries that have already been recorded
 	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass"
 	// Uses bounded LRU with TTL to prevent unbounded memory growth.
@@ -1027,6 +1036,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
 		nodataRelayLogged:         newNodataRelayLogCache(),
 		mysqlPorts:                newMysqlPortRegistry(),
+		redisSaid:                 processRedisSkipSaid,
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
 		// against CoreDNS (~500 ms default) while keeping app-side lookup
@@ -1856,6 +1866,8 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
+	// Redis passes through when no Redis parser is linked (redis_skip.go).
+	p.installRedisSkip()
 	sort.Slice(p.integrationsPriority, func(i, j int) bool {
 		return p.integrationsPriority[i].Priority > p.integrationsPriority[j].Priority
 	})
@@ -2448,25 +2460,30 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				// What follows the handler (its error's logging) is
 				// recovered here, as the handler is in handleRecovered.
 				defer util.Recover(p.logger, clientConn, nil)
-				err := p.handleRecovered(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF {
-					// Network closed errors are expected when client closes connection (e.g., app shutdown)
-					// Only log as error if it's not a shutdown/network closed error
-					if isShutdownError(err) || isNetworkClosedErr(err) {
-						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
-					} else {
-						if errors.As(err, new(reportedMiss)) {
-							p.logger.Debug("failed to handle the client connection: no mock matched its call", zap.Error(err))
-						} else if refusedLocally(err) {
-							p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", zap.Error(err))
-						} else {
-							utils.LogError(p.logger, err, "failed to handle the client connection")
-						}
-					}
-				}
+				p.logHandled(p.handleRecovered(clientConnCtx, clientConn))
 				return nil
 			})
 		}
+	}
+}
+
+// logHandled logs what handling a client connection returned: at Debug what
+// is expected or was said already, as an error anything else.
+func (p *Proxy) logHandled(err error) {
+	switch {
+	case err == nil || err == io.EOF:
+	// Network closed errors are expected when client closes connection (e.g., app shutdown)
+	// Only log as error if it's not a shutdown/network closed error
+	case isShutdownError(err) || isNetworkClosedErr(err):
+		p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
+	case errors.As(err, new(reportedMiss)):
+		p.logger.Debug("failed to handle the client connection: no mock matched its call", zap.Error(err))
+	case errors.As(err, new(redisUnreachable)):
+		p.logger.Debug("failed to handle the client connection: keploy could not reach the Redis it relays it to (said once for its destination)", zap.Error(err))
+	case refusedLocally(err):
+		p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", zap.Error(err))
+	default:
+		utils.LogError(p.logger, err, "failed to handle the client connection")
 	}
 }
 
@@ -3518,6 +3535,36 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.String("parser", string(parserType)),
 		zap.Bool("generic", generic),
 	)
+
+	// A Redis connection in a build without a Redis parser: relayed to the
+	// real Redis in record and in test mode, recording nothing and serving
+	// no mock (redis_skip.go). A replay has dialled nothing yet; it reaches
+	// the destination the way a record did above, at the address a name
+	// the recording's DNS answered has now (dns_live.go).
+	if parserType == integrations.REDIS_SKIP {
+		return p.serveRedisSkip(parserCtx, logger, dstAddr, srcConn, &dstConn, func() (net.Conn, string, error) {
+			addr := dstAddr
+			if isTLS {
+				addr = dstCfg.Addr
+			}
+			target := util.DialTarget{Addr: p.liveAddr(addr)}
+			if target.Addr == addr {
+				target.Predialed = predialed
+			}
+			if !isTLS {
+				c, err := util.DialDestination(parserCtx, p.logger, "tcp", target)
+				return c, target.Addr, err
+			}
+			cfg := dstCfg.TLSCfg.Clone()
+			if isMTLS && clientPeerCert != nil {
+				if err := p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey); err != nil {
+					return nil, target.Addr, err
+				}
+			}
+			c, err := util.DialDestinationTLS(parserCtx, p.logger, "tcp", target, cfg)
+			return c, target.Addr, err
+		})
+	}
 
 	// Record-mode parsing kill switch: if record-time parsing has been
 	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin

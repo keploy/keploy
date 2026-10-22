@@ -466,7 +466,7 @@ func TestKeepConnFailureMappingsLeavesTheStartupSectionToAWriteWithOne(t *testin
 	kinds := map[string]models.Kind{"cf-boot": models.ConnectionFailure, "cf-1": models.ConnectionFailure}
 	onDiskStartup := []models.MockEntry{{Name: "cf-boot"}, {Name: "mock-boot", Kind: string(models.HTTP)}}
 	write := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-1", Kind: string(models.HTTP)}}}}}
-	keepConnFailureMappings(write, map[string][]models.MockEntry{"test-1": {{Name: "cf-1"}}}, onDiskStartup, kinds)
+	keepConnFailureMappings(write, map[string][]models.MockEntry{"test-1": {{Name: "cf-1"}}}, onDiskStartup, kinds, nil)
 	if len(write.Startup) != 0 {
 		t.Fatalf("a write with no startup section got %v, which would replace the one on disk (cf-boot and mock-boot)", write.Startup)
 	}
@@ -474,7 +474,7 @@ func TestKeepConnFailureMappingsLeavesTheStartupSectionToAWriteWithOne(t *testin
 		t.Fatalf("precondition: test-1 keeps its connection failure, got %v", write.TestCases[0].Mocks)
 	}
 	write.Startup = []models.MockEntry{{Name: "mock-boot-now", Kind: string(models.HTTP)}}
-	keepConnFailureMappings(write, nil, onDiskStartup, kinds)
+	keepConnFailureMappings(write, nil, onDiskStartup, kinds, nil)
 	if len(write.Startup) != 2 || write.Startup[1].Name != "cf-boot" {
 		t.Fatalf("a write with a startup section keeps the boot-time connection failure: got %v", write.Startup)
 	}

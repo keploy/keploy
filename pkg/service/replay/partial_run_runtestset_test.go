@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -72,7 +73,8 @@ func (m *prMockDB) UpdateMocks(_ context.Context, _ string, keep map[string]mode
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.updateCalls++
-	m.kept = keep
+	// A copy: what the prune was handed, not what the caller adds after.
+	m.kept = maps.Clone(keep)
 	return nil
 }
 func (m *prMockDB) pruneCalls() int {

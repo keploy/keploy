@@ -24,6 +24,7 @@ import (
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/redisskip"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -52,6 +53,21 @@ type ClientMockStorage struct {
 	// is a test mock (data-plane): one is a recorded call its test is judged
 	// for (refusedOf).
 	refused map[string]bool
+	// leftOut names the mocks this store left out: the Redis mocks of a set
+	// a build without a Redis parser replays (redisskip.Recorded), whose
+	// calls are made for real. Those of them parked on disk stay there, and
+	// every read of the disk that serves, owns or learns from a mock leaves
+	// them out (mocksForParams, mocksByName, diskRecordedBefore); the disk's
+	// indexes by request key and by destination (RangeKeys,
+	// LoadDestinations) hold no Generic or Redis mock. A mapping that lists
+	// one owns nothing for it, and nothing misses or goes unconsumed for it
+	// (mocksByName).
+	leftOut map[string]bool
+	// leftOutResident counts the mocks of leftOut the store keeps nowhere:
+	// those taken out of filtered and unfiltered (leaveOut), and the
+	// left-out mocks the stream held back to refuse, which it never parked
+	// (StoreMocksStream); the rest of them are parked on disk.
+	leftOutResident int
 	// statements is the set's statement catalog, read from diskMocks once
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
 	// the store is published (seedStatementCatalog); nil with no on-disk store.
@@ -1065,6 +1081,11 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
+	// A build without a Redis parser leaves the set's Redis mocks out of the
+	// pool: its proxy relays Redis to the real server (redisskip.Recorded).
+	// They are read from the whole set, as keploy test reads it, before any
+	// mock is refused: a connection is judged by its first exchange.
+	leftOut := redisskip.LeftOutOf(storage.filtered, storage.unfiltered)
 	if provenswitch.On() {
 		// Which recorded container keys are ambiguous is read from the whole
 		// set, before any mock is refused or consumed.
@@ -1076,9 +1097,16 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 			tally.Add(m)
 		}
 		containerkey.Default.SetRecorded(&tally)
+	}
+	// What is left out is never served, so nothing says it cannot be: it
+	// goes before any is refused.
+	storage.leftOut = leftOut
+	storage.leaveOut()
+	if provenswitch.On() {
 		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
 		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered, storage)
 	}
+	sayLeftOut(a.logger, storage.leftOut)
 
 	// Derive Lifetime once per mock before they enter the runtime pool.
 	// Idempotent: DeriveLifetime short-circuits when the Lifetime
@@ -1102,7 +1130,7 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// Non-stream path keeps everything resident, so the complete async corpus
 	// is exactly the async subset of filtered+unfiltered.
 	if a.wantsAsyncMocks() {
-		a.loadAsyncIntoProxy(append(collectAsyncMocks(filtered), collectAsyncMocks(unfiltered)...))
+		a.loadAsyncIntoProxy(storage.withoutLeftOut(append(collectAsyncMocks(filtered), collectAsyncMocks(unfiltered)...)))
 	}
 	a.logger.Debug("Successfully stored mocks for client")
 	return nil
@@ -1123,9 +1151,13 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	a.seedStatementCatalog(storage)
 	a.seedRecordedDestinations(storage)
 
-	// Track the loaded count for /agent/mock/stats.
+	// Track the loaded count for /agent/mock/stats: what the store holds,
+	// and the mocks it left out (those parked on disk are in its Len), as
+	// keploy test counts what it sent (ensureAgentHoldsStoredMocks: a set
+	// whose mocks are all Redis is held, not missing). The mocks it refused
+	// are not counted.
 	a.scopeMu.Lock()
-	a.loadedMocks = len(storage.filtered) + len(storage.unfiltered)
+	a.loadedMocks = len(storage.filtered) + len(storage.unfiltered) + storage.leftOutResident
 	if storage.diskMocks != nil {
 		a.loadedMocks += storage.diskMocks.Len()
 	}
@@ -1212,6 +1244,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// counted as it is decoded, before any is refused or parked on disk.
 	proven := provenswitch.On()
 	var tally containerkey.RecordedTally
+	// A build without a Redis parser leaves the set's Redis mocks out of the
+	// pool (redisskip.Recorded), decided once the whole set is read: a
+	// Generic mock is judged by its connection's first exchange.
+	redisMocks := redisskip.NewRecorded()
+	// unfollowed: the mocks whose variables keploy cannot follow, and why,
+	// refused once the set is read unless left out; the mocks themselves are
+	// not kept.
+	var unfollowed []refusal
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -1229,9 +1269,23 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		if proven {
 			tally.Add(mock)
 		}
-		if proven && !a.followable(mock) {
-			storage.noteRefused(mock)
-			continue
+		// Read before any mock is refused, as StoreMocks reads the set.
+		redisMocks.Add(mock)
+		// One whose variables keploy cannot follow is refused once the set
+		// is read: one left out is never served, so nothing says it cannot
+		// be.
+		if proven {
+			if why := a.unfollowable(mock); why != "" {
+				if redisMocks == nil {
+					// A build that leaves nothing out (one with a Redis
+					// parser) refuses it as it reads it.
+					a.sayUnfollowable(mock.Name, mock.Kind, why)
+					storage.noteRefused(mock)
+					continue
+				}
+				unfollowed = append(unfollowed, refusal{name: mock.Name, kind: mock.Kind, protocolPhase: mock.IsProtocolPhase(), why: why})
+				continue
+			}
 		}
 		if wantAsync && mock.IsAsync() {
 			asyncMocks = append(asyncMocks, mock)
@@ -1256,6 +1310,20 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	if proven {
 		containerkey.Default.SetRecorded(&tally)
 	}
+	// What is left out and was parked on disk stays there, and every read
+	// of the disk leaves it out (mocksForParams, mocksByName).
+	storage.leftOut = redisMocks.LeftOut()
+	storage.leaveOut()
+	for _, r := range unfollowed {
+		if storage.leftOut[r.name] {
+			storage.leftOutResident++
+			continue
+		}
+		a.sayUnfollowable(r.name, r.kind, r.why)
+		storage.noteRefusedAs(r.name, r.protocolPhase)
+	}
+	asyncMocks = storage.withoutLeftOut(asyncMocks)
+	sayLeftOut(a.logger, storage.leftOut)
 	if disk != nil {
 		disk.Finalize()
 		statements, err := disk.LoadStatements()
@@ -1289,32 +1357,55 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 // whose variable does not hold. It is named in an error, and the call it was
 // recorded for misses.
 func (a *Agent) followable(m *models.Mock) bool {
-	if m == nil || len(m.Spec.Variables) == 0 {
+	why := a.unfollowable(m)
+	if why == "" {
 		return true
 	}
-	why := ""
+	a.sayUnfollowable(m.Name, m.Kind, why)
+	return false
+}
+
+// refusal is what refusing a mock keploy cannot follow the variables of
+// takes of it (StoreMocksStream): its name, kind, whether it is a protocol
+// phase one, and why (unfollowable).
+type refusal struct {
+	name          string
+	kind          models.Kind
+	protocolPhase bool
+	why           string
+}
+
+// sayUnfollowable says, at Error, that keploy will not answer the call the
+// mock name (of kind) recorded, since it cannot follow its variables (why).
+func (a *Agent) sayUnfollowable(name string, kind models.Kind, why string) {
+	a.logger.Error("keploy cannot follow the variables of a recorded call, so it will not answer that call",
+		zap.String("mock", name), zap.String("kind", string(kind)), zap.String("why", why),
+		zap.String("next_step", "re-record the test with this keploy, or remove the variables block of "+name+" to replay the call as recorded"))
+}
+
+// unfollowable is why this keploy cannot follow the variables m declares
+// (followable), "" when it can, saying nothing.
+func (a *Agent) unfollowable(m *models.Mock) string {
+	if m == nil || len(m.Spec.Variables) == 0 {
+		return ""
+	}
 	follow, registered := integrations.VariableFollowerOf(m.Kind)
 	switch {
 	case m.Kind == models.HTTP && m.IsAsync():
-		why = "keploy does not follow variables on an async HTTP call"
+		return "keploy does not follow variables on an async HTTP call"
 	case m.Kind == models.HTTP:
-		return true
+		return ""
 	case !registered:
-		why = "keploy follows variables on HTTP calls, and on the calls of a parser that says it does; the " + string(m.Kind) + " parser does not"
-	default:
-		ok, w := follow(m)
-		if ok {
-			return true
-		}
-		why = w
-		if why == "" {
-			why = "the " + string(m.Kind) + " parser does not follow this mock's variables"
-		}
+		return "keploy follows variables on HTTP calls, and on the calls of a parser that says it does; the " + string(m.Kind) + " parser does not"
 	}
-	a.logger.Error("keploy cannot follow the variables of a recorded call, so it will not answer that call",
-		zap.String("mock", m.Name), zap.String("kind", string(m.Kind)), zap.String("why", why),
-		zap.String("next_step", "re-record the test with this keploy, or remove the variables block of "+m.Name+" to replay the call as recorded"))
-	return false
+	ok, why := follow(m)
+	if ok {
+		return ""
+	}
+	if why == "" {
+		why = "the " + string(m.Kind) + " parser does not follow this mock's variables"
+	}
+	return why
 }
 
 // refuseUnfollowable drops the mocks whose variables this keploy cannot follow
@@ -1331,16 +1422,63 @@ func (a *Agent) refuseUnfollowable(mocks []*models.Mock, store *ClientMockStorag
 	return out
 }
 
+// leaveOut takes what s left out (leftOut) out of its resident pools, and
+// counts it (leftOutResident).
+func (s *ClientMockStorage) leaveOut() {
+	n := len(s.filtered) + len(s.unfiltered)
+	s.filtered = s.withoutLeftOut(s.filtered)
+	s.unfiltered = s.withoutLeftOut(s.unfiltered)
+	s.leftOutResident = n - len(s.filtered) - len(s.unfiltered)
+}
+
+// withoutLeftOut is mocks less those s left out (leftOut): mocks itself when
+// s left out nothing, a new slice otherwise.
+func (s *ClientMockStorage) withoutLeftOut(mocks []*models.Mock) []*models.Mock {
+	if len(s.leftOut) == 0 {
+		return mocks
+	}
+	out := make([]*models.Mock, 0, len(mocks))
+	for _, m := range mocks {
+		if m == nil || !s.leftOut[m.Name] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// sayLeftOut tells the user, once per stored set, how many Redis mocks the
+// store left out (redisskip.LeftOutNotice), and the first of them in
+// recorded order (mock-2 before mock-10).
+func sayLeftOut(logger *zap.Logger, leftOut map[string]bool) {
+	if len(leftOut) == 0 {
+		return
+	}
+	names := make([]string, 0, len(leftOut))
+	for n := range leftOut {
+		names = append(names, n)
+	}
+	redisskip.SortNames(names)
+	logger.Warn(redisskip.LeftOutNotice, zap.Int("mocks", len(names)), zap.Strings("first", names[:min(len(names), 5)]))
+}
+
 // noteRefused notes that the store refused mock; before the store is
 // published.
 func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
-	if mock == nil || mock.Name == "" {
+	if mock == nil {
+		return
+	}
+	s.noteRefusedAs(mock.Name, mock.IsProtocolPhase())
+}
+
+// noteRefusedAs is noteRefused of the mock name, a protocol phase one or not.
+func (s *ClientMockStorage) noteRefusedAs(name string, protocolPhase bool) {
+	if name == "" {
 		return
 	}
 	if s.refused == nil {
 		s.refused = map[string]bool{}
 	}
-	s.refused[mock.Name] = !mock.IsProtocolPhase()
+	s.refused[name] = !protocolPhase
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
@@ -2047,11 +2185,14 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
 	}
+	// What the store left out and parked on disk is not read back.
+	originalFiltered = storage.withoutLeftOut(originalFiltered)
 	carryOver, err := a.loadCarryOverLookahead(disk, params)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
 	}
+	carryOver = storage.withoutLeftOut(carryOver)
 
 	a.logger.Debug("Original mocks before filtering",
 		zap.Int("originalFiltered", len(originalFiltered)),

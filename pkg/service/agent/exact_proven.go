@@ -423,7 +423,17 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 	if disk == nil {
 		return nil
 	}
-	return disk.RangeRecordedBefore
+	if len(s.leftOut) == 0 {
+		return disk.RangeRecordedBefore
+	}
+	// What the store left out (its Redis mocks, in a build without a Redis
+	// parser) is no earlier place of a value: its call is made for real, so
+	// its recorded answer is no answer of this replay.
+	return func(t time.Time, visit func(*models.Mock) bool) error {
+		return disk.RangeRecordedBefore(t, func(m *models.Mock) bool {
+			return (m != nil && s.leftOut[m.Name]) || visit(m)
+		})
+	}
 }
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks

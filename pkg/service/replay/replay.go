@@ -1973,6 +1973,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// only ones an agent that says so reads consumed entries for (see
 	// consumedForAgent). nil until StoreMocks: then everything is sent.
 	var perTestRegion map[string]struct{}
+	// redisLeftOut names the set's Redis mocks this build leaves out of the
+	// replay (redis_leftout.go), read as the set's mocks are loaded;
+	// redisUnowned counts the per-test mapping entries that named one.
+	var redisLeftOut map[string]bool
+	var redisUnowned int
+	// agentTestMockMappings is each test's mapping as recorded, the Redis
+	// mocks this build leaves out included: what the agent is sent to load a
+	// test's mocks by. The agent holds none of those (it left them out, or
+	// never had a Keploy Enterprise one this build cannot decode), and a test
+	// whose mapping names only them is still loaded by its mapping (no
+	// per-test mock), not by its window, as a stripped, empty one would be.
+	var agentTestMockMappings map[string][]models.MockEntry
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -2160,6 +2172,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if fromWindows {
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
+		// The set's Redis mocks a build without a Redis parser leaves out of
+		// the replay are no test's and no worker scope's (redis_leftout.go).
+		redisLeftOut = leftOutRedis(skipped.kinds, filtered, unfiltered)
+		agentTestMockMappings = expectedTestMockMappings
+		expectedTestMockMappings, workerScope, redisUnowned = withoutLeftOutRedis(expectedTestMockMappings, workerScope, redisLeftOut)
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
@@ -2195,7 +2212,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
-			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
+			// The plan is of what the agent holds: none of the mocks it
+			// leaves out (redisLeftOut) is the pool's either.
+			r.exact = newExactPlan(expectedTestMockMappings, workerScope, withoutNames(filtered, redisLeftOut), withoutNames(unfiltered, redisLeftOut))
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
 			r.exact.share = newSharePlan(conc, workerScope, filtered, unfiltered)
 			// keploy record's full round shares the recordings made while
@@ -2210,7 +2229,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// application for it: an application kept alive from an earlier
 			// set, or one keploy does not start, booted before this set.
 			r.exact.bootSeen = r.instrument && !serveTest && (strings.TrimSpace(conf.AppCommand) != "" || strings.TrimSpace(r.config.Command) != "")
-			r.noteOwnsNothing(testSetID)
+			r.noteOwnsNothing(testSetID, redisUnowned)
 		}
 		return filtered, unfiltered, nil
 	}
@@ -3190,7 +3209,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// auth, pool warm-up) out of the pool for every test — the gap the
 			// startup section exists to close. The timestamp path needs no
 			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
-			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
+			expectedNames := models.MergeStartupMockNames(agentTestMockMappings[testCase.Name], startupMockNames)
 			// Open this test's capture window BEFORE moving the agent's mock
 			// window to it: moving it releases what the test recorded the app
 			// being pushed (a Pulsar MESSAGE), and a call the app makes at once
@@ -4300,7 +4319,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// happened to be consumed at boot lands in `startup:`, and adding it
 			// to expected would have that unexpected consumption tolerated — a
 			// test that should go OBSOLETE would pass instead.
-			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
+			streamExpected := models.MergeStartupMockNames(agentTestMockMappings[tc.Name], startupMockNames)
 			// Open the per-test capture window before simulation, and before the
 			// agent's mock window moves to this test (see the non-streaming
 			// path). Unlike the non-streaming path we must NOT finalize it right
@@ -5931,6 +5950,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// retain everything (see startupMockCutoff).
 		startupCutoffTime := startupMockCutoff(testCases, pruneBefore)
 
+		// Nor is a Redis mock this build left out of the replay unused: its
+		// call was made for real (redis_leftout.go).
+		keepLeftOutRedis(passingTotalConsumedMocks, redisLeftOut)
+
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, startupCutoffTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
@@ -6146,19 +6169,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if shouldWriteMappings {
-		// Only a set that holds connection failures can have mapping entries
-		// for them to keep: every other set is written as before, with no
-		// second read of its mapping file.
-		if holdsConnFailures(mockKindByName) {
+		// Only a set that holds connection failures, or Redis mocks this
+		// build leaves out, can have mapping entries for them to keep: every
+		// other set is written as before, with no second read of its mapping
+		// file.
+		if holdsConnFailures(mockKindByName) || len(redisLeftOut) > 0 {
 			onDisk, _, err := r.mappingDB.Get(ctx, testSetID)
 			var onDiskStartup []models.MockEntry
 			if err == nil {
 				onDiskStartup, err = r.mappingDB.GetStartup(ctx, testSetID)
 			}
 			if err == nil {
-				keepConnFailureMappings(mappingDoc, onDisk, onDiskStartup, mockKindByName)
+				keepConnFailureMappings(mappingDoc, onDisk, onDiskStartup, mockKindByName, redisLeftOut)
 			} else {
-				r.logger.Debug("could not read the mapping file to keep its connection-failure entries", zap.String("testSetID", testSetID), zap.Error(err))
+				r.logger.Debug("could not read the mapping file to keep its connection-failure and left-out Redis entries", zap.String("testSetID", testSetID), zap.Error(err))
 			}
 		}
 		logKept := func() {

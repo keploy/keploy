@@ -1586,8 +1586,13 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 // --update-test-mapping run would strip them from the recording for good, and
 // a keploy that replays them would no longer serve one to its test (or at
 // boot). An entry is a connection failure by its own kind or, for an entry
-// recorded without one, by mockKindByName.
-func keepConnFailureMappings(write *models.Mapping, onDisk map[string][]models.MockEntry, onDiskStartup []models.MockEntry, mockKindByName map[string]models.Kind) {
+// recorded without one, by mockKindByName. The entries of the mocks this
+// build left out of the replay (leftOut: the set's Redis mocks, in a build
+// without a Redis parser, redis_leftout.go) are kept the same way: no run of
+// this build consumes one, its call being made for real, so this build says
+// nothing of whether a test still makes it, and Keploy Enterprise replays
+// its own Redis mocks by these entries.
+func keepConnFailureMappings(write *models.Mapping, onDisk map[string][]models.MockEntry, onDiskStartup []models.MockEntry, mockKindByName map[string]models.Kind, leftOut map[string]bool) {
 	if write == nil {
 		return
 	}
@@ -1597,7 +1602,7 @@ func keepConnFailureMappings(write *models.Mapping, onDisk map[string][]models.M
 			have[m.Name] = true
 		}
 		for _, e := range disk {
-			if have[e.Name] || !isConnFailureEntry(e, mockKindByName) {
+			if have[e.Name] || !(isConnFailureEntry(e, mockKindByName) || leftOut[e.Name]) {
 				continue
 			}
 			written = append(written, e)

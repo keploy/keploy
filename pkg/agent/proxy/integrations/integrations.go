@@ -89,7 +89,35 @@ const (
 	MONGO_V1    IntegrationType = "mongo_v1"
 	MONGO_V2    IntegrationType = "mongo_v2"
 	AEROSPIKE   IntegrationType = "aerospike"
+
+	// REDIS is the name Keploy Enterprise's Redis parser registers under.
+	// This build has no Redis parser: the name is declared here so that the
+	// proxy can tell whether one is linked (see REDIS_SKIP), and so that
+	// Enterprise pins its parser's name to this one rather than to a
+	// string of its own.
+	REDIS IntegrationType = "redis"
+	// REDIS_SKIP is the proxy's own stand-in for a Redis parser, installed
+	// only when no integration is registered as REDIS once every package's
+	// init has run (the proxy's InitIntegrations). It records and mocks
+	// nothing: a connection whose client opens with a Redis command is
+	// relayed to the real Redis, in record and in test mode, and the
+	// RedisSkipNotice is logged once per destination. It is never put in
+	// Registered: the proxy adds it to its own parsers, so a build that
+	// links a Redis parser (Keploy Enterprise, whose agent runs this proxy)
+	// never has it, whatever order its packages' inits ran in.
+	REDIS_SKIP IntegrationType = "redis_enterprise_only"
 )
+
+// RedisEnterpriseURL is where the RedisSkipNotice sends a user who wants
+// Redis recorded and mocked: Keploy Enterprise's installation page.
+const RedisEnterpriseURL = "https://keploy.io/docs/keploy-cloud/cloud-installation/"
+
+// RedisSkipNotice is the warning a build without a Redis parser logs, once
+// per Redis destination per process, when the application's calls to that
+// Redis are passed through instead of recorded or mocked.
+const RedisSkipNotice = "Redis calls are skipped: this keploy records and mocks Redis only in Keploy Enterprise, " +
+	"so calls to this Redis pass through to the real server and are neither recorded nor mocked. " +
+	"To record and mock Redis, use Keploy Enterprise: " + RedisEnterpriseURL
 
 type Parsers struct {
 	Initializer Initializer
