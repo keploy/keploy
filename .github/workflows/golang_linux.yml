@@ -39,9 +39,6 @@ jobs:
           - name: proven-record-mappings
             path: http-pokeapi
             script_dir: proven_record_mappings
-          - name: mock-mismatch-streaming
-            path: sse-redis
-            script_dir: mock_mismatch_streaming
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
@@ -462,6 +459,84 @@ jobs:
             ${{ runner.temp }}/async_value_flip/*/keploy/
             ${{ runner.temp }}/async_value_flip/*/*.log
             ${{ runner.temp }}/async_value_flip/*/mocks.recorded.yaml
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Streaming mock-mismatch reporting: a streaming test (SSE, NDJSON,
+  # multipart, plain text) surfaces the unmatched outgoing call it made, by
+  # default and under KEPLOY_PROVEN=1. The app and the HTTP store it streams
+  # from are in this repo (test_workflow_scripts/golang/mock_mismatch_streaming);
+  # the recorded read of the store is rewritten so the replay's read matches
+  # no mock. The lane ran on samples-go sse-redis until Redis became a Keploy
+  # Enterprise dependency.
+  # Not record_build_replay_latest: a release replayer predates the feature.
+  mock_mismatch_streaming:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: mock-mismatch-streaming (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script rewrites mocks with yq, which the runner image ships;
+          # install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, rewrite the store read, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          WORK: ${{ runner.temp }}/mock_mismatch_streaming
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mock_mismatch_streaming/golang-linux.sh"
+
+      - name: Upload mock_mismatch_streaming recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-mismatch-streaming-${{ matrix.config.job }}
+          path: |
+            ${{ runner.temp }}/mock_mismatch_streaming/keploy/
+            ${{ runner.temp }}/mock_mismatch_streaming/*.txt
+            ${{ runner.temp }}/mock_mismatch_streaming/*.log
           if-no-files-found: warn
           retention-days: 7
 
