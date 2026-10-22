@@ -52,7 +52,7 @@ runs:
 
     - name: Download ${{ inputs.name }}
       if: steps.get.outputs.hit != 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: ${{ inputs.name }}
         path: ${{ inputs.path }}
