@@ -108,6 +108,24 @@ func TestPersistLearnedWritesWords(t *testing.T) {
 			if got := setMocks(t, dir, set)["mock-0"].Spec.LearnedWords["body.note"]; !got.Void() {
 				t.Fatalf("two layouts of one leaf read back %+v, want void", got)
 			}
+			// Words learned as noise at a place, on disk, and then a later
+			// call shows the value flowed on: the place is the variable's,
+			// so the noise words already written there go, and the
+			// variable's own stay.
+			if _, err := ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-0": {Name: "mock-0", LearnedWords: map[string]models.WordsEntry{"body.key": idWords}}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, noise := setMocks(t, dir, set)["mock-0"].Spec.LearnedWords["body.key"]; !noise {
+				t.Fatal("precondition: the noise words at body.key are not on disk")
+			}
+			if _, err := ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-0": {Name: "mock-0",
+				Variables: models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Echo: true, Answer: []string{"body.id"}, Words: &idWords}}}}); err != nil {
+				t.Fatal(err)
+			}
+			flowed := setMocks(t, dir, set)["mock-0"].Spec
+			if _, noise := flowed.LearnedWords["body.key"]; noise || flowed.Variables["key"].Words == nil {
+				t.Fatalf("after the value flowed on: words %+v variables %+v", flowed.LearnedWords, flowed.Variables)
+			}
 			// The value turns out to flow on: the variable's words stay, the
 			// noise words at its place go.
 			if _, err := ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-0": {Name: "mock-0",

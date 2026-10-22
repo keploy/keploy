@@ -172,6 +172,41 @@ func TestLegibleSaysWhatEachMockLearned(t *testing.T) {
 // staging copy's local values by ID, the staging copy winning, and prunes
 // what the staging mocks no longer learn. With the switch off nothing is
 // written, and a set that learned nothing gets no file.
+// learned.local.yaml redacts F's values as learned.yaml redacts recorded
+// ones (RedactLearnedValue): a value F saw that reads as a credential is
+// never written, even where the recorded one did not read as one, and a
+// long one is cut.
+func TestTheLocalFileRedactsFsValues(t *testing.T) {
+	keploy := filepath.Join(t.TempDir(), "keploy")
+	set := filepath.Join(keploy, "test-set-0")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := NewDriftCache().Words("ORD-1 ref=a1", "ORD-1 ref=b2", nil)
+	mocks := []*models.Mock{{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{"body.note": "ORD-1 ref=a1"}, LearnedWords: map[string]models.WordsEntry{"body.note": e}}}}
+	withSet(t, nil)
+	RegisterSetReader(func(string) ([]*models.Mock, error) { return mocks, nil })
+	t.Setenv(provenswitch.Env, "1")
+	long := "ORD-1 ref=" + strings.Repeat("b", 200)
+	for _, tc := range []struct{ f, want string }{
+		{"ORD-1 ref=b2 user=a password=hunter2", redacted},
+		{"Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", redacted},
+		{long, RedactLearnedValue("body.note", long, nil)},
+	} {
+		if err := WriteLearned(set, []LocalValue{{Mock: "mock-1", Path: "body.note", F: tc.f}}); err != nil {
+			t.Fatal(err)
+		}
+		local, err := readLearned(filepath.Join(set, models.LearnedLocalFile))
+		if err != nil || len(local) != 1 || local[0].F != tc.want {
+			t.Fatalf("F %q written as %+v (%v), want %q", tc.f, local, err, tc.want)
+		}
+		if b, _ := os.ReadFile(filepath.Join(set, models.LearnedLocalFile)); strings.Contains(string(b), "hunter2") || strings.Contains(string(b), strings.Repeat("b", 200)) {
+			t.Fatalf("learned.local.yaml holds what it redacts:\n%s", b)
+		}
+	}
+}
+
 func TestTheLearnedFilesAreWrittenIgnoredFirst(t *testing.T) {
 	root := t.TempDir()
 	keploy := filepath.Join(root, "keploy")
