@@ -758,7 +758,7 @@ func (idc *Impl) generateKeployVolumes() []string {
 		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err == nil {
-			dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+			dockerContext := currentDockerContext(out)
 			if dockerContext != "colima" {
 				// Default Docker context on Windows
 				volumes = append(volumes,
