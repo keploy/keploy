@@ -246,6 +246,21 @@ func TestWhatTheAgentsStreamsCouldNotTellLeavesTheSetNotVerified(t *testing.T) {
 		t.Fatalf("handed %+v, want the set not verified for it", handed)
 	}
 
+	// keploy record takes it from the agent client's markers: a stream that
+	// ended unmarked, a test case past the watch.
+	instr := &lateTaker{countingInstr: countingInstr{answers: []models.CaptureLosses{nil}},
+		ends: models.StreamEndSummary{Unmarked: 1, NotRechecked: 2}}
+	r := &Recorder{logger: zap.NewNop(), instrumentation: instr}
+	handed = nil
+	w = watchCaptureLosses(context.Background(), zap.NewNop(), instr)
+	r.takeStreamEnds(w)
+	if fail, incomplete := w.finishRun("test-set-0", false, ""); fail || !incomplete {
+		t.Fatalf("the markers' account taken: fail %v, incomplete %v; want the recording kept and incomplete", fail, incomplete)
+	}
+	if len(handed) != 1 || !strings.Contains(handed[0].NotVerified, why) {
+		t.Fatalf("handed %+v, want the set not verified for what the markers could not tell", handed)
+	}
+
 	t.Setenv(provenswitch.Env, "")
 	w = watchCaptureLosses(context.Background(), zap.NewNop(), &countingInstr{answers: []models.CaptureLosses{nil}})
 	w.untoldOfSet(why)
