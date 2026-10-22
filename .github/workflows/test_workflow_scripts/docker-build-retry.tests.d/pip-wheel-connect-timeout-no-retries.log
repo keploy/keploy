@@ -1,0 +1,4 @@
+Looking in indexes: http://127.0.0.1:42715/simple/
+Collecting flask==3.1.2
+ERROR: Could not install packages due to an OSError: HTTPConnectionPool(host='192.0.2.1', port=80): Max retries exceeded with url: /packages/flask-3.1.2-py3-none-any.whl (Caused by ConnectTimeoutError(<pip._vendor.urllib3.connection.HTTPConnection object at 0xffff8eaa1f90>, 'Connection to 192.0.2.1 timed out. (connect timeout=3.0)'))
+
