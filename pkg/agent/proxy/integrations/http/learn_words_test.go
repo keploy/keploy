@@ -103,9 +103,16 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			if served, _ := strictMatch(t, tc.call(regressed), nil, nil, nil, withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))); served != nil {
 				t.Fatalf("paid 999 at %s is served: a word F did not see change changed", tc.place)
 			}
-			// The words are read only under the switch.
+			// The words are read only under the switch (knownOf): against
+			// the recording's own destination, so only the words decide, a
+			// fresh ref is no difference with the switch on and one with it
+			// off.
+			dest := recordedDestination(m)
+			if diffs := strictDiff(tc.call(fresh), dest, m, strictNoise{}); len(diffs) != 0 {
+				t.Fatalf("with the switch on, a fresh ref at %s differs: %+v", tc.place, fieldDiffs(diffs))
+			}
 			t.Setenv(provenswitch.Env, "")
-			if diffs := strictDiff(tc.call(fresh), destination{}, m, strictNoise{}); len(diffs) == 0 {
+			if diffs := strictDiff(tc.call(fresh), dest, m, strictNoise{}); len(diffs) == 0 {
 				t.Fatalf("the switch off read the words at %s", tc.place)
 			}
 		})
@@ -150,6 +157,74 @@ func TestAFormKeySentTwiceIsNotOneValue(t *testing.T) {
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/orders", two("ORD-1", "ref-a1"), ct, `{"ok":true}`)}}
 	if served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/orders", two("ORD-1", "ref-b2"), ct), db, n, opts); err != nil || served != nil || miss == nil {
 		t.Fatalf("a key recorded twice: served %v miss %+v err %v, want refused", served, miss, err)
+	}
+}
+
+// A leaf whose type changed (the string "100" sent as the number 300) is
+// refused at a words place by every serve site, whatever its words admit:
+// the learn step's own pass (learn.Compare reads the type first), the
+// variable pass beside a variable (fitVariables' words loop), and the strict
+// serve (jsonDiffs). The same value as a string is served by each.
+func TestATypeChangeAtAWordsPlaceIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		amt string
+		ok  bool
+	}{
+		{`"300"`, true},
+		{`300`, false},
+	} {
+		h, n, _ := learnOn(t)
+		lm := withWords(t, learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"amt":"100","note":"x"}`, nil, `{"ok":true}`), "body.amt", "100", "200")
+		served, err := h.learnedMatch(context.Background(), live("POST", "/v1/charges", `{"amt":`+tc.amt+`,"note":"x"}`, nil), &learnDb{perTest: []*models.Mock{lm}}, n, models.OutgoingOptions{})
+		if err != nil || (served != nil) != tc.ok {
+			t.Errorf("amt %s, the learn step's pass: served %v (%v), want %v", tc.amt, served != nil, err, tc.ok)
+		}
+
+		vm := varMock("m", "POST", "/v1/orders", `{"id":"k-1","amt":"100"}`, 200, `{"id":"k-1"}`,
+			models.MockVariables{"id": {Recorded: "k-1", Bind: "body.id", Echo: true, Answer: []string{"body.id"}, Words: wordsOf(t, "k-1", "k-2")}})
+		vm = withWords(t, vm, "body.amt", "100", "200")
+		if ok, _, diag := matchVar(t, newHTTP(), &varDb{perTest: []*models.Mock{vm}}, live("POST", "/v1/orders", `{"id":"k-7","amt":`+tc.amt+`}`, map[string]string{"Host": ""})); ok != tc.ok {
+			t.Errorf("amt %s, the variable pass: served %v (%+v), want %v", tc.amt, ok, diag, tc.ok)
+		}
+
+		sm := withWords(t, recorded("m", "/v1/charges", map[string]string{"Content-Type": "application/json"}, `{"amt":"100","note":"x"}`), "body.amt", "100", "200")
+		if served, diag := strictMatch(t, sent("/v1/charges", map[string]string{"Content-Type": "application/json"}, `{"amt":`+tc.amt+`,"note":"x"}`), nil, nil, nil, sm); (served != nil) != tc.ok {
+			t.Errorf("amt %s, the strict serve: served %v (%+v), want %v", tc.amt, served != nil, diag, tc.ok)
+		}
+	}
+}
+
+// tiePlaces refuses two places of a call that hold one value, recorded and
+// now, but were learned apart (noise beside an echo, a variable beside an
+// echo): it cannot follow them as one value. learnPlan gives it no such pair
+// today: Classify reads a leaf by its two values alone, so every place of
+// one recorded and one live value is learned alike, and an echo or a
+// variable of one value takes one name. The refusal is tiePlaces' own
+// contract, for whatever learnPlan gives it.
+func TestTiePlacesRefusesTwinsLearnedApart(t *testing.T) {
+	leaf := func(path string) learn.Learned {
+		return learn.Learned{Recorded: learn.Leaf{Path: path, Type: learn.String, Value: "o-1111"}, Live: learn.Leaf{Path: path, Type: learn.String, Value: "o-9999"}}
+	}
+	for _, tc := range []struct {
+		name string
+		a, b slotPlace
+		ok   bool
+	}{
+		{"noise and an echo", slotPlace{l: leaf("body.a"), kind: learn.KindNoise}, slotPlace{l: leaf("body.b"), kind: learn.KindEcho, name: "b"}, false},
+		{"a variable and an echo", slotPlace{l: leaf("body.a"), kind: learn.KindVariable, name: "a"}, slotPlace{l: leaf("body.b"), kind: learn.KindEcho, name: "b"}, false},
+		{"one echo at both", slotPlace{l: leaf("body.a"), kind: learn.KindEcho, name: "a"}, slotPlace{l: leaf("body.b"), kind: learn.KindEcho, name: "a"}, true},
+	} {
+		p := pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{}}
+		why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{tc.a, tc.b}, nil, true, map[string]bool{}, nil)
+		if tc.ok {
+			if why != "" {
+				t.Errorf("%s: refused: %s", tc.name, why)
+			}
+			continue
+		}
+		if !strings.Contains(why, "learned them apart") || p.refused != models.RefusedTie {
+			t.Errorf("%s: %q (refused %q), want refused as two values learned apart", tc.name, why, p.refused)
+		}
 	}
 }
 

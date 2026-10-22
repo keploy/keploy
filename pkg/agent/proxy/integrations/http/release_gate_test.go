@@ -13,8 +13,10 @@ import (
 // The release gate of word-level learn (design r9 §7), in process: record's
 // full round learns the words of "ORD-1 paid 100 ref=<hex>" that changed
 // (learnMatch), the consumed mock's state is written onto the recording
-// (mockdb's PersistLearned) and read back from disk, and a later replay's
-// strict serve answers a fresh ref and refuses "paid 999".
+// (mockdb's PersistLearned) and read back from disk, and a later replay
+// answers a fresh ref and refuses "paid 999", in production's order under
+// the switch: the learn step's own pass first (learnedMatch), then the
+// matcher's strict serve; each alone gives the same answer.
 func TestReleaseGateLearnPersistServe(t *testing.T) {
 	h, n, opts := learnOn(t)
 	const body, bodyF = `{"note":"ORD-1 paid 100 ref=3f2b8c1e9a4d","item":"book"}`, `{"note":"ORD-1 paid 100 ref=a7c4e2d10b3f","item":"book"}`
@@ -65,9 +67,20 @@ func TestReleaseGateLearnPersistServe(t *testing.T) {
 		{`{"note":"ORD-1 paid 100 ref=0c9d8e7f6a5b","item":"pen"}`, false},
 	} {
 		in := sent("/v1/orders", map[string]string{"Content-Type": "application/json"}, tc.body)
-		served, _ := strictMatch(t, in, nil, nil, nil, read.DeepCopy())
-		if (served != nil) != tc.ok {
-			t.Errorf("%s: served %v, want %v", tc.body, served != nil, tc.ok)
+		strict, _ := strictMatch(t, in, nil, nil, nil, read.DeepCopy())
+		if (strict != nil) != tc.ok {
+			t.Errorf("%s: the strict serve served %v, want %v", tc.body, strict != nil, tc.ok)
+		}
+		replay, rn, _ := learnOn(t)
+		pass, err := replay.learnedMatch(ctx, live("POST", "/v1/orders", tc.body, map[string]string{"Host": "api.example"}), &learnDb{perTest: []*models.Mock{read.DeepCopy()}}, rn, models.OutgoingOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (pass != nil) != tc.ok {
+			t.Errorf("%s: the learn step's pass served %v, want %v", tc.body, pass != nil, tc.ok)
+		}
+		if served := pass != nil || strict != nil; served != tc.ok {
+			t.Errorf("%s: production's order served %v, want %v", tc.body, served, tc.ok)
 		}
 	}
 }
