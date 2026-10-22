@@ -33,13 +33,17 @@ func (p sysProc) file(pid uint32, name string) string {
 
 // KernelPidsLocal reports whether a kernel pid names in p's /proc the
 // process it names in the kernel (utils.KernelPidsLocalIn): only then does
-// the registry name a process its proxy reports by one (KernelPids).
+// the registry name a process its proxy reports by one (KernelPids). This
+// process's /proc is read once (ownPidsLocal).
 func (p sysProc) KernelPidsLocal() bool {
 	if p.proc() == "/proc" {
-		return utils.KernelPidsAreLocal()
+		return ownPidsLocal()
 	}
 	return utils.KernelPidsLocalIn(p.proc())
 }
+
+// ownPidsLocal is utils.KernelPidsAreLocal: this process's /proc, read once.
+var ownPidsLocal = utils.KernelPidsAreLocal
 
 var (
 	bootOnce sync.Once

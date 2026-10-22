@@ -109,6 +109,19 @@ func TestAKernelPidIsReadOnlyWhereItIsKeploysOwn(t *testing.T) {
 		if p := m.Origin.Persisted(); p == nil || *p != (models.Origin{Clock: "proxy:run-1"}) {
 			t.Fatalf("persisted origin %+v; want the clock alone", p)
 		}
+		// Said once per recording: a reset (the next record session) says
+		// it again, once.
+		r.NoteOrigin("8", kernelPid)
+		r.StampOrigin(&models.Mock{Name: "mock-7", ConnectionID: "8", Origin: &models.Origin{Clock: "proxy:run-1"}})
+		if n := logs.FilterMessageSnippet("keploy runs in a PID namespace of its own").Len(); n != 1 {
+			t.Fatalf("said %d times before a reset; want once", n)
+		}
+		r.Reset()
+		r.NoteOrigin("9", kernelPid)
+		r.StampOrigin(&models.Mock{Name: "mock-0", ConnectionID: "9", Origin: &models.Origin{Clock: "proxy:run-2"}})
+		if n := logs.FilterMessageSnippet("keploy runs in a PID namespace of its own").Len(); n != 2 {
+			t.Fatalf("said %d times after a reset; want twice", n)
+		}
 	})
 	t.Run("keploy's own", func(t *testing.T) {
 		root := fakeProcRoot(t, hostPIDNS, kernelPid, "sqs", "./sqs", "--queue", "orders")
@@ -145,5 +158,21 @@ func TestSysProcSaysWhereThisProcessRuns(t *testing.T) {
 	}
 	if got, want := (sysProc{}).KernelPidsLocal(), link == hostPIDNS; got != want {
 		t.Fatalf("KernelPidsLocal = %v in %s; want %v", got, link, want)
+	}
+	// This process's /proc, by either name, is answered by what this
+	// process's own entry says (ownPidsLocal), each way; another root by
+	// its own entry.
+	defer func(f func() bool) { ownPidsLocal = f }(ownPidsLocal)
+	private := fakeProcRoot(t, privatePIDNS, 1, "sh", "/bin/sh")
+	for _, own := range []bool{false, true} {
+		ownPidsLocal = func() bool { return own }
+		for _, p := range []sysProc{{}, {root: "/proc"}} {
+			if got := p.KernelPidsLocal(); got != own {
+				t.Fatalf("%+v: KernelPidsLocal = %v where this process's entry says %v", p, got, own)
+			}
+		}
+		if (sysProc{root: private}).KernelPidsLocal() {
+			t.Fatal("a root whose own entry is a private namespace's read as the kernel's")
+		}
 	}
 }
