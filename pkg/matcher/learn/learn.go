@@ -296,6 +296,10 @@ type Result struct {
 	Reason string
 	// Why, for a miss, is what differed, by path; it never holds a value.
 	Why string
+	// Refused, for a MissRequestChanged miss, is the word-level rule that
+	// refused the request (models.RefusedTie, RefusedContainment), "" when
+	// none did.
+	Refused string
 }
 
 // Pair decides one request against its candidates (design §7.2 steps 1-5),

@@ -365,29 +365,38 @@ func TestTieOf(t *testing.T) {
 	later := wAt.Add(FullRoundLead)
 	v7, v7f := uuid7Of(wAt, "abc123456789abcdef", 'a', false), uuid7Of(later, "def0123456789abcde", 'b', false)
 	for _, tc := range []struct {
-		name string
-		a, b [2]string
-		want Tie
+		name  string
+		a, b  [2]string
+		want  Tie
+		class string
 	}{
-		{"ORD123 and 123", [2]string{"ORD123", "ORD456"}, [2]string{"123", "456"}, TiePartial},
-		{"INV1042 and 1042", [2]string{"INV1042", "INV2077"}, [2]string{"1042", "2077"}, TiePartial},
-		{"INV1042 and ORD1042", [2]string{"INV1042", "INV2077"}, [2]string{"ORD1042", "ORD2077"}, TiePartial},
-		{"1042A and ORD1042", [2]string{"1042A", "2077A"}, [2]string{"ORD1042", "ORD2077"}, TiePartial},
-		{"p12x1042 beside 1042", [2]string{"p12x1042", "p9x5678"}, [2]string{"1042", "5678"}, TiePartial},
-		{"a template key INV1042 and a slot ORD1042", [2]string{"INV1042", "INV2077"}, [2]string{"note ORD1042", "note ORD2077"}, TiePartial},
-		{"ORD 12347 beside 1234 (N17)", [2]string{"ORD 12347", "ORD 56785"}, [2]string{"1234", "5678"}, TieNone},
-		{"seq=17 beside a fresh hex", [2]string{"seq=17", "seq=18"}, [2]string{"3f2b8c1e9a4d70a1", "a7c4e2d10b3f4c2e"}, TieNone},
-		{"createdAt and updatedAt", [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt},
-		{"an instant beside text and the same instant", [2]string{"at " + wAt.Format(time.RFC3339), "at " + later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt},
-		{"a UUID v7 in a path and a body", [2]string{v7, v7f}, [2]string{v7, v7f}, TieWhole},
-		{"one id at two places", [2]string{"o-1111", "o-9999"}, [2]string{"o-1111", "o-9999"}, TieWhole},
-		{"two fresh ids", [2]string{"r-3f2b8c", "r-a7c4e2"}, [2]string{"n-91d0e3", "n-5be7aa"}, TieNone},
+		{"ORD123 and 123", [2]string{"ORD123", "ORD456"}, [2]string{"123", "456"}, TiePartial, models.RefusedContainment},
+		{"INV1042 and 1042", [2]string{"INV1042", "INV2077"}, [2]string{"1042", "2077"}, TiePartial, models.RefusedContainment},
+		{"INV1042 and ORD1042", [2]string{"INV1042", "INV2077"}, [2]string{"ORD1042", "ORD2077"}, TiePartial, models.RefusedContainment},
+		{"1042A and ORD1042", [2]string{"1042A", "2077A"}, [2]string{"ORD1042", "ORD2077"}, TiePartial, models.RefusedContainment},
+		{"p12x1042 beside 1042", [2]string{"p12x1042", "p9x5678"}, [2]string{"1042", "5678"}, TiePartial, models.RefusedContainment},
+		{"a template key INV1042 and a slot ORD1042", [2]string{"INV1042", "INV2077"}, [2]string{"note ORD1042", "note ORD2077"}, TiePartial, models.RefusedContainment},
+		{"ORD 12347 beside 1234 (N17)", [2]string{"ORD 12347", "ORD 56785"}, [2]string{"1234", "5678"}, TieNone, ""},
+		{"seq=17 beside a fresh hex", [2]string{"seq=17", "seq=18"}, [2]string{"3f2b8c1e9a4d70a1", "a7c4e2d10b3f4c2e"}, TieNone, ""},
+		{"createdAt and updatedAt", [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt, ""},
+		{"an instant beside text and the same instant", [2]string{"at " + wAt.Format(time.RFC3339), "at " + later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt, ""},
+		{"a UUID v7 in a path and a body", [2]string{v7, v7f}, [2]string{v7, v7f}, TieWhole, models.RefusedTie},
+		{"one id at two places", [2]string{"o-1111", "o-9999"}, [2]string{"o-1111", "o-9999"}, TieWhole, models.RefusedTie},
+		{"two fresh ids", [2]string{"r-3f2b8c", "r-a7c4e2"}, [2]string{"n-91d0e3", "n-5be7aa"}, TieNone, ""},
 	} {
 		if got := NewDriftCache().TieOf(tc.a, tc.b, nil); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
 		if got := NewDriftCache().TieOf(tc.b, tc.a, nil); got != tc.want {
 			t.Errorf("%s, the other order: %v, want %v", tc.name, got, tc.want)
+		}
+		// The rule a refusal of the pair names (models.UnmatchedCall.Refused):
+		// containment only where the glued test alone ties them.
+		if got := NewDriftCache().TieClass(tc.a, tc.b, nil); got != tc.class {
+			t.Errorf("%s: class %q, want %q", tc.name, got, tc.class)
+		}
+		if got := NewDriftCache().TieClass(tc.b, tc.a, nil); got != tc.class {
+			t.Errorf("%s, the other order: class %q, want %q", tc.name, got, tc.class)
 		}
 	}
 }
@@ -400,8 +409,26 @@ func TestAGluedValueOfAnEarlierCallIsFound(t *testing.T) {
 	live := Shape{Leaves: map[string]Leaf{"body.order": {Path: "body.order", Type: String, Value: "ORD2077"}}}
 	rec := Shape{Leaves: map[string]Leaf{"body.order": {Path: "body.order", Type: String, Value: "ORD1042"}}}
 	got := Classify(nil, []string{"body.order"}, live, rec, wAt.Add(time.Second), earlier, nil, nil)
-	if got[0].Kind != KindVariable || got[0].From.Whole {
-		t.Fatalf("learned %+v, want a variable from inside mock-0's value", got[0])
+	if got[0].Kind != KindVariable || got[0].From.Whole || !got[0].From.Glued {
+		t.Fatalf("learned %+v, want a variable glued inside mock-0's value", got[0])
+	}
+	// As a word of the earlier value, it is found by the token test: no glue.
+	earlier[0].Seen[0].Leaf.Value, earlier[0].Seen[0].Live = "INV-1042", "INV-2077"
+	rec.Leaves["body.order"], live.Leaves["body.order"] = Leaf{Path: "body.order", Type: String, Value: "1042"}, Leaf{Path: "body.order", Type: String, Value: "2077"}
+	got = Classify(nil, []string{"body.order"}, live, rec, wAt.Add(time.Second), earlier, nil, nil)
+	if got[0].Kind != KindVariable || got[0].From.Whole || got[0].From.Glued {
+		t.Fatalf("learned %+v, want a variable inside mock-0's value, not glued", got[0])
+	}
+}
+
+// RefusalClass names the tie rules behind the reasons Words gives: a changed
+// word that repeats is a tie, one glued inside another containment, and
+// every other reason no tie rule.
+func TestRefusalClass(t *testing.T) {
+	for why, want := range map[string]string{whyRepeat: models.RefusedTie, whyGlued: models.RefusedContainment, whyParts: "", whyGluedUUID: "", whyMoved: "", "": ""} {
+		if got := RefusalClass(why); got != want {
+			t.Errorf("RefusalClass(%q) = %q, want %q", why, got, want)
+		}
 	}
 }
 

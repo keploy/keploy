@@ -978,7 +978,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb), w)
 			if why != "" {
-				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				res.Outcome, res.Reason, res.Why, res.Refused = learn.Miss, models.MissRequestChanged, why, plan.refused
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if own && !tracker.Answer(test, m) {
@@ -1032,13 +1032,17 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 // included, each with its words), the variables of the test bound at an
 // earlier mock that it uses (binds, by that mock), each variable's value in
 // this call, for its answer, and record's full round's value at each place
-// whose words it learned (f, by mock, then place: learned.local.yaml).
+// whose words it learned (f, by mock, then place: learned.local.yaml). Of a
+// request it refuses, refused names the word-level rule that refused it, if
+// one did (models.RefusedTie, RefusedContainment): the miss's report says it
+// (models.UnmatchedCall.Refused).
 type pairing struct {
-	words  map[string]models.WordsEntry
-	vars   models.MockVariables
-	binds  map[string]models.MockVariables
-	values map[string]variables.Binding
-	f      map[string]map[string]string
+	words   map[string]models.WordsEntry
+	vars    models.MockVariables
+	binds   map[string]models.MockVariables
+	values  map[string]variables.Binding
+	f       map[string]map[string]string
+	refused string
 }
 
 // slotPlace is a place of the call the learn step learned words at, as the
@@ -1127,6 +1131,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindNoise:
 			e, why := dc.Words(r.Value, l.Live.Value, w)
 			if why != "" {
+				p.refused = learn.RefusalClass(why)
 				return p, r.Path + " changed, and keploy cannot tell which of its words changed alone: " + why
 			}
 			p.words[r.Path] = e
@@ -1140,7 +1145,15 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
 			case from.Side != learn.Request:
 				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
-			case !from.Whole || from.Var == "":
+			case !from.Whole:
+				// Tied to the earlier place's value in part: a partial tie, or
+				// a changed piece glued inside it (B1).
+				p.refused = models.RefusedTie
+				if from.Glued {
+					p.refused = models.RefusedContainment
+				}
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+			case from.Var == "":
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 			case !own || !from.Own:
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
@@ -1157,6 +1170,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// this one's).
 			words, why := dc.Words(r.Value, from.Live, nil)
 			if why != "" {
+				p.refused = learn.RefusalClass(why)
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier at " + from.Var + ", and keploy cannot tell which of its words changed alone there: " + why
 			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
@@ -1219,6 +1233,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			words, why := dc.Words(r.Value, l.Live.Value, w)
 			if why != "" {
+				p.refused = learn.RefusalClass(why)
 				return p, r.Path + " is echoed in the answer, and keploy cannot tell which of its words changed alone: " + why
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
@@ -1274,6 +1289,7 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 			// value of its own (two counters both at 1 when recorded are two
 			// values): no tie. One that carries the key's inside it is.
 			if dc.TieOf([2]string{g.Recorded, g.Value}, value(a), w) == learn.TiePartial {
+				p.refused = dc.TieClass([2]string{g.Recorded, g.Value}, value(a), w)
 				return a.l.Recorded.Path + " carries the test case's " + g.Name + " inside it, with more beside it that changed, which keploy cannot follow (N8)"
 			}
 		}
@@ -1283,6 +1299,7 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 			case learn.TieExempt, learn.TieNone:
 				continue
 			case learn.TiePartial:
+				p.refused = dc.TieClass(value(a), value(b), w)
 				return a.l.Recorded.Path + " and " + b.l.Recorded.Path + " changed together, the one carried inside the other or glued to it, which keploy cannot follow as one value (N8)"
 			}
 			// One recorded value, whole, at both places: one value of the
@@ -1299,6 +1316,7 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 			case a.name != "" && a.name == b.name:
 				// One variable already.
 			default:
+				p.refused = models.RefusedTie
 				return a.l.Recorded.Path + " and " + b.l.Recorded.Path + " held one value when recorded and now, and keploy learned them apart, so it cannot follow them as one value"
 			}
 		}
@@ -1320,6 +1338,7 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 		first := slots[g].l
 		bind, ok := learn.VarPlace(first.Recorded, jsonReq)
 		if !ok {
+			p.refused = models.RefusedTie
 			return first.Recorded.Path + " holds one value with another place of the call, at a place keploy cannot bind it (a form or multipart field)"
 		}
 		words, ok := p.words[first.Recorded.Path]
@@ -1330,6 +1349,7 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 		for _, i := range members[g] {
 			use, ok := learn.VarPlace(slots[i].l.Recorded, jsonReq)
 			if !ok {
+				p.refused = models.RefusedTie
 				return slots[i].l.Recorded.Path + " holds one value with " + first.Recorded.Path + ", at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
 			v.Use = appendNew(v.Use, use)
@@ -1756,7 +1776,7 @@ func (m *learnMiss) explain(r *models.MockMismatchReport) {
 	if r == nil {
 		return
 	}
-	r.Reason = m.res.Reason
+	r.Reason, r.Refused = m.res.Reason, m.res.Refused
 	why := "keploy's learn step: " + m.res.Why + "."
 	switch m.res.Reason {
 	case models.MissUnstableOrder:

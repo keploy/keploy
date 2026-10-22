@@ -284,6 +284,9 @@ type MockMismatchReport struct {
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
 	// the tests the call's recordings were made beside.
 	Concurrent *ConcurrentNote
+	// Refused is the word-level learn rule that refused the call, when one
+	// did (UnmatchedCall.Refused): RefusedTie or RefusedContainment.
+	Refused string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

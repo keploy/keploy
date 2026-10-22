@@ -963,6 +963,45 @@ func (dc *DriftCache) TieOf(a, b [2]string, w *Window) Tie {
 	return TieNone
 }
 
+// TieClass names the word-level rule that ties drifted values a and b of one
+// call, as TieOf reads them, for the report of a call refused by the tie
+// (models.UnmatchedCall.Refused): models.RefusedContainment when the glued
+// test (B1) alone ties them, models.RefusedTie for any other tie, "" when
+// TieOf finds none or exempts them. It names a rule and decides nothing:
+// TieOf decides.
+func (dc *DriftCache) TieClass(a, b [2]string, w *Window) string {
+	if dc == nil {
+		dc = NewDriftCache()
+	}
+	va, vb := dc.ofIn(a[0], a[1], w), dc.ofIn(b[0], b[1], w)
+	if instantOnly(va.rec, va.live, va.clock) && instantOnly(vb.rec, vb.live, vb.clock) {
+		return ""
+	}
+	found, _, glued := sourcesBy(va, vb)
+	switch {
+	case !found:
+		return ""
+	case glued:
+		return models.RefusedContainment
+	}
+	return models.RefusedTie
+}
+
+// RefusalClass names the word-level rule behind a reason Words gives for a
+// value's words it cannot learn (why), for the report of the call it refuses
+// (models.UnmatchedCall.Refused): models.RefusedTie for a changed word that
+// repeats in the leaf, models.RefusedContainment for one glued inside another
+// (B1); "" for every other reason.
+func RefusalClass(why string) string {
+	switch why {
+	case whyRepeat:
+		return models.RefusedTie
+	case whyGlued:
+		return models.RefusedContainment
+	}
+	return ""
+}
+
 // --- serve: WordsAdmit ---
 
 // maxCollapses bounds the ways WordsAdmit tries to place a value's instant

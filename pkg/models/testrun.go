@@ -491,6 +491,12 @@ type UnmatchedCall struct {
 	// (Mapping.Groups): with whom, and which of them its recording was
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// Refused is, of a MissRequestChanged miss, the word-level learn rule
+	// that refused the call (design r9 §2, N8): RefusedTie or
+	// RefusedContainment. Empty for every other miss, and for a call refused
+	// for any other reason. It names a rule, never a value: what tells how
+	// many recordings those rules cost (E-measure).
+	Refused string `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
 // ConcurrentNote is what keploy knows of a call made by a test that was
@@ -620,6 +626,20 @@ const (
 	// that was open beside it already answered with: one of the two made a
 	// call it did not record.
 	MissConcurrentConflict = "concurrent_conflict"
+)
+
+// The word-level learn rules that refuse a call of record's full round
+// (UnmatchedCall.Refused), a closed set.
+const (
+	// RefusedTie: a value that changed is tied to another place it cannot be
+	// held equal to: a partial tie between places of one call or with an
+	// earlier call's, a changed word that repeats in one leaf, a test case's
+	// value inside a place, two places of one value learned apart.
+	RefusedTie = "tie"
+	// RefusedContainment: a changed piece of a value lies inside another
+	// changed value's, at a class boundary of it (glued containment, B1), and
+	// no other rule ties the two.
+	RefusedContainment = "containment"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
