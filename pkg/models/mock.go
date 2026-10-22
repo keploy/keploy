@@ -1340,8 +1340,11 @@ func (s *MockSpec) SetLearnedF(f map[string]map[string]string) { s.learnedF = f 
 func (s *MockSpec) LearnedF() map[string]map[string]string { return s.learnedF }
 
 // MergeLearnedF is a and b as one map of record's full round's values
-// (MockSpec.LearnedF), neither changed: b's value at a place both hold
-// wins. nil when both are empty.
+// (MockSpec.LearnedF), neither changed: at a place both hold, the lesser
+// value, so the merge is a function of the values, never of which side
+// (which consume of a mock the round answered twice) came first, and the
+// learned.local.yaml written from it is too (learn.WriteLearned keeps the
+// least the same way). nil when both are empty.
 func MergeLearnedF(a, b map[string]map[string]string) map[string]map[string]string {
 	if len(a) == 0 && len(b) == 0 {
 		return nil
@@ -1353,7 +1356,9 @@ func MergeLearnedF(a, b map[string]map[string]string) map[string]map[string]stri
 				out[mock] = make(map[string]string, len(places))
 			}
 			for place, v := range places {
-				out[mock][place] = v
+				if cur, ok := out[mock][place]; !ok || v < cur {
+					out[mock][place] = v
+				}
 			}
 		}
 	}

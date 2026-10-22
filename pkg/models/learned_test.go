@@ -214,15 +214,78 @@ func TestAMergeKeepsAnEntryThisBuildCannotRead(t *testing.T) {
 			}
 		})
 	}
-	// Seen rides through a union and a void, from either side.
+	// Seen rides through a union and a void, from either side; of two, a's
+	// is kept.
 	seen := readable
 	seen.Seen = `"ORD-1 ref=d4"`
+	otherSeen := readable
+	otherSeen.Seen = `"ORD-1 ref=e5"`
 	for _, other := range []WordsEntry{readable, {V: WordsVersion, Digest: readable.Digest, Layout: "0000000000000000", Slots: []WordSlot{}}} {
 		for _, got := range []WordsEntry{MergeWordsEntry(seen, other), MergeWordsEntry(other, seen)} {
 			if got.Seen != seen.Seen || got.Unreadable() != "" {
 				t.Errorf("merged %+v, want Seen %s carried", got, seen.Seen)
 			}
 		}
+		withSeen := other
+		withSeen.Seen = otherSeen.Seen
+		if got := MergeWordsEntry(seen, withSeen); got.Seen != seen.Seen {
+			t.Errorf("a's Seen %s and b's %s merged to %s, want a's", seen.Seen, withSeen.Seen, got.Seen)
+		}
+		if got := MergeWordsEntry(withSeen, seen); got.Seen != withSeen.Seen {
+			t.Errorf("a's Seen %s and b's %s merged to %s, want a's", withSeen.Seen, seen.Seen, got.Seen)
+		}
+	}
+}
+
+// Of two entries this build cannot read, a's is kept as written, in either
+// order and in a map of them: the merge reads neither, so it changes
+// neither.
+func TestAMergeOfTwoUnreadableEntriesKeepsTheFirst(t *testing.T) {
+	readable := wordsFixture()
+	foreign := []WordsEntry{
+		{V: WordsVersion, Digest: readable.Digest, Layout: readable.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}, Seen: `"ORD-1 ref=d4"`, Unknown: `{"max":2}`},
+		{V: WordsVersion, Digest: readable.Digest, Layout: readable.Layout, Slots: []WordSlot{{Seg: 9, Run: 1, Unknown: `{"class":"hex"}`}}},
+		{V: WordsVersion + 1, Unknown: `{"digest":"9f2c41d07a3be815","grammar":"g2"}`},
+		{Digest: readable.Digest, Layout: readable.Layout, Slots: []WordSlot{{Seg: 9, Run: 1}}},
+	}
+	for i, a := range foreign {
+		for j, b := range foreign {
+			if i == j {
+				continue
+			}
+			if got := MergeWordsEntry(a, b); !reflect.DeepEqual(got, a) {
+				t.Errorf("unreadable %d with %d: merged %+v, want the first as written %+v", i, j, got, a)
+			}
+			if got := MergeWords(map[string]WordsEntry{"body.note": a}, map[string]WordsEntry{"body.note": b}); !reflect.DeepEqual(got["body.note"], a) {
+				t.Errorf("MergeWords, unreadable %d with %d: %+v, want the first as written", i, j, got["body.note"])
+			}
+		}
+	}
+}
+
+// Of two values record's full round saw at one place of one mock (a mock
+// the round answered twice), the merge keeps the lesser, whichever came
+// first, so learned.local.yaml is a function of the values; places either
+// side alone holds are kept, and neither input is changed.
+func TestMergeLearnedFIsAFunctionOfTheValues(t *testing.T) {
+	if MergeLearnedF(nil, map[string]map[string]string{}) != nil {
+		t.Error("two empty maps merge to a map")
+	}
+	a := map[string]map[string]string{"mock-0": {"body.note": "ORD-1 ref=e5", "body.a": "a-1"}}
+	b := map[string]map[string]string{"mock-0": {"body.note": "ORD-1 ref=d4", "body.b": "b-1"}, "mock-1": {"header.x": "x-1"}}
+	want := map[string]map[string]string{"mock-0": {"body.note": "ORD-1 ref=d4", "body.a": "a-1", "body.b": "b-1"}, "mock-1": {"header.x": "x-1"}}
+	for _, got := range []map[string]map[string]string{MergeLearnedF(a, b), MergeLearnedF(b, a)} {
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("merged %v, want %v", got, want)
+		}
+	}
+	if a["mock-0"]["body.note"] != "ORD-1 ref=e5" || len(a["mock-0"]) != 2 || len(b) != 2 {
+		t.Errorf("the merge changed its inputs: %v %v", a, b)
+	}
+	got := MergeLearnedF(a, b)
+	got["mock-0"]["body.a"] = "changed"
+	if a["mock-0"]["body.a"] != "a-1" {
+		t.Error("the merged map shares a map with an input")
 	}
 }
 
