@@ -3,6 +3,7 @@ package learn
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,60 +95,91 @@ func TestWhatIsNoReadInTheCallsWindowIsNoClockRead(t *testing.T) {
 }
 
 // The SQS sample's start-up insert end to end, as record's full round met
-// it: read in the insert's window it is a clock read, and noise; read by the
-// lead alone (a boot the lead does not cover) it is no clock read, and noise
-// too: the words of its instant that changed (its minute and second) are
-// words of the receive's Date header, but an instant is compared as one unit
-// (instants.go), and the receive holds no such instant whole. What the window
-// does not hold is read as the lead reads it, whatever it is: a constant, an
-// instant read before the receive, and an instant a recorded answer carries
-// (the receive's own SentTimestamp, recorded, and another recorded answer's
-// in F), which the receive holds whole, a variable of it.
+// it, its instant one unit (instants.go, rule 3): read in the insert's
+// window it is a clock read, and noise; read by the lead alone (a boot the
+// lead does not cover) it is no clock read, and noise too: the words of its
+// instant that changed (its minute and second) are words of the receive's
+// Date header, but a unit is compared whole, and the receive holds no such
+// moment. So whether the read fell in its call's window decides nothing. A
+// unit the receive does hold is followed, whatever the window: an instant a
+// recorded answer carries (the receive's own SentTimestamp, recorded, and
+// another recorded answer's in F).
+//
+// An instant that only stands inside a longer value is read word by word,
+// and there the window decides: read in it, its words are a clock read's and
+// it is noise; read by the lead alone, or outside the window (a constant, a
+// read before the receive), its minute and second are words of the
+// receive's Date header, a value that flowed from the receive, refused.
 func TestClassifyInTheStartUpInsertsInstantIsNoise(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
+	inText := func(t time.Time) string { return "at " + iso(t) + " by w-1" }
 	sent := recReceive.Add(-time.Millisecond).Truncate(time.Millisecond)
 	raw := []Raw{{Mock: "mock-0", At: recReceive, Text: "200 Date: " + recReceive.Format(http.TimeFormat) +
 		` {"Messages":[{"MessageId":"135dcb85-3c73-4bb1-8569-a5c7092b89e8","Attributes":{"SentTimestamp":"` + iso(sent) + `"},"Body":"Test message 1"}]}`}}
 	w, live := fWindow(2 * time.Second)
-	classify := func(rec, now time.Time, w *Window) Learned {
-		r := body(t, "k", `{"event":"Test message 1","processed_at":"`+iso(rec)+`"}`)
-		l := body(t, "k", `{"event":"Test message 1","processed_at":"`+iso(now)+`"}`)
+	classify := func(form func(time.Time) string, rec, now time.Time, w *Window) Learned {
+		r := body(t, "k", `{"event":"Test message 1","processed_at":"`+form(rec)+`"}`)
+		l := body(t, "k", `{"event":"Test message 1","processed_at":"`+form(now)+`"}`)
 		return ClassifyIn(nil, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, w)[0]
 	}
-	if ln := classify(recRead, live, w); ln.Kind != KindNoise {
-		t.Fatalf("in the call's window: %s (%s, from %q); want noise", ln.Kind, ln.Why, ln.From.Mock)
-	}
-	if ln := classify(recRead, live, nil); ln.Kind != KindNoise {
-		t.Fatalf("by the lead alone: %s (%s, from %q); want noise: the receive holds no word of it outside an instant", ln.Kind, ln.Why, ln.From.Mock)
-	}
+	// One unit.
 	for _, tc := range []struct {
 		name      string
 		rec, live time.Time
 		want      Kind
 	}{
+		{"the insert's clock read", recRead, live, KindNoise},
 		{"a constant", recRead, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), KindNoise},
 		{"read before the previous call", recRead, w.F.From.Add(-time.Millisecond), KindNoise},
 		{"an instant recorded answers carry", sent, sent.Add(-5 * time.Millisecond), KindVariable},
 	} {
-		if ln := classify(tc.rec, tc.live, w); ln.Kind != tc.want {
-			t.Errorf("%s: %s in the call's window; want %s", tc.name, ln.Kind, tc.want)
+		for wname, win := range map[string]*Window{"in the call's window": w, "by the lead alone": nil} {
+			if ln := classify(iso, tc.rec, tc.live, win); ln.Kind != tc.want || tc.want == KindVariable && ln.From.Mock != "mock-0" {
+				t.Errorf("one unit, %s, %s: %s (%s, from %q); want %s", tc.name, wname, ln.Kind, ln.Why, ln.From.Mock, tc.want)
+			}
 		}
-		if ln := classify(tc.rec, tc.live, nil); ln.Kind != tc.want {
-			t.Errorf("%s: %s by the lead alone; want %s", tc.name, ln.Kind, tc.want)
+	}
+	// Inside a longer value.
+	if ln := classify(inText, recRead, live, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-0" {
+		t.Fatalf("inside a longer value, by the lead alone: %s from %q; want a variable from mock-0", ln.Kind, ln.From.Mock)
+	}
+	if ln := classify(inText, recRead, live, w); ln.Kind != KindNoise {
+		t.Fatalf("inside a longer value, in the call's window: %s (%s, from %q); want noise", ln.Kind, ln.Why, ln.From.Mock)
+	}
+	for _, tc := range []struct {
+		name      string
+		rec, live time.Time
+	}{
+		{"a constant", recRead, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"read before the previous call", recRead, w.F.From.Add(-time.Millisecond)},
+		{"an instant recorded answers carry", sent, sent.Add(-5 * time.Millisecond)},
+	} {
+		if ln := classify(inText, tc.rec, tc.live, w); ln.Kind == KindNoise {
+			t.Errorf("inside a longer value, %s: learned as noise in the call's window", tc.name)
 		}
 	}
 	// A cache keeps one reading of a value per window: two windows that
 	// differ in F's span alone read it apart, and so does none.
 	shifted := &Window{Rec: w.Rec, F: Span{From: w.F.From.Add(time.Hour), To: w.F.To.Add(time.Hour)}}
+	{
+		dc := NewDriftCache()
+		r := body(t, "k", `{"processed_at":"`+inText(recRead)+`"}`)
+		l := body(t, "k", `{"processed_at":"`+inText(live)+`"}`)
+		if ln := ClassifyIn(dc, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, w)[0]; ln.Kind != KindNoise {
+			t.Fatalf("in the window, cached: %s", ln.Kind)
+		}
+		if ln := ClassifyIn(dc, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, shifted)[0]; ln.Kind == KindNoise {
+			t.Fatal("a window whose F span misses the read was answered from another window's cached reading")
+		}
+	}
 	dc := NewDriftCache()
-	if !dc.ofIn(iso(recRead), iso(live), w).clock.whole {
-		t.Fatal("in the window: no clock read")
+	r := body(t, "k", `{"processed_at":"`+inText(recRead)+`"}`)
+	l := body(t, "k", `{"processed_at":"`+inText(live)+`"}`)
+	if ln := ClassifyIn(dc, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, w)[0]; ln.Kind != KindNoise {
+		t.Fatalf("in the window, cached: %s", ln.Kind)
 	}
-	if dc.ofIn(iso(recRead), iso(live), shifted).clock.whole {
-		t.Fatal("a window whose F span misses the read was answered from another window's cached reading")
-	}
-	if dc.ofIn(iso(recRead), iso(live), nil).clock.whole {
-		t.Fatal("by the lead, after the window's reading was cached: a clock read")
+	if ln := ClassifyIn(dc, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, nil)[0]; ln.Kind != KindVariable {
+		t.Fatalf("by the lead, after the window's reading was cached: %s", ln.Kind)
 	}
 }
 
@@ -167,19 +199,33 @@ func TestWindowHolds(t *testing.T) {
 
 // A word of what changed that the call's answer holds is no echo where it
 // is a part of a clock read in the call's window, as where the lead moved
-// it; nor, read by the lead alone, where the boot's instant is no clock read:
-// an instant is compared as one unit (instants.go), and the answer holds a
-// word of it (its second), not it.
+// it; read by the lead alone, the boot's instant inside a longer value is no
+// clock read, and the word is refused. A unit's words are no words of their
+// own (instants.go, rule 3): noise, however it is read. A word of the value
+// outside every instant is an echo (an id beside the stamp).
 func TestClassifyInAClockWordInTheAnswerIsNoEcho(t *testing.T) {
 	w, live := fWindow(2 * time.Second)
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
-	rec := body(t, "k", `{"at":"`+iso(recRead)+`"}`)
-	got := body(t, "k", `{"at":"`+iso(live)+`"}`)
-	resp := []Leaf{{Path: "body.note", Noise: "body.note", Type: String, Value: "seq " + recRead.Format("05")}}
-	if ln := ClassifyIn(nil, []string{"body.at"}, got, rec, recInsert, nil, nil, resp, w)[0]; ln.Kind != KindNoise {
-		t.Fatalf("in the call's window: %s (%s); want noise", ln.Kind, ln.Why)
+	resp := []Leaf{{Path: "body.note", Noise: "body.note", Type: String, Value: "seq " + recRead.Format("05") + " of o-41"}}
+	for _, form := range []struct {
+		of   func(time.Time) string
+		unit bool
+	}{{iso, true}, {func(t time.Time) string { return "at " + iso(t) }, false}} {
+		rec := body(t, "k", `{"at":"`+form.of(recRead)+`"}`)
+		got := body(t, "k", `{"at":"`+form.of(live)+`"}`)
+		for wname, win := range map[string]*Window{"in the call's window": w, "by the lead alone": nil} {
+			want := KindNoise
+			if win == nil && !form.unit {
+				want = KindUnaccounted
+			}
+			if ln := ClassifyIn(nil, []string{"body.at"}, got, rec, recInsert, nil, nil, resp, win)[0]; ln.Kind != want {
+				t.Errorf("%q, %s: %s (%s); want %s", form.of(recRead), wname, ln.Kind, ln.Why, want)
+			}
+		}
 	}
-	if ln := ClassifyIn(nil, []string{"body.at"}, got, rec, recInsert, nil, nil, resp, nil)[0]; ln.Kind != KindNoise {
-		t.Fatalf("by the lead alone: %s (%s); want noise", ln.Kind, ln.Why)
+	rec := body(t, "k", `{"at":"o-41 at `+iso(recRead)+`"}`)
+	got := body(t, "k", `{"at":"o-42 at `+iso(live)+`"}`)
+	if ln := ClassifyIn(nil, []string{"body.at"}, got, rec, recInsert, nil, nil, resp, w)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "comes back in the answer") {
+		t.Fatalf("an id beside the stamp, which the answer holds: %s (%s); want refused", ln.Kind, ln.Why)
 	}
 }

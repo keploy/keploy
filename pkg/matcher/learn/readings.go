@@ -780,13 +780,6 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		if moved && allClock(t, recorded, v.clock) || !moved && clockWord(t, recorded, v, v.clock) {
 			return ""
 		}
-		// A word of an instant of the value is accounted for by its
-		// instant, one unit read whole (instants.go): where that came from
-		// is appearedIn's to find, by the instant whole. And a word inside
-		// an instant of an earlier place is no word it shares.
-		if recorded && !v.outRec[i][t] || !recorded && !v.outLive[i][t] {
-			return ""
-		}
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
 			// test of the set: the set's start-up's.
@@ -796,16 +789,24 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 			for _, s := range e.Seen {
 				ed := dc.of(s.Leaf.Value, s.Live)
-				if recorded && ed.outRec[i][t] || !recorded && ed.outLive[i][t] {
+				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
 					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
 				}
 			}
+		}
+		// A unit's words are the date and time of its one moment, no
+		// words of their own in a payload, of which F holds no live view
+		// (instants.go, rule 3): appearedIn searched it there whole.
+		if v.unit {
+			return ""
 		}
 		for _, x := range raw {
 			if !x.Served && !x.At.Before(at) {
 				continue
 			}
-			if dc.rawTokensOutside(x.Text)[i][t] {
+			// A protocol-phase answer's own clock reads blanked
+			// (instants.go, rule 2).
+			if dc.searchedTokens(x)[i][t] {
 				return "a word of it appears earlier in the test, in " + x.Mock + "'s payload: keploy cannot tell whether it came from there"
 			}
 		}

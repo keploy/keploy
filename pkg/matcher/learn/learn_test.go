@@ -648,22 +648,32 @@ func TestSources(t *testing.T) {
 		// step 6), a clock read or not (an id from Date.now() sent twice).
 		{"one clock read whole, twice", at.Format(time.RFC3339), f.Format(time.RFC3339), at.Format(time.RFC3339), f.Format(time.RFC3339), true, true},
 		{"UUID v7s of one minute, both moved by the lead", uuid7(at, "abc123456789abcdef"), uuid7(f, "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(f.Add(203*time.Millisecond), "fedcba987654321012"), false, false},
-		// Instants that moved by another amount than the lead, no drift F's
-		// clock explains, are compared as units too (instants.go): at a
-		// leaf F saw drift, only the same value whole flowed, as for a clock
-		// read (two reads of one second drift alike whatever made them, and
-		// whether one is a clock read turns on the boot and the window); a
-		// shared date or time word, or a UUID's time groups, never.
-		{"clock reads moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), false, false},
-		{"instants of one minute moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute + 7*time.Second).Format(time.RFC3339), false, false},
+		// Clock reads that moved by another amount than the lead are no
+		// drift F's clock explains: a shared word is a value that flowed.
+		{"clock reads moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, false},
+		{"UUID v7s whose time moved by another amount", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(at.Add(81*time.Second+200*time.Millisecond), "fedcba987654321012"), true, false},
+		// At an earlier leaf F saw drift, a value that is one instant whole
+		// co-drifts by its words as any value does (both lost the minute,
+		// both gained the next), and also as the moment it names, both
+		// ways, in another layout, or as its whole text (instants.go, rules
+		// 1 and 3), but not one way only.
+		{"instants of one minute moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute + 7*time.Second).Format(time.RFC3339), true, false},
 		{"one instant moved by another amount, whole", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, true},
-		{"UUID v7s whose time moved by another amount", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(at.Add(81*time.Second+200*time.Millisecond), "fedcba987654321012"), false, false},
+		{"one instant moved by another amount, inside a longer value", "at " + at.Format(time.RFC3339) + " ok", "at " + at.Add(5*time.Minute).Format(time.RFC3339) + " ok", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, false},
+		{"one instant moved by another amount, its milliseconds", strconv.FormatInt(at.UnixMilli(), 10), strconv.FormatInt(at.Add(5*time.Minute).UnixMilli(), 10), at.Format("2006-01-02T15:04:05.000Z"), at.Add(5 * time.Minute).Format("2006-01-02T15:04:05.000Z"), true, false},
+		{"the moment held one way only", at.Format(time.RFC1123), at.Add(9 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), false, false},
+		{"one instant, its second against its millisecond", strconv.FormatInt(at.Unix(), 10), strconv.FormatInt(at.Add(5*time.Minute).Unix(), 10), at.Add(473 * time.Millisecond).Format("2006-01-02T15:04:05.000Z"), at.Add(5*time.Minute + 473*time.Millisecond).Format("2006-01-02T15:04:05.000Z"), false, false},
+		// What only stands inside a longer value is no unit: read word by
+		// word, as every value is. Both lost the minute's word and both
+		// gained A7K29QXM, a word that flowed.
+		{"instants of one minute, then one word gained in both", at.Format(time.RFC3339), at.Add(5*time.Minute).Format(time.RFC3339) + " A7K29QXM", at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute+7*time.Second).Format(time.RFC3339) + " A7K29QXM", true, false},
 		{"one UUID v7 whose time moved by another amount, inside a longer value", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(at.Add(81*time.Second), "def0123456789abcde"), true, false},
-		// Both lost only words of their instants (one minute), and both
-		// gained one word outside them: the minute is no word both lost,
-		// so this is no co-drift. Only both losing and both gaining a word
-		// outside their instants is.
-		{"instants of one minute, then one word gained in both", at.Format(time.RFC3339), at.Add(5*time.Minute).Format(time.RFC3339) + " A7K29QXM", at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute+7*time.Second).Format(time.RFC3339) + " A7K29QXM", false, false},
+		// An id whose digits read as a date is no unit, nor is a value it
+		// stands inside of: it is followed wherever it went, whatever its
+		// length (S12 K1 review round 2: a rand.Int31 id, a Snowflake id).
+		{"a ten-digit id inside a longer value", "1298498081", "1427131847", "user-1298498081", "user-1427131847", true, false},
+		{"a nineteen-digit id inside a longer value", "1541815603606036480", "1541815603606036999", "ref:1541815603606036480", "ref:1541815603606036999", true, false},
+		{"a ten-digit id, whole", "1298498081", "1427131847", "1298498081", "1427131847", true, true},
 		// One UUID v7 next to a fresh part in both: its random groups are
 		// shared, a value that flowed.
 		{"one UUID v7 next to a fresh part in both", uuid7(at, "abc123456789abcdef") + ":n1", uuid7(f, "def0123456789abcde") + ":n2", "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(f, "def0123456789abcde"), true, false},

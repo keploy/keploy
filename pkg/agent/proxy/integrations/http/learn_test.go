@@ -2647,69 +2647,91 @@ func TestLearnMatchAnOwnCallInFlightReadsEveryEarlierRecording(t *testing.T) {
 // At start-up F's clock runs the lead past the earliest recording from when
 // keploy froze it, before the app booted: a start-up call's clock read moved
 // by the lead and the boot's difference, which the lead alone does not read.
-// Read in the call's window (the receive served before it, its arrival, on
-// the app's clock) it is a clock read, whether the boot took 2 s or 30 s
-// longer; read by the lead alone (no app clock, or a test's own call, which
-// is read so: F sets each test's clock) it is none. It is noise either way:
-// the minute and second that changed are words of the receive's Date header,
-// but an instant is compared as one unit (learn's instants.go), and the
-// receive holds no such instant, so whether the read is a clock read decides
-// nothing.
+// Where the read stands inside a longer value ("at <instant>"), its words are
+// read one by one, and the window decides: read in the call's window (the
+// receive served before it, its arrival, on the app's clock) it is a clock
+// read, learned as noise, whether the boot took 2 s or 30 s longer; read by
+// the lead alone (no app clock, or a test's own call, which is read so: F
+// sets each test's clock), the minute and second that changed are words of
+// the receive's Date header, a value that flowed from the receive, refused.
+// Where the read is the value whole, one instant (learn's instants.go, rule
+// 3), it is compared as the one moment it names, which the receive does not
+// hold: noise, however it is read.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
-	for _, tc := range []struct {
-		name  string
-		boot  time.Duration
-		clock bool
-		own   bool
+	for _, form := range []struct {
+		name string
+		of   func(time.Time) string
+		unit bool
 	}{
-		{"a 2 s longer boot", 2 * time.Second, true, false},
-		{"a 30 s longer boot", 30 * time.Second, true, false},
-		{"no app clock", 2 * time.Second, false, false},
-		{"a test's own call", 2 * time.Second, true, true},
+		{"inside a longer value", func(t time.Time) string { return "at " + iso(t) }, false},
+		{"one instant whole", iso, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h, n, opts := learnOn(t)
-			opts.LearnPool = true
-			receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
-			receive.Spec.HTTPResp.Header = map[string]string{"Date": learnAt.Format(http.TimeFormat)}
-			event := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(recRead)+`"}`, nil, `{}`)
-			event.TestModeInfo.Lifetime = models.LifetimeSession
-			db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{event}}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
-			tr := learn.NewTracker() // no test has begun: the start-up
-			if tc.own {
-				// The event is the open test's own, in its window.
-				event.TestModeInfo.Lifetime = models.LifetimePerTest
-				db = &learnDb{perTest: []*models.Mock{event}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
-				tr.Begin()
-			}
-			offset := learn.FullRoundLead + tc.boot - 40*time.Second
-			read := 0
-			if tc.clock {
-				tr.SetAppClock(func(real time.Time) (time.Time, bool) { read++; return real.Add(offset), true })
-			}
-			served := learnAt.Add(40 * time.Second) // when F's replay served the receive
-			tr.ServedMockAt(receive, served)
-			in := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(served.Add(offset+time.Millisecond))+`"}`, nil)
-			in.arrived = served.Add(2 * time.Millisecond)
-			got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.own && read != 0 {
-				t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
-			}
-			if tc.own {
-				if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) {
-					t.Fatalf("served %v miss %+v consumed %+v; want the test's own recording consumed, body.processed_at learned as noise", got, miss, db.consumed)
+		for _, tc := range []struct {
+			name  string
+			boot  time.Duration
+			clock bool
+			own   bool
+			noise bool
+		}{
+			{"a 2 s longer boot", 2 * time.Second, true, false, true},
+			{"a 30 s longer boot", 30 * time.Second, true, false, true},
+			{"no app clock", 2 * time.Second, false, false, false},
+			{"a test's own call", 2 * time.Second, true, true, false},
+		} {
+			t.Run(form.name+", "+tc.name, func(t *testing.T) {
+				h, n, opts := learnOn(t)
+				opts.LearnPool = true
+				receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
+				receive.Spec.HTTPResp.Header = map[string]string{"Date": learnAt.Format(http.TimeFormat)}
+				event := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/events", `{"event":"m-1","processed_at":"`+form.of(recRead)+`"}`, nil, `{}`)
+				event.TestModeInfo.Lifetime = models.LifetimeSession
+				db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{event}}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
+				tr := learn.NewTracker() // no test has begun: the start-up
+				if tc.own {
+					// The event is the open test's own, in its window.
+					event.TestModeInfo.Lifetime = models.LifetimePerTest
+					db = &learnDb{perTest: []*models.Mock{event}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
+					tr.Begin()
 				}
-				return
-			}
-			if got == nil || len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) {
-				t.Fatalf("served %v miss %+v pooled %+v; want body.processed_at learned as noise", got, miss, db.pooled)
-			}
-		})
+				offset := learn.FullRoundLead + tc.boot - 40*time.Second
+				read := 0
+				if tc.clock {
+					tr.SetAppClock(func(real time.Time) (time.Time, bool) { read++; return real.Add(offset), true })
+				}
+				served := learnAt.Add(40 * time.Second) // when F's replay served the receive
+				tr.ServedMockAt(receive, served)
+				in := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+form.of(served.Add(offset+time.Millisecond))+`"}`, nil)
+				in.arrived = served.Add(2 * time.Millisecond)
+				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.own && read != 0 {
+					t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
+				}
+				if !tc.noise && !form.unit {
+					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
+						t.Fatalf("served %v miss %+v; want refused, a value from mock-0 as the lead reads it", got, miss)
+					}
+					return
+				}
+				var noise []map[string][]string
+				for _, m := range db.pooled {
+					noise = append(noise, m.Spec.ReqBodyNoise)
+				}
+				if tc.own {
+					noise = nil
+					for _, m := range db.consumed {
+						noise = append(noise, m.Spec.ReqBodyNoise)
+					}
+				}
+				if got == nil || miss != nil || len(noise) != 1 || !reflect.DeepEqual(noise[0], map[string][]string{"body.processed_at": {}}) {
+					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned as noise", got, miss, noise)
+				}
+			})
+		}
 	}
 }
 
@@ -2761,56 +2783,64 @@ func TestLearnMatchAWindowIsOneRunOfTheAppsClock(t *testing.T) {
 // the set: those the store stages, those it keeps on disk, and those the
 // replay served (a per-test recording a serve took out of the store): a read
 // made before that previous call, though after the latest one found
-// elsewhere, is no clock read of the call. It is noise all the same, as one
-// in the window is: an instant is compared as one unit (learn's
-// instants.go), and the receive's Date header shares only its second, so
-// when the app read its clock against its other calls decides nothing.
+// elsewhere, is no clock read of the call, and is refused where it stands
+// inside a longer value (its words, read one by one, are words of the
+// receive's Date header). Where it is the value whole, one instant (learn's
+// instants.go, rule 3), it is compared as the moment it names, which the
+// receive does not hold: noise, wherever the previous call is.
 func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
-	for _, tc := range []struct {
-		name               string
-		disk, staged, gone bool
-	}{
-		{"the previous call in memory", false, false, false},
-		{"a later previous call on disk", true, false, false},
-		{"a later previous call staged", false, true, false},
-		{"the previous call served, no longer staged", false, false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h, n, opts := learnOn(t)
-			opts.LearnPool = true
-			receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
-			receive.Spec.HTTPResp.Header = map[string]string{"Date": learnAt.Format(http.TimeFormat)}
-			ack := learnRecorded("mock-2", 2*time.Millisecond, "POST", "/queue/ack", `{"id":"135dcb85"}`, nil, `{}`)
-			event := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(learnAt.Add(time.Millisecond))+`"}`, nil, `{}`)
-			event.TestModeInfo.Lifetime = models.LifetimeSession
-			var onDisk []*models.Mock
-			if tc.disk {
-				onDisk = []*models.Mock{ack}
-			}
-			staged := []*models.Mock{receive}
-			switch {
-			case tc.staged:
-				staged = append(staged, ack)
-			case tc.gone:
-				staged = nil
-			}
-			db := &recordedBeforeDb{learnDb: &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{event}}, staged: staged, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true, ack.Spec.ReqTimestampMock: true}}, onDisk: onDisk}
-			tr := learn.NewTracker()
-			offset := learn.FullRoundLead + 2*time.Second - 40*time.Second
-			tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
-			served := learnAt.Add(40 * time.Second)
-			tr.ServedMockAt(receive, served)
-			in := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(served.Add(offset+time.Millisecond))+`"}`, nil)
-			in.arrived = served.Add(2 * time.Millisecond)
-			got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got == nil || len(db.pooled) != 1 {
-				t.Fatalf("served %v (miss %+v); want processed_at learned as noise", got, miss)
-			}
-		})
+	for _, unit := range []bool{false, true} {
+		form := func(t time.Time) string { return "at " + iso(t) }
+		if unit {
+			form = iso
+		}
+		for _, tc := range []struct {
+			name               string
+			disk, staged, gone bool
+			noise              bool
+		}{
+			{"the previous call in memory", false, false, false, true},
+			{"a later previous call on disk", true, false, false, false},
+			{"a later previous call staged", false, true, false, false},
+			{"the previous call served, no longer staged", false, false, true, true},
+		} {
+			t.Run(fmt.Sprintf("%s, one instant whole %v", tc.name, unit), func(t *testing.T) {
+				h, n, opts := learnOn(t)
+				opts.LearnPool = true
+				receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
+				receive.Spec.HTTPResp.Header = map[string]string{"Date": learnAt.Format(http.TimeFormat)}
+				ack := learnRecorded("mock-2", 2*time.Millisecond, "POST", "/queue/ack", `{"id":"135dcb85"}`, nil, `{}`)
+				event := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/events", `{"event":"m-1","processed_at":"`+form(learnAt.Add(time.Millisecond))+`"}`, nil, `{}`)
+				event.TestModeInfo.Lifetime = models.LifetimeSession
+				var onDisk []*models.Mock
+				if tc.disk {
+					onDisk = []*models.Mock{ack}
+				}
+				staged := []*models.Mock{receive}
+				switch {
+				case tc.staged:
+					staged = append(staged, ack)
+				case tc.gone:
+					staged = nil
+				}
+				db := &recordedBeforeDb{learnDb: &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{event}}, staged: staged, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true, ack.Spec.ReqTimestampMock: true}}, onDisk: onDisk}
+				tr := learn.NewTracker()
+				offset := learn.FullRoundLead + 2*time.Second - 40*time.Second
+				tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+				served := learnAt.Add(40 * time.Second)
+				tr.ServedMockAt(receive, served)
+				in := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+form(served.Add(offset+time.Millisecond))+`"}`, nil)
+				in.arrived = served.Add(2 * time.Millisecond)
+				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if learned := got != nil && len(db.pooled) == 1; learned != (tc.noise || unit) {
+					t.Fatalf("learned %v (miss %+v); want %v", learned, miss, tc.noise || unit)
+				}
+			})
+		}
 	}
 }
 

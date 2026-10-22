@@ -71,6 +71,15 @@ type Raw struct {
 	At     time.Time
 	Served bool
 	Text   string
+	// AnswerClock are, of a protocol-phase mock (a driver's handshake,
+	// heartbeat or auth), the moments of its answer's own clock reads
+	// (RawOf, answerClock): the instants its answer holds, between its
+	// request and its answer, that its request does not, which the
+	// dependency read from its clock while it answered. No value came from
+	// one of them (instants.go, rule 2). nil for a data-plane mock, or one
+	// whose answer or span is not known: then every instant of it is a place
+	// a value may have come from.
+	AnswerClock []time.Time
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -201,19 +210,24 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 // common subsequences, recorded side; no part of a clock read the lead
 // moved), in any declared form of the answer, in its case or folded; "" when
 // nowhere.
+//
+// A unit's words are no words of their own (instants.go, rule 3), and are
+// not searched here. A stale echo of an instant is served, and an
+// application that checks it goes red at replay: a false red, never a false
+// green.
 func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
+	if v.unit {
+		return ""
+	}
 	for i := range readings {
 		words := map[string]bool{}
-		// A word inside an instant of the value is no word of what changed
-		// on its own, and a word inside an instant of the answer is no word
-		// of the answer (instants.go).
 		for t := range v.lost[i] {
-			if !clockWord(t, true, v, v.clock) && v.outRec[i][t] {
+			if !clockWord(t, true, v, v.clock) {
 				words[t] = true
 			}
 		}
 		for t := range v.movedRec[i] {
-			if !allClock(t, true, v.clock) && v.outRec[i][t] {
+			if !allClock(t, true, v.clock) {
 				words[t] = true
 			}
 		}
@@ -224,7 +238,7 @@ func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 			if a.Value == "" {
 				continue
 			}
-			toks := dc.rawTokensOutside(a.Value)[i]
+			toks := dc.rawTokens(a.Value)[i]
 			for t := range words {
 				if toks[t] || toks[strings.ToLower(t)] {
 					return "a word of it comes back in the answer at " + a.Path + ", which keploy cannot answer with this run's value"
@@ -554,17 +568,13 @@ type valueDrift struct {
 	unparsed string
 	// wholes are the value whole, recorded, in each declared form.
 	wholes map[string]bool
-	// The value's instants, compared as units (instants.go): outRec and
-	// outLive are, by reading, its words, recorded and live, in every form,
-	// outside every instant the form holds; maskedRec and maskedLive its
-	// forms with each instant blanked, one per line; blankRec, blankLive,
-	// blankDecRec and blankDecLive the value raw and decoded so blanked;
-	// instants its instants that changed (echoedInstants).
-	outRec, outLive           []map[string]bool
-	maskedRec, maskedLive     string
-	blankRec, blankLive       string
-	blankDecRec, blankDecLive string
-	instants                  []driftedInstant
+	// The value's instants (instants.go, readInstants): instants are those
+	// of its forms that changed; recKeys and liveKeys the moments its forms
+	// hold, recorded and live; unit whether it is one instant whole of more
+	// than one word (rule 3).
+	instants          []driftedInstant
+	recKeys, liveKeys map[instantKey]bool
+	unit              bool
 }
 
 // DriftCache keeps each value's drift for one test of the learn step: the
@@ -574,22 +584,25 @@ type DriftCache struct {
 	m      map[driftKey]*valueDrift
 	raw    map[string]string
 	rawTok map[string][]map[string]bool
-	// mockText is each mock's text as Classify reads it (RawOf), by mock:
-	// the store's mocks are read once per test, not once per request.
-	mockText map[*models.Mock]string
-	// readText is each mock's text with its answer read back (ReadRaw), by
+	// mockText is each mock as Classify reads it (RawOf: its text and its
+	// answer's clock reads), by mock: the store's mocks are read once per
+	// test, not once per request.
+	mockText map[*models.Mock]Raw
+	// readText is each mock so read with its answer read back (ReadRaw), by
 	// mock: apart from mockText, which RawOf fills with a parked mock's
 	// text without its answer.
-	readText map[*models.Mock]string
-	// spans and rawTokOut are, by text, the instants it holds
-	// (instantSpans) and its words outside them (rawTokensOutside).
-	spans     map[string][]instant
-	rawTokOut map[string][]map[string]bool
+	readText map[*models.Mock]Raw
+	// spans are, by text, the instants it holds (instantSpans); blanked and
+	// blankTok, by payload (rawKey), its texts and words with its answer's
+	// clock reads blanked (searched, searchedTokens).
+	spans    map[string][]instant
+	blanked  map[string][2]string
+	blankTok map[string][]map[string]bool
 }
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}, spans: map[string][]instant{}, rawTokOut: map[string][]map[string]bool{}}
+	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, spans: map[string][]instant{}}
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -606,10 +619,11 @@ func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
 		return dc.RawOf(m, served), nil
 	}
 	dc.mu.Lock()
-	text, ok := dc.readText[m]
+	r, ok := dc.readText[m]
 	dc.mu.Unlock()
 	if ok {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}, nil
+		r.Served = served
+		return r, nil
 	}
 	r, err := ReadRaw(m, served)
 	if err != nil {
@@ -617,9 +631,9 @@ func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	}
 	dc.mu.Lock()
 	if dc.readText == nil {
-		dc.readText = map[*models.Mock]string{}
+		dc.readText = map[*models.Mock]Raw{}
 	}
-	dc.readText[m] = r.Text
+	dc.readText[m] = r
 	dc.mu.Unlock()
 	return r, nil
 }
@@ -645,14 +659,18 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 		return RawOf(m, served)
 	}
 	dc.mu.Lock()
-	text, ok := dc.mockText[m]
+	r, ok := dc.mockText[m]
 	dc.mu.Unlock()
 	if ok {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}
+		r.Served = served
+		return r
 	}
-	r := RawOf(m, served)
+	r = RawOf(m, served)
 	dc.mu.Lock()
-	dc.mockText[m] = r.Text
+	if dc.mockText == nil {
+		dc.mockText = map[*models.Mock]Raw{}
+	}
+	dc.mockText[m] = r
 	dc.mu.Unlock()
 	return r
 }
@@ -666,16 +684,7 @@ func (dc *DriftCache) rawTokens(text string) []map[string]bool {
 	if ok {
 		return t
 	}
-	forms := textForms(text)
-	for _, word := range readings {
-		set := map[string]bool{}
-		for _, f := range forms {
-			for w := range tokensBy(f, word) {
-				set[w] = true
-			}
-		}
-		t = append(t, set)
-	}
+	t = tokensOfForms(textForms(text))
 	dc.mu.Lock()
 	dc.rawTok[text] = t
 	dc.mu.Unlock()
@@ -828,7 +837,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 	for _, f := range forms {
 		d.pieces = append(d.pieces, pieces(f[0], f[1])...)
 	}
-	// Its instants, compared as units.
+	// Its instants (instants.go).
 	d.readInstants()
 	dc.mu.Lock()
 	dc.m[k] = d
@@ -957,18 +966,31 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	if e.clock.whole && v.b64Holds(e) || v.clock.whole && e.b64Holds(v) {
 		return true, false
 	}
-	// Words and pieces of the two outside their instants only: an instant
-	// co-drifts as one unit (instants.go).
+	drifted := func(p run, rec, live string) bool {
+		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
+	}
+	// A unit (instants.go, rules 1 and 3) drifted with e also where e held
+	// its moment both ways, in any layout, or its text, recorded and live;
+	// its words co-drift below as any value's do. A clock read the lead
+	// moved, or read in its call's window, in either is no part, as its
+	// words are none below: two clock reads of one moment drift alike
+	// whatever made them.
+	if v.unit && !v.clock.whole && !e.clock.whole {
+		whole := run{v.rec, v.live}
+		if e.holdsMomentOf(v) || drifted(whole, e.rec, e.live) || v.decoded && drifted(run{v.decRec, v.decLive}, e.rec, e.live) || e.decoded && drifted(whole, e.decRec, e.decLive) {
+			return true, false
+		}
+	}
 	for i := range readings {
 		lost, gained := false, false
 		for t := range v.lost[i] {
-			if e.lost[i][t] && v.outRec[i][t] && e.outRec[i][t] && !clockWord(t, true, v, v.clock, e.clock) {
+			if e.lost[i][t] && !clockWord(t, true, v, v.clock, e.clock) {
 				lost = true
 				break
 			}
 		}
 		for t := range v.gained[i] {
-			if e.gained[i][t] && v.outLive[i][t] && e.outLive[i][t] && !clockWord(t, false, v, v.clock, e.clock) {
+			if e.gained[i][t] && !clockWord(t, false, v, v.clock, e.clock) {
 				gained = true
 				break
 			}
@@ -977,16 +999,13 @@ func sources(e, v *valueDrift) (found, whole bool) {
 			return true, false
 		}
 	}
-	drifted := func(p run, rec, live string) bool {
-		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
-	}
 	for _, p := range v.pieces {
-		if !isClock(p, v.clock, e.clock) && v.outsidePiece(p) && (drifted(p, e.blankRec, e.blankLive) || e.decoded && drifted(p, e.blankDecRec, e.blankDecLive)) {
+		if !isClock(p, v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
 			return true, false
 		}
 	}
 	for _, p := range e.pieces {
-		if !isClock(p, e.clock, v.clock) && e.outsidePiece(p) && (drifted(p, v.blankRec, v.blankLive) || v.decoded && drifted(p, v.blankDecRec, v.blankDecLive)) {
+		if !isClock(p, e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
 			return true, false
 		}
 	}
@@ -1059,32 +1078,27 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// around it holds a clock read of its own form, which is noise). It errs
 	// to refusing.
 	//
-	// An instant is one unit (instants.go): a word or a piece of the value
-	// inside one of its instants is never searched on its own, and no word
-	// is found inside an instant of a payload; the value whole is (decoded
-	// too, as a clock read's is), and so is an instant of it that the
-	// payloads echo both ways, recorded and in F (echoedInstants).
+	// Instants (instants.go): a payload is searched with a protocol-phase
+	// answer's own clock reads blanked (rule 2), but where the payloads hold
+	// the instant F saw too (echoedInstants); a unit is searched whole, never
+	// by a word or a piece of it (rule 3).
 	var searched []string
 	if !v.clock.whole {
 		searched = append(searched, recorded)
-		if v.decoded && v.decRec != recorded {
-			searched = append(searched, v.decRec)
-		}
 	}
-	add := func(p run) {
-		if p.rec != recorded && !isClock(p, v.clock) && v.outsidePiece(p) {
-			searched = append(searched, p.rec)
-		}
-	}
-	for i := range readings {
-		for t := range v.lost[i] {
-			if t != recorded && !clockWord(t, true, v, v.clock) && v.outRec[i][t] {
-				searched = append(searched, t)
+	if !v.unit {
+		for i := range readings {
+			for t := range v.lost[i] {
+				if t != recorded && !clockWord(t, true, v, v.clock) {
+					searched = append(searched, t)
+				}
 			}
 		}
-	}
-	for _, p := range v.pieces {
-		add(p)
+		for _, p := range v.pieces {
+			if p.rec != recorded && !isClock(p, v.clock) {
+				searched = append(searched, p.rec)
+			}
+		}
 	}
 	var payloads []string
 	for _, x := range raw {
@@ -1097,17 +1111,19 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		if !x.Served && !x.At.Before(at) {
 			continue
 		}
-		texts := []string{x.Text, dc.rawExtra(x.Text)}
-		for _, text := range texts {
-			if v.clock.whole && (containsWholeClock(text, recorded) || v.decoded && containsWholeClock(text, v.decRec)) {
-				return Place{Mock: x.Mock}, true
-			}
-			if dc.holdsInstant(text, echoed) {
-				return Place{Mock: x.Mock}, true
+		if dc.holdsInstant(x.Text, echoed) || dc.holdsInstant(dc.rawExtra(x.Text), echoed) {
+			return Place{Mock: x.Mock}, true
+		}
+		texts := dc.searched(x)
+		if v.clock.whole {
+			for _, text := range texts {
+				if containsWholeClock(text, recorded) || v.decoded && containsWholeClock(text, v.decRec) {
+					return Place{Mock: x.Mock}, true
+				}
 			}
 		}
 		for _, w := range searched {
-			if dc.holdsUnits(texts[0], w) || dc.holdsUnits(texts[1], w) {
+			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
 				return Place{Mock: x.Mock}, true
 			}
 		}
@@ -1186,9 +1202,13 @@ func RawOf(m *models.Mock, served bool) Raw {
 	// The payload's own text, not its JSON: a JSON string escapes what
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.
+	payload := dropKeys(v, 0)
 	var sb strings.Builder
-	textOf(dropKeys(v, 0), &sb)
+	textOf(payload, &sb)
 	r.Text = sb.String()
+	if m.IsProtocolPhase() {
+		r.AnswerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+	}
 	return r
 }
 

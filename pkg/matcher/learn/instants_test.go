@@ -2,12 +2,14 @@ package learn
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
 // The SQS sample's delivering ReceiveMessage of S12's E2 leg (b), run 1, as
@@ -40,14 +42,8 @@ func r1Receive(attrs string) *models.Mock {
 	}}
 }
 
-// The consumer's insert (mock-8) and the call before it at record: a
-// concurrent handler's call on another connection (mock-9), sent after the
-// consumer read its clock for processed_at under load (11:14:17.012 against
-// 11:14:17.014).
-var (
-	r1Insert   = time.Date(2026, 10, 22, 11, 14, 17, 155076558, time.UTC)
-	r1PrevCall = time.Date(2026, 10, 22, 11, 14, 17, 14119590, time.UTC)
-)
+// The consumer's insert (mock-8) at record.
+var r1Insert = time.Date(2026, 10, 22, 11, 14, 17, 155076558, time.UTC)
 
 // processedAt is the insert's processed_at leaf as a Mongo request's two
 // readings name it: the raw reading's epoch milliseconds, the typed
@@ -62,15 +58,19 @@ func processedAt(at time.Time, typed bool) Shape {
 }
 
 // classifyProcessedAt classifies the insert's processed_at, recorded at rec
-// and live in F, against the receives F served before it (raw), read in w.
-func classifyProcessedAt(rec, live time.Time, typed bool, receive *models.Mock, w *Window, more ...*models.Mock) Learned {
+// and live in F, recorded at insert (r1Insert when zero), against the
+// recordings F served before it (raw), read in w.
+func classifyProcessedAt(rec, live time.Time, typed bool, insert time.Time, w *Window, mocks ...*models.Mock) Learned {
 	const p = "body.docs.msgs.0.processed_at.$date.$numberLong"
+	if insert.IsZero() {
+		insert = r1Insert
+	}
 	dc := NewDriftCache()
 	var raw []Raw
-	for _, m := range append([]*models.Mock{receive}, more...) {
+	for _, m := range mocks {
 		raw = append(raw, dc.RawOf(m, true))
 	}
-	return ClassifyIn(dc, []string{p}, processedAt(live, typed), processedAt(rec, typed), r1Insert, nil, raw, nil, w)[0]
+	return ClassifyIn(dc, []string{p}, processedAt(live, typed), processedAt(rec, typed), insert, nil, raw, nil, w)[0]
 }
 
 // windows are the ways the insert's clock read can fall against its call's
@@ -86,14 +86,17 @@ func r1Windows(rec, live time.Time) map[string]*Window {
 	}
 }
 
-// An instant is compared as one unit: the consumer's processed_at, a read of
-// its clock, is no value the receive held because the receive's Date header,
-// its X-Amz-Date or its ReceiptHandle's epoch second share its minute, its
-// second or the digits of its millisecond. Learned as noise in each reading,
-// whatever the offset between the two instants and wherever the read fell
-// against its call's window, as the E2 runs that paired it found; before
-// this rule, a read that fell before a concurrent call's was refused as a
-// value of the receive (its minute "14" is a word of the receive's Date).
+// The consumer's processed_at, a read of its clock, is no value the receive
+// held because the receive's Date header, its X-Amz-Date or its
+// ReceiptHandle's epoch second share its minute, its second or the digits of
+// its millisecond, whatever the offset between the two instants and wherever
+// the read fell against its call's window, as the E2 runs that paired it
+// found. The typed reading is one unit (rule 3): its words are never
+// searched, so the receive's minute and second, and a receive count or
+// sequence number of those digits, meet none of it. The raw reading is one
+// word, its milliseconds, searched whole: the receive holds that moment only
+// as its answer's own clock read (its Date header, rule 2), which no value
+// came from.
 func TestAnInstantIsComparedAsOneUnit(t *testing.T) {
 	// The receive as recorded, and one whose attributes hold, as words of
 	// their own, the instants' minute, second and millisecond digits: a
@@ -118,7 +121,7 @@ func TestAnInstantIsComparedAsOneUnit(t *testing.T) {
 			for wname, w := range r1Windows(row.rec, live) {
 				for i, receive := range receives {
 					for _, typed := range []bool{false, true} {
-						if ln := classifyProcessedAt(row.rec, live, typed, receive, w); ln.Kind != KindNoise {
+						if ln := classifyProcessedAt(row.rec, live, typed, time.Time{}, w, receive); ln.Kind != KindNoise {
 							t.Errorf("%s, live %s, %s, receive %d, typed %v: %s (from %q, %s); want noise", row.name, live.Format(time.RFC3339Nano), wname, i, typed, ln.Kind, ln.From.Mock, ln.Why)
 						}
 					}
@@ -131,14 +134,14 @@ func TestAnInstantIsComparedAsOneUnit(t *testing.T) {
 // An application that stores an instant it was sent stores, in F, the
 // instant of the answer F served, as it stored the recorded one at record:
 // the payloads hold the instant both ways, and it is a variable of the place
-// that held it when recorded, in each reading (the typed reading's RFC 3339
-// is the raw reading's epoch milliseconds: one moment in another layout,
-// trailing zeros or not), and wherever the read fell against its call's
-// window. So is one held inside a longer value, or as an epoch second with
-// its millisecond. Held one way only (F's value in no payload) it is no
-// echo of an instant: only the reading that writes it as the payload does
-// follows it, as the same value whole (a founder decision). As another
-// moment (its second, a finer one its digits begin) it is no echo: noise.
+// that held it when recorded, in each reading, in every layout, and wherever
+// the read fell against its call's window. Held one way only (F's value in
+// no payload), a data-plane answer's instant is followed as the same value
+// whole, in the reading that writes it so (a founder decision); a
+// protocol-phase answer's own clock read (instants.go, rule 2) is no place it
+// came from: noise, but echoed both ways, or recorded outside its answer's
+// span. As another moment (its second, a finer one its digits begin) it is
+// none.
 func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 	for _, sent := range []time.Time{
 		time.Date(2026, 10, 22, 11, 14, 16, 473e6, time.UTC),
@@ -167,17 +170,32 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 		for i := range recorded {
 			receive, delivered := r1Receive(recorded[i]), r1Receive(served[i])
 			delivered.Name = "mock-11"
+			// The receive a protocol-phase exchange (a hook's config call),
+			// its attribute within its span: its answer's own clock read.
+			config := r1Receive(recorded[i])
+			config.Spec.Metadata["type"] = "config"
+			// That exchange answered before the producer sent: no clock
+			// read of its answer.
+			early := r1Receive(recorded[i])
+			early.Spec.Metadata["type"] = "config"
+			early.Spec.ReqTimestampMock = sent.Add(-2 * time.Hour)
+			early.Spec.ResTimestampMock = sent.Add(-time.Hour)
 			for wname, w := range r1Windows(sent, got) {
 				for _, typed := range []bool{false, true} {
-					if ln := classifyProcessedAt(sent, got, typed, receive, w, delivered); ln.Kind != KindVariable || ln.From.Mock != "mock-4" {
-						t.Errorf("%s then %s, %s, typed %v: %s from %q; want a variable from mock-4", recorded[i], served[i], wname, typed, ln.Kind, ln.From.Mock)
+					for _, m := range []*models.Mock{receive, config} {
+						if ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, m, delivered); ln.Kind != KindVariable || ln.From.Mock != "mock-4" {
+							t.Errorf("%s then %s (config %v), %s, typed %v: %s from %q; want a variable from mock-4", recorded[i], served[i], m == config, wname, typed, ln.Kind, ln.From.Mock)
+						}
 					}
-					ln := classifyProcessedAt(sent, got, typed, receive, w)
-					switch {
-					case sameText(recorded[i], typed) && (ln.Kind != KindVariable || ln.From.Mock != "mock-4"):
-						t.Errorf("%s, F's value in no payload, %s, typed %v: %s from %q; want the same value whole followed", recorded[i], wname, typed, ln.Kind, ln.From.Mock)
-					case !sameText(recorded[i], typed) && ln.Kind != KindNoise:
-						t.Errorf("%s, F's value in no payload, %s, typed %v: %s from %q; want noise", recorded[i], wname, typed, ln.Kind, ln.From.Mock)
+					if ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, config); ln.Kind != KindNoise {
+						t.Errorf("%s, a protocol-phase answer's clock read, F's value in no payload, %s, typed %v: %s from %q; want noise", recorded[i], wname, typed, ln.Kind, ln.From.Mock)
+					}
+					for _, m := range []*models.Mock{receive, early} {
+						want := sameText(recorded[i], typed)
+						ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, m)
+						if want && (ln.Kind != KindVariable || ln.From.Mock != "mock-4") || !want && ln.Kind != KindNoise {
+							t.Errorf("%s, no protocol-phase answer's clock read (early %v), F's value in no payload, %s, typed %v: %s from %q; want a variable %v", recorded[i], m == early, wname, typed, ln.Kind, ln.From.Mock, want)
+						}
 					}
 				}
 			}
@@ -193,7 +211,7 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 			delivered.Name = "mock-11"
 			for wname, w := range r1Windows(sent, got) {
 				for _, typed := range []bool{false, true} {
-					if ln := classifyProcessedAt(sent, got, typed, receive, w, delivered); ln.Kind != KindNoise {
+					if ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, receive, delivered); ln.Kind != KindNoise {
 						t.Errorf("%s then %s, %s, typed %v: %s (from %q); want noise", other[0], other[1], wname, typed, ln.Kind, ln.From.Mock)
 					}
 				}
@@ -202,9 +220,232 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 	}
 }
 
+// r2Hello is a Mongo driver's isMaster handshake as S12 E3 leg (b), run r2,
+// recorded it (mock-5, mock-7): sent on a new connection while the lane held
+// Mongo, answered when the hold was released, its localTime the server's
+// clock as it answered.
+func r2Hello(name string, conn int32, asked, answered time.Time, localTime int64) *models.Mock {
+	return &models.Mock{Name: name, Kind: models.Mongo, ConnectionID: strconv.Itoa(int(conn)), Spec: models.MockSpec{
+		Metadata: map[string]string{"type": "config", "connID": strconv.Itoa(int(conn))},
+		MongoRequests: []models.MongoRequest{{
+			//nolint:staticcheck // SA1019: the driver's isMaster handshake is a genuine legacy OpQuery frame.
+			Header: &models.MongoHeader{Length: 276, RequestID: 12, Opcode: wiremessage.OpQuery},
+			Message: &models.MongoOpQuery{Flags: 4, FullCollectionName: "admin.$cmd", NumberToReturn: -1,
+				Query: `{"isMaster":{"$numberInt":"1"},"helloOk":true,"compression":[],"client":{"driver":{"name":"mongo-go-driver","version":"1.17.3"},"os":{"type":"linux","architecture":"amd64"},"platform":"go1.27.0","env":{"container":{"runtime":"docker"}}}}`},
+		}},
+		MongoResponses: []models.MongoResponse{{
+			Header: &models.MongoHeader{Opcode: wiremessage.OpReply, ResponseTo: 12},
+			Message: &models.MongoOpReply{ResponseFlags: 8, NumberReturned: 1, Documents: []string{
+				`{"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"6ad9efef4a1daead80f664bf"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"` + strconv.FormatInt(localTime, 10) + `"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"13"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"29"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}`,
+			}},
+		}},
+		ReqTimestampMock: asked,
+		ResTimestampMock: answered,
+	}}
+}
+
+// r2Mongo is a Mongo OP_MSG recording of S12 E3 leg (b), run r2: request and
+// answer sections, recorded from asked to answered.
+func r2Mongo(name string, asked, answered time.Time, request []string, answer string) *models.Mock {
+	return &models.Mock{Name: name, Kind: models.Mongo, Spec: models.MockSpec{
+		Metadata:         map[string]string{"operation": "OP_MSG"},
+		MongoRequests:    []models.MongoRequest{{Header: &models.MongoHeader{RequestID: 9, Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: request}}},
+		MongoResponses:   []models.MongoResponse{{Header: &models.MongoHeader{ResponseTo: 9, Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{answer}}}},
+		ReqTimestampMock: asked,
+		ResTimestampMock: answered,
+	}}
+}
+
+// S12 E3, leg (b), run r2 (keploy 6db6cd0f3): the consumer read its clock for
+// processed_at (1792694293458, 18:38:13.458) in the millisecond the lane's
+// hold released Mongo, which the driver's handshakes on post-url-1's new
+// connections (mock-5, mock-7) were answered in, each with that millisecond
+// as its localTime; record's full round then refused the boot insert's drift
+// pairing ("processed_at carries a value a recording of the test set holds
+// earlier (in mock-5)"), and the set failed. These are r2's recordings made
+// before the insert, trimmed: the delivering receive (mock-4), the
+// handshakes, the duplicate read (mock-6, answered at 13.458619) and
+// post-url-1's upsert (mock-8, its created read at 13.219). Two clocks that
+// read one millisecond are no copy: a handshake's localTime is its answer's
+// own clock read, and processed_at is noise in both readings, wherever the
+// read fell against its call's window. The rule is the answer's span alone:
+// a localTime the recorded answer came before (a server whose clock ran
+// ahead) is followed, and so is that millisecond in a request (by the raw
+// reading, which writes it so; the typed one, a unit, is searched as it is
+// written); and a localTime F served too, as the value it saw, is an echo.
+func TestAHandshakesLocalTimeIsNoSourceOfAClockRead(t *testing.T) {
+	ts := func(sec, nsec int) time.Time { return time.Date(2026, 10, 22, 18, 38, sec, nsec, time.UTC) }
+	const read = 1792694293458 // processed_at, recorded
+	receive := r1Receive("")
+	receive.Spec.ReqTimestampMock, receive.Spec.ResTimestampMock = ts(12, 106755139), ts(13, 111622044)
+	receive.Spec.HTTPReq.Header["X-Amz-Date"] = "20261022T183812Z"
+	receive.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 18:38:13 GMT"
+	hello5 := r2Hello("mock-5", 8, ts(13, 205118312), ts(13, 458911204), read)
+	hello7 := r2Hello("mock-7", 10, ts(13, 301455028), ts(13, 459120377), read)
+	count := r2Mongo("mock-6", ts(13, 112600041), ts(13, 458619421),
+		[]string{`{ SectionSingle msg: {"aggregate":"events","pipeline":[{"$match":{"event":"S12 message"}},{"$group":{"_id":{"$numberInt":"1"},"n":{"$sum":{"$numberInt":"1"}}}}],"cursor":{},"lsid":{"id":{"$binary":{"base64":"cTrN0a9jSF2Bikv/YvQI4A==","subType":"04"}}},"$db":"keploy"} }`},
+		`{ SectionSingle msg: {"cursor":{"firstBatch":[],"id":{"$numberLong":"0"},"ns":"keploy.events"},"ok":{"$numberDouble":"1.0"}} }`)
+	upsert := r2Mongo("mock-8", ts(13, 459791587), ts(14, 421828601),
+		[]string{`{ SectionSingle msg: {"update":"url-shortener","ordered":true,"writeConcern":{"w":"majority"},"$db":"keploy"} }`,
+			`{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":"Lhr4BWAi"},"u":{"$set":{"_id":"Lhr4BWAi","created":{"$date":{"$numberLong":"1792694293219"}},"updated":{"$date":{"$numberLong":"1792694293219"}},"url":"https://google.com"}},"upsert":true} ] }`},
+		`{ SectionSingle msg: {"n":{"$numberInt":"1"},"upserted":[{"index":{"$numberInt":"0"},"_id":"Lhr4BWAi"}],"nModified":{"$numberInt":"0"},"ok":{"$numberDouble":"1.0"}} }`)
+	insert := ts(13, 459990012)
+	rec := time.UnixMilli(read).UTC()
+	// F's boot read, the lead past the recording and some.
+	for _, live := range []time.Time{rec.Add(FullRoundLead + 813*time.Millisecond), rec.Add(FullRoundLead - 1250*time.Millisecond)} {
+		windows := map[string]*Window{
+			"in its call's window":          {Rec: Span{From: ts(13, 458619421), To: insert}, F: Span{From: live.Add(-time.Millisecond), To: live.Add(time.Millisecond)}},
+			"read before the previous call": {Rec: Span{From: ts(13, 459791587), To: insert}, F: Span{From: live.Add(-time.Millisecond), To: live.Add(time.Millisecond)}},
+			"by the lead alone, no window":  nil,
+		}
+		for wname, w := range windows {
+			for _, typed := range []bool{false, true} {
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, hello7, upsert); ln.Kind != KindNoise {
+					t.Errorf("live %s, %s, typed %v: %s (from %q, %s); want noise", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, ln.Why)
+				}
+				// The server's clock ran ahead: its localTime is later than
+				// its answer reached keploy, no read of its answer's.
+				followed := !typed
+				ahead := r2Hello("mock-5", 8, ts(13, 205118312), ts(13, 457911204), read)
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, ahead, count, upsert); followed && (ln.Kind != KindVariable || ln.From.Mock != "mock-5") || !followed && ln.Kind != KindNoise {
+					t.Errorf("a localTime after its answer, live %s, %s, typed %v: %s from %q; want a variable from mock-5 %v", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, followed)
+				}
+				// That millisecond in a request: the app's own, followed.
+				sent := r2Mongo("mock-8", ts(13, 459791587), ts(14, 421828601),
+					[]string{`{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":"Lhr4BWAi"},"u":{"$set":{"created":{"$date":{"$numberLong":"1792694293458"}}}}} ] }`}, `{ SectionSingle msg: {"ok":{"$numberDouble":"1.0"}} }`)
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, sent); followed && (ln.Kind != KindVariable || ln.From.Mock != "mock-8") || !followed && ln.Kind != KindNoise {
+					t.Errorf("that millisecond in a request, live %s, %s, typed %v: %s from %q; want a variable from mock-8 %v", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, followed)
+				}
+				// F served a handshake whose localTime is the value F saw.
+				echo := r2Hello("mock-9", 12, ts(15, 0), ts(15, 1000), live.UnixMilli())
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, echo); ln.Kind != KindVariable || ln.From.Mock != "mock-5" {
+					t.Errorf("F's value a localTime F served, live %s, %s, typed %v: %s from %q; want a variable from mock-5", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock)
+				}
+			}
+		}
+	}
+}
+
+// configReceive is the receive as a protocol-phase exchange: a post-record
+// hook's config call, as enterprise's SQS hook tags one.
+func configReceive(attrs string) *models.Mock {
+	m := r1Receive(attrs)
+	m.Spec.Metadata["type"] = "config"
+	return m
+}
+
+// A protocol-phase answer's own clock reads (Raw.AnswerClock) are the
+// instants its answer holds within the span from its request to its answer,
+// at their own resolution, that its request does not hold: none of its
+// request's, none recorded outside that span, no time of day (which names
+// no day), and none of a mock whose span or answer is not known. A
+// data-plane answer has none: it may read back what the application stored.
+func TestAnswerClock(t *testing.T) {
+	keys := func(r Raw) []string {
+		var out []string
+		for _, at := range r.AnswerClock {
+			out = append(out, at.Format(time.RFC3339Nano))
+		}
+		return out
+	}
+	receive := configReceive(`{"SentTimestamp": "1792667656470", "Created": "2026-10-22T09:00:00Z", "At": "11:14:15"}`)
+	if got, want := keys(RawOf(receive, false)), []string{"2026-10-22T11:14:16Z", "2026-10-22T11:14:16.47Z", "2026-10-22T11:14:16.4732103Z"}; !sameSet(got, want) {
+		t.Fatalf("the receive's answer's clock reads are %q; want %q (its Date, its SentTimestamp, its ReceiptHandle's instant)", got, want)
+	}
+	// Its request holding the Date's moment: no clock read of its answer.
+	asked := configReceive("")
+	asked.Spec.HTTPReq.Header["If-Modified-Since"] = "Thu, 22 Oct 2026 11:14:16 GMT"
+	if got := keys(RawOf(asked, false)); !sameSet(got, []string{"2026-10-22T11:14:16.4732103Z"}) {
+		t.Fatalf("with its request holding the Date's moment: %q", got)
+	}
+	// A second read inside the span, at its resolution: the request sent
+	// at 11:14:13.778 and an answer of second 13 holds it (the request
+	// signed in second 12).
+	same := configReceive("")
+	same.Spec.HTTPReq.Header["X-Amz-Date"] = "20261022T111412Z"
+	same.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 11:14:13 GMT"
+	if got := keys(RawOf(same, false)); !sameSet(got, []string{"2026-10-22T11:14:13Z", "2026-10-22T11:14:16.4732103Z"}) {
+		t.Fatalf("a Date of the request's second: %q", got)
+	}
+	// Its request signed in that second too: none.
+	same = configReceive("")
+	same.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 11:14:13 GMT"
+	if got := keys(RawOf(same, false)); !sameSet(got, []string{"2026-10-22T11:14:16.4732103Z"}) {
+		t.Fatalf("a Date of the second the request was signed in: %q", got)
+	}
+	for name, m := range map[string]func(*models.Mock){
+		"no answer time":  func(m *models.Mock) { m.Spec.ResTimestampMock = time.Time{} },
+		"no request time": func(m *models.Mock) { m.Spec.ReqTimestampMock = time.Time{} },
+		"no answer":       func(m *models.Mock) { m.Spec.HTTPResp = nil },
+		"answered before it was asked": func(m *models.Mock) {
+			m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(-time.Second)
+		},
+	} {
+		x := configReceive("")
+		m(x)
+		if got := keys(RawOf(x, false)); len(got) != 0 {
+			t.Errorf("%s: %q; want none", name, got)
+		}
+	}
+	if got := RawOf(r1Receive(`{"SentTimestamp": "1792667656470"}`), false).AnswerClock; got != nil {
+		t.Fatalf("a data-plane answer's clock reads: %v; want none", got)
+	}
+	// A cache reads it once per mock, served or not, as RawOf does.
+	dc := NewDriftCache()
+	if a, b := dc.RawOf(receive, true), dc.RawOf(receive, false); !reflect.DeepEqual(a.AnswerClock, RawOf(receive, false).AnswerClock) || !reflect.DeepEqual(b.AnswerClock, a.AnswerClock) || !a.Served || b.Served {
+		t.Fatalf("cached reads: %+v, %+v", a.AnswerClock, b.AnswerClock)
+	}
+	if r, err := dc.ReadRaw(receive, true); err != nil || !reflect.DeepEqual(r.AnswerClock, RawOf(receive, false).AnswerClock) {
+		t.Fatalf("ReadRaw: %v, %+v", err, r.AnswerClock)
+	}
+}
+
+// sameSet reports whether a and b hold the same strings.
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := map[string]int{}
+	for _, s := range a {
+		m[s]++
+	}
+	for _, s := range b {
+		if m[s] == 0 {
+			return false
+		}
+		m[s]--
+	}
+	return true
+}
+
+// Every field of a mock's spec that holds an answer is one answerClock reads
+// as the answer's: a new parser's answer field must be named there, or its
+// answers' clock reads would be read as its request's (followed: a false
+// red).
+func TestEveryAnswerFieldIsAnAnswer(t *testing.T) {
+	named := map[string]bool{}
+	st := reflect.TypeOf(models.MockSpec{})
+	for _, n := range answerFieldNames {
+		if _, ok := st.FieldByName(n); !ok {
+			t.Errorf("models.MockSpec has no field %s", n)
+		}
+		named[n] = true
+	}
+	if len(answerFields) != len(answerFieldNames) {
+		t.Errorf("answerFields holds %d JSON names for %d fields", len(answerFields), len(answerFieldNames))
+	}
+	for i := 0; i < st.NumField(); i++ {
+		n := st.Field(i).Name
+		answer := strings.HasSuffix(n, "Resp") || strings.Contains(n, "Response")
+		if answer != named[n] {
+			t.Errorf("models.MockSpec.%s: an answer %v, named as one %v", n, answer, named[n])
+		}
+	}
+}
+
 // The instants a text holds, in either case, and a time-ordered UUID's time
-// groups; a word is found only outside every instant of the text, and an
-// instant only whole.
+// groups; the moment each names, and a unit (rule 3): one instant whole of
+// more than one word.
 func TestInstantSpans(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 14, 16, 473e6, time.UTC)
 	for _, tc := range []struct {
@@ -264,45 +505,179 @@ func TestInstantSpans(t *testing.T) {
 			t.Errorf("%q and %q are one instant; want two", two[0], two[1])
 		}
 	}
-	if got, want := blankInstants("Date: Thu, 22 Oct 2026 11:14:16 GMT; seq 14"), "Date: "+strings.Repeat(" ", len("Thu, 22 Oct 2026 11:14:16 GMT"))+"; seq 14"; got != want {
-		t.Fatalf("blankInstants = %q", got)
-	}
-	var dc *DriftCache
-	if dc.holdsUnits("Thu, 22 Oct 2026 11:14:16 GMT", "14") || !dc.holdsUnits("seq 14 at Thu, 22 Oct 2026 11:14:16 GMT", "14") {
-		t.Fatal("holdsUnits found a word inside an instant, or missed one outside every instant")
-	}
-	if dc.holdsUnits("2026-10-22 11:14:16", "2026-10-22 11:14") || !dc.holdsUnits("at 2026-10-22 11:14:16 ok", "2026-10-22 11:14:16") {
-		t.Fatal("holdsUnits found an instant inside a longer one, or missed one whole")
-	}
-	if dc.holdsUnits("1792667656.4732103", "1792667656") {
-		t.Fatal("holdsUnits found an epoch second inside its fraction")
+	for s, unit := range map[string]bool{
+		at.Format(time.RFC3339Nano):           true,
+		at.Format(time.RFC1123):               true,
+		at.Format("15:04:05"):                 true,
+		"1792667656.4732103":                  true,
+		strconv.FormatInt(at.UnixMilli(), 10): false, // one word
+		at.Format("20060102T150405Z"):         false, // one word
+		"1298498081":                          false, // one word, an id or an epoch
+		"user-1298498081":                     false, // an instant inside
+		"at " + at.Format(time.RFC3339):       false,
+		uuid7(at, "abc123456789abcdef"):       false, // an id with an instant inside
+		"order 2025-13-45 x":                  false,
+	} {
+		if wholeInstant(s) != unit {
+			t.Errorf("wholeInstant(%q) = %v; want %v", s, !unit, unit)
+		}
 	}
 }
 
-// A word of a value outside every instant of it is never found inside an
-// instant of another text: a batch number that drifted from 14 to 15 is no
-// word of the receive's Date header, whose minute is 14, nor of an answer's
-// date. Held outside every instant (a receive count of 14), it is found, as
-// before.
-func TestAWordIsNeverFoundInsideAnotherTextsInstant(t *testing.T) {
+// A word of a value is never found in a protocol-phase answer's own clock
+// read (rule 2): a batch number that drifted from 14 to 15 is no word of a
+// hook's config call's Date header, whose minute is 14. A data-plane
+// answer's Date is searched as any text is (it may hold what the
+// application stored), and so is a protocol-phase exchange's of no known
+// answer time and an instant of a request: a date there whose minute is 14
+// holds the word, refused. Held outside every instant (a receive count of
+// 14), it is found, as before; and in the call's own answer, a word of a
+// date there is a word of the answer, refused.
+func TestAWordIsNeverFoundInAProtocolPhaseAnswersClockRead(t *testing.T) {
 	r := Shape{Leaves: map[string]Leaf{"body.batch": {Path: "body.batch", Noise: "body.batch", Type: String, Value: "batch-14"}}}
 	l := Shape{Leaves: map[string]Leaf{"body.batch": {Path: "body.batch", Noise: "body.batch", Type: String, Value: "batch-15"}}}
 	classify := func(receive *models.Mock, resp []Leaf) Learned {
 		dc := NewDriftCache()
 		return ClassifyIn(dc, []string{"body.batch"}, l, r, r1Insert, nil, []Raw{dc.RawOf(receive, true)}, resp, nil)[0]
 	}
-	if ln := classify(r1Receive(""), nil); ln.Kind != KindNoise {
-		t.Fatalf("beside the receive's Date header: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
+	if ln := classify(configReceive(""), nil); ln.Kind != KindNoise {
+		t.Fatalf("beside a config call's Date header: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
 	}
-	date := []Leaf{{Path: "body.at", Noise: "body.at", Type: String, Value: "Thu, 22 Oct 2026 11:14:16 GMT"}}
-	if ln := classify(r1Receive(""), date); ln.Kind != KindNoise {
-		t.Fatalf("an answer holding a date of its minute: %s (%s); want noise", ln.Kind, ln.Why)
+	asked := configReceive("")
+	asked.Spec.HTTPReq.Header["If-Modified-Since"] = "Thu, 22 Oct 2026 10:14:09 GMT"
+	unknown := configReceive("")
+	unknown.Spec.ResTimestampMock = time.Time{}
+	for name, m := range map[string]*models.Mock{
+		"a data-plane receive's Date":                   r1Receive(""),
+		"a date of its request whose minute is 14":      asked,
+		"the Date of a config call of no answer time":   unknown,
+		"a receive count of 14":                         configReceive(`{"ApproximateReceiveCount": "14"}`),
+		"a data-plane receive count of 14 and its Date": r1Receive(`{"ApproximateReceiveCount": "14"}`),
+	} {
+		if ln := classify(m, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-4" {
+			t.Errorf("beside %s: %s from %q; want a variable from mock-4", name, ln.Kind, ln.From.Mock)
+		}
 	}
-	if ln := classify(r1Receive(`{"ApproximateReceiveCount": "14"}`), nil); ln.Kind != KindVariable || ln.From.Mock != "mock-4" {
-		t.Fatalf("beside a receive count of 14: %s from %q; want a variable from mock-4", ln.Kind, ln.From.Mock)
+	for name, v := range map[string]string{"a date of its minute": "Thu, 22 Oct 2026 11:14:16 GMT", "14 as a word": "seen 14 times"} {
+		resp := []Leaf{{Path: "body.at", Noise: "body.at", Type: String, Value: v}}
+		if ln := classify(configReceive(""), resp); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "comes back in the answer") {
+			t.Errorf("the call's answer holding %s: %s (%s); want it refused", name, ln.Kind, ln.Why)
+		}
 	}
-	count := []Leaf{{Path: "body.n", Noise: "body.n", Type: String, Value: "seen 14 times"}}
-	if ln := classify(r1Receive(""), count); ln.Kind != KindUnaccounted {
-		t.Fatalf("an answer holding 14 as a word: %s; want it refused", ln.Kind)
+	// A word F saw (15) in a config call's Date, its answer's clock read, is
+	// no word of the payload for unaccounted either.
+	r13 := Shape{Leaves: map[string]Leaf{"body.batch": {Path: "body.batch", Noise: "body.batch", Type: String, Value: "batch-13"}}}
+	late := configReceive("")
+	late.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 11:15:16 GMT"
+	late.Spec.ResTimestampMock = time.Date(2026, 10, 22, 11, 15, 16, 900e6, time.UTC)
+	dc := NewDriftCache()
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+		t.Fatalf("15, a word of a config call's Date: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+	late.Spec.Metadata["type"] = "HTTP_CLIENT"
+	dc = NewDriftCache()
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted {
+		t.Fatalf("15, a word of a data-plane receive's Date: %s (%s); want refused", ln.Kind, ln.Why)
+	}
+}
+
+// A unit's words are its own at an earlier leaf F saw (rule 3 holds in
+// payloads only, which F holds no live view of): a stamp that drifted in
+// lockstep with an earlier one in another precision (minute and second
+// alike) is a value of that leaf, refused as one, and a word of it a leaf F
+// saw unchanged holds (an answer's expiry it copied at record) is
+// unaccounted for. In the call's own answer, a unit's words are no words of
+// their own; every other value's are (an id sent inside a filter, whatever
+// its digits read as, which the answer echoes, is refused).
+func TestAUnitIsReadWordByWordWhereFSawIt(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 14, 16, 470e6, time.UTC)
+	f := at.Add(3*time.Minute + 3*time.Second)
+	leaf := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{"body.at": {Path: "body.at", Noise: "body.at", Type: String, Value: v}}}
+	}
+	audit := []Earlier{{Mock: "mock-1", At: r1Insert.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request,
+		Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Format("2006-01-02T15:04:05.000Z")}, Live: f.Format("2006-01-02T15:04:05.000Z"), Place: "body.at"}}}}
+	if ln := ClassifyIn(NewDriftCache(), []string{"body.at"}, leaf(f.Format(time.RFC3339)), leaf(at.Format(time.RFC3339)), r1Insert, audit, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" {
+		t.Fatalf("in lockstep with an earlier leaf's stamp: %s from %q; want a variable from mock-1", ln.Kind, ln.From.Mock)
+	}
+	expiry := at.Add(time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	token := []Earlier{{Mock: "mock-2", At: r1Insert.Add(-time.Second), Own: true, Seen: []Seen{{Side: Response,
+		Leaf: Leaf{Path: "body.expiresAt", Noise: "body.expiresAt", Type: String, Value: expiry}, Live: expiry}}}}
+	if ln := ClassifyIn(NewDriftCache(), []string{"body.at"}, leaf(f.Add(time.Hour).Format(time.RFC3339)), leaf(expiry), r1Insert, token, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-2") {
+		t.Fatalf("a copy of an expiry F served unchanged: %s (%s); want it unaccounted for", ln.Kind, ln.Why)
+	}
+	resp := []Leaf{{Path: "body.id", Noise: "body.id", Type: String, Value: "1298498081"}, {Path: "body.note", Noise: "body.note", Type: String, Value: "seq " + at.Format("05")}}
+	filter := Shape{Leaves: map[string]Leaf{"body.q": {Path: "body.q", Noise: "body.q", Type: String, Value: "user-1298498081"}}}
+	now := Shape{Leaves: map[string]Leaf{"body.q": {Path: "body.q", Noise: "body.q", Type: String, Value: "user-1427131847"}}}
+	if ln := ClassifyIn(NewDriftCache(), []string{"body.q"}, now, filter, r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "comes back in the answer") {
+		t.Fatalf("an id the answer echoes: %s (%s); want refused", ln.Kind, ln.Why)
+	}
+	if ln := ClassifyIn(NewDriftCache(), []string{"body.at"}, leaf(f.Format(time.RFC3339)), leaf(at.Format(time.RFC3339)), r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindNoise {
+		t.Fatalf("a unit whose second the answer holds: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+}
+
+// An id whose digits read as a date flows as every id does, from a place
+// that held it whole into a longer value, at a leaf F saw drift and in an
+// earlier recording's payload: a variable of that place, whatever its
+// length, ten digits (a rand.Int31 id), nineteen (a Snowflake id) or twelve
+// (no epoch's). Only a value that is one instant whole, of more than one
+// word, is one unit (S12 K1 review round 2).
+func TestAnIdThatReadsAsADateFlowsAsAnId(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 0, 1, 0, time.UTC)
+	const p = "body.ref"
+	for _, ids := range [][2]string{{"1298498081", "1427131847"}, {"1541815603606036480", "1584512345678901234"}, {"129849808112", "142713184712"}} {
+		rec := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "user-" + ids[0]}}}
+		live := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "user-" + ids[1]}}}
+		earlier := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request,
+			Leaf: Leaf{Path: "body.userId", Noise: "body.userId", Type: String, Value: ids[0]}, Live: ids[1], Place: "body.userId"}}}}
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, earlier, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" {
+			t.Errorf("%s at an earlier leaf: %s from %q; want a variable from mock-1", ids[0], ln.Kind, ln.From.Mock)
+		}
+		write := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "/users", Body: `{"userId":` + ids[0] + `,"name":"a"}`},
+			HTTPResp:         &models.HTTPResp{StatusCode: 201, Body: `{"ok":true}`},
+			ReqTimestampMock: at.Add(-time.Second),
+			ResTimestampMock: at.Add(-time.Second + time.Millisecond),
+		}}
+		dc := NewDriftCache()
+		if ln := ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{dc.RawOf(write, true)}, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" {
+			t.Errorf("%s in an earlier payload: %s from %q; want a variable from mock-1", ids[0], ln.Kind, ln.From.Mock)
+		}
+	}
+}
+
+// S12 E3, leg (b), the archived runs that failed (r1/legb-archive, keploy
+// 6db6cd0f3, CI shape): the consumer's insert rode a connection the driver
+// opened for it, whose isMaster handshake (mock-6, a config recording) was
+// answered in the millisecond processed_at was read, with that millisecond
+// as its localTime. Exact values; both readings, wherever the read fell
+// against its call's window and whatever F's clock read: noise, so the boot
+// insert pairs by drift.
+func TestTheArchivedLegBHandshakeIsNoSourceOfProcessedAt(t *testing.T) {
+	for _, run := range []struct {
+		name                    string
+		asked, answered, insert time.Time
+		read                    int64
+	}{
+		{"run-2", time.Date(2026, 10, 22, 20, 33, 39, 892516772, time.UTC), time.Date(2026, 10, 22, 20, 33, 39, 909520718, time.UTC), time.Date(2026, 10, 22, 20, 33, 39, 909704835, time.UTC), 1792701219909},
+		{"run-3", time.Date(2026, 10, 22, 20, 34, 7, 506459279, time.UTC), time.Date(2026, 10, 22, 20, 34, 7, 530402069, time.UTC), time.Date(2026, 10, 22, 20, 34, 7, 530640923, time.UTC), 1792701247530},
+	} {
+		hello := r2Hello("mock-6", 8, run.asked, run.answered, run.read)
+		rec := time.UnixMilli(run.read).UTC()
+		for _, live := range []time.Time{rec.Add(FullRoundLead + 211*time.Millisecond), rec.Add(FullRoundLead + 3*time.Second)} {
+			f := Span{From: live.Add(-2 * time.Millisecond), To: live.Add(time.Millisecond)}
+			for wname, w := range map[string]*Window{
+				"in its call's window":          {Rec: Span{From: run.asked, To: run.insert}, F: f},
+				"read before the previous call": {Rec: Span{From: rec.Add(time.Millisecond), To: run.insert}, F: f},
+				"by the lead alone, no window":  nil,
+			} {
+				for _, typed := range []bool{false, true} {
+					if ln := classifyProcessedAt(rec, live, typed, run.insert, w, hello); ln.Kind != KindNoise {
+						t.Errorf("%s, live %s, %s, typed %v: %s (from %q, %s); want noise", run.name, live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, ln.Why)
+					}
+				}
+			}
+		}
 	}
 }
