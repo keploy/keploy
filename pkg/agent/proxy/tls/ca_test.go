@@ -201,7 +201,7 @@ func TestLoadSystemCABundle_EmbeddedFallback_ReturnsBytes(t *testing.T) {
 // TestLoadSystemCABundle_EmbeddedFallback_ContainsMozillaRoots is a
 // build-time sanity check that the embedded blob actually parses as a
 // PEM bundle and contains a non-trivial number of x509 root
-// certificates. If a future refresh of mozilla_roots.pem accidentally
+// certificates. If a future bump of x509roots/fallback accidentally
 // truncates or replaces the file with garbage, CI catches it here.
 //
 // We assert >=100 roots — Mozilla NSS typically ships ~140-150. Below
@@ -225,6 +225,41 @@ func TestLoadSystemCABundle_EmbeddedFallback_ContainsMozillaRoots(t *testing.T) 
 	count := bytes.Count(embeddedFallbackRoots, []byte("-----BEGIN CERTIFICATE-----"))
 	if count < minCerts {
 		t.Fatalf("embeddedFallbackRoots has only %d cert(s); expected >=%d (Mozilla NSS bundle is typically ~140). Refresh may have produced a truncated file.", count, minCerts)
+	}
+}
+
+// distrustedRootFingerprints are SHA-256 fingerprints (of the DER cert) of roots
+// Mozilla has removed from NSS for cause. The embedded bundle is handed to
+// recorded apps as their trust store when they have none of their own, so a
+// root that is still in it stays trusted by those apps even after every browser
+// has dropped it.
+var distrustedRootFingerprints = map[string]string{
+	// eMudhra intermediate key compromise (Mozilla bug 2083449, Oct 2026): the
+	// eight compromised intermediates chain to these roots; NSS 3.131.1 removed them.
+	"86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b": "emSign ECC Root CA - G3",
+	"125609aa301da0a249b97a8239cb6a34216f44dcac9f3954b14292f2e8c8608f": "emSign Root CA - C1",
+	"bc4d809b15189d78db3e1d8cf4f9726a795da1643ca5f1358e1ddb0edc0d7eb3": "emSign ECC Root CA - C3",
+}
+
+// TestLoadSystemCABundle_EmbeddedFallback_ExcludesDistrustedRoots fails when the
+// embedded Mozilla bundle still carries a root Mozilla has distrusted, i.e. when
+// golang.org/x/crypto/x509roots/fallback was not bumped after a CA incident
+// (or was downgraded).
+func TestLoadSystemCABundle_EmbeddedFallback_ExcludesDistrustedRoots(t *testing.T) {
+	rest := embeddedFallbackRoots
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		sum := sha256.Sum256(block.Bytes)
+		if name, bad := distrustedRootFingerprints[fmt.Sprintf("%x", sum)]; bad {
+			t.Errorf("embedded NSS bundle still contains distrusted root %q (sha256 %x); bump golang.org/x/crypto/x509roots/fallback", name, sum)
+		}
 	}
 }
 

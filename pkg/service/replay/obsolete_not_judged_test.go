@@ -73,6 +73,11 @@ func TestADemotedWrongAnswerLeavesItsTestAndSetNotJudged(t *testing.T) {
 			if got := h.replayer.notJudged("test-set-0"); got != c.notJudged {
 				t.Fatalf("the set's not-judged mark is %v; want %v", got, c.notJudged)
 			}
+			// A demoted wrong answer has no verdict whatever its set's status,
+			// for the run's exit code to read (Replayer.stoppedAfterNoVerdict).
+			if got, want := fmt.Sprint(h.replayer.noVerdicts()), map[bool]string{true: "map[test-set-0:[test-2]]", false: "map[]"}[c.wantStale]; got != want {
+				t.Fatalf("the run's marks of tests with no verdict are %s; want %s", got, want)
+			}
 			var row models.TestResult
 			for _, r := range h.report.results {
 				if r.TestCaseID == "test-2" {

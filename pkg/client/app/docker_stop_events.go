@@ -143,11 +143,18 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 // be read), and what releases that watch.
 type containerWatch struct {
 	seen, running, readable bool
-	// exitCode is a stopped container's, as the daemon gave it.
+	// restarting: the daemon is starting it again after an exit, by its
+	// restart policy, and calls it running meanwhile (running is set too).
+	restarting bool
+	// exitCode is a stopped or restarting container's last exit's, as the
+	// daemon gave it.
 	exitCode int
-	procs    []utils.Reached
-	mainGone <-chan struct{}
-	release  func()
+	// stopSignal is the stop signal the container declares (its compose
+	// stop_signal, or its image's STOPSIGNAL), "" when it declares none.
+	stopSignal string
+	procs      []utils.Reached
+	mainGone   <-chan struct{}
+	release    func()
 }
 
 // watchContainer reads container id for its stop. The daemon's word is
@@ -161,7 +168,12 @@ func (a *App) watchContainer(ctx context.Context, id string) containerWatch {
 	switch {
 	case ierr == nil && info.ContainerJSONBase != nil && info.State != nil:
 		w.seen, w.running = true, info.State.Running
-		if !w.running {
+		if info.Config != nil {
+			w.stopSignal = info.Config.StopSignal
+		}
+		if !w.running || info.State.Restarting {
+			// A restarting container has no process to read (its pid is 0).
+			w.restarting = info.State.Restarting
 			w.exitCode = info.State.ExitCode
 			return w
 		}

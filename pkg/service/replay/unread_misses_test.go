@@ -278,6 +278,37 @@ func TestAGRPCAnswersStartIsJudgedOnItsMetadata(t *testing.T) {
 	}
 }
 
+// Under the switch the start of a gRPC answer whose recording is a
+// Trailers-Only one kept as headers alone (enterprise's low-latency recorder
+// before its fix: a call that failed NOT_FOUND in one HEADERS frame) is
+// judged on its metadata: the app's headers, which carry no status, replace
+// that block, and the recording's status, read off it as a gRPC client reads
+// it, stands in for the trailers that never came. A start like the
+// recording's is no difference; one whose content-type differs still is.
+func TestAGRPCAnswersStartAgainstATrailersOnlyRecordingIsJudgedOnItsMetadata(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
+	view := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-1"}
+	view.GrpcResp.Headers = models.GrpcHeaders{
+		PseudoHeaders:   map[string]string{":status": "200"},
+		OrdinaryHeaders: map[string]string{"content-type": "application/grpc", "grpc-status": "5", "grpc-message": "no such thing"},
+	}
+	view.GrpcResp.Trailers = models.GrpcHeaders{PseudoHeaders: map[string]string{}, OrdinaryHeaders: map[string]string{}}
+	start := func(contentType string) *models.GrpcResp {
+		return &models.GrpcResp{Headers: models.GrpcHeaders{
+			PseudoHeaders:   map[string]string{":status": "200"},
+			OrdinaryHeaders: map[string]string{"content-type": contentType},
+		}}
+	}
+	if row, differs := r.startFailedRow(nil, view, view, start("application/grpc"), "s", time.Now()); differs {
+		t.Fatalf("a start like the recording's differs: status %d -> %d", row.Result.StatusCode.Expected, row.Result.StatusCode.Actual)
+	}
+	row, differs := r.startFailedRow(nil, view, view, start("text/plain"), "s", time.Now())
+	if !differs || row == nil || !row.Result.StatusCode.Normal {
+		t.Fatalf("%v, %+v; want a judged FAILED row on its content-type alone", differs, row)
+	}
+}
+
 // An HTTP start is judged on its status and headers. A header that holds a
 // capture is resolved as the main path resolves it, on a throwaway run: the
 // app's value is taken where the literal text and uses around it match (a

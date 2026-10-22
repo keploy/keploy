@@ -1095,12 +1095,13 @@ func grpcRequestSize(reqMsgs []models.GrpcLengthPrefixedMessage) int64 {
 // recorded answer: a keepalive after them, under the proven switch, is one
 // beyond the recording (pingWatch). One empty message is how a recording keeps
 // an answer of trailers alone (SimulateGRPC), and also an empty message
-// (google.protobuf.Empty): the recorded status tells them apart, an error
-// being an answer of trailers alone, which none completes.
+// (google.protobuf.Empty): the recorded status, as a gRPC client reads it
+// (models.GrpcResp.TrailersAsRead), tells them apart, an error being an
+// answer of trailers alone, which none completes.
 func recordedMessagesComplete(resp models.GrpcResp) int {
 	msgs := resp.AllMessages()
 	if len(msgs) == 1 && msgs[0].MessageLength == 0 && msgs[0].DecodedData == "" {
-		if code := strings.TrimSpace(resp.Trailers.OrdinaryHeaders["grpc-status"]); code != "" && code != "0" {
+		if code := strings.TrimSpace(resp.TrailersAsRead().OrdinaryHeaders["grpc-status"]); code != "" && code != "0" {
 			return 0
 		}
 	}

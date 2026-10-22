@@ -120,6 +120,25 @@ func (r GrpcResp) AllMessages() []GrpcLengthPrefixedMessage {
 	return allMessages(r.Body, r.AdditionalMessages)
 }
 
+// TrailersAsRead is the trailer block of a recorded answer as a gRPC client
+// reads it (gRPC over HTTP/2): its trailers or, when it has no trailers and
+// its one header block carries grpc-status, that block. Such an answer is a
+// Trailers-Only one, a single HEADERS frame that ends the stream: grpc-go
+// sends it for every call that ends before it sends headers or a message, an
+// OK one included (a server stream that returns no message). keploy's
+// recorder keeps that block as the answer's trailers as well as its headers;
+// enterprise's low-latency (proxyless) recorder kept it as its headers alone,
+// with no trailers, until it was fixed to keep both.
+func (r GrpcResp) TrailersAsRead() GrpcHeaders {
+	if len(r.Trailers.PseudoHeaders) > 0 || len(r.Trailers.OrdinaryHeaders) > 0 {
+		return r.Trailers
+	}
+	if _, ok := r.Headers.OrdinaryHeaders["grpc-status"]; ok {
+		return r.Headers
+	}
+	return r.Trailers
+}
+
 func allMessages(head GrpcLengthPrefixedMessage, tail []GrpcLengthPrefixedMessage) []GrpcLengthPrefixedMessage {
 	out := make([]GrpcLengthPrefixedMessage, 0, 1+len(tail))
 	out = append(out, head)

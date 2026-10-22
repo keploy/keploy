@@ -90,7 +90,13 @@ jobs:
           #               error: unhandled builtin recover" on Go 1.26.
           #   v2.13.1  -> honnef v0.8.0      clean on go1.27.0 (verified
           #               locally: `golangci-lint run` reports 0 issues).
-          version: v2.13.1
+          #   v2.13.x  fails on go1.27.2+: "export data version 5 is greater
+          #               than maximum supported version 4" for every stdlib
+          #               import, so lint type-checks nothing.
+          #   v2.14.0  -> first release that reads go1.27.2+ export data; 0
+          #               issues on go1.27.3 (go.mod's go line, the eMudhra
+          #               crypto/x509 fix). Same version keploy-ci-golint ships.
+          version: v2.14.0
           only-new-issues: true
           args: --timeout=5m
 

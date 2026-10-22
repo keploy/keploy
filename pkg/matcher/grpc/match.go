@@ -288,19 +288,46 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare grpc-status trailer — this is the canonical gRPC status code.
 	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
 	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
-	expectedGrpcStatus := parseGrpcStatus(expectedResp.Trailers.OrdinaryHeaders["grpc-status"])
-	actualGrpcStatus := parseGrpcStatus(actualResp.Trailers.OrdinaryHeaders["grpc-status"])
+	//
+	// The recording's status is read as a gRPC client reads it, with the
+	// proven switch on or off: off its trailers when it has any, else off its
+	// one header block when that block carries grpc-status, a Trailers-Only
+	// answer (models.GrpcResp.TrailersAsRead). Read off the trailers alone, a
+	// Trailers-Only answer kept as its headers alone (enterprise's low-latency
+	// recorder before its fix) had no status, which reads as 0 with the switch
+	// off: its recording of NOT_FOUND passed against an app answering OK.
+	// The answer's status is as keploy's replay client, grpc-go, read it
+	// (pkg.SimulateGRPC), or the recording's own where the app sent none (a
+	// stream it held open).
+	expectedStatusText := expectedResp.TrailersAsRead().OrdinaryHeaders["grpc-status"]
+	actualStatusText := actualResp.Trailers.OrdinaryHeaders["grpc-status"]
+	expectedGrpcStatus := parseGrpcStatus(expectedStatusText)
+	actualGrpcStatus := parseGrpcStatus(actualStatusText)
+	statusDiff := grpcDiff{
+		Expected: strconv.Itoa(expectedGrpcStatus),
+		Actual:   strconv.Itoa(actualGrpcStatus),
+		Message:  "grpc-status mismatch",
+	}
+	statusNormal := expectedGrpcStatus == actualGrpcStatus
+	if provenswitch.On() {
+		// Under the proven switch an answer with no grpc-status is not an OK
+		// answer (provenGrpcStatusMatch).
+		expectedGrpcStatus, actualGrpcStatus = provenGrpcStatusCode(expectedStatusText), provenGrpcStatusCode(actualStatusText)
+		statusNormal = provenGrpcStatusMatch(expectedStatusText, actualStatusText)
+		statusDiff.Expected, statusDiff.Actual = shownGrpcStatus(expectedStatusText), shownGrpcStatus(actualStatusText)
+		if _, inHeaders := expectedResp.Headers.OrdinaryHeaders["grpc-status"]; expectedStatusText == "" && !inHeaders && !statusNormal && emitFailureLogs {
+			logger.Warn("the recorded answer has no grpc-status, in its trailers or its headers, which a gRPC client reads as an error, so it matches no answer that carries a status; "+
+				"record the test case again if its recorder lost the status (keploy before v3.6.148 did, for trailers split across CONTINUATION frames)",
+				zap.String("testcase", tc.Name))
+		}
+	}
 	result.StatusCode = models.IntResult{
-		Normal:   expectedGrpcStatus == actualGrpcStatus,
+		Normal:   statusNormal,
 		Expected: expectedGrpcStatus,
 		Actual:   actualGrpcStatus,
 	}
 	if !result.StatusCode.Normal {
-		differences["trailers.grpc-status"] = grpcDiff{
-			Expected: strconv.Itoa(expectedGrpcStatus),
-			Actual:   strconv.Itoa(actualGrpcStatus),
-			Message:  "grpc-status mismatch",
-		}
+		differences["trailers.grpc-status"] = statusDiff
 		currentRisk = models.High
 		currentCategories = append(currentCategories, models.StatusCodeChanged)
 	}
@@ -357,6 +384,10 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 						// Any other body differences
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					}
+				} else if strings.HasPrefix(path, "trailers.") && provenswitch.On() {
+					// Under the proven switch a test that fails on its
+					// grpc-status alone shows it, not an empty diff.
+					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, path, nil)
 				}
 			}
 		} else {
@@ -440,7 +471,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 }
 
 // parseGrpcStatus parses a grpc-status trailer value to int.
-// An empty string (trailer absent) is treated as 0 (OK) — the gRPC default.
+// An empty string (trailer absent) is treated as 0 (OK). That is the
+// comparison with the proven switch off only: no gRPC client reads an answer
+// without grpc-status as OK (provenGrpcStatusMatch).
 func parseGrpcStatus(s string) int {
 	if s == "" {
 		return 0
@@ -452,6 +485,51 @@ func parseGrpcStatus(s string) int {
 		return -1
 	}
 	return n
+}
+
+// provenGrpcStatusMatch reports, under the proven switch, whether two
+// grpc-status trailer values say the same status. Two codes compare as codes.
+// A value that is no code, absent or not a number, matches only the same
+// value: an answer without grpc-status is not an OK one. A gRPC client reads
+// it as an error (grpc-go: UNKNOWN), and a recording that lacks it may have
+// lost it, as keploy's recorder did before v3.6.148 for trailers split across
+// CONTINUATION frames (the call's headers were kept as its trailers), so its
+// status is not known. Read as 0, a failed call recorded so passed against an
+// app that now answers OK.
+//
+// It is not read as UNKNOWN either: keploy's replay client reads the app's
+// answer through grpc-go, which says UNKNOWN for an answer without
+// grpc-status and for one with grpc-status 2 alike, so an answer recorded
+// without its status would pass against an app that now fails UNKNOWN.
+//
+// Two absent values match: the comparison of an answer whose trailers are
+// the recording's own (a stream the app held open, the start of an answer
+// that stalled) is not failed by them.
+func provenGrpcStatusMatch(expected, actual string) bool {
+	e, eErr := strconv.Atoi(expected)
+	a, aErr := strconv.Atoi(actual)
+	if eErr == nil && aErr == nil {
+		return e == a
+	}
+	return expected == actual
+}
+
+// provenGrpcStatusCode is a grpc-status value as the result holds it under
+// the proven switch: -1 for one that is no code, absent too, never 0.
+func provenGrpcStatusCode(s string) int {
+	if s == "" {
+		return -1
+	}
+	return parseGrpcStatus(s)
+}
+
+// shownGrpcStatus is a grpc-status value as a difference shows it under the
+// proven switch: as written, "none" when absent.
+func shownGrpcStatus(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 // grpcDiff is one entry in the differences map. It was an anonymous struct

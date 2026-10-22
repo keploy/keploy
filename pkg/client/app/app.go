@@ -2124,6 +2124,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if composeStopsTheApp() {
 			a.composeApp.halted.Store(nil)
 			a.composeApp.stopping.Store(false)
+			a.composeApp.project.Store(nil)
 			halt := make(chan struct{})
 			composeHaltSeen = halt
 			composeEnd = a.composeHaltEnd(ctx, halt, composeDown)

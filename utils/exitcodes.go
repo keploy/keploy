@@ -26,6 +26,12 @@ import (
 //	         this. A wrapped command's own 1, 3, 4, 5, 6 or 8 reads the same
 //	         as Keploy's codes below: that is the price of passing it
 //	         through untouched.
+//	128+N    a run the user's signal N stopped before it had its verdict
+//	         (SIGINT 130, SIGHUP 129, SIGTERM 143), with no failure armed
+//	         first: `keploy mock replay` (keploy#4700), and `keploy test`
+//	         under KEPLOY_PROVEN=1 (replay.armStoppedRunExitCode). With the
+//	         switch off, a stopped `keploy test` exits 0 unless what it
+//	         reached already fails it.
 //	1        a generic Keploy-side failure
 //	3,4,6    a SPECIFIC Keploy-side failure, listed below (5 is the enterprise
 //	         build's: a command that needs a session it cannot use)
