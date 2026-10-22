@@ -144,17 +144,26 @@ func TestMergeVariableKeepsWordsWithTheBind(t *testing.T) {
 // Backward compatibility (compat audit A6): a rewrite with the switch off (a
 // noise persist, a prune) reads and writes back every mock's words, a newer
 // keploy's entry included, so the next proven run reads what was learned; a
-// mock that carries none is written byte for byte as before.
+// mock that carries none is written byte for byte as before. The gob format
+// (KEPLOY_MOCK_FORMAT=gob) carries them too; its bytes are the gob encoder's,
+// so only the YAML and JSON files are compared byte for byte.
 func TestWordsSurviveASwitchOffRewrite(t *testing.T) {
 	const note, noteF = "ORD-1 paid 100 ref=a1b2", "ORD-1 paid 100 ref=c3d4"
-	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON, mockFormatGob} {
 		t.Run(string(f), func(t *testing.T) {
 			t.Setenv(provenswitch.Env, "")
 			words := learnedWordsOf(t, note, noteF)
 			newer := models.WordsEntry{V: models.WordsVersion + 1, Unknown: `{"digest":"9f2c41d07a3be815","shape":{"k":[1,2]}}`}
 			varWords := learnedWordsOf(t, "k-1", "k-2")
 			dir := t.TempDir()
-			ys := NewWithFormat(zap.NewNop(), dir, "mocks", f)
+			var ys *MockYaml
+			if f == mockFormatGob {
+				SetConfiguredMockFormat(mockFormatGob)
+				t.Cleanup(func() { SetConfiguredMockFormat("") })
+				ys = New(zap.NewNop(), dir, "mocks")
+			} else {
+				ys = NewWithFormat(zap.NewNop(), dir, "mocks", f)
+			}
 			ctx := context.Background()
 			set := "test-set-0"
 			m := noiseTestMock(`{"note":"` + note + `","key":"k-1","other":"o"}`)
@@ -169,7 +178,11 @@ func TestWordsSurviveASwitchOffRewrite(t *testing.T) {
 			if err := ys.Close(); err != nil {
 				t.Fatal(err)
 			}
-			file := filepath.Join(dir, set, "mocks."+f.FileExtension())
+			ext := string(mockFormatGob)
+			if f != mockFormatGob {
+				ext = f.FileExtension()
+			}
+			file := filepath.Join(dir, set, "mocks."+ext)
 			before, err := os.ReadFile(file)
 			if err != nil {
 				t.Fatal(err)
@@ -199,7 +212,7 @@ func TestWordsSurviveASwitchOffRewrite(t *testing.T) {
 				}
 				return b
 			}
-			if !bytes.Equal(first(before), first(after)) {
+			if f != mockFormatGob && !bytes.Equal(first(before), first(after)) {
 				t.Fatalf("the rewrite changed the words-carrying mock's bytes:\n%s\n---\n%s", first(before), first(after))
 			}
 			// A prune that keeps every mock rewrites it too.
