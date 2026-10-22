@@ -26,16 +26,19 @@ var unsaidSwitch = []struct {
 }{
 	{regexp.MustCompile(`\(` + Env + `=1[);]`), "tags the line as the switch's"},
 	{regexp.MustCompile(`\(` + Env + `\)`), "tags the line as the variable's"},
-	{regexp.MustCompile(`\b(under|with|without|unset) ` + Env + `([^=A-Z_]|$)`), `says "under/with/without/unset KEPLOY_PROVEN", which an unset variable no longer means on Linux`},
-	{regexp.MustCompile(`\bwithout ` + Env + `=1`), "says a run without KEPLOY_PROVEN=1 is off, which it is not on Linux"},
-	{regexp.MustCompile(`\bunder ` + Env + `=1\b`), `says a line happens "under KEPLOY_PROVEN=1", a value a user on Linux never set: say "under the proven model" (an instruction to set it, "run X with KEPLOY_PROVEN=1", names how to set it)`},
-	{regexp.MustCompile(Env + ` is not set`), "says the switch is off because the variable is not set, which on Linux it is not"},
-	{regexp.MustCompile(`\bstaging (switch|gate)\b`), "calls the switch a staging gate"},
+	{regexp.MustCompile(`\b(?i:under|with|without|unset) ` + Env + `([^=A-Z_]|$)`), `says "under/with/without/unset KEPLOY_PROVEN", which an unset variable no longer means on Linux`},
+	{regexp.MustCompile(`\b(?i:without) ` + Env + `=1`), "says a run without KEPLOY_PROVEN=1 is off, which it is not on Linux"},
+	{regexp.MustCompile(`\b(?i:under) ` + Env + `=1\b`), `says a line happens "under KEPLOY_PROVEN=1", a value a user on Linux never set: say "under the proven model" (an instruction to set it, "run X with KEPLOY_PROVEN=1", names how to set it)`},
+	{regexp.MustCompile(Env + ` (?i:is not set)`), "says the switch is off because the variable is not set, which on Linux it is not"},
+	{regexp.MustCompile(`\b(?i:staging (switch|gate))\b`), "calls the switch a staging gate"},
 }
 
 // The guard catches each spelling it names, "under KEPLOY_PROVEN=1" among
-// them, which its first pattern let through ("=" ends it), and lets through
-// a message that says how to set the switch. Mutation: drop a pattern.
+// them, which its first pattern let through ("=" ends it), at the start of a
+// sentence too ("Under KEPLOY_PROVEN=1 a skip ...", which keploy
+// enterprise's auto-replay prompt said past a guard that read only the
+// lower case), and lets through a message that says how to set the switch.
+// Mutation: drop a pattern; read a pattern's words in one case only.
 func TestUnsaidSwitchCatchesEachSpelling(t *testing.T) {
 	caught := func(s string) bool {
 		for _, u := range unsaidSwitch {
@@ -56,6 +59,13 @@ func TestUnsaidSwitchCatchesEachSpelling(t *testing.T) {
 		"unset " + Env + " to undo it",
 		Env + " is not set, so it is off",
 		"the staging switch",
+		"Under " + Env + "=1 a skip leaves keploy record with no verdict",
+		"Under " + Env + ", a skip leaves no verdict",
+		"With " + Env + " this runs the proven model",
+		"Without " + Env + "=1 it is off",
+		"Unset " + Env + " to undo it",
+		Env + " Is Not Set, so it is off",
+		"the Staging Gate",
 	} {
 		if !caught(s) {
 			t.Errorf("the guard lets %q through", s)
@@ -67,6 +77,8 @@ func TestUnsaidSwitchCatchesEachSpelling(t *testing.T) {
 		"run keploy mock judge with " + Env + "=1",
 		"the proven model is on, keploy's default on Linux; " + Env + "=0 runs without it",
 		"the agent ignores its " + Env + "=1",
+		"With " + Env + "=1 set, run keploy mock judge",
+		"Set " + Env + "=0 to run without the proven model",
 	} {
 		if caught(s) {
 			t.Errorf("the guard refuses %q, which says how to set the switch", s)
