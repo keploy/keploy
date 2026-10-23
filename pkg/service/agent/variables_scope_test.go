@@ -288,3 +288,87 @@ func TestAKeployTestCasesWindowOpensWithItsVariables(t *testing.T) {
 		})
 	}
 }
+
+// requestProxy is an openerProxy whose learn step reads a test case's own
+// request (coreAgent.TestRequestTaker).
+type requestProxy struct{ openerProxy }
+
+func (p *requestProxy) AwaitTestRequest() { p.log("await") }
+
+func (p *requestProxy) TakeTestRequest(req *models.TestRequest) {
+	if req == nil {
+		p.log("request none")
+		return
+	}
+	p.log("request " + req.Test)
+}
+
+var _ coreAgent.TestRequestTaker = (*requestProxy)(nil)
+
+// A keploy test case's filter hands its request to the learn step before its
+// window opens (the replay sends the request once the filter is answered);
+// a filter that carries none (a keploy older than its agent) is handed as
+// none, which the learn step reads as a request it could not read. A set's
+// staging hands nothing.
+func TestAKeployTestCaseHandsItsRequestToTheLearnStepFirst(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	open := models.MockFilterParams{
+		AfterTime: time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC), BeforeTime: time.Date(2026, 10, 1, 10, 0, 5, 0, time.UTC),
+		TestRequest: &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "/a", Sent: "/a"}}},
+	}
+	unsent := open
+	unsent.TestRequest = nil
+	for _, tc := range []struct {
+		name   string
+		params models.MockFilterParams
+		want   string
+	}{
+		{"with its request", open, "request test-1, open-window"},
+		{"from a keploy older than its agent", unsent, "request none, open-window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &requestProxy{}
+			a := newReplayAgent()
+			a.Proxy = p
+			a.clientMocks.Store(uint64(0), &ClientMockStorage{})
+			if err := a.OpenTestCase(context.Background(), tc.params); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(p.events, ", "); got != tc.want {
+				t.Fatalf("events %s; want %s", got, tc.want)
+			}
+			_ = a.OpenTestCase(context.Background(), models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()})
+			if got := strings.Join(p.events, ", "); got != tc.want {
+				t.Fatalf("after a staging, events %s; want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// keploy test opening a test's capture window tells the learn step the test
+// has a request of its own, which its opening filter brings: until then the
+// learn step reads it as one it could not read. With the switch off it tells
+// nothing.
+func TestKeployTestsCaptureWindowAwaitsTheTestCasesRequest(t *testing.T) {
+	for _, on := range []string{"1", "0"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			p := &requestProxy{}
+			a := newReplayAgent()
+			a.Proxy = p
+			if err := a.BeginTestErrorCapture(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.ContinueTestErrorCapture(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			want := "await, await"
+			if on != "1" {
+				want = ""
+			}
+			if got := strings.Join(p.events, ", "); got != want {
+				t.Fatalf("events %q; want %q", got, want)
+			}
+		})
+	}
+}

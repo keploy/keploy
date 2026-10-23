@@ -1000,3 +1000,55 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 		t.Fatalf("learned %v; want body.processed_at", noise)
 	}
 }
+
+// A slot the app picks by its clock from its test case's own request, which
+// the agent was handed as the test case opened (TakeTestRequest), is refused,
+// naming the request's slot: the learn step's echo reads the request. Handed
+// none (a keploy older than its agent), the call is refused for the request
+// it could not read, never learned as noise.
+func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	book := func() *models.Mock {
+		m := batchMock()
+		m.Spec.HTTPReq.URL, m.Spec.HTTPReq.Body = "/book", `{"slot":"11:14"}`
+		m.Spec.HTTPResp.Header["Content-Length"], m.Spec.HTTPResp.Body = "11", `{"ok":true}`
+		return m
+	}
+	body := `{"slots":["11:13","11:14","11:15"]}`
+	slots := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: body, Sent: body}}}
+	for _, tc := range []struct {
+		name string
+		req  *models.TestRequest
+		want string
+	}{
+		{"handed its request", slots, "carries a moment the test case's own request holds (test case test-1 at body.slots[1])"},
+		{"handed none", nil, "keploy could not read the test case's own request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			p.ContinueTestErrorCapture()
+			p.TakeTestRequest(tc.req)
+			req := `{"slot":"11:15"}`
+			resp, _, _ := learnCall(t, p, book(), "POST /book HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(req))+"\r\n\r\n"+req)
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("the app got %d, want 502", resp.StatusCode)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 || misses[0].Reason != models.MissRequestChanged || !strings.Contains(misses[0].NextSteps, tc.want) {
+				t.Fatalf("misses %+v; want a request_changed naming %q", misses, tc.want)
+			}
+		})
+	}
+	// With the switch off, nothing is handed.
+	t.Setenv(provenswitch.Env, "0")
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	p.learnTracker.Begin()
+	p.TakeTestRequest(slots)
+	if _, earlier, _, _ := p.learnTracker.Test(); len(earlier) != 0 {
+		t.Fatalf("switch off, the tracker holds %+v", earlier)
+	}
+}

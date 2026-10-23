@@ -673,16 +673,17 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 }
 
 // serveExactTest opens test case name on the agent, served exactly its own
-// mocks; vars are the test variables its request carries.
-func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, vars ...models.VariableBinding) error {
+// mocks, with what its opening carries (testOpening).
+func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, open testOpening) error {
 	plan.begin(name)
 	ex := &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)}
 	// keploy record's full round: the recordings it shares with the tests
 	// that ran beside it, after its own.
 	ex.Concurrent = plan.concurrentServing(name)
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
-		Variables: vars,
-		Exact:     ex,
+		Variables:   open.vars,
+		TestRequest: open.request,
+		Exact:       ex,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -723,6 +725,192 @@ func requestVariables(run *templates.Run, tc *models.TestCase) []models.Variable
 		out = append(out, models.VariableBinding{Name: v.Key, Value: v.Value, Recorded: v.Recorded, Mock: "test case " + tc.Name, Place: "request", Given: true})
 	}
 	return out
+}
+
+// testOpening is what the mock filter that opens a test case carries for it
+// (proven switch): the values its request gives (requestVariables), and, in
+// record's full round, its request itself (testRequestOf), which the agent's
+// learn step reads.
+type testOpening struct {
+	vars    []models.VariableBinding
+	request *models.TestRequest
+}
+
+// openingOf is tc's opening.
+func (r *Replayer) openingOf(run *templates.Run, tc *models.TestCase) testOpening {
+	o := testOpening{vars: requestVariables(run, tc)}
+	if r.learning() {
+		o.request = testRequestOf(run, tc, r.config.Path)
+	}
+	return o
+}
+
+// maxTestRequest is the most of a test case's request, in bytes of its
+// parts, recorded and as sent, that the filter carries to the learn step.
+const maxTestRequest = 16 << 20
+
+// testRequestOf is tc's own request, as recorded and as this run sends it
+// (toSend: with its template values), part by part, in a stable order, for
+// record's full round's learn step (models.TestRequest): an HTTP test case's
+// URL, headers, body (read back from its asset where it is kept apart from
+// the test case, against keployPath as the replay reads it) and every part
+// of its form, each as its own part in the order recorded ("form.<key>", a
+// repeated key's later parts "form.<key>#2", ...), a value kept apart and a
+// file's contents read back too; a gRPC test case's headers and every
+// message it sends ("body", then "body#2", ...). A request keploy cannot
+// read here (of another kind, an asset it cannot read, one larger than
+// maxTestRequest) says why, with no parts, and the learn step refuses what
+// only it could account for.
+func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *models.TestRequest {
+	if tc == nil {
+		return nil
+	}
+	out := &models.TestRequest{Test: tc.Name}
+	sent := toSend(run, tc)
+	var parts []models.TestRequestPart
+	size := 0
+	add := func(name, recorded, live string) {
+		parts = append(parts, models.TestRequestPart{Name: name, Recorded: recorded, Sent: live})
+		size += len(recorded) + len(live)
+	}
+	headers := func(prefix string, rec, live map[string]string) {
+		var keys []string
+		for k := range rec {
+			keys = append(keys, k)
+		}
+		for k := range live {
+			if _, ok := rec[k]; !ok {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			add(prefix+k, rec[k], live[k])
+		}
+	}
+	read := func(path string) (string, error) {
+		if keployPath != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(keployPath, path)
+		}
+		b, err := os.ReadFile(path)
+		return string(b), err
+	}
+	// numbered names the n-th part (from 0) of a name: the name, then
+	// "<name>#2", ...
+	numbered := func(name string, n int) string {
+		if n == 0 {
+			return name
+		}
+		return name + "#" + strconv.Itoa(n+1)
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		rec, live := tc.HTTPReq, sent.HTTPReq
+		add("url", rec.URL, live.URL)
+		headers("header.", rec.Header, live.Header)
+		recBody, liveBody := rec.Body, live.Body
+		if rec.Body == "" && rec.BodyRef.Path != "" {
+			b, err := read(rec.BodyRef.Path)
+			if err != nil {
+				out.Unread = "its body is kept apart from the test case (" + rec.BodyRef.Path + "), and keploy could not read it: " + err.Error()
+				return out
+			}
+			recBody = b
+			if live.Body == "" {
+				liveBody = b
+			}
+		}
+		add("body", recBody, liveBody)
+		if rec.Binary != "" || live.Binary != "" {
+			add("binary", rec.Binary, live.Binary)
+		}
+		seen := map[string]int{}
+		for i, f := range rec.Form {
+			var lf models.FormData
+			if i < len(live.Form) {
+				lf = live.Form[i]
+			}
+			name := numbered("form."+f.Key, seen[f.Key])
+			seen[f.Key]++
+			r, l, why := formPart(f, lf, read)
+			if why != "" {
+				out.Unread = "its form part " + name + " " + why
+				return out
+			}
+			add(name, r, l)
+		}
+	case models.GRPC_EXPORT:
+		rec, live := tc.GrpcReq, sent.GrpcReq
+		headers("header.", rec.Headers.PseudoHeaders, live.Headers.PseudoHeaders)
+		headers("header.", rec.Headers.OrdinaryHeaders, live.Headers.OrdinaryHeaders)
+		add("body", rec.Body.DecodedData, live.Body.DecodedData)
+		for i, m := range rec.AdditionalMessages {
+			var lm models.GrpcLengthPrefixedMessage
+			if i < len(live.AdditionalMessages) {
+				lm = live.AdditionalMessages[i]
+			}
+			add(numbered("body", i+1), m.DecodedData, lm.DecodedData)
+		}
+	default:
+		out.Unread = "keploy reads no request of a test case of kind " + string(tc.Kind)
+		return out
+	}
+	if size > maxTestRequest {
+		out.Unread = "it is " + strconv.Itoa(size) + " bytes, recorded and as sent, more than the " + strconv.Itoa(maxTestRequest) + " keploy carries to the learn step"
+		return out
+	}
+	out.Parts = parts
+	return out
+}
+
+// formPart is one part of a test case's form, as recorded (f) and as this
+// run sends it (live): its values, one per line, a value kept apart from the
+// test case and a file's contents read back (read), as the replay reads
+// them to send them. why says why it could not be read, "" when it was.
+func formPart(f, live models.FormData, read func(string) (string, error)) (recorded, sent, why string) {
+	text := func(fd models.FormData) (string, string) {
+		var vals []string
+		for j, v := range fd.Values {
+			// A value kept apart from the test case (the replay reads it
+			// back before it sends the form).
+			if v == "" && len(fd.FileNames) == 0 && j < len(fd.Paths) && fd.Paths[j] != "" {
+				b, err := read(fd.Paths[j])
+				if err != nil {
+					return "", "its value kept apart from the test case (" + fd.Paths[j] + ") could not be read: " + err.Error()
+				}
+				v = b
+			}
+			vals = append(vals, v)
+		}
+		// A file's contents: inline, or from its path.
+		if len(fd.FileNames) > 0 {
+			for j := range fd.FileNames {
+				switch {
+				case j < len(fd.FileContents) && fd.FileContents[j] != nil:
+					vals = append(vals, string(fd.FileContents[j]))
+				case j < len(fd.Paths) && fd.Paths[j] != "":
+					b, err := read(fd.Paths[j])
+					if err != nil {
+						return "", "its file (" + fd.Paths[j] + ") could not be read: " + err.Error()
+					}
+					vals = append(vals, b)
+				}
+			}
+		}
+		return strings.Join(vals, "\n"), ""
+	}
+	recorded, why = text(f)
+	if why != "" {
+		return "", "", why
+	}
+	if live.Key == "" && len(live.Values) == 0 && len(live.FileNames) == 0 {
+		return recorded, recorded, ""
+	}
+	sent, why = text(live)
+	if why != "" {
+		return "", "", why
+	}
+	return recorded, sent, ""
 }
 
 // variableReader reads back the test variables the agent bound in a test.

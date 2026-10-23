@@ -4513,6 +4513,26 @@ func (p *Proxy) SetPoolNames(names []string) error {
 	return nil
 }
 
+// TakeTestRequest gives the learn step the running keploy test case's own
+// request (agent.TestRequestTaker; learn.Tracker.Give), under the proven
+// switch: the test's earliest place, which its echo reads.
+func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
+	if provenswitch.On() {
+		p.learnTracker.Give(learn.GivenRequest(req))
+	}
+}
+
+// AwaitTestRequest marks the running test as one keploy test opened, whose
+// request its opening filter brings (agent.TestRequestTaker;
+// learn.Tracker.Await), under the proven switch.
+func (p *Proxy) AwaitTestRequest() {
+	if provenswitch.On() {
+		p.learnTracker.Await()
+	}
+}
+
+var _ agent.TestRequestTaker = (*Proxy)(nil)
+
 // SetAppClock makes the learn step read the app's clock through f
 // (agent.AppClockSetter).
 func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {

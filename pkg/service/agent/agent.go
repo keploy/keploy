@@ -982,7 +982,17 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 		// uses start here.
 		t.BeginTest()
 	}
+	a.awaitTestRequest()
 	return nil
+}
+
+// awaitTestRequest tells the learn step that the test keploy test opens has
+// a request of its own, which the filter that opens it brings
+// (coreAgent.TestRequestTaker), under the proven switch.
+func (a *Agent) awaitTestRequest() {
+	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok && provenswitch.On() {
+		taker.AwaitTestRequest()
+	}
 }
 
 // ContinueTestErrorCapture opens the next test's capture window, carrying in
@@ -997,6 +1007,7 @@ func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
 			// here.
 			t.BeginTest()
 		}
+		a.awaitTestRequest()
 		return nil
 	}
 	return a.BeginTestErrorCapture(ctx)
@@ -1823,6 +1834,14 @@ type opening struct{ given []models.VariableBinding }
 func (a *Agent) OpenTestCase(ctx context.Context, params models.MockFilterParams) error {
 	if !provenswitch.On() || !params.BeginsTestVariables() {
 		return errors.New("this mock filter opens no test case, and begins no test's variables")
+	}
+	// The test case's own request, for the learn step, before its mocks go
+	// live: the replay sends the request only after the filter is answered.
+	// A filter that carries none (a keploy older than its agent) is given
+	// as such, and the learn step refuses what only the request could
+	// account for.
+	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok {
+		taker.TakeTestRequest(params.TestRequest)
 	}
 	open := &opening{given: params.Variables}
 	if params.Exact != nil {

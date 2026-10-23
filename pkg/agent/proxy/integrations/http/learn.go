@@ -1094,6 +1094,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindVariable:
 			from := l.From
 			switch {
+			case from.Given:
+				// The test case's own request (learn.Earlier.Given): what
+				// the application was given, which no variable binds at.
+				why := r.Path + " carries a moment the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case from.Side == "":
 				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
 				if l.Why != "" {

@@ -2424,7 +2424,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2565,7 +2565,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -3226,11 +3226,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// being pushed (a Pulsar MESSAGE), and a call the app makes at once
 			// in reaction is this test's. Opened after, that miss landed with
 			// no window open and was discarded.
+			// What the filter that opens the test case carries, read before
+			// its capture window opens: the agent's learn step awaits the
+			// request from then on.
+			opening := r.openingOf(tmplRun, testCase)
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
 			if r.exact != nil {
-				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, requestVariables(tmplRun, testCase)...)
+				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, opening)
 			} else {
-				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, testCase)...)
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, &opening)
 			}
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
@@ -4338,11 +4342,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// outgoing mock calls keep happening while CompareHTTPStream consumes
 			// the stream body below. Every exit path therefore calls
 			// attachMockErrors only AFTER stream consumption has finished.
+			// What the filter that opens the test case carries, read before
+			// its capture window opens: the agent's learn step awaits the
+			// request from then on.
+			opening := r.openingOf(tmplRun, tc)
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
 			if r.exact != nil {
-				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, requestVariables(tmplRun, tc)...)
+				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, opening)
 			} else {
-				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, tc)...)
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, &opening)
 			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
@@ -6647,7 +6655,7 @@ func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
 // sending filtered mocks. shape is only meaningful on the set's staging call
 // (see recordedSetShape); pass the zero value on per-test calls.
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape, vars ...models.VariableBinding) error {
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape, open *testOpening) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -6702,7 +6710,11 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		AgentOwnsConsumed:      agentOwnsConsumed,
 		TotalConsumedMocks:     consumedForAgent,
 		StrictMockWindow:       strictMockWindow,
-		Variables:              vars,
+	}
+	// A test case's opening: the values its request gives, and in record's
+	// full round the request itself (testOpening). nil on the set's staging.
+	if open != nil {
+		params.Variables, params.TestRequest = open.vars, open.request
 	}
 	// Under the proven switch the set's staging call (no mapping, from
 	// BaseTime) stages the set once, and the agent then serves its pool
@@ -6903,7 +6915,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases)); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil); err != nil {
 		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
 			return exitErr
 		}

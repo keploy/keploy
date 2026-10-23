@@ -475,6 +475,23 @@ type VariableResetter interface {
 	ResetVariables()
 }
 
+// TestRequestTaker is the optional extension implemented by proxies whose
+// learn step reads a keploy test case's own request (models.TestRequest): the
+// agent hands it the request the filter that opens the test case carries,
+// before the test case's mocks go live (nil: the filter carried none, as a
+// keploy older than its agent sends it). Under the proven switch the learn
+// step's echo reads it as the test's earliest place. A proxy that lacks it
+// reads none.
+//
+// AwaitTestRequest marks the running test as one keploy test opened, whose
+// request its opening filter brings: until TakeTestRequest gives it, the
+// learn step reads the request as one it could not read. The agent calls it
+// as keploy test opens the test's capture window.
+type TestRequestTaker interface {
+	AwaitTestRequest()
+	TakeTestRequest(req *models.TestRequest)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back

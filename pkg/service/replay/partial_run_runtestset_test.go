@@ -1431,7 +1431,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -1443,7 +1443,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {
