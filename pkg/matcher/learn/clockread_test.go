@@ -43,6 +43,7 @@ func TestADriftThatHoldsNothingNewIsRefused(t *testing.T) {
 		{"swapped ids, percent-encoded", "A7K%2CB8L", "B8L%2CA7K", "no word in it is new: only the order of its words changed", []string{"A7K", "B8L"}},
 		{"swapped ids after a JSON escape", `A7K\nB8L`, `B8L\nA7K`, "no word in it is new: only the order of its words changed", []string{"A7K", "B8L"}},
 		{"a sign flip, percent-encoded", "%2D5", "5", "no word in it is new: only a sign or separator between its words changed", []string{"5"}},
+		{"a word held once more", "A7K B8L", "A7K B8L B8L", "no word in it is new: only how many times it holds a word changed", []string{"A7K", "B8L"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := classifyNote(t, tc.rec, tc.live)
@@ -62,6 +63,34 @@ func TestADriftThatHoldsNothingNewIsRefused(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A drift that lost a word, or gained one, holds something new: it is not
+// refused as one whose words only regrouped.
+func TestADriftThatLostOrGainedAWordHoldsSomethingNew(t *testing.T) {
+	for _, tc := range [][2]string{{"A7K B8L", "A7K"}, {"A7K", "A7K B8L"}} {
+		if got := classifyNote(t, tc[0], tc[1]); strings.Contains(got.Why, "no word in it is new") {
+			t.Errorf("%q -> %q refused as %q", tc[0], tc[1], got.Why)
+		}
+	}
+}
+
+// An instant only a value's decoded form shows (its colons percent-encoded)
+// is a clock read of the value, by the lead and within the call's window.
+func TestAnInstantOnlyTheDecodedFormShowsIsAClockRead(t *testing.T) {
+	esc := func(t time.Time) string { return strings.ReplaceAll(t.Format(time.RFC3339), ":", "%3A") }
+	at := time.Date(2026, 10, 21, 10, 28, 2, 0, time.UTC)
+	if d := NewDriftCache().of(esc(at), esc(at.Add(FullRoundLead))); !d.clock.whole {
+		t.Error("moved by the lead: no clock read")
+	}
+	boot := at.Add(4 * time.Minute)
+	w := &Window{Rec: Span{From: at.Add(-time.Second), To: at.Add(time.Second)}, F: Span{From: boot.Add(-time.Second), To: boot.Add(time.Second)}}
+	if d := NewDriftCache().ofIn(esc(at), esc(boot), w); !d.clock.whole {
+		t.Error("read within the window: no clock read")
+	}
+	if d := NewDriftCache().of(esc(at), esc(boot)); d.clock.whole {
+		t.Error("by the lead alone, an instant read within the window is a clock read")
 	}
 }
 

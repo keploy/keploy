@@ -735,6 +735,10 @@ func TestTieOf(t *testing.T) {
 		{"a UUID v7 in a path and a body", [2]string{v7, v7f}, [2]string{v7, v7f}, TieWhole, models.RefusedTie},
 		{"one id at two places", [2]string{"o-1111", "o-9999"}, [2]string{"o-1111", "o-9999"}, TieWhole, models.RefusedTie},
 		{"two fresh ids", [2]string{"r-3f2b8c", "r-a7c4e2"}, [2]string{"n-91d0e3", "n-5be7aa"}, TieNone, ""},
+		// A run of words carried whole inside another value, whose words came back
+		// in another order there: no word of it was lost or gained alone, but the
+		// run drifted as a token of the other (a tie, not a glue).
+		{"a run carried whole inside a value whose words came back in another order", [2]string{"a1 b2", "c3 d4"}, [2]string{"a1 b2 / z", "c3 d4 / b2 a1"}, TiePartial, models.RefusedTie},
 		// A value that did not change is no instant alone, beside one that is; nor
 		// is one that dropped a word beside an instant.
 		{"an unchanged value beside an instant", [2]string{"x", "x"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},

@@ -2,9 +2,14 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/pkg/models"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
@@ -94,4 +99,58 @@ type interruptedSet struct{ *prTestDB }
 
 func (interruptedSet) Interrupted(context.Context, string) error {
 	return fmt.Errorf("%w: test-set-0 holds test-1.yaml.tmp: finish or undo the keploy templatize that wrote it", setfile.ErrReplaceInterrupted)
+}
+
+// filesStore is a mock store that keeps what the learn step learned and
+// writes the set's learned files: it records what each was handed, and its
+// files' write fails with fail.
+type filesStore struct {
+	MockDB
+	persisted map[string]models.MockState
+	files     map[string]map[string]models.MockState
+	fail      error
+}
+
+func (s *filesStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+	s.persisted = states
+	return nil, nil
+}
+
+func (s *filesStore) WriteLearnedFiles(set string, states map[string]models.MockState) error {
+	if s.files == nil {
+		s.files = map[string]map[string]models.MockState{}
+	}
+	s.files[set] = states
+	return s.fail
+}
+
+// Once what the learn step learned is on the set's mocks, the set's learned
+// files are written from the same states; a store whose files' write fails
+// says so in a warning, and the recording is kept all the same.
+func TestPersistLearnedWritesTheSetsLearnedFiles(t *testing.T) {
+	consumed := map[string]models.MockState{"mock-1": {Name: "mock-1"}}
+	store := &filesStore{}
+	core, logs := observer.New(zapcore.WarnLevel)
+	r := &Replayer{mockDB: store, logger: zap.New(core)}
+	if err := r.persistLearned(context.Background(), "test-set-0", consumed, &models.Mapping{}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(store.files, map[string]map[string]models.MockState{"test-set-0": consumed}) || !reflect.DeepEqual(store.persisted, consumed) {
+		t.Fatalf("files written of %v, persisted %v, want the set's consumed states", store.files, store.persisted)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("warned: %v", logs.All())
+	}
+	store.fail = errors.New("disk full")
+	if err := r.persistLearned(context.Background(), "test-set-0", consumed, &models.Mapping{}); err != nil {
+		t.Fatalf("a failed write of the learned files failed the set: %v", err)
+	}
+	if logs.FilterMessageSnippet("its learned files were not written").FilterField(zap.String("testSetID", "test-set-0")).Len() != 1 {
+		t.Fatalf("no warning that the learned files were not written: %v", logs.All())
+	}
+	for _, e := range logs.All() {
+		if fmt.Sprint(e.ContextMap()["error"]) != "disk full" {
+			t.Fatalf("the warning does not say why: %v", e.ContextMap())
+		}
+	}
 }

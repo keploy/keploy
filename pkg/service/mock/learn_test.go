@@ -2,12 +2,15 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A record's full round keeps what it learned only on the recordings the
@@ -71,5 +74,55 @@ func TestPersistLearnedSaysEveryField(t *testing.T) {
 	bound := []models.MockState{{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-old": {"id": {Recorded: "1", Bind: "body.id"}}}}}
 	if _, _, err := m.persistLearned(context.Background(), "s", bound, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-old"}}}); err == nil {
 		t.Fatal("a bind onto a recording the record did not make was written")
+	}
+}
+
+// filesStore is a learnedStore that writes the set's learned files: it
+// records the states each write was handed, and fails with fail.
+type filesStore struct {
+	learnedStore
+	files map[string]map[string]models.MockState
+	fail  error
+}
+
+func (s *filesStore) WriteLearnedFiles(set string, states map[string]models.MockState) error {
+	if s.files == nil {
+		s.files = map[string]map[string]models.MockState{}
+	}
+	s.files[set] = states
+	return s.fail
+}
+
+// The set's learned files are written from the states the learn step wrote
+// onto the set's mocks (those of the tests the record made); a write that
+// fails is a warning, and the recording is kept all the same.
+func TestPersistLearnedWritesTheSetsLearnedFiles(t *testing.T) {
+	store := &filesStore{}
+	core, logs := observer.New(zapcore.WarnLevel)
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.New(core)}
+	m.config.Test.LearnTests = map[string]bool{"o::A": true}
+	consumed := []models.MockState{{Name: "mock-1"}, {Name: "mock-2"}}
+	expected := map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-2"}}}
+	if _, _, err := m.persistLearned(context.Background(), "s", consumed, nil, expected); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]models.MockState{"mock-1": {Name: "mock-1"}}
+	if !reflect.DeepEqual(store.files, map[string]map[string]models.MockState{"s": want}) || !reflect.DeepEqual(store.got, want) {
+		t.Fatalf("files written of %v, persisted %v, want the record's own test's states", store.files, store.got)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("warned: %v", logs.All())
+	}
+	store.fail = errors.New("disk full")
+	if _, _, err := m.persistLearned(context.Background(), "s", consumed, nil, expected); err != nil {
+		t.Fatalf("a failed write of the learned files failed the round: %v", err)
+	}
+	if logs.FilterMessageSnippet("its learned files were not written").FilterField(zap.String("set", "s")).Len() != 1 {
+		t.Fatalf("no warning that the learned files were not written: %v", logs.All())
+	}
+	for _, e := range logs.All() {
+		if e.ContextMap()["error"] != "disk full" {
+			t.Fatalf("the warning does not say why: %v", e.ContextMap())
+		}
 	}
 }
