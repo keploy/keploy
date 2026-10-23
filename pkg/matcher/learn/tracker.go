@@ -753,3 +753,16 @@ func TrackerFrom(ctx context.Context) *Tracker {
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
 	return t
 }
+
+// State is the running test's number, whether a test is open (Begin, until
+// End) and whether one has begun in this set (Begin, until NewSet), in one
+// read: Test, Open and Begun without the copies Test makes. A nil tracker
+// answers 0, true, true, as Open and Begun do.
+func (t *Tracker) State() (number uint64, open, began bool) {
+	if t == nil {
+		return 0, true, true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.epoch, t.open, t.began
+}

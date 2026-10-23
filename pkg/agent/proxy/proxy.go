@@ -4156,7 +4156,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		p.missCutPending.Store(true)
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
-		p.learnTracker.NewSet()
+		p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
 	}
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
@@ -4520,6 +4520,20 @@ func (p *Proxy) SetPoolNames(names []string) error {
 	}
 	m.SetPoolNames(names)
 	return nil
+}
+
+// learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
+// proxy's learn tracker through the mock manager it holds
+// (MockManager.LearnBoundary): holding the manager's round lock, so a learn
+// step's one read of the round (integrations.RoundReader) sees the tracker
+// and the store's view of one instant. With no manager, on the tracker
+// alone.
+func (p *Proxy) learnBoundary(step func(*learn.Tracker)) {
+	if mm := p.getMockManager(); mm != nil {
+		mm.LearnBoundary(p.learnTracker, step)
+		return
+	}
+	step(p.learnTracker)
 }
 
 // TakeTestRequest gives the learn step the running keploy test case's own
@@ -5045,7 +5059,7 @@ func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true) }
 func (p *Proxy) openTestErrorCapture(carry bool) {
 	if provenswitch.On() {
 		// The learn step's earlier places are the running test's.
-		p.learnTracker.Begin()
+		p.learnBoundary(func(t *learn.Tracker) { t.Begin() })
 	}
 	acc := &testErrorAccumulator{}
 	p.captureMu.Lock()
@@ -5146,7 +5160,7 @@ func missSummaries(errs []error) []string {
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
 func (p *Proxy) EndTestErrorCapture() []error {
 	if provenswitch.On() {
-		p.learnTracker.End()
+		p.learnBoundary(func(t *learn.Tracker) { t.End() })
 	}
 	acc := p.activeTestErrors.Swap(nil)
 	p.testWindows.Add(1)
@@ -5251,7 +5265,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		p.testWindows.Add(1)
 		if provenswitch.On() {
 			// The test is over: no test is open until the next one begins.
-			p.learnTracker.End()
+			p.learnBoundary(func(t *learn.Tracker) { t.End() })
 		}
 	} else {
 		// Rendezvous could not complete (the drain stopped, or the caller gave

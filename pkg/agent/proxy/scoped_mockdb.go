@@ -326,6 +326,37 @@ var (
 	_ integrations.Pairing         = (*scopedMockDb)(nil)
 )
 
+// RoundSnapshot, WithinRound, ClaimPairingIn, SpendByKindIn and TakenLog
+// forward the store's one read of exact serving's round
+// (integrations.RoundReader). A view passes everything through to its
+// store under exact serving (passThrough), the only time a round is read:
+// a parser on a view made before exact serving began reads and takes as it
+// does on the bare manager. A store that reads no round answers none.
+func (s *scopedMockDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	return integrations.SnapshotRound(s.MockMemDb, q)
+}
+
+func (s *scopedMockDb) WithinRound(at integrations.RoundAt) integrations.RoundScope {
+	return integrations.WithinRound(s.MockMemDb, at)
+}
+
+func (s *scopedMockDb) ClaimPairingIn(m *models.Mock, at integrations.RoundAt) (bool, bool, string) {
+	return integrations.ClaimPairingIn(s.MockMemDb, m, at)
+}
+
+func (s *scopedMockDb) SpendByKindIn(m *models.Mock, at integrations.RoundAt) (bool, bool, string) {
+	return integrations.SpendByKindIn(s.MockMemDb, m, at)
+}
+
+func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take {
+	if r, ok := s.MockMemDb.(integrations.RoundReader); ok {
+		return r.TakenLog(epoch, from, to)
+	}
+	return nil
+}
+
+var _ integrations.RoundReader = (*scopedMockDb)(nil)
+
 // FindStagedNotOwned forwards the store's lookup of a staged mock the open
 // test does not own (integrations.StagedFinder), "" from a store that has
 // none: under exact serving a Generic miss on a view made before it began is

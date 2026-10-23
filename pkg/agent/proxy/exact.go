@@ -138,6 +138,18 @@ type exactView struct {
 	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
 	outside *outsideAnswers
 	epoch   *atomic.Uint64
+
+	// round is the round's generation this view was installed at
+	// (roundState.gen), set holding the round lock before the view is
+	// visible. learnNumber is, on a test's view, the learn tracker's test
+	// it is bound to (learnBound: the tracker's boundaries reach this
+	// manager, LearnBoundary): a tracker whose open test is another is at a
+	// boundary (integrations.RoundBoundary). Set once, holding the round
+	// lock: at the install (roundState.bindLocked), or at the tracker's
+	// begin after it.
+	round       uint64
+	learnNumber uint64
+	learnBound  bool
 }
 
 // exactState is a manager's exact serving: off until the agent turns it on
@@ -188,6 +200,10 @@ type exactState struct {
 	// claims are the shared recordings the tests of the current staging
 	// answered with (exactClaims).
 	claims exactClaims
+	// round is what exact serving's round changes holding its one lock
+	// (exact_round.go): the generation, the take log, the learn tracker's
+	// boundaries.
+	round roundState
 	// beforeInstall, beforeBump and onClosedWait are test seams, nil outside
 	// tests: beforeInstall runs after a view is closed (closeAhead) and
 	// before its replacement is installed; beforeBump once installExact has
@@ -402,11 +418,17 @@ func (m *MockManager) prepareOutside() {
 // staging answer again, and key's stateful cursors (exactCursorKey) start
 // over. No other key's are touched: pool slices name disjoint recordings.
 func (m *MockManager) RestartExactKey(key string, names []string) {
+	// One step of the round (exact_round.go): a snapshot reads each name
+	// spent and in the take log, or answering again and given back there,
+	// never shown and taken both.
+	m.lockRound()
 	if st := m.exact.outside.cur.Load(); st != nil {
 		for _, n := range names {
 			st.spent.Delete(n)
 		}
 	}
+	m.restoreLocked(names)
+	m.exact.round.mu.Unlock()
 	// A carry-over mock of the pool the app consumed as it started is the
 	// retried package's to consume again.
 	m.forgetBootTaken(names)
@@ -729,7 +751,6 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
 	}
-	m.exact.claims.release(m.stagingEpoch.Load(), test)
 	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands))}
 	v.addOwned(owned)
 	if n := len(v.owned); len(cands) > 0 {
@@ -764,10 +785,17 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		v.carried[a.owned.Name] = true
 	}
 	install := func() {
-		m.exact.begun.add(m.stagingEpoch.Load(), owned)
-		m.exact.fired.Store(true)
-		m.exact.last.Store(v)
-		m.installExact(v)
+		// One step with the swap, holding the round lock: no snapshot sees
+		// the claims of a retried test released, its mocks begun, or its
+		// carried answers, before the view that holds them.
+		m.installExactWith(v, func(r *roundState) {
+			epoch := m.stagingEpoch.Load()
+			m.exact.claims.release(epoch, test)
+			m.exact.begun.add(epoch, owned)
+			m.exact.fired.Store(true)
+			m.exact.last.Store(v)
+			m.settleAheadLocked(r, answered, v, func(name string) (bool, bool) { return v.carried[name], false })
+		})
 	}
 	if begin {
 		// What the test's calls in flight bound is read before the
@@ -804,6 +832,9 @@ type aheadAnswer struct{ owned, served *models.Mock }
 // one that comes in between waits for the next view (closedWait), and is
 // settled there.
 func (m *MockManager) closeAhead() (answered []aheadAnswer, ahead []string) {
+	// A close changes nothing a snapshot of the round reads (its answers are
+	// final under the view's own lock, which every consume checks closed
+	// under): what moves the round is the install that follows.
 	prev := m.exact.view.Load()
 	if prev == nil || prev.test != "" || len(prev.owned) == 0 {
 		return nil, nil
@@ -952,7 +983,9 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 		}
 	}
 	m.aheadVars.StartCarrying(nil, bound)
-	m.installExact(v)
+	m.installExactWith(v, func(r *roundState) {
+		m.settleAheadLocked(r, answered, v, func(name string) (bool, bool) { return false, kept[name] })
+	})
 	for _, a := range answered {
 		if !kept[a.owned.Name] && m.logger != nil {
 			m.logger.Debug("a call answered in the gap as the next test's is not the next test's: the one named did not open",
@@ -983,7 +1016,12 @@ func (m *MockManager) ServeExactWorker(names []string) {
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
 // and so does the window signal.
-func (m *MockManager) installExact(v *exactView) {
+func (m *MockManager) installExact(v *exactView) { m.installExactWith(v, nil) }
+
+// installExactWith is installExact that runs under, when not nil, holding the
+// round lock in the step that moves the round's generation and swaps v in:
+// what it changes is seen by a snapshot with v, never before it.
+func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if v.test == "" {
 		key := v.poolKey
@@ -1001,12 +1039,26 @@ func (m *MockManager) installExact(v *exactView) {
 			v.workerOrder = w.order
 		}
 	}
+	// The generation moves, and the learn tracker's open test is bound to a
+	// test's view, before the view is visible: holding the round lock, which
+	// every snapshot reads under.
+	m.lockRound()
+	r := &m.exact.round
+	r.bump("a view was installed")
+	v.round = r.gen
+	if v.test != "" {
+		r.bindLocked(v)
+	}
+	if under != nil {
+		under(r)
+	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
 		prev.mu.Lock()
 		prev.closed = true
 		prev.mu.Unlock()
 	}
+	r.mu.Unlock()
 	if m.exact.beforeBump != nil {
 		m.exact.beforeBump(prev)
 	}
@@ -1364,8 +1416,48 @@ const (
 // moved, and is settled against that one (closedWait), as one that came a
 // moment later would be.
 func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
+	return m.exactConsumeAt(mk, evicts, nil, nil)
+}
+
+// exactConsumeAt is exactConsume that tells the served observer (observe,
+// when not nil, once) in the step that settles the consume, and, with g,
+// settles it only while the store is still at g's round (roundGuard): a
+// consume decided on a snapshot never lands in another staging, view or
+// learn test, and one refused for that tells the observer nothing. Each
+// settle holds the round lock (exact_round.go), as every snapshot does, so a
+// snapshot sees a consume, its take and the observer's account of it all,
+// or none of them.
+func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, observe func()) exactVerdict {
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
-		return m.exactConsumeIn(v, mk, evicts)
+		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name)) {
+			if _, own := v.index[mk.Name]; !own {
+				// What a spend reads (consumeOutside), and the staged
+				// recording its take names (stagedRecording), before the
+				// round lock: it reads the staging under swapMu.
+				m.prepareOutside()
+			}
+		}
+		m.lockRound()
+		// A take the round moved under is refused, or waits for the install
+		// its closing view announces and is settled again in the view that
+		// follows (where the round moved): either way before the served
+		// observer is told, of a mock nothing served.
+		if ok, wait := m.guardLocked(g, v); !ok {
+			return exactRefused, wait
+		}
+		if observe != nil {
+			observe()
+			observe = nil
+		}
+		verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
+		m.exact.round.mu.Unlock()
+		if f := m.exact.round.onSettled; f != nil && verdict == exactServed {
+			f()
+		}
+		if after != nil {
+			after()
+		}
+		return verdict, wait
 	})
 }
 
@@ -1391,12 +1483,15 @@ func settleInForce[T any](m *MockManager, refused T, settle func(v *exactView) (
 	}
 }
 
-// exactConsumeIn is exactConsume settled against v. wait, when not nil, says
-// v is closed: nothing was settled, and the consume is to be settled again
-// once wait is closed.
-func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool) (exactVerdict, <-chan struct{}) {
+// exactConsumeIn is exactConsume settled against v, holding the round lock:
+// what it takes is written to the staging's take log in the same step.
+// wait, when not nil, says v is closed: nothing was settled, and the consume
+// is to be settled again once wait is closed. after, when not nil, is what
+// the consume tells the replay and the parsers' indexes, to run once the
+// round lock is let go.
+func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool) (exactVerdict, <-chan struct{}, func()) {
 	if v == nil || mk == nil {
-		return exactPass, nil
+		return exactPass, nil, nil
 	}
 	// The open test's mocks, or a pool view's ahead (the next test's mocks
 	// in flight when it began): each answers once.
@@ -1406,22 +1501,22 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			// before this begin) answers for nothing now. A mock a parser
 			// built by name carries no view, and is the open test's.
 			if g := mk.TestModeInfo.ServedIn; g != 0 && g != v.gen {
-				return exactRefused, nil
+				return exactRefused, nil, nil
 			}
 			v.mu.Lock()
 			if wait := v.closedWait(); wait != nil {
 				v.mu.Unlock()
-				return exactRefused, wait
+				return exactRefused, wait, nil
 			}
 			if v.consumed[i] {
 				v.mu.Unlock()
-				return exactRefused, nil
+				return exactRefused, nil, nil
 			}
 			// A shared recording answers once in the staging: for the
 			// first of the tests it is shared with to make its call.
 			if v.isCand(i) && !m.exact.claims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
 				v.mu.Unlock()
-				return exactRefused, nil
+				return exactRefused, nil, nil
 			}
 			v.consumed[i] = true
 			v.order = append(v.order, i)
@@ -1432,17 +1527,19 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 				// ended test's drain does not read it.
 				v.served[i] = mk.ShallowCopy()
 				v.mu.Unlock()
-				m.bumpRevisionKind(owned.Kind)
-				m.bumpRevisionAll()
-				return exactServed, nil
+				m.takeLocked(integrations.Take{Mock: owned, How: integrations.TakeConsumed, Gen: v.round, Ahead: true})
+				return exactServed, nil, func() {
+					m.bumpRevisionKind(owned.Kind)
+					m.bumpRevisionAll()
+				}
 			}
 			v.mu.Unlock()
-			m.noteExactServed(owned, mk)
-			return exactServed, nil
+			m.takeLocked(integrations.Take{Mock: owned, How: integrations.TakeConsumed, Gen: v.round, Test: v.test})
+			return exactServed, nil, func() { m.noteExactServed(owned, mk) }
 		}
 	}
 	if !v.shows(mk) {
-		return exactRefused, nil
+		return exactRefused, nil, nil
 	}
 	// One of the worker scope's answers at most one request in the staging,
 	// as a test's own mock does in its test, through whichever door a parser
@@ -1450,7 +1547,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// MarkMockAsUsed) spends it too.
 	worker := v.isWorker(mk.Name) && !mk.IsProtocolPhase()
 	if !evicts && !worker {
-		return exactPass, nil
+		return exactPass, nil, nil
 	}
 	// A data-plane recording consumed through a delete door with no test
 	// open, and one of the worker scope's whether a test is open or not, is
@@ -1458,37 +1555,37 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// is one of the pool's a test consumes under S12's background rules:
 	// the background is the set's, whoever's call it answers.
 	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
-		m.prepareOutside()
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
 		v.mu.Lock()
 		if wait := v.closedWait(); wait != nil {
 			v.mu.Unlock()
-			return exactRefused, wait
+			return exactRefused, wait, nil
 		}
 		verdict := m.consumeOutside(mk)
 		v.mu.Unlock()
-		if verdict == exactServed {
-			m.noteExactSpent(mk)
+		if verdict != exactServed {
+			return verdict, nil, nil
 		}
-		return verdict, nil
+		m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test})
+		return verdict, nil, func() { m.noteExactSpent(mk) }
 	}
 	v.mu.Lock()
 	if wait := v.closedWait(); wait != nil {
 		v.mu.Unlock()
-		return exactRefused, wait
+		return exactRefused, wait, nil
 	}
 	if v.spent[mk.Name] {
 		v.mu.Unlock()
-		return exactRefused, nil
+		return exactRefused, nil, nil
 	}
 	if v.spent == nil {
 		v.spent = map[string]bool{}
 	}
 	v.spent[mk.Name] = true
 	v.mu.Unlock()
-	m.noteExactSpent(mk)
-	return exactServed, nil
+	m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test, ForView: true})
+	return exactServed, nil, func() { m.noteExactSpent(mk) }
 }
 
 // closedWait is, with v.mu held, nil while v is open, else a channel that is
@@ -1532,15 +1629,31 @@ func (m *MockManager) waitReplaced(wait <-chan struct{}) {
 	<-wait
 }
 
-// exactConsumeValue is exactConsume for a door that takes the mock by value.
-// Its copy is made only under exact serving: a door taking the mock's
-// address would move every consume's mock to the heap, switch on or off.
-func (m *MockManager) exactConsumeValue(mock models.Mock, evicts bool) exactVerdict {
+// exactConsumeValueAt is exactConsumeAt for a door that takes the mock by
+// value, which tells the served observer of a copy of its own when observe
+// is set: first, with exact serving off; in the step that settles the
+// consume, holding the round lock, under it. Its copy is made only under
+// exact serving: a door taking the mock's address would move every
+// consume's mock to the heap, switch on or off. With g, exact serving off
+// refuses the consume, telling the observer nothing: no round is read
+// without it.
+func (m *MockManager) exactConsumeValueAt(mock models.Mock, evicts bool, g *roundGuard, observe bool) exactVerdict {
 	if m.exactView() == nil {
+		if g != nil {
+			g.refuse("exact serving is off")
+			return exactRefused
+		}
+		if observe {
+			m.observeServedCopy(mock)
+		}
 		return exactPass
 	}
 	mk := mock
-	return m.exactConsume(&mk, evicts)
+	var tell func()
+	if observe {
+		tell = func() { m.observeServedCopy(mk) }
+	}
+	return m.exactConsumeAt(&mk, evicts, g, tell)
 }
 
 // dataPlaneTyped is MockState.DataPlane for mk: a test mock whose type tag

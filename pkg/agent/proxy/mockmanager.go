@@ -620,8 +620,11 @@ func (m *MockManager) ResetForReplaySession() {
 	// goes on serving, until the agent serves the next session, only the
 	// protocol-phase mocks of what is staged: no data-plane mock of the
 	// previous session answers an application kept alive across them.
+	m.lockRound()
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
+	m.exact.round.bound = nil
+	m.exact.round.mu.Unlock()
 	// Nor any of its worker scope (models.Mapping.Worker), or its recording
 	// source: names are unique only within a set, and the next set names its
 	// own.
@@ -1212,7 +1215,7 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 	ownForStaging(&filtered, &unfiltered)
 	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
 	// the zero-window staging below leaves alone.
-	m.stagingEpoch.Add(1)
+	m.bumpStagingEpoch()
 	m.carry.reset()
 	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
 	// A zero window is no time window: the per-test tier takes filtered as
@@ -1411,7 +1414,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if isInitialStaging {
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
-		m.stagingEpoch.Add(1)
+		m.bumpStagingEpoch()
 		// The carry-over tier and its lookahead bookkeeping belong to that
 		// snapshot too.
 		m.carry.reset()
@@ -3246,7 +3249,12 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
-	m.observeServed(new)
+	return m.updateUnFilteredMock(old, new, nil)
+}
+
+// updateUnFilteredMock is UpdateUnFilteredMock, settled under exact serving
+// only while the store is at g's round when g is set (WithinRound).
+func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g *roundGuard) bool {
 	// The copy the parser reports carries what it detected and what the
 	// learn step learned onto the recording; the exact view knows it by
 	// name, as it knows old.
@@ -3254,11 +3262,21 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if served == nil {
 		served = old
 	}
-	switch m.exactConsume(served, false) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
+	if m.exactView() == nil {
+		if g != nil {
+			g.refuse("exact serving is off")
+			return false
+		}
+		m.observeServed(new)
+	} else {
+		// Under exact serving the served observer is told in the step that
+		// settles the consume, holding the round lock (exactConsumeAt).
+		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new) }) {
+		case exactServed:
+			return true
+		case exactRefused:
+			return false
+		}
 	}
 	if old != nil && m.stalePooled(old) {
 		return false
@@ -3386,8 +3404,13 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	m.observeServedCopy(mock)
-	switch m.exactConsumeValue(mock, true) {
+	return m.deleteFilteredMock(mock, nil)
+}
+
+// deleteFilteredMock is DeleteFilteredMock, settled under exact serving only
+// while the store is at g's round when g is set (WithinRound).
+func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
+	switch m.exactConsumeValueAt(mock, true, g, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3474,7 +3497,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	// Returning true here keeps the caller contract ("consumed, stop looping")
 	// exactly as it was, while the mock that actually gets consumed is now the
 	// one the caller matched instead of whatever shared its key.
-	if m.deleteStartupMock(mock) {
+	if m.deleteStartupMock(mock, nil, false) {
 		return true
 	}
 	// Last, the carry-over tier (models.CarryOverKind kinds only): a mock
@@ -3524,8 +3547,13 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	m.observeServedCopy(mock)
-	switch m.exactConsumeValue(mock, true) {
+	return m.deleteUnFilteredMock(mock, nil)
+}
+
+// deleteUnFilteredMock is DeleteUnFilteredMock, settled under exact serving
+// only while the store is at g's round when g is set (WithinRound).
+func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool {
+	switch m.exactConsumeValueAt(mock, true, g, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3625,17 +3653,19 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // connection-tier mock, or a prior DeleteStartupMock already consumed
 // it).
 func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
-	m.observeServedCopy(mock)
-	return m.deleteStartupMock(mock)
+	return m.deleteStartupMock(mock, nil, true)
 }
 
-// deleteStartupMock is DeleteStartupMock without telling the served
-// observer: for a caller that told it already.
-func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
+// deleteStartupMock is DeleteStartupMock, telling the served observer only
+// with observe (a caller that told it already does not), and settled under
+// exact serving only while the store is at g's round when g is set
+// (WithinRound).
+func (m *MockManager) deleteStartupMock(mock models.Mock, g *roundGuard, observe bool) bool {
 	if mock.Name == "" {
+		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValue(mock, true) {
+	switch m.exactConsumeValueAt(mock, true, g, observe) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3933,11 +3963,17 @@ func (m *MockManager) signalWindowChange() {
 // stays at 0 or 1 since they're consumed on match so the bump has no
 // semantic meaning but is harmless.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
-	m.observeServedCopy(mock)
+	return m.markMockAsUsed(mock, nil)
+}
+
+// markMockAsUsed is MarkMockAsUsed, settled under exact serving only while
+// the store is at g's round when g is set (WithinRound).
+func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 	if mock.Name == "" {
+		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValue(mock, false) {
+	switch m.exactConsumeValueAt(mock, false, g, true) {
 	case exactServed:
 		return true
 	case exactRefused:

@@ -230,19 +230,50 @@ func (m *MockManager) KindBackground(kind models.Kind) (unused, spent []*models.
 // revisions moved, and spends against that one (closedWait), as exactConsume
 // does. While a view is in force, its close never refuses a spend.
 func (m *MockManager) SpendByKind(mk *models.Mock) bool {
-	return settleInForce(m, false, func(v *exactView) (bool, <-chan struct{}) {
-		return m.spendByKindIn(v, mk)
-	})
+	ok, _ := m.spendByKindAt(mk, nil)
+	return ok
 }
 
-// spendByKindIn is SpendByKind settled against v. wait, when not nil, says v
-// is closed: nothing was spent, and the spend is to be settled again once
-// wait is closed.
+// spendByKindAt is SpendByKind settled holding the round lock, its take
+// written to the staging's take log in the same step, and, with g, only
+// while the store is still at g's round. why says what refused it.
+func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool, why string) {
+	why = "it is no unused background recording of the set"
+	spent = settleInForce(m, false, func(v *exactView) (bool, <-chan struct{}) {
+		if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) {
+			if g != nil && v == nil {
+				why = "exact serving is off"
+			}
+			return false, nil
+		}
+		m.prepareOutside()
+		m.lockRound()
+		// Refused when the round moved; settled again in the view that
+		// replaces a closing one, where it did (exactConsumeAt).
+		if ok, wait := m.guardLocked(g, v); !ok {
+			if g.moved != "" {
+				why = g.moved
+			}
+			return false, wait
+		}
+		ok, wait := m.spendByKindIn(v, mk)
+		m.exact.round.mu.Unlock()
+		if ok {
+			why = ""
+			m.noteExactSpent(mk)
+		}
+		return ok, wait
+	})
+	return spent, why
+}
+
+// spendByKindIn is SpendByKind settled against v, holding the round lock.
+// wait, when not nil, says v is closed: nothing was spent, and the spend is
+// to be settled again once wait is closed.
 func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan struct{}) {
 	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) || v.spentBackground(mk.Name) {
 		return false, nil
 	}
-	m.prepareOutside()
 	// The view's closed check and the spend are one step, as exactConsume's.
 	v.mu.Lock()
 	if wait := v.closedWait(); wait != nil {
@@ -254,7 +285,7 @@ func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan
 	if verdict != exactServed {
 		return false, nil
 	}
-	m.noteExactSpent(mk)
+	m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test})
 	return true, nil
 }
 
@@ -418,13 +449,49 @@ func (m *MockManager) PairingCandidates(kind models.Kind) []*models.Mock {
 // session does not pair. A claim is no consumption: mk stays its owner's,
 // and its owner's test may still consume it.
 func (m *MockManager) ClaimPairing(mk *models.Mock) bool {
+	ok, _ := m.claimPairingAt(mk, nil)
+	return ok
+}
+
+// claimPairingAt is ClaimPairing holding the round lock, the claim written
+// to the staging's take log in the same step, and, with g, only while the
+// store is still at g's round. why says what refused it.
+func (m *MockManager) claimPairingAt(mk *models.Mock, g *roundGuard) (claimed bool, why string) {
+	for {
+		m.lockRound()
+		ok, wait := m.guardLocked(g, m.exactView())
+		if ok {
+			claimed, why = m.claimPairingLocked(mk)
+			m.exact.round.mu.Unlock()
+			return claimed, why
+		}
+		if wait == nil {
+			return false, g.moved
+		}
+		// The view is closing: the round moves once its replacement is in
+		// force, and the claim is refused for that then.
+		m.waitReplaced(wait)
+	}
+}
+
+// claimPairingLocked is ClaimPairing holding the round lock.
+func (m *MockManager) claimPairingLocked(mk *models.Mock) (claimed bool, why string) {
 	v, epoch := m.pairing()
-	if v == nil || mk == nil || mk.IsProtocolPhase() || mk.IsAsync() || !m.ownedElsewhere(v, mk.Name) {
-		return false
+	switch {
+	case v == nil:
+		return false, "the session does not pair"
+	case mk == nil || mk.IsProtocolPhase() || mk.IsAsync():
+		return false, "it is no recording a pairing may take"
+	case !m.ownedElsewhere(v, mk.Name) || m.takenInStagingLocked(mk.Name):
+		return false, "it is no other test's recording the set left unused: the background's, the view's own, or consumed, spent or claimed in the staging"
 	}
 	// The claim is the one guard against a second: one step, so two calls
 	// that race for a recording never both take it.
-	return m.exact.claimed.claim(epoch, mk.Name)
+	if !m.exact.claimed.claim(epoch, mk.Name) {
+		return false, "another call claimed it already"
+	}
+	m.takeLocked(integrations.Take{Mock: mk, How: integrations.TakeClaimed, Gen: v.round, Test: v.test})
+	return true, ""
 }
 
 var _ integrations.Pairing = (*MockManager)(nil)

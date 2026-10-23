@@ -329,7 +329,7 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	mm.ServeExactPool("-", nil)
 	// The race: a consume that loaded v before the swap.
 	mk := *held[0]
-	verdict, wait := mm.exactConsumeIn(v, &mk, true)
+	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true)
 	if verdict != exactRefused || wait == nil {
 		t.Fatalf("a consume in a replaced view: %v, wait %v; want refused, to be settled in the view in force", verdict, wait)
 	}
