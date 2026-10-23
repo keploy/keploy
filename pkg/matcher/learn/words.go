@@ -353,7 +353,6 @@ const (
 	whyScript     = "a part of it with text beyond ASCII changed how its words are split"
 	whyMoved      = "a word of it that changed stands elsewhere in it on the other side: its words moved, which is no fresh value"
 	whyCase       = "only the case of a word of it changed"
-	whyEmpty      = "a word of it that changed is empty on one side"
 	whyEscape     = "a word of it that changed stands right after a '%' or '\\', an escape keploy does not read apart"
 	whyInstant    = "a word of it that changed is part of an instant that did not move as F's clock moves it, so it is no clock read keploy may learn"
 	whyZone       = "a word of it that changed is part of an instant written in another zone than when it was recorded, which F's clock does not account for"
@@ -450,19 +449,26 @@ func learnWords(rec, live string, c clockSet) (models.WordsEntry, string) {
 		slots = append(slots, models.WordSlot{Seg: g, Kind: models.WordSlotToken})
 		spans = append(spans, changedSpan{seg: g, kind: models.WordSlotToken, r: [2]int{rs.from, rs.to}, l: [2]int{fs.from, fs.to}})
 	}
-	if len(slots) == 0 {
-		return models.WordsEntry{}, whySeparators
-	}
+	// (A value that changed holds a slot: its segments, the separators
+	// between them and the gaps between a segment's runs stand alike, so
+	// some instant, run or segment differs, and each makes one.)
 	if why := checkSlots(rec, live, tr, tf, spans, c); why != "" {
 		return models.WordsEntry{}, why
 	}
-	return models.WordsEntry{V: models.WordsVersion, Digest: wordsDigest(rec), Layout: layoutHash(tr), Slots: models.SortWordSlots(slots)}, ""
+	e := models.WordsEntry{V: models.WordsVersion, Digest: wordsDigest(rec), Layout: layoutHash(tr), Slots: models.SortWordSlots(slots)}
+	// What is learned is what a later replay reads (WordsAdmit): an entry
+	// it cannot place (the recorded value's instants too many to try every
+	// way of, whyTooMany) is no entry, and the value is refused here, never
+	// learned to go red on every later run.
+	if ok, why := WordsAdmit(rec, live, e); !ok {
+		return models.WordsEntry{}, why
+	}
+	return e, ""
 }
 
 // checkSlots says why the slots of a drifted value (spans; tr and tf, its
 // words recorded and live) cannot be learned, "" when they can: per slot, a
-// word that moved, changed only its case, is empty, stands right after an
-// escape, or is part of an instant that is no accepted clock read (or of a
+// word that moved, changed only its case, stands right after an escape, or is part of an instant that is no accepted clock read (or of a
 // time-ordered UUID glued to a word); and between the slots of the value, a
 // changed word that repeats, or one glued inside another (the changed piece,
 // class-bounded: gluedPieces). An instant slot is a clock read: it is
@@ -473,10 +479,8 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 		if sp.kind == models.WordSlotInstant {
 			continue
 		}
+		// (Neither side is empty: a run holds a rune, a segment a byte.)
 		a, b := sp.recText(rec), sp.liveText(live)
-		if a == "" || b == "" {
-			return whyEmpty
-		}
 		if strings.EqualFold(a, b) {
 			return whyCase
 		}

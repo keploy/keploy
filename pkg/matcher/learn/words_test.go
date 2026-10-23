@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -69,6 +70,9 @@ func TestOnlyTheWordsThatChangedMayChange(t *testing.T) {
 		{"ORD-1 paid 100 ref=0c9d 8e7f", false},
 		{"ORD-1 paid 100  ref=0c9d8e7f6a5b", false},
 		{"ORD-1 paid 100 ref=0c9d8e7f6a5b ", false},
+		{" ORD-1 paid 100 ref=0c9d8e7f6a5b", false},
+		{"\"ORD-1 paid 100 ref=0c9d8e7f6a5b", false},
+		{"ORD-1 paid 100 ref=0c9d8e7f6a5b#", false},
 		{"ORD-1 paid 100 ref=ünï", false},
 		{"ORD-1 paid 100 ref=a.b-c_d", true}, // the run alone in its segment: any ASCII token (N1)
 	} {
@@ -88,9 +92,20 @@ func TestWhatEachSlotAdmits(t *testing.T) {
 	}{
 		{"a run among others", "id ab-12-cd", "id ab-34-cd", "s1r1", map[string]bool{
 			"id ab-99-cd": true, "id ab-x9Y-cd": true, "id ab-9.9-cd": false, "id ab-9-9-cd": false, "id ab--cd": false, "id ab-99-ce": false, "id ab_99-cd": false,
+			"id ab-99-cd.": false, "id ab-99-cd-": false, "id .ab-99-cd": false,
 		}},
 		// The segment's runs are counted: a run added after the slot, or
 		// before it, is a word that was not there, never compared.
+		// What stands after a segment's last run is fixed, as what stands
+		// between its runs is.
+		{"a run among others, the separator after its last fixed", "id ab-12-cd.", "id ab-34-cd.", "s1r1", map[string]bool{
+			"id ab-99-cd.": true, "id ab-99-cd..": false, "id ab-99-cd": false, "id ab-99-cd.-": false, "id ab-99-cd-": false,
+		}},
+		// A value's parts are counted: one that ends in a structural character
+		// holds no more parts after it.
+		{"a value's parts counted after a trailing structural character", "ORD-1 ref=abc;", "ORD-1 ref=xyz;", "s2r0", map[string]bool{
+			"ORD-1 ref=k9;": true, "ORD-1 ref=k9;DROP TABLE x": false, "ORD-1 ref=k9;x": false, "ORD-1 ref=k9; x": false, "ORD-1 ref=k9": false,
+		}},
 		{"a run among others, its segment's runs counted", "ORD-1 paid", "ORD-2 paid", "s0r1", map[string]bool{
 			"ORD-9 paid": true, "ORD-9X paid": true, "ORD-9-X paid": false, "X-ORD-9 paid": false, "ORD paid": false,
 		}},
@@ -191,6 +206,10 @@ func uuid7Of(at time.Time, rand string, variant byte, upper bool) string {
 	return u
 }
 
+// mixedCase is u with its last group's letters in upper case: a UUID that
+// mixes cases, which uuidSkeleton reads as none.
+func mixedCase(u string) string { return u[:24] + strings.ToUpper(u[24:]) }
+
 // A time-ordered UUID is an instant slot in its letters' case, its version
 // and a variant of 8, 9, a or b, either case (SF2); a recorded variant
 // outside them is refused (N18), and so is one glued to a word.
@@ -284,6 +303,50 @@ func TestAValueOfTooManyInstantsToPlaceIsRefusedSayingSo(t *testing.T) {
 	}
 }
 
+// What is learned is what a later replay can place (WordsAdmit): a value
+// whose recorded instants are too many to try every way of placing its
+// instant slots is refused when it is learned, saying so, never learned to
+// go red on every later run.
+func TestAValueWhoseInstantsCannotBePlacedIsRefusedAtLearn(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	at := func(t time.Time) string { return t.Format(time.RFC3339) }
+	var static []string
+	for i := 0; i < 25; i++ {
+		static = append(static, at(wAt.Add(-time.Duration(i+1)*time.Hour)))
+	}
+	rec := strings.Join(static, " ") + " from " + at(wAt) + " to " + at(wAt.Add(time.Second))
+	f := strings.Join(static, " ") + " from " + at(later) + " to " + at(later.Add(time.Second))
+	if e, why := NewDriftCache().Words(rec, f, nil); why != whyTooMany {
+		t.Fatalf("learned %s (%q); want refused: %s", slotsOf(e), why, whyTooMany)
+	}
+	// A few static instants beside them are placed, and learned.
+	rec = strings.Join(static[:3], " ") + " from " + at(wAt) + " to " + at(wAt.Add(time.Second))
+	f = strings.Join(static[:3], " ") + " from " + at(later) + " to " + at(later.Add(time.Second))
+	learnedWords(t, rec, f)
+}
+
+// The structural characters are the closed class the design declares, each
+// one a split between two segments, and no other byte is one.
+func TestTheStructuralCharactersAreTheDeclaredOnes(t *testing.T) {
+	const declared = " \t\n\r\f\v\"'`{}[]():,;&<>|\\=/?#+"
+	if structuralSet != declared {
+		t.Fatalf("structuralSet %q, want %q", structuralSet, declared)
+	}
+	for i := 0; i < 256; i++ {
+		c := byte(i)
+		want := strings.IndexByte(declared, c) >= 0
+		if structural(c) != want {
+			t.Errorf("structural(%q) = %v, want %v", c, !want, want)
+		}
+		if c >= utf8.RuneSelf || isWord(c) {
+			continue
+		}
+		if segs := len(tokenize("a"+string(c)+"b", nil).segs); want && segs != 2 || !want && segs != 1 {
+			t.Errorf("%q splits a value between two words into %d segments", c, segs)
+		}
+	}
+}
+
 // What is refused, each with its reason: a value whose parts changed, a word
 // that moved or changed only its case, one beyond ASCII, one after an escape,
 // one inside an instant that is no accepted clock read (its zone changed, or
@@ -310,6 +373,12 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"an epoch that moved otherwise", "ts " + strconv.FormatInt(wAt.Unix(), 10), "ts " + strconv.FormatInt(wAt.Unix()+3600, 10), whyInstant, nil},
 		{"an instant written otherwise", strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.UnixMilli(), 10), whySkeleton, nil},
 		{"a changed word that repeats", "id=x1 ref=x1", "id=y2 ref=y2", whyRepeat, nil},
+		{"a changed word that repeats recorded only", "id=x1 ref=x1", "id=y2 ref=z3", whyRepeat, nil},
+		{"a changed word that repeats in F only", "id=x1 ref=y2", "id=z3 ref=z3", whyRepeat, nil},
+		// As many parts, one of them an instant on one side and plain text on
+		// the other: its clock read stands elsewhere.
+		{"a clock read that stands in another part", "ab " + wAt.Format(time.RFC3339) + " cd", "ab cd " + later.Format(time.RFC3339), whyParts, []string{"ab", "cd"}},
+		{"a time-ordered UUID mixing cases", "id " + mixedCase(uuid7Of(wAt, "abc123456789abcdef", 'a', false)), "id " + mixedCase(uuid7Of(later, "def0123456789abcde", 'b', false)), whyUUIDCase, nil},
 		{"a changed word glued inside another", "Invoice INV1042 for order 1042", "Invoice INV2077 for order 2077", whyGlued, []string{"1042", "2077"}},
 		{"two pieces glued, one each", "Invoice INV1042 for order ORD1042", "Invoice INV2077 for order ORD2077", whyGlued, nil},
 		{"it did not change", "a", "a", whySame, nil},
@@ -406,6 +475,14 @@ func TestTieOf(t *testing.T) {
 		{"1042A and ORD1042", [2]string{"1042A", "2077A"}, [2]string{"ORD1042", "ORD2077"}, TiePartial, models.RefusedContainment},
 		{"p12x1042 beside 1042", [2]string{"p12x1042", "p9x5678"}, [2]string{"1042", "5678"}, TiePartial, models.RefusedContainment},
 		{"a template key INV1042 and a slot ORD1042", [2]string{"INV1042", "INV2077"}, [2]string{"note ORD1042", "note ORD2077"}, TiePartial, models.RefusedContainment},
+		// A segment whose runs drifted (one token slot) has the segment's
+		// changed piece: "INV1042x_y" -> "INV2077x__y" is "1042x_" ->
+		// "2077x__", which holds "1042" -> "2077" at a class boundary.
+		{"a token slot's piece INV1042x_y and ORD1042", [2]string{"ref INV1042x_y", "ref INV2077x__y"}, [2]string{"ORD1042", "ORD2077"}, TiePartial, models.RefusedContainment},
+		// A value whose parts do not line up (another number of them) has
+		// the value's changed piece whole: "/orders/1042" -> "/orders/2077/v2"
+		// holds "1042" -> "2077" from its start.
+		{"a value whose parts do not line up, /orders/1042 and ORD1042", [2]string{"/orders/1042", "/orders/2077/v2"}, [2]string{"ORD1042", "ORD2077"}, TiePartial, models.RefusedContainment},
 		// Beside an accepted clock read, a changed word is no instant: the
 		// two are not exempt, and the glued piece ties them.
 		{"INV1042 and ORD1042, each beside an instant", [2]string{"at " + wAt.Format(time.RFC3339) + " INV1042", "at " + later.Format(time.RFC3339) + " INV2077"},
@@ -551,6 +628,15 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 			c.Slots = append(c.Slots, models.WordSlot{Seg: c.Slots[0].Seg, Kind: models.WordSlotToken})
 		}), whyRange},
 		{"a run slot twice", rec, with(func(c *models.WordsEntry) { c.Slots = append(c.Slots, c.Slots[0]) }), whyRange},
+		{"a negative segment", rec, with(func(c *models.WordsEntry) { c.Slots[0].Seg = -1 }), whyRange},
+		{"a negative run", rec, with(func(c *models.WordsEntry) { c.Slots[0].Run = -1 }), whyRange},
+		{"an instant slot of a negative segment", rec, with(func(c *models.WordsEntry) { c.Slots[1].Seg = -1 }), whyRange},
+		{"an instant slot naming a run", rec, with(func(c *models.WordsEntry) { c.Slots[1].Run = 1 }), whyGuard},
+		{"a token slot naming a run", rec, with(func(c *models.WordsEntry) { c.Slots[0].Kind, c.Slots[0].Run = models.WordSlotToken, 1 }), whyGuard},
+		{"a run slot with a layout", rec, with(func(c *models.WordsEntry) { c.Slots[0].Layout = "iso8601" }), whyGuard},
+		{"a run slot with a skeleton", rec, with(func(c *models.WordsEntry) { c.Slots[0].Skeleton = "d4" }), whyGuard},
+		{"a token slot with a layout", rec, with(func(c *models.WordsEntry) { c.Slots[0].Kind, c.Slots[0].Layout = models.WordSlotToken, "iso8601" }), whyGuard},
+		{"an instant slot with no skeleton", rec, with(func(c *models.WordsEntry) { c.Slots[1].Skeleton = "" }), whyKind},
 	} {
 		ok, why := WordsAdmit(tc.rec, f, tc.e)
 		if ok || why != tc.why {
