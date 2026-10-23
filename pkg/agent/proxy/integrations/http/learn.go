@@ -42,18 +42,21 @@ import (
 // media type, and the third follows the body.
 
 func init() {
-	// What a set's mocks learned is said leaf by leaf (learn.Legible): an
-	// HTTP mock's recorded leaves are read by their exact place as the learn
-	// step reads them, every header a leaf.
-	learn.RegisterLeafReader(models.HTTP, func(m *models.Mock) map[string]learn.Leaf {
-		if m == nil || m.Spec.HTTPReq == nil {
-			return nil
-		}
-		return learnNoise{headers: map[string]bool{}}.shape(recordedParts(m), sameDest).Leaves
-	})
+	// What a set's mocks learned is said leaf by leaf (learn.Legible).
+	learn.RegisterLeafReader(models.HTTP, recordedLeaves)
 	// The learn step learns an HTTP leaf by its words (learnPlan): one an
 	// HTTP mock holds whole was learned before it did.
 	learn.RegisterWordsKind(models.HTTP)
+}
+
+// recordedLeaves are an HTTP mock's recorded leaves by their exact place, as
+// the learn step reads them, every header a leaf; none for a mock with no
+// request.
+func recordedLeaves(m *models.Mock) map[string]learn.Leaf {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return nil
+	}
+	return learnNoise{headers: map[string]bool{}}.shape(recordedParts(m), sameDest).Leaves
 }
 
 // credentialHeaders leave the static noise list in the learn step (design
@@ -237,19 +240,18 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 		s.Fixed["body"] = "form"
 		for k, vs := range form {
-			if len(vs) > 1 {
-				// A repeated key's values come in any order (formDiffs
-				// reads them as members), so no one of them has a place a
-				// learned entry could name; and joined, they would read as
-				// one value holding ", ", whose words would admit one value
-				// sent as two: compared whole, as a repeated query
-				// parameter is.
-				vs = append([]string(nil), vs...)
-				sort.Strings(vs)
-				s.Fixed["body."+k] = strings.Join(vs, "\x00")
+			if len(vs) == 1 {
+				add("body."+k, vs[0], strings.ContainsAny(k, ".[]"))
 				continue
 			}
-			add("body."+k, vs[0], strings.ContainsAny(k, ".[]"))
+			// A repeated key's values come in any order (formDiffs reads
+			// them as members), so no one of them has a place a learned
+			// entry could name; and joined, they would read as one value
+			// holding ", ", whose words would admit one value sent as two:
+			// compared whole, as a repeated query parameter is. (form is
+			// this call's own parse: its values are sorted in place.)
+			sort.Strings(vs)
+			s.Fixed["body."+k] = strings.Join(vs, "\x00")
 		}
 	case p.mediaType == "multipart/form-data":
 		if !multipartLeaves(p, s.Leaves, s.Fixed) {
@@ -1067,10 +1069,8 @@ type pairing struct {
 // becomes one when another place of the call holds its value whole, r9 §2),
 // and else what Classify found it (l.Kind).
 func (p pairing) learnedAs(l learn.Learned) string {
+	// (A place whose words are noise is one Classify found noise: l.Kind.)
 	path := l.Recorded.Path
-	if _, ok := p.words[path]; ok {
-		return string(learn.KindNoise)
-	}
 	at := func(vars models.MockVariables) string {
 		names := make([]string, 0, len(vars))
 		for n := range vars {
@@ -1527,9 +1527,7 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 		if len(p.words) > 0 {
 			spec.LearnedWords = models.MergeWords(spec.LearnedWords, p.words)
 		}
-		if len(p.f) > 0 {
-			spec.SetLearnedF(models.MergeLearnedF(spec.LearnedF(), p.f))
-		}
+		spec.SetLearnedF(models.MergeLearnedF(spec.LearnedF(), p.f))
 		// What was learned rides out on the consumed mock's state, never on
 		// what the pool serves next: a reused mock stays the recording the
 		// learn step pairs again (not one the variable pass alone serves).

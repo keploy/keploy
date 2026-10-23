@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -554,7 +555,7 @@ func TestTheLearnPlansTies(t *testing.T) {
 		// variable can stand: two form fields that held one value are
 		// refused, never learned apart (each place's own words would let
 		// the two take two values).
-		{name: "twins in a form", method: "POST", path: "/a", rec: "a=k1x9q2&b=k1x9q2", f: "a=z7m3w8&b=z7m3w8", ct: formCT, refused: "a form or multipart field", class: models.RefusedTie},
+		{name: "twins in a form", method: "POST", path: "/a", rec: "a=k1x9q2&b=k1x9q2", f: "a=z7m3w8&b=z7m3w8", ct: formCT, refused: "at a place keploy cannot bind it (a form or multipart field)", class: models.RefusedTie},
 		{name: "twins, a JSON field and one of an empty key", method: "POST", path: "/a", rec: `{"a":"o-1111","b":{"":"o-1111"}}`, f: `{"a":"o-9999","b":{"":"o-9999"}}`, refused: "cannot follow a variable to", class: models.RefusedTie},
 		{name: "no tie rule: a separator changed", method: "POST", path: "/a", rec: `{"note":"a, b"}`, f: `{"note":"a ,b"}`, refused: "no word in it is new", class: ""},
 		{name: "createdAt = updatedAt", method: "POST", path: "/a",
@@ -767,5 +768,260 @@ func TestTheLearnLogSaysWhatEachLeafBecame(t *testing.T) {
 	}
 	if len(leaves) != 1 || leaves[0].Basis[0] != models.BasisBeforeWords || leaves[0].Recorded != "x" {
 		t.Errorf("an HTTP mock's whole noise: %+v", leaves)
+	}
+}
+
+// An HTTP mock's leaves, as learn.Legible reads them through the reader HTTP
+// registers: the recorded request's leaves by their exact place, none for a
+// mock with no request.
+func TestTheLeafReaderReadsTheRecordedRequest(t *testing.T) {
+	if got := recordedLeaves(nil); got != nil {
+		t.Errorf("no mock: %v", got)
+	}
+	if got := recordedLeaves(&models.Mock{Kind: models.HTTP}); got != nil {
+		t.Errorf("no request: %v", got)
+	}
+	got := recordedLeaves(learnRecorded("mock-0", 0, "POST", "/v1/orders?q=1", `{"note":"ORD-1"}`, nil, `{}`))
+	for _, p := range []string{"body.note", "url.query.q", "url.path.1"} {
+		if _, ok := got[p]; !ok {
+			t.Errorf("no leaf at %s: %v", p, got)
+		}
+	}
+}
+
+// tiePlaces' own contract, for whatever learnPlan gives it: an echo and noise
+// that held one value are refused in either order; twins of one number are
+// one variable when F sent the number twice in two spellings; their
+// variable takes a name the test case's keys left free; a test that ended
+// names none; and two places whose only change is an instant read within
+// the call's window are exempt there.
+func TestTiePlacesOwnContract(t *testing.T) {
+	leaf := func(path string, typ learn.Type, rec, live string) learn.Learned {
+		return learn.Learned{Kind: learn.KindNoise, Recorded: learn.Leaf{Path: path, Type: typ, Value: rec}, Live: learn.Leaf{Path: path, Type: typ, Value: live}}
+	}
+	plan := func(t *testing.T, slots ...slotPlace) pairing {
+		p := pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{"mock-0": {}}}
+		for _, s := range slots {
+			if s.kind == learn.KindNoise {
+				p.words[s.l.Recorded.Path] = *wordsOf(t, s.l.Recorded.Value, s.l.Live.Value)
+				p.f["mock-0"][s.l.Recorded.Path] = s.l.Live.Value
+			}
+		}
+		return p
+	}
+	t.Run("an echo, then noise", func(t *testing.T) {
+		a := slotPlace{l: leaf("body.a", learn.String, "o-1111", "o-9999"), kind: learn.KindEcho, name: "a"}
+		b := slotPlace{l: leaf("body.b", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise}
+		p := plan(t, a, b)
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a, b}, nil, true, map[string]bool{}, nil); !strings.Contains(why, "learned them apart") || p.refused != models.RefusedTie {
+			t.Errorf("%q (refused %q), want refused as two values learned apart", why, p.refused)
+		}
+	})
+	t.Run("twins of one number, spelled two ways", func(t *testing.T) {
+		a := slotPlace{l: leaf("body.a", learn.Number, "1042", "2077"), kind: learn.KindNoise}
+		b := slotPlace{l: leaf("body.b", learn.Number, "1042", "2077.0"), kind: learn.KindNoise}
+		p := plan(t, a, b)
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a, b}, nil, true, map[string]bool{}, nil); why != "" {
+			t.Fatalf("refused: %s", why)
+		}
+		if len(p.words) != 0 || len(p.vars) != 1 || p.vars["a"].Bind != "body.a" || !reflect.DeepEqual(p.vars["a"].Use, []string{"body.b"}) {
+			t.Fatalf("words %v variables %+v, want one variable bound at body.a and used at body.b", p.words, p.vars)
+		}
+	})
+	twins := func() (slotPlace, slotPlace) {
+		return slotPlace{l: leaf("body.id", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise},
+			slotPlace{l: leaf("header.x-id", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise}
+	}
+	t.Run("a name the test case's keys left free", func(t *testing.T) {
+		a, b := twins()
+		p := plan(t, a, b)
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a, b}, nil, true, map[string]bool{"id": true}, nil); why != "" {
+			t.Fatalf("refused: %s", why)
+		}
+		if _, ok := p.vars["id"]; ok || p.vars["id-2"].Bind != "body.id" {
+			t.Fatalf("variables %+v, want id-2 (the test case holds id)", p.vars)
+		}
+	})
+	t.Run("a test that ended", func(t *testing.T) {
+		a, b := twins()
+		p := plan(t, a, b)
+		tr := learn.NewTracker()
+		if why := tiePlaces(tr, 1, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a, b}, nil, true, map[string]bool{}, nil); why != "the test ended before body.id was learned" {
+			t.Fatalf("%q, want the test ended", why)
+		}
+	})
+	t.Run("instants read within the window", func(t *testing.T) {
+		boot := learnAt.Add(4 * time.Minute)
+		w := &learn.Window{Rec: learn.Span{From: learnAt.Add(-time.Second), To: learnAt.Add(time.Second)}, F: learn.Span{From: boot.Add(-time.Second), To: boot.Add(time.Second)}}
+		a := slotPlace{l: leaf("body.at", learn.String, "at "+learnAt.Format(time.RFC3339), "at "+boot.Format(time.RFC3339)), kind: learn.KindNoise}
+		b := slotPlace{l: leaf("body.created", learn.String, learnAt.Format(time.RFC3339), boot.Format(time.RFC3339)), kind: learn.KindNoise}
+		p := pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{}}
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a, b}, nil, true, map[string]bool{}, w); why != "" {
+			t.Fatalf("refused: %s", why)
+		}
+		g := []variables.Binding{{Name: "created", Recorded: learnAt.Format(time.RFC3339), Value: boot.Format(time.RFC3339), Given: true}}
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a}, g, true, map[string]bool{}, w); why != "" {
+			t.Fatalf("a test case's instant, refused: %s", why)
+		}
+	})
+}
+
+// What learnPlan learns across calls and of an echo, beyond the ties: a
+// value an earlier call sent whole at a place no variable can stand (a form
+// field) is refused; a variable keeps F's value at its bind for
+// learned.local.yaml and the earlier call's answer places that echoed it;
+// an echo that cannot learn its words says by which rule; and two places of
+// one call that name one variable name each get a name of their own.
+func TestTheLearnPlanAcrossCalls(t *testing.T) {
+	t.Run("a value sent earlier at a place no variable can stand", func(t *testing.T) {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/invoices", "id=k1x9q2", formCT, `{"ok":true}`),
+			learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"order":"k1x9q2"}`, nil, `{}`),
+		}}
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/invoices", "id=z7m3w8", formCT), db, n, opts); served == nil {
+			t.Fatalf("precondition: %+v", miss)
+		}
+		served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"z7m3w8"}`, nil), db, n, opts)
+		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "at a place keploy cannot bind it") {
+			t.Fatalf("served %v miss %+v, want refused as at a place keploy cannot bind it", served, miss)
+		}
+	})
+	t.Run("a variable's F at its bind, and the answers that echoed it", func(t *testing.T) {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"id":"k-1a2b"}`, nil, `{"id":"k-1a2b"}`),
+			learnRecorded("mock-1", time.Second, "POST", "/v1/receipts", `{"order":"k-1a2b"}`, nil, `{}`),
+		}}
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"id":"k-9z8y"}`, nil), db, n, opts); served == nil {
+			t.Fatalf("precondition: %+v", miss)
+		}
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/receipts", `{"order":"k-9z8y"}`, nil), db, n, opts); served == nil {
+			t.Fatalf("the use: %+v", miss)
+		}
+		var use *models.Mock
+		for i := range db.consumed {
+			if db.consumed[i].Name == "mock-1" {
+				use = &db.consumed[i]
+			}
+		}
+		if use == nil {
+			t.Fatal("mock-1 was not consumed")
+		}
+		binds := use.Spec.LearnedBinds()["mock-0"]
+		if len(binds) != 1 {
+			t.Fatalf("binds %+v, want one variable bound at mock-0", use.Spec.LearnedBinds())
+		}
+		for name, v := range binds {
+			if v.Bind != "body.id" || !reflect.DeepEqual(v.Answer, []string{"body.id"}) || v.Words == nil {
+				t.Fatalf("%s: %+v, want bound at body.id, answered at mock-0's body.id, with words", name, v)
+			}
+		}
+		if want := map[string]map[string]string{"mock-0": {"body.id": "k-9z8y"}}; !reflect.DeepEqual(use.Spec.LearnedF(), want) {
+			t.Fatalf("F's values %v, want %v", use.Spec.LearnedF(), want)
+		}
+	})
+	t.Run("an echo whose words repeat", func(t *testing.T) {
+		h, n, opts := learnOn(t)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/a", `{"note":"id=x1 ref=x1"}`, nil, `{"note":"id=x1 ref=x1"}`)}}
+		served, miss, _ := h.learnMatch(context.Background(), live("POST", "/a", `{"note":"id=y2 ref=y2"}`, nil), db, n, opts)
+		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "is echoed in the answer") || miss.res.Refused != models.RefusedTie {
+			t.Fatalf("served %v miss %+v, want refused by the tie rule as an echo", served, miss)
+		}
+	})
+	t.Run("an echo and twins whose binds name one variable", func(t *testing.T) {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/a", `{"id":"k-1a","item":{"id":"q-7b"},"ref":"q-7b"}`, nil, `{"id":"k-1a"}`)}}
+		served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"k-2c","item":{"id":"q-9d"},"ref":"q-9d"}`, nil), db, n, opts)
+		if served == nil {
+			t.Fatalf("refused: %+v", miss)
+		}
+		got := db.consumed[0].Spec.Learned()
+		if len(got) != 2 || got["id"].Bind != "body.id" || got["id-2"].Bind != "body.item.id" || !reflect.DeepEqual(got["id-2"].Use, []string{"body.ref"}) {
+			t.Fatalf("variables %+v, want the echo id and the twins' id-2", got)
+		}
+	})
+}
+
+// A mock's AWS target (X-Amz-Target) whose words were learned, or that is
+// obfuscated, may change: the not-owned index keys it by its other parts, as
+// one learned whole. A target with no words is keyed exactly, and words for
+// a target the mock does not hold key nothing.
+func TestATargetWithWordsIsKeyedByItsOtherParts(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const target, targetF = "DynamoDB_20120810.GetItem", "DynamoDB_20120810.PutItem"
+	shape, learned := requestKeyShape("POST", 2), requestKeyLearned("POST", 2)
+	exact := func(target string) []string {
+		return []string{shape, requestKeyExact("POST", []string{"v1", "items"}, target)}
+	}
+	m := recorded("m", "/v1/items", map[string]string{amzTargetHeader: target}, "")
+	if keys := recordedRequestKeys(m); !reflect.DeepEqual(keys, exact(target)) {
+		t.Fatalf("a target with no words: %v", keys)
+	}
+	withWords(t, m, "header."+strings.ToLower(amzTargetHeader), target, targetF)
+	if keys := recordedRequestKeys(m); !reflect.DeepEqual(keys, []string{shape, learned}) {
+		t.Fatalf("a target with words: %v", keys)
+	}
+	o := recorded("o", "/v1/items", map[string]string{amzTargetHeader: target}, "")
+	o.Noise = []string{"^" + regexp.QuoteMeta(target) + "$"}
+	if keys := recordedRequestKeys(o); !reflect.DeepEqual(keys, []string{shape, learned}) {
+		t.Fatalf("an obfuscated target: %v", keys)
+	}
+	none := recorded("n", "/v1/items", nil, "")
+	withWords(t, none, "header."+strings.ToLower(amzTargetHeader), target, targetF)
+	if keys := recordedRequestKeys(none); !reflect.DeepEqual(keys, exact("")) {
+		t.Fatalf("words for a target the mock does not hold: %v", keys)
+	}
+}
+
+// A multipart field is excused by keploy.yml's body noise that names it
+// whole, never by one whose regex would match an empty value, and a file
+// part is compared whatever words its field learned.
+func TestAMultipartPartsNoiseAndWords(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mp := func(note, file string) (string, string) {
+		var b bytes.Buffer
+		w := multipart.NewWriter(&b)
+		_ = w.SetBoundary("b0undary")
+		_ = w.WriteField("note", note)
+		fw, _ := w.CreateFormFile("upload", "a.txt")
+		_, _ = fw.Write([]byte(file))
+		_ = w.Close()
+		return "multipart/form-data; boundary=b0undary", b.String()
+	}
+	h := newHTTP()
+	ct, rec := mp("ORD-1 ref=a1", "doc ref=a1")
+	_, liveNote := mp("ORD-2 ref=b2", "doc ref=a1")
+	_, liveFile := mp("ORD-1 ref=a1", "doc ref=b2")
+	if d := (strictKnown{n: h.newStrictNoise(nil, map[string][]string{"note": {}}, nil)}).multipartDiffs(ct, rec, ct, []byte(liveNote)); len(d) != 0 {
+		t.Errorf("a field keploy.yml's noise names whole: %v", d)
+	}
+	if d := (strictKnown{n: h.newStrictNoise(nil, map[string][]string{"note": {".*"}}, nil)}).multipartDiffs(ct, rec, ct, []byte(liveNote)); len(d) == 0 {
+		t.Error("a field a value regex names: excused")
+	}
+	k := strictKnown{n: h.newStrictNoise(nil, nil, nil), words: map[string]models.WordsEntry{"body.upload": *wordsOf(t, "doc ref=a1", "doc ref=c3")}}
+	if d := k.multipartDiffs(ct, rec, ct, []byte(liveFile)); len(d) == 0 {
+		t.Error("a file part with words: excused")
+	}
+}
+
+// The learn step's own pass (learnedMatch) serves only a recording that
+// learned something: one with no noise and no words is the matcher's, even
+// for its own recorded call.
+func TestLearnedMatchLeavesAnUnlearnedRecordingToTheMatcher(t *testing.T) {
+	h, n, _ := learnOn(t)
+	rec := `{"note":"ORD-1 paid 100 ref=a1b2c3"}`
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/charges", rec, nil, `{"ok":true}`)}}
+	if served, err := h.learnedMatch(context.Background(), live("POST", "/v1/charges", rec, nil), db, n, models.OutgoingOptions{}); err != nil || served != nil {
+		t.Fatalf("served %v err %v, want none", served, err)
 	}
 }
