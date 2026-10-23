@@ -323,12 +323,37 @@ func (f *prInstr) errs() ([]models.UnmatchedCall, error) {
 	}
 	return nil, nil
 }
-func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+func (f *prInstr) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+	filtered, err := wholeMocks(ctx, filtered)
+	if err != nil {
+		return err
+	}
+	if unfiltered, err = wholeMocks(ctx, unfiltered); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scopeSaid = false
 	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
 	return nil
+}
+
+// wholeMocks is mocks as the agent gets them: each one whose payload its read
+// left on disk read back (models.Mock.WithPayload), as AgentClient.StoreMocks
+// reads it back to send it. nil stays nil.
+func wholeMocks(ctx context.Context, mocks []*models.Mock) ([]*models.Mock, error) {
+	if mocks == nil {
+		return nil, nil
+	}
+	out := make([]*models.Mock, 0, len(mocks))
+	for _, m := range mocks {
+		whole, err := m.WithPayload(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, whole)
+	}
+	return out, nil
 }
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()

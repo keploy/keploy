@@ -94,6 +94,33 @@ func TestSessionKeepsNothingItWillNotUse(t *testing.T) {
 	}
 }
 
+// A restarted agent is not sent the mocks of a test set that has run, whose
+// mock file was rewritten once it ended (models.ErrPayloadFileReplaced): the
+// set being set up stores its own. The rest of the setup is made again.
+func TestSessionReapplyGoesOnPastStoredMocksOfASetThatHasRun(t *testing.T) {
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepMockOutgoing, noteStep(&got, &mu, "outgoing"))
+	s.record(stepStoreMocks, func(context.Context) error {
+		return fmt.Errorf("failed to send the mocks to the agent: %w", models.ErrPayloadFileReplaced)
+	})
+	s.record(stepMockParams, noteStep(&got, &mu, "params"))
+	s.record(stepAgentReady, noteStep(&got, &mu, "ready"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatalf("reapply: %v", err)
+	}
+	if want := "outgoing params ready"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+
+	// Any other failure to store the mocks still fails the setup.
+	s.record(stepStoreMocks, func(context.Context) error { return fmt.Errorf("agent down") })
+	if err := s.reapply(context.Background(), zap.NewNop()); err == nil {
+		t.Fatal("a store that failed for another reason did not fail the setup")
+	}
+}
+
 // The replayer goes on changing the consumed-mocks map it hands over; the
 // copy recorded is the call as it was made.
 func TestCopyMockParamsSharesNothing(t *testing.T) {
