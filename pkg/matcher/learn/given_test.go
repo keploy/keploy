@@ -1,7 +1,10 @@
 package learn
 
 import (
+	"context"
+	"encoding/base64"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +55,7 @@ func TestGivenRequestReadsEachPart(t *testing.T) {
 		keys = append(keys, `"`+k+`":"v`+k+`"`)
 		wantMany = append(wantMany, "body."+k)
 	}
-	many := GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: "{" + strings.Join(keys, ",") + "}", Sent: "{" + strings.Join(keys, ",") + "}"}}})
+	many := GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}, {Name: "body", Recorded: "{" + strings.Join(keys, ",") + "}", Sent: "{" + strings.Join(keys, ",") + "}"}}})
 	var gotMany []string
 	for _, s := range many.Seen[:len(wantMany)] {
 		gotMany = append(gotMany, s.Leaf.Path)
@@ -139,7 +142,7 @@ func TestAPickFromTheTestRequestIsRefused(t *testing.T) {
 // wherever it stands in the value, never noise; nothing is read back from it.
 func TestTheTestRequestIsAnEarlierPlace(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
-	req := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: `{"order":"ord-77","ref":"r-3f2b8c"}`, Sent: `{"order":"ord-78","ref":"r-3f2b8c"}`}}}
+	req := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"order":"ord-77","ref":"r-3f2b8c"}`, Sent: `{"order":"ord-78","ref":"r-3f2b8c"}`}}}
 	given := []Earlier{GivenRequest(req)}
 	const p = "body.ref"
 	shape := func(v string) Shape {
@@ -182,7 +185,7 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 		{`{"slots":[{"id":17,"at":"11:14"},{"id":18,"at":"11:15"}]}`, "17", "18", "body.slots[0].id"},
 		{`{"open":"2026-10-22T09:00:00Z","close":"2026-10-22T17:00:00Z"}`, "open", "closed", "body{keys}"},
 	} {
-		given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: c.body, Sent: c.body}}})}
+		given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: c.body, Sent: c.body}}})}
 		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(c.live), shape(c.rec), at, given, nil, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "appears in what the test case gave the application, in test case test-1 at "+c.at+",") {
 			t.Errorf("%q -> %q from %s: %s (%s); want it refused, naming the request's %s", c.rec, c.live, c.body, ln.Kind, ln.Why, c.at)
@@ -200,7 +203,7 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 	framed := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{
 		{Name: "url", Recorded: "http://localhost:8080/api/orders", Sent: "http://localhost:8080/api/orders"},
 		{Name: "header.content-length", Recorded: "42", Sent: "43"}, {Name: "header.Host", Recorded: "localhost:8080", Sent: "localhost:8080"},
-		{Name: "body", Recorded: `{"q":"a"}`, Sent: `{"q":"b"}`}}})}
+		jsonType, {Name: "body", Recorded: `{"q":"a"}`, Sent: `{"q":"b"}`}}})}
 	for _, f := range [][2]string{{"item-42", "item-43"}, {"port 8080", "port 8081"}} {
 		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(f[1]), shape(f[0]), at, framed, nil, nil, nil)[0]; ln.Kind != KindNoise {
 			t.Errorf("%q -> %q beside a Content-Length that changed alike and the app's address: %s from %+v (%s); want noise", f[0], f[1], ln.Kind, ln.From, ln.Why)
@@ -250,7 +253,8 @@ func TestAnUnreadTestRequestRefusesEveryChange(t *testing.T) {
 		typed := func(at time.Time) Shape {
 			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 		}
-		rec := time.Date(2026, 10, 22, 11, 14, 17, 152e6, time.UTC)
+		// Read before its call, at: a clock read the lead moved.
+		rec := time.Date(2026, 10, 22, 11, 13, 39, 152e6, time.UTC)
 		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "could not read the test case's own request") {
 			t.Errorf("%s, a typed clock read: %s (%s); want it refused for the unread request", name, ln.Kind, ln.Why)
 		}
@@ -271,17 +275,30 @@ func TestTrackerGivesTheRunningTestItsRequest(t *testing.T) {
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Given || earlier[0].Unread != strayRequest || len(earlier[0].Seen) != 0 {
 		t.Fatalf("given with no test open: %+v; want a request that could not be read", earlier)
 	}
-	// A test keploy test opens awaits its request: until it comes, one that
-	// could not be read.
-	tr.Begin()
-	tr.Await()
-	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Given || earlier[0].Unread != unopenedRequest {
-		t.Fatalf("awaited: %+v; want a request that could not be read", earlier)
+	// A test keploy test opens awaits its request, and says so to a call
+	// that reads its places (TestACallInTheGapWaitsForTheRequest waits): one
+	// that ends without it leaves a request that could not be read.
+	tr.BeginAwaiting()
+	if _, earlier, _, _, awaiting := tr.Places(); !awaiting || len(earlier) != 1 || earlier[0].Unread != unopenedRequest {
+		t.Fatalf("awaiting: %+v, %v; want a request that could not be read, awaited", earlier, awaiting)
 	}
 	tr.End()
+	if _, _, _, _, awaiting := tr.Places(); awaiting {
+		t.Fatal("a test that ended still awaits its request")
+	}
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Given || earlier[0].Unread != unopenedRequest {
+		t.Fatalf("ended awaiting: %+v; want a request that could not be read", earlier)
+	}
+	// Await marks no test that is not open, nor one given its request.
 	tr.Await()
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Unread != unopenedRequest {
 		t.Fatalf("awaited with no test open: %+v", earlier)
+	}
+	tr.Begin()
+	tr.Give(GivenRequest(slotRequest("11:14")))
+	tr.Await()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Unread != "" || earlier[0].Mock != "test case test-1" {
+		t.Fatalf("awaited after its request came: %+v; want the request", earlier)
 	}
 	tr.Begin()
 	n, _, _, _ := tr.Test()
@@ -307,6 +324,279 @@ func TestTrackerGivesTheRunningTestItsRequest(t *testing.T) {
 	var none *Tracker
 	none.Give(GivenRequest(nil))
 	none.Await()
+	none.BeginAwaiting()
+	none.OnAwait(nil)
+	if err := none.AwaitRequest(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A call that reads a test's places after keploy test opened the test's
+// window and before the filter that opens it brought its test case's request
+// (the gap between the tracker's BeginAwaiting and Give) waits for the
+// request, and is learned from as a call made after it: the verdict on a
+// background call's drift does not hang on where the scheduler put it. A
+// pool call's nonce that drifted is noise either way; one the request holds
+// a word of is refused, naming the request, either way. A test whose window
+// closes without the request (End) refuses it, saying the filter never
+// brought it; a call whose own end comes first learns nothing. Each order is
+// forced through the tracker's OnAwait, through no clock, 200 times.
+func TestACallInTheGapWaitsForTheRequest(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
+	const p = "body.nonce"
+	rec := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "n-5f2a91"}}}
+	live := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "n-77c0d3"}}}
+	request := func(q string) *models.TestRequest {
+		return &models.TestRequest{Test: "test-2", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"q":"` + q + `"}`, Sent: `{"q":"` + q + `"}`}}}
+	}
+	// verdict is the call's, as the HTTP adapter reads it: the test's places,
+	// and, where the test still awaits its request, the request awaited and
+	// the places read again.
+	verdict := func(tr *Tracker) (Learned, error) {
+		for {
+			_, earlier, _, _, awaiting := tr.Places()
+			if !awaiting {
+				return ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, earlier, nil, nil, nil)[0], nil
+			}
+			if err := tr.AwaitRequest(context.Background()); err != nil {
+				return Learned{}, err
+			}
+		}
+	}
+	for _, row := range []struct {
+		name string
+		req  *models.TestRequest
+		want func(Learned) bool
+	}{
+		{"a request that holds nothing of it", request("books"), func(ln Learned) bool { return ln.Kind == KindNoise }},
+		{"a request that holds its word", request("n-5f2a91"), func(ln Learned) bool {
+			return ln.Kind != KindNoise && ln.Kind != KindEcho && (ln.From.Given || strings.Contains(ln.Why, "test case test-2"))
+		}},
+	} {
+		for i := 0; i < 200; i++ {
+			// The request first: the filter answered before the call.
+			tr := NewTracker()
+			tr.BeginAwaiting()
+			tr.Give(GivenRequest(row.req))
+			// A Give that left the test awaiting fails here, not at the
+			// test's timeout.
+			if _, _, _, _, still := tr.Places(); still {
+				t.Fatalf("%s: the request was given, and the test still awaits it", row.name)
+			}
+			after, err := verdict(tr)
+			if err != nil || !row.want(after) {
+				t.Fatalf("%s, after the request: %s (%s), %v", row.name, after.Kind, after.Why, err)
+			}
+			// The call first, waiting in the gap: the request after it.
+			tr = NewTracker()
+			waiting := make(chan struct{}, 1)
+			tr.OnAwait(func() {
+				select {
+				case waiting <- struct{}{}:
+				default:
+				}
+			})
+			tr.BeginAwaiting()
+			got := make(chan Learned, 1)
+			go func() {
+				ln, _ := verdict(tr)
+				got <- ln
+			}()
+			var before Learned
+			select {
+			case <-waiting:
+				tr.Give(GivenRequest(row.req))
+				// Read at once, not by waiting on the call: a Give that
+				// left it waiting fails here, not at the test's timeout.
+				if _, _, _, _, still := tr.Places(); still {
+					t.Fatalf("%s: the request was given, and the test still awaits it", row.name)
+				}
+				before = <-got
+			case before = <-got:
+				// Decided without waiting for the request.
+				tr.Give(GivenRequest(row.req))
+			}
+			if before.Kind != after.Kind || before.Why != after.Why {
+				t.Fatalf("%s: in the gap %s (%s), after the request %s (%s): two verdicts by where the call fell", row.name, before.Kind, before.Why, after.Kind, after.Why)
+			}
+		}
+	}
+	// The window closes without the request: refused, saying so.
+	for i := 0; i < 200; i++ {
+		tr := NewTracker()
+		waiting := make(chan struct{}, 1)
+		tr.OnAwait(func() {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+		})
+		tr.BeginAwaiting()
+		got := make(chan Learned, 1)
+		go func() {
+			ln, _ := verdict(tr)
+			got <- ln
+		}()
+		select {
+		case <-waiting:
+		case ln := <-got:
+			t.Fatalf("decided before the window closed: %s (%s)", ln.Kind, ln.Why)
+		}
+		tr.End()
+		if _, _, _, _, still := tr.Places(); still {
+			t.Fatalf("the window closed, and its test still awaits its request")
+		}
+		if ln := <-got; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(unopenedRequest) {
+			t.Fatalf("a window closed without its request: %s (%s); want it refused, the filter never having brought it", ln.Kind, ln.Why)
+		}
+	}
+	// The window closes as the next test begins, one keploy test did not
+	// open, or as the next set begins: a call that waited reads what then
+	// stands, and no test awaits a request.
+	for _, next := range []struct {
+		name  string
+		close func(*Tracker)
+		after func(*Tracker) uint64
+	}{
+		{"the next test begins awaiting nothing", func(tr *Tracker) { tr.Begin() }, func(tr *Tracker) uint64 { n, _, _, _ := tr.Test(); return n }},
+		{"the next set begins", func(tr *Tracker) { tr.NewSet() }, func(tr *Tracker) uint64 { n, _, _, _ := tr.Test(); return n }},
+	} {
+		tr := NewTracker()
+		waiting := make(chan struct{}, 1)
+		tr.OnAwait(func() { waiting <- struct{}{} })
+		tr.BeginAwaiting()
+		got := make(chan uint64, 1)
+		go func() {
+			_ = tr.AwaitRequest(context.Background())
+			n, _, _, _ := tr.Test()
+			got <- n
+		}()
+		<-waiting
+		next.close(tr)
+		if _, _, _, _, still := tr.Places(); still {
+			t.Fatalf("%s: a request is still awaited", next.name)
+		}
+		if g, n := <-got, next.after(tr); g != n {
+			t.Fatalf("%s: the waiting call read test %d; want %d", next.name, g, n)
+		}
+	}
+	// A call whose own end comes first learns nothing, and never starts to
+	// wait (OnAwait): were it to, the window's close the hook makes would
+	// wake it to learn, which fails here at once, not at the test's timeout.
+	tr := NewTracker()
+	tr.OnAwait(func() { tr.End() })
+	tr.BeginAwaiting()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := tr.AwaitRequest(ctx); err != context.Canceled {
+		t.Fatalf("a call ended before it waited: %v; want its context's error, no wait begun", err)
+	}
+	// A call whose own end comes as it waits learns nothing; one that wakes
+	// to the request come learns from it, though its end came too: what it
+	// reads as it wakes decides, never which the scheduler showed it first.
+	tr = NewTracker()
+	waiting := make(chan struct{}, 1)
+	tr.OnAwait(func() { waiting <- struct{}{} })
+	tr.BeginAwaiting()
+	ctx, cancel = context.WithCancel(context.Background())
+	ended := make(chan error, 1)
+	go func() { ended <- tr.AwaitRequest(ctx) }()
+	<-waiting
+	cancel()
+	if err := <-ended; err != context.Canceled {
+		t.Fatalf("a call whose end came as it waited: %v; want its context's error", err)
+	}
+	for i := 0; i < 200; i++ {
+		tr := NewTracker()
+		ctx, cancel := context.WithCancel(context.Background())
+		tr.OnAwait(func() {
+			// Both before the call looks again: the request, and its end.
+			tr.Give(GivenRequest(request("books")))
+			cancel()
+		})
+		tr.BeginAwaiting()
+		if err := tr.AwaitRequest(ctx); err != nil {
+			t.Fatalf("a call that woke to its request, its end come too: %v; want it to learn from the request", err)
+		}
+	}
+	// A call that waits sees the next test's window open, and waits for its
+	// request in turn.
+	tr = NewTracker()
+	waiting = make(chan struct{}, 2)
+	tr.OnAwait(func() { waiting <- struct{}{} })
+	tr.BeginAwaiting()
+	got := make(chan uint64, 1)
+	go func() {
+		_ = tr.AwaitRequest(context.Background())
+		n, _, _, _ := tr.Test()
+		got <- n
+	}()
+	<-waiting
+	tr.BeginAwaiting()
+	<-waiting
+	tr.Give(GivenRequest(request("books")))
+	n, _, _, _ := tr.Test()
+	if g := <-got; g != n {
+		t.Fatalf("the waiting call read test %d; want the next test, %d", g, n)
+	}
+}
+
+// A test's window that closes while the test still awaits its test case's
+// request (End, the next Begin, NewSet), which the filter that opens it never
+// brought, is said (OnUnreadClose), with how many calls waited for it: every
+// value that changed in a call of the test is then refused, and the agent
+// says so at its default log level. One whose request came says nothing.
+func TestAWindowClosedWithoutItsRequestIsSaid(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		close func(*Tracker)
+		gives bool
+		want  []int
+	}{
+		{"End, a call waiting", (*Tracker).End, false, []int{1}},
+		{"the next test begins", (*Tracker).Begin, false, []int{1}},
+		{"the next test begins awaiting its own", (*Tracker).BeginAwaiting, false, []int{1}},
+		{"the next set begins", (*Tracker).NewSet, false, []int{1}},
+		{"End, the request given", (*Tracker).End, true, nil},
+	} {
+		tr := NewTracker()
+		var said []int
+		tr.OnUnreadClose(func(n int) { said = append(said, n) })
+		waiting := make(chan struct{}, 1)
+		tr.OnAwait(func() {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+		})
+		tr.BeginAwaiting()
+		done := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			_ = tr.AwaitRequest(ctx)
+			close(done)
+		}()
+		<-waiting
+		if row.gives {
+			tr.Give(GivenRequest(&models.TestRequest{Test: "test-1"}))
+		}
+		row.close(tr)
+		cancel()
+		<-done
+		if !slices.Equal(said, row.want) {
+			t.Errorf("%s: said %v; want %v", row.name, said, row.want)
+		}
+	}
+	// No call waited: said still, with none.
+	tr := NewTracker()
+	var said []int
+	tr.OnUnreadClose(func(n int) { said = append(said, n) })
+	tr.BeginAwaiting()
+	tr.End()
+	tr.End()
+	if !slices.Equal(said, []int{0}) {
+		t.Errorf("a window closed unread, no call waiting, then closed again: said %v; want [0]", said)
+	}
 }
 
 // The echo reads the test case's request as keploy test sent it too (its
@@ -322,7 +612,7 @@ func TestTheEchoReadsTheTestRequestAsSent(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
 	req := func(recorded, sent string) []Earlier {
-		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: `{"slots":["` + recorded + `"]}`, Sent: `{"slots":["` + sent + `"]}`}}})}
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"slots":["` + recorded + `"]}`, Sent: `{"slots":["` + sent + `"]}`}}})}
 	}
 	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, req("11:14", "11:15"), nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given || ln.From.Path != "body.slots[0]" {
 		t.Errorf("F's pick in the request as sent: %s from %+v (%s); want a variable of the request's slot", ln.Kind, ln.From, ln.Why)
@@ -392,7 +682,7 @@ func TestAPickTheRequestNoLongerListsIsRefused(t *testing.T) {
 	// The part keploy test sent with template values: the request as
 	// recorded held the moment, the reason says how keploy test sent it,
 	// and the request as sent is not what decides (it holds neither).
-	templated := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body",
+	templated := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body",
 		Recorded: `{"slots":["2026-10-22T11:13:00Z","2026-10-22T11:14:00Z"]}`, Sent: `{"slots":["2026-10-22T11:20:00Z","2026-10-22T11:21:00Z"]}`}}})}
 	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("none"), shape("11:14"), at, templated, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[1]", false) {
 		t.Errorf("a pick from a part sent with template values: %s (%s); want it refused, naming the slot as recorded", ln.Kind, ln.Why)
@@ -552,7 +842,9 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 // that call's variable (followed, compared), not two clock reads of one
 // moment, which in keploy test it is (noise).
 func TestAClientTestFollowsAnInstantTheLeadMoved(t *testing.T) {
-	at := time.Date(2026, 10, 22, 11, 14, 16, 900_000_000, time.UTC)
+	// The call is in the minute the slot names: a read of the clock is no
+	// later than its call.
+	at := time.Date(2026, 10, 22, 11, 20, 16, 900_000_000, time.UTC)
 	const p = "body.note"
 	str := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
@@ -660,3 +952,89 @@ func TestWindowHoldsRead(t *testing.T) {
 		t.Error("no window holds a read")
 	}
 }
+
+// A body keploy keeps as the base64 of its bytes is read as the text its
+// bytes are, where its request declares a text media type: a pick from the
+// words it holds is refused, naming the request, as from a text body. A body
+// its request declares no text (a protobuf listing slots s17 and s18 as
+// application/x-protobuf, its fields' tags and lengths printable or not,
+// kept as its base64 or, as OSS records a body, as its bytes' text), or
+// declares no type for, is a request keploy could not read: every value
+// that changed is refused, saying why, the pick a printable tag and length
+// glue to its word ("BAs17") too, and a value no word of the request holds.
+// Bytes that are no text are unread whatever the request declares.
+func TestABinaryRequestBodyIsReadForItsText(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
+	const p = "body.slot"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	requestAs := func(ct, part string, body []byte) []Earlier {
+		v := string(body)
+		if part == "binary" {
+			v = base64.StdEncoding.EncodeToString(body)
+		}
+		parts := []models.TestRequestPart{{Name: part, Recorded: v, Sent: v}}
+		if ct != "" {
+			parts = append([]models.TestRequestPart{{Name: "header.Content-Type", Recorded: ct, Sent: ct}}, parts...)
+		}
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: parts})}
+	}
+	text := requestAs("text/plain; charset=utf-8", "binary", []byte("slots s17 s18"))
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("s18"), shape("s17"), at, text, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in test case test-1 at binary{text}") {
+		t.Errorf("a pick from a binary request of text: %s from %+v (%s); want it refused, naming the request's text", ln.Kind, ln.From, ln.Why)
+	}
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("n-77c0d3"), shape("n-5f2a91"), at, text, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		t.Errorf("a value a binary request of text does not hold: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+	// Field 8, length 65: "B" and "A", printable, before "s17"; every byte
+	// printable.
+	printable := append([]byte{0x42, 0x41}, []byte("s17 and more text here to make it sixty-five bytes long, all of i")...)
+	for _, row := range []struct {
+		name, ct, part string
+		body           []byte
+		why            string
+	}{
+		// Field 1, length 3, "s17"; field 1, length 3, "s18".
+		{"tags and lengths no text, declared text", "text/plain", "binary", []byte{0x0a, 0x03, 's', '1', '7', 0x0a, 0x03, 's', '1', '8'}, binaryUnread},
+		{"a protobuf, every byte printable, as base64", "application/x-protobuf", "binary", printable, mediaUnread("application/x-protobuf")},
+		{"a protobuf, every byte printable, as its text", "application/x-protobuf", "body", printable, mediaUnread("application/x-protobuf")},
+		{"a gRPC message as its text", "application/grpc+proto", "body", printable, mediaUnread("application/grpc+proto")},
+		{"a body of no declared type", "", "body", []byte("slots s17 s18"), mediaUnread("")},
+	} {
+		req := requestAs(row.ct, row.part, row.body)
+		for _, v := range [][2]string{{"s17", "s18"}, {"n-5f2a91", "n-77c0d3"}} {
+			ln := ClassifyIn(NewDriftCache(), []string{p}, shape(v[1]), shape(v[0]), at, req, nil, nil, nil)[0]
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.why) {
+				t.Errorf("%s, %s: %s from %+v (%s); want it refused, the request unread", row.name, v[0], ln.Kind, ln.From, ln.Why)
+			}
+		}
+	}
+	for ct, want := range map[string]bool{
+		"application/json": true, "application/vnd.api+json; charset=utf-8": true, "text/csv": true, "application/x-www-form-urlencoded": true, "application/soap+xml": true,
+		"application/x-protobuf": false, "application/octet-stream": false, "multipart/form-data; boundary=x": false, "image/png": false, "": false, "not a type": false,
+	} {
+		if got := textMedia(ct); got != want {
+			t.Errorf("textMedia(%q) = %v; want %v", ct, got, want)
+		}
+	}
+	for b64, want := range map[string]struct {
+		text string
+		ok   bool
+	}{
+		"aGVsbG8gd29ybGQ=":     {"hello world", true},
+		"aGVsbG8gd29ybGQ":      {"hello world", true},
+		"bGluZSBvbmUKbGluZTI=": {"line one\nline2", true},
+		"":                     {"", true},
+		"CgNzMTcKA3MxOA==":     {"", false},
+		"AAECAw==":             {"", false},
+		"not base64!":          {"", false},
+	} {
+		if got, ok := binaryText(b64); got != want.text || ok != want.ok {
+			t.Errorf("binaryText(%q) = %q, %v; want %q, %v", b64, got, ok, want.text, want.ok)
+		}
+	}
+}
+
+// jsonType is a test case's request's Content-Type part declaring JSON.
+var jsonType = models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}

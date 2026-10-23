@@ -1,11 +1,15 @@
 package learn
 
 import (
+	"encoding/base64"
+	"mime"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -50,9 +54,10 @@ func givenPlace(test string) string {
 // filter that opened it carried none.
 const unsentRequest = "keploy test sent the agent no copy of the test case's request, as a keploy older than its agent does"
 
-// unopenedRequest is why it could not be read when the test's calls came
-// before the filter that opens it brought it (Tracker.Await), or no such
-// filter came.
+// unopenedRequest is why it could not be read when the test's window closed
+// before the filter that opens it brought it (Tracker.Await): a call that
+// came before the filter waits for it (Tracker.AwaitRequest), and reads this
+// only where no such filter came.
 const unopenedRequest = "the filter that opens the test case had not brought its request to the agent"
 
 // strayRequest is why it could not be read when it came while no test was
@@ -66,12 +71,17 @@ const strayRequest = "the test case's request reached the agent while no test wa
 // query's values (url.path.<i>, url.query.<key>), never its scheme, host or
 // port, where the application is reached; a JSON body's leaves too, ahead of
 // the body whole, so a reason names the leaf, and its object keys
-// (KeysLeaf); the names of its query parameters, headers and form fields
-// (request{names}); and none of what addresses or frames it (a Host, an
-// :authority or a :scheme header, a Content-Length, a Content-Type, a
-// header keploy adds). A nil req (a keploy older than its agent sent none),
-// or one keploy test could not read (TestRequest.Unread), is a place that
-// could not be read (Earlier.Unread), with no leaves.
+// (KeysLeaf); the text a body kept as the base64 of its bytes holds
+// (binaryText), beside the base64; the names of its query
+// parameters, headers and form fields (request{names}); and none of what
+// addresses or frames it (a Host, an :authority or a :scheme header, a
+// Content-Length, a Content-Type, a header keploy adds). A nil req (a keploy
+// older than its agent sent none), one keploy test could not read
+// (TestRequest.Unread), and one whose body its Content-Type does not declare
+// text (textMedia: a protobuf, an image, a body of no declared type; or bytes
+// that are no text, binaryUnread) are a place that could not be read
+// (Earlier.Unread), with no leaves: whether a body is text is read from what
+// the request declares, never from the look of its bytes.
 func GivenRequest(req *models.TestRequest) Earlier {
 	if req == nil {
 		return Earlier{Mock: givenPlace(""), Given: true, Unread: unsentRequest}
@@ -80,6 +90,7 @@ func GivenRequest(req *models.TestRequest) Earlier {
 	if req.Unread != "" {
 		return e
 	}
+	recMedia, sentMedia := requestMedia(req.Parts)
 	recNames, sentNames := map[string]bool{}, map[string]bool{}
 	name := func(n, recorded, sent string) {
 		// A part one side alone holds is "" on the other.
@@ -93,6 +104,19 @@ func GivenRequest(req *models.TestRequest) Earlier {
 	for _, part := range req.Parts {
 		if !givenPart(part.Name) {
 			continue
+		}
+		if (part.Name == "body" || part.Name == "binary") && (part.Recorded != "" && !textMedia(recMedia) || part.Sent != "" && !textMedia(sentMedia)) {
+			// A body its Content-Type declares no text in (a protobuf
+			// sent as application/x-protobuf, recorded as its bytes' text
+			// or their base64) holds the application's words beside the
+			// bytes that frame them (a field's tag and length), which may
+			// be printable and glued to a word: keploy cannot tell one
+			// from the other, so it cannot read the request.
+			media := sentMedia
+			if part.Recorded != "" && !textMedia(recMedia) {
+				media = recMedia
+			}
+			return Earlier{Mock: e.Mock, Given: true, Unread: mediaUnread(media)}
 		}
 		switch {
 		case part.Name == "url":
@@ -108,6 +132,20 @@ func GivenRequest(req *models.TestRequest) Earlier {
 			}
 		case part.Name == "body":
 			e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
+		case part.Name == "binary":
+			// A body of a text media type keploy keeps as the base64 of
+			// its bytes (models.HTTPReq.Binary): read as the text its bytes
+			// are, as a part of its own beside the base64 as it stands.
+			// Bytes that are no text whatever the request declares are
+			// one keploy cannot read.
+			r, rok := binaryText(part.Recorded)
+			l, lok := binaryText(part.Sent)
+			if !rok || !lok {
+				return Earlier{Mock: e.Mock, Given: true, Unread: binaryUnread}
+			}
+			if r != "" || l != "" {
+				e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: "binary{text}", Noise: "binary{text}", Type: String, Value: r}, Live: l})
+			}
 		}
 		e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: part.Name, Noise: part.Name, Type: String, Value: part.Recorded}, Live: part.Sent})
 		if n, ok := paramName(part.Name); ok {
@@ -119,6 +157,82 @@ func GivenRequest(req *models.TestRequest) Earlier {
 	}
 	return e
 }
+
+// binaryText is the text the bytes b64 (standard base64, padded or not)
+// hold, and ok, where every byte is a part of a printable character or of
+// white space (valid UTF-8); "" and ok for none. Not ok where b64 is no
+// base64, or a byte is neither. It decodes a body its request declares text
+// (textMedia), and refuses one that is not: it never tells text from bytes
+// that frame words by bytes of their own (a protobuf's tags and lengths may
+// all be printable, "BA" before "s17"), which only the declared media type
+// does.
+func binaryText(b64 string) (string, bool) {
+	b, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if b, err = base64.RawStdEncoding.DecodeString(b64); err != nil {
+			return "", false
+		}
+	}
+	for i := 0; i < len(b); {
+		r, n := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && n <= 1 || !unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			return "", false
+		}
+		i += n
+	}
+	return string(b), true
+}
+
+// requestMedia is the Content-Type a test case's request declares, recorded
+// and as sent (its header part), "" where it declares none.
+func requestMedia(parts []models.TestRequestPart) (recorded, sent string) {
+	for _, p := range parts {
+		if h, ok := strings.CutPrefix(p.Name, "header."); ok && strings.EqualFold(h, "content-type") {
+			return p.Recorded, p.Sent
+		}
+	}
+	return "", ""
+}
+
+// textMedia reports whether a body declared as ct (a Content-Type) is text by
+// its media type: text/*, and of application/* JSON, XML (and their +json
+// and +xml types), a URL-encoded form, GraphQL, JavaScript, NDJSON and YAML.
+// Any other (application/x-protobuf, application/grpc, application/octet-
+// stream, multipart/*, image/*), one that does not parse, and none ("")
+// are not.
+func textMedia(ct string) bool {
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	typ, sub, _ := strings.Cut(mt, "/")
+	switch {
+	case typ == "text":
+		return true
+	case typ != "application":
+		return false
+	case strings.HasSuffix(sub, "+json"), strings.HasSuffix(sub, "+xml"):
+		return true
+	}
+	switch sub {
+	case "json", "xml", "x-www-form-urlencoded", "graphql", "javascript", "x-ndjson", "yaml", "x-yaml":
+		return true
+	}
+	return false
+}
+
+// mediaUnread is why a test case's request could not be read when its body
+// is declared as ct, no text media type (textMedia).
+func mediaUnread(ct string) string {
+	if ct == "" {
+		return "its body declares no media type (no Content-Type), so keploy cannot tell whether it is text, nor the words the application was given from bytes that frame them"
+	}
+	return "its body is declared " + strconv.Quote(ct) + ", no text media type, and keploy cannot tell the words the application was given from the bytes that frame them"
+}
+
+// binaryUnread is why a test case's request could not be read when its body
+// is bytes that are no text (binaryText).
+const binaryUnread = "its body is bytes that are no text, kept as their base64, and keploy cannot tell the words the application was given from the bytes that frame them"
 
 // givenPart reports whether a part of a test case's request is one the
 // application is given: none that addresses or frames the request (a Host,

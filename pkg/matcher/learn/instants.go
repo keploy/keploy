@@ -19,11 +19,12 @@ import (
 // is excused as a clock read by its provenance alone, never by its shape
 // (units, HH:MM, digits, lengths):
 //
-//   - the app's own clock read: an instant that moved by F's lead, or that
-//     lies, in both runs, within its call's window (Window: from the call's
-//     previous call to the call, by the stamps keploy took of both, and the
-//     clock F set; PreviousCall). Its words are then no words of a value
-//     (clockIn), and only the same read whole elsewhere is followed;
+//   - the app's own clock read: an instant that moved by F's lead as a read
+//     made no later than its call moves (readNoLaterThan), or that lies, in
+//     both runs, within its call's window (Window: from the call's previous
+//     call to the call, by the stamps keploy took of both, and the clock F
+//     set; PreviousCall). Its words are then no words of a value (clockAt),
+//     and only the same read whole elsewhere is followed;
 //   - a dependency's own clock read: rules 2 and 3 below, which say that a
 //     place is no source of a value, never that a value is noise.
 //
@@ -49,6 +50,12 @@ import (
 // a neighbour recording F delivered within one unit of the recorded one is
 // one), or where what F served names F's moment alone (holdsApart). The
 // moments are compared, never their texts.
+//
+// Nor before the offset rule reads them (offset.go): where F gave the
+// application, at a place of what it was given, another instant than the
+// recording did, moved as the value's instant moved, the value may be built
+// on it by an offset (a message's sent time and five minutes), and is
+// refused, naming the place and the offset.
 //
 // A value whose provenance shows neither stays checked: where an earlier
 // place holds one of its words, it is refused (a variable that cannot be

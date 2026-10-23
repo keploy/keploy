@@ -1455,15 +1455,16 @@ func TestLearnMatchATraceIdNextToAFreshSpanIsRefused(t *testing.T) {
 // milliseconds: an Azure call's x-ms-date (excused, RFC 1123) and then a
 // document's createdAt (JS toISOString). In F both move by the shift. They
 // share a minute and a second, not a run nor a long word: the later value is
-// noise, not refused as a part of the header.
+// noise, not refused as a part of the header. Each call is recorded after the
+// read it carries: a read of the clock is no later than its call.
 func TestLearnMatchAClockReadWithMillisAfterADateHeaderIsNoise(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
 	tr.Begin()
 	ctx := learn.WithTracker(context.Background(), tr)
 	db := &learnDb{perTest: []*models.Mock{
-		learnRecorded("mock-0", 0, "PUT", "/container/blob1", `{"v":1}`, map[string]string{"X-Ms-Date": "Wed, 14 Oct 2026 10:00:41 GMT"}, `{}`),
-		learnRecorded("mock-1", 200*time.Millisecond, "POST", "/dbs/app/docs", `{"createdAt":"2026-10-14T10:00:41.456Z"}`, nil, `{}`),
+		learnRecorded("mock-0", 42*time.Second, "PUT", "/container/blob1", `{"v":1}`, map[string]string{"X-Ms-Date": "Wed, 14 Oct 2026 10:00:41 GMT"}, `{}`),
+		learnRecorded("mock-1", 42*time.Second+200*time.Millisecond, "POST", "/dbs/app/docs", `{"createdAt":"2026-10-14T10:00:41.456Z"}`, nil, `{}`),
 	}}
 	if served, miss, _ := h.learnMatch(ctx, live("PUT", "/container/blob1", `{"v":1}`, map[string]string{"X-Ms-Date": "Wed, 14 Oct 2026 10:01:42 GMT"}), db, n, opts); served == nil {
 		t.Fatalf("precondition: %+v", miss)
@@ -3266,3 +3267,76 @@ func TestLearnMatchAClientTestsBindCarriesNoClockEvidence(t *testing.T) {
 		})
 	}
 }
+
+// A call that reaches the learn step after keploy test opened its test's
+// window and before the filter that opens the test brought its test case's
+// request waits for the request, and is learned from as a call made after it:
+// its nonce that drifted is noise either way, and one the request holds a
+// word of is refused, naming the request, either way. Each order is forced
+// through the tracker's OnAwait, through no clock, 200 times each.
+func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
+	h, n, opts := learnOn(t)
+	request := func(q string) *models.TestRequest {
+		return &models.TestRequest{Test: "test-2", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"q":"` + q + `"}`, Sent: `{"q":"` + q + `"}`}}}
+	}
+	call := live("POST", "/v1/nonce", `{"nonce":"n-77c0d3"}`, nil)
+	outcome := func(served *models.Mock, miss *learnMiss, err error) string {
+		switch {
+		case err != nil:
+			return "error " + err.Error()
+		case miss != nil:
+			return "miss " + miss.res.Why
+		}
+		return "served " + served.Name
+	}
+	for _, q := range []string{"books", "n-5f2a91"} {
+		for i := 0; i < 200; i++ {
+			// The request first.
+			tr := learn.NewTracker()
+			tr.BeginAwaiting()
+			tr.Give(learn.GivenRequest(request(q)))
+			db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}}
+			after := outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts))
+			if q == "books" && after != "served mock-0" || q != "books" && !strings.Contains(after, "test case test-2 at body.q") {
+				t.Fatalf("q %s, after the request: %s", q, after)
+			}
+			// The call first, in the gap.
+			tr = learn.NewTracker()
+			waiting := make(chan struct{}, 1)
+			tr.OnAwait(func() {
+				select {
+				case waiting <- struct{}{}:
+				default:
+				}
+			})
+			tr.BeginAwaiting()
+			db = &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}}
+			got := make(chan string, 1)
+			go func() { got <- outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts)) }()
+			var before string
+			select {
+			case <-waiting:
+				tr.Give(learn.GivenRequest(request(q)))
+				before = <-got
+			case before = <-got:
+				tr.Give(learn.GivenRequest(request(q)))
+			}
+			if before != after {
+				t.Fatalf("q %s: in the gap %s, after the request %s: two outcomes by where the call fell", q, before, after)
+			}
+		}
+	}
+}
+
+// An exchange served leaf by leaf carries its recording's payload
+// (learn.Earlier.Payload), its answer read, for the learn step's offset rule.
+func TestAnExchangeServedLeafByLeafCarriesItsPayload(t *testing.T) {
+	m := learnRecorded("mock-4", 0, "POST", "/v1/receive", `{"max":1}`, nil, `{"Messages":[{"SentTimestamp":"1792667656473"}]}`)
+	e := earlierOf(m, learn.Shape{}, learn.Shape{}, m, false)
+	if !e.Payload.Read() || e.Payload.Mock() != "mock-4" || !strings.Contains(e.Payload.Text(), "1792667656473") {
+		t.Fatalf("payload %+v; want mock-4's, its answer read", e.Payload)
+	}
+}
+
+// jsonType is a test case's request's Content-Type part declaring JSON.
+var jsonType = models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}

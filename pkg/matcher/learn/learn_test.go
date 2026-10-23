@@ -284,7 +284,11 @@ func TestClassify(t *testing.T) {
 		RawOf(&models.Mock{Name: "redis-2", Spec: models.MockSpec{ReqTimestampMock: at.Add(-3 * time.Second), Metadata: map[string]string{"args": "SET sid s-71a"}, GenericRequests: []models.Payload{{Message: []models.OutputBinary{{Data: "s-71a"}}}}}}, false),
 		RawOf(&models.Mock{Name: "pg-4", Spec: models.MockSpec{ReqTimestampMock: at.Add(-3 * time.Second), Metadata: map[string]string{"row": "2026-10-14 09:59"}}}, false),
 	}
-	got := Classify(nil, []string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts", "body.sess", "body.at", "body.seq", "body.file"}, live, rec, at, earlier, raw, respLeaves)
+	// The application writes its wall clock of no zone in UTC+10, where the
+	// call at midnight UTC is 10:00 and body.at's read just before it.
+	dc := NewDriftCache()
+	dc.zone = time.FixedZone("AEST", 10*3600)
+	got := Classify(dc, []string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts", "body.sess", "body.at", "body.seq", "body.file"}, live, rec, at, earlier, raw, respLeaves)
 	kinds := map[string]Kind{}
 	from := map[string]Place{}
 	for _, l := range got {
@@ -1010,8 +1014,9 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 		{"java, +05:30, milliseconds", "2006-01-02T15:04:05.000Z07:00", ist},
 		{"postgres text, +00, microseconds", "2006-01-02 15:04:05.000000-07", time.UTC},
 	} {
-		rec := at.Add(234567 * time.Microsecond).In(tc.zone).Format(tc.layout)
-		live := at.Add(FullRoundLead).Add(123456 * time.Microsecond).In(tc.zone).Format(tc.layout)
+		// Read in the second before its call, at.
+		rec := at.Add(234567*time.Microsecond - time.Second).In(tc.zone).Format(tc.layout)
+		live := at.Add(FullRoundLead).Add(123456*time.Microsecond - time.Second).In(tc.zone).Format(tc.layout)
 		if got := classifyOne(rec, live, at, nil, nil, nil); got.Kind != KindNoise {
 			t.Errorf("%s: a clock read the lead moved is %s (%q)", tc.name, got.Kind, got.Why)
 		}

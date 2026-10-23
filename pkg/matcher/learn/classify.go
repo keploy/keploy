@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -80,6 +81,12 @@ type Earlier struct {
 	// (ClassifyIn), never learned as noise or an echo.
 	Unread string
 	Seen   []Seen
+	// Payload is the exchange's recording as a payload is read (RawOf), its
+	// answer read back, where the adapter that served it leaf by leaf gives
+	// it (the zero Raw where it does not): the answer's fields name the same
+	// places as another recording's of its kind, which the offset rule reads
+	// (offsetFrom). Nothing else reads it: the leaves are the exchange's.
+	Payload Raw
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
@@ -101,6 +108,10 @@ type Raw struct {
 	mock   string
 	at     time.Time
 	served bool
+	// call is the call the mock answers, as one recording of it stands in
+	// for another (callOf): only an answer to the same call is given in
+	// another's place (the offset rule, offsetFrom).
+	call string
 	// read: the text was read from the mock (RawOf).
 	read bool
 	// text is Text; answerClock is AnswerClock.
@@ -286,6 +297,15 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
+	// The moved places the offset rule reads (offset.go), read once for the
+	// call, and only where a changed instant reaches it.
+	var op *offsetPlaces
+	places := func() *offsetPlaces {
+		if op == nil {
+			op = dc.offsetPlacesOf(at, served, raw)
+		}
+		return op
+	}
 	out := make([]Learned, 0, len(drift))
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
@@ -294,15 +314,15 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 			continue
 		}
 		if r.Type == Instant || l.Type == Instant {
-			out = append(out, dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq))
+			out = append(out, dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places))
 			continue
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); ok {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
-					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w), from)
+					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -315,12 +335,16 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 		// list); and only where its readings account for all it changed. An
 		// echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
-			v := dc.ofIn(r.Value, l.Value, w)
+			v := dc.ofIn(r.Value, l.Value, w, at)
 			why := ""
 			if unreadReq != "" {
 				why = unreadRequestWhy(unreadReq)
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
 				why = requestHoldsWhy(where, asRecorded)
+			} else if m, ok := offsetOfValue(v, places); ok {
+				// An instant of it built on a moved place by an offset, before
+				// any lead or window excuses its words (offset.go).
+				why = offsetWhy(m)
 			} else {
 				why = unaccounted(dc, v, at, served, raw)
 			}
@@ -338,7 +362,7 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 		// argument, an OData filter) that the answer holds is an echo keploy
 		// cannot answer with this run's value.
 		if ln.Kind == KindNoise {
-			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w), resp); why != "" {
+			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
 				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
@@ -902,7 +926,7 @@ func ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	}
 	full := m.ShallowCopy()
 	if err := full.HydrateResponse(); err != nil {
-		return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served}, err
+		return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served, call: callOf(m)}, err
 	}
 	return RawOf(full, served), nil
 }
@@ -964,19 +988,27 @@ func (dc *DriftCache) rawExtra(text string) string {
 }
 
 // driftKey is a drifted value, with the window of the call it is read in
-// (Window.key).
+// (Window.key) and the call's recorded instant (UnixNano, 0 for none).
 type driftKey struct {
 	run
-	w [4]int64
+	w    [4]int64
+	call int64
 }
 
-func (dc *DriftCache) of(rec, live string) *valueDrift { return dc.ofIn(rec, live, nil) }
+// of is what the drifted value (rec, live) changed, as an earlier place
+// holds it: its clock reads read by the lead alone, bounded by no call.
+func (dc *DriftCache) of(rec, live string) *valueDrift { return dc.ofIn(rec, live, nil, time.Time{}) }
 
 // ofIn is what the drifted value (rec, live) changed, its clock reads read
 // by the lead and in w, the window of the call that carries it (nil: by the
-// lead alone).
-func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
-	k := driftKey{run{rec, live}, w.key()}
+// lead alone), the call recorded at call (zero: not known), which bounds
+// what the lead moved (clockAt).
+func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDrift {
+	var at int64
+	if !call.IsZero() {
+		at = call.UnixNano()
+	}
+	k := driftKey{run{rec, live}, w.key(), at}
 	dc.mu.Lock()
 	d, ok := dc.m[k]
 	dc.mu.Unlock()
@@ -984,7 +1016,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 		return d
 	}
 	lead := !dc.clientTests
-	d = &valueDrift{rec: rec, live: live, clock: clockIn(rec, live, w, lead)}
+	d = &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, dc.zone)}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -1000,7 +1032,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockIn(d.decRec, d.decLive, w, lead)
+		dclock = clockAt(d.decRec, d.decLive, w, lead, call, dc.zone)
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
@@ -1008,7 +1040,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
-		merge(clockIn(f[0], f[1], w, lead))
+		merge(clockAt(f[0], f[1], w, lead, call, dc.zone))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -1693,7 +1725,7 @@ var payloadKeys = map[string]bool{
 // RawOf is a mock as Classify reads it when no leaf names its values: its
 // recorded request and answer, the payload only, as one text.
 func RawOf(m *models.Mock, served bool) Raw {
-	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served}
+	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served, call: callOf(m)}
 	b, err := json.Marshal(payloadSpec(m.Spec))
 	if err != nil {
 		return r
@@ -1713,6 +1745,23 @@ func RawOf(m *models.Mock, served bool) Raw {
 	}
 	r.stamps = answerStamps(r.text, r.fields, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	return r
+}
+
+// callOf is the call m answers, as one recording of a call is given in place
+// of another: its kind, and of an HTTP call its method, its authority and
+// how many segments its path has (the operation the HTTP adapter pairs a
+// request within). Another kind is read as one call: two of its recordings
+// may each stand in for the other, which only refuses more.
+func callOf(m *models.Mock) string {
+	call := string(m.Kind)
+	if r := m.Spec.HTTPReq; r != nil {
+		host, path := r.URL, ""
+		if u, err := url.Parse(r.URL); err == nil {
+			host, path = u.Host, u.Path
+		}
+		call += " " + string(r.Method) + " " + host + " /" + strconv.Itoa(len(strings.Split(strings.TrimPrefix(path, "/"), "/")))
+	}
+	return call
 }
 
 // payloadSpec is spec without what says, below the spec's own fields

@@ -156,6 +156,10 @@ type LearnRead struct {
 	// Earlier, Served and Before are learn.Tracker.Test's.
 	Earlier        []learn.Earlier
 	Served, Before []*models.Mock
+	// Awaiting: the running test still awaits its test case's request
+	// (learn.Tracker.Places): a call that reads the round then learns
+	// nothing from it until the request came (learn.Tracker.AwaitRequest).
+	Awaiting bool
 	// Answered is learn.Tracker.AnsweredMocks.
 	Answered []*models.Mock
 }

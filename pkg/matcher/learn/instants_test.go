@@ -1755,15 +1755,25 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 			t.Errorf("%s, a read of the clock: %s from %+v (%s); want noise", zone, ln.Kind, ln.From, ln.Why)
 		}
 		// An instant its protocol types is the moment it names, in UTC:
-		// the wall clock it would write in another zone is no copy of it.
+		// the wall clock it would write in another zone is no copy of it,
+		// and no variable. It is the receives' instants moved by the zone's
+		// offset, as the delivery moved them: refused, naming the two
+		// receives and the offset (offset.go), where F delivered the one in
+		// place of the other: the recording gave the application the
+		// receive before the call, and F the delivering one instead.
 		typed := func(at time.Time) Shape {
 			wall := at.In(loc).Truncate(time.Second)
 			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, time.UTC), time.Second)}}
 		}
 		dc = NewDriftCache()
-		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
-		if ln.Kind != KindUnaccounted || ln.From.Mock != "" || ln.Why != instantNotClock {
-			t.Errorf("%s, typed: %s from %+v (%s); want it refused for its provenance alone", zone, ln.Kind, ln.From, ln.Why)
+		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]
+		_, off := sent.In(loc).Zone()
+		rel := (time.Duration(off) * time.Second).String() + " after"
+		if off < 0 {
+			rel = (-time.Duration(off) * time.Second).String() + " before"
+		}
+		if ln.Kind != KindUnaccounted || ln.From.Mock != "" || !strings.Contains(ln.Why, "stands "+rel+" the moment mock-4 at spec.resp.body holds as the recording gave it") || !strings.Contains(ln.Why, rel+" the moment mock-11 at spec.resp.body holds") {
+			t.Errorf("%s, typed: %s from %+v (%s); want it refused, built on the receives by %s", zone, ln.Kind, ln.From, ln.Why, rel)
 		}
 	}
 }
@@ -1893,7 +1903,7 @@ func TestAValueBuiltOnAGivenDateIsTheEchos(t *testing.T) {
 	}
 	body := `{"dates":["2026-10-22","2026-10-23"]}`
 	request := func(body string) []Earlier {
-		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: body, Sent: body}}})}
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: body, Sent: body}}})}
 	}
 	served := func(body string) []Earlier {
 		v, _ := DecodeJSON([]byte(body))

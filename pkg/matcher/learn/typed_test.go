@@ -340,37 +340,42 @@ func TestATypedPickFromAServedTimetableStaysChecked(t *testing.T) {
 	}
 }
 
-// A typed instant came from a leaf of an exchange F served that drifted,
-// whatever its provenance: one that was, as recorded, that instant (in any
-// layout and form: an equal instant is followed), or that held the moment it
-// was recorded with and the moment F saw, both ways, neither on its other
-// side (rule 1). Whole, of the place, only where its text is the instant's.
-// A leaf F served as recorded did not drift, and holds nothing of it; one
-// that held another recorded moment, or the recorded moment only as
-// recorded, is no source.
+// A typed instant came from a leaf of an exchange F served, whatever its
+// provenance: one that was, as recorded, that instant (in any layout and
+// form: an equal instant is followed), or that held the moment it was
+// recorded with and the moment F saw, both ways, neither on its other side
+// (rule 1); and, as a payload holding it is, one that holds the moment it was
+// recorded with, exactly, as recorded, whatever F saw there, a leaf F saw as
+// recorded too (instantLeafFrom). Whole, of the place, only where its text
+// is the instant's. One that held another recorded moment is no source.
 func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 	sent := func(rec, live string) []Earlier {
 		return []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Own: true, Seen: []Seen{
 			{Side: Request, Leaf: Leaf{Path: "header.x-sent-at", Noise: "header.x-sent-at", Type: String, Value: rec}, Live: live},
 		}}}
 	}
+	// held: the leaf did not drift with the instant, and only holds the
+	// moment it was recorded with as recorded (instantLeafFrom), which the
+	// variable's evidence says; every other source drifted with it, or was
+	// it as recorded (instantServedFrom), and needs none.
 	for _, row := range []struct {
 		name      string
 		rec, live string
 		source    bool
 		whole     bool
+		held      bool
 	}{
-		{"its epoch milliseconds", "1792726810740", "1792726870942", true, false},
-		{"its text", "2026-10-23T03:40:10.740Z", "2026-10-23T03:41:10.942Z", true, true},
-		{"Go's text of it", "2026-10-23T03:40:10.74Z", "2026-10-23T03:41:10.942Z", true, false},
-		{"it percent-encoded", "2026-10-23T03%3A40%3A10.740Z", "2026-10-23T03%3A41%3A10.942Z", true, false},
-		{"Go's text of it, F another moment", "2026-10-23T03:40:10.74Z", "2026-10-23T03:41:10.000Z", true, false},
-		{"it percent-encoded, F another text", "2026-10-23T03%3A40%3A10.740Z", "none", true, false},
-		{"its moments inside a longer text", "sent 1792726810740 by sqs", "sent 1792726870942 by sqs", true, false},
-		{"its moments percent-encoded inside a longer text", "at=2026-10-23T03%3A40%3A10.740Z&x=1", "at=2026-10-23T03%3A41%3A10.942Z&x=1", true, false},
-		{"the recorded moment only as recorded", "sent 1792726810740 by sqs", "sent 1792726870000 by sqs", false, false},
-		{"F's moment beside the recorded one in F", "at 1792726810740", "at 1792726870942 was 1792726810740", false, false},
-		{"another recorded moment", "1792726810741", "1792726870942", false, false},
+		{"its epoch milliseconds", "1792726810740", "1792726870942", true, false, false},
+		{"its text", "2026-10-23T03:40:10.740Z", "2026-10-23T03:41:10.942Z", true, true, false},
+		{"Go's text of it", "2026-10-23T03:40:10.74Z", "2026-10-23T03:41:10.942Z", true, false, false},
+		{"it percent-encoded", "2026-10-23T03%3A40%3A10.740Z", "2026-10-23T03%3A41%3A10.942Z", true, false, false},
+		{"Go's text of it, F another moment", "2026-10-23T03:40:10.74Z", "2026-10-23T03:41:10.000Z", true, false, false},
+		{"it percent-encoded, F another text", "2026-10-23T03%3A40%3A10.740Z", "none", true, false, false},
+		{"its moments inside a longer text", "sent 1792726810740 by sqs", "sent 1792726870942 by sqs", true, false, false},
+		{"its moments percent-encoded inside a longer text", "at=2026-10-23T03%3A40%3A10.740Z&x=1", "at=2026-10-23T03%3A41%3A10.942Z&x=1", true, false, false},
+		{"the recorded moment only as recorded", "sent 1792726810740 by sqs", "sent 1792726870000 by sqs", true, false, true},
+		{"F's moment beside the recorded one in F", "at 1792726810740", "at 1792726870942 was 1792726810740", true, false, true},
+		{"another recorded moment", "1792726810741", "1792726870942", false, false, false},
 	} {
 		for wname, w := range map[string]*Window{"in its window": qnWindow(), "no window": nil} {
 			ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), w, sent(row.rec, row.live), nil)
@@ -378,6 +383,9 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 			case row.source:
 				if ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "header.x-sent-at" || ln.From.Whole != row.whole || ln.From.Echo {
 					t.Errorf("%s, %s: %s (from %+v, %s); want a variable of mock-1's header.x-sent-at, whole %v", row.name, wname, ln.Kind, ln.From, ln.Why, row.whole)
+				}
+				if held := strings.Contains(ln.Why, "the moment it was recorded with stands in mock-1 at header.x-sent-at, as an instant of its own"); held != row.held || !held && ln.Why != "" {
+					t.Errorf("%s, %s: evidence %q; want it held as recorded only %v", row.name, wname, ln.Why, row.held)
 				}
 			case w != nil:
 				if ln.Kind != KindNoise {
@@ -390,12 +398,21 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 			}
 		}
 	}
-	// A leaf F served as recorded did not drift: nothing came from it, its
-	// recorded text whole included.
-	for _, undrifted := range []string{"1792726810740", "2026-10-23T03:40:10.740Z"} {
-		if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), sent(undrifted, undrifted), nil); ln.Kind != KindNoise {
-			t.Errorf("a leaf F served as recorded (%s): %s (from %+v, %s); want noise", undrifted, ln.Kind, ln.From, ln.Why)
+	// A leaf F saw as recorded did not drift, and still held the instant as
+	// recorded: an equal instant is followed from there, as from a payload,
+	// in its window too; whole only where its text is the instant's.
+	for undrifted, whole := range map[string]bool{"1792726810740": false, "2026-10-23T03:40:10.740Z": true} {
+		if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), sent(undrifted, undrifted), nil); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "header.x-sent-at" || ln.From.Whole != whole || ln.From.Echo || !strings.Contains(ln.Why, "the moment it was recorded with stands in mock-1 at header.x-sent-at, as an instant of its own") {
+			t.Errorf("a leaf F saw as recorded (%s): %s (from %+v, %s); want a variable of mock-1's header.x-sent-at, whole %v", undrifted, ln.Kind, ln.From, ln.Why, whole)
 		}
+	}
+	// Nor is an answer's own clock stamp, served as recorded, a place an
+	// instant came from (rule 3).
+	stampAt := []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Own: true, Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: "2026-10-23T03:40:10.740Z"}, Live: "2026-10-23T03:40:10.740Z", Stamp: true},
+	}}}
+	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), stampAt, nil); ln.Kind != KindNoise {
+		t.Errorf("an answer's stamp served as recorded: %s (from %+v, %s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 	// A leaf that held both moments, on one side or both, did not drift with
 	// it (rule 1); F's moment stands there, so the echo finds the place
@@ -505,6 +522,11 @@ func TestATypedInstantKeployCannotReadIsRefused(t *testing.T) {
 		if ln := classifyTyped(qnTyped(rec), qnTyped(rec.Add(FullRoundLead)), nil, nil, nil); ln.Kind != KindUnaccounted {
 			t.Errorf("an instant that the lead moved %s: %s (%s); want refused", name, ln.Kind, ln.Why)
 		}
+		// Read in the second before its call, which a read is no later
+		// than: refused for the range alone.
+		if ln := ClassifyIn(NewDriftCache(), []string{qnPath}, Shape{Leaves: map[string]Leaf{qnPath: qnTyped(rec.Add(FullRoundLead))}}, Shape{Leaves: map[string]Leaf{qnPath: qnTyped(rec)}}, rec.Add(time.Second), nil, nil, nil, nil)[0]; ln.Kind != KindUnaccounted {
+			t.Errorf("an instant that the lead moved %s, read before its call: %s (%s); want refused", name, ln.Kind, ln.Why)
+		}
 	}
 }
 
@@ -606,6 +628,33 @@ func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
 		}
 		if ln := classify(str(row.rec), str(row.live), nil); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in "+holder.Name+" at "+row.field+":") {
 			t.Errorf("%s, a date-like string, no provenance: %s (from %q, %s); want refused for %s, as the lane was", row.name, ln.Kind, ln.From.Mock, ln.Why, holder.Name)
+		}
+	}
+}
+
+// An instant its protocol types that moved by the lead is no read of the
+// clock where its recorded moment is later than its call (a Mongo TTL,
+// expiresAt = Date.now() + 1 h), and the reason says so, never that it did
+// not move by the lead; one F saw past what a read before its call moves by
+// the lead says that instead.
+func TestATypedInstantLaterThanItsCallIsRefusedSayingSo(t *testing.T) {
+	const p = "body.expiresAt"
+	call := time.Date(2026, 10, 22, 11, 14, 17, 155e6, time.UTC)
+	read := call.Add(-40 * time.Millisecond)
+	for _, row := range []struct {
+		name      string
+		rec, live time.Time
+		res       time.Duration
+		why       string
+	}{
+		{"an hour after its call", read.Add(time.Hour), read.Add(time.Hour + FullRoundLead + 37*time.Millisecond), time.Millisecond, instantAfterCall},
+		// The call's minute, F's two on: the lead takes two minutes'
+		// move, a read before its call one.
+		{"F's past the lead from its call", call.Truncate(time.Minute), call.Truncate(time.Minute).Add(2 * time.Minute), time.Minute, instantPastCall},
+	} {
+		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || ln.Why != row.why {
+			t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.why)
 		}
 	}
 }

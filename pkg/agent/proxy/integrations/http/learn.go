@@ -929,6 +929,18 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		}
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
 		test, earlier, served, before := read.test, read.earlier, read.served, read.before
+		if read.awaiting {
+			// The call came after the test's window opened and before the
+			// filter that opens it brought its test case's request: it
+			// learns from nothing until the request came
+			// (learn.Tracker.AwaitRequest), then reads the round again,
+			// learned from as a call made after it, whichever way the two
+			// fell.
+			if err := tracker.AwaitRequest(ctx); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -1098,9 +1110,12 @@ type learnRead struct {
 	test           uint64
 	earlier        []learn.Earlier
 	served, before []*models.Mock
-	windows        integrations.TestWindows
-	claimDb        integrations.MockMemDb
-	at             learnPass
+	// awaiting: the running test still awaits its test case's request
+	// (learn.Tracker.Places), and the pass learns nothing from its places.
+	awaiting bool
+	windows  integrations.TestWindows
+	claimDb  integrations.MockMemDb
+	at       learnPass
 }
 
 // readLearnPass reads a pass of the learn step. From a store that reads its
@@ -1116,14 +1131,15 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 	rev := storeRevision(mockDb)
 	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
 		r := learnRead{
-			sc:      h.learnScopeIn(snap, live, liveShape, n, pool),
-			test:    snap.Learn.Number,
-			earlier: snap.Learn.Earlier,
-			served:  snap.Learn.Served,
-			before:  snap.Learn.Before,
-			windows: snap,
-			claimDb: integrations.WithinRound(mockDb, snap.At),
-			at:      learnPass{rev: rev, round: snap.At},
+			sc:       h.learnScopeIn(snap, live, liveShape, n, pool),
+			test:     snap.Learn.Number,
+			earlier:  snap.Learn.Earlier,
+			served:   snap.Learn.Served,
+			before:   snap.Learn.Before,
+			awaiting: snap.Learn.Awaiting,
+			windows:  snap,
+			claimDb:  integrations.WithinRound(mockDb, snap.At),
+			at:       learnPass{rev: rev, round: snap.At},
 		}
 		return r, nil
 	}
@@ -1132,7 +1148,7 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 		return learnRead{}, err
 	}
 	r := learnRead{sc: sc, claimDb: mockDb, at: learnPass{rev: rev}}
-	r.test, r.earlier, r.served, r.before = tracker.Test()
+	r.test, r.earlier, r.served, r.before, r.awaiting = tracker.Places()
 	r.windows, _ = mockDb.(integrations.TestWindows)
 	return r, nil
 }
@@ -1497,9 +1513,11 @@ func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp
 // earlierOf is the exchange F just served from m (own: one of the test's own
 // mocks), as a later request of the test reads it: each recorded leaf of its
 // request with the live value, and each recorded leaf of its answer with the
-// value served, each with its variable place.
+// value served, each with its variable place; and m's payload
+// (learn.Earlier.Payload), whose answer's places the learn step's offset rule
+// reads against another recording's of the call.
 func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own bool) learn.Earlier {
-	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own}
+	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own, Payload: learn.RawOf(m, true)}
 	jsonReq := rec.Fixed["body"] == "json"
 	for p, r := range rec.Leaves {
 		place, _ := learn.VarPlace(r, jsonReq)

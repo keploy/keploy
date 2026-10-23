@@ -38,20 +38,27 @@ import (
 //     or, held nowhere, refused. An instant its protocol types is never read
 //     as a value built on a coarser instant (a date with a time of its own):
 //     matched at its own precision only;
-//   - a variable where a payload served or recorded earlier holds the moment
-//     it was recorded with, exactly, in any layout, a protocol-phase answer's
-//     own clock reads and an HTTP answer's stamp blanked (rules 2 and 3):
+//   - a variable where a leaf of an exchange F served leaf by leaf, as
+//     recorded, or a payload served or recorded earlier holds the moment it
+//     was recorded with, exactly, in any layout, an answer's own clock stamp
+//     and a protocol-phase answer's own clock reads excepted (rules 2 and 3):
 //     an instant equal to an earlier one is followed, whatever its
-//     provenance;
+//     provenance (instantLeafFrom, instantRawFrom);
+//   - refused where it is built on a moved place by an offset (offset.go):
+//     where F gave the application, at a place of what it was given, another
+//     instant than the recording did, moved as the value moved, at the
+//     value's own resolution (a message's sent time and five minutes, F
+//     delivering another recording of the receive);
 //   - noise only where its provenance shows a read of the application's
-//     clock (InstantClockRead): it moved by FullRoundLead, or lies within its
-//     call's window in both runs. An echo of it in the call's own recorded
-//     answer is then answered there (KindEcho);
-//   - refused otherwise (KindUnaccounted), saying why. Read whole, an instant
-//     derived from what the application was given (an hour after a moment it
-//     was served) shares no word with its source, so only its provenance
-//     tells a read of the clock from it: a false red that fails closed,
-//     never noise.
+//     clock: it lies within its call's window in both runs, or it moved by
+//     FullRoundLead as a read made no later than its call moves
+//     (readNoLaterThan: a minute, an hour or a day the lead takes a move of a
+//     unit or two for a read, so the call bounds it). An echo of it in the
+//     call's own recorded answer is then answered there (KindEcho);
+//   - refused otherwise (KindUnaccounted), saying why: a false red that
+//     fails closed, never noise. Read whole, an instant derived from what the
+//     application was given shares no word with its source: the offset rule
+//     above, not a word, is what finds it.
 
 // InstantLeaf is the leaf of a field its protocol's decoder types as one
 // instant: at in UTC, truncated to res (the decoder's resolution: a BSON
@@ -105,7 +112,8 @@ func InstantClockRead(rec, live Leaf, w *Window) bool {
 	return instantClockRead(rec, live, w, true)
 }
 
-// instantClockRead is InstantClockRead, by the lead too where lead is set.
+// instantClockRead is InstantClockRead, by the lead too where lead is set,
+// of a call whose recorded instant is not known.
 func instantClockRead(rec, live Leaf, w *Window, lead bool) bool {
 	rt, rres, ok := InstantOf(rec)
 	if !ok {
@@ -115,21 +123,24 @@ func instantClockRead(rec, live Leaf, w *Window, lead bool) bool {
 	if !ok {
 		return false
 	}
-	return instantClock(rt, lt, rres, lres, w, lead)
+	return instantClock(rt, lt, rres, lres, w, lead, time.Time{})
 }
 
 // instantClock reports whether rt and lt, an instant as recorded (at
 // resolution rres) and as F saw it (lres), are a read of each run's clock,
-// as clockIn reads an instant of a text: lt is rt moved by FullRoundLead
-// (leadMoved), or each lies within its run's span of its call's window w
-// (nil: none), each at its own resolution; without lead (keploy mock's
-// client tests: DriftCache.ClientTests), within the window only. An instant
-// before 2000 or after 2100 is no read of a recording's clock.
-func instantClock(rt, lt time.Time, rres, lres time.Duration, w *Window, lead bool) bool {
+// as clockAt reads an instant of a text: lt is rt moved by FullRoundLead
+// (leadMoved) as a read made no later than its call, recorded at call, moves
+// (readNoLaterThan; zero: not known), or each lies within its run's span of
+// its call's window w (nil: none), each at its own resolution; without lead
+// (keploy mock's client tests: DriftCache.ClientTests), within the window
+// only. An instant before 2000 or after 2100 is no read of a recording's
+// clock. An instant its protocol types names its moment: it is read in UTC
+// alone.
+func instantClock(rt, lt time.Time, rres, lres time.Duration, w *Window, lead bool, call time.Time) bool {
 	if !inClockRange(rt) || !inClockRange(lt) {
 		return false
 	}
-	return w != nil && w.Rec.holds(rt, rres) && w.F.holds(lt, lres) || lead && leadMoved(rt, lt, rres, lres, false)
+	return w != nil && w.Rec.holds(rt, rres) && w.F.holds(lt, lres) || lead && leadMoved(rt, lt, rres, lres, false) && readNoLaterThan(rt, lt, rres, call, true, nil)
 }
 
 // instantForms are the forms InstantLeaf writes an instant in, coarsest
@@ -178,6 +189,14 @@ func instantMoment(t time.Time, res time.Duration) moment {
 // The reasons a typed instant is refused for (Learned.Why), read after
 // "<field> changed, and ".
 const (
+	// instantAfterCall is why an instant its protocol types that moved by
+	// the lead is no read of the clock where its recorded moment is later
+	// than its call (readNoLaterThan): a time to live, a due date.
+	instantAfterCall = "nothing shows it is a read of the application's clock: its protocol types it as one instant, which keploy compares whole, and it moved by the lead that record's full round runs ahead of the recording, but the moment it was recorded with is later than its call, and a read of the clock a call carries is made no later than the call: it is built on the clock or another instant by an offset (a time to live, a due date), which keploy cannot follow yet. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	// instantPastCall is why one that moved by about the lead is none where
+	// the moment record's full round saw is later than a read no later than
+	// its call moved by the lead (readNoLaterThan).
+	instantPastCall = "nothing shows it is a read of the application's clock: its protocol types it as one instant, which keploy compares whole, and it moved by about the lead that record's full round runs ahead of the recording, but the moment record's full round saw is later than a read of the clock made no later than its call moves by the lead, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 	instantNotClock = "nothing shows it is a read of the application's clock: its protocol types it as one instant, which keploy compares whole, and it did not move by the lead that record's full round runs ahead of the recording, nor does a window of its call show a read. Read whole, an instant derived from a value the application was given shares no word with that value, so keploy learns an instant as noise only where it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 )
 
@@ -203,7 +222,7 @@ func instantUnread(r, l Leaf) string {
 // its words. unread says why the test case's own request could not be read
 // (requestUnread; "" when it was, or no test case's request applies): then
 // the echo could not read it, and the instant is never noise or an echo.
-func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string) Learned {
+func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, rres, okR := InstantOf(r)
 	lt, lres, okL := InstantOf(l)
@@ -229,6 +248,10 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, pickUnaccounted(where)
 		return ln
 	}
+	if from, ok := dc.instantLeafFrom(r, rec, served); ok {
+		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
+		return ln
+	}
 	if from, ok := dc.instantRawFrom(r, rec, at, raw); ok {
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 		return ln
@@ -240,10 +263,25 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, requestHoldsWhy(where, asRecorded)
 		return ln
 	}
-	if !instantClock(rt, lt, rres, lres, w, !dc.clientTests) {
+	// Built on a moved place by an offset (offset.go), before any provenance
+	// excuses it.
+	if m, ok := places().offsetFrom([]driftedInstant{{rec: rec, live: live}}); ok {
+		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
+		return ln
+	}
+	if !instantClock(rt, lt, rres, lres, w, !dc.clientTests, at) {
 		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
-		if dc.clientTests {
+		switch {
+		case dc.clientTests:
 			ln.Why = clientTestWhy("", w != nil)
+		case inClockRange(rt) && inClockRange(lt) && leadMoved(rt, lt, rres, lres, false):
+			// Moved by the lead, as a read made after its call would
+			// (readNoLaterThan): the reason says so, never that it did
+			// not move by it.
+			ln.Why = instantPastCall
+			if !at.IsZero() && rt.After(at) {
+				ln.Why = instantAfterCall
+			}
 		}
 		return ln
 	}
@@ -367,6 +405,35 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		}
 	}
 	return Place{}, false
+}
+
+// instantLeafFrom is the leaf of an exchange F served earlier, leaf by leaf,
+// that holds rec, the moment the drifted instant r was recorded with, as an
+// instant of its own, exactly (not its time of day, nor a finer instant cut
+// to it), in any form, as recorded, whatever F saw there, ranked by placeRank:
+// as a payload that holds it is (instantRawFrom), an exchange served leaf by
+// leaf is an earlier place, and an instant equal to one it holds is followed
+// as a value from there, whether or not it is a read of the clock. An answer's
+// own clock stamp served as recorded is none (Seen.Stamp, rule 3), nor is the
+// test case's own request, which requestHolds reads.
+func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Place, bool) {
+	var best Place
+	rank := 7
+	for _, e := range served {
+		if e.Given {
+			continue
+		}
+		for _, s := range e.Seen {
+			if stamped(s) || !dc.holdsExact(s.Leaf.Value, rec) && !dc.holdsExact(dc.rawExtra(s.Leaf.Value), rec) {
+				continue
+			}
+			whole := s.Leaf.Value == r.Value
+			if pr := placeRank(e, s, whole); pr < rank {
+				best, rank = seenPlace(e, s, whole), pr
+			}
+		}
+	}
+	return best, rank < 7
 }
 
 // instantRawFrom is the first payload served earlier in the test or recorded

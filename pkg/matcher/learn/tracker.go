@@ -83,6 +83,22 @@ type Tracker struct {
 	// given, and for a test no keploy test case opened (keploy mock's).
 	// Begin forgets it.
 	given *Earlier
+	// awaiting is open while the running test awaits its test case's request
+	// (BeginAwaiting, Await): a call that reads the test's places then
+	// (Places) waits (AwaitRequest) until Give brings the request, or the
+	// test's window closes without it (End, the next Begin, NewSet), which
+	// close it. nil while no test awaits one.
+	awaiting chan struct{}
+	// onAwait, when set (OnAwait), is called as a call starts to wait for
+	// the running test's request, the tracker's lock not held.
+	onAwait func()
+	// onUnread, when set (OnUnreadClose), is called as a test's window
+	// closes while it still awaited its request, with how many calls waited
+	// for it then (waiting), the tracker's lock not held.
+	onUnread func(waiting int)
+	// waiting counts the calls waiting for the running test's request
+	// (AwaitRequest).
+	waiting int
 	// clientTests: the agent serves keploy mock (SetClientTests), whose
 	// tests a test harness runs and gives the application its inputs; every
 	// DriftCache the tracker makes says so (DriftCache.ClientTests).
@@ -131,9 +147,128 @@ func (t *Tracker) NewSet() {
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt = nil
 	t.given = nil
+	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
 	t.mu.Unlock()
+	say()
+}
+
+// closeAwaiting ends the running test's wait for its request (awaiting):
+// every call waiting reads the test's places as they now stand. It reports
+// whether the test still awaited it. t.mu is held.
+func (t *Tracker) closeAwaiting() bool {
+	if t.awaiting == nil {
+		return false
+	}
+	close(t.awaiting)
+	t.awaiting = nil
+	return true
+}
+
+// closeUnread ends the running test's wait for its request as its window
+// closes without it (End, the next Begin, NewSet), not because Give brought
+// it (closeAwaiting). It returns what to call once t.mu is released: the
+// OnUnreadClose hook, with how many calls waited, where the test still
+// awaited its request; otherwise nothing. t.mu is held.
+func (t *Tracker) closeUnread() func() {
+	if !t.closeAwaiting() || t.onUnread == nil {
+		return func() {}
+	}
+	f, n := t.onUnread, t.waiting
+	return func() { f(n) }
+}
+
+// waitGiven waits while the running test awaits its test case's request
+// (awaiting), t.mu held on entry and on return, released while it waits:
+// until Give brings it, or the test's window closes without it, or done is
+// closed. false where done closed while the test still awaited it.
+//
+// What it answers is read from the tracker as the call wakes, never from
+// which of the two the scheduler showed it first: where the request came
+// (or the window closed) by then, true, as for a call that read the places
+// after it; where the test still awaits it and done is closed, false.
+func (t *Tracker) waitGiven(done <-chan struct{}) bool {
+	for t.awaiting != nil {
+		if closed(done) {
+			return false
+		}
+		ch, hook := t.awaiting, t.onAwait
+		t.waiting++
+		t.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		select {
+		case <-ch:
+		case <-done:
+		}
+		t.mu.Lock()
+		t.waiting--
+	}
+	return true
+}
+
+// closed reports whether done is closed.
+func closed(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// OnUnreadClose makes the tracker call f as a test's window closes (End, the
+// next Begin, NewSet) while the test still awaited its test case's request,
+// which the filter that opens it never brought, with how many calls waited
+// for it then, without the tracker's lock: the agent says so in its log at
+// the default level, for every value that changed in a call of the test is
+// then refused. nil calls nothing.
+func (t *Tracker) OnUnreadClose(f func(waiting int)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onUnread = f
+	t.mu.Unlock()
+}
+
+// OnAwait makes the tracker call f as a call starts to wait for the running
+// test's request (AwaitRequest), without the tracker's lock: the agent says
+// so in its log, and a test orders the request after a call that waits for
+// it through no clock. nil calls nothing.
+func (t *Tracker) OnAwait(f func()) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onAwait = f
+	t.mu.Unlock()
+}
+
+// AwaitRequest waits while the running test awaits its test case's request
+// (BeginAwaiting): until Give brings it, or the test's window closes without
+// it (End, the next Begin, NewSet), or ctx ends, whose error it returns. A
+// call that read the test's places while it awaited (Places) reads them
+// again only then: the replay sends the request only after the filter that
+// brings it is answered, so a call made in between is the test's background
+// (a pool call, a call of the previous test's flow), and it is learned from
+// as one made after the request came, whichever way the scheduler ordered
+// the two. A tracker no test awaits a request of returns at once. It holds
+// no lock of the tracker's while it waits; its caller must hold none that
+// Give, End or a Begin takes.
+func (t *Tracker) AwaitRequest(ctx context.Context) error {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	ok := t.waitGiven(ctx.Done())
+	t.mu.Unlock()
+	if !ok {
+		return ctx.Err()
+	}
+	return nil
 }
 
 // newDrifts is an empty DriftCache of the tracker's tests: one of keploy
@@ -234,6 +369,36 @@ func (t *Tracker) BeginAt(at time.Time) {
 		return
 	}
 	t.mu.Lock()
+	say := t.beginAt(at)
+	t.mu.Unlock()
+	say()
+}
+
+// BeginAwaiting starts the next test now as one keploy test opened
+// (BeginAwaitingAt).
+func (t *Tracker) BeginAwaiting() { t.BeginAwaitingAt(time.Now()) }
+
+// BeginAwaitingAt is BeginAt and Await in one step: the next test, which
+// keploy test opened, begins at the real instant at awaiting its test case's
+// request, which the filter that opens it brings (Give). No call reads the
+// test's places between the two without being told the test awaits its
+// request (Places), and waiting for it (AwaitRequest). The agent begins so
+// as keploy test opens a test's capture window.
+func (t *Tracker) BeginAwaitingAt(at time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	say := t.beginAt(at)
+	t.await()
+	t.mu.Unlock()
+	say()
+}
+
+// beginAt is BeginAt, t.mu held. It returns what to call once t.mu is
+// released (closeUnread).
+func (t *Tracker) beginAt(at time.Time) func() {
+	say := t.closeUnread()
 	t.epoch++
 	t.served = nil
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
@@ -244,26 +409,38 @@ func (t *Tracker) BeginAt(at time.Time) {
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
-	t.mu.Unlock()
+	return say
 }
 
-// Await marks the running test as a keploy test case's, whose own request
-// the filter that opens it carries (Give): until it is given, the test's
-// earliest place is a request the learn step could not read (Earlier.Unread),
-// so every value that changed in a call the test makes before then, or in
-// every call of a test whose filter never brought its request, is refused.
-// The agent marks it as keploy test opens the test's capture window, after
-// Begin. A test keploy test did not open (keploy mock's) is never marked: it
-// has no keploy test case.
+// Await marks the running test, begun already, as a keploy test case's,
+// whose own request the filter that opens it carries (Give), where none was
+// given yet: until it is given, a call that reads the test's places is told
+// so (Places), and waits for it (AwaitRequest). A test that ends without it
+// (End) leaves its earliest place a request the learn step could not read
+// (Earlier.Unread): every value that changed in a call that read the test's
+// places after then is refused. At the next Begin a call still waiting reads
+// the next test's places instead, waiting again where that test awaits its
+// own request. BeginAwaitingAt
+// marks a test as it begins, in one step; a test keploy test did not open
+// (keploy mock's) is never marked: it has no keploy test case.
 func (t *Tracker) Await() {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
-	if t.open {
-		t.given = &Earlier{Mock: givenPlace(""), Given: true, Unread: unopenedRequest}
+	if t.open && t.given == nil {
+		t.await()
 	}
 	t.mu.Unlock()
+}
+
+// await marks the running test as awaiting its request (Await). t.mu is
+// held.
+func (t *Tracker) await() {
+	t.given = &Earlier{Mock: givenPlace(""), Given: true, Unread: unopenedRequest}
+	if t.awaiting == nil {
+		t.awaiting = make(chan struct{})
+	}
 }
 
 // Give makes e (GivenRequest: the running keploy test case's own request)
@@ -286,18 +463,23 @@ func (t *Tracker) Give(e Earlier) {
 	} else {
 		t.given = &Earlier{Mock: e.Mock, Given: true, Unread: strayRequest}
 	}
+	t.closeAwaiting()
 	t.mu.Unlock()
 }
 
 // End ends the running test: until the next Begin no test is open, and a
-// request belongs to no test's own mocks.
+// request belongs to no test's own mocks. A test that still awaited its
+// request closes without it: the calls waiting for it read the test's places
+// with a request that could not be read (Await).
 func (t *Tracker) End() {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	t.open = false
+	say := t.closeUnread()
 	t.mu.Unlock()
+	say()
 }
 
 // Open reports whether a test is open. A nil tracker, which knows nothing of
@@ -328,10 +510,25 @@ func (t *Tracker) Begun() bool {
 // (ServedMock), and the mocks served before it began: those served since the
 // previous test began (see Tracker.before), and every one served while no
 // test was open (see Tracker.outside), each once. A request reads it once
-// its scope is read, and hands the number back to Served.
+// its scope is read, and hands the number back to Served. It never waits:
+// while the running test awaits its test case's request its earliest place
+// is a request the learn step could not read, and a caller that learns from
+// a call reads Places instead, which says so.
 func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
+	n, earlier, served, before, _ := t.Places()
+	return n, earlier, served, before
+}
+
+// Places is Test, and, in the same read, whether the running test still
+// awaits its test case's request (BeginAwaiting, Await): a call that reads
+// its places then learns nothing from them, waits for the request
+// (AwaitRequest), and reads its scope and places again, so that the learn
+// step's verdict on it does not hang on whether it fell before the filter
+// that opens the test or after. It never waits itself: a caller may read it
+// holding a lock of its own.
+func (t *Tracker) Places() (uint64, []Earlier, []*models.Mock, []*models.Mock, bool) {
 	if t == nil {
-		return 0, nil, nil, nil
+		return 0, nil, nil, nil, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -350,7 +547,7 @@ func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 		earlier = append(earlier, *t.given)
 	}
 	earlier = append(append(earlier, t.run...), t.served...)
-	return t.epoch, earlier, append([]*models.Mock(nil), t.mocks...), before
+	return t.epoch, earlier, append([]*models.Mock(nil), t.mocks...), before, t.awaiting != nil
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
