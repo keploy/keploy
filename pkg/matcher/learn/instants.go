@@ -29,14 +29,19 @@ import (
 //
 // Before any of these excuses a word of a value, the echo reads its instants
 // (echoedIn): where an earlier place holds the moment F saw in the value (a
-// payload served or recorded earlier, or a leaf of an exchange F served, its
-// recorded value or the one F saw, on either side, in every form), the value
-// may be a pick from what the application was given, by its clock (a
-// timetable's next departure), which moves as a read of the clock does. It
-// is then a variable of the place holding the moment it was recorded with,
-// or, held nowhere, refused (unaccounted). A place holds a moment as an
-// instant of it in any layout, or as its time of day as written in its own
-// zone or in UTC (heldMoments).
+// payload served or recorded earlier, a leaf of an exchange F served, its
+// recorded value or the one F saw, on either side, in every form, or the
+// test case's own request, as recorded and as sent: Earlier.Given), the
+// value may be a pick from what the application was given, by its clock (a
+// timetable's next departure, the next of the slots the request lists), or a
+// copy of it, which moves as a read of the clock does. It is then a variable
+// of the place holding the moment it was recorded with, or, held nowhere,
+// refused (unaccounted). A place holds a moment as an instant of it in any
+// layout, at the value's own precision (an instant the place holds finer, cut
+// to the value's resolution or to a coarser one the value is whole at,
+// truncated or rounded: a stored second of a served millisecond; covers), or
+// as its time of day as written in its own zone or in UTC (heldMoments).
+// The moments are compared, never their texts.
 //
 // A value whose provenance shows neither stays checked: where an earlier
 // place holds one of its words, it is refused (a variable that cannot be
@@ -115,7 +120,9 @@ var instantRes = func() []*regexp.Regexp {
 // instantKey is the moment an instant names, compared as one unit: at, in
 // UnixNano (of a time of day, the nanoseconds into its day, day). Two
 // instants are one only with equal keys: an epoch second and that second's
-// millisecond 473 are two moments; "…16.47Z" and "…16.470Z" one.
+// millisecond 473 are two moments; "…16.47Z" and "…16.470Z" one. The echo
+// also holds a coarser instant where a finer one cut to its precision is it
+// (covers): that second is a copy of the millisecond, not the other way.
 type instantKey struct {
 	at  int64
 	day bool
@@ -123,25 +130,42 @@ type instantKey struct {
 
 // instant is one instant a text holds: [start, end) of it, the index of its
 // layout in clockLayouts, what it is (key), the time of day its text writes
-// (wall) and the resolution its text gives it (res). keyed is false for a
-// time-ordered UUID's time groups, which name no moment a payload is
-// searched for.
+// (wall), the resolution its text gives it (res) and the zone it names
+// (zone, zoned: moment). keyed is false for a time-ordered UUID's time
+// groups, which name no moment a payload is searched for.
 type instant struct {
 	start, end, layout int
 	key                instantKey
 	wall               int64
 	res                time.Duration
+	zone               int64
+	zoned              bool
 	keyed              bool
 }
 
+// moment is sp as a payload is searched for it.
+func (sp instant) moment() moment {
+	return moment{key: sp.key, wall: sp.wall, res: sp.res, zone: sp.zone, zoned: sp.zoned}
+}
+
 // moment is an instant as a payload is searched for it (heldMoments): what
-// it is (key), and the time of day its text writes (wall, in nanoseconds
-// into its day): of a zoned instant, its wall clock in its own zone
+// it is (key), the time of day its text writes (wall, in nanoseconds into
+// its day): of a zoned instant, its wall clock in its own zone
 // ("2026-10-22T11:15+05:30" writes 11:15, at 05:45 UTC); of an instant in
-// UTC or of no zone, its UTC time of day; of a time of day, itself.
+// UTC or of no zone, its UTC time of day; of a time of day, itself), the
+// resolution its text gives it (res: a millisecond of "1792667656473", a
+// second of "…T11:14:16Z"), and the zone its text names: zoned where it
+// names one or is an absolute instant (an epoch, a "Z", an HTTP-date), with
+// its offset east of UTC in nanoseconds (zone: 05:30 of "+05:30", -10:00 of
+// "-10:00"). An instant of no zone ("2026-10-22 16:44:16", a DATETIME) is
+// read in UTC, and is not zoned: it may be a wall clock in any zone
+// (inZone). A time of day is never zoned.
 type moment struct {
-	key  instantKey
-	wall int64
+	key   instantKey
+	wall  int64
+	res   time.Duration
+	zone  int64
+	zoned bool
 }
 
 // clockOfDay is t's time of day as its text writes it, in its own location,
@@ -162,10 +186,12 @@ func instantKeyOf(k int, s string) (moment, time.Duration, bool) {
 	}
 	if lay.wraps {
 		tod := clockOfDay(t)
-		return moment{key: instantKey{at: tod, day: true}, wall: tod}, res, true
+		return moment{key: instantKey{at: tod, day: true}, wall: tod, res: res}, res, true
 	}
 	wall := clockOfDay(t)
 	at := t.UnixNano()
+	_, off := t.Zone()
+	zone, zoned := int64(off)*int64(time.Second), namesZone(k, up)
 	// An epoch with a fraction, to the nanosecond from its digits (its
 	// layout reads it through a float).
 	if i := strings.IndexByte(up, '.'); i == 10 && isEpochText(up) {
@@ -184,7 +210,26 @@ func instantKeyOf(k int, s string) (moment, time.Duration, bool) {
 		at = sec*int64(time.Second) + ns
 		wall = timeOfDay(at)
 	}
-	return moment{key: instantKey{at: at}, wall: wall}, res, true
+	return moment{key: instantKey{at: at}, wall: wall, res: res, zone: zone, zoned: zoned}, res, true
+}
+
+// namesZone reports whether s, a match of layout k (in upper case), is an
+// instant its text places on the time line by itself: an HTTP-date, an
+// epoch, or a text that names its zone ("Z", "+05:30", "-0500", "UTC",
+// "GMT"). A date or a date and time of no zone is a wall clock of a zone the
+// text does not name.
+func namesZone(k int, s string) bool {
+	switch k {
+	case 1:
+		if strings.HasSuffix(s, "UTC") || strings.HasSuffix(s, "GMT") {
+			return true
+		}
+		// After its date ("2006-01-02"), whose dashes name no zone.
+		return len(s) > 10 && strings.ContainsAny(s[10:], "Z+-")
+	case 2:
+		return strings.HasSuffix(s, "Z")
+	}
+	return true
 }
 
 // isEpochText reports whether s is digits around one '.'.
@@ -238,7 +283,7 @@ func instantSpans(s string) []instant {
 				if !ok {
 					continue
 				}
-				sp.key, sp.wall, sp.res, sp.keyed = mo.key, mo.wall, res, true
+				sp.key, sp.wall, sp.res, sp.zone, sp.zoned, sp.keyed = mo.key, mo.wall, res, mo.zone, mo.zoned, true
 			}
 			if taken == nil {
 				taken = make([]bool, len(s))
@@ -313,7 +358,7 @@ func driftedInstants(recorded, live string) []driftedInstant {
 	byLayout := map[int][]moment{}
 	for _, sp := range instantSpans(live) {
 		if sp.keyed {
-			byLayout[sp.layout] = append(byLayout[sp.layout], moment{sp.key, sp.wall})
+			byLayout[sp.layout] = append(byLayout[sp.layout], sp.moment())
 		}
 	}
 	seen := map[int]int{}
@@ -325,7 +370,7 @@ func driftedInstants(recorded, live string) []driftedInstant {
 		n := seen[r.layout]
 		seen[r.layout]++
 		if l := byLayout[r.layout]; n < len(l) && l[n].key != r.key {
-			out = append(out, driftedInstant{rec: moment{r.key, r.wall}, live: l[n]})
+			out = append(out, driftedInstant{rec: r.moment(), live: l[n]})
 		}
 	}
 	return out
@@ -333,7 +378,8 @@ func driftedInstants(recorded, live string) []driftedInstant {
 
 // readInstants fills d's reading of its instants once its forms are read:
 // the instants of its forms that changed (instants), and the moments its
-// forms hold, recorded and live (recKeys, liveKeys).
+// forms hold, recorded and live (recKeys, liveKeys; recMoments,
+// liveMoments).
 func (d *valueDrift) readInstants() {
 	d.recKeys, d.liveKeys = map[instantKey]bool{}, map[instantKey]bool{}
 	seen := map[driftedInstant]bool{}
@@ -347,14 +393,38 @@ func (d *valueDrift) readInstants() {
 		for _, sp := range instantSpans(f[0]) {
 			if sp.keyed {
 				d.recKeys[sp.key] = true
+				d.recMoments = appendMoment(d.recMoments, sp.moment())
 			}
 		}
 		for _, sp := range instantSpans(f[1]) {
 			if sp.keyed {
 				d.liveKeys[sp.key] = true
+				d.liveMoments = appendMoment(d.liveMoments, sp.moment())
 			}
 		}
 	}
+}
+
+// appendMoment is ms with m, unless ms holds it.
+func appendMoment(ms []moment, m moment) []moment {
+	for _, x := range ms {
+		if x == m {
+			return ms
+		}
+	}
+	return append(ms, m)
+}
+
+// lostMoments are the moments v was recorded with that F's value of it does
+// not hold, in the order they stand.
+func lostMoments(v *valueDrift) []moment {
+	var out []moment
+	for _, m := range v.recMoments {
+		if !v.liveKeys[m.key] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // holdsMomentOf reports whether e, what F saw drift at an earlier place, held
@@ -380,14 +450,34 @@ func (e *valueDrift) holdsMomentOf(v *valueDrift) bool {
 // clock as a read of it does. Each is returned as recorded; nil when none. A
 // place holds an instant where it names that moment (heldMoments.holds): an
 // instant of the same moment in any layout, or a time of day that is the
-// instant's own, to the nanosecond, as written in its own zone or in UTC (a
-// timetable's "11:15" holds "2026-10-22 11:15" and
-// "2026-10-22T11:15+05:30"), and the other way round.
-func echoedInstants(v *valueDrift, held *heldMoments) []driftedInstant {
+// instant's own, as written in its own zone or in UTC (a timetable's "11:15"
+// holds "2026-10-22 11:15" and "2026-10-22T11:15+05:30"), and the other way
+// round, each at the drifted instant's own precision (covers: a second of a
+// served millisecond is held), by an instant that does not name the moment
+// it was recorded with too (holdsApart). A wall clock of no zone is also
+// read in each zone a zone may be in, where the zone makes both moments ones
+// the places hold (recorded: what the recordings hold).
+func echoedInstants(v *valueDrift, held, recorded *heldMoments) []driftedInstant {
 	var out []driftedInstant
 	for _, p := range v.instants {
-		if held.holds(p.live) {
+		if held.holdsApart(p.live, p.rec) {
 			out = append(out, p)
+			continue
+		}
+		// A wall clock of no zone, in a zone neither it nor the place names
+		// (a DATETIME an application writes in its own): read in each zone
+		// a zone may be in, it is an echo where one zone makes the moment F
+		// saw one an earlier place holds and the moment it was recorded with
+		// one a recorded place holds, as that zone's moments.
+		if p.rec.zoned || p.live.zoned {
+			continue
+		}
+		for _, z := range held.zonesOf(p.live) {
+			r, l := p.rec.inZone(z), p.live.inZone(z)
+			if held.holdsApart(l, r) && recorded.holdsApart(r, l) {
+				out = append(out, driftedInstant{rec: r, live: l})
+				break
+			}
 		}
 	}
 	return out
@@ -436,12 +526,12 @@ func (dc *DriftCache) holdsInstant(text string, instants []moment) bool {
 }
 
 // heldMoments are the moments a place's instants name: each keyed instant
-// as it is (keys), its times of day (days), and, of its other instants, the
-// time of day each writes in its own zone and its UTC one (onDays), in
-// nanoseconds.
+// as it is, once in each spelling (its zone, its wall clock, its
+// resolution: list), which a drifted moment is matched against at its own
+// precision, as an instant or as a time of day (covers).
 type heldMoments struct {
-	keys         map[instantKey]bool
-	days, onDays map[int64]bool
+	seen map[moment]bool
+	list []moment
 }
 
 // add files spans' keyed instants.
@@ -450,33 +540,242 @@ func (h *heldMoments) add(spans []instant) {
 		if !sp.keyed {
 			continue
 		}
-		if h.keys == nil {
-			h.keys, h.days, h.onDays = map[instantKey]bool{}, map[int64]bool{}, map[int64]bool{}
-		}
-		h.keys[sp.key] = true
-		if sp.key.day {
-			h.days[sp.key.at] = true
-		} else {
-			h.onDays[timeOfDay(sp.key.at)] = true
-			h.onDays[sp.wall] = true
-		}
+		h.addMoment(sp.moment())
+	}
+}
+
+// addMoment files m.
+func (h *heldMoments) addMoment(m moment) {
+	if h.seen == nil {
+		h.seen = map[moment]bool{}
+	}
+	if !h.seen[m] {
+		h.seen[m] = true
+		h.list = append(h.list, m)
 	}
 }
 
 // holds reports whether the place names m's moment: an instant of it, or,
 // for an instant, a time of day that is its own (as it writes it in its
-// zone, or in UTC), and, for a time of day, an instant whose own it is.
+// zone, or in UTC), and, for a time of day, an instant whose own it is; each
+// at m's own precision, the place's finer instants cut to it (covers).
 func (h *heldMoments) holds(m moment) bool {
-	if h.keys == nil {
-		return false
+	for _, held := range h.list {
+		if covers(held, m) {
+			return true
+		}
 	}
-	if h.keys[m.key] {
+	return false
+}
+
+// holdsApart reports whether the place names m's moment (holds) by an
+// instant that does not also name other's: one instant, cut to a value's
+// precision by one rule, is one value, so an instant that names both the
+// moment a value was recorded with and the one F saw (one by truncation, the
+// other by rounding) is a copy of neither.
+func (h *heldMoments) holdsApart(m, other moment) bool {
+	for _, held := range h.list {
+		if covers(held, m) && !covers(held, other) {
+			return true
+		}
+	}
+	return false
+}
+
+// precisionUnits are the precisions an instant may be cut to, finest first:
+// each decimal fraction of a second, the second, the minute, the hour and
+// the day.
+var precisionUnits = []time.Duration{
+	time.Nanosecond, 10 * time.Nanosecond, 100 * time.Nanosecond,
+	time.Microsecond, 10 * time.Microsecond, 100 * time.Microsecond,
+	time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond,
+	time.Second, time.Minute, time.Hour, 24 * time.Hour,
+}
+
+// nsPerDay is a day in nanoseconds.
+const nsPerDay = int64(24 * time.Hour)
+
+// offset is how far ahead of UTC m's text writes it (the offset of the zone
+// it names, as its text names it), in nanoseconds: 0 of a time of day, and
+// of an instant in UTC or of no zone.
+func (m moment) offset() int64 {
+	if m.key.day {
+		return 0
+	}
+	return m.zone
+}
+
+// zoneOffsets are the offsets a zone may have from UTC: each quarter of an
+// hour from 12 hours behind it to 14 ahead.
+var zoneOffsets = func() []int64 {
+	var out []int64
+	for o := -12 * time.Hour; o <= 14*time.Hour; o += 15 * time.Minute {
+		if o != 0 {
+			out = append(out, int64(o))
+		}
+	}
+	return out
+}()
+
+// zonesOf are the zones a zone may be in (zoneOffsets) that read m, a moment
+// of no zone, as a wall clock some instant of the place may name at m's
+// precision: those within the coarsest unit m may be cut to of where m's
+// wall clock, read in UTC, stands from each instant the place holds (of a
+// time of day, around the day). A unit m is whole at, or, read in a zone a
+// quarter hour off, the hour (of a wall clock whole at the minute) or the
+// day (whole at the quarter hour). Only these can make the place hold m
+// (covers), and each is read once, in order.
+func (h *heldMoments) zonesOf(m moment) []int64 {
+	unit := int64(m.res)
+	for _, d := range precisionUnits {
+		if u := int64(d); u > unit && whole(m.key.at, 0, u) && (!m.key.day || u < nsPerDay) {
+			unit = u
+		}
+	}
+	switch {
+	case whole(m.key.at, 0, int64(15*time.Minute)):
+		unit = nsPerDay
+	case whole(m.key.at, 0, int64(time.Minute)) && unit < int64(time.Hour):
+		unit = int64(time.Hour)
+	}
+	near := map[int64]bool{}
+	for _, held := range h.list {
+		var ds []int64
+		switch {
+		case !held.key.day && !m.key.day:
+			ds = []int64{m.key.at - held.key.at}
+		default:
+			// A time of day on either side: around the day.
+			d := (timeOfDay(m.key.at) - timeOfDay(held.key.at)) % nsPerDay
+			ds = []int64{d, d - nsPerDay, d + nsPerDay}
+			if !held.key.day {
+				w := (timeOfDay(m.key.at) - held.wall) % nsPerDay
+				ds = append(ds, w, w-nsPerDay, w+nsPerDay)
+			}
+		}
+		for _, d := range ds {
+			for _, z := range zoneOffsets {
+				if z >= d-unit && z <= d+unit {
+					near[z] = true
+				}
+			}
+		}
+	}
+	var out []int64
+	for _, z := range zoneOffsets {
+		if near[z] {
+			out = append(out, z)
+		}
+	}
+	return out
+}
+
+// inZone is m, a moment of no zone (a wall clock its text names no zone
+// of), read as the wall clock of a zone z ahead of UTC: the instant it then
+// is, zoned z; of a time of day, its time of day in UTC.
+func (m moment) inZone(z int64) moment {
+	if m.key.day {
+		at := ((m.key.at-z)%nsPerDay + nsPerDay) % nsPerDay
+		return moment{key: instantKey{at: at, day: true}, wall: m.wall, res: m.res}
+	}
+	return moment{key: instantKey{at: m.key.at - z}, wall: m.wall, res: m.res, zone: z, zoned: true}
+}
+
+// cut is at, in nanoseconds, cut to a whole u as a clock z ahead of UTC
+// writes it: truncated, and rounded half up.
+func cut(at, z, u int64) (trunc, round int64) {
+	r := ((at+z)%u + u) % u
+	trunc, round = at-r, at-r
+	if 2*r >= u {
+		round += u
+	}
+	return trunc, round
+}
+
+// whole reports whether at is a whole u as a clock z ahead of UTC writes it.
+func whole(at, z, u int64) bool { return ((at+z)%u+u)%u == 0 }
+
+// covers reports whether held, an instant a place holds, names m's moment at
+// m's own precision: held truncated, or rounded, to a precision m has (its
+// resolution, or a coarser one of precisionUnits it is whole at), is m (a
+// stored second of a served millisecond, "…T11:14:16Z" of "1792667656473";
+// the same second written as milliseconds, "1792667656000"; a minute or a
+// day of it). Two instants are cut as a clock in UTC, in held's zone or in
+// m's zone writes them (a day is a zone's own); and an m of no zone (read in
+// UTC) is also held's own wall clock, cut (a date of a zoned instant's own
+// day, a DATETIME of its local time). A wall clock of a zone neither names
+// is the echo's to read, both ways (echoedInstants). Of a time of day
+// only its time of day is cut, to less than a day, and an instant's time of
+// day is the one it writes in its zone or in UTC. The precision is m's: a
+// finer m is no copy of a coarser held. Nothing is read from either's text
+// but its moment.
+func covers(held, m moment) bool {
+	if held.key == m.key {
 		return true
 	}
-	if m.key.day {
-		return h.onDays[m.key.at]
+	units := func(at, z int64, day bool, visit func(u int64) bool) bool {
+		for _, d := range precisionUnits {
+			u := int64(d)
+			if d < m.res || day && u >= nsPerDay || !whole(at, z, u) {
+				continue
+			}
+			if visit(u) {
+				return true
+			}
+		}
+		return false
 	}
-	return h.days[timeOfDay(m.key.at)] || h.days[m.wall]
+	ofDay := func(v, u int64) (int64, int64) {
+		t, r := cut(v, 0, u)
+		return (t%nsPerDay + nsPerDay) % nsPerDay, (r%nsPerDay + nsPerDay) % nsPerDay
+	}
+	switch {
+	case !held.key.day && !m.key.day:
+		hz, mz := held.offset(), m.offset()
+		for _, z := range []int64{0, hz, mz} {
+			if units(m.key.at, z, false, func(u int64) bool {
+				t, r := cut(held.key.at, z, u)
+				return t == m.key.at || r == m.key.at
+			}) {
+				return true
+			}
+		}
+		// m of no zone (read in UTC) may be held's own wall clock, cut: the
+		// date or time of day a zoned instant writes.
+		if !m.zoned && hz != 0 && units(m.key.at, 0, false, func(u int64) bool {
+			t, r := cut(held.key.at, hz, u)
+			return t+hz == m.key.at || r+hz == m.key.at
+		}) {
+			return true
+		}
+	case held.key.day && m.key.day:
+		return units(m.key.at, 0, true, func(u int64) bool {
+			t, r := ofDay(held.key.at, u)
+			return t == m.key.at || r == m.key.at
+		})
+	case held.key.day:
+		// A time of day held, an instant drifted: the instant's own time
+		// of day, as it writes it or in UTC.
+		for _, mt := range []int64{timeOfDay(m.key.at), m.wall} {
+			if units(mt, 0, true, func(u int64) bool {
+				t, r := ofDay(held.key.at, u)
+				return t == mt || r == mt
+			}) {
+				return true
+			}
+		}
+	default:
+		// An instant held, a time of day drifted.
+		for _, ht := range []int64{timeOfDay(held.key.at), held.wall} {
+			if units(m.key.at, 0, true, func(u int64) bool {
+				t, r := ofDay(ht, u)
+				return t == m.key.at || r == m.key.at
+			}) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // timeOfDay is at's (UnixNano) time of day on its UTC day, in nanoseconds:
@@ -687,12 +986,15 @@ func (dc *DriftCache) stampsEchoed(v *valueDrift, served []Earlier, raw []Raw) b
 		for _, f := range x.stamps {
 			text := x.text[f.start:f.end]
 			all = append(all, text)
-			if x.Served {
+			if x.served {
 				given = append(given, text)
 			}
 		}
 	}
 	for _, e := range served {
+		if e.Given {
+			continue
+		}
 		for _, s := range e.Seen {
 			if stamped(s) {
 				all = append(all, s.Leaf.Value)

@@ -78,6 +78,10 @@ type Tracker struct {
 	// data-plane mocks at, in order (ServedMockAt): when the app's calls the
 	// replay answered reached keploy. NewSet forgets them.
 	servedAt []time.Time
+	// given is the running test case's own request (Give), an earlier place
+	// only the echo reads (Earlier.Given); nil until it is given, and for a
+	// test no keploy test case opened (keploy mock's). Begin forgets it.
+	given *Earlier
 }
 
 // NewTracker makes a tracker with no test open.
@@ -107,6 +111,7 @@ func (t *Tracker) NewSet() {
 	t.names, t.taken = nil, nil
 	t.answered, t.drifts = nil, NewDriftCache()
 	t.servedAt = nil
+	t.given = nil
 	t.open, t.began = false, false
 	t.mu.Unlock()
 }
@@ -130,7 +135,50 @@ func (t *Tracker) Begin() {
 	t.answered = nil
 	t.drifts = NewDriftCache()
 	t.names, t.taken = nil, nil
+	t.given = nil
 	t.open, t.began = true, true
+	t.mu.Unlock()
+}
+
+// Await marks the running test as a keploy test case's, whose own request
+// the filter that opens it carries (Give): until it is given, the test's
+// earliest place is a request the learn step could not read (Earlier.Unread),
+// so a call the test makes before then, or every call of a test whose filter
+// never brought its request, is refused what only the request could account
+// for. The agent marks it as keploy test opens the test's capture window,
+// after Begin. A test keploy test did not open (keploy mock's) is never
+// marked: it has no keploy test case.
+func (t *Tracker) Await() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	if t.open {
+		t.given = &Earlier{Mock: givenPlace(""), Given: true, Unread: unopenedRequest}
+	}
+	t.mu.Unlock()
+}
+
+// Give makes e (GivenRequest: the running keploy test case's own request)
+// the running test's earliest place, which only the echo reads
+// (Earlier.Given), until the next test begins. The agent gives it as the
+// test case opens (its mock filter), after Begin and before the replay sends
+// the request: a call the test's request led to finds it. One given while no
+// test is open (the test's begin never reached the agent) is tied to no
+// test's calls: the calls made until the next test begins read a request
+// that could not be read, never the previous test's.
+func (t *Tracker) Give(e Earlier) {
+	if t == nil {
+		return
+	}
+	e.Given = true
+	e.Seen = append([]Seen(nil), e.Seen...)
+	t.mu.Lock()
+	if t.open {
+		t.given = &e
+	} else {
+		t.given = &Earlier{Mock: e.Mock, Given: true, Unread: strayRequest}
+	}
 	t.mu.Unlock()
 }
 
@@ -167,8 +215,9 @@ func (t *Tracker) Begun() bool {
 	return t.began
 }
 
-// Test is the running test's number, what the learn step served in it so
-// far, leaf by leaf, every mock any parser served in it so far
+// Test is the running test's number, its earlier places: its test case's
+// own request first (Give), then what the learn step served in it so
+// far, leaf by leaf; every mock any parser served in it so far
 // (ServedMock), and the mocks served before it began: those served since the
 // previous test began (see Tracker.before), and every one served while no
 // test was open (see Tracker.outside), each once. A request reads it once
@@ -189,7 +238,11 @@ func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 			before = append(before, m)
 		}
 	}
-	earlier := append(append(make([]Earlier, 0, len(t.run)+len(t.served)), t.run...), t.served...)
+	earlier := make([]Earlier, 0, len(t.run)+len(t.served)+1)
+	if t.given != nil {
+		earlier = append(earlier, *t.given)
+	}
+	earlier = append(append(earlier, t.run...), t.served...)
 	return t.epoch, earlier, append([]*models.Mock(nil), t.mocks...), before
 }
 

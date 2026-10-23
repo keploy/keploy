@@ -241,9 +241,12 @@ func TestAClockReadIsNoiseOnlyWhereItsWindowShowsIt(t *testing.T) {
 // whole, in the reading that writes it so (a founder decision); a
 // protocol-phase answer's own clock read (instants.go, rule 2) is no place it
 // came from: noise, but echoed both ways, or recorded outside its answer's
-// span. As another moment (its second, a finer one its digits begin) it is
-// none. Where no provenance shows a clock read, the typed reading's words
-// are searched: a payload holding one as a word of its own (a note's text)
+// span. As another moment it is none: a second of it is coarser than the
+// value, which is no copy of it; but a finer one its digits begin (its
+// microsecond) holds the value, its millisecond, at the value's own
+// precision, and the value is a variable of the receive. Where no
+// provenance shows a clock read, the typed reading's words are searched: a
+// payload holding one as a word of its own (a note's text)
 // refuses it; the receive's Date header, its server's stamp (rule 3), does
 // not.
 func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
@@ -314,25 +317,33 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 		}
 		ms, sec := strconv.FormatInt(sent.UnixMilli(), 10), strconv.FormatInt(sent.Unix(), 10)
 		gms, gsec := strconv.FormatInt(got.UnixMilli(), 10), strconv.FormatInt(got.Unix(), 10)
-		for _, other := range [][2]string{
-			{`{"SentTimestamp": "` + sec + `"}`, `{"SentTimestamp": "` + gsec + `"}`},
-			{`{"SentTimestamp": "` + ms + `123"}`, `{"SentTimestamp": "` + gms + `123"}`},
-			{`{"SentAt": "` + sec + `.4732103"}`, `{"SentAt": "` + gsec + `.4732103"}`},
+		for _, other := range []struct {
+			rec, live string
+			// copied: the value is the served instant cut to its own
+			// precision, both ways (a millisecond of a served
+			// microsecond): a variable of the receive, however it was read.
+			copied bool
+		}{
+			{`{"SentTimestamp": "` + sec + `"}`, `{"SentTimestamp": "` + gsec + `"}`, false},
+			{`{"SentTimestamp": "` + ms + `123"}`, `{"SentTimestamp": "` + gms + `123"}`, true},
+			{`{"SentAt": "` + sec + `.4732103"}`, `{"SentAt": "` + gsec + `.4732103"}`, false},
 		} {
-			receive, delivered := r1Receive(other[0]), r1Receive(other[1])
+			receive, delivered := r1Receive(other.rec), r1Receive(other.live)
 			delivered.Name = "mock-11"
 			for wname, w := range r1Windows(sent, got) {
 				for _, typed := range []bool{false, true} {
 					// Where no provenance shows a clock read the typed
 					// reading's words are searched: the Date header, its
 					// server's stamp, holds none, and a form refuses it
-					// only where it holds one as a word.
+					// only where it holds one as a word. A coarser copy
+					// is the echo's, whatever the provenance.
 					want := KindNoise
-					if typed && !shownClockRead(sent, got, typed, w) && (heldWord(other[0], sent, got, typed) || heldWord(other[1], sent, got, typed)) {
+					if other.copied || typed && !shownClockRead(sent, got, typed, w) && (heldWord(other.rec, sent, got, typed) || heldWord(other.live, sent, got, typed)) {
 						want = KindVariable
 					}
-					if ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, receive, delivered); ln.Kind != want {
-						t.Errorf("%s then %s, %s, typed %v: %s (from %q); want %s", other[0], other[1], wname, typed, ln.Kind, ln.From.Mock, want)
+					ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, receive, delivered)
+					if ln.Kind != want || other.copied && ln.From.Mock != "mock-4" {
+						t.Errorf("%s then %s, %s, typed %v: %s (from %q); want %s", other.rec, other.live, wname, typed, ln.Kind, ln.From.Mock, want)
 					}
 				}
 			}
@@ -523,7 +534,7 @@ func TestAnswerClock(t *testing.T) {
 	}
 	// A cache reads it once per mock, served or not, as RawOf does.
 	dc := NewDriftCache()
-	if a, b := dc.RawOf(receive, true), dc.RawOf(receive, false); !reflect.DeepEqual(a.AnswerClock(), RawOf(receive, false).AnswerClock()) || !reflect.DeepEqual(b.AnswerClock(), a.AnswerClock()) || !a.Served || b.Served {
+	if a, b := dc.RawOf(receive, true), dc.RawOf(receive, false); !reflect.DeepEqual(a.AnswerClock(), RawOf(receive, false).AnswerClock()) || !reflect.DeepEqual(b.AnswerClock(), a.AnswerClock()) || !a.Served() || b.Served() {
 		t.Fatalf("cached reads: %+v, %+v", a.AnswerClock(), b.AnswerClock())
 	}
 	if r, err := dc.ReadRaw(receive, true); err != nil || !reflect.DeepEqual(r.AnswerClock(), RawOf(receive, false).AnswerClock()) {
@@ -1156,7 +1167,7 @@ func TestAServedDateHeaderIsNoSourceButIsEchoed(t *testing.T) {
 	first, second := poll("mock-1", "Thu, 22 Oct 2026 11:14:16 GMT", day(11, 14, 15)), poll("mock-2", "Thu, 22 Oct 2026 11:15:20 GMT", day(11, 15, 19))
 	dc := NewDriftCache()
 	raws := []Raw{dc.RawOf(first, false), dc.RawOf(second, true)}
-	raws[0].At = at.Add(-time.Hour)
+	raws[0].at = at.Add(-time.Hour)
 	if ln := ClassifyIn(dc, []string{p}, l, r, at, nil, raws, nil, nil)[0]; ln.Kind == KindNoise || ln.Kind == KindEcho {
 		t.Errorf("a batch labelled by its answer's minute, F serving another recording of the call: %s; want it refused", ln.Kind)
 	}
@@ -1217,6 +1228,11 @@ func TestAZonedPickFromALocalTimetableStaysChecked(t *testing.T) {
 	}
 	if ln := classifyDeparture("11:14", "11:15", at, nil, servedTimetable(at.Add(-2*time.Second), zoned...)); ln.Kind != KindVariable || ln.From.Path != "body.departures[1]" {
 		t.Errorf("a time of day from zoned instants, served leaf by leaf: %s from %+v (%s); want a variable of mock-0's body.departures[1]", ln.Kind, ln.From, ln.Why)
+	}
+	// Only F's departures listed, in their zone: F's pick stands at its
+	// written time of day, the recorded one nowhere: refused, naming it.
+	if ln := classifyDeparture("11:14", "11:15", at, nil, servedTimetable(at.Add(-2*time.Second), "2026-10-22T11:15+05:30", "2026-10-22T11:16+05:30")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in mock-0 at body.departures[0]") {
+		t.Errorf("a time of day only F's zoned timetable lists: %s (%s); want it refused, naming where F's moment stands", ln.Kind, ln.Why)
 	}
 	// A zone the timetable's times are not written in holds no pick: F's
 	// "11:15+05:30" is 05:45 UTC, and a table of UTC instants holds neither
@@ -1379,5 +1395,326 @@ func TestAnInstantsWrittenTimeOfDayIsNotTheHosts(t *testing.T) {
 				t.Errorf("host zone %s: %s from %q (%s); want noise", loc, ln.Kind, ln.From.Mock, ln.Why)
 			}
 		}()
+	}
+}
+
+// A coarser copy of a served instant is the echo's: the queue consumer
+// stores the SentTimestamp of the message it was delivered (milliseconds) at
+// a coarser precision (a second, a minute, or milliseconds ending in 000),
+// truncated or rounded, typed or as text: RFC 3339, epoch seconds or
+// milliseconds, a MySQL DATETIME, a Postgres timestamp(0). F delivers another
+// recording's message (mock-11, sent 2m0.311s later). The value came from
+// served data in every form: a variable of the receive that held its
+// recorded moment (mock-4), compared as instants at the value's own
+// precision, never by text; held as F saw it only (the receive not among the
+// places), refused, naming mock-11. Never noise.
+func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
+	sent := time.Date(2026, 10, 22, 11, 14, 16, 473e6, time.UTC)
+	got := sent.Add(2*time.Minute + 311*time.Millisecond)
+	attrs := func(at time.Time) string {
+		return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}`
+	}
+	receive, delivered := r1Receive(attrs(sent)), r1Receive(attrs(got))
+	delivered.Name = "mock-11"
+	for _, m := range []*models.Mock{receive, delivered} {
+		// No Date header of the moment: only the attribute holds it.
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+	}
+	// The delivering receive alone, as nothing else of the recorded
+	// message's moment: its attribute holds F's.
+	alone := &models.Mock{Name: "mock-11", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "POST", URL: "/000000000000/localstack-queue/"},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"Messages": [{"Body": "S12 message", "Attributes": ` + attrs(got) + `}]}`},
+		ReqTimestampMock: r1Insert.Add(-3 * time.Second), ResTimestampMock: r1Insert.Add(-2 * time.Second),
+	}}
+	sec := func(at time.Time) time.Time { return at.Truncate(time.Second) }
+	round := func(at time.Time) time.Time { return at.Round(time.Second) }
+	minute := func(at time.Time) time.Time { return at.Truncate(time.Minute) }
+	const p = "body.processed_at"
+	text := func(f func(time.Time) string) func(time.Time) Leaf {
+		return func(at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: f(at)} }
+	}
+	for _, tc := range []struct {
+		name string
+		cut  func(time.Time) time.Time
+		leaf func(time.Time) Leaf
+	}{
+		{"RFC 3339 to the second", sec, text(func(at time.Time) string { return at.Format(time.RFC3339) })},
+		{"RFC 3339 rounded to the second", round, text(func(at time.Time) string { return at.Format(time.RFC3339) })},
+		{"epoch seconds", sec, text(func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) })},
+		{"epoch milliseconds ending 000", sec, text(func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) })},
+		{"a MySQL DATETIME", sec, text(func(at time.Time) string { return at.Format("2006-01-02 15:04:05") })},
+		{"a Postgres timestamp(0) with its zone", sec, text(func(at time.Time) string { return at.Format("2006-01-02 15:04:05") + "+00" })},
+		{"a Postgres timestamp(0) rounded", round, text(func(at time.Time) string { return at.Format("2006-01-02 15:04:05") })},
+		{"to the minute", minute, text(func(at time.Time) string { return at.Format("2006-01-02T15:04Z07:00") })},
+		{"a typed second", sec, func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Second) }},
+		{"a typed rounded second", round, func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Second) }},
+		{"a typed millisecond ending 000", sec, func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) }},
+		{"a typed minute", minute, func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Minute) }},
+	} {
+		rec := Shape{Leaves: map[string]Leaf{p: tc.leaf(tc.cut(sent))}}
+		live := Shape{Leaves: map[string]Leaf{p: tc.leaf(tc.cut(got))}}
+		dc := NewDriftCache()
+		ln := ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+			t.Errorf("%s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, rec.Leaves[p].Value, live.Leaves[p].Value, ln.Kind, ln.From, ln.Why)
+		}
+		dc = NewDriftCache()
+		ln = ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(alone, true)}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-11") {
+			t.Errorf("%s, mock-11 alone: %s (%s); want it refused, naming mock-11", tc.name, ln.Kind, ln.Why)
+		}
+	}
+	// A finer value is no copy of a coarser served instant: the receive's
+	// seconds hold no millisecond of them.
+	secAttrs := func(at time.Time) string { return `{"SentTimestamp": "` + strconv.FormatInt(at.Unix(), 10) + `"}` }
+	coarse, coarser := r1Receive(secAttrs(sent)), r1Receive(secAttrs(got))
+	coarser.Name = "mock-11"
+	for _, m := range []*models.Mock{coarse, coarser} {
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+	}
+	ms := func(at time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.UnixMilli(), 10)}}}
+	}
+	dc := NewDriftCache()
+	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+		t.Errorf("milliseconds beside served seconds: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// covers cuts the held instant to the drifted one's own precision: its
+// resolution, or a coarser one it is whole at, truncated or rounded, in UTC
+// or either one's zone; a time of day by its time of day, below a day.
+func TestCovers(t *testing.T) {
+	mo := func(s string) moment {
+		sp := instantSpans(s)
+		if len(sp) != 1 || !sp[0].keyed {
+			t.Fatalf("%q: spans %+v", s, sp)
+		}
+		return sp[0].moment()
+	}
+	for _, tc := range []struct {
+		held, m string
+		want    bool
+	}{
+		{"1792667656473", "2026-10-22T11:14:16Z", true},
+		{"1792667656473", "2026-10-22T11:14:17Z", false},
+		{"1792667656784", "2026-10-22T11:14:17Z", true},
+		{"1792667656784", "2026-10-22T11:14:16Z", true},
+		{"1792667656473", "1792667656000", true},
+		{"1792667656473", "1792667656474", false},
+		{"2026-10-22T11:14:16Z", "1792667656473", false},
+		{"1792667656473", "2026-10-22T11:14Z", true},
+		{"1792667656473", "2026-10-22T11:15Z", false},
+		{"1792667656473", "2026-10-22", true},
+		{"1792667656473", "2026-10-23", false},
+		{"2026-10-22T11:14:16.473+05:30", "2026-10-22", true},
+		{"2026-10-22T23:44:16.473-05:00", "2026-10-22", true},
+		{"2026-10-22T23:44:16.473-05:00", "2026-10-23", true},
+		{"1792667656473", "11:14", true},
+		{"1792667656473", "11:14:16", true},
+		{"1792667656473", "11:13", false},
+		{"11:14:16.473", "11:14", true},
+		{"11:14:16.473", "2026-10-22T11:14:16Z", true},
+		{"11:14", "2026-10-22T11:14:16Z", false},
+		{"11:14", "2026-10-22", false},
+		{"2026-10-22T11:14:16.473Z", "1792667656473", true},
+		{"2026-10-22T20:00:00Z", "2026-10-23T00:00+05:30", true},
+		{"2026-10-22T20:00:00Z", "2026-10-22T00:00+05:30", false},
+		// Zones behind UTC by more than ten hours: the instant's own day
+		// and wall clock, and its UTC day, never a day or a wall clock a
+		// zone ahead would write.
+		{"2026-10-22T20:00:00-10:00", "2026-10-22", true},
+		{"2026-10-22T20:00:00-10:00", "2026-10-22 20:00:00", true},
+		{"2026-10-22T20:00:00-10:00", "2026-10-23", true},
+		{"2026-10-22T20:00:00-10:00", "2026-10-24", false},
+		{"2026-10-22T20:00:00-10:00", "2026-10-23 20:00:00", false},
+		{"2026-10-22T20:00:00-12:00", "2026-10-22 20:00:00", true},
+		{"2026-10-22T20:00:00-12:00", "2026-10-23 20:00:00", false},
+		// A text that names its zone is that zone's: no other zone's wall
+		// clock.
+		{"2026-10-22T16:44:16+05:30", "2026-10-22T16:44:16Z", false},
+	} {
+		if got := covers(mo(tc.held), mo(tc.m)); got != tc.want {
+			t.Errorf("covers(%q, %q) = %v; want %v", tc.held, tc.m, got, tc.want)
+		}
+	}
+}
+
+// The review's rows for what the echo reads of an exchange F served: a
+// base64 leaf F served otherwise than recorded holds, decoded, the moment F
+// saw in the value and the one it was recorded with (a cursor's slots): the
+// echo reads the recorded leaf in its every form, and names it, so the pick
+// is a variable of that leaf, never noise and never left unaccounted for.
+// And a stamp-to-stamp drift in a payload (a batch labelled by its answer's
+// minute, F serving another recording of the call) is a variable of the
+// stamp's mock, at its Date header: the stamps are searched as any text
+// where the premise of rule 3 fails (stampsEchoed).
+func TestTheEchoReadsAServedLeafInEveryForm(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 30, 0, time.UTC)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	served := []Earlier{{Mock: "mock-2", At: at.Add(-2 * time.Second), Own: true, Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.cursor", Noise: "body.cursor", Type: String, Value: b64(`{"slots":["2026-10-22T11:13:00Z","2026-10-22T11:14:00Z","2026-10-22T11:15:00Z"]}`)}, Live: b64(`{"slots":["2026-10-22T09:00:00Z"]}`)},
+	}}}
+	const p = "body.slot"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]
+	if ln.Kind != KindVariable || ln.From.Mock != "mock-2" || ln.From.Path != "body.cursor" || !ln.From.Echo || ln.From.Side != Response {
+		t.Errorf("a pick from a base64 leaf served otherwise: %s from %+v (%s); want an echo's variable of mock-2's body.cursor", ln.Kind, ln.From, ln.Why)
+	}
+	// The stamp-to-stamp drift.
+	poll := func(name, date string, asked time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "/status"},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": date}, Body: `{"ok":true}`},
+			ReqTimestampMock: asked, ResTimestampMock: asked.Add(time.Second),
+		}}
+	}
+	day := func(h, m, s int) time.Time { return time.Date(2026, 10, 22, h, m, s, 0, time.UTC) }
+	first, second := poll("mock-1", "Thu, 22 Oct 2026 11:14:16 GMT", day(11, 14, 15)), poll("mock-2", "Thu, 22 Oct 2026 11:16:20 GMT", day(11, 16, 19))
+	dc := NewDriftCache()
+	raws := []Raw{dc.RawOf(first, true), dc.RawOf(second, true)}
+	batch := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{"body.batch": {Path: "body.batch", Noise: "body.batch", Type: String, Value: v}}}
+	}
+	ln = ClassifyIn(dc, []string{"body.batch"}, batch("batch-16"), batch("batch-14"), day(11, 17, 0), nil, raws, nil, nil)[0]
+	if ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Field != "spec.resp.header.Date" {
+		t.Errorf("a stamp-to-stamp drift: %s from %+v (%s); want a variable of mock-1 at spec.resp.header.Date", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// A place holds each spelling of an instant: one it names in UTC and in a
+// zone of its own holds the zone's wall clock, whichever it names first.
+func TestAPlaceHoldsEverySpellingOfAnInstant(t *testing.T) {
+	tod := func(s string) moment {
+		sp := instantSpans(s)
+		if len(sp) != 1 || !sp[0].keyed {
+			t.Fatalf("%q: spans %+v", s, sp)
+		}
+		return sp[0].moment()
+	}
+	for _, text := range []string{`{"utc":"2026-10-22T11:15:00Z","local":"2026-10-22T16:45:00+05:30"}`, `{"local":"2026-10-22T16:45:00+05:30","utc":"2026-10-22T11:15:00Z"}`} {
+		var held heldMoments
+		held.add(instantSpans(text))
+		for _, m := range []string{"16:45", "11:15"} {
+			if !held.holds(tod(m)) {
+				t.Errorf("%s holds no %s", text, m)
+			}
+		}
+	}
+}
+
+// The coarser copy of a served instant in a zone neither it nor the place
+// names: the consumer writes the delivered message's SentTimestamp as a
+// DATETIME of its own zone (a JDBC LocalDateTime, PHP's date()). Read in
+// each zone a zone may be in, one zone makes the moment F saw the delivering
+// receive's and the moment it was recorded with the recorded receive's: a
+// variable of the receive. A wall clock that only F's moment, or nothing,
+// fits in some zone is no echo: a DATETIME read of the clock stays noise.
+func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
+	sent := time.Date(2026, 10, 22, 11, 14, 16, 473e6, time.UTC)
+	got := sent.Add(2*time.Minute + 311*time.Millisecond)
+	attrs := func(at time.Time) string {
+		return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}`
+	}
+	receive, delivered := r1Receive(attrs(sent)), r1Receive(attrs(got))
+	delivered.Name = "mock-11"
+	for _, m := range []*models.Mock{receive, delivered} {
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+	}
+	const p = "body.processed_at"
+	for _, zone := range []string{"Asia/Kolkata", "America/New_York", "Pacific/Honolulu", "Asia/Kathmandu"} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("no zone data: %v", err)
+		}
+		dt := func(at time.Time) Shape {
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: at.In(loc).Truncate(time.Second).Format("2006-01-02 15:04:05")}}}
+		}
+		dc := NewDriftCache()
+		ln := ClassifyIn(dc, []string{p}, dt(got), dt(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+			t.Errorf("%s: %s from %+v (%s); want an echo's variable from mock-4", zone, ln.Kind, ln.From, ln.Why)
+		}
+		// A DATETIME read of the clock, moved by the lead, beside the
+		// receives: no zone makes both moments theirs.
+		now := r1Insert.Add(-40 * time.Millisecond)
+		dc = NewDriftCache()
+		ln = ClassifyIn(dc, []string{p}, dt(now.Add(FullRoundLead)), dt(now), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		if ln.Kind != KindNoise {
+			t.Errorf("%s, a read of the clock: %s from %+v (%s); want noise", zone, ln.Kind, ln.From, ln.Why)
+		}
+		// An instant its protocol types is the moment it names, in UTC:
+		// the wall clock it would write in another zone is no copy of it.
+		typed := func(at time.Time) Shape {
+			wall := at.In(loc).Truncate(time.Second)
+			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, time.UTC), time.Second)}}
+		}
+		dc = NewDriftCache()
+		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || ln.From.Mock != "" || ln.Why != instantNotClock {
+			t.Errorf("%s, typed: %s from %+v (%s); want it refused for its provenance alone", zone, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// One instant an earlier place holds, cut by one rule, is one value: a
+// minute read of the clock ("11:14" then "11:15", moved by the lead) beside
+// a served created_at of 11:14:40.120, which names 11:14 truncated and 11:15
+// rounded, is no pick from it, and stays noise wherever in the minute the
+// neighbour was recorded.
+func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 14, 50, 0, time.UTC)
+	const p = "body.at"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	for _, created := range []string{"2026-10-22T11:14:40.120Z", "2026-10-22T11:14:20.000Z"} {
+		served := []Earlier{{Mock: "mock-3", At: at.Add(-5 * time.Second), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.created_at", Noise: "body.created_at", Type: String, Value: created}, Live: created},
+		}}}
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
+			t.Errorf("beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// An instant its protocol types names its moment in UTC: one that is a
+// served zoned instant's wall clock written as UTC is no copy of it, and is
+// noise only by its provenance.
+func TestATypedInstantIsNoZonedInstantsWallClock(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
+	const p = "body.processed_at"
+	typed := func(t time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, t, time.Second)}} }
+	served := []Earlier{{Mock: "mock-4", At: at.Add(-time.Second), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.sentAt", Noise: "body.sentAt", Type: String, Value: "2026-10-22T16:44:16+05:30"}, Live: "2026-10-22T16:46:16+05:30"},
+	}}}
+	ln := ClassifyIn(NewDriftCache(), []string{p}, typed(time.Date(2026, 10, 22, 16, 46, 16, 0, time.UTC)), typed(time.Date(2026, 10, 22, 16, 44, 16, 0, time.UTC)), at, served, nil, nil, nil)[0]
+	if ln.Kind != KindUnaccounted || ln.From.Mock != "" || ln.Why != instantNotClock {
+		t.Errorf("a typed instant of a zoned instant's wall clock: %s from %+v (%s); want it refused for its provenance alone", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// A wall clock of no zone that only F's moment fits in some zone, beside a
+// recording that holds no moment it was recorded with in that zone, is no
+// echo: a coincidence on one side, which a read of the clock can meet.
+func TestAWallClockOfNoZoneFitOnOneSideIsNoEcho(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
+	const p = "body.at"
+	dt := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	served := []Earlier{{Mock: "mock-4", At: at.Add(-time.Second), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.sentAt", Noise: "body.sentAt", Type: String, Value: "1792667656473"}, Live: "1792667776784"},
+	}}}
+	// F's 16:46:16 is mock-4's live SentTimestamp in +05:30; the recorded
+	// 16:44:01 is no moment mock-4 recorded, in that zone or any.
+	ln := ClassifyIn(NewDriftCache(), []string{p}, dt("2026-10-22 16:46:16"), dt("2026-10-22 16:44:01"), at, served, nil, nil, nil)[0]
+	if ln.Kind != KindNoise {
+		t.Errorf("a wall clock F's side alone fits: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 }

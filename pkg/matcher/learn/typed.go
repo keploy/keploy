@@ -148,11 +148,14 @@ func instantFormOf(res time.Duration) struct {
 	return instantForms[len(instantForms)-1]
 }
 
-// instantMoment is t as the places' moments are compared (heldMoments): the
-// instant, and the time of day it writes in UTC.
-func instantMoment(t time.Time) moment {
+// instantMoment is t, of resolution res, as the places' moments are compared
+// (heldMoments): the instant, in UTC (an instant its protocol types names
+// its moment, as an epoch does), the time of day it writes there, and its
+// resolution, the precision a place's instant is cut to where it is matched
+// against it (covers).
+func instantMoment(t time.Time, res time.Duration) moment {
 	t = t.UTC()
-	return moment{key: instantKey{at: t.UnixNano()}, wall: clockOfDay(t)}
+	return moment{key: instantKey{at: t.UnixNano()}, wall: clockOfDay(t), res: res, zoned: true}
 }
 
 // The reasons a typed instant is refused for (Learned.Why), read after
@@ -180,8 +183,10 @@ func instantUnread(r, l Leaf) string {
 // classifyInstant is ClassifyIn's reading of a drifted leaf its protocol
 // types as one instant (r as recorded, l as F saw it: Instant leaves), in its
 // call's window w, as the header of this file says: the instant whole, never
-// its words.
-func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window) Learned {
+// its words. unread says why the test case's own request could not be read
+// (requestUnread; "" when it was, or no test case's request applies): then
+// the echo could not read it, and the instant is never noise or an echo.
+func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, rres, okR := InstantOf(r)
 	lt, lres, okL := InstantOf(l)
@@ -189,13 +194,13 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, instantUnread(r, l)
 		return ln
 	}
-	rec, live := instantMoment(rt), instantMoment(lt)
+	rec, live := instantMoment(rt, rres), instantMoment(lt, lres)
 	if from, ok := dc.instantServedFrom(r, rec, live, served); ok {
 		ln.Kind, ln.From = KindVariable, from
 		return ln
 	}
 	// The echo, before any provenance excuses the instant.
-	if dc.earlierMoments(at, served, raw).holds(live) {
+	if dc.earlierMoments(at, served, raw).holdsApart(live, rec) {
 		if from, ok := dc.instantEchoFrom(r, rec, at, served, raw); ok {
 			ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 			return ln
@@ -211,8 +216,21 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 		return ln
 	}
+	// The test case's own request, as recorded, holding the moment it was
+	// recorded with, before any provenance excuses it: a pick from the
+	// request by the clock whose pick in F the request does not list.
+	if where := dc.requestHolds([]moment{rec}, []moment{live}, served); where != "" {
+		ln.Kind, ln.Why = KindUnaccounted, requestHoldsWhy(where)
+		return ln
+	}
 	if !instantClock(rt, lt, rres, lres, w) {
 		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
+		return ln
+	}
+	// Noise, or an echo, only where the echo could read the test case's own
+	// request, where the moment F saw may stand.
+	if unread != "" {
+		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
@@ -229,11 +247,15 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 // followed whatever its provenance, as in a payload), or that held the
 // moment it was recorded with as recorded and the moment F saw as F saw it,
 // neither on its other side (it drifted with it, rule 1). Whole, of the
-// place, is its recorded text's being r's: where the value can be bound.
+// place, is its recorded text's being r's: where the value can be bound. The
+// test case's own request is the echo's alone (Earlier.Given).
 func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
 	var best Place
 	rank := 7
 	for _, e := range served {
+		if e.Given {
+			continue
+		}
 		for _, s := range e.Seen {
 			if s.Live == s.Leaf.Value {
 				continue
@@ -263,7 +285,7 @@ func (dc *DriftCache) instantSource(s Seen, v *valueDrift) bool {
 	if !ok {
 		return false
 	}
-	return dc.instantCoDrifted(v.rec, v.live, instantMoment(rt), instantMoment(lt))
+	return dc.instantCoDrifted(v.rec, v.live, instantMoment(rt, 0), instantMoment(lt, 0))
 }
 
 // isInstant reports whether text, in one of its declared forms (textForms),
@@ -314,16 +336,16 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, rec moment, at time.Time, served [
 		return best, true
 	}
 	for _, x := range raw {
-		if !x.Served && !x.At.Before(at) {
+		if !x.served && !x.at.Before(at) {
 			continue
 		}
 		for _, f := range x.fields {
 			if !f.key && dc.holdsInstant(x.text[f.start:f.end], rm) {
-				return Place{Mock: x.Mock, Field: f.describe(), Echo: true}, true
+				return Place{Mock: x.mock, Field: f.describe(), Echo: true}, true
 			}
 		}
 		if dc.holdsInstant(x.text, rm) || dc.holdsInstant(dc.rawExtra(x.text), rm) {
-			return Place{Mock: x.Mock, Echo: true}, true
+			return Place{Mock: x.mock, Echo: true}, true
 		}
 	}
 	return Place{}, false
@@ -332,12 +354,13 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, rec moment, at time.Time, served [
 // instantRawFrom is the first payload served earlier in the test or recorded
 // before at that holds rec, the moment the drifted instant r was recorded
 // with, as an instant of its own in any layout, exactly (not its time of
-// day: that is the echo's), in any form, with a protocol-phase answer's own
-// clock reads and an HTTP answer's stamp blanked (searched: rules 2 and 3),
-// and the field that holds it.
+// day, nor a finer instant cut to it: those are the echo's, which F's moment
+// gates), in any form, with a protocol-phase answer's own clock reads and an
+// HTTP answer's stamp blanked (searched: rules 2 and 3), and the field that
+// holds it.
 func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
-		if !x.Served && !x.At.Before(at) {
+		if !x.served && !x.at.Before(at) {
 			continue
 		}
 		texts := dc.searched(x, false)
@@ -355,7 +378,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw
 				break
 			}
 		}
-		return Place{Mock: x.Mock, Field: field, Held: r.Value}, true
+		return Place{Mock: x.mock, Field: field, Held: r.Value}, true
 	}
 	return Place{}, false
 }

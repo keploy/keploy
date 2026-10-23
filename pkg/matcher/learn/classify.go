@@ -64,8 +64,23 @@ type Earlier struct {
 	Own bool
 	// Run: served while no test was open (Tracker.Served): a variable bound
 	// at it is the run's, which every later test uses (Tracker.RunName).
-	Run  bool
-	Seen []Seen
+	Run bool
+	// Given: the place is no mock but the running keploy test case's own
+	// request (GivenRequest, Tracker.Give), each part as recorded (Leaf) and
+	// as keploy test sent it (Live): what the application was given before
+	// any call of the test. Only the echo reads it (echoedIn): a value the
+	// application picked from it by its clock (the next of the slots the
+	// request lists) moves as a read of the clock does, and is followed from
+	// there, or refused, never learned as noise. Nothing else is searched
+	// in it: the request is sent as recorded, so a value that drifted was
+	// not copied from it.
+	Given bool
+	// Unread, of a Given place, says why the test case's request could not
+	// be read (none was sent with the test case, or keploy cannot read its
+	// kind): it has no Seen, and a changed instant the echo would have read
+	// it for is refused (ClassifyIn), never learned as noise.
+	Unread string
+	Seen   []Seen
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
@@ -74,16 +89,21 @@ type Earlier struct {
 // one text: a value found there flowed from that mock, at a place no leaf
 // names.
 //
-// A Raw with a text comes only from its mock (RawOf, ReadRaw, and their
-// DriftCache forms), or from another Raw (WithServed): its text and its
-// answer's clock reads (AnswerClock) are read together from the mock and
-// travel together, so no copy keeps the one and drops the other. A cache of
-// Raws keeps the Raw whole; a literal of the exported fields alone has no
-// text, and is searched for nothing.
+// A Raw is read from its mock only (RawOf, ReadRaw, and their DriftCache
+// forms), or made from another Raw (WithServed): its fields are its own, so
+// its text and its answer's clock reads (AnswerClock) are read together from
+// the mock and travel together, and no copy keeps the one and drops the
+// other. A Raw that was not read from its mock (the zero Raw, or ReadRaw's
+// of an answer it could not read back) is refused wherever it is handed to
+// the classifier (ClassifyIn): what it held cannot be told, and nothing is
+// learned on the strength of its absence.
 type Raw struct {
-	Mock   string
-	At     time.Time
-	Served bool
+	// mock is Mock, at At and served Served.
+	mock   string
+	at     time.Time
+	served bool
+	// read: the text was read from the mock (RawOf).
+	read bool
 	// text is Text; answerClock is AnswerClock.
 	text        string
 	answerClock []time.Time
@@ -97,6 +117,19 @@ type Raw struct {
 	// one, and only the echo reads them.
 	stamps []rawField
 }
+
+// Mock is the name of r's mock.
+func (r Raw) Mock() string { return r.mock }
+
+// At is when r's mock's request was recorded.
+func (r Raw) At() time.Time { return r.at }
+
+// Served reports whether r's mock was served earlier in the test.
+func (r Raw) Served() bool { return r.served }
+
+// Read reports whether r was read from its mock (RawOf): a Raw that was not
+// holds no text, and the classifier refuses it.
+func (r Raw) Read() bool { return r.read }
 
 // rawField is one scalar or key of a Raw's text: [start, end) of it in the
 // text, and its field of the mock's spec, by the spec's JSON names
@@ -124,7 +157,7 @@ func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answe
 // WithServed is r as served, or not, earlier in the test: the same text,
 // fields and answer clock reads.
 func (r Raw) WithServed(served bool) Raw {
-	r.Served = served
+	r.served = served
 	return r
 }
 
@@ -163,6 +196,9 @@ type Place struct {
 	Own bool
 	// Run: the mock was served while no test was open (Earlier.Run).
 	Run bool
+	// Given: the place is the test case's own request (Earlier.Given), no
+	// call of the test: nothing binds a variable there.
+	Given bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Field, of a place found in a raw mock's payload, is the field of its
@@ -230,19 +266,30 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 // ClassifyIn is Classify of a call whose clock reads were made in w
 // (Tracker.CallWindow; nil: none): a drifted instant that is a read of each
 // run's clock within it is a clock read, as one the lead moved is.
+//
+// A leaf its protocol types as one instant (Instant) is classified whole,
+// never word by word (typed.go). A Raw that was not read from its mock
+// (Raw.Read) refuses every drift: what it held cannot be told. Where the test
+// case's own request could not be read (Earlier.Unread), a value with a
+// changed instant is refused rather than learned as noise or an echo: the
+// echo could not read the request it may have been picked from.
 func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	unreadRaw := rawUnread(raw)
+	unreadReq := requestUnread(served)
 	out := make([]Learned, 0, len(drift))
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
-		// A field its protocol types as one instant is compared whole
-		// (typed.go), never word by word.
+		if unreadRaw != "" {
+			out = append(out, Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw})
+			continue
+		}
 		if r.Type == Instant || l.Type == Instant {
-			out = append(out, dc.classifyInstant(r, l, at, served, raw, resp, w))
+			out = append(out, dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq))
 			continue
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
@@ -272,9 +319,42 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
+		// Noise, or an echo, only where the echo could read the test case's
+		// own request, wherever the value holds an instant, recorded or as
+		// F saw it; and only where the request, as recorded, holds no
+		// moment the value was recorded with and lost (a pick from it by
+		// the clock whose pick in F the request does not list).
+		if ln.Kind == KindNoise || ln.Kind == KindEcho {
+			v := dc.ofIn(r.Value, l.Value, w)
+			switch {
+			case unreadReq != "" && len(v.recMoments)+len(v.liveMoments) > 0:
+				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, unreadRequestWhy(unreadReq), nil
+			default:
+				if where := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
+					ln.Kind, ln.Why, ln.Echo = KindUnaccounted, requestHoldsWhy(where), nil
+				}
+			}
+		}
 		out = append(out, ln)
 	}
 	return out
+}
+
+// rawUnread says why the classifier refuses raw: one of them was not read
+// from its mock (Raw.Read: the zero Raw, or one built otherwise than by
+// RawOf), so what it held cannot be told; "" when every one was.
+func rawUnread(raw []Raw) string {
+	for _, x := range raw {
+		if x.read {
+			continue
+		}
+		name := "a recording of the test"
+		if x.mock != "" {
+			name = x.mock
+		}
+		return "keploy could not read " + name + ", an earlier place of the call, from its mock (learn.RawOf), so it cannot tell whether what changed came from there: a fault of keploy's, which keploy reports rather than learn anything"
+	}
+	return ""
 }
 
 // echoedPart says where the call's recorded answer (resp) holds a word of
@@ -606,6 +686,53 @@ func wordsBy(s string, word func(byte) bool) []string {
 	return out
 }
 
+// inOrder are words, a set of v's words (of its recorded value, or of what F
+// saw in it: recorded), in the order they stand there: where each first
+// stands as a word in the value, then in each of its other forms in turn
+// (decoded, case-folded, encoded), and by text where two stand at one place
+// or at none. Wherever the first word a search finds names a place or a
+// reason, the words are searched in this order: one input, one reason.
+func (v *valueDrift) inOrder(words map[string]bool, recorded bool) []string {
+	out := make([]string, 0, len(words))
+	for w := range words {
+		out = append(out, w)
+	}
+	texts := []string{v.live}
+	if recorded {
+		texts[0] = v.rec
+	}
+	for _, f := range v.forms {
+		if recorded {
+			texts = append(texts, f[0])
+		} else {
+			texts = append(texts, f[1])
+		}
+	}
+	pos := make(map[string]int, len(out))
+	for _, w := range out {
+		off := 0
+		p := -1
+		for _, t := range texts {
+			if i := tokenIndex(t, w); i >= 0 {
+				p = off + i
+				break
+			}
+			off += len(t) + 1
+		}
+		if p < 0 {
+			p = off
+		}
+		pos[w] = p
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if pos[out[i]] != pos[out[j]] {
+			return pos[out[i]] < pos[out[j]]
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
 // valueDrift is what one drifted value (rec, live) changed, read once per
 // test: its clock reads the lead moved, the words each reading finds the
 // recorded value lost and the live one gained (in every declared form), its
@@ -638,9 +765,11 @@ type valueDrift struct {
 	wholes map[string]bool
 	// The value's instants (instants.go, readInstants): instants are those
 	// of its forms that changed; recKeys and liveKeys the moments its forms
-	// hold, recorded and live.
-	instants          []driftedInstant
-	recKeys, liveKeys map[instantKey]bool
+	// hold, recorded and live, and recMoments and liveMoments those moments
+	// in each spelling, in the order they stand.
+	instants                []driftedInstant
+	recKeys, liveKeys       map[instantKey]bool
+	recMoments, liveMoments []moment
 }
 
 // DriftCache keeps each value's drift for one test of the learn step: the
@@ -688,7 +817,7 @@ func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	r, ok := dc.readText[m]
 	dc.mu.Unlock()
 	if ok {
-		r.Served = served
+		r.served = served
 		return r, nil
 	}
 	r, err := ReadRaw(m, served)
@@ -713,7 +842,7 @@ func ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	}
 	full := m.ShallowCopy()
 	if err := full.HydrateResponse(); err != nil {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served}, err
+		return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served}, err
 	}
 	return RawOf(full, served), nil
 }
@@ -728,7 +857,7 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 	r, ok := dc.mockText[m]
 	dc.mu.Unlock()
 	if ok {
-		r.Served = served
+		r.served = served
 		return r
 	}
 	r = RawOf(m, served)
@@ -1098,6 +1227,10 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	var best Place
 	rank := 7
 	for _, e := range served {
+		// The test case's own request is the echo's alone (Earlier.Given).
+		if e.Given {
+			continue
+		}
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
 			// value there is the same every run, and a value that drifted
@@ -1133,22 +1266,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// window excuses a word of it. An exchange F served leaf by leaf first,
 	// then a raw mock (below).
 	echoed := recordedOf(dc.echoedIn(v, at, served, raw))
-	if len(echoed) > 0 {
-		for _, e := range served {
-			for _, s := range e.Seen {
-				if !dc.holdsInstant(s.Leaf.Value, echoed) && !dc.holdsInstant(dc.rawExtra(s.Leaf.Value), echoed) {
-					continue
-				}
-				whole := s.Leaf.Value == recorded
-				if r := placeRank(e, s, whole); r < rank {
-					best, rank = seenPlace(e, s, whole), r
-					best.Echo = true
-				}
-			}
-		}
-		if rank < 7 {
-			return best, true
-		}
+	if from, ok := dc.echoServed(echoed, recorded, served); ok {
+		return from, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
 	// the recorded value, or what of it drifted (a changed word, a piece),
@@ -1164,12 +1283,15 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// the instant F saw too (echoedInstants). Every value is searched whole
 	// and by its words and pieces, whatever it looks like: only a clock read
 	// its call's window or the lead shows (clockIn), a provenance, is none.
+	//
+	// The words are searched in the order they stand in the value (inOrder),
+	// never in a set's: the first one found names the place and the reason.
 	var searched []string
 	if !v.clock.whole {
 		searched = append(searched, recorded)
 	}
 	for i := range readings {
-		for t := range v.lost[i] {
+		for _, t := range v.inOrder(v.lost[i], true) {
 			if t != recorded && !clockWord(t, true, v, v.clock) {
 				searched = append(searched, t)
 			}
@@ -1182,35 +1304,72 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	for _, x := range raw {
-		if !x.Served && !x.At.Before(at) {
+		if !x.served && !x.at.Before(at) {
 			continue
 		}
-		if len(echoed) > 0 {
-			for _, f := range x.fields {
-				if !f.key && dc.holdsInstant(x.text[f.start:f.end], echoed) {
-					return Place{Mock: x.Mock, Field: f.describe(), Echo: true}, true
-				}
-			}
-			if dc.holdsInstant(x.text, echoed) || dc.holdsInstant(dc.rawExtra(x.text), echoed) {
-				return Place{Mock: x.Mock, Echo: true}, true
-			}
+		if from, ok := dc.echoRaw(x, echoed); ok {
+			return from, true
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
-					return Place{Mock: x.Mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.Mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				return Place{Mock: x.Mock, Field: dc.fieldOf(x, texts, w), Held: w}, true
+				return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w}, true
 			}
 		}
+	}
+	return Place{}, false
+}
+
+// echoServed is the place of an exchange F served leaf by leaf (or the test
+// case's request) that holds one of echoed, the moments a drifted value
+// (recorded) was recorded with, where the echo found the moment F saw in it
+// held earlier (echoedIn): as recorded, in every form, the first by
+// placeRank. ok is false when none does.
+func (dc *DriftCache) echoServed(echoed []moment, recorded string, served []Earlier) (Place, bool) {
+	if len(echoed) == 0 {
+		return Place{}, false
+	}
+	var best Place
+	rank := 7
+	for _, e := range served {
+		for _, s := range e.Seen {
+			if !dc.holdsInstant(s.Leaf.Value, echoed) && !dc.holdsInstant(dc.rawExtra(s.Leaf.Value), echoed) {
+				continue
+			}
+			whole := s.Leaf.Value == recorded
+			if r := placeRank(e, s, whole); r < rank {
+				best, rank = seenPlace(e, s, whole), r
+				best.Echo = true
+			}
+		}
+	}
+	return best, rank < 7
+}
+
+// echoRaw is the place of payload x that holds one of echoed (echoServed):
+// the field that does, else the payload, in every form. ok is false when x
+// holds none.
+func (dc *DriftCache) echoRaw(x Raw, echoed []moment) (Place, bool) {
+	if len(echoed) == 0 {
+		return Place{}, false
+	}
+	for _, f := range x.fields {
+		if !f.key && dc.holdsInstant(x.text[f.start:f.end], echoed) {
+			return Place{Mock: x.mock, Field: f.describe(), Echo: true}, true
+		}
+	}
+	if dc.holdsInstant(x.text, echoed) || dc.holdsInstant(dc.rawExtra(x.text), echoed) {
+		return Place{Mock: x.mock, Echo: true}, true
 	}
 	return Place{}, false
 }
@@ -1224,24 +1383,25 @@ func (dc *DriftCache) heldAt(moments []moment, at time.Time, served []Earlier, r
 	}
 	for _, e := range served {
 		for _, s := range e.Seen {
-			// As echoedIn reads it: what F served, not what the application
-			// itself sent where it drifted.
-			if holds(s.Leaf.Value) || (s.Side == Response || s.Live == s.Leaf.Value) && holds(s.Live) {
+			// As echoedIn reads it: what F served, or gave the application
+			// as its test case's request, not what the application itself
+			// sent where it drifted.
+			if holds(s.Leaf.Value) || (s.Side == Response || e.Given || s.Live == s.Leaf.Value) && holds(s.Live) {
 				return "in " + e.Mock + " at " + s.Leaf.Path
 			}
 		}
 	}
 	for _, x := range raw {
-		if !x.Served && !x.At.Before(at) {
+		if !x.served && !x.at.Before(at) {
 			continue
 		}
 		for _, f := range x.fields {
 			if !f.key && holds(x.text[f.start:f.end]) {
-				return "in " + x.Mock + " at " + f.describe()
+				return "in " + x.mock + " at " + f.describe()
 			}
 		}
 		if holds(x.text) {
-			return "in " + x.Mock + "'s payload"
+			return "in " + x.mock + "'s payload"
 		}
 	}
 	return ""
@@ -1320,7 +1480,9 @@ func partOf(value, part string) string {
 // the run's before another's; then the same inside a longer value; then an
 // answer.
 func placeRank(e Earlier, s Seen, whole bool) int {
-	if s.Side != Request {
+	// The test case's own request is what the application was given, as an
+	// answer is.
+	if s.Side != Request || e.Given {
 		return 6
 	}
 	r := 2
@@ -1339,7 +1501,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name}
 }
 
 // echoedIn are v's changed instants whose live moment an earlier place
@@ -1351,18 +1513,19 @@ func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, ra
 	if len(v.instants) == 0 {
 		return nil
 	}
-	return echoedInstants(v, dc.earlierMoments(at, served, raw))
+	return echoedInstants(v, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw))
 }
 
 // earlierMoments are the moments the earlier places of a call recorded at
-// at hold, as the echo reads them (echoedIn): a payload served earlier in
-// the test or recorded before at (raw), in every form, as it stands, and
+// at hold, as the echo reads them (echoedIn): every payload served earlier
+// in the test or recorded before at (raw), in every form, as it stands, and
 // every value of an exchange F served earlier (served), on either side, as
-// recorded and as F served it, in every form.
+// recorded and as F served it, in every form, and the test case's own
+// request, as recorded and as sent.
 func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
 	var held heldMoments
 	for _, x := range raw {
-		if x.Served || x.At.Before(at) {
+		if x.served || x.at.Before(at) {
 			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
 		}
 	}
@@ -1370,12 +1533,32 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 		for _, s := range e.Seen {
 			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
 			// What F served (an answer's value, or a request's that did not
-			// drift). What the application itself sent in F, where it
-			// drifted, is its own output, whose co-drift with v sources
+			// drift), and the test case's request as keploy test sent it
+			// (Earlier.Given). What the application itself sent in F, where
+			// it drifted, is its own output, whose co-drift with v sources
 			// reads: two reads of the clock in one moment drift alike.
-			if s.Side == Response || s.Live == s.Leaf.Value {
+			if s.Side == Response || e.Given || s.Live == s.Leaf.Value {
 				dc.heldIn(&held, s.Live, dc.rawExtra(s.Live))
 			}
+		}
+	}
+	return &held
+}
+
+// recordedMoments are the moments the recordings of a call's earlier places
+// hold, as recorded: every payload served earlier in the test or recorded
+// before at (raw), and every value of an exchange F served earlier (served)
+// as recorded, in every form, and the test case's own request as recorded.
+func (dc *DriftCache) recordedMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
+	var held heldMoments
+	for _, x := range raw {
+		if x.served || x.at.Before(at) {
+			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
+		}
+	}
+	for _, e := range served {
+		for _, s := range e.Seen {
+			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
 		}
 	}
 	return &held
@@ -1403,8 +1586,8 @@ func Echoes(dc *DriftCache, r Leaf, resp []Leaf) []Leaf {
 			// An answer's instant its protocol types echoes the value
 			// where the value holds that moment, in any layout and form:
 			// it has no words to hold.
-			if t, _, ok := InstantOf(a); ok {
-				m := instantMoment(t)
+			if t, res, ok := InstantOf(a); ok {
+				m := instantMoment(t, res)
 				if dc.holdsExact(r.Value, m) || dc.holdsExact(dc.rawExtra(r.Value), m) {
 					out = append(out, a)
 				}
@@ -1451,7 +1634,7 @@ var payloadKeys = map[string]bool{
 // RawOf is a mock as Classify reads it when no leaf names its values: its
 // recorded request and answer, the payload only, as one text.
 func RawOf(m *models.Mock, served bool) Raw {
-	r := Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served}
+	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served}
 	b, err := json.Marshal(payloadSpec(m.Spec))
 	if err != nil {
 		return r
@@ -1460,6 +1643,7 @@ func RawOf(m *models.Mock, served bool) Raw {
 	if !ok {
 		return r
 	}
+	r.read = true
 	// The payload's own text, not its JSON: a JSON string escapes what
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.
@@ -1770,6 +1954,9 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	// one was seen (wrote).
 	live, wrote := "", false
 	for _, e := range served {
+		if e.Given {
+			continue
+		}
 		for _, s := range e.Seen {
 			if s.Side != Request || !s.Written || s.Record != record || s.Leaf.Value != r.Value {
 				continue

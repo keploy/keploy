@@ -327,6 +327,11 @@ func TestATypedPickFromAServedTimetableStaysChecked(t *testing.T) {
 			if ln.Kind != KindVariable || ln.From.Mock != "mock-2" || !ln.From.Echo || !strings.Contains(ln.Why, "a pick from what the application was given") {
 				t.Errorf("read as a payload (%s), %s: %s (from %+v, %s); want a variable of mock-2, by the echo", slots[0], wname, ln.Kind, ln.From, ln.Why)
 			}
+			// The field that holds it as it stands is named; one that holds
+			// it only in another form (percent-encoded) is not.
+			if plain := !strings.Contains(slots[0], "%"); plain != (ln.From.Field == "spec.responses[0].message.sections[0]") {
+				t.Errorf("read as a payload (%s), %s: the field %q", slots[0], wname, ln.From.Field)
+			}
 		}
 		ln := classify(w, servedTimetable(at.Add(-2*time.Second), "11:15", "11:16"))
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in mock-0 at body.departures[0]") {
@@ -530,6 +535,77 @@ func TestInstantClockRead(t *testing.T) {
 	} {
 		if got := InstantClockRead(row.rec, row.live, row.w); got != row.want {
 			t.Errorf("%s: %v; want %v", row.name, got, row.want)
+		}
+	}
+}
+
+// The other two boot inserts the queue consumer's lane refused for a
+// two-digit coincidence, as unit rows on the classifier (the json build's
+// runs 3 and 6, keploy e3d67a7e4): processed_at, a BSON datetime, read as
+// text, had a minute F saw (34, 38) that stood as a word in a recording
+// made before it, a Mongo reply's requestId (mock-10) and a version in the
+// SQS SDK's User-Agent (mock-5). Read whole, the minute is no word: in its
+// call's window, or moved by the lead, the instant is noise; shown by
+// neither, it is refused for its provenance alone, naming no recording.
+// Read word by word (a String), it is refused for the recording, as the lane
+// was.
+func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
+	reply := func(name string, requestID int32, asked time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.Mongo, ConnectionID: "0", Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "config", "connID": "0"},
+			MongoRequests: []models.MongoRequest{{
+				Header:  &models.MongoHeader{Length: 148, RequestID: 4, Opcode: wiremessage.OpMsg},
+				Message: &models.MongoOpMessage{FlagBits: 65536, Sections: []string{`{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"$db":"admin"} }`}},
+			}},
+			MongoResponses: []models.MongoResponse{{
+				Header:  &models.MongoHeader{Length: 117, RequestID: requestID, ResponseTo: 4, Opcode: wiremessage.OpMsg},
+				Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"ok":{"$numberDouble":"1.0"}} }`}},
+			}},
+			ReqTimestampMock: asked, ResTimestampMock: asked.Add(time.Millisecond),
+		}}
+	}
+	receive := func(name, userAgent string, asked time.Time) *models.Mock {
+		m := qnReceive()
+		m.Name = name
+		m.Spec.HTTPReq.Header["User-Agent"] = userAgent
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = asked, asked.Add(time.Second)
+		m.Spec.HTTPResp.Header["Date"] = asked.Add(time.Second).Format("Mon, 02 Jan 2006 15:04:05 GMT")
+		return m
+	}
+	for _, row := range []struct {
+		name      string
+		rec, live time.Time
+		holder    func(at time.Time) *models.Mock
+		field     string
+	}{
+		{"a reply's requestId", time.UnixMilli(1792726422011).UTC(), time.UnixMilli(1792726485013).UTC(),
+			func(at time.Time) *models.Mock { return reply("mock-10", 34, at.Add(-2*time.Second)) }, "spec.responses[0].header.requestId"},
+		{"a version in a User-Agent", time.UnixMilli(1792726643396).UTC(), time.UnixMilli(1792726702045).UTC(),
+			func(at time.Time) *models.Mock {
+				return receive("mock-5", "aws-sdk-go-v2/1.36.3 ua/2.1 os/linux lang/go#1.27.0 md/GOOS#linux md/GOARCH#amd64 api/sqs#1.38.1 m/E", at.Add(-3*time.Second))
+			}, "spec.req.header.User-Agent"},
+	} {
+		at := row.rec.Add(time.Millisecond)
+		holder := row.holder(at)
+		w := &Window{Rec: Span{From: row.rec.Add(-300 * time.Millisecond), To: at}, F: Span{From: row.live.Add(-300 * time.Millisecond), To: row.live.Add(time.Millisecond)}}
+		classify := func(r, l Leaf, w *Window) Learned {
+			dc := NewDriftCache()
+			return ClassifyIn(dc, []string{qnPath}, Shape{Leaves: map[string]Leaf{qnPath: l}}, Shape{Leaves: map[string]Leaf{qnPath: r}}, at, nil, []Raw{dc.RawOf(holder, false)}, nil, w)[0]
+		}
+		if ln := classify(qnTyped(row.rec), qnTyped(row.live), w); ln.Kind != KindNoise {
+			t.Errorf("%s, typed, in its window: %s (from %q, %s); want noise", row.name, ln.Kind, ln.From.Mock, ln.Why)
+		}
+		if ln := classify(qnTyped(row.rec), qnTyped(row.rec.Add(FullRoundLead+202*time.Millisecond)), nil); ln.Kind != KindNoise {
+			t.Errorf("%s, typed, moved by the lead: %s (from %q, %s); want noise", row.name, ln.Kind, ln.From.Mock, ln.Why)
+		}
+		if ln := classify(qnTyped(row.rec), qnTyped(row.live), nil); ln.Kind != KindUnaccounted || ln.From.Mock != "" || ln.Why != instantNotClock {
+			t.Errorf("%s, typed, no provenance: %s (from %q, %s); want refused for its provenance, naming no recording", row.name, ln.Kind, ln.From.Mock, ln.Why)
+		}
+		str := func(at time.Time) Leaf {
+			return Leaf{Path: qnPath, Noise: "body.docs.msgs.0.processed_at", Type: String, Value: at.Format(time.RFC3339Nano)}
+		}
+		if ln := classify(str(row.rec), str(row.live), nil); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in "+holder.Name+" at "+row.field+":") {
+			t.Errorf("%s, a date-like string, no provenance: %s (from %q, %s); want refused for %s, as the lane was", row.name, ln.Kind, ln.From.Mock, ln.Why, holder.Name)
 		}
 	}
 }

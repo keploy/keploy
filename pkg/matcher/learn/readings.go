@@ -803,6 +803,11 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			return ""
 		}
 		for _, e := range served {
+			// The test case's own request is the echo's alone
+			// (Earlier.Given).
+			if e.Given {
+				continue
+			}
 			// The run's exchange (Earlier.Run) is an earlier place of every
 			// test of the set: the set's start-up's.
 			where := "earlier in the test"
@@ -828,38 +833,41 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 		}
 		for _, x := range raw {
-			if !x.Served && !x.At.Before(at) {
+			if !x.served && !x.at.Before(at) {
 				continue
 			}
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
 			if dc.searchedTokens(x, keep)[i][t] {
-				at := x.Mock + "'s payload"
+				at := x.mock + "'s payload"
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
-					at = x.Mock + " at " + f
+					at = x.mock + " at " + f
 				}
-				return word(t, recorded) + " appears earlier in the test, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.Mock)
+				return word(t, recorded) + " appears earlier in the test, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
 			}
 		}
 		return ""
 	}
+	// Each set of words is checked in the order its words stand in the
+	// value (inOrder), never in a set's: the first one found names the place
+	// and the reason.
 	for i := range readings {
-		for t := range v.lost[i] {
+		for _, t := range v.inOrder(v.lost[i], true) {
 			if why := check(i, t, true, false); why != "" {
 				return why
 			}
 		}
-		for t := range v.gained[i] {
+		for _, t := range v.inOrder(v.gained[i], false) {
 			if why := check(i, t, false, false); why != "" {
 				return why
 			}
 		}
-		for t := range v.movedRec[i] {
+		for _, t := range v.inOrder(v.movedRec[i], true) {
 			if why := check(i, t, true, true); why != "" {
 				return why
 			}
 		}
-		for t := range v.movedLive[i] {
+		for _, t := range v.inOrder(v.movedLive[i], false) {
 			if why := check(i, t, false, true); why != "" {
 				return why
 			}
