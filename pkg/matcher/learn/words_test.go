@@ -1502,10 +1502,18 @@ func TestAChangedIDOfEveryLengthIsLearned(t *testing.T) {
 		// An instant every letter and digit of which changed holds nothing of
 		// it fixed: its words are learned, its separators kept.
 		{"on 2026-10-21", "on 2027-11-25", "s1r0 s1r1 s1r2"},
+		// A time-ordered UUID that moved otherwise than F's clock, every group
+		// of it changed: its groups are learned as a fresh UUID's are.
+		{"id " + uuid7Of(wAt.Add(FullRoundLead), "def0123456789abcde", '8', false), "id " + uuid7Of(wAt, "abc123456789abcdef", '9', false), "s1r0 s1r1 s1r2 s1r3 s1r4"},
 	} {
 		if got := slotsOf(learnedWords(t, tc[0], tc[1])); got != tc[2] {
 			t.Errorf("%q -> %q: slots %s, want %s", tc[0], tc[1], got, tc[2])
 		}
+	}
+	// One whose first group did not change keeps it as recorded, which a
+	// later run's clock moves: refused.
+	if _, why := NewDriftCache().Words("id "+uuid7Of(wAt.Add(-time.Minute), "def0123456789abcde", '8', false), "id "+uuid7Of(wAt, "abc123456789abcdef", '9', false), nil); why != whyInstant {
+		t.Errorf("a UUID that moved otherwise, its first group as recorded: %q, want %q", why, whyInstant)
 	}
 }
 
