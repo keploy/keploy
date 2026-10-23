@@ -150,7 +150,8 @@ func (s *tcpClientSocket) written() (uint64, bool) {
 // side of SIOCOUTQ, and the sum is exact when it did not move. When it moves
 // on every try, the sum with the later count is no less than the bytes
 // written: a chunk is then judged from no earlier than its first byte, which
-// can cost a chunk the client took, never tee one it did not.
+// can cost a chunk the client took (refused although acknowledged and read),
+// never tee one its stack did not acknowledge.
 func (s *tcpClientSocket) countAt(fd uintptr) {
 	for try := 0; try < writtenTries; try++ {
 		if !s.askInfo(fd, &s.winfo) {

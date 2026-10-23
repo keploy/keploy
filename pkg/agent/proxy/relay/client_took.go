@@ -96,23 +96,37 @@ import (
 // once the answer came.
 //
 // What a client's stack acknowledged is not always what the application read,
-// and the socket cannot tell the two apart. A half-closed client that resets
-// before its acknowledgement of a chunk went out (it read the chunk in part and
-// closed with the rest unread, or read all of it and closed abortively, with
-// SO_LINGER 0) resets with none of the chunk acknowledged: that chunk is
-// refused although the application read some or all of it. So is the last
-// chunk a half-closed client read whole and then closed its socket on,
-// normally, while its acknowledgement was still delayed (a stack in delayed-ACK
-// mode holds it some tens of milliseconds), when the destination sends more
-// after: the close drops the delayed acknowledgement, and the closed socket
-// resets on the bytes that come next. A destination that sends only its FIN
-// after is acknowledged, chunk and FIN, and the chunk is teed. A reset carries
-// an acknowledgement number, but the kernel does not process the
-// acknowledgement of a reset (tcp_validate_incoming handles the reset before
-// tcp_ack), so no count of the socket's moves for it. Telling such a client
-// from one that closed before the chunk came would take a rule on time (no
-// reset within so long of the chunk), which keploy does not use: the cost is
-// a missing mock, never a recorded reply the application did not read.
+// and the socket cannot tell the two apart. It goes wrong both ways:
+//
+//   - Recorded though unread: a chunk a half-closed client's stack
+//     acknowledged is teed, even when the application then leaves it unread
+//     and closes its socket (unread data makes the close a reset): an
+//     acknowledgement is not a read, and a teed chunk is not taken back. Only
+//     the chunks written after the reset are refused. This mirrors a client
+//     that resets with no FIN before, whose chunks are all teed. The
+//     recording then holds a reply the application did not read.
+//   - Refused though read: a half-closed client that resets before its
+//     acknowledgement of a chunk went out (it read the chunk in part and
+//     closed with the rest unread, or read all of it and closed abortively,
+//     with SO_LINGER 0) resets with none of the chunk acknowledged: that chunk
+//     is refused although the application read some or all of it. So is the
+//     last chunk a half-closed client read whole and then closed its socket
+//     on, normally, while its acknowledgement was still delayed (a stack in
+//     delayed-ACK mode holds it some tens of milliseconds), when the
+//     destination sends more after: the close drops the delayed
+//     acknowledgement, and the closed socket resets on the bytes that come
+//     next. A destination that sends only its FIN after is acknowledged, chunk
+//     and FIN, and the chunk is teed. A reset carries an acknowledgement
+//     number, but the kernel does not process the acknowledgement of a reset
+//     (tcp_validate_incoming handles the reset before tcp_ack), so no count of
+//     the socket's moves for it. Telling such a client from one that closed
+//     before the chunk came would take a rule on time (no reset within so
+//     long of the chunk), which keploy does not use. And when the client's
+//     acknowledgements move between written's two questions on every one of
+//     its tries (countAt), written can count more bytes than were written: a
+//     chunk no longer than that excess, which the client acknowledged and
+//     then closed on, is refused although it took it. Each of these costs a
+//     missing mock.
 //
 // Only a client connection that is a TCP socket on Linux can be asked
 // (clientSocketOf). Elsewhere every chunk is teed as it is written, as before,
