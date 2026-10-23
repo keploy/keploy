@@ -41,6 +41,31 @@ func (d Direction) String() string {
 // ConnSeq's to say (CapturedBefore), never theirs.
 type Chunk struct {
 	Dir Direction
+	// AfterClientClose, on a chunk from the destination, says its bytes
+	// reached the producer after the client had closed its side of the
+	// connection: the relay had read the client's FIN (its Read on the client
+	// returned io.EOF), and numbered it as it numbers a client chunk, before it
+	// forwarded it, and this chunk is numbered after it (ConnSeq). The
+	// destination's answer to the FIN itself always is: it can send one only
+	// once the FIN is forwarded. Bytes that were already waiting in the
+	// relay's socket when the FIN was read are not, however late they are
+	// read, where the socket's count can say so (a TCP socket on Linux;
+	// elsewhere bytes the relay had not read yet are numbered after the FIN:
+	// connseq.Upstream).
+	//
+	// The relay still forwards and tees these bytes; it is the fact, and what
+	// it means is the protocol's. A client that only half-closed
+	// (shutdown(SHUT_WR)) and waits for its reply, as an EOF-delimited
+	// request does, reads them. A client that sends its FIN as it closes the
+	// connection, and stops reading it then, as a MongoDB driver does, never
+	// reads them: they answer nothing the application received, and a parser
+	// for such a protocol does not record them.
+	//
+	// False on every chunk from the client, and on every chunk of a producer
+	// that does not number the client's FIN: such a chunk reads as one
+	// captured before it, as every chunk did before the relay numbered it.
+	// In the padding after Dir, so a queued chunk costs no more memory.
+	AfterClientClose bool
 	// ConnSeq is the connection-wide capture sequence: the producer numbers
 	// the chunks of BOTH directions of a connection from one counter, once,
 	// where the bytes enter the capture, with ConnSeqOf, by one rule: a

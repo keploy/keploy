@@ -702,7 +702,11 @@ func (r *Relay) forward(
 			if dir == fakeconn.FromClient {
 				chunk.ConnSeq = r.order.FromClient()
 			} else {
-				chunk.ConnSeq = r.order.FromDest()
+				// AfterClientClose: numbered after the client's FIN (numbered
+				// below, as the client's Read returns io.EOF), by
+				// connseq.Upstream's rule, so the client had closed its side
+				// before these bytes were forwarded to it.
+				chunk.ConnSeq, chunk.AfterClientClose = r.order.FromDest()
 			}
 			chunk.Bytes = make([]byte, n)
 			copy(chunk.Bytes, buf[:n])
@@ -949,6 +953,18 @@ func (r *Relay) forward(
 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				if dir == fakeconn.FromClient {
+					// The client's FIN, numbered here, as its Read returns
+					// and before onForwarderExit forwards it to the
+					// destination, by the rule every client chunk is
+					// numbered by: after every byte the destination had sent
+					// the proxy by then. Every destination chunk numbered
+					// after it is marked as captured after the client closed
+					// (fakeconn.Chunk.AfterClientClose), the destination's
+					// answer to the FIN itself among them, since it can come
+					// only once the FIN is forwarded.
+					r.order.ClientClosed()
+				}
 				return io.EOF
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause

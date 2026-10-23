@@ -33,6 +33,16 @@
 // caller — but "only reads and writes them" is no longer the whole
 // story.
 //
+// What the destination sends after the client's FIN is still forwarded
+// and teed, but marked: the relay numbers the FIN in the capture
+// sequence as it reads it, before it forwards it, and every destination
+// chunk numbered after it carries [fakeconn.Chunk.AfterClientClose].
+// Whether the client reads those bytes is the protocol's to say, so the
+// relay drops nothing: a client that half-closed and waits for its reply
+// reads them, and a client that stops reading as it closes the
+// connection (a MongoDB driver) never does, so its parser does not
+// record them.
+//
 // This package is wired into the record path via the V2 dispatcher
 // (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
 // (those implementing integrations.IntegrationsV2 with IsV2()==true)
