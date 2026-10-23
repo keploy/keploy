@@ -1,0 +1,22 @@
+# The compose cell's Redis servers (../golang-compose-linux.sh): Redis A and
+# Redis B on the lane's network, each at the address the lane gives it
+# (REDIS_A_IP, REDIS_B_IP), so recreating one with another address moves it.
+# They are a project of their own, not services of the app's file (app.yml):
+# keploy brings the app's project up and takes it down with each keploy
+# record and keploy test, and these outlive both, so the lane recreates them
+# between the record and the replay and counts what reached them.
+services:
+  redis-a:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    networks:
+      lane:
+        ipv4_address: ${REDIS_A_IP:?the address of Redis A}
+  redis-b:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    networks:
+      lane:
+        ipv4_address: ${REDIS_B_IP:?the address of Redis B}
+networks:
+  lane:
+    name: redisskip-lane
+    external: true

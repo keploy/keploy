@@ -557,11 +557,17 @@ jobs:
   # an older replay wrote, and in Keploy Enterprise's Redis kind) replays
   # with this build, Redis live, and passes, by default and under
   # KEPLOY_PROVEN=1 (the plain fixture also with --remove-unused-mocks,
-  # which keeps its Redis mocks), and its debug log proves the Generic
-  # parser neither held nor served one of its Redis mocks. The
-  # record_build_proven_replay_build cell records under KEPLOY_PROVEN=1.
-  # Not record_build_replay_latest: a release that predates the skip mocks
-  # Redis at replay, and this build records none.
+  # which keeps its Redis mocks, and the mapped and Enterprise ones with
+  # --update-test-mapping, which keeps their Redis mapping entries), and its
+  # debug log proves the Generic parser neither held nor served one of its
+  # Redis mocks. The record_build_proven_replay_build cell records under
+  # KEPLOY_PROVEN=1. The compose_record_build_replay_build cell runs the app
+  # in docker compose (golang-compose-linux.sh): it reaches Redis by its
+  # compose service name, Redis is recreated at other addresses between the
+  # record and the replay, and the replay passes with Redis relayed live to
+  # where the name points now, not to the address the recording's DNS answer
+  # holds. Not record_build_replay_latest: a release that predates the skip
+  # mocks Redis at replay, and this build records none.
   redis_skip:
     timeout-minutes: 30
     if: ${{ inputs.jobs_to_run == 'all' }}
@@ -582,6 +588,12 @@ jobs:
             record_src: build
             replay_src: build
             record_proven: "1"
+          # The app in docker compose, keploy's agent in a container of its
+          # project (golang-compose-linux.sh).
+          - job: compose_record_build_replay_build
+            record_src: build
+            replay_src: build
+            compose: "1"
     name: redis-skip (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -618,14 +630,42 @@ jobs:
         with:
           src: ${{ matrix.config.replay_src }}
 
+      # The compose cell's agent runs from keploy's image, built here from
+      # this build's binary as build-docker-image-amd64 builds it. That job
+      # is not among this workflow's needs: it is skipped on fork PRs, and
+      # every job here would be skipped with it.
+      - id: agent
+        if: ${{ matrix.config.compose == '1' }}
+        uses: ./.github/actions/download-binary
+        with:
+          src: build-no-race
+
+      - name: Build keploy's agent image from this build
+        if: ${{ matrix.config.compose == '1' }}
+        env:
+          AGENT_BIN: ${{ steps.agent.outputs.path }}
+        run: |
+          # A context of only what Dockerfile.runtime copies, not the
+          # checkout with the downloaded binaries in it.
+          ctx="$RUNNER_TEMP/agent-image"
+          mkdir -p "$ctx/dist/keploy-linux-amd64"
+          cp "$AGENT_BIN" "$ctx/dist/keploy-linux-amd64/keploy"
+          cp Dockerfile.runtime entrypoint.sh "$ctx/"
+          source .github/workflows/test_workflow_scripts/docker-build-retry.sh
+          docker_build_retry docker buildx build --platform linux/amd64 --provenance=false \
+            --file "$ctx/Dockerfile.runtime" --load -t ghcr.io/keploy/keploy:v3-dev "$ctx"
+
       - name: Record, replay with Redis live, replay the fixture
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
           RECORD_PROVEN: ${{ matrix.config.record_proven || '' }}
+          COMPOSE_CELL: ${{ matrix.config.compose || '' }}
           WORK: ${{ runner.temp }}/redis_skip
         run: |
-          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/redis_skip/golang-linux.sh"
+          script=golang-linux.sh
+          [ "$COMPOSE_CELL" = 1 ] && script=golang-compose-linux.sh
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/redis_skip/$script"
 
       - name: Upload redis_skip recordings and keploy logs
         if: always()
@@ -637,6 +677,8 @@ jobs:
             ${{ runner.temp }}/redis_skip/own-*/keploy/reports/
             ${{ runner.temp }}/redis_skip/fixture-*/keploy/reports/
             ${{ runner.temp }}/redis_skip/fixture-*/keploy/test-set-0/mocks.yaml
+            ${{ runner.temp }}/redis_skip/fixture-*/keploy/test-set-0/mappings.yaml
+            ${{ runner.temp }}/redis_skip/*-mappings.before.yaml
             ${{ runner.temp }}/redis_skip/*.log
           if-no-files-found: warn
           retention-days: 7

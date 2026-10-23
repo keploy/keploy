@@ -66,6 +66,11 @@
 #      so. Replayed by default and under the proven switch: the read of the
 #      set says once, at WARN, how many Redis mocks it does not read, no
 #      ERROR is logged for them, and the set passes, Redis relayed.
+#   4d. The fixtures of 4b and 4c replayed with --update-test-mapping, by
+#      default and under the proven switch: mappings.yaml keeps every entry
+#      that names a Redis mock, so Keploy Enterprise still replays the set's
+#      Redis mocks after an OSS replay rewrote its mapping (by default; under
+#      the proven switch keploy test leaves the file as it is).
 #   5. No ERROR in a log this build wrote, and no data race in any log.
 #
 # RECORD_PROVEN=1 records under the proven switch (the
@@ -615,7 +620,9 @@ if [ -z "${FIXTURE_OUT:-}" ]; then
     # (the docs say so: docs/explanation/mock-lifetimes.md).
     fresh_fixture "$WORK/fixture-prune" || fail "cannot copy the fixture"
     replay replay-fixture-prune "$WORK/fixture-prune" --remove-unused-mocks
-    plain replay-fixture-prune.log | grep -qF "pruned mocks successfully" || fail "replay with --remove-unused-mocks: keploy did not prune the set (no 'pruned mocks successfully'), so the check below proves nothing"
+    # grep -q reads a process substitution, not a pipe: under pipefail its
+    # early exit would fail the pipe on plain's SIGPIPE, a match or not.
+    grep -qF "pruned mocks successfully" < <(plain replay-fixture-prune.log) || fail "replay with --remove-unused-mocks: keploy did not prune the set (no 'pruned mocks successfully'), so the check below proves nothing"
     kept_redis=$(count_kind "$WORK/fixture-prune/keploy/test-set-0/mocks.yaml" redis)
     [ "$kept_redis" -eq "$fixture_redis" ] || fail "replay with --remove-unused-mocks kept $kept_redis of the fixture's $fixture_redis Redis mocks: it deleted recordings this build only left out"
     echo "--remove-unused-mocks kept $kept_redis of $fixture_redis Redis mocks"
@@ -653,6 +660,65 @@ if [ -z "${FIXTURE_OUT:-}" ]; then
         # The Generic Redis mocks the set was made from are checked as
         # never pooled or served; the agent, never sent one, says nothing.
         check_clean_cut "$mode replay of the Enterprise fixture" "$FIX_MOCKS" "$name.log" unsent
+    done
+
+    # redis_entries <mappings.yaml> <name...>: the mapping's entries that
+    # name one of the mocks named, one line each, sorted: "<test id> <mock>",
+    # or "startup <mock>" for its startup section's.
+    redis_entries() {
+        local f=$1 n
+        shift
+        for n in "$@"; do
+            N=$n yq -N '(.tests[] | .id as $t | .mock_entries[] | select(.name == strenv(N)) | $t + " " + .name), (.startup[] | select(.name == strenv(N)) | "startup " + .name)' "$f"
+        done | grep . | sort
+    }
+    # 4d. --update-test-mapping on the mapped fixture (4b) and on the
+    # Enterprise one (4c), by default and under the proven switch: the
+    # mapping keeps every entry naming a Redis mock, which this build leaves
+    # out and Keploy Enterprise replays. By default the flag rewrites the
+    # file from what the passing tests consumed, and no test consumed a Redis
+    # mock here; under the proven switch only a record writes mappings.yaml,
+    # so the file must stay as it was.
+    for variant in mapped enterprise; do
+        for mode in default proven; do
+            dir="$WORK/fixture-utm-$variant-$mode"
+            name=replay-fixture-utm-$variant-$mode
+            if [ "$variant" = mapped ]; then
+                fresh_fixture_mapped "$dir" || { fail "$name: cannot copy the mapped fixture"; continue; }
+            else
+                fresh_fixture_enterprise "$dir" || { fail "$name: cannot make the Enterprise-shaped fixture"; continue; }
+            fi
+            MAPF="$dir/keploy/test-set-0/mappings.yaml"
+            cp "$MAPF" "$WORK/$name-mappings.before.yaml"
+            # The fixture's Redis mocks: the Generic ones (mapped), or those
+            # of Enterprise's kind (enterprise).
+            rnames=$({ names_of "$dir/keploy/test-set-0/mocks.yaml" redis; yq -N 'select(.kind == "Redis") | .name' "$dir/keploy/test-set-0/mocks.yaml"; } | grep .)
+            before=$(redis_entries "$MAPF" $rnames)
+            [ -n "$before" ] || fail "$name: the fixture's mapping names no Redis mock, so keeping them proves nothing"
+            if [ "$mode" = proven ]; then
+                REPLAY_PROVEN=1 replay "$name" "$dir" --update-test-mapping
+            else
+                replay "$name" "$dir" --update-test-mapping
+            fi
+            check_notices "$name" "$name.log"
+            if [ "$variant" = mapped ]; then
+                check_clean_cut "$name" "$FIX_MOCKS" "$name.log"
+            else
+                check_clean_cut "$name" "$FIX_MOCKS" "$name.log" unsent
+            fi
+            after=$(redis_entries "$MAPF" $rnames)
+            echo "$name: the mapping's entries naming a Redis mock: $(grep -c . <<<"$before") before, $(grep -c . <<<"$after") after"
+            [ "$after" = "$before" ] || {
+                fail "$name: --update-test-mapping changed the mapping's entries naming a Redis mock, which Keploy Enterprise replays (< before, > after):"
+                diff <(echo "$before") <(echo "$after") | grep '^[<>]' | head -20
+            }
+            if [ "$mode" = proven ]; then
+                cmp -s "$WORK/$name-mappings.before.yaml" "$MAPF" || fail "$name: under the proven switch keploy test changed mappings.yaml, which only a record writes"
+            else
+                grep -qF "Successfully saved test-mock mappings" < <(plain "$WORK/$name.log") ||
+                    fail "$name: keploy test did not write mappings.yaml (no 'Successfully saved test-mock mappings'), so the check above proves nothing"
+            fi
+        done
     done
 fi
 

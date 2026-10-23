@@ -75,8 +75,15 @@ func main() {
 		defer scancel()
 		_ = srv.Shutdown(sctx)
 	}()
+	// Said once the port is bound, not before: the compose cell waits for
+	// this line, and for keploy's agent to take the port over, before its
+	// first request (../golang-compose-linux.sh).
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		log.Fatal(err)
+	}
 	log.Printf("listening on %s", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
