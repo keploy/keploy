@@ -63,8 +63,14 @@ func Exited(pid int, st ProcStat) bool {
 	if st.State != 'Z' {
 		return false
 	}
-	_, runs, err := RunningThread("/proc", pid)
+	_, runs, err := runningThread(pid)
 	return err == nil && !runs
+}
+
+// runningThread is RunningThread of a process in this host's /proc, as
+// Exited and MarkExit read it: a test makes the read fail.
+var runningThread = func(pid int) (tid int, ok bool, err error) {
+	return RunningThread("/proc", pid)
 }
 
 // statState is the state letter of a stat line, the field after the command

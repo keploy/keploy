@@ -1312,12 +1312,29 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 					t.Fatalf("the next set's reason %q; want it to say what was charged from before it, and why: %q", reason, tc.why)
 				case tc.kept && lost.appLife && said != 1:
 					t.Fatalf("the next set: %d ERRORs say a loss was carried into it; want one", said)
+				case tc.kept && lost.appLife && !strings.Contains(errorWhy(logs, "before this test-set began runs on in it"), tc.why):
+					// The log says why on its own, as the reason does: a
+					// reader of the log alone learns why the application ran
+					// on into the set.
+					t.Fatalf("the ERROR saying a loss was carried into the next set says why %q; want it to say %q", errorWhy(logs, "before this test-set began runs on in it"), tc.why)
 				case (!tc.kept || !lost.appLife) && (carried || said != 0):
 					t.Fatalf("the next set's reason %q (and %d ERRORs) say a loss was carried into it", reason, said)
 				}
 			})
 		}
 	}
+}
+
+// errorWhy is the "why" field of the first of logs' entries at ERROR that
+// says what; "" where none does, or it has no such field.
+func errorWhy(logs *observer.ObservedLogs, what string) string {
+	for _, e := range logs.All() {
+		if e.Level == zapcore.ErrorLevel && strings.Contains(e.Message, what) {
+			why, _ := e.ContextMap()["why"].(string)
+			return why
+		}
+	}
+	return ""
 }
 
 // errorsSaying is how many of logs' entries at ERROR say what.

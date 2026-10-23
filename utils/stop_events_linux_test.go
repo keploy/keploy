@@ -1030,3 +1030,17 @@ while [ ! -e go ]; do sleep 0.01; done`)
 	}
 	awaitReaped(t, "the app", reaped)
 }
+
+// MarkExit counts as running a process whose stat says Z and whose threads
+// could not be read, as Exited does; read, the same zombie has exited.
+func TestMarkExitCountsAProcessWhoseThreadsCouldNotBeReadAsRunning(t *testing.T) {
+	pid, st := startZombie(t)
+	procs := []Reached{{PID: pid, Start: st.StartTime}}
+	if m := MarkExit(procs); m.Running != 0 {
+		t.Fatalf("zombie %d, its threads read: %d running; want 0", pid, m.Running)
+	}
+	threadsUnreadable(t)
+	if m := MarkExit(procs); m.Running != 1 {
+		t.Fatalf("zombie %d, its threads not read: %d running; want 1: the read failed, so it is not known to have ended", pid, m.Running)
+	}
+}

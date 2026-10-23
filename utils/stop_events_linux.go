@@ -70,7 +70,9 @@ func MarkExit(procs []Reached) ExitMark {
 		dir := "/proc/" + strconv.Itoa(p.PID)
 		fdDir := dir + "/fd"
 		if st.State == 'Z' {
-			tid, runs, err := RunningThread("/proc", p.PID)
+			// A read of its threads that fails leaves it running, as in
+			// Exited: what keploy cannot tell has ended is not taken for so.
+			tid, runs, err := runningThread(p.PID)
 			if err == nil && !runs {
 				continue
 			}

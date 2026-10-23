@@ -162,3 +162,50 @@ func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 		t.Fatal("threads that could not be listed read as none running")
 	}
 }
+
+// startZombie starts a child that exits at once and is not waited for, and
+// returns its pid and stat once it reads as a zombie; it is waited for when
+// the test ends.
+func startZombie(t *testing.T) (int, ProcStat) {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Wait() })
+	deadline := time.Now().Add(time.Minute) // turns a hang into a failure
+	for {
+		if st, ok := ReadProcStat(cmd.Process.Pid); ok && st.State == 'Z' {
+			return cmd.Process.Pid, st
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d did not become a zombie", cmd.Process.Pid)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// threadsUnreadable makes every read of a process's threads (runningThread)
+// fail until the test ends.
+func threadsUnreadable(t *testing.T) {
+	t.Helper()
+	read := runningThread
+	t.Cleanup(func() { runningThread = read })
+	runningThread = func(pid int) (int, bool, error) {
+		return 0, false, fmt.Errorf("list process %d's threads: %w", pid, syscall.EACCES)
+	}
+}
+
+// A process whose stat says Z, and whose threads could not be read, has not
+// exited for Exited: keploy goes on treating as running what it cannot tell
+// has ended. Read, the same zombie has.
+func TestExitedTakesAProcessWhoseThreadsCouldNotBeReadForRunning(t *testing.T) {
+	pid, st := startZombie(t)
+	if !Exited(pid, st) {
+		t.Fatalf("zombie %d, its threads read: not exited; want exited", pid)
+	}
+	threadsUnreadable(t)
+	if Exited(pid, st) {
+		t.Fatalf("zombie %d, its threads not read: exited; want running: the read failed, so it is not known to have ended", pid)
+	}
+}
