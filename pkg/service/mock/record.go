@@ -375,7 +375,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 		protocol := provenswitch.On() && mk.IsProtocolPhase()
 		fp, write := callFingerprint(mk)
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef, fp: fp, write: write})
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef, fp: fp, write: write, ans: answerOf(mk)})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -779,7 +779,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				// The calls a repeating timer made, as the tests' harness
 				// reported them: the worker scope's, each answered within its
 				// stretch of the set's writes.
-				byTest, startup, worker = timerScope(windows, dataPlane(recorded), byTest, startup)
+				byTest, worker = timerScope(windows, dataPlane(recorded), byTest)
 			}
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
@@ -1103,8 +1103,11 @@ type capturedMock struct {
 	// kind.
 	fp string
 	// write: an HTTP call its parser does not declare a read
-	// (models.IsReadCall): what moves a timer's stretch on.
+	// (models.IsReadCall): what can end a timer's stretch.
 	write bool
+	// ans is an HTTP call's recorded answer (answerOf): a timer's recordings
+	// that answered alike share one stretch.
+	ans string
 }
 
 // stagingSetID returns the staging set name record captures into while recording
