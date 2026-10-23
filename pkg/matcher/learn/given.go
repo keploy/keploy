@@ -78,10 +78,13 @@ const strayRequest = "the test case's request reached the agent while no test wa
 // Content-Length, a Content-Type, a header keploy adds). A nil req (a keploy
 // older than its agent sent none), one keploy test could not read
 // (TestRequest.Unread), and one whose body its Content-Type does not declare
-// text (textMedia: a protobuf, an image, a body of no declared type; or bytes
-// that are no text, binaryUnread) are a place that could not be read
-// (Earlier.Unread), with no leaves: whether a body is text is read from what
-// the request declares, never from the look of its bytes.
+// text (textMedia: a protobuf, an image; or bytes that are no text,
+// binaryUnread) are a place that could not be read (Earlier.Unread), with no
+// leaves: whether a declared body is text is read from what the request
+// declares, never from the look of its bytes. A body that declares no media
+// type (no Content-Type) is read as text where its bytes are text
+// (plainText); one whose bytes are not is a place that could not be read
+// (undeclaredUnread).
 func GivenRequest(req *models.TestRequest) Earlier {
 	if req == nil {
 		return Earlier{Mock: givenPlace(""), Given: true, Unread: unsentRequest}
@@ -105,18 +108,21 @@ func GivenRequest(req *models.TestRequest) Earlier {
 		if !givenPart(part.Name) {
 			continue
 		}
-		if (part.Name == "body" || part.Name == "binary") && (part.Recorded != "" && !textMedia(recMedia) || part.Sent != "" && !textMedia(sentMedia)) {
+		if part.Name == "body" || part.Name == "binary" {
 			// A body its Content-Type declares no text in (a protobuf
 			// sent as application/x-protobuf, recorded as its bytes' text
 			// or their base64) holds the application's words beside the
 			// bytes that frame them (a field's tag and length), which may
 			// be printable and glued to a word: keploy cannot tell one
-			// from the other, so it cannot read the request.
-			media := sentMedia
-			if part.Recorded != "" && !textMedia(recMedia) {
-				media = recMedia
+			// from the other, so it cannot read the request. Each side is
+			// read by what it declares: the recorded one first.
+			why := bodyUnread(part.Name, part.Recorded, recMedia)
+			if why == "" {
+				why = bodyUnread(part.Name, part.Sent, sentMedia)
 			}
-			return Earlier{Mock: e.Mock, Given: true, Unread: mediaUnread(media)}
+			if why != "" {
+				return Earlier{Mock: e.Mock, Given: true, Unread: why}
+			}
 		}
 		switch {
 		case part.Name == "url":
@@ -167,18 +173,29 @@ func GivenRequest(req *models.TestRequest) Earlier {
 // all be printable, "BA" before "s17"), which only the declared media type
 // does.
 func binaryText(b64 string) (string, bool) {
-	b, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		if b, err = base64.RawStdEncoding.DecodeString(b64); err != nil {
-			return "", false
-		}
+	s, ok := decodeBase64(b64)
+	if !ok {
+		return "", false
 	}
+	b := []byte(s)
 	for i := 0; i < len(b); {
 		r, n := utf8.DecodeRune(b[i:])
 		if r == utf8.RuneError && n <= 1 || !unicode.IsPrint(r) && !unicode.IsSpace(r) {
 			return "", false
 		}
 		i += n
+	}
+	return string(b), true
+}
+
+// decodeBase64 is the bytes b64 (standard base64, padded or not) holds, and
+// ok; not ok where b64 is no base64.
+func decodeBase64(b64 string) (string, bool) {
+	b, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if b, err = base64.RawStdEncoding.DecodeString(b64); err != nil {
+			return "", false
+		}
 	}
 	return string(b), true
 }
@@ -221,14 +238,61 @@ func textMedia(ct string) bool {
 	return false
 }
 
+// bodyUnread is why one side of a test case's request body (part: "body",
+// its text, or "binary", the base64 of its bytes) could not be read, "" where
+// it can, or where that side holds none. Declared as media, it is read where
+// media is a text media type (textMedia); declaring none (no Content-Type),
+// where its bytes are text (plainText), a binary part's once decoded.
+func bodyUnread(part, value, media string) string {
+	switch {
+	case value == "":
+		return ""
+	case media != "":
+		if textMedia(media) {
+			return ""
+		}
+		return mediaUnread(media)
+	}
+	text := value
+	if part == "binary" {
+		b, ok := decodeBase64(value)
+		if !ok {
+			return binaryUnread
+		}
+		text = b
+	}
+	if plainText(text) {
+		return ""
+	}
+	return undeclaredUnread
+}
+
+// plainText reports whether s, a body that declares no media type, is text
+// by its bytes: valid UTF-8 that holds no NUL and no other control
+// character but a tab, a line feed and a carriage return. A body that
+// declares a media type is read by it (textMedia), never so.
+func plainText(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r != '\t' && r != '\n' && r != '\r' && unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // mediaUnread is why a test case's request could not be read when its body
 // is declared as ct, no text media type (textMedia).
 func mediaUnread(ct string) string {
-	if ct == "" {
-		return "its body declares no media type (no Content-Type), so keploy cannot tell whether it is text, nor the words the application was given from bytes that frame them"
-	}
 	return "its body is declared " + strconv.Quote(ct) + ", no text media type, and keploy cannot tell the words the application was given from the bytes that frame them"
 }
+
+// undeclaredUnread is why a test case's request could not be read when its
+// body declares no media type (no Content-Type) and its bytes are no text
+// (plainText).
+const undeclaredUnread = "its body declares no media type (no Content-Type) and its bytes are no text (no UTF-8, or a NUL or another control byte), and keploy cannot tell the words the application was given from the bytes that frame them"
 
 // binaryUnread is why a test case's request could not be read when its body
 // is bytes that are no text (binaryText).

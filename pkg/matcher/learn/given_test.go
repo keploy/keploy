@@ -958,8 +958,8 @@ func TestWindowHoldsRead(t *testing.T) {
 // words it holds is refused, naming the request, as from a text body. A body
 // its request declares no text (a protobuf listing slots s17 and s18 as
 // application/x-protobuf, its fields' tags and lengths printable or not,
-// kept as its base64 or, as OSS records a body, as its bytes' text), or
-// declares no type for, is a request keploy could not read: every value
+// kept as its base64 or, as OSS records a body, as its bytes' text) is a
+// request keploy could not read: every value
 // that changed is refused, saying why, the pick a printable tag and length
 // glue to its word ("BAs17") too, and a value no word of the request holds.
 // Bytes that are no text are unread whatever the request declares.
@@ -1000,7 +1000,6 @@ func TestABinaryRequestBodyIsReadForItsText(t *testing.T) {
 		{"a protobuf, every byte printable, as base64", "application/x-protobuf", "binary", printable, mediaUnread("application/x-protobuf")},
 		{"a protobuf, every byte printable, as its text", "application/x-protobuf", "body", printable, mediaUnread("application/x-protobuf")},
 		{"a gRPC message as its text", "application/grpc+proto", "body", printable, mediaUnread("application/grpc+proto")},
-		{"a body of no declared type", "", "body", []byte("slots s17 s18"), mediaUnread("")},
 	} {
 		req := requestAs(row.ct, row.part, row.body)
 		for _, v := range [][2]string{{"s17", "s18"}, {"n-5f2a91", "n-77c0d3"}} {
@@ -1032,6 +1031,90 @@ func TestABinaryRequestBodyIsReadForItsText(t *testing.T) {
 	} {
 		if got, ok := binaryText(b64); got != want.text || ok != want.ok {
 			t.Errorf("binaryText(%q) = %q, %v; want %q, %v", b64, got, ok, want.text, want.ok)
+		}
+	}
+}
+
+// A request body that declares no media type (no Content-Type) is read as
+// text where its bytes are text (valid UTF-8 with no NUL or other control
+// byte but a tab, a line feed and a carriage return), as its text or as the
+// base64 of its bytes: a pick from its words is refused, naming the request,
+// and a value it does not hold is noise. One whose bytes are no text (a
+// protobuf's tags and lengths, a NUL, no UTF-8) is a request keploy could not
+// read, the reason naming it: every value that changed is refused. Each side
+// is read by what it declares: a sent body declared no text beside a recorded
+// one declared JSON leaves the request unread, naming the sent side's type.
+func TestARequestBodyOfNoDeclaredTypeIsReadWhereItsBytesAreText(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
+	const p = "body.slot"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	request := func(parts ...models.TestRequestPart) []Earlier {
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: parts})}
+	}
+	both := func(name, v string) models.TestRequestPart {
+		return models.TestRequestPart{Name: name, Recorded: v, Sent: v}
+	}
+	b64 := func(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+	pick := func(req []Earlier) Learned {
+		return ClassifyIn(NewDriftCache(), []string{p}, shape("s18"), shape("s17"), at, req, nil, nil, nil)[0]
+	}
+	other := func(req []Earlier) Learned {
+		return ClassifyIn(NewDriftCache(), []string{p}, shape("n-77c0d3"), shape("n-5f2a91"), at, req, nil, nil, nil)[0]
+	}
+	for _, row := range []struct {
+		name  string
+		req   []Earlier
+		where string
+	}{
+		{"its text", request(both("body", "slots s17 s18")), "in test case test-1 at body"},
+		{"its text over lines and tabs", request(both("body", "slots:\r\n\ts17\n\ts18")), "in test case test-1 at body"},
+		{"its bytes as base64", request(both("binary", b64([]byte("slots s17 s18")))), "in test case test-1 at binary{text}"},
+	} {
+		if e := row.req[0]; e.Unread != "" {
+			t.Fatalf("%s: unread (%s); want it read as text", row.name, e.Unread)
+		}
+		if ln := pick(row.req); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.where) {
+			t.Errorf("%s: a pick from it: %s (%s); want it refused, naming %q", row.name, ln.Kind, ln.Why, row.where)
+		}
+		if ln := other(row.req); ln.Kind != KindNoise {
+			t.Errorf("%s: a value it does not hold: %s (%s); want noise", row.name, ln.Kind, ln.Why)
+		}
+	}
+	// Field 1, length 3, "s17"; field 1, length 3, "s18".
+	tagged := []byte{0x0a, 0x03, 's', '1', '7', 0x0a, 0x03, 's', '1', '8'}
+	for _, row := range []struct {
+		name string
+		req  []Earlier
+		why  string
+	}{
+		{"a protobuf's tags and lengths as its text", request(both("body", string(tagged))), undeclaredUnread},
+		{"a protobuf as base64", request(both("binary", b64(tagged))), undeclaredUnread},
+		{"a NUL in its text", request(both("body", "slots s17\x00s18")), undeclaredUnread},
+		{"a DEL in its text", request(both("body", "slots s17\x7fs18")), undeclaredUnread},
+		{"no UTF-8", request(both("body", "slots s17 \xffs18")), undeclaredUnread},
+		{"recorded as text, sent as bytes", request(models.TestRequestPart{Name: "body", Recorded: "slots s17 s18", Sent: "slots s17\x01s18"}), undeclaredUnread},
+		{"recorded declared JSON, sent declared a protobuf",
+			request(models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/x-protobuf"},
+				models.TestRequestPart{Name: "body", Recorded: `{"slots":["s17","s18"]}`, Sent: "BAs17 s18"}),
+			mediaUnread("application/x-protobuf")},
+	} {
+		if e := row.req[0]; e.Unread != row.why {
+			t.Errorf("%s: unread %q; want %q", row.name, e.Unread, row.why)
+		}
+		for _, ln := range []Learned{pick(row.req), other(row.req)} {
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.why) {
+				t.Errorf("%s: %s (%s); want it refused, the request unread", row.name, ln.Kind, ln.Why)
+			}
+		}
+	}
+	for s, want := range map[string]bool{
+		"": true, "slots s17 s18": true, "a\tb\r\nc": true, "日本語 ok": true,
+		"a\x00b": false, "a\x01b": false, "a\x1bb": false, "a\x7fb": false, "a\u0085b": false, "a\vb": false, "a\fb": false, "\xff": false,
+	} {
+		if got := plainText(s); got != want {
+			t.Errorf("plainText(%q) = %v; want %v", s, got, want)
 		}
 	}
 }
