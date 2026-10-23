@@ -285,6 +285,12 @@ type Proxy struct {
 	scopeSeq      uint64
 	workerScopeAt map[uint32]uint64
 	universeAt    uint64
+	// startsSeen is the starts registry's Changes the proxy last saw, and
+	// startsAt the scope sequence value it took then: the version of a view
+	// served as the run's one open test's worker changes with which tests
+	// are open (soleOpenView). Guarded by workerScopeMu.
+	startsSeen uint64
+	startsAt   uint64
 	// mappedUniverse is the union of every test's mapped mock names; lets a
 	// scoped worker distinguish "another test's mock" from an unmapped shared
 	// recording. Guarded by workerScopeMu.

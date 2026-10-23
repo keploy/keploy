@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/templates"
@@ -31,6 +32,65 @@ func JSONLeafAt(doc string, path []templates.PathSeg) (templates.Leaf, bool) {
 		}
 	}
 	return templates.Leaf{}, false
+}
+
+// JSONDoc is one JSON document read once, for the scalars at many of its
+// paths: JSONLeafAt reads the whole document for each one, and an answer
+// with variables at hundreds of places (a run's report) was read hundreds of
+// times, several times each, for one call.
+type JSONDoc struct {
+	body   string
+	leaves map[string]templates.Leaf
+}
+
+// ReadJSONDoc reads body, which must be one JSON document.
+func ReadJSONDoc(body string) (*JSONDoc, bool) {
+	if !IsJSONDoc(body) {
+		return nil, false
+	}
+	leaves, ok := templates.JSONLeaves(body)
+	if !ok {
+		return nil, false
+	}
+	d := &JSONDoc{body: body, leaves: make(map[string]templates.Leaf, len(leaves))}
+	for _, l := range leaves {
+		if l.Shadowed {
+			continue
+		}
+		k := pathKey(l.Path)
+		if _, seen := d.leaves[k]; !seen {
+			d.leaves[k] = l
+		}
+	}
+	return d, true
+}
+
+// LeafAt is JSONLeafAt of the document.
+func (d *JSONDoc) LeafAt(path []templates.PathSeg) (templates.Leaf, bool) {
+	l, ok := d.leaves[pathKey(path)]
+	return l, ok
+}
+
+// AnswerEdit is AnswerEdit of the document.
+func (d *JSONDoc) AnswerEdit(path []templates.PathSeg, recorded, value string) (Edit, string) {
+	l, ok := d.LeafAt(path)
+	return answerEdit(d.body, l, ok, recorded, value)
+}
+
+// pathKey writes path so that two paths have one key exactly when samePath
+// holds: each step's key (quoted), index and kind.
+func pathKey(path []templates.PathSeg) string {
+	var b strings.Builder
+	for _, s := range path {
+		b.WriteString(strconv.Quote(s.Key))
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(s.Index))
+		if s.IsIndex {
+			b.WriteByte('i')
+		}
+		b.WriteByte('/')
+	}
+	return b.String()
 }
 
 // IsNumberLeaf reports whether l is a JSON number.
@@ -93,6 +153,11 @@ type Edit struct {
 // there, it says why.
 func AnswerEdit(body string, path []templates.PathSeg, recorded, value string) (Edit, string) {
 	l, ok := JSONLeafAt(body, path)
+	return answerEdit(body, l, ok, recorded, value)
+}
+
+// answerEdit is AnswerEdit of the scalar l of body, found (ok) at the path.
+func answerEdit(body string, l templates.Leaf, ok bool, recorded, value string) (Edit, string) {
 	if !ok {
 		return Edit{}, "the recorded response holds no scalar there"
 	}

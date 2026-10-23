@@ -211,12 +211,16 @@ func TestOwnsIsTheOpenTestsMapping(t *testing.T) {
 			t.Errorf("Owns(%q) = %v, %v; want %v, true", name, owned, known, want)
 		}
 	}
-	if _, known := r.Owns(999, "pen-old"); known {
-		t.Fatal("a pid of no worker has no view")
+	// A process no scope registered is served as the one open test's worker.
+	if owned, known := r.Owns(999, "pen-old"); !owned || !known {
+		t.Fatalf("a pid of no worker while one test is open: owned %v known %v; want the open test's", owned, known)
 	}
 	r.End(100, "orders.TestReload", false, at(150))
 	if owned, _ := r.Owns(101, "pen-old"); owned {
 		t.Fatal("an ended test owns nothing")
+	}
+	if _, known := r.Owns(999, "pen-old"); known {
+		t.Fatal("a pid of no worker with no test open has no view")
 	}
 }
 
@@ -400,5 +404,156 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 	f.spawn(7, 1, at(5), "/tmp/other")
 	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
 		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
+	}
+}
+
+// A process no scope registered — a helper the CI started beside the test
+// binary rather than under it — is served, while exactly one test is open on
+// the run, as that test's worker: the test's own recordings first, the
+// runner's after, another test's hidden; its scope is the test's, so its
+// cursors and consumed recordings are the test's.
+func TestAnUnregisteredProcessIsServedAsTheOneOpenTest(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	r.SetTable("/r", map[string]models.SetTable{"e2e": {
+		Runner: []string{"login"},
+		Tests: map[string][]models.Owned{
+			"TestSeeded": {{Name: "persons-500"}},
+			"TestOther":  {{Name: "persons-200"}},
+		},
+	}})
+	f.spawn(100, 1, at(0), "e2e.test")
+	f.spawn(300, 1, at(1), "keploy-agent") // beside the test binary, not under it
+	r.Begin(100, "/r/e2e", "/r/e2e", true, at(10))
+	r.Begin(100, "TestSeeded", "/r/e2e", false, at(20))
+
+	rank, _, ok := r.View(300, at(30))
+	if !ok || rank["persons-500"] != 1 || rank["login"] != 2 || hasAny(rank, "persons-200") {
+		t.Fatalf("the helper during TestSeeded must see TestSeeded's recordings, not TestOther's: %v %v", rank, ok)
+	}
+	own, _, _ := r.View(100, at(30))
+	if len(own) != len(rank) {
+		t.Fatalf("the helper's view %v must be the test binary's own %v", rank, own)
+	}
+	if got, want := r.Scope(300), r.Scope(100); got == "" || got != want {
+		t.Fatalf("the helper's scope %q must be the open test's %q", got, want)
+	}
+	if owned, known := r.Owns(300, "persons-500"); !owned || !known {
+		t.Fatalf("Owns(helper, own test's recording) = %v, %v", owned, known)
+	}
+	if owned, _ := r.Owns(300, "persons-200"); owned {
+		t.Fatal("another test's recording is not the helper's")
+	}
+	if len(r.List()) != 0 {
+		t.Fatalf("the helper is no app the tests started: %v", r.List())
+	}
+	if pid, ok := r.SoleOpenTest([]uint32{300}); !ok || pid != 100 {
+		t.Fatalf("SoleOpenTest = %d, %v; want the test binary", pid, ok)
+	}
+
+	// The next test: the helper follows it.
+	r.End(100, "TestSeeded", false, at(40))
+	r.Begin(100, "TestOther", "/r/e2e", false, at(50))
+	if rank, _, _ := r.View(300, at(60)); rank["persons-200"] != 1 || hasAny(rank, "persons-500") {
+		t.Fatalf("the helper during TestOther: %v", rank)
+	}
+}
+
+// With no test open — before the first, between two, after the suite — a
+// process no scope registered is served as before: no view, the whole pool.
+func TestAnUnregisteredProcessWithNoTestOpenIsServedAsBefore(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	r.SetTable("/r", map[string]models.SetTable{"e2e": {Tests: map[string][]models.Owned{"TestA": {{Name: "a"}}}}})
+	f.spawn(100, 1, at(0), "e2e.test")
+	f.spawn(300, 1, at(1), "keploy-agent")
+	none := func(when string) {
+		t.Helper()
+		if rank, _, ok := r.View(300, at(100)); ok {
+			t.Fatalf("%s: the helper has a view %v; want none (the whole pool)", when, rank)
+		}
+		if s := r.Scope(300); s != "" {
+			t.Fatalf("%s: the helper's scope is %q; want none", when, s)
+		}
+		if _, known := r.Owns(300, "a"); known {
+			t.Fatalf("%s: the helper knows a view", when)
+		}
+		if _, ok := r.SoleOpenTest([]uint32{300}); ok {
+			t.Fatalf("%s: SoleOpenTest found a test", when)
+		}
+	}
+	none("before any scope")
+	r.Begin(100, "/r/e2e", "/r/e2e", true, at(10))
+	none("the suite open, before the first test")
+	r.Begin(100, "TestA", "/r/e2e", false, at(20))
+	r.End(100, "TestA", false, at(30))
+	none("between tests")
+	r.End(100, "/r/e2e", true, at(40))
+	none("after the suite")
+}
+
+// With more than one test open at once — on two workers, or two tests of one
+// process run in parallel — which one a call of no registered process belongs
+// to would be a guess: it is served as before. A subtest open inside its
+// test is one test running, the innermost.
+func TestAnUnregisteredProcessWithTestsOpenInParallelIsServedAsBefore(t *testing.T) {
+	sets := map[string]models.SetTable{"e2e": {Tests: map[string][]models.Owned{
+		"TestA": {{Name: "a"}}, "TestA/case": {{Name: "a-case"}}, "TestB": {{Name: "b"}},
+	}}}
+	f := newFake()
+	f.spawn(100, 1, at(0), "e2e.test")
+	f.spawn(200, 1, at(0), "e2e.test")
+	f.spawn(300, 1, at(1), "keploy-agent")
+
+	r := New(f, 0)
+	r.SetTable("/r", sets)
+	r.Begin(100, "TestA", "/r/e2e", false, at(10))
+	r.Begin(200, "TestB", "/r/e2e", false, at(11))
+	if rank, _, ok := r.View(300, at(20)); ok {
+		t.Fatalf("two workers' tests open: the helper has a view %v", rank)
+	}
+	if s := r.Scope(300); s != "" {
+		t.Fatalf("two workers' tests open: the helper's scope is %q", s)
+	}
+
+	r = New(f, 0)
+	r.SetTable("/r", sets)
+	r.Begin(100, "TestA", "/r/e2e", false, at(10))
+	r.Begin(100, "TestB", "/r/e2e", false, at(11)) // t.Parallel in one process
+	if rank, _, ok := r.View(300, at(20)); ok {
+		t.Fatalf("two parallel tests of one process open: the helper has a view %v", rank)
+	}
+
+	r = New(f, 0)
+	r.SetTable("/r", sets)
+	r.Begin(100, "TestA", "/r/e2e", false, at(10))
+	r.Begin(100, "TestA/case", "/r/e2e", false, at(11))
+	if rank, _, ok := r.View(300, at(20)); !ok || rank["a-case"] != 1 || hasAny(rank, "a", "b") {
+		t.Fatalf("a subtest open in its test: the helper must be served the subtest's: %v %v", rank, ok)
+	}
+}
+
+// A registered process is served by its own scope, as before: SoleOpenTest
+// leaves a chain with a worker on it alone. Changes counts every begin and end.
+func TestARegisteredProcessIsNotServedAsTheOneOpenTest(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	r.SetTable("/r", map[string]models.SetTable{"e2e": {Tests: map[string][]models.Owned{"TestA": {{Name: "a"}}}}})
+	f.spawn(100, 1, at(0), "e2e.test")
+	f.spawn(101, 100, at(1), "helper")
+	r.Begin(100, "TestA", "/r/e2e", false, at(10))
+	if _, ok := r.SoleOpenTest([]uint32{101, 100}); ok {
+		t.Fatal("a chain with a worker on it is that worker's, not served as the open test's")
+	}
+	if pid, ok := r.SoleOpenTest([]uint32{101}); !ok || pid != 100 {
+		t.Fatalf("SoleOpenTest = %d, %v", pid, ok)
+	}
+	if c := r.Changes(); c == 0 {
+		t.Fatal("a begin is a change to which tests are open")
+	}
+	before := r.Changes()
+	r.End(100, "TestA", false, at(20))
+	if r.Changes() <= before {
+		t.Fatal("an end is a change to which tests are open")
 	}
 }

@@ -256,6 +256,20 @@ func TestStrictExcusesOnlyKnownBodyNoise(t *testing.T) {
 	}
 }
 
+// Noise the learn step learned at a key holding a dot names that key alone,
+// as the learn step does: not the nested field its name reads as.
+func TestStrictExcusesNoiseLearnedAtADottedKey(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json"}
+	learned := recorded("learned", "/v1/events", ct, `{"meta.ts":1,"meta":{"ts":5}}`)
+	learned.Spec.ReqBodyNoise = map[string][]string{`body["meta.ts"]`: {}}
+	if got, diag := strictMatch(t, sent("/v1/events", ct, `{"meta.ts":2,"meta":{"ts":5}}`), nil, nil, nil, learned); got == nil {
+		t.Fatalf("noise learned at a dotted key was not excused: %v", differs(diag))
+	}
+	if got, _ := strictMatch(t, sent("/v1/events", ct, `{"meta.ts":1,"meta":{"ts":6}}`), nil, nil, nil, learned); got != nil {
+		t.Fatal("noise learned at a dotted key excused the nested field its name reads as")
+	}
+}
+
 // A form is compared key by key, in any order of its keys and of a repeated
 // key's values (as the learn step reads them); a field the mock learned may
 // change.

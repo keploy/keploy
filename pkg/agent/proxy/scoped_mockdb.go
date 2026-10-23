@@ -31,7 +31,15 @@ import (
 // worker on that chain registered at that moment, so the connection follows
 // its worker from test to test. Connections from unregistered process trees
 // (and every connection when no worker has scoped) get the whole pool — so
-// suite-level and single-worker sequential scoping behave exactly as before.
+// suite-level and single-worker sequential scoping behave exactly as before —
+// except while exactly one test is open on the run: a process no scope
+// registered (a helper CI started beside the test binary, not under it, that
+// the test hands work to) is then served as that test's worker, its own
+// recordings first and another test's hidden, as `keploy mock record`
+// attributed its calls to the one open test by their time
+// (correlateScopes). With no test open, or more than one at once, it gets the
+// whole pool as before (workerViewFor; starts.Registry.servedAs for the
+// per-start table).
 //
 // Scope of the isolation: this filters VISIBILITY (which per-test mocks a call
 // can see), over the one shared pool. Per-test mocks are per-test-named in
@@ -942,7 +950,9 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 // process descends from a registered worker gets a view that follows that
 // worker from test to test, resolved on every read (see scopedMockDb.src);
 // any other call gets the bare manager (whole pool), as does kpid == 0
-// (non-eBPF platform / lookup miss).
+// (non-eBPF platform / lookup miss) — but for a call from a process tree no
+// scope registered while exactly one test is open on the run, which gets a
+// view served as that test's worker (workerViewFor).
 //
 // A connection opened before its process (or an ancestor) registered as a
 // worker — a client a test binary dialled during its setup — keeps the bare
@@ -1006,19 +1016,78 @@ func ancestorChain(pid uint32) []uint32 {
 // workerViewFor is what a call from a process with the given ancestor chain
 // may see now: the allowlist and current scope of the nearest registered
 // worker, or — when it descends from none — the whole pool.
+//
+// A chain no scope ever registered (no process on it is a worker, here or in
+// the starts registry) — a helper the CI started beside the test binary
+// rather than under it — is served as the worker of the run's one open test
+// (starts.Registry.SoleOpenTest): that worker's allowlist and scope, as its
+// own call is. With no test open, or more than one at once, it is still the
+// whole pool.
 func (p *Proxy) workerViewFor(chain []uint32) workerView {
 	p.workerScopeMu.RLock()
-	defer p.workerScopeMu.RUnlock()
 	v := workerView{universe: p.mappedUniverse, version: p.universeAt}
+	registered := false
 	for _, pid := range chain {
 		// Every worker on the chain counts, not only the nearest: one that
 		// ended its test changed this view as much as one that began.
-		v.version = max(v.version, p.workerScopeAt[pid])
+		at, ever := p.workerScopeAt[pid]
+		registered = registered || ever
+		v.version = max(v.version, at)
 		if e, ok := p.workerScope[pid]; ok && v.allow == nil {
 			v.allow, v.scope = e.allow, e.scope
 		}
 	}
+	p.workerScopeMu.RUnlock()
+	if registered || len(chain) == 0 {
+		return v
+	}
+	return p.soleOpenView(chain, v)
+}
+
+// soleOpenView is workerViewFor for a chain no scope registered: the view of
+// the worker of the run's one open test, when exactly one is open and its
+// worker's test has a scope here; else v, the whole pool.
+//
+// What it shows changes when any worker's scope does, or which tests are
+// open does (the starts registry), so its version is the latest of either.
+// It is read before the view is, so a view is never older than its version.
+func (p *Proxy) soleOpenView(chain []uint32, v workerView) workerView {
+	changedAt := p.startsChangedAt()
+	pid, sole := starts.Default.SoleOpenTest(chain)
+	p.workerScopeMu.RLock()
+	defer p.workerScopeMu.RUnlock()
+	v.version = max(v.version, changedAt)
+	for _, at := range p.workerScopeAt {
+		v.version = max(v.version, at)
+	}
+	if !sole {
+		return v
+	}
+	if e, ok := p.workerScope[pid]; ok {
+		v.allow, v.scope = e.allow, e.scope
+	}
 	return v
+}
+
+// startsChangedAt is the scope sequence value the proxy took when it first
+// saw the starts registry's current Changes: a change to which tests are
+// open is a change to the scope sequence, noticed at the first read after
+// it, so it ranks above every view made before (see Revision).
+func (p *Proxy) startsChangedAt() uint64 {
+	c := starts.Default.Changes()
+	p.workerScopeMu.RLock()
+	seen, at := p.startsSeen, p.startsAt
+	p.workerScopeMu.RUnlock()
+	if c <= seen {
+		return at
+	}
+	p.workerScopeMu.Lock()
+	defer p.workerScopeMu.Unlock()
+	if c > p.startsSeen {
+		p.scopeSeq++
+		p.startsSeen, p.startsAt = c, p.scopeSeq
+	}
+	return p.startsAt
 }
 
 // ppidFromStat reads the parent PID of pid from /proc/<pid>/stat

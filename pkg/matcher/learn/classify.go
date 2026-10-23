@@ -71,6 +71,9 @@ type Raw struct {
 	At     time.Time
 	Served bool
 	Text   string
+	// read is Text as the test's cache reads it (DriftCache.RawOf), nil
+	// when no cache read it.
+	read *rawRead
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -162,14 +165,13 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 	if dc == nil {
 		dc = NewDriftCache()
 	}
-	served := append([]Earlier(nil), earlier...)
-	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	served, raws := dc.view(earlier), dc.rawView(raw, at)
 	out := make([]Learned, 0, len(drift))
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); ok {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), served, raws); ok {
 				ln.Kind, ln.From = KindVariable, from
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -178,7 +180,7 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 		// Noise, or an echo, only where its readings account for all it
 		// changed: an echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
-			if why := unaccounted(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); why != "" {
+			if why := unaccountedIn(dc, dc.ofIn(r.Value, l.Value, w), served, raws); why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
@@ -223,6 +225,16 @@ func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 			}
 			toks := dc.rawTokens(a.Value)[i]
 			for t := range words {
+				// A UUID's group comes back only with its UUID.
+				if us, in := v.asWords(t, true); in {
+					uuids := dc.rawUUIDs(a.Value)
+					for _, u := range us {
+						if uuids[u] {
+							return "a word of it comes back in the answer at " + a.Path + ", which keploy cannot answer with this run's value"
+						}
+					}
+					continue
+				}
 				if toks[t] || toks[strings.ToLower(t)] {
 					return "a word of it comes back in the answer at " + a.Path + ", which keploy cannot answer with this run's value"
 				}
@@ -551,6 +563,12 @@ type valueDrift struct {
 	unparsed string
 	// wholes are the value whole, recorded, in each declared form.
 	wholes map[string]bool
+	// uuidRec and uuidLive are the UUIDs the value holds, recorded and live,
+	// in every form, lower-cased; uuidGroupsRec and uuidGroupsLive the words
+	// it holds only as a group of one of them, each with the UUIDs that hold
+	// it (uuidParts).
+	uuidRec, uuidLive             map[string]bool
+	uuidGroupsRec, uuidGroupsLive map[string][]string
 }
 
 // DriftCache keeps each value's drift for one test of the learn step: the
@@ -560,18 +578,35 @@ type DriftCache struct {
 	m      map[driftKey]*valueDrift
 	raw    map[string]string
 	rawTok map[string][]map[string]bool
-	// mockText is each mock's text as Classify reads it (RawOf), by mock:
+	// rawUUID are the UUIDs of each payload's text (rawUUIDs).
+	rawUUID map[string]map[string]bool
+	// mockRead is each mock's text as Classify reads it (RawOf), by mock:
 	// the store's mocks are read once per test, not once per request.
-	mockText map[*models.Mock]string
-	// readText is each mock's text with its answer read back (ReadRaw), by
-	// mock: apart from mockText, which RawOf fills with a parked mock's
-	// text without its answer.
-	readText map[*models.Mock]string
+	// readRead is each mock's text with its answer read back (ReadRaw), by
+	// mock: apart from mockRead, which RawOf fills with a parked mock's text
+	// without its answer.
+	mockRead   map[*models.Mock]*rawRead
+	readRead   map[*models.Mock]*rawRead
+	rawMu      sync.Mutex
+	rawIndexed map[*rawRead]bool
+	// rawHolders are the payloads read so far (rawView, rawIndexed) that
+	// hold each word, by reading.
+	rawHolders []map[string][]*rawRead
+	// ix is what the test served so far, read once per exchange (view):
+	// from tracker, while its test is epoch, when the tracker made the cache.
+	ixMu    sync.Mutex
+	ix      *servedIndex
+	tracker *Tracker
+	epoch   uint64
 }
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
+	dc := &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, rawUUID: map[string]map[string]bool{}, mockRead: map[*models.Mock]*rawRead{}, readRead: map[*models.Mock]*rawRead{}, rawIndexed: map[*rawRead]bool{}}
+	for range readings {
+		dc.rawHolders = append(dc.rawHolders, map[string][]*rawRead{})
+	}
+	return dc
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -588,22 +623,25 @@ func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
 		return dc.RawOf(m, served), nil
 	}
 	dc.mu.Lock()
-	text, ok := dc.readText[m]
+	rd, ok := dc.readRead[m]
 	dc.mu.Unlock()
-	if ok {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}, nil
+	if !ok {
+		r, err := ReadRaw(m, served)
+		if err != nil {
+			return r, err
+		}
+		read := &rawRead{text: r.Text}
+		dc.mu.Lock()
+		if dc.readRead == nil {
+			dc.readRead = map[*models.Mock]*rawRead{}
+		}
+		if rd, ok = dc.readRead[m]; !ok {
+			rd = read
+			dc.readRead[m] = rd
+		}
+		dc.mu.Unlock()
 	}
-	r, err := ReadRaw(m, served)
-	if err != nil {
-		return r, err
-	}
-	dc.mu.Lock()
-	if dc.readText == nil {
-		dc.readText = map[*models.Mock]string{}
-	}
-	dc.readText[m] = r.Text
-	dc.mu.Unlock()
-	return r, nil
+	return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: rd.text, read: rd}, nil
 }
 
 // ReadRaw is RawOf with m's answer read back first when the agent parked it
@@ -627,16 +665,18 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 		return RawOf(m, served)
 	}
 	dc.mu.Lock()
-	text, ok := dc.mockText[m]
+	rd, ok := dc.mockRead[m]
 	dc.mu.Unlock()
-	if ok {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}
+	if !ok {
+		read := &rawRead{text: RawOf(m, served).Text}
+		dc.mu.Lock()
+		if rd, ok = dc.mockRead[m]; !ok {
+			rd = read
+			dc.mockRead[m] = rd
+		}
+		dc.mu.Unlock()
 	}
-	r := RawOf(m, served)
-	dc.mu.Lock()
-	dc.mockText[m] = r.Text
-	dc.mu.Unlock()
-	return r
+	return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: rd.text, read: rd}
 }
 
 // rawTokens are every word of a payload's text in every declared form, by
@@ -648,7 +688,16 @@ func (dc *DriftCache) rawTokens(text string) []map[string]bool {
 	if ok {
 		return t
 	}
-	forms := textForms(text)
+	t = formTokens(textForms(text))
+	dc.mu.Lock()
+	dc.rawTok[text] = t
+	dc.mu.Unlock()
+	return t
+}
+
+// formTokens are every word of forms, by reading.
+func formTokens(forms []string) []map[string]bool {
+	var out []map[string]bool
 	for _, word := range readings {
 		set := map[string]bool{}
 		for _, f := range forms {
@@ -656,12 +705,9 @@ func (dc *DriftCache) rawTokens(text string) []map[string]bool {
 				set[w] = true
 			}
 		}
-		t = append(t, set)
+		out = append(out, set)
 	}
-	dc.mu.Lock()
-	dc.rawTok[text] = t
-	dc.mu.Unlock()
-	return t
+	return out
 }
 
 // rawExtra is what a payload's text is searched in besides itself: its
@@ -744,6 +790,12 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 		d.clock.live[strings.ToLower(w)] = true
 	}
 	d.forms = forms
+	recs, lives := make([]string, len(forms)), make([]string, len(forms))
+	for i, f := range forms {
+		recs[i], lives[i] = f[0], f[1]
+	}
+	d.uuidRec, d.uuidGroupsRec = uuidParts(recs)
+	d.uuidLive, d.uuidGroupsLive = uuidParts(lives)
 	// What the readings cannot read whole, in every form but the raw one
 	// of a value with escapes (whose '%' and '\' are the escapes).
 	for i, f := range forms {
@@ -955,77 +1007,48 @@ func sources(e, v *valueDrift) (found, whole bool) {
 			return true, false
 		}
 	}
-	drifted := func(p run, rec, live string) bool {
-		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
-	}
 	for _, p := range v.pieces {
-		if !isClock(p, v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
+		if !isClock(p, v.clock, e.clock) && (codrifted(p, e.rec, e.live) || e.decoded && codrifted(p, e.decRec, e.decLive)) {
 			return true, false
 		}
 	}
 	for _, p := range e.pieces {
-		if !isClock(p, e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
+		if !isClock(p, e.clock, v.clock) && (codrifted(p, v.rec, v.live) || v.decoded && codrifted(p, v.decRec, v.decLive)) {
 			return true, false
 		}
 	}
 	return false, false
 }
 
+// codrifted reports whether piece p drifted in a value (rec, live): its
+// recorded text is a token of the recorded value and its live text of the
+// live one, neither of the other.
+func codrifted(p run, rec, live string) bool {
+	return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
+}
+
 // appeared is the earlier place of the test's recording the drifted value
 // (recorded, now) came from: a leaf of an HTTP mock F served before (every
 // one of them came earlier in the test) that F saw drift (sources), else a
 // raw mock served before or recorded before at (of which F saw no live
-// value).
+// value). served are read in the order they were recorded.
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	return appearedIn(dc, dc.of(recorded, now), at, served, raw)
+	return appearedIn(dc, dc.of(recorded, now), dc.view(served), dc.rawView(raw, at))
 }
 
-// appearedIn is appeared of the drifted value v, read in its call's window.
-func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
+// appearedIn is appeared of the drifted value v (read in its call's window),
+// in the exchanges w views and the payloads raws views.
+func appearedIn(dc *DriftCache, v *valueDrift, w earlierView, raws rawView) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
 	// application sent it, whole): the test's own call that sent it first,
 	// else the run's, else another's; then the same inside a longer value;
-	// an answer that gave it only when no call sent it. Earliest within each.
-	var best Place
-	rank := 7
-	for _, e := range served {
-		for _, s := range e.Seen {
-			// A place F saw hold its recorded value did not drift: the
-			// value there is the same every run, and a value that drifted
-			// here did not come from it.
-			if s.Live == s.Leaf.Value {
-				continue
-			}
-			ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v)
-			if !ok {
-				continue
-			}
-			r := 6
-			if s.Side == Request {
-				switch {
-				case e.Own:
-					r = 0
-				case e.Run:
-					r = 1
-				default:
-					r = 2
-				}
-				if !whole {
-					r += 3
-				}
-			}
-			if r < rank {
-				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}, r
-			}
-			if rank == 0 {
-				return best, true
-			}
-		}
-	}
-	if rank < 7 {
+	// an answer that gave it only when no call sent it. Earliest within each
+	// (earlierView.source). A place F saw hold its recorded value did not
+	// drift: the value there is the same every run, and a value that drifted
+	// here did not come from it.
+	if best, ok := w.source(v); ok {
 		return best, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
@@ -1040,35 +1063,59 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	if !v.clock.whole {
 		searched = append(searched, recorded)
 	}
+	// A UUID's group is looked for as its UUID (uuidParts).
 	add := func(p run) {
 		if p.rec != recorded && !isClock(p, v.clock) {
-			searched = append(searched, p.rec)
+			ws, _ := v.asWords(p.rec, true)
+			searched = append(searched, ws...)
 		}
 	}
 	for i := range readings {
 		for t := range v.lost[i] {
 			if t != recorded && !clockWord(t, true, v, v.clock) {
-				searched = append(searched, t)
+				ws, _ := v.asWords(t, true)
+				searched = append(searched, ws...)
 			}
 		}
 	}
 	for _, p := range v.pieces {
 		add(p)
 	}
-	for _, x := range raw {
-		if !x.Served && !x.At.Before(at) {
-			continue
-		}
-		texts := []string{x.Text, dc.rawExtra(x.Text)}
+	holds := func(x Raw, extra string) bool {
+		texts := []string{x.Text, extra}
 		for _, text := range texts {
 			if v.clock.whole && (containsWholeClock(text, recorded) || v.decoded && containsWholeClock(text, v.decRec)) {
-				return Place{Mock: x.Mock}, true
+				return true
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
+				return true
+			}
+		}
+		return false
+	}
+	// A payload holds a value as a token, or a clock read whole, only where
+	// it holds each of its ASCII words (rawView.holders): the payloads that
+	// hold the longest of one are read, in their order.
+	keys := append([]string{recorded}, searched...)
+	if v.decoded {
+		keys = append(keys, v.decRec)
+	}
+	if at, ok := raws.holders(dc, keys); ok {
+		for _, p := range at {
+			if x := raws.raw[p]; holds(x, x.read.extra) {
 				return Place{Mock: x.Mock}, true
 			}
+		}
+		return Place{}, false
+	}
+	for _, x := range raws.raw {
+		if !x.Served && !x.At.Before(raws.at) {
+			continue
+		}
+		if holds(x, dc.rawExtra(x.Text)) {
+			return Place{Mock: x.Mock}, true
 		}
 	}
 	return Place{}, false
@@ -1340,14 +1387,17 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 	if r.Unnamed || r.Value == "" || record == "" {
 		return Place{}, false
 	}
-	served := append([]Earlier(nil), earlier...)
-	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
-	var first Place
-	found := false
+	// The first place in the order the exchanges were recorded, then as
+	// given: one recorded no earlier than the one found is not taken. Every
+	// write is still read: whether they hold one live value does not depend
+	// on their order.
+	var from *Earlier
+	var at Seen
 	// live is the live value every write of r's recorded value holds, once
 	// one was seen (wrote).
 	live, wrote := "", false
-	for _, e := range served {
+	for i := range earlier {
+		e := &earlier[i]
 		for _, s := range e.Seen {
 			if s.Side != Request || !s.Written || s.Record != record || s.Leaf.Value != r.Value {
 				continue
@@ -1357,20 +1407,19 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 			} else if s.Live != live {
 				return Place{}, false
 			}
-			if s.Place == "" || found {
+			if s.Place == "" || from != nil && !e.At.Before(from.At) {
 				continue
 			}
-			first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
-			found = true
+			from, at = e, s
 		}
 	}
 	// No write is at a place a variable can hold, the writes kept the
 	// recorded value, or F could not read it: nothing this run wrote is r's.
-	if !found || live == r.Value || live == "" {
+	if from == nil || live == r.Value || live == "" {
 		return Place{}, false
 	}
-	return first, true
+	return Place{Mock: from.Mock, Side: Request, Path: at.Leaf.Path, Noise: at.Leaf.Noise,
+		Var: at.Place, Live: at.Live, Whole: true, Own: from.Own, Run: from.Run, Name: at.Name}, true
 }
 
 // Named is e with each request place that holds one of vars (as its bind or

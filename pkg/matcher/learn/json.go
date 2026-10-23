@@ -61,14 +61,13 @@ func KeysLeaf(root string, v interface{}) (Leaf, bool) {
 // leaf name of the value itself, "body"). See Leaf for the two path
 // dialects.
 func JSONLeaves(root string, v interface{}, out map[string]Leaf) {
-	jsonLeaves(root, "", root, false, v, out)
+	jsonLeaves(root, "", root, v, out)
 }
 
-// jsonLeaves walks v. path is its exact path, risk its path in the request
-// noise dialect relative to the root (the request matcher's JSON walker,
-// matcher.ChangedJSONFieldPaths: keys dot-joined, an array "[]"), and
-// unnamed whether some key on the way cannot be named.
-func jsonLeaves(path, risk, root string, unnamed bool, v interface{}, out map[string]Leaf) {
+// jsonLeaves walks v. path is its exact path, and risk its path in the
+// request noise dialect relative to the root (the request matcher's JSON
+// walker, matcher.ChangedJSONFieldPaths: keys dot-joined, an array "[]").
+func jsonLeaves(path, risk, root string, v interface{}, out map[string]Leaf) {
 	noise := root
 	if risk != "" {
 		noise = root + "." + risk
@@ -76,7 +75,7 @@ func jsonLeaves(path, risk, root string, unnamed bool, v interface{}, out map[st
 	switch t := v.(type) {
 	case map[string]interface{}:
 		if len(t) == 0 {
-			out[path] = Leaf{Path: path, Noise: noise, Type: EmptyObj, Unnamed: unnamed}
+			out[path] = Leaf{Path: path, Noise: noise, Type: EmptyObj}
 			return
 		}
 		for k, child := range t {
@@ -84,11 +83,11 @@ func jsonLeaves(path, risk, root string, unnamed bool, v interface{}, out map[st
 			if risk != "" {
 				childRisk = risk + "." + k
 			}
-			jsonLeaves(path+"."+k, childRisk, root, unnamed || strings.ContainsAny(k, ".[]"), child, out)
+			jsonLeaves(path+KeyStep(k), childRisk, root, child, out)
 		}
 	case []interface{}:
 		if len(t) == 0 {
-			out[path] = Leaf{Path: path, Noise: noise, Type: EmptyArray, Unnamed: unnamed}
+			out[path] = Leaf{Path: path, Noise: noise, Type: EmptyArray}
 			return
 		}
 		childRisk := "[]"
@@ -96,12 +95,24 @@ func jsonLeaves(path, risk, root string, unnamed bool, v interface{}, out map[st
 			childRisk = risk + "[]"
 		}
 		for i, child := range t {
-			jsonLeaves(path+"["+strconv.Itoa(i)+"]", childRisk, root, unnamed, child, out)
+			jsonLeaves(path+"["+strconv.Itoa(i)+"]", childRisk, root, child, out)
 		}
 	default:
 		typ, val := scalar(t)
-		out[path] = Leaf{Path: path, Noise: noise, Type: typ, Value: val, Unnamed: unnamed}
+		out[path] = Leaf{Path: path, Noise: noise, Type: typ, Value: val}
 	}
+}
+
+// KeyStep is the step an object key adds to an exact path (Leaf.Path): .key,
+// or ["key"], the key as a JSON string as the variable grammar writes it
+// (variables.Parse), for a key holding '.', '[' or ']', which a dot-joined
+// path cannot name alone ("testsuite._id" in a Mongo filter).
+func KeyStep(k string) string {
+	if !strings.ContainsAny(k, ".[]") {
+		return "." + k
+	}
+	q, _ := json.Marshal(k)
+	return "[" + string(q) + "]"
 }
 
 // scalar is a decoded JSON scalar's type and text.
@@ -156,7 +167,7 @@ func walkReorder(path, risk string, rec, live interface{}, known Known, out *[]s
 			if !ok {
 				continue
 			}
-			walkReorder(path+"."+k, childRisk(risk, k), rv, lv, known, out)
+			walkReorder(path+KeyStep(k), childRisk(risk, k), rv, lv, known, out)
 		}
 	case []interface{}:
 		l, ok := live.([]interface{})
@@ -209,10 +220,10 @@ func prune(path, risk string, v interface{}, known Known) interface{} {
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(t))
 		for k, child := range t {
-			if excusedNode(path+"."+k, childRisk(risk, k), child, known) {
+			if excusedNode(path+KeyStep(k), childRisk(risk, k), child, known) {
 				continue
 			}
-			out[k] = prune(path+"."+k, childRisk(risk, k), child, known)
+			out[k] = prune(path+KeyStep(k), childRisk(risk, k), child, known)
 		}
 		return out
 	case []interface{}:

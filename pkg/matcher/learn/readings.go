@@ -768,8 +768,24 @@ func nonASCIIRuns(s string) []string {
 // reading: ids it holds in another order, or once more, are words of what
 // changed too; a word at its own place on both sides is not. keploy cannot
 // tell whether such a word came from there, and refuses rather than learn
-// it as noise.
+// it as noise. served are read in the order they were recorded.
+// whereServed is where unaccounted says an exchange that holds a word of
+// what changed was served: the run's exchange (Earlier.Run) is an earlier
+// place of every test of the set, the set's start-up's.
+func whereServed(run bool) string {
+	if run {
+		return "in the test set's start-up"
+	}
+	return "earlier in the test"
+}
+
 func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) string {
+	return unaccountedIn(dc, v, dc.view(served), dc.rawView(raw, at))
+}
+
+// unaccountedIn is unaccounted of the exchanges w views, and the payloads
+// raws views.
+func unaccountedIn(dc *DriftCache, v *valueDrift, w earlierView, raws rawView) string {
 	if v.unparsed != "" {
 		return v.unparsed
 	}
@@ -780,22 +796,39 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		if moved && allClock(t, recorded, v.clock) || !moved && clockWord(t, recorded, v, v.clock) {
 			return ""
 		}
-		for _, e := range served {
-			// The run's exchange (Earlier.Run) is an earlier place of every
-			// test of the set: the set's start-up's.
-			where := "earlier in the test"
-			if e.Run {
-				where = "in the test set's start-up"
-			}
-			for _, s := range e.Seen {
-				ed := dc.of(s.Leaf.Value, s.Live)
-				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
-					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
+		// A UUID's group appears earlier only with its UUID (uuidParts).
+		if us, in := v.asWords(t, recorded); in {
+			for _, u := range us {
+				if mock, path, run, ok := w.holdingUUID(u, recorded); ok {
+					return "a word of it appears " + whereServed(run) + ", in " + mock + " at " + path + ", which did not drift with it: keploy cannot tell whether it came from there"
 				}
 			}
+			for _, u := range us {
+				if raws.pos != nil {
+					if p := raws.firstUUID(dc, u); p >= 0 {
+						return "a word of it appears earlier in the test, in " + raws.raw[p].Mock + "'s payload: keploy cannot tell whether it came from there"
+					}
+					continue
+				}
+				for _, x := range raws.raw {
+					if (x.Served || x.At.Before(raws.at)) && dc.rawUUIDs(x.Text)[u] {
+						return "a word of it appears earlier in the test, in " + x.Mock + "'s payload: keploy cannot tell whether it came from there"
+					}
+				}
+			}
+			return ""
 		}
-		for _, x := range raw {
-			if !x.Served && !x.At.Before(at) {
+		if mock, path, run, ok := w.holding(i, t, recorded); ok {
+			return "a word of it appears " + whereServed(run) + ", in " + mock + " at " + path + ", which did not drift with it: keploy cannot tell whether it came from there"
+		}
+		if raws.pos != nil {
+			if p := raws.first(dc, i, t); p >= 0 {
+				return "a word of it appears earlier in the test, in " + raws.raw[p].Mock + "'s payload: keploy cannot tell whether it came from there"
+			}
+			return ""
+		}
+		for _, x := range raws.raw {
+			if !x.Served && !x.At.Before(raws.at) {
 				continue
 			}
 			if dc.rawTokens(x.Text)[i][t] {

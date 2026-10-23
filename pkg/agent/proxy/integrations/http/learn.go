@@ -1015,6 +1015,9 @@ type pairing struct {
 //   - A variable is bound at its earlier place, a request place of one of
 //     the test's own HTTP mocks F served, which held the value whole, and is
 //     used here: it holds when the live value here is the one F saw there.
+//     A time the request stores (written: a place in a write's body) is
+//     never such a use: it is the call's own clock read, equal to the
+//     earlier one only by falling in its second, and is learned as noise.
 //   - An echo is a variable of this call alone (echo: true), bound here and
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
@@ -1080,6 +1083,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			use, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
+			}
+			if written(m, r.Path) && learn.IsTime(r.Value) && learn.IsTime(l.Live.Value) {
+				// A time a call stores is its own clock read, never a use
+				// of an earlier call's: the two are one only when they fell
+				// in one second (or millisecond), which another run's need
+				// not. Noise, as the Mongo learn step learns it.
+				p.noise[r.Path] = []string{}
+				continue
 			}
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
@@ -1317,6 +1328,20 @@ func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp
 		rec, liveShape = unmasked.shape(rp, destOf(live, rp)), unmasked.shape(live, sameDest)
 	}
 	return withExcused(earlierOf(recorded, rec, liveShape, served, own), n, live, rp), true
+}
+
+// written reports whether m's request stores the value at its leaf path: a
+// place in the body of a write (POST, PUT or PATCH), which creates or updates
+// a record with it, rather than only naming or comparing with it.
+func written(m *models.Mock, path string) bool {
+	if m.Spec.HTTPReq == nil || !strings.HasPrefix(path, "body") {
+		return false
+	}
+	switch m.Spec.HTTPReq.Method {
+	case "POST", "PUT", "PATCH":
+		return true
+	}
+	return false
 }
 
 // earlierOf is the exchange F just served from m (own: one of the test's own

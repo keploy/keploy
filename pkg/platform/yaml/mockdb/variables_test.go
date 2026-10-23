@@ -26,6 +26,8 @@ func variablesMock() *models.Mock {
 			Variables: models.MockVariables{
 				"orderId":   {Recorded: "o1", Bind: "body.id", Answer: []string{"body.id"}},
 				"requestId": {Recorded: "r1", Bind: "header.X-Request-Id", Use: []string{"url.query.rid"}, Echo: true},
+				// A place at a key holding a dot is quoted (learn.KeyStep).
+				"suiteId": {Recorded: "s1", Use: []string{`body.filter["suite._id"]`}, Answer: []string{`body.items[0]["suite._id"]`}},
 			},
 			ReqTimestampMock: time.Unix(1_700_000_000, 0).UTC(),
 			ResTimestampMock: time.Unix(1_700_000_001, 0).UTC(),

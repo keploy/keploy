@@ -52,7 +52,7 @@ func TestJSONLeavesDialects(t *testing.T) {
 		"body.e":           {Path: "body.e", Noise: "body.e", Type: EmptyObj},
 		"body.n":           {Path: "body.n", Noise: "body.n", Type: Null},
 		"body.big":         {Path: "body.big", Noise: "body.big", Type: Number, Value: "12345678901234567890"},
-		"body.d.ot":        {Path: "body.d.ot", Noise: "body.d.ot", Type: Number, Value: "1", Unnamed: true},
+		`body["d.ot"]`:     {Path: `body["d.ot"]`, Noise: "body.d.ot", Type: Number, Value: "1"},
 		"body.z":           {Path: "body.z", Noise: "body.z", Type: EmptyArray},
 	}
 	if !reflect.DeepEqual(s.Leaves, want) {
@@ -98,12 +98,57 @@ func TestCompare(t *testing.T) {
 			t.Fatalf("structural %q", d.Structural)
 		}
 	})
+	t.Run("a dotted key's drift is named", func(t *testing.T) {
+		d := Compare(body(t, "k", `{"a.b":2,"a":{"b":1}}`), body(t, "k", `{"a.b":1,"a":{"b":1}}`), nil)
+		if d.Structural != "" || !reflect.DeepEqual(d.Drift, []string{`body["a.b"]`}) {
+			t.Fatalf("got structural %q drift %v", d.Structural, d.Drift)
+		}
+	})
 	t.Run("an unnamed leaf cannot drift", func(t *testing.T) {
-		d := Compare(body(t, "k", `{"a.b":2}`), body(t, "k", `{"a.b":1}`), nil)
+		form := func(v string) Shape {
+			return Shape{Key: "k", Leaves: map[string]Leaf{"body.a.b": {Path: "body.a.b", Noise: "body.a.b", Type: String, Value: v, Unnamed: true}}}
+		}
+		d := Compare(form("2"), form("1"), nil)
 		if !strings.Contains(d.Structural, "no path names it alone") {
 			t.Fatalf("structural %q", d.Structural)
 		}
 	})
+}
+
+// A key holding '.', '[' or ']' (a Mongo filter's "testsuite._id") is one
+// step of its leaf's path, quoted: the leaf is named, apart from the nested
+// keys its name reads as, and its path is the variable place's and back.
+func TestADottedKeyIsOneStepOfItsPath(t *testing.T) {
+	s := body(t, "k", `{"filter":{"testsuite._id":"s-1","testsuite":{"_id":"s-2"}},"x[0]":[{"k]":"v","q\".<w>":"u"}]}`)
+	want := map[string]string{
+		`body.filter["testsuite._id"]`:         "s-1",
+		"body.filter.testsuite._id":            "s-2",
+		`body["x[0]"][0]["k]"]`:                "v",
+		`body["x[0]"][0]["q\".\u003cw\u003e"]`: "u",
+	}
+	if len(s.Leaves) != len(want) {
+		t.Fatalf("leaves %+v, want %v", s.Leaves, want)
+	}
+	for path, value := range want {
+		l, ok := s.Leaves[path]
+		if !ok || l.Value != value || l.Unnamed {
+			t.Fatalf("leaf %s is %+v (%v), want %q, named", path, l, ok, value)
+		}
+		place, ok := VarPlace(l, true)
+		if !ok || place != path {
+			t.Fatalf("VarPlace(%s) = %q %v", path, place, ok)
+		}
+		if back, ok := LeafPath(place); !ok || back != path {
+			t.Fatalf("LeafPath(%q) = %q %v, want %s", place, back, ok, path)
+		}
+	}
+	if l := s.Leaves[`body.filter["testsuite._id"]`]; l.Noise != "body.filter.testsuite._id" {
+		t.Fatalf("the request matcher's dialect is %q, want the keys dot-joined", l.Noise)
+	}
+	d := Compare(body(t, "k", `{"a.b":[2,1]}`), body(t, "k", `{"a.b":[1,2]}`), nil)
+	if d.Structural != "" || !reflect.DeepEqual(d.Reordered, []string{`body["a.b"]`}) || d.count() != 0 {
+		t.Fatalf("an array under a dotted key in another order: %+v", d)
+	}
 }
 
 func cand(s Shape, pairable bool) Candidate {
@@ -450,6 +495,7 @@ func TestVarPlaces(t *testing.T) {
 		{Leaf{Path: "header.x-request-id"}, false, "header.x-request-id"},
 		{Leaf{Path: "body.items[0].id"}, true, "body.items[0].id"},
 		{Leaf{Path: `body.a"b`}, true, `body["a\"b"]`},
+		{Leaf{Path: `body.filter["suite._id"].$in[0]`}, true, `body.filter["suite._id"].$in[0]`},
 		{Leaf{Path: "body.id"}, false, ""},                // a form or multipart field
 		{Leaf{Path: "body"}, true, ""},                    // a whole body
 		{Leaf{Path: "body.a.b", Unnamed: true}, true, ""}, // no path names it alone
@@ -1582,5 +1628,32 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 	})
 	if _, err := dc.ReadRaw(broken, false); err == nil || !strings.Contains(err.Error(), "store closed") {
 		t.Fatalf("an answer that cannot be read back: err %v; want the store's", err)
+	}
+}
+
+func TestIsTime(t *testing.T) {
+	for s, want := range map[string]bool{
+		"1792438920":                           true,  // seconds
+		"1792438920.437":                       true,  // seconds, with a fraction
+		"1792438920437":                        true,  // milliseconds
+		"2026-10-19T19:42:00Z":                 true,  // RFC 3339
+		"2026-10-19T19:42:00.437913341Z":       true,  // with nanoseconds
+		"2026-10-19 19:42:00+05:30":            true,  // a SQL timestamp
+		"2026-10-19":                           true,  // a date
+		"Mon, 19 Oct 2026 19:42:00 GMT":        true,  // RFC 1123
+		"20261019T194200Z":                     true,  // compact
+		"1792438920437913":                     false, // microseconds: an id as often
+		"1792438920403707704":                  false, // nanoseconds, or a snowflake ID
+		"019a0d6e-1c2a-7b3e-9f00-0123456789ab": false, // a v7 UUID is an id
+		"19:42:00":                             false, // a time of day names no instant
+		"9876543210":                           false, // after 2100
+		"0946684799":                           false, // before 2000
+		"k-1792438920":                         false, // not whole
+		"1792438920 ":                          false,
+		"":                                     false,
+	} {
+		if got := IsTime(s); got != want {
+			t.Errorf("IsTime(%q) = %v, want %v", s, got, want)
+		}
 	}
 }

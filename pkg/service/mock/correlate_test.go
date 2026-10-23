@@ -126,3 +126,35 @@ func names(entries []models.MockEntry) []string {
 	}
 	return out
 }
+
+// A call of a process no scope registered — a helper CI starts beside the
+// test binary rather than under it, so its PID is in no window — is the open
+// test's by its time, as replay serves it (scoped_mockdb.go, workerViewFor):
+// a call during one open test lands in that test's mapping; one before the
+// first test or between two is no test's (the pool). With two workers'
+// windows overlapping it keeps the timestamp scan's innermost window, which
+// replay, serving it the whole pool, does not depend on.
+func TestCorrelateScopesUnregisteredProcess(t *testing.T) {
+	const testBinary, helper = 100, 300
+	windows := []models.ScopeWindow{
+		{Name: "TestSeeded", Start: ts(10), End: ts(20), PID: testBinary},
+		{Name: "TestOther", Start: ts(30), End: ts(40), PID: testBinary},
+	}
+	got := correlateScopes(windows, []capturedMock{
+		{name: "before-first", ts: ts(5), pid: helper},
+		{name: "persons-500", ts: ts(15), pid: helper},
+		{name: "between", ts: ts(25), pid: helper},
+		{name: "persons-200", ts: ts(35), pid: helper},
+		{name: "own", ts: ts(36), pid: testBinary},
+	})
+	require.ElementsMatch(t, []string{"persons-500"}, names(got["TestSeeded"]), "the helper's call during TestSeeded is TestSeeded's")
+	require.ElementsMatch(t, []string{"persons-200", "own"}, names(got["TestOther"]))
+	require.Len(t, got, 2, "a call before the first test or between two is no test's")
+
+	parallel := []models.ScopeWindow{
+		{Name: "a", Start: ts(10), End: ts(30), PID: 100},
+		{Name: "b", Start: ts(15), End: ts(35), PID: 200},
+	}
+	got = correlateScopes(parallel, []capturedMock{{name: "helper-call", ts: ts(20), pid: helper}})
+	require.ElementsMatch(t, []string{"helper-call"}, names(got["b"]), "overlapping windows: the innermost, as before")
+}
