@@ -3,13 +3,16 @@ package http_test
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
+	httpclient "go.keploy.io/server/v3/pkg/platform/http"
 	"go.uber.org/zap"
-	"net/http/httptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // diskFile is a models.PayloadSource: the mock file a replay's read left the
@@ -98,6 +101,32 @@ func TestStoreMocks_SendsAMockWhosePayloadIsOnDiskWithIt(t *testing.T) {
 	}
 	if file.reads != 2 {
 		t.Fatalf("the payloads were read back %d times; want once each", file.reads)
+	}
+}
+
+// The CLI says how many of the mocks it stored it read back from their mock
+// file as it sent them: every one, for a set whose payloads its read left
+// on disk.
+func TestStoreMocks_SaysHowManyPayloadsItReadBack(t *testing.T) {
+	file := &diskFile{recorded: map[string]func() *models.Mock{
+		"f1": recordedHTTP("f1", "http://orders/v1"),
+		"u1": recordedHTTP("u1", "http://config/v1"),
+	}}
+	core, logs := observer.New(zap.InfoLevel)
+	client := httpclient.New(zap.New(core), nil, &config.Config{
+		Agent: config.Agent{SetupOptions: models.SetupOptions{AgentURI: agentServer(t, &stubSvc{})}},
+	})
+	whole := &models.Mock{Name: "w1", Kind: models.HTTP}
+	if err := client.StoreMocks(context.Background(), append(onDisk(file, "f1"), whole), onDisk(file, "u1")); err != nil {
+		t.Fatalf("StoreMocks: %v", err)
+	}
+	stored := logs.FilterMessage("stored the mocks on the agent").All()
+	if len(stored) != 1 {
+		t.Fatalf("logged %d store lines; want 1", len(stored))
+	}
+	fields := stored[0].ContextMap()
+	if fields["mocks"] != int64(3) || fields["payloadsReadBack"] != int64(2) {
+		t.Fatalf("the store was logged as %v; want 3 mocks, 2 of them read back", fields)
 	}
 }
 

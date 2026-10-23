@@ -300,6 +300,65 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_prune_prepared/golang-linux.sh"
 
+  # keploy test does not hold a test set's mocks in memory: it reads the set's
+  # mocks.yaml into a small entry per mock and reads each payload back only to
+  # send it to the agent. A keploy that loads the set whole held about twice
+  # the file, and recordings of a few GB were Killed (exit 137). The lane
+  # records http-pokeapi, adds 600 unused 1 MiB mocks to each test set's
+  # mocks.yaml, and replays: every set must pass, the agent must be sent every
+  # mock, and keploy test's peak RSS must stay under 300 MiB. Against
+  # build-no-race, whose memory is the one shipped (the race build's is
+  # several times it). Not replay_latest: the released replay is the bug.
+  client_mock_memory:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+    name: keploy test holds no test set in memory (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Record, inflate, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/http-pokeapi
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/client_mock_memory/golang-linux.sh
+
   # Decision 27: keploy test --remove-unused-mocks keeps a stateful dependency's
   # recordings whole. The app (test_workflow_scripts/golang/stateful_prune)
   # answers GET /tick with a counter's next value; eight are recorded, test 6

@@ -1216,6 +1216,9 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	a.concurrentServing.Store(res.Header.Get(models.ExactConcurrentHeader) == models.ExactConcurrentServes)
 	a.logger.Info("stored the mocks on the agent",
 		zap.Int("mocks", len(filtered)+len(unFiltered)),
+		// How many of them were read back from their mock file as they were
+		// sent: a set read whole has none.
+		zap.Int64("payloadsReadBack", sent.readBack.Load()),
 		zap.Int64("bytes", sent.raw.Load()),
 		zap.Int64("sentBytes", sent.wire.Load()),
 		zap.String("encoding", encodingName(encoding)),
@@ -1294,6 +1297,9 @@ type mockStreamBytes struct {
 	raw  atomic.Int64
 	wire atomic.Int64
 	err  atomic.Pointer[error]
+	// readBack counts the mocks whose payloads were read back from their
+	// mock file as they were encoded (models.Mock.WithPayload).
+	readBack atomic.Int64
 }
 
 // failure is why the encoder ended the stream before its last mock when the
@@ -1368,6 +1374,9 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 					}
 				}
 				i++
+				if m.PayloadOnDisk() {
+					sent.readBack.Add(1)
+				}
 				whole, err := m.WithPayload(ctx)
 				if err != nil {
 					// Kept for the caller: the agent sees only a stream that
