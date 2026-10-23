@@ -3417,6 +3417,15 @@ type ConsumedScopeReader interface {
 	AgentReadsConsumedPerTestOnly() bool
 }
 
+// TestRequestReader is an optional extension of the instrumentation a replay
+// talks to the agent through: whether the agent said, in its answer to the
+// last filter, that its learn step took the test case's request the filter
+// carried (models.TestRequestReadHeader). Without it, the request is taken
+// for one the agent did not read.
+type TestRequestReader interface {
+	AgentReadTestRequest() bool
+}
+
 // BackgroundRulesReader is an optional extension of the instrumentation a
 // replay talks to the agent through: the background rules the agent said, in
 // its answer to the last staging call, it serves the staged set by

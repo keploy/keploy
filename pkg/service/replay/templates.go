@@ -749,8 +749,10 @@ func (r *Replayer) openingOf(run *templates.Run, tc *models.TestCase) testOpenin
 // parts, recorded and as sent, that the filter carries to the learn step.
 const maxTestRequest = 16 << 20
 
-// testRequestOf is tc's own request, as recorded and as this run sends it
-// (toSend: with its template values), part by part, in a stable order, for
+// testRequestOf is tc's own request, as recorded (with the values its
+// template placeholders were recorded with: templates.Run.RecordedRequest)
+// and as this run sends it (toSend: with its template values), part by part,
+// in a stable order, for
 // record's full round's learn step (models.TestRequest): an HTTP test case's
 // URL, headers, body (read back from its asset where it is kept apart from
 // the test case, against keployPath as the replay reads it) and every part
@@ -774,17 +776,7 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 		size += len(recorded) + len(live)
 	}
 	headers := func(prefix string, rec, live map[string]string) {
-		var keys []string
-		for k := range rec {
-			keys = append(keys, k)
-		}
-		for k := range live {
-			if _, ok := rec[k]; !ok {
-				keys = append(keys, k)
-			}
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
+		for _, k := range headerNames(rec, live) {
 			add(prefix+k, rec[k], live[k])
 		}
 	}
@@ -805,7 +797,9 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 	}
 	switch tc.Kind {
 	case models.HTTP:
-		rec, live := tc.HTTPReq, sent.HTTPReq
+		// As recorded: the text the recording held where each placeholder
+		// now is, not the placeholder (templates.Run.RecordedRequest).
+		rec, live := run.RecordedRequest(tc.HTTPReq), sent.HTTPReq
 		add("url", rec.URL, live.URL)
 		headers("header.", rec.Header, live.Header)
 		recBody, liveBody := rec.Body, live.Body
@@ -840,7 +834,7 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 			add(name, r, l)
 		}
 	case models.GRPC_EXPORT:
-		rec, live := tc.GrpcReq, sent.GrpcReq
+		rec, live := run.RecordedGRPCRequest(tc.GrpcReq), sent.GrpcReq
 		headers("header.", rec.Headers.PseudoHeaders, live.Headers.PseudoHeaders)
 		headers("header.", rec.Headers.OrdinaryHeaders, live.Headers.OrdinaryHeaders)
 		add("body", rec.Body.DecodedData, live.Body.DecodedData)
@@ -983,4 +977,22 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
 	}
 	return bound, fails, unjudged
+}
+
+// headerNames are the names of the headers either side of a test case's
+// request holds (rec as recorded, live as keploy test sends it), sorted, each
+// once: a header one side alone holds is a part of the request too, "" on the
+// other side.
+func headerNames(rec, live map[string]string) []string {
+	keys := make([]string, 0, len(rec)+len(live))
+	for k := range rec {
+		keys = append(keys, k)
+	}
+	for k := range live {
+		if _, ok := rec[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }

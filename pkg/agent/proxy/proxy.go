@@ -4515,7 +4515,7 @@ func (p *Proxy) SetPoolNames(names []string) error {
 
 // TakeTestRequest gives the learn step the running keploy test case's own
 // request (agent.TestRequestTaker; learn.Tracker.Give), under the proven
-// switch: the test's earliest place, which its echo reads.
+// switch: the test's earliest place, which it reads as any earlier place.
 func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
 	if provenswitch.On() {
 		p.learnTracker.Give(learn.GivenRequest(req))

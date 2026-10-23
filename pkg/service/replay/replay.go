@@ -602,6 +602,10 @@ type Replayer struct {
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
 	setCalls setCalls
+	// requestsUnread are the test cases of the set RunTestSet is running
+	// whose request the agent did not say its learn step took
+	// (test_request_read.go).
+	requestsUnread requestsUnread
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -2741,8 +2745,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// previous one closed (openTestErrorCapture).
 	var captureOpened bool
 	// What the previous set's application missed before its first test is
-	// not this set's.
+	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
+	r.requestsUnread.reset()
 	// var to store the error in the loop
 	var loopErr error
 	// Add secret files to .gitignore if they exist
@@ -5832,7 +5837,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
-		} else if err := r.persistLearned(runTestSetCtx, testSetID, r.exact.stripUnresolved(allConsumedAcrossCycles), actualTestMockMappings, r.exact.consumerOf()); err != nil {
+		} else if err := r.persistLearned(runTestSetCtx, testSetID, r.readLearning(testSetID, r.exact.stripUnresolved(allConsumedAcrossCycles), consumers), actualTestMockMappings, r.exact.consumerOf()); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
 		}
@@ -6732,6 +6737,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 		return err
 	}
+	r.noteOpening(params)
 	if ex := params.Exact; ex != nil && ex.Stage && ex.Background != "" {
 		r.confirmBackground(ex.Background)
 	}

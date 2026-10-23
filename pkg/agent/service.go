@@ -480,7 +480,7 @@ type VariableResetter interface {
 // agent hands it the request the filter that opens the test case carries,
 // before the test case's mocks go live (nil: the filter carried none, as a
 // keploy older than its agent sends it). Under the proven switch the learn
-// step's echo reads it as the test's earliest place. A proxy that lacks it
+// step reads it as the test's earliest place. A proxy that lacks it
 // reads none.
 //
 // AwaitTestRequest marks the running test as one keploy test opened, whose

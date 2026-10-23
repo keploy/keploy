@@ -113,6 +113,11 @@ type AgentClient struct {
 	// last staging call said it serves the set by
 	// (models.BackgroundRulesHeader): "" until one says S12's.
 	stagedBackground atomic.Pointer[string]
+	// testRequestRead holds whether the agent's answer to the last
+	// /updatemockparams said its learn step took the test case's request
+	// the filter carried (models.TestRequestReadHeader). Every call clears
+	// it first.
+	testRequestRead atomic.Bool
 
 	// concurrentServing holds what the agent's last /storemocks answer said
 	// of serving a test the recordings it shares with the tests that ran
@@ -273,6 +278,14 @@ func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
 // and from the start of every StoreMocks.
 func (a *AgentClient) ServesConcurrent() bool {
 	return a.concurrentServing.Load()
+}
+
+// AgentReadTestRequest reports whether the agent's answer to the last
+// /updatemockparams said its learn step took the test case's request the
+// filter carried (models.TestRequestReadHeader). False until an answer says
+// so, and from the start of every call.
+func (a *AgentClient) AgentReadTestRequest() bool {
+	return a.testRequestRead.Load()
 }
 
 // AgentServesBackground is the background rules the agent's answer to the
@@ -1513,6 +1526,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
+	a.testRequestRead.Store(false)
 	// Nor does it believe a staging's background rules (stagedBackground)
 	// until the agent's answer to it says them.
 	if ex := params.Exact; ex != nil && ex.Stage {
@@ -1556,6 +1570,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 		return err
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
+	a.testRequestRead.Store(res.Header.Get(models.TestRequestReadHeader) == models.TestRequestRead)
 	if ex := params.Exact; ex != nil && ex.Stage {
 		rules := res.Header.Get(models.BackgroundRulesHeader)
 		a.stagedBackground.Store(&rules)

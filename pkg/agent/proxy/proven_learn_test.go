@@ -1021,7 +1021,7 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 		req  *models.TestRequest
 		want string
 	}{
-		{"handed its request", slots, "carries a moment the test case's own request holds (test case test-1 at body.slots[1])"},
+		{"handed its request", slots, "carries a value the test case's own request holds (test case test-1 at body.slots[1])"},
 		{"handed none", nil, "keploy could not read the test case's own request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1820,6 +1820,15 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 // applies (OpenTestCase): with given bound.
 type opening struct{ given []models.VariableBinding }
 
+// ReadsTestRequest reports whether OpenTestCase hands the learn step the
+// test case's request its filter carries (coreAgent.TestRequestTaker), under
+// the proven switch: what the agent answers the opening filter with
+// (models.TestRequestReadHeader).
+func (a *Agent) ReadsTestRequest() bool {
+	_, ok := a.Proxy.(coreAgent.TestRequestTaker)
+	return ok && provenswitch.On()
+}
+
 // OpenTestCase applies a keploy test case's mock filter that opens a test
 // (models.MockFilterParams.BeginsTestVariables, under the proven switch) as
 // UpdateMockParams does, and begins the test's variables with the values its

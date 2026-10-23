@@ -528,8 +528,8 @@ func TestRunTestSet_TheFullRoundSendsEachTestCasesRequest(t *testing.T) {
 				t.Errorf("the create's parts begin %q; want the url first", create.Parts[0].Name)
 			}
 			u := parts(read)["url"]
-			if read == nil || read.Test != "test-2" || !strings.HasSuffix(u.Recorded, "/users/{{string .id}}") || !strings.HasSuffix(u.Sent, "/users/u_live_0002") {
-				t.Fatalf("the read-back's request %+v; want its URL as recorded and as sent with this run's id", read)
+			if read == nil || read.Test != "test-2" || !strings.HasSuffix(u.Recorded, "/users/u_rec_0001") || !strings.HasSuffix(u.Sent, "/users/u_live_0002") {
+				t.Fatalf("the read-back's request %+v; want its URL as recorded, with the recorded id, and as sent with this run's id", read)
 			}
 		})
 	}
@@ -552,6 +552,33 @@ func TestTestRequestOf(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "url,header.A,header.B,body,form.slot" || got.Parts[0].Sent != "http://h/u/u_rec" || got.Parts[4].Recorded != "11:14\n11:15" || got.Unread != "" {
 		t.Fatalf("the HTTP request %+v", got)
+	}
+	// As recorded, each placeholder holds the value it was recorded with,
+	// never its text: a template value in the URL, the body, a header and a
+	// form field, and a secret in a header's name, which the recording held
+	// as the request as sent does.
+	run2 := templates.NewRun(nil, map[string]interface{}{"id": "u_rec", "slot": "11:14"}, map[string]interface{}{"tenant": "acme7"})
+	run2.Apply([]templates.Capture{{Key: "id", Value: "u_live"}})
+	keyed := &models.TestCase{Kind: models.HTTP, Name: "test-6", HTTPReq: models.HTTPReq{URL: "http://h/u/{{string .id}}",
+		Header: map[string]string{"X-Tenant-{{string .secret.tenant}}": "{{string .id}}"}, Body: `{"slot":"{{string .slot}}","id":"{{string .id}}"}`,
+		Form: []models.FormData{{Key: "who", Values: []string{"{{string .id}}"}}}}}
+	got = testRequestOf(run2, keyed, "")
+	names = nil
+	for _, p := range got.Parts {
+		names = append(names, p.Name+"="+p.Recorded+">"+p.Sent)
+	}
+	if want := `url=http://h/u/u_rec>http://h/u/u_live,header.X-Tenant-acme7=u_rec>u_live,body={"slot":"11:14","id":"u_rec"}>{"slot":"11:14","id":"u_live"},form.who=u_rec>u_live`; strings.Join(names, ",") != want || got.Unread != "" {
+		t.Fatalf("a templated request:\n%v\nwant\n%s", strings.Join(names, ","), want)
+	}
+	g2 := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-7", GrpcReq: models.GrpcReq{
+		Headers: models.GrpcHeaders{OrdinaryHeaders: map[string]string{"x-id": "{{string .id}}"}}, Body: models.GrpcLengthPrefixedMessage{DecodedData: `id: "{{string .id}}"`}}}
+	got = testRequestOf(run2, g2, "")
+	names = nil
+	for _, p := range got.Parts {
+		names = append(names, p.Name+"="+p.Recorded+">"+p.Sent)
+	}
+	if want := `header.x-id=u_rec>u_live,body=id: "u_rec">id: "u_live"`; strings.Join(names, ",") != want {
+		t.Fatalf("a templated gRPC request:\n%v\nwant\n%s", strings.Join(names, ","), want)
 	}
 	// A multipart form records one part per value: each is a part of its
 	// own, a repeated key's numbered; a value and a file kept apart, and a
@@ -625,6 +652,19 @@ func TestSendMockFilterParamsCarriesTheTestCasesOpening(t *testing.T) {
 	}
 	if got := h.instr.lastParams; got.TestRequest != req || !reflect.DeepEqual(got.Variables, vars) {
 		t.Fatalf("the filter carries %+v and %+v; want the opening's request and values", got.TestRequest, got.Variables)
+	}
+	// The harness's agent cannot say it read the request: the test case is
+	// noted as one whose request it did not read.
+	if unread := h.replayer.requestsUnread.set(); !unread["test-1"] {
+		t.Fatalf("tests whose request the agent did not read: %v; want test-1", unread)
+	}
+	h.replayer.requestsUnread.reset()
+	h.replayer.instrumentation = &readsInstr{prInstr: h.instr, reads: true}
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
+		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+	}
+	if unread := h.replayer.requestsUnread.set(); unread != nil {
+		t.Fatalf("an agent that read the request: noted %v", unread)
 	}
 	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)

@@ -369,6 +369,49 @@ func TestKeployTestsCaptureWindowAwaitsTheTestCasesRequest(t *testing.T) {
 			if got := strings.Join(p.events, ", "); got != want {
 				t.Fatalf("events %q; want %q", got, want)
 			}
+			// A proxy that carries a window's misses into the next one
+			// (keploy test's path for every test after a set's first)
+			// awaits the request too, after the window opens.
+			c := &continuingRequestProxy{}
+			a.Proxy = c
+			if err := a.ContinueTestErrorCapture(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			want = "continue, await"
+			if on != "1" {
+				want = "continue"
+			}
+			if got := strings.Join(c.events, ", "); got != want {
+				t.Fatalf("continued: events %q; want %q", got, want)
+			}
 		})
+	}
+}
+
+// continuingRequestProxy is a requestProxy whose capture window carries the
+// misses of the previous one in (ContinueTestErrorCapture).
+type continuingRequestProxy struct{ requestProxy }
+
+func (p *continuingRequestProxy) ContinueTestErrorCapture() { p.log("continue") }
+
+// The agent says its OpenTestCase hands the learn step a test case's request
+// (models.TestRequestReadHeader) only under the switch, with a proxy that
+// takes one.
+func TestTheAgentSaysItReadsATestCasesRequestOnlyWhereItDoes(t *testing.T) {
+	for _, tc := range []struct {
+		on    string
+		proxy coreAgent.Proxy
+		want  bool
+	}{
+		{"1", &requestProxy{}, true},
+		{"0", &requestProxy{}, false},
+		{"1", &openerProxy{}, false},
+	} {
+		t.Setenv(provenswitch.Env, tc.on)
+		a := newReplayAgent()
+		a.Proxy = tc.proxy
+		if got := a.ReadsTestRequest(); got != tc.want {
+			t.Errorf("KEPLOY_PROVEN=%s, %T: %v; want %v", tc.on, tc.proxy, got, tc.want)
+		}
 	}
 }

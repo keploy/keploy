@@ -680,15 +680,18 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 	// keploy record's full round: the recordings it shares with the tests
 	// that ran beside it, after its own.
 	ex.Concurrent = plan.concurrentServing(name)
-	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
+	params := models.MockFilterParams{
 		Variables:   open.vars,
 		TestRequest: open.request,
 		Exact:       ex,
-	})
+	}
+	err := r.instrumentation.UpdateMockParams(ctx, params)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))
+		return err
 	}
-	return err
+	r.noteOpening(params)
+	return nil
 }
 
 // nextExactTest is the test case a replay loop opens after the one that just

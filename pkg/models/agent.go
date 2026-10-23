@@ -434,12 +434,15 @@ type MockFilterParams struct {
 	// round (the learn step's round, under the proven switch), the test
 	// case's own request: what the application was given before any call
 	// of the test. The agent's learn step reads it as the test's earliest
-	// place, for its echo alone: a value the application picks from it by
-	// its clock (the next of the slots it lists) is followed from there, or
-	// refused, never learned as noise. nil for every other caller. An agent
-	// that predates it ignores it; one that has it reads a filter that opens
-	// a test case without it (a keploy older than its agent) as a request it
-	// could not read, and refuses what only that request could account for.
+	// place: a value the application took from it (a part of it, the next
+	// of the slots it lists picked by its clock) is refused, never learned
+	// as noise. nil for every other caller. An agent that reads it says so
+	// in its answer (TestRequestReadHeader); one that predates it ignores
+	// it, and the replay then keeps none of what that agent learned as noise
+	// for the test (its request was not read). An agent that has it reads a
+	// filter that opens a test case without it (a keploy older than its
+	// agent) as a request it could not read, and refuses every value that
+	// changed in the test.
 	TestRequest *TestRequest `json:"testRequest,omitempty"`
 }
 
@@ -578,6 +581,19 @@ const (
 // scope required by its end) whatever it asked for: never looser than the
 // rules the set was served by.
 const BackgroundRulesHeader = "X-Keploy-Background-Rules"
+
+// TestRequestReadHeader is the /updatemockparams response header in which an
+// agent says, answering the filter that opens a keploy test case
+// (MockFilterParams.TestRequest), that its learn step took the request the
+// filter carried, or that it carried none (TestRequestRead). An agent that
+// does not send it, every agent released before it among them, learns from
+// the test without reading its request, so a value the application took from
+// the request may be learned as noise: the replay keeps nothing the agent
+// learned as noise, or as an echo, on the mocks the test consumed.
+const (
+	TestRequestReadHeader = "X-Keploy-Test-Request"
+	TestRequestRead       = "read"
+)
 
 // UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
 // agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with

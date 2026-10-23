@@ -271,6 +271,12 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 			respondAgent(w, r, http.StatusInternalServerError, err)
 			return
 		}
+		// The learn step took the test case's request (models.
+		// TestRequestReadHeader): the replay keeps what it learned for the
+		// test only when the agent says so.
+		if s, ok := a.svc.(testRequestReader); ok && s.ReadsTestRequest() {
+			w.Header().Set(models.TestRequestReadHeader, models.TestRequestRead)
+		}
 	} else if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
@@ -304,6 +310,12 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 // request gave bound, as its mocks go live.
 type testCaseOpener interface {
 	OpenTestCase(ctx context.Context, params models.MockFilterParams) error
+}
+
+// testRequestReader says whether the agent's OpenTestCase hands the test
+// case's request its filter carries to the learn step (proven switch).
+type testRequestReader interface {
+	ReadsTestRequest() bool
 }
 
 // variableStarter begins a test's variables with the values its test case's

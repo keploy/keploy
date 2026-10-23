@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -3873,5 +3874,18 @@ func TestMustPass_RemovesTheFailingAndStopsAtTheRefused(t *testing.T) {
 				t.Fatalf("a run with a refused test case exited %d, want 1", code)
 			}
 		})
+	}
+}
+
+// A test case's request lists every header either side holds, each once,
+// sorted: one the sent request alone holds is a part of it as one the
+// recording alone holds is, "" on the other side.
+func TestHeaderNames(t *testing.T) {
+	got := headerNames(map[string]string{"X-B": "1", "X-A": "2"}, map[string]string{"X-A": "3", "X-C": "4"})
+	if want := []string{"X-A", "X-B", "X-C"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("names %v; want %v", got, want)
+	}
+	if got := headerNames(nil, nil); len(got) != 0 {
+		t.Fatalf("no headers: %v", got)
 	}
 }
