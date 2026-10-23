@@ -9,16 +9,18 @@
 # a mix of two builds, with the pull request's files, with the merged branch's
 # first build, with a file main never had, and with no file at all. A token
 # the server refuses, whichever way it says so, ends the check after one
-# attempt. With no token, a check that is not a fork's fails, as does a
-# PR_FROM_FORK that is neither true nor false.
+# attempt; a server error is tried again. With no token, unset or empty as
+# GitHub gives a missing secret, a check that is not a fork's fails and
+# clones nothing, as does a PR_FROM_FORK that is neither true nor false.
 #
 # A keploy/keploy of its own gives a fork's pull request its checkout: the
 # merge commit, two commits deep as actions/checkout fetches it. Each merge
 # is made on a main commit whose eBPF files main later changes again. A pull
 # request that leaves the files passes; one that changes, adds or removes one
 # fails, listing those; a checkout one commit deep, one that is no merge
-# commit, and a hooks directory in no checkout fail. A fork's check clones
-# nothing. With a token a fork gets the whole check.
+# commit, and a hooks directory in no checkout fail. A fork's check, its
+# token unset or empty, clones nothing. With a token a fork gets the whole
+# check.
 #
 # The check's git is a wrapper (bin/git) that, for each clone, records
 # whether git may prompt and what password git's credential helpers give for
@@ -26,10 +28,14 @@
 # be: the check's own must be the one that answers, with the token. After a
 # clone it tells the helpers to store the credentials, as git does after one
 # GitHub accepted. It records the token on any git command line, and in any
-# file of the check's temporary directory, home or working directory before
-# or after a clone; a case fails on either, on the token in such a file once
-# the check has ended, and on the token in the check's output. It can also
-# refuse a clone in each of the ways GitHub and git refuse credentials.
+# file of the check's temporary directory, home or working directory, or one
+# under /tmp or /dev/shm written since the case began (scan), before or after
+# a clone; a case fails on either, on the token in such a file once the check
+# has ended, and on the token in the check's output. The token is looked for
+# as it is and in base64, at each of the three byte alignments (so also as
+# an Authorization header gives it, x-access-token:TOKEN), in both
+# alphabets. The wrapper can also refuse a clone in each of the ways GitHub
+# and git refuse credentials, or fail the first clone as a server error does.
 #
 #   bash .github/workflows/test_workflow_scripts/check-ebpf-objects.tests.sh
 set -euo pipefail
@@ -42,7 +48,16 @@ files=(bpf_arm64_bpfel.go bpf_arm64_bpfel.o bpf_x86_bpfel.go bpf_x86_bpfel.o
 # cases; the global one holds the decoy helper.
 printf '[credential]\n\thelper = "!f() { echo username=decoy; echo password=decoy; }; f"\n' > "$work/gitconfig"
 export GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1
-token="ghp_test$RANDOM$RANDOM${RANDOM}never"
+token="ghp_test$RANDOM$RANDOM$RANDOM$RANDOM${RANDOM}never"
+# needles: the token, and the base64 any bytes holding it have, at each of
+# the three alignments, less the four characters at each end that the bytes
+# around it change; in the standard alphabet and the URL-safe one.
+needles=("$token")
+for k in 0 1 2; do
+  b=$(printf '%.*s%s' "$k" xx "$token" | base64 | tr -d '\n=')
+  b=${b:4:$((${#b} - 8))}
+  needles+=("$b" "$(printf '%s' "$b" | tr '+/' '-_')")
+done
 
 src="$work/ebpf"
 git init -q -b main "$src"
@@ -112,45 +127,76 @@ co() {
   echo "$work/co-$1/pkg/agent/hooks/linux"
 }
 
-# bin/git: the real git, but it records in $SHIM_LOG "argv-has-token" if the
-# token is in its arguments; and for a clone, "prompts" if git may prompt for
-# credentials, "helper:" with the password git's helpers give for github.com
-# under its -c options (or "none"), and "file-has-token" if a file under
-# $SHIM_SCAN holds the token before or after it. A clone that succeeds has
-# the helpers store the credentials, as git does once GitHub accepts them.
-# With SHIM_REFUSE it refuses the clone instead, as GitHub refuses a token
-# that cannot read the repository (notfound) or is not valid (auth), or as
-# git does when no helper gives a username (username) or a password
-# (password).
+# scan: the files that hold one of $SHIM_NEEDLES: any under $SHIM_SCAN, and
+# any under /tmp and /dev/shm (of less than 16 MB) written since $SHIM_MARK.
+# There it skips each directory that has not changed since then: writing a
+# file changes its directory, and making a directory changes its parent. So
+# a /tmp of a million files (a shared box's) is not read whole for each
+# case; it misses only a file written in an older directory below one that
+# did not change.
+cat > "$work/scan" <<'EOF'
+#!/bin/bash
+set -f
+needles=($SHIM_NEEDLES)
+set +f
+e=()
+for n in "${needles[@]}"; do e+=(-e "$n"); done
+{
+  grep -rlF "${e[@]}" "$SHIM_SCAN"
+  find /tmp /dev/shm -xdev -mindepth 1 -type d ! -newer "$SHIM_MARK" -prune -o \
+    -type f -newer "$SHIM_MARK" -size -16M -print0 | xargs -0r grep -lF "${e[@]}"
+} 2> /dev/null
+exit 0
+EOF
+chmod +x "$work/scan"
+
+# bin/git: the real git, but it records in $SHIM_LOG "argv-has-token" if one
+# of $SHIM_NEEDLES is in its arguments; and for a clone, "prompts" if git may
+# prompt for credentials, "helper:" with the password git's helpers give for
+# github.com under its -c options (or "none"), and "file-has-token" if scan
+# finds one in a file before or after it. A clone that succeeds has the
+# helpers store the credentials, as git does once GitHub accepts them. With
+# SHIM_REFUSE it refuses the clone instead, as GitHub refuses a token that
+# cannot read the repository (notfound), is not valid (auth) or may not read
+# it (forbidden: an organization's SSO), or as git does when no helper gives
+# a username (username) or a password (password); or (blip) fails the first
+# clone as a server error does, and runs the next.
 real=$(command -v git)
 mkdir -p "$work/bin"
 cat > "$work/bin/git" <<EOF
 #!/bin/bash
-real='$real'
+real='$real' scan='$work/scan'
 EOF
 cat >> "$work/bin/git" <<'EOF'
 args=("$@") cfg=() i=0
+set -f
+needles=($SHIM_NEEDLES)
+set +f
 for a in "${args[@]}"; do
-  case $a in *"$SHIM_TOKEN"*) echo argv-has-token >> "$SHIM_LOG" ;; esac
+  for n in "${needles[@]}"; do
+    case $a in *"$n"*) echo argv-has-token >> "$SHIM_LOG" ;; esac
+  done
 done
 while [ "$i" -lt ${#args[@]} ] && [ "${args[$i]}" = -c ]; do cfg+=(-c "${args[$((i + 1))]}"); i=$((i + 2)); done
 [ "${args[$i]:-}" = clone ] || exec "$real" "$@"
 [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] || echo prompts >> "$SHIM_LOG"
 cred=$(printf 'protocol=https\nhost=github.com\npath=keploy/ebpf.git\n\n' |
   GIT_TERMINAL_PROMPT=0 "$real" "${cfg[@]}" credential fill 2> /dev/null) || cred=""
-pw=$(sed -n 's/^password=//p' <<< "$cred")
+pw=""
+case $'\n'$cred in *$'\n'password=*) pw=${cred#*password=} pw=${pw%%$'\n'*} ;; esac
 if [ "$pw" = "$SHIM_TOKEN" ]; then echo helper:token >> "$SHIM_LOG"; else echo "helper:${pw:-none}" >> "$SHIM_LOG"; fi
-infile() { grep -rqF -- "$SHIM_TOKEN" "$SHIM_SCAN" 2> /dev/null; }
+infile() { "$scan" | grep -q .; }
+clone() {
+  "$real" "${args[@]}"
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$cred" ]; then
+    printf '%s\n\n' "$cred" | "$real" "${cfg[@]}" credential approve > /dev/null 2>&1
+  fi
+}
 leak=""
 infile && leak=1
 case ${SHIM_REFUSE:-} in
-  "")
-    "$real" "$@"
-    rc=$?
-    if [ "$rc" -eq 0 ] && [ -n "$cred" ]; then
-      printf '%s\n\n' "$cred" | "$real" "${cfg[@]}" credential approve > /dev/null 2>&1
-    fi
-    ;;
+  "") clone ;;
   notfound)
     echo "remote: Repository not found." >&2
     echo "fatal: repository 'https://github.com/keploy/ebpf.git/' not found" >&2
@@ -169,8 +215,21 @@ case ${SHIM_REFUSE:-} in
     echo "fatal: could not read Password for 'https://x-access-token@github.com': terminal prompts disabled" >&2
     rc=128
     ;;
+  forbidden)
+    echo "remote: The 'keploy' organization has enabled or enforced SAML SSO." >&2
+    echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 403" >&2
+    rc=128
+    ;;
+  blip)
+    if [ "$(grep -c '^helper:' "$SHIM_LOG")" -le 1 ]; then
+      echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 502" >&2
+      rc=128
+    else
+      clone
+    fi
+    ;;
   *)
-    echo "bin/git: SHIM_REFUSE is '$SHIM_REFUSE', none of notfound, auth, username, password" >&2
+    echo "bin/git: SHIM_REFUSE is '$SHIM_REFUSE', none of notfound, auth, username, password, forbidden, blip" >&2
     exit 2
     ;;
 esac
@@ -195,23 +254,29 @@ hooks() {
 # PRO_ACCESS_TOKEN or PR_FROM_FORK but those of the VARs, exits RC and says
 # PATTERN. It runs with a temporary directory, home and working directory of
 # its own, under $run; neither its output, a git command line it runs, nor a
-# file under $run while it clones or once it has ended holds the token. Its
-# clones are recorded in $work/shim.log.
+# file under $run, or one under /tmp or /dev/shm written since the case
+# began (scan), while it clones or once it has ended, holds the token in any
+# of its forms (needles). Its clones are recorded in $work/shim.log.
 run="$work/run"
+export SHIM_NEEDLES="${needles[*]}" SHIM_SCAN="$run" SHIM_MARK="$work/mark"
 expect() {
-  local out rc=0 leak
+  local out rc=0 leak n
   : > "$work/shim.log"
   rm -rf "$run" && mkdir -p "$run/tmp" "$run/home" "$run/cwd"
+  # A second early: a file's time is from the kernel's coarse clock, which
+  # may still read the marker's when the check writes its first file.
+  touch -d '1 second ago' "$work/mark"
   out=$(cd "$run/cwd" && env -u PRO_ACCESS_TOKEN -u PR_FROM_FORK -u SHIM_REFUSE -u GIT_TERMINAL_PROMPT \
-    PATH="$work/bin:$PATH" TMPDIR="$run/tmp" HOME="$run/home" \
-    SHIM_LOG="$work/shim.log" SHIM_TOKEN="$token" SHIM_SCAN="$run" "${@:5}" bash "$check" "$url" "$4" 2>&1) || rc=$?
-  leak=$({ grep -rlF -- "$token" "$run"; grep -xE 'argv-has-token|file-has-token' "$work/shim.log"; } 2> /dev/null || true)
+    PATH="$work/bin:$PATH" TMPDIR="$run/tmp" HOME="$run/home" SHIM_LOG="$work/shim.log" SHIM_TOKEN="$token" \
+    "${@:5}" bash "$check" "$url" "$4" 2>&1) || rc=$?
+  leak=$({ "$work/scan"; grep -xE 'argv-has-token|file-has-token' "$work/shim.log"; } 2> /dev/null || true)
+  for n in "${needles[@]}"; do [[ $out != *"$n"* ]] || leak+=" output-has-token"; done
   # The whole output against one extended regular expression: . and a
   # newline in it match a newline.
-  if [ "$rc" = "$2" ] && [[ $out =~ $3 ]] && [[ $out != *"$token"* ]] && [ -z "$leak" ]; then
+  if [ "$rc" = "$2" ] && [[ $out =~ $3 ]] && [ -z "$leak" ]; then
     echo "ok   $1"
   else
-    echo "FAIL $1: exit $rc (want $2), want /$3/, no token in a file or argv (got: ${leak:-none}) or in:"
+    echo "FAIL $1: exit $rc (want $2), want /$3/, no token in a file, argv or the output (got: ${leak:-none}) in:"
     sed 's/^/     /' <<< "$out"
     failed=1
   fi
@@ -240,25 +305,43 @@ expect "no file" 1 "no \*_bpfel.o or \*_bpfel.go file" "$work/hooks-none" "${sam
 # What git says, last, before the check's message.
 declare -A refusal=([notfound]="fatal: repository '[^']*' not found" [auth]="fatal: Authentication failed for '[^']*'"
   [username]="fatal: could not read Username for '[^']*': terminal prompts disabled"
-  [password]="fatal: could not read Password for '[^']*': terminal prompts disabled")
-for r in notfound auth username password; do
+  [password]="fatal: could not read Password for '[^']*': terminal prompts disabled"
+  [forbidden]="fatal: unable to access '[^']*': The requested URL returned error: 403")
+for r in notfound auth username password forbidden; do
   expect "a refused token ($r)" 1 "${refusal[$r]}
 PRO_ACCESS_TOKEN cannot read file://.*: the server refused it" "$work/hooks-old" "${same[@]}" SHIM_REFUSE="$r"
   clones "a refused token ($r) is not tried again" "helper:token"
 done
-expect "no token, not a fork" 1 "PRO_ACCESS_TOKEN is not set: this check reads file://" "$work/hooks-old" PR_FROM_FORK=false
-clones "no token, not a fork: nothing is cloned" ""
-expect "no token, no PR_FROM_FORK" 1 "PRO_ACCESS_TOKEN is not set" "$work/hooks-old"
+# Not a refusal: waits its 10 s and clones again.
+expect "a server error is tried again" 0 "The requested URL returned error: 502
+clone of file://.* failed \(attempt 1 of 5\); retrying in 10s
+the 8 eBPF files of .* are keploy/ebpf main's at [0-9a-f]+ \(two\)" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=blip
+clones "a server error is tried again: two clones" "helper:token helper:token"
+# GitHub gives a missing or withheld secret as an empty variable.
+for t in unset empty; do
+  tok=(); [ "$t" = empty ] && tok=(PRO_ACCESS_TOKEN=)
+  expect "no token ($t), not a fork" 1 "PRO_ACCESS_TOKEN is empty or not set: this check reads file://" "$work/hooks-old" PR_FROM_FORK=false "${tok[@]}"
+  clones "no token ($t), not a fork: nothing is cloned" ""
+  expect "no token ($t), no PR_FROM_FORK" 1 "PRO_ACCESS_TOKEN is empty or not set: this check reads file://" "$work/hooks-old" "${tok[@]}"
+  clones "no token ($t), no PR_FROM_FORK: nothing is cloned" ""
+done
 expect "a PR_FROM_FORK that is not true or false" 1 "PR_FROM_FORK is 'yes': it must be true or false" "$work/hooks-old" "${same[@]}" PR_FROM_FORK=yes
 
 fork=(PR_FROM_FORK=true)
 merged="the commit its merge commit is made on"
 expect "a fork that leaves the files, which main changed since" 0 "from a fork, .* its 8 eBPF files of .* are, byte for byte, those of main at [0-9a-f]+ \(two\), $merged" "$(co same merge-same)" "${fork[@]}"
 clones "a fork clones nothing" ""
+expect "a fork that leaves the files, its token empty" 0 "from a fork, .* its 8 eBPF files of .* are, byte for byte, those of main at [0-9a-f]+ \(two\), $merged" "$(co emptysame merge-same)" "${fork[@]}" PRO_ACCESS_TOKEN=
+clones "a fork, its token empty, clones nothing" ""
 expect "a fork that changes files, which main changed since" 1 "^this pull request is from a fork, and its eBPF files of .* are not those of main at [0-9a-f]+ \(two\), $merged:
   bpf_x86_bpfel.go: this pull request changes its bytes
   bpf_x86_bpfel.o: this pull request changes its bytes
 A pull request from a fork cannot change the eBPF objects: .*A maintainer must copy them" "$(co change merge-change)" "${fork[@]}"
+expect "a fork that changes files, its token empty" 1 "^this pull request is from a fork, and its eBPF files of .* are not those of main at [0-9a-f]+ \(two\), $merged:
+  bpf_x86_bpfel.go: this pull request changes its bytes
+  bpf_x86_bpfel.o: this pull request changes its bytes
+A pull request from a fork cannot change" "$(co emptychange merge-change)" "${fork[@]}" PRO_ACCESS_TOKEN=
+clones "a fork, its token empty, that changes files clones nothing" ""
 d=$(co add merge-same); printf 'x\n' > "$d/other_x86_bpfel.o"
 expect "a fork that adds a file" 1 "not those of main at [0-9a-f]+ \(two\), $merged:
   other_x86_bpfel.o: main has no such file, this pull request adds it

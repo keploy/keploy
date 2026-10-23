@@ -28,15 +28,19 @@
 # content (a blobless clone): a tree names each file by the hash of its
 # bytes, which `git hash-object` gives for the files here, so the trees are
 # all the check reads. It is retried a bounded number of times, each attempt
-# given up once its transfer stays below 1000 B/s for 30 s; a server that
-# refuses the credentials ends it at once.
+# given up once its transfer stays below 1000 B/s for 30 s. A server that
+# refuses the credentials ends it at once: one that says they are not valid
+# (401), that the repository is not there for them (404) or that they may not
+# read it (403, as an organization's SSO or IP allow list says it), and git
+# asking for credentials it was not given.
 #
 # keploy/ebpf is a private repository. PRO_ACCESS_TOKEN must be a token that
 # can read it: git gets it from a credential helper that reads it from the
 # environment, so it is never in a URL, a command line or a file, and the
-# check never prints it. With no token, a pull request from a keploy/keploy
-# branch or a push to main fails: those get the repository's secrets, so a
-# missing token is a broken workflow.
+# check never prints it. With no token (GitHub gives an empty one when the
+# secret is missing or withheld), a pull request from a keploy/keploy branch
+# or a push to main fails: those get the repository's secrets, so a missing
+# token is a broken workflow.
 #
 # A pull request from a fork (PR_FROM_FORK=true, from the event's
 # pull_request.head.repo.fork) gets no secrets, so with no token it cannot
@@ -131,7 +135,7 @@ if [ -z "${PRO_ACCESS_TOKEN:-}" ] && [ "$fork" = true ]; then
   exit 1
 fi
 if [ -z "${PRO_ACCESS_TOKEN:-}" ]; then
-  echo "PRO_ACCESS_TOKEN is not set: this check reads $repo, and keploy/ebpf is a private repository" \
+  echo "PRO_ACCESS_TOKEN is empty or not set: this check reads $repo, and keploy/ebpf is a private repository" \
     "that it can read only with a token that has read access to it. A push to main and a pull request" \
     "from a keploy/keploy branch get the repository's secrets, so the workflow must pass PRO_ACCESS_TOKEN" \
     "(prepare_and_run.yml, run_ebpf_objects)." >&2
@@ -146,8 +150,10 @@ export GIT_TERMINAL_PROMPT=0
 # that answers; the helper reads it from the environment when git asks.
 helper='!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "$PRO_ACCESS_TOKEN"; fi; }; f'
 # clone: a bare, blobless clone of repo's main into $work/ebpf. 1 once five
-# attempts have failed, 2 at once if the server refused the credentials (or
-# asked for some and git had none): no retry changes that.
+# attempts have failed, 2 at once if the server refused the credentials (401,
+# 404 or 403) or asked for some and git had none: no retry changes that. Any
+# other failure, such as a name that does not resolve, a connection that
+# stalls or a 5xx, is tried again.
 clone() {
   local i
   for i in 1 2 3 4 5; do
@@ -157,7 +163,7 @@ clone() {
       return 0
     fi
     cat "$work/clone.err" >&2
-    if grep -qE "fatal: (Authentication failed for|repository '.*' not found|could not read (Username|Password) for)" "$work/clone.err"; then
+    if grep -qE "fatal: (Authentication failed for|repository '.*' not found|could not read (Username|Password) for|unable to access '.*': The requested URL returned error: 403$)" "$work/clone.err"; then
       return 2
     fi
     [ "$i" -eq 5 ] && return 1
