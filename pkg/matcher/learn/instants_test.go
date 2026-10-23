@@ -618,6 +618,13 @@ func TestInstantSpans(t *testing.T) {
 		{"id=" + uuid7(at, "abc123456789abcdef"), []string{uuid7(at, "abc123456789abcdef")[:13]}},
 		{"order 2025-13-45 x", nil},
 		{"seq 14 of 41", nil},
+		// ISO 8601 to the hour, after a T only; a space and an hour are
+		// words of their own.
+		{"due 2026-10-22T11Z.", []string{"2026-10-22T11Z"}},
+		{"due 2026-10-22T11+05:30", []string{"2026-10-22T11+05:30"}},
+		{"due 2026-10-22T11 ok", []string{"2026-10-22T11"}},
+		{"due 2026-10-22 11 ok", []string{"2026-10-22"}},
+		{"id 2026-10-22T11a", nil},
 	} {
 		var got []string
 		for _, sp := range instantSpans(tc.text) {
@@ -625,6 +632,11 @@ func TestInstantSpans(t *testing.T) {
 		}
 		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("instantSpans(%q) = %q; want %q", tc.text, got, tc.want)
+		}
+	}
+	for text, res := range map[string]time.Duration{"2026-10-22T11Z": time.Hour, "2026-10-22T11+05:30": time.Hour, "2026-10-22T11": time.Hour, "2026-10-22T11:14Z": time.Minute, "2026-10-22": 24 * time.Hour} {
+		if sp := instantSpans(text); len(sp) != 1 || sp[0].res != res {
+			t.Errorf("instantSpans(%q) = %+v; want one instant to the %v", text, sp, res)
 		}
 	}
 	key := func(s string) instantKey {

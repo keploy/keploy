@@ -44,7 +44,9 @@ type clockLayout struct {
 // text writes (instant.wall), are the text's, whatever zone keploy runs in.
 var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})`), read: readRFC1123},
-	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?)?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
+	// ISO 8601 at the day, the hour ("2026-10-22T10Z", its reduced
+	// precision, after a T only), the minute, the second and a fraction.
+	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
 	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
@@ -396,6 +398,9 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 			clock = clock[:z]
 		}
 		res = time.Minute
+		if !strings.Contains(clock, ":") {
+			res = time.Hour
+		}
 		if strings.Count(clock, ":") >= 2 {
 			res = time.Second
 			if f := strings.IndexByte(clock, '.'); f >= 0 {
@@ -404,7 +409,8 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 		}
 	}
 	for _, layout := range []string{"2006-01-02T15:04:05Z07:00", "2006-01-02T15:04:05Z0700", "2006-01-02T15:04:05Z07", "2006-01-02T15:04:05",
-		"2006-01-02T15:04Z07:00", "2006-01-02T15:04Z0700", "2006-01-02T15:04", "2006-01-02"} {
+		"2006-01-02T15:04Z07:00", "2006-01-02T15:04Z0700", "2006-01-02T15:04",
+		"2006-01-02T15Z07:00", "2006-01-02T15Z0700", "2006-01-02T15Z07", "2006-01-02T15", "2006-01-02"} {
 		if t, err := time.ParseInLocation(layout, n, time.UTC); err == nil && inClockRange(t) {
 			return t, res, true
 		}
