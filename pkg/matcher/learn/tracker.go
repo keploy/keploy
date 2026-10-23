@@ -252,6 +252,24 @@ func (t *Tracker) Epoch() uint64 {
 	return t.epoch
 }
 
+// OpenEpoch is the open test's number (Epoch) while a test is open (Begin,
+// until End or NewSet), and 0 while none is: before the first Begin, after a
+// test's End, and after NewSet until the next Begin. The mock store stamps a
+// test's view with it as it installs the view (proxy MockManager.
+// SetOpenTestEpoch): a view installed while the tracker had no test open
+// carries 0, which no reader takes for a test of the tracker's.
+func (t *Tracker) OpenEpoch() uint64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open {
+		return 0
+	}
+	return t.epoch
+}
+
 // Drifts is what each value drifted, kept for the running test (Classify),
 // and before the set's first test for its start-up, so that the start-up's
 // calls read each earlier recording's text once.

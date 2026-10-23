@@ -333,29 +333,39 @@ type ExactConsumedReader interface {
 
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
-// observer (the learn tracker's ServedMock). ServedInOpenTest returns every
-// mock a parser was served while the open test's view was installed, of any
-// lifetime and through any door (the test's own, a protocol-phase or
-// reusable one, one spent through a delete door, a worker-scope one), a serve
-// whose claim was refused included (the tracker hears those too), once each
-// by learn.MockID, in the order they came; none while no test is open. The
-// test's own mocks the pool view answered before the test's view was
-// installed (in flight when it began: InFlightIntoOpenTest) are in
-// ConsumedTestMocks and not here: they were served before the test opened.
+// observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one
+// read of the open test's view, its stamp and its account:
 //
-// The store tells the observer of each serve before it files it here, and
-// files it in the view that was installed when the observer was told, and the
-// replay begins the tracker's test before it installs the test's view. So a
-// learn step that reads the tracker's Epoch, then this, then the tracker's
-// Test, and finds the two epochs equal, finds every mock this returns among
-// the tracker's served in its running test. One this returns that the
-// tracker files only before its running test (in Test's before, not in its
-// served) says the store's open test is not the tracker's: a test begun over
-// the last one's view. When the epochs differ, a test's end and the next
-// one's begin, or a new set, landed between the reads, and the reads are of
-// no one test. A matcher must only read them: they answer nothing.
+//   - The stamp is the learn tracker's open test (Tracker.OpenEpoch) as the
+//     view was installed. It is 0 while no test is open, with no tracker,
+//     when the tracker had no test open as the view was installed, and in a
+//     tracker test two tests' views were installed in: in each, the tracker
+//     began no test for this view alone, and 0 is no test of the tracker's.
+//   - The account is every mock a parser was served while the view was
+//     installed, of any lifetime and through any door (the test's own, a
+//     protocol-phase or reusable one, one spent through a delete door, a
+//     worker-scope one), a serve whose claim was refused included (the
+//     tracker hears those too), once each by learn.MockID, in the order they
+//     came; none while no test is open, and none with no observer. The
+//     test's own mocks the pool view answered before the test's view was
+//     installed (in flight when it began: InFlightIntoOpenTest) are in
+//     ConsumedTestMocks and not here: they were served before the test
+//     opened.
+//
+// A learn step takes the tracker's Epoch as the call it learns of is
+// matched, before it is answered, and reads this and the tracker's Test as
+// it decides. When the stamp is not 0 and equals both epochs, the call, the
+// store's open test and the tracker's running test are one test: the view
+// was installed after the tracker began that test, and no test began and no
+// set started from the match to the reads. The store loads the view a serve
+// is filed in before it tells the observer of the serve, and files it after,
+// so every mock the account holds is then among the tracker's served in its
+// running test. Otherwise the reads are of no one test (a test's end and the
+// next one's begin, or a new set, landed after the match, or the store's
+// test is not the tracker's) and the step learns nothing from them. A
+// matcher must only read them: they answer nothing.
 type ExactServedReader interface {
-	ServedInOpenTest() []*models.Mock
+	ServedInOpenTest() (uint64, []*models.Mock)
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
