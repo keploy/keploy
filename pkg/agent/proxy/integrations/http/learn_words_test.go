@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"mime/multipart"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"reflect"
@@ -67,15 +68,21 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 		// twice is the call sending the field twice, a then b (nil where
 		// a call cannot).
 		twice func(a, b string) *req
+		// recTwice is the mock recorded with the field twice, a then b
+		// (nil where the site compares a repeated field whole).
+		recTwice func(a, b string) *models.Mock
 	}{
 		{"a path segment", "url.path.2",
 			func(v string) *models.Mock { return recorded("m", "/v1/orders/"+seg(v), nil, "") },
-			func(v string) *req { return sent("/v1/orders/"+seg(v), nil, "") }, seg, nil},
+			func(v string) *req { return sent("/v1/orders/"+seg(v), nil, "") }, seg, nil, nil},
 		{"a query value", "url.query.note",
 			func(v string) *models.Mock { return recorded("m", "/v1/orders?note="+url.QueryEscape(v), nil, "") },
 			func(v string) *req { return sent("/v1/orders?note="+url.QueryEscape(v), nil, "") }, func(v string) string { return v },
 			func(a, b string) *req {
 				return sent("/v1/orders?note="+url.QueryEscape(a)+"&note="+url.QueryEscape(b), nil, "")
+			},
+			func(a, b string) *models.Mock {
+				return recorded("m", "/v1/orders?note="+url.QueryEscape(a)+"&note="+url.QueryEscape(b), nil, "")
 			}},
 		{"a header", "header.x-order-ref",
 			func(v string) *models.Mock {
@@ -86,7 +93,7 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 				in := sent("/v1/orders", map[string]string{"X-Order-Ref": a}, "")
 				in.header.Add("X-Order-Ref", b)
 				return in
-			}},
+			}, nil},
 		{"a form field", "body.note",
 			func(v string) *models.Mock {
 				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(v))
@@ -96,6 +103,9 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			}, func(v string) string { return v },
 			func(a, b string) *req {
 				return sent("/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(a)+"&"+form(b))
+			},
+			func(a, b string) *models.Mock {
+				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form(a)+"&"+form(b))
 			}},
 		{"a multipart field", "body.note",
 			func(v string) *models.Mock {
@@ -109,7 +119,7 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			func(a, b string) *req {
 				ct, body := multipartNote("BBB", a, b)
 				return sent("/v1/orders", map[string]string{"Content-Type": ct}, body)
-			}},
+			}, nil},
 		{"a JSON body field", "body.note",
 			func(v string) *models.Mock {
 				return recorded("m", "/v1/orders", map[string]string{"Content-Type": "application/json"}, jsonOf(v))
@@ -117,7 +127,7 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 			func(v string) *req {
 				return sent("/v1/orders", map[string]string{"Content-Type": "application/json"}, jsonOf(v))
 			},
-			func(v string) string { return v }, nil},
+			func(v string) string { return v }, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))
@@ -134,6 +144,13 @@ func TestEachStrictSiteReadsTheWords(t *testing.T) {
 					if served, _ := strictMatch(t, tc.twice(fresh, extra), nil, nil, nil, withWords(t, tc.mock(rec), tc.place, tc.value(rec), tc.value(f))); served != nil {
 						t.Fatalf("a fresh ref at %s sent with %q beside it is served: words admit one value", tc.place, extra)
 					}
+				}
+			}
+			if tc.recTwice != nil {
+				// Recorded twice, the field is two values, and words (here
+				// of its first) admit none of them sent once.
+				if served, _ := strictMatch(t, tc.call(fresh), nil, nil, nil, withWords(t, tc.recTwice(rec, "EXTRA"), tc.place, tc.value(rec), tc.value(f))); served != nil {
+					t.Fatalf("a fresh ref at %s, recorded with one more value beside it, is served: words admit one value", tc.place)
 				}
 			}
 			// The words are read only under the switch (knownOf): against
@@ -540,6 +557,8 @@ func TestTheLearnPlansTies(t *testing.T) {
 		class    string
 		words    []string
 		variable *models.MockVariable
+		// varName is the name of the one call-local variable learned.
+		varName string
 	}{
 		{name: "a partial tie", method: "POST", path: "/a", rec: `{"note":"ORD-123","id":"123"}`, f: `{"note":"ORD-456","id":"456"}`, refused: "(N8)", class: models.RefusedTie},
 		{name: "a piece glued to a word", method: "POST", path: "/a", rec: `{"note":"ORD123","id":"123"}`, f: `{"note":"ORD456","id":"456"}`, refused: "(N8)", class: models.RefusedContainment},
@@ -564,6 +583,10 @@ func TestTheLearnPlansTies(t *testing.T) {
 			words: []string{"body.createdAt", "body.updatedAt"}},
 		{name: "equal only when recorded", method: "POST", path: "/a", rec: `{"a":"x-1","b":"x-1"}`, f: `{"a":"x-2","b":"x-3"}`, words: []string{"body.a", "body.b"}},
 		{name: "seq beside a fresh hex", method: "POST", path: "/a", rec: `{"note":"seq=17","id":"3f2b8c1e9a4d70a1"}`, f: `{"note":"seq=18","id":"a7c4e2d10b3f4c2e"}`, words: []string{"body.id", "body.note"}},
+		// Twins are named by their first place, past the test case's keys
+		// (here "id", which the twins' value does not carry).
+		{name: "twins named past a test case's key", method: "POST", path: "/a", rec: `{"id":"o-1111","ref":"o-1111"}`, f: `{"id":"o-9999","ref":"o-9999"}`,
+			given: []variables.Binding{{Name: "id", Recorded: "q-77", Value: "q-88", Given: true}}, varName: "id-2"},
 		{name: "a UUID v7 in the path and the body", method: "PUT", path: "/items/" + rv7, fpath: "/items/" + fv7, rec: `{"id":"` + rv7 + `"}`, f: `{"id":"` + fv7 + `"}`,
 			variable: &models.MockVariable{Recorded: rv7, Bind: "body.id", Use: []string{"url.path[1]"}, Echo: true, Words: wordsOf(t, rv7, fv7)}},
 	} {
@@ -605,6 +628,11 @@ func TestTheLearnPlansTies(t *testing.T) {
 			}
 			if tc.words != nil && !reflect.DeepEqual(sortedCopyOf(places), tc.words) {
 				t.Fatalf("words at %v, want %v", places, tc.words)
+			}
+			if tc.varName != "" {
+				if _, ok := got.Learned()[tc.varName]; !ok || len(got.Learned()) != 1 {
+					t.Fatalf("variables %+v, want one named %s", got.Learned(), tc.varName)
+				}
 			}
 			if tc.variable != nil {
 				if len(got.LearnedWords) != 0 || len(got.Learned()) != 1 {
@@ -863,6 +891,21 @@ func TestTiePlacesOwnContract(t *testing.T) {
 		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{a}, g, true, map[string]bool{}, w); why != "" {
 			t.Fatalf("a test case's instant, refused: %s", why)
 		}
+		// Two places glued (INV1042, ORD1042), each beside an instant read
+		// within the window: the rule that ties them is read in the window
+		// too, where the instants are clock reads and only the glued test
+		// ties them (containment), never their instants' words.
+		inv := slotPlace{l: leaf("body.inv", learn.String, "at "+learnAt.Format(time.RFC3339)+" INV1042", "at "+boot.Format(time.RFC3339)+" INV2077"), kind: learn.KindNoise}
+		ord := slotPlace{l: leaf("body.ord", learn.String, "on "+learnAt.Format(time.RFC3339)+" ORD1042", "on "+boot.Format(time.RFC3339)+" ORD2077"), kind: learn.KindNoise}
+		q := pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{}}
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &q, []slotPlace{inv, ord}, nil, true, map[string]bool{}, w); !strings.Contains(why, "changed together") || q.refused != models.RefusedContainment {
+			t.Fatalf("%q (refused %q), want refused by containment", why, q.refused)
+		}
+		gi := []variables.Binding{{Name: "inv", Recorded: "at " + learnAt.Format(time.RFC3339) + " INV1042", Value: "at " + boot.Format(time.RFC3339) + " INV2077", Given: true}}
+		q = pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{}}
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &q, []slotPlace{ord}, gi, true, map[string]bool{}, w); !strings.Contains(why, "test case's inv") || q.refused != models.RefusedContainment {
+			t.Fatalf("a test case's value: %q (refused %q), want refused by containment", why, q.refused)
+		}
 	})
 }
 
@@ -1011,6 +1054,66 @@ func TestAMultipartPartsNoiseAndWords(t *testing.T) {
 	k := strictKnown{n: h.newStrictNoise(nil, nil, nil), words: map[string]models.WordsEntry{"body.upload": *wordsOf(t, "doc ref=a1", "doc ref=c3")}}
 	if d := k.multipartDiffs(ct, rec, ct, []byte(liveFile)); len(d) == 0 {
 		t.Error("a file part with words: excused")
+	}
+	// A field is excused, as a form field is, by the noise the learn step
+	// learned at it, and where the recording's value is one the obfuscator
+	// redacted; with neither, it is compared.
+	m := recorded("m", "/v1/orders", map[string]string{"Content-Type": ct}, rec)
+	if d := knownOf(h.newStrictNoise(nil, nil, nil), m).multipartDiffs(ct, rec, ct, []byte(liveNote)); len(d) != 1 {
+		t.Errorf("a field with no noise: %v, want it to differ", d)
+	}
+	m.Spec.ReqBodyNoise = map[string][]string{"body.note": nil}
+	if d := knownOf(h.newStrictNoise(nil, nil, nil), m).multipartDiffs(ct, rec, ct, []byte(liveNote)); len(d) != 0 {
+		t.Errorf("a field the learn step learned as noise: %v", d)
+	}
+	m = recorded("m", "/v1/orders", map[string]string{"Content-Type": ct}, rec)
+	m.Noise = []string{"^ORD-1 ref=a1$"}
+	if d := knownOf(h.newStrictNoise(nil, nil, nil), m).multipartDiffs(ct, rec, ct, []byte(liveNote)); len(d) != 0 {
+		t.Errorf("a field whose recorded value was redacted: %v", d)
+	}
+}
+
+// A call is on the route of a mock with variables at a path segment whose
+// words the learn step learned (noise.words), where its slots may change: its
+// field diffs leave the variable's place out there, as at a segment a
+// variable is declared at.
+func TestARouteHoldsTheSegmentsItsWordsMayChange(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := at(varMock("mock-1", "POST", "http://store/orders/ORD-1", `{"id":"r1","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id")}), 1)
+	withWords(t, m, "url.path.1", "ORD-1", "ORD-7")
+	r := makeReq("POST", "/orders/ORD-2")
+	r.Header = http.Header{"Content-Type": []string{"application/json"}}
+	if _, body := asRecordedForDiff(r, []byte(`{"id":"l1","item":"pen"}`), m); !strings.Contains(string(body), `"r1"`) {
+		t.Fatalf("the call's variable was not put back on its route: %s", body)
+	}
+	other := makeReq("POST", "/orderz/ORD-2")
+	other.Header = r.Header
+	if _, body := asRecordedForDiff(other, []byte(`{"id":"l1","item":"pen"}`), m); strings.Contains(string(body), `"r1"`) {
+		t.Fatalf("a call to another route had its variable put back: %s", body)
+	}
+}
+
+// A pairing keeps what the recording carried: the words learned of its
+// leaves before (here of a header this call does not send) and F's values
+// beside them (a reusable mock paired before in the round), beside what it
+// learns now.
+func TestAPairingKeepsWhatTheMockCarried(t *testing.T) {
+	h, n, opts := learnOn(t)
+	m := learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"note":"ORD-1 paid 100 ref=a1b2c3"}`, nil, `{"ok":true}`)
+	m.Spec.LearnedWords = map[string]models.WordsEntry{"header.x-old": *wordsOf(t, "t-1", "t-2")}
+	m.Spec.SetLearnedF(map[string]map[string]string{"mock-0": {"header.x-old": "t-2"}})
+	db := &learnDb{perTest: []*models.Mock{m}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/charges", `{"note":"ORD-1 paid 100 ref=d4e5f6"}`, nil), db, n, opts)
+	if err != nil || served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	got := db.consumed[0].Spec
+	if _, ok := got.LearnedWords["header.x-old"]; !ok || len(got.LearnedWords) != 2 {
+		t.Fatalf("words at %v, want the recording's and body.note", got.LearnedWords)
+	}
+	if want := map[string]map[string]string{"mock-0": {"header.x-old": "t-2", "body.note": "ORD-1 paid 100 ref=d4e5f6"}}; !reflect.DeepEqual(got.LearnedF(), want) {
+		t.Fatalf("F's values %v, want %v", got.LearnedF(), want)
 	}
 }
 
