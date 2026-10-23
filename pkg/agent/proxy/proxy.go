@@ -1066,6 +1066,15 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy.capture = relay.NewWatermark()
 	proxy.parserLag = debugParserLag(logger)
 
+	// keploy mock's tests are a test harness's, which gives the application
+	// its inputs and keploy no request: the learn step reads them so
+	// (learn.Tracker.SetClientTests).
+	proxy.learnTracker.SetClientTests(opts.Agent.MockMode)
+	// The application runs beside the agent, and writes a wall clock of no
+	// zone in its local zone, the agent's own, or in UTC
+	// (learn.Tracker.SetAppZone).
+	proxy.learnTracker.SetAppZone(time.Local)
+
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
 	// settled here; nothing is read off disk (see upstreamTLSOnce).
 	proxy.upstreamTLSVerifyCfg, proxy.upstreamTLSCACert = resolveUpstreamTLSConfig(opts)
@@ -4532,6 +4541,23 @@ func (p *Proxy) AwaitTestRequest() {
 }
 
 var _ agent.TestRequestTaker = (*Proxy)(nil)
+
+// ClientTests reports whether the learn step reads the agent's tests as
+// keploy mock's client tests (agent.ClientTestsReader).
+func (p *Proxy) ClientTests() bool { return p.learnTracker.ClientTests() }
+
+var _ agent.ClientTestsReader = (*Proxy)(nil)
+
+// TakeRecordedBegin gives the learn step the instant the next test began at
+// in its recording (agent.RecordedBeginTaker; learn.Tracker.RecordedBegin),
+// under the proven switch.
+func (p *Proxy) TakeRecordedBegin(at time.Time) {
+	if provenswitch.On() {
+		p.learnTracker.RecordedBegin(at)
+	}
+}
+
+var _ agent.RecordedBeginTaker = (*Proxy)(nil)
 
 // SetAppClock makes the learn step read the app's clock through f
 // (agent.AppClockSetter).

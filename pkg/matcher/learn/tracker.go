@@ -83,6 +83,24 @@ type Tracker struct {
 	// given, and for a test no keploy test case opened (keploy mock's).
 	// Begin forgets it.
 	given *Earlier
+	// clientTests: the agent serves keploy mock (SetClientTests), whose
+	// tests a test harness runs and gives the application its inputs; every
+	// DriftCache the tracker makes says so (DriftCache.ClientTests).
+	clientTests bool
+	// beganAt is the real instant the running test began at (BeginAt),
+	// zero before the set's first test: in a client test whose begin moved
+	// the app's clock, a call's window on F's clock starts there
+	// (CallWindowFrom).
+	beganAt time.Time
+	// recBegan is the instant the running test began at in its recording
+	// (RecordedBegin, taken by BeginAt from nextRecBegan), zero where none
+	// was given: in a client test a call's window in the recording starts
+	// there where no earlier recorded call bounds it (CallWindowFrom).
+	recBegan, nextRecBegan time.Time
+	// appZone is the zone the application writes a wall clock of no zone
+	// in, beside UTC (SetAppZone); nil: UTC alone. Every DriftCache the
+	// tracker makes reads it (DriftCache.zone).
+	appZone *time.Location
 }
 
 // NewTracker makes a tracker with no test open.
@@ -110,11 +128,52 @@ func (t *Tracker) NewSet() {
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
-	t.answered, t.drifts = nil, NewDriftCache()
+	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt = nil
 	t.given = nil
 	t.open, t.began = false, false
+	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
 	t.mu.Unlock()
+}
+
+// newDrifts is an empty DriftCache of the tracker's tests: one of keploy
+// mock's client tests where the tracker's are (SetClientTests). t.mu is held.
+func (t *Tracker) newDrifts() *DriftCache {
+	dc := NewDriftCache()
+	dc.clientTests, dc.zone = t.clientTests, t.appZone
+	return dc
+}
+
+// SetClientTests says whether the agent serves keploy mock: its tests are a
+// test harness's (a Playwright or CLI test, any harness), which gives the
+// application its inputs and never hands keploy a request of its own, so
+// the learn step has no request place (Earlier.Given) for them. A value the
+// harness gave the application can still change between the recording and
+// record's full round, and move by about F's lead (a slot a minute on), so
+// there a changed instant is learned as noise only where the call's window
+// on the application's clock shows it a read of that clock in both runs
+// (DriftCache.ClientTests). The agent sets it once, before any test.
+func (t *Tracker) SetClientTests(on bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.clientTests = on
+	t.drifts.clientTests = on
+	t.mu.Unlock()
+}
+
+// ClientTests reports whether the tracker's tests are keploy mock's client
+// tests (SetClientTests): an adapter then reads the window (CallWindowFrom)
+// of every call, a test's own too, since only the window shows a read of
+// the application's clock there.
+func (t *Tracker) ClientTests() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.clientTests
 }
 
 // mockID is a served mock's identity: its name, which is unique within one
@@ -124,8 +183,53 @@ func mockID(m *models.Mock) string {
 		"\x00" + strconv.FormatInt(m.Spec.ResTimestampMock.UnixNano(), 10)
 }
 
-// Begin starts the next test: nothing is earlier than its first call.
-func (t *Tracker) Begin() {
+// SetAppZone says in which zone, beside UTC, the application writes a wall
+// clock of no zone (a "2026-10-22 16:44:16" its text names no zone of): its
+// own local zone, which the agent, running beside it, reads as its own
+// (nil: UTC alone). In a client test only a wall clock read in one of those
+// two zones, in both runs, can be a read of the application's clock within
+// its call's window (Window.holdsRead): a value any other zone would read so
+// is no read keploy can tell from a value the test harness gave it (the
+// clock's reading plus two hours). An application whose zone is neither has
+// such a value refused, a false red that fails closed. The agent sets it
+// once, before any test.
+func (t *Tracker) SetAppZone(loc *time.Location) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.appZone = loc
+	t.drifts.zone = loc
+	t.mu.Unlock()
+}
+
+// RecordedBegin gives the instant the next test (the one the next Begin
+// starts) began at in its recording: keploy mock's tests, whose begin moves
+// the app's clock there (the agent's test begins). In a client test a call's
+// window in the recording then starts no earlier than it (CallWindowFrom),
+// as F's starts no earlier than the test's begin in this run: the app reads
+// its clock for a call of the test after the test began. A test begun with
+// none given has none.
+func (t *Tracker) RecordedBegin(at time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.nextRecBegan = at
+	t.mu.Unlock()
+}
+
+// Begin starts the next test now (BeginAt).
+func (t *Tracker) Begin() { t.BeginAt(time.Now()) }
+
+// BeginAt starts the next test at the real instant at: nothing is earlier
+// than its first call. The agent begins it once the test's begin has moved
+// the app's clock (keploy mock's tests, at their recorded begin, given first
+// by RecordedBegin): in a client test, a call of the test reads its window
+// on F's clock from then on where none runs from the previous call, and in
+// the recording from the recorded begin where no earlier recorded call
+// bounds it (CallWindowFrom).
+func (t *Tracker) BeginAt(at time.Time) {
 	if t == nil {
 		return
 	}
@@ -134,10 +238,12 @@ func (t *Tracker) Begin() {
 	t.served = nil
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
-	t.drifts = NewDriftCache()
+	t.drifts = t.newDrifts()
 	t.names, t.taken = nil, nil
 	t.given = nil
 	t.open, t.began = true, true
+	t.beganAt = at
+	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
 	t.mu.Unlock()
 }
 
@@ -145,9 +251,10 @@ func (t *Tracker) Begin() {
 // the filter that opens it carries (Give): until it is given, the test's
 // earliest place is a request the learn step could not read (Earlier.Unread),
 // so every value that changed in a call the test makes before then, or in
-// every call of a test whose filter never brought its request, is refused. The agent marks it as keploy test opens the test's capture window,
-// after Begin. A test keploy test did not open (keploy mock's) is never
-// marked: it has no keploy test case.
+// every call of a test whose filter never brought its request, is refused.
+// The agent marks it as keploy test opens the test's capture window, after
+// Begin. A test keploy test did not open (keploy mock's) is never marked: it
+// has no keploy test case.
 func (t *Tracker) Await() {
 	if t == nil {
 		return
@@ -571,15 +678,25 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // data-plane call (recorded at prevRec, PreviousCall: every recording of the
 // set seen, the ones the agent keeps on disk too) and no later than paired;
 // in this run, on the app's clock, after the previous data-plane call the
-// store served (ServedMockAt) and no later than arrival. nil when either run
-// has no previous call (the app's start is not recorded), paired has no
-// recorded time, no app clock reads arrival and the previous call, or the
-// app's clock did not run as one between them (a test's begin moved it):
-// the span F's clock read from the previous serve to the arrival must be
-// the real time between them, exactly, or what the window bounds is no run
-// of one clock.
+// store served (ServedMockAt) and no later than arrival. nil when the
+// recording has no previous call (the app's start is not recorded), paired
+// has no recorded time, no app clock reads arrival and the previous serve,
+// or the app's clock did not run as one between them (a test's begin moved
+// it): the span F's clock reads from its start to the arrival must be the
+// real time between them, exactly, or what the window bounds is no run of
+// one clock.
+//
+// In a client test (SetClientTests), whose begin moves the app's clock, a
+// span also starts where the running test began, when that came after the
+// previous call: in this run at the test's begin (BeginAt), where the app's
+// clock did not run as one from the previous serve to the arrival, or the
+// store served none before it; in the recording at the test's recorded
+// begin (RecordedBegin), where it came after prevRec or none is recorded.
+// The app reads its clock for a call of the test after the test began, so
+// a later start only narrows a span, and a test's first call has a window
+// where no earlier call bounds it. keploy test's windows are as they were.
 func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival time.Time) *Window {
-	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() || prevRec.IsZero() || !prevRec.Before(paired.Spec.ReqTimestampMock) {
+	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil
 	}
 	t.mu.Lock()
@@ -589,19 +706,39 @@ func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival
 	if i > 0 {
 		prev = t.servedAt[i-1]
 	}
+	client, began, recBegan := t.clientTests, t.beganAt, t.recBegan
 	t.mu.Unlock()
-	if clock == nil || prev.IsZero() {
+	recFrom := prevRec
+	if client && recBegan.After(recFrom) {
+		recFrom = recBegan
+	}
+	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || clock == nil {
 		return nil
 	}
-	fFrom, ok := clock(prev)
+	// span is F's span from the real instant from to the arrival, ok where
+	// the app's clock ran as one between them.
+	span := func(from time.Time) (Span, bool) {
+		if from.IsZero() || from.After(arrival) {
+			return Span{}, false
+		}
+		fFrom, ok := clock(from)
+		if !ok {
+			return Span{}, false
+		}
+		fTo, ok := clock(arrival)
+		if !ok || fTo.Sub(fFrom) != arrival.Sub(from) {
+			return Span{}, false
+		}
+		return Span{From: fFrom, To: fTo}, true
+	}
+	f, ok := span(prev)
+	if !ok && client && began.After(prev) {
+		f, ok = span(began)
+	}
 	if !ok {
 		return nil
 	}
-	fTo, ok := clock(arrival)
-	if !ok || fTo.Sub(fFrom) != arrival.Sub(prev) {
-		return nil
-	}
-	return &Window{Rec: Span{From: prevRec, To: paired.Spec.ReqTimestampMock}, F: Span{From: fFrom, To: fTo}}
+	return &Window{Rec: Span{From: recFrom, To: paired.Spec.ReqTimestampMock}, F: f}
 }
 
 type trackerKey struct{}

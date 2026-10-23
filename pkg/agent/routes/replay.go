@@ -36,8 +36,20 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
+	// The learn step reads keploy mock's tests as client tests (models.
+	// ClientTestsReadHeader): keploy mock keeps what it learns only when the
+	// agent says so.
+	if s, ok := a.svc.(clientTestsReader); ok && OutgoingReq.OutgoingOptions.Learn && s.ReadsClientTests() {
+		w.Header().Set(models.ClientTestsReadHeader, models.ClientTestsRead)
+	}
 
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// clientTestsReader says whether the agent's learn step reads its tests as
+// keploy mock's client tests (proven switch).
+type clientTestsReader interface {
+	ReadsClientTests() bool
 }
 
 // respondAgent writes an AgentResp with the given status. It exists so no

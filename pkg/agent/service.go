@@ -492,6 +492,26 @@ type TestRequestTaker interface {
 	TakeTestRequest(req *models.TestRequest)
 }
 
+// ClientTestsReader is the optional extension implemented by proxies whose
+// learn step reads keploy mock's tests as a test harness's client tests
+// (learn.Tracker.SetClientTests): ClientTests reports whether it does, which
+// the agent of a keploy mock session answers the session's MockOutgoing
+// with (models.ClientTestsReadHeader). A proxy that lacks it reads none so.
+type ClientTestsReader interface {
+	ClientTests() bool
+}
+
+// RecordedBeginTaker is the optional extension implemented by proxies whose
+// learn step bounds a client test's calls by the test's begin: the agent
+// gives it, as a keploy mock test begins and before the proxy opens the
+// test, the instant the test began at in its recording (the one the test's
+// begin moves the app's clock to), so the test's first call has a window
+// on the app's clock in the recording too (learn.Tracker.RecordedBegin). A
+// proxy that lacks it bounds no call so.
+type RecordedBeginTaker interface {
+	TakeRecordedBegin(at time.Time)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back

@@ -273,7 +273,11 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 // (Raw.Read) refuses every drift: what it held cannot be told. Where the test
 // case's own request could not be read (Earlier.Unread), every value that
 // changed is refused rather than learned as noise or an echo: it may have
-// come from the request, and keploy cannot tell.
+// come from the request, and keploy cannot tell. In keploy mock's client
+// tests (DriftCache.ClientTests), which have no request place, a value with
+// an instant that changed is noise or an echo only where each such instant
+// lies, in both runs, within w, read on the application's clock: the lead
+// shows no read there (given.go).
 func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
@@ -319,6 +323,11 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 				why = requestHoldsWhy(where, asRecorded)
 			} else {
 				why = unaccounted(dc, v, at, served, raw)
+			}
+			// In keploy mock's client tests, a changed instant only where the
+			// call's window shows it a read of the application's clock.
+			if why == "" && dc.clientTests {
+				why = dc.clientTestUnread(v, w)
 			}
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
@@ -771,8 +780,16 @@ type valueDrift struct {
 }
 
 // DriftCache keeps each value's drift for one test of the learn step: the
-// earlier places of a test are read once, not once per request.
+// earlier places of a test are read once, not once per request. It also says
+// whose tests they are (ClientTests), which the classifier reads with it.
 type DriftCache struct {
+	// clientTests: the test is one of keploy mock's client tests
+	// (ClientTests), set as the tracker makes the cache and never after.
+	clientTests bool
+	// zone is the zone the application writes a wall clock of no zone in,
+	// beside UTC (Tracker.SetAppZone), nil for UTC alone: a client test's
+	// window reads such a wall clock in those two only (Window.holdsRead).
+	zone   *time.Location
 	mu     sync.Mutex
 	m      map[driftKey]*valueDrift
 	raw    map[string]string
@@ -791,6 +808,51 @@ type DriftCache struct {
 	spans    map[string][]instant
 	blanked  map[string][2]string
 	blankTok map[string][]map[string]bool
+}
+
+// ClientTests reports whether dc is of one of keploy mock's client tests
+// (Tracker.SetClientTests): a test harness's (a Playwright or CLI test, any
+// harness), which gives the application its inputs and hands keploy no
+// request of its own. A value the harness gave the application may change
+// between the recording and record's full round, and move by about F's lead
+// (a slot a minute on), and no earlier place of keploy's holds it. So there
+// the lead shows no read of the application's clock, and a changed instant
+// of a value (in any declared layout, or a leaf its protocol types as one)
+// is learned as noise, or as an echo, only where it lies, in both runs,
+// within its call's window on the application's clock as the agent's clock
+// hooks report it (Window): a read of that clock for the call. Otherwise it
+// is refused (ClassifyIn), and the reason says so (given.go). A
+// NewDriftCache is no client test's: keploy test's, whose test case's
+// request the learn step reads (Earlier.Given).
+func (dc *DriftCache) ClientTests() bool { return dc != nil && dc.clientTests }
+
+// Zone is the zone, beside UTC, in which a client test's window reads a
+// wall clock of no zone (Tracker.SetAppZone): nil for UTC alone.
+func (dc *DriftCache) Zone() *time.Location {
+	if dc == nil {
+		return nil
+	}
+	return dc.zone
+}
+
+// ClockReads is ClockReads of the cache's test: none in one of keploy mock's
+// client tests (ClientTests), where the lead shows no read of the
+// application's clock, so a value a test harness gave the application that
+// the lead moved carries no clock evidence onto the variable it binds
+// (models.MockVariable.Clock): a replay never lets two such variables
+// share one live value (models.ReadInOneSecond).
+func (dc *DriftCache) ClockReads(recorded, live string) []models.ClockRead {
+	if dc.ClientTests() {
+		return nil
+	}
+	return ClockReads(recorded, live)
+}
+
+// InstantClockRead is InstantClockRead of the cache's test: in one of keploy
+// mock's client tests (ClientTests) the lead shows no read of the
+// application's clock, so only w can.
+func (dc *DriftCache) InstantClockRead(rec, live Leaf, w *Window) bool {
+	return instantClockRead(rec, live, w, !dc.ClientTests())
 }
 
 // NewDriftCache makes an empty cache.
@@ -921,7 +983,8 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 	if ok {
 		return d
 	}
-	d = &valueDrift{rec: rec, live: live, clock: clockIn(rec, live, w)}
+	lead := !dc.clientTests
+	d = &valueDrift{rec: rec, live: live, clock: clockIn(rec, live, w, lead)}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -937,7 +1000,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockIn(d.decRec, d.decLive, w)
+		dclock = clockIn(d.decRec, d.decLive, w, lead)
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
@@ -945,7 +1008,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window) *valueDrift {
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
-		merge(clockIn(f[0], f[1], w))
+		merge(clockIn(f[0], f[1], w, lead))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -22,6 +23,35 @@ func (m *mockService) learning() bool {
 // a full record, which replaces the pool (config.Test.LearnPool).
 func (m *mockService) learningPool() bool {
 	return m.learning() && m.config.Test.LearnPool
+}
+
+// keepLearned writes what record's full round learned onto the set's mocks
+// (persistLearned), where the agent said its learn step reads the session's
+// tests as client tests (clientTestsRead). Otherwise it keeps none of it, and
+// says so: an agent older than this keploy learns a value the test harness
+// gave the application as noise where it changed, and the recording keeps
+// comparing every field. consumedErr is why the agent's consumed mocks could
+// not be read: then what was learned cannot be read either.
+func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
+	if consumedErr != nil {
+		return nil, nil, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
+	}
+	if !m.clientTestsRead() {
+		m.logger.Warn("keploy kept nothing its agent learned in record's full round: the agent did not say it reads keploy mock's tests as a test harness's client tests, as an agent older than this keploy does not, so a value the harness gave the application may have been learned as noise; the recording keeps comparing every field",
+			zap.String("mock-set", set),
+			zap.String("next_step", "run the keploy agent of this keploy version"))
+		return nil, nil, nil
+	}
+	return m.persistLearned(ctx, set, consumed, flows, expected)
+}
+
+// clientTestsRead reports whether the agent said, answering the session's
+// MockOutgoing, that its learn step reads the session's tests as client
+// tests (pkg.ClientTestsReader, models.ClientTestsReadHeader). An
+// instrumentation that cannot say read none so.
+func (m *mockService) clientTestsRead() bool {
+	r, ok := m.instrumentation.(pkg.ClientTestsReader)
+	return ok && r.AgentReadsClientTests()
 }
 
 // learnedPersister writes what the learn step learned onto a set's mocks and

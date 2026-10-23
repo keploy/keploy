@@ -2732,6 +2732,106 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	}
 }
 
+// keploy mock's client tests (a Playwright or CLI test drives the app; no
+// test case's request reaches keploy): the app stamps its clock into the
+// first call of a test, which the test's begin moved the app's clock for
+// (its recorded begin plus the lead). The call's window runs from the begin
+// on F's clock, and from the recording's previous call, and holds the stamp
+// in both runs: noise, and the replay after it answers the call with a
+// third stamp. A slot the harness gave the app that moved a minute on, by
+// about the lead, lies in neither span: refused, saying no clock read by the
+// app matched it; in keploy test, which reads a test's own call by the lead,
+// it is noise. With no app clock (no clock hooks) nothing shows the stamp is
+// a read either: refused, saying keploy saw no read of the app's clock for
+// the call. Where the recording has no call before the test's (its first
+// data-plane call), the call's window in the recording runs from the test's
+// recorded begin (learn.Tracker.RecordedBegin), and the stamp is noise; with
+// no recorded begin given it has none, and is refused so.
+func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+	recBegin := learnAt.Add(time.Second)
+	recRead := learnAt.Add(1995 * time.Millisecond) // 5 ms before the recorded call
+	base := learnAt.Add(10 * time.Minute)           // F's boot call, on the real clock
+	moved := base.Add(time.Second)                  // the begin moved the app's clock
+	began := moved.Add(time.Millisecond)
+	before := learn.FullRoundLead - 10*time.Minute
+	after := recBegin.Add(learn.FullRoundLead).Sub(began)
+	appClock := func(r time.Time) (time.Time, bool) {
+		if r.Before(moved) {
+			return r.Add(before), true
+		}
+		return r.Add(after), true
+	}
+	read := began.Add(994 * time.Millisecond) // the app's read in F, on the real clock
+	arrival := began.Add(time.Second)
+	for _, tc := range []struct {
+		name         string
+		client, hook bool
+		rec, f       string // the field and its value, recorded and in F
+		noise        bool
+		// first: the recording has no call before the test's (no boot
+		// staged), and the test's recorded begin is given or not (begun).
+		first, begun bool
+		windowed     bool // the refusal's call had a window
+	}{
+		{"the app's stamp", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, true, false, false, true},
+		{"a slot the harness gave, a minute on", true, true, `"slot":"2026-10-14T10:05Z"`, `"slot":"2026-10-14T10:06Z"`, false, false, false, true},
+		{"the slot in keploy test", false, true, `"slot":"2026-10-14T10:05Z"`, `"slot":"2026-10-14T10:06Z"`, true, false, false, true},
+		{"the app's stamp, no clock hooks", true, false, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, false, false, false, false},
+		{"the app's stamp in the recording's first call", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, true, true, true, true},
+		{"the app's stamp in the recording's first call, no recorded begin", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, false, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			boot := learnRecorded("mock-0", 0, "POST", "/v1/flags", `{"app":"web"}`, nil, `{"on":true}`)
+			signup := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/events", `{"event":"signup",`+tc.rec+`}`, nil, `{}`)
+			db := &learnDb{perTest: []*models.Mock{signup}, staged: []*models.Mock{boot}, pool: map[time.Time]bool{boot.Spec.ReqTimestampMock: true}}
+			if tc.first {
+				db = &learnDb{perTest: []*models.Mock{signup}}
+			}
+			tr := learn.NewTracker()
+			tr.SetClientTests(tc.client)
+			if tc.hook {
+				tr.SetAppClock(appClock)
+			}
+			tr.ServedMockAt(boot, base)
+			if tc.begun {
+				tr.RecordedBegin(recBegin)
+			}
+			tr.BeginAt(began)
+			in := live("POST", "/v1/events", `{"event":"signup",`+tc.f+`}`, nil)
+			in.arrived = arrival
+			got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			field := "body.at"
+			if strings.HasPrefix(tc.rec, `"slot"`) {
+				field = "body.slot"
+			}
+			if !tc.noise {
+				head := field + " changed, and no clock read by the app matched it (an instant, its characters 1 to "
+				if !tc.windowed {
+					head = field + " changed, and keploy saw no read of the app's clock for its call (an instant, its characters 1 to "
+				}
+				if got != nil || miss == nil || !strings.Contains(miss.res.Why, head) || !strings.Contains(miss.res.Why, "If your test supplies this value, have it supply the same value in every run") {
+					t.Fatalf("served %v miss %+v; want %s refused, saying keploy saw no read of the app's clock that matched it", got, miss, field)
+				}
+				return
+			}
+			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{field: {}}) {
+				t.Fatalf("served %v miss %+v consumed %+v; want %s learned as noise", got, miss, db.consumed, field)
+			}
+			// The replay after record's full round: a third value is answered.
+			third := `"at":"` + iso(read.Add(after+90*time.Second)) + `"`
+			if field == "body.slot" {
+				third = `"slot":"2026-10-14T10:09Z"`
+			}
+			inCI(t, learnedOnto([]*models.Mock{signup}, db.consumed), []*req{live("POST", "/v1/events", `{"event":"signup",`+third+`}`, nil)})
+		})
+	}
+}
+
 // A window is one run of F's clock: across a re-write of the app's clock
 // between the previous serve and the arrival (a test's begin), there is
 // none, and an instant a served recorded answer carries (another receive's
@@ -3100,6 +3200,68 @@ func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 			}
 			if !tc.served && (served != nil || !strings.Contains(miss.res.Why, "comes back in the answer at header.date")) {
 				t.Fatalf("served %v, miss %+v; want it refused, the answer's header.date holding a word of it", served != nil, miss)
+			}
+		})
+	}
+}
+
+// In keploy mock's client tests a variable keploy binds carries no clock
+// evidence (models.MockVariable.Clock): the lead shows no read of the app's
+// clock there, so a value the test harness gave the application that the
+// lead moved, followed into a later call, could otherwise share its live
+// value with another variable in a replay (models.ReadInOneSecond). The
+// app's stamp, noise in its window at the first call and sent again in a
+// later one, is that call's variable bound at the first, with no clock
+// evidence; in keploy test the same bind carries the read the lead moved.
+func TestLearnMatchAClientTestsBindCarriesNoClockEvidence(t *testing.T) {
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+	recBegin := learnAt.Add(time.Second)
+	recRead := learnAt.Add(1995 * time.Millisecond) // 5 ms before the recorded call
+	base := learnAt.Add(10 * time.Minute)           // F's boot call, on the real clock
+	moved := base.Add(time.Second)                  // the begin moved the app's clock
+	began := moved.Add(time.Millisecond)
+	before := learn.FullRoundLead - 10*time.Minute
+	after := recBegin.Add(learn.FullRoundLead).Sub(began)
+	appClock := func(r time.Time) (time.Time, bool) {
+		if r.Before(moved) {
+			return r.Add(before), true
+		}
+		return r.Add(after), true
+	}
+	read := began.Add(994 * time.Millisecond) // the app's read in F, on the real clock
+	arrival := began.Add(time.Second)
+	for _, client := range []bool{true, false} {
+		t.Run(map[bool]string{true: "a client test", false: "keploy test"}[client], func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			boot := learnRecorded("mock-0", 0, "POST", "/v1/flags", `{"app":"web"}`, nil, `{"on":true}`)
+			signup := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/events", `{"event":"signup","at":"`+iso(recRead)+`"}`, nil, `{}`)
+			list := learnRecorded("mock-2", 3*time.Second, "GET", "/v1/events?since="+url.QueryEscape(iso(recRead)), "", nil, `{}`)
+			db := &learnDb{perTest: []*models.Mock{signup, list}, staged: []*models.Mock{boot}, pool: map[time.Time]bool{boot.Spec.ReqTimestampMock: true}}
+			tr := learn.NewTracker()
+			tr.SetClientTests(client)
+			tr.SetAppClock(appClock)
+			tr.ServedMockAt(boot, base)
+			tr.BeginAt(began)
+			ctx := learn.WithTracker(context.Background(), tr)
+			fAt := iso(read.Add(after))
+			in := live("POST", "/v1/events", `{"event":"signup","at":"`+fAt+`"}`, nil)
+			in.arrived = arrival
+			if got, miss, err := h.learnMatch(ctx, in, db, n, opts); err != nil || got == nil || miss != nil {
+				t.Fatalf("the stamp's call: served %v miss %+v err %v; want it served, the stamp noise", got, miss, err)
+			}
+			in = live("GET", "/v1/events?since="+url.QueryEscape(fAt), "", nil)
+			in.arrived = arrival.Add(time.Second)
+			if got, miss, err := h.learnMatch(ctx, in, db, n, opts); err != nil || got == nil || miss != nil {
+				t.Fatalf("the later call: served %v miss %+v err %v", got, miss, err)
+			}
+			binds := db.consumed[1].Spec.LearnedBinds()["mock-1"]
+			if len(binds) != 1 {
+				t.Fatalf("binds %+v; want one variable bound at mock-1", db.consumed[1].Spec.LearnedBinds())
+			}
+			for name, v := range binds {
+				if v.Bind != "body.at" || (v.Clock == nil) != client {
+					t.Fatalf("variable %s bound %+v; want at body.at, with clock evidence only in keploy test", name, v)
+				}
 			}
 		})
 	}

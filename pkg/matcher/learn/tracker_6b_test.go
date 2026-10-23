@@ -288,3 +288,233 @@ func TestAPendingCallIsNoPreviousCall(t *testing.T) {
 		t.Error("a read before its call's previous call, typed: noise; want it checked, and refused by the receive")
 	}
 }
+
+// Every DriftCache a tracker makes reads a wall clock of no zone in the
+// application's zone it was given (SetAppZone): the one it has, the next
+// test's, the next set's; a new tracker's, in UTC alone.
+func TestTrackerGivesItsCachesTheAppsZone(t *testing.T) {
+	tr := NewTracker()
+	if tr.Drifts().Zone() != nil {
+		t.Fatalf("a new tracker's zone %v; want none but UTC", tr.Drifts().Zone())
+	}
+	zone := time.FixedZone("IST", 5*3600+1800)
+	tr.SetAppZone(zone)
+	if tr.Drifts().Zone() != zone {
+		t.Fatalf("the cache it has reads %v; want %v", tr.Drifts().Zone(), zone)
+	}
+	tr.Begin()
+	if tr.Drifts().Zone() != zone {
+		t.Fatalf("the next test's cache reads %v; want %v", tr.Drifts().Zone(), zone)
+	}
+	tr.NewSet()
+	if tr.Drifts().Zone() != zone {
+		t.Fatalf("the next set's cache reads %v; want %v", tr.Drifts().Zone(), zone)
+	}
+	var none *DriftCache
+	if none.Zone() != nil {
+		t.Fatal("no cache reads a zone")
+	}
+}
+
+// A tracker of keploy mock's client tests (SetClientTests) says so, and so
+// does every DriftCache it makes: the one it has, the next test's, the next
+// set's. One of keploy test's never does.
+func TestTrackerSaysItsTestsAreClientTests(t *testing.T) {
+	tr := NewTracker()
+	if tr.ClientTests() || tr.Drifts().ClientTests() {
+		t.Fatal("a new tracker's tests are client tests")
+	}
+	tr.SetClientTests(true)
+	if !tr.ClientTests() || !tr.Drifts().ClientTests() {
+		t.Fatal("SetClientTests(true): the tracker's cache is no client test's")
+	}
+	tr.Begin()
+	if !tr.Drifts().ClientTests() {
+		t.Fatal("the next test's cache is no client test's")
+	}
+	tr.NewSet()
+	if !tr.Drifts().ClientTests() {
+		t.Fatal("the next set's cache is no client test's")
+	}
+	tr.SetClientTests(false)
+	tr.Begin()
+	if tr.ClientTests() || tr.Drifts().ClientTests() {
+		t.Fatal("SetClientTests(false): still client tests")
+	}
+	var none *Tracker
+	if none.ClientTests() || none.Drifts().ClientTests() {
+		t.Fatal("a nil tracker's tests are client tests")
+	}
+}
+
+// Where a client test's begin moved the app's clock (keploy mock's tests,
+// each at its recorded begin plus the lead), a call's window on F's clock
+// runs from the begin, not from the previous call served before it: the
+// test's first call has a window. A begin the clock moved after gives none,
+// nor does a begin after the arrival; a serve after the begin is the start,
+// as before; and with no serve before at all the begin is. keploy test's
+// windows are as they were: a begin starts none (its clock moves as it
+// sends the test case's request, after the begin).
+func TestTrackerCallWindowStartsAtABeginThatMovedTheClock(t *testing.T) {
+	rec := time.Date(2026, 10, 20, 15, 49, 55, 0, time.UTC)
+	prev := &models.Mock{Name: "mock-0", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec}}
+	paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec.Add(3 * time.Second)}}
+	base := time.Date(2026, 10, 20, 15, 50, 35, 0, time.UTC)
+	moved := base.Add(time.Second) // the begin moved the clock here
+	before, after := 20*time.Second, -38*time.Second
+	var unread time.Time
+	clock := func(r time.Time) (time.Time, bool) {
+		if r.Before(moved) {
+			return r.Add(before), true
+		}
+		return r.Add(after), !r.Equal(unread)
+	}
+	arrival := moved.Add(5 * time.Millisecond)
+	unread = moved.Add(3 * time.Millisecond)
+	for _, tc := range []struct {
+		name   string
+		client bool
+		served []time.Time
+		began  time.Time
+		from   time.Time // F's span's start on the real clock, zero for none
+	}{
+		{"a begin after the previous serve", true, []time.Time{base}, moved.Add(time.Millisecond), moved.Add(time.Millisecond)},
+		{"no begin", true, []time.Time{base}, time.Time{}, time.Time{}},
+		{"a begin the clock moved after", true, []time.Time{base}, moved.Add(-time.Millisecond), time.Time{}},
+		{"a begin after the arrival", true, []time.Time{base}, arrival.Add(time.Millisecond), time.Time{}},
+		{"a serve after the begin", true, []time.Time{base, moved.Add(2 * time.Millisecond)}, moved.Add(time.Millisecond), moved.Add(2 * time.Millisecond)},
+		{"no serve before", true, nil, moved.Add(time.Millisecond), moved.Add(time.Millisecond)},
+		// The clock cannot read the serve (a write in flight), and the begin
+		// came before it: no window starts before the previous call.
+		{"a begin before a serve the clock cannot read", true, []time.Time{unread}, moved.Add(time.Millisecond), time.Time{}},
+		{"keploy test, a begin after the previous serve", false, []time.Time{base}, moved.Add(time.Millisecond), time.Time{}},
+		{"keploy test, no serve before", false, nil, moved.Add(time.Millisecond), time.Time{}},
+		{"keploy test, a serve after the begin", false, []time.Time{base, moved.Add(2 * time.Millisecond)}, moved.Add(time.Millisecond), moved.Add(2 * time.Millisecond)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker()
+			tr.SetClientTests(tc.client)
+			tr.SetAppClock(clock)
+			if !tc.began.IsZero() {
+				tr.BeginAt(tc.began)
+			}
+			for _, at := range tc.served {
+				tr.ServedMockAt(prev, at)
+			}
+			w := tr.CallWindowFrom(prev.Spec.ReqTimestampMock, paired, arrival)
+			if tc.from.IsZero() {
+				if w != nil {
+					t.Fatalf("window %+v; want none", w)
+				}
+				return
+			}
+			want := &Window{Rec: Span{From: rec, To: paired.Spec.ReqTimestampMock}, F: Span{From: tc.from.Add(after), To: arrival.Add(after)}}
+			if !reflect.DeepEqual(w, want) {
+				t.Fatalf("window %+v; want %+v", w, want)
+			}
+		})
+	}
+}
+
+// A client test's window in the recording starts no earlier than the test's
+// recorded begin (RecordedBegin, given before the Begin that takes it): the
+// test's first call, which no earlier recorded call precedes, has a window
+// from it, and a recorded call before the begin (an earlier test's) gives
+// way to it; one after it starts the window, as before. A begin after the
+// recorded call gives none. A recorded begin is the next test's alone, and
+// a new set forgets it and the running test's begin: its first call before
+// a test begins has no window from the previous set's test. keploy test
+// reads none.
+func TestTrackerCallWindowStartsAtATestsRecordedBegin(t *testing.T) {
+	recBegin := time.Date(2026, 10, 20, 15, 49, 54, 0, time.UTC)
+	paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: recBegin.Add(3 * time.Second)}}
+	base := time.Date(2026, 10, 20, 15, 50, 35, 0, time.UTC)
+	moved := base.Add(time.Second) // the begin moved the clock here
+	after := recBegin.Add(FullRoundLead).Sub(moved)
+	clock := func(r time.Time) (time.Time, bool) {
+		if r.Before(moved) {
+			return r.Add(time.Hour), true
+		}
+		return r.Add(after), true
+	}
+	began, arrival := moved.Add(time.Millisecond), moved.Add(5*time.Millisecond)
+	f := Span{From: began.Add(after), To: arrival.Add(after)}
+	// served after the begin: a serve the app's clock runs as one from to
+	// the arrival, so F's span starts there whoever's test it is.
+	served := began.Add(time.Millisecond)
+	for _, tc := range []struct {
+		name     string
+		client   bool
+		prevRec  time.Time
+		recBegin time.Time
+		serve    time.Time // the previous serve, on the real clock
+		from     time.Time // the recording's span's start, zero for none
+	}{
+		{"no earlier recorded call", true, time.Time{}, recBegin, base, recBegin},
+		{"an earlier test's recorded call", true, recBegin.Add(-time.Second), recBegin, base, recBegin},
+		{"an earlier call of the test", true, recBegin.Add(time.Second), recBegin, base, recBegin.Add(time.Second)},
+		{"no recorded begin", true, time.Time{}, time.Time{}, base, time.Time{}},
+		{"a recorded begin after the call", true, time.Time{}, paired.Spec.ReqTimestampMock.Add(time.Millisecond), base, time.Time{}},
+		{"keploy test", false, time.Time{}, recBegin, base, time.Time{}},
+		{"keploy test, a serve after the begin", false, time.Time{}, recBegin, served, time.Time{}},
+		{"keploy test, an earlier recorded call", false, recBegin.Add(-time.Second), recBegin, served, recBegin.Add(-time.Second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker()
+			tr.SetClientTests(tc.client)
+			tr.SetAppClock(clock)
+			tr.ServedMockAt(paired, tc.serve)
+			tr.RecordedBegin(tc.recBegin)
+			tr.BeginAt(began)
+			w := tr.CallWindowFrom(tc.prevRec, paired, arrival)
+			if tc.from.IsZero() {
+				if w != nil {
+					t.Fatalf("window %+v; want none", w)
+				}
+				return
+			}
+			f := f
+			if !tc.serve.Equal(base) {
+				f = Span{From: tc.serve.Add(after), To: arrival.Add(after)}
+			}
+			want := &Window{Rec: Span{From: tc.from, To: paired.Spec.ReqTimestampMock}, F: f}
+			if !reflect.DeepEqual(w, want) {
+				t.Fatalf("window %+v; want %+v", w, want)
+			}
+		})
+	}
+	tr := NewTracker()
+	tr.SetClientTests(true)
+	tr.SetAppClock(clock)
+	tr.RecordedBegin(recBegin)
+	tr.BeginAt(began)
+	tr.BeginAt(began)
+	if w := tr.CallWindowFrom(time.Time{}, paired, arrival); w != nil {
+		t.Fatalf("a second test, no recorded begin given: window %+v; want none", w)
+	}
+	tr.RecordedBegin(recBegin)
+	tr.BeginAt(began)
+	tr.NewSet()
+	if w := tr.CallWindowFrom(time.Time{}, paired, arrival); w != nil {
+		t.Fatalf("a new set before its first test: window %+v; want none from the last set's recorded begin", w)
+	}
+	if w := tr.CallWindowFrom(recBegin.Add(-time.Second), paired, arrival); w != nil {
+		t.Fatalf("a new set before its first test: window %+v; want none from the last set's begin", w)
+	}
+	// A serve in the new set the clock runs as one from: still no window
+	// from the last set's recorded begin.
+	tr.ServedMockAt(paired, began.Add(time.Millisecond))
+	if w := tr.CallWindowFrom(time.Time{}, paired, arrival); w != nil {
+		t.Fatalf("a new set's serve: window %+v; want none from the last set's recorded begin", w)
+	}
+	// A recorded begin given before a new set is no test's of it.
+	tr.RecordedBegin(recBegin)
+	tr.NewSet()
+	tr.BeginAt(began)
+	if w := tr.CallWindowFrom(time.Time{}, paired, arrival); w != nil {
+		t.Fatalf("the new set's first test: window %+v; want none from a recorded begin given before the set", w)
+	}
+	var none *Tracker
+	none.RecordedBegin(recBegin)
+	none.SetAppZone(time.UTC)
+}

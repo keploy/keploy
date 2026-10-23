@@ -536,6 +536,16 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"keploy's agent could not open "+id+": "+err.Error(), "check the agent's log")
 	}
 	if capture != nil {
+		// The learn step bounds the test's calls by when the test began in
+		// its recording, the instant its begin moved the app's clock to
+		// (coreAgent.RecordedBeginTaker): given before the window opens, so
+		// the test begins with it.
+		if r, ok := a.Proxy.(coreAgent.RecordedBeginTaker); ok {
+			a.scopeMu.Lock()
+			began := a.testBegins[id]
+			a.scopeMu.Unlock()
+			r.TakeRecordedBegin(began)
+		}
 		// Misses made from here, and those made since the previous test
 		// ended (or before the first test), are this test's: a miss outside
 		// every test is charged to the next test that begins (design v14

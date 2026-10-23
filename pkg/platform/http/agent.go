@@ -118,6 +118,10 @@ type AgentClient struct {
 	// the filter carried (models.TestRequestReadHeader). Every call clears
 	// it first.
 	testRequestRead atomic.Bool
+	// clientTestsRead holds whether the agent's answer to the last /mock
+	// said its learn step reads the session's tests as keploy mock's client
+	// tests (models.ClientTestsReadHeader). Every call clears it first.
+	clientTestsRead atomic.Bool
 
 	// concurrentServing holds what the agent's last /storemocks answer said
 	// of serving a test the recordings it shares with the tests that ran
@@ -278,6 +282,14 @@ func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
 // and from the start of every StoreMocks.
 func (a *AgentClient) ServesConcurrent() bool {
 	return a.concurrentServing.Load()
+}
+
+// AgentReadsClientTests reports whether the agent's answer to the last /mock
+// said its learn step reads the session's tests as keploy mock's client
+// tests (models.ClientTestsReadHeader). False until an answer says so, and
+// from the start of every call.
+func (a *AgentClient) AgentReadsClientTests() bool {
+	return a.clientTestsRead.Load()
 }
 
 // AgentReadTestRequest reports whether the agent's answer to the last
@@ -905,6 +917,9 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	// Only a successful answer that says so (models.ClientTestsReadHeader)
+	// sets it again below.
+	a.clientTestsRead.Store(false)
 
 	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
 	// agent still sees the toggle.
@@ -950,8 +965,11 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	if readErr != nil {
 		return fmt.Errorf("failed to read response body for mock outgoing: %s", readErr.Error())
 	}
-
-	return agentRespErr("mock outgoing", res, rawBody)
+	if err := agentRespErr("mock outgoing", res, rawBody); err != nil {
+		return err
+	}
+	a.clientTestsRead.Store(res.Header.Get(models.ClientTestsReadHeader) == models.ClientTestsRead)
+	return nil
 }
 
 // agentRespErr turns an agent reply into the caller's error, and is the ONE

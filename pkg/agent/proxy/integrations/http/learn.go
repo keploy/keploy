@@ -964,9 +964,11 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			// are read in its own window (learn.Tracker.CallWindowFrom),
 			// as well as by the lead. Its previous recorded call is found
 			// among every recording of the set, those on disk too, as the
-			// earlier places streamed them.
+			// earlier places streamed them. In keploy mock's client tests
+			// every call's are, a test's own too: there the lead shows no
+			// read of the application's clock (learn.DriftCache.ClientTests).
 			var w *learn.Window
-			if !own {
+			if !own || tracker.ClientTests() {
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
 			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w)
@@ -1148,8 +1150,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// F's clock evidence, read where the variable is bound: a clock
 			// read that moved by the lead there may share its live value with
 			// another one read in the same second in a replay
-			// (models.MockVariable.Clock).
-			bv.Clock = learn.ClockReads(r.Value, from.Live)
+			// (models.MockVariable.Clock). None in keploy mock's client
+			// tests, where the lead shows no read of the app's clock
+			// (learn.DriftCache.ClockReads).
+			bv.Clock = tracker.Drifts().ClockReads(r.Value, from.Live)
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}

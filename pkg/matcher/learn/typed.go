@@ -97,9 +97,16 @@ func InstantOf(l Leaf) (time.Time, time.Duration, bool) {
 
 // InstantClockRead reports whether rec and live, an Instant leaf as
 // recorded and as record's full round saw it, are a read of each run's
-// clock by their provenance (instantClock). false for a leaf InstantOf does
-// not read.
+// clock by their provenance (instantClock), the lead's or w's. false for a
+// leaf InstantOf does not read. An adapter that reads a test's DriftCache
+// asks its InstantClockRead, which keploy mock's client tests read by w
+// alone.
 func InstantClockRead(rec, live Leaf, w *Window) bool {
+	return instantClockRead(rec, live, w, true)
+}
+
+// instantClockRead is InstantClockRead, by the lead too where lead is set.
+func instantClockRead(rec, live Leaf, w *Window, lead bool) bool {
 	rt, rres, ok := InstantOf(rec)
 	if !ok {
 		return false
@@ -108,20 +115,21 @@ func InstantClockRead(rec, live Leaf, w *Window) bool {
 	if !ok {
 		return false
 	}
-	return instantClock(rt, lt, rres, lres, w)
+	return instantClock(rt, lt, rres, lres, w, lead)
 }
 
 // instantClock reports whether rt and lt, an instant as recorded (at
 // resolution rres) and as F saw it (lres), are a read of each run's clock,
 // as clockIn reads an instant of a text: lt is rt moved by FullRoundLead
 // (leadMoved), or each lies within its run's span of its call's window w
-// (nil: none), each at its own resolution. An instant before 2000 or after
-// 2100 is no read of a recording's clock.
-func instantClock(rt, lt time.Time, rres, lres time.Duration, w *Window) bool {
+// (nil: none), each at its own resolution; without lead (keploy mock's
+// client tests: DriftCache.ClientTests), within the window only. An instant
+// before 2000 or after 2100 is no read of a recording's clock.
+func instantClock(rt, lt time.Time, rres, lres time.Duration, w *Window, lead bool) bool {
 	if !inClockRange(rt) || !inClockRange(lt) {
 		return false
 	}
-	return w != nil && w.Rec.holds(rt, rres) && w.F.holds(lt, lres) || leadMoved(rt, lt, rres, lres, false)
+	return w != nil && w.Rec.holds(rt, rres) && w.F.holds(lt, lres) || lead && leadMoved(rt, lt, rres, lres, false)
 }
 
 // instantForms are the forms InstantLeaf writes an instant in, coarsest
@@ -232,8 +240,11 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, requestHoldsWhy(where, asRecorded)
 		return ln
 	}
-	if !instantClock(rt, lt, rres, lres, w) {
+	if !instantClock(rt, lt, rres, lres, w, !dc.clientTests) {
 		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
+		if dc.clientTests {
+			ln.Why = clientTestWhy("", w != nil)
+		}
 		return ln
 	}
 	// Noise, or an echo, only where the echo could read the test case's own

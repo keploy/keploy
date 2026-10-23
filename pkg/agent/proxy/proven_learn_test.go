@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -1050,5 +1051,51 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 	p.TakeTestRequest(slots)
 	if _, earlier, _, _ := p.learnTracker.Test(); len(earlier) != 0 {
 		t.Fatalf("switch off, the tracker holds %+v", earlier)
+	}
+}
+
+// An agent that serves keploy mock (its --mock-mode) learns its tests as a
+// test harness's client tests (learn.Tracker.SetClientTests); one that serves
+// keploy test does not.
+func TestAMockModeAgentsLearnStepReadsClientTests(t *testing.T) {
+	for _, mock := range []bool{false, true} {
+		cfg := config.New()
+		cfg.Agent.MockMode = mock
+		p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+		if got := p.learnTracker.ClientTests(); got != mock || p.learnTracker.Drifts().ClientTests() != mock || p.ClientTests() != mock {
+			t.Fatalf("mock mode %v: client tests %v", mock, got)
+		}
+	}
+}
+
+// keploy mock's agent reads a wall clock of no zone in its own zone, the
+// application's beside it (learn.Tracker.SetAppZone), and, under the proven
+// switch, bounds a test's calls by the test's recorded begin it is given
+// (TakeRecordedBegin; learn.Tracker.RecordedBegin): the test's first call
+// has a window from it. With the switch off it is given nothing.
+func TestAMockModeAgentsLearnStepReadsTheAppsZoneAndATestsRecordedBegin(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(map[bool]string{true: "switch on", false: "switch off"}[on], func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{true: "1", false: ""}[on])
+			cfg := config.New()
+			cfg.Agent.MockMode = true
+			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			if got := p.learnTracker.Drifts().Zone(); got != time.Local {
+				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, time.Local)
+			}
+			rec := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
+			paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec.Add(time.Second)}}
+			p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+			p.TakeRecordedBegin(rec)
+			began := time.Now()
+			p.learnTracker.BeginAt(began)
+			w := p.learnTracker.CallWindowFrom(time.Time{}, paired, began.Add(time.Millisecond))
+			if on && (w == nil || !w.Rec.From.Equal(rec)) {
+				t.Fatalf("window %+v; want one from the test's recorded begin", w)
+			}
+			if !on && w != nil {
+				t.Fatalf("switch off: window %+v; want none", w)
+			}
+		})
 	}
 }

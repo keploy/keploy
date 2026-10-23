@@ -1,9 +1,13 @@
 package learn
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	// The zones' rules a row reads (America/New_York's summer time), the
+	// same on every host.
+	_ "time/tzdata"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -395,5 +399,264 @@ func TestAPickTheRequestNoLongerListsIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(requestHoldsWhy("x", false), "which keploy test sent with template values in it") || !strings.Contains(requestHoldsWhy("x", true), "which keploy test sent as recorded") {
 		t.Error("the reason does not say how keploy test sent the request's part")
+	}
+}
+
+// clientTestCache is a DriftCache of one of keploy mock's client tests, as
+// its tracker makes one (Tracker.SetClientTests), of an application whose
+// zone is UTC.
+func clientTestCache() *DriftCache { return clientTestCacheIn(nil) }
+
+// clientTestCacheIn is clientTestCache of an application that writes a wall
+// clock of no zone in zone, beside UTC (Tracker.SetAppZone).
+func clientTestCacheIn(zone *time.Location) *DriftCache {
+	dc := NewDriftCache()
+	dc.clientTests, dc.zone = true, zone
+	return dc
+}
+
+// ist is the zone of an application that runs in India, 5:30 ahead of UTC.
+var ist = time.FixedZone("IST", 5*3600+1800)
+
+// clientTestRefusal reports whether why is a client test's refusal of a
+// value whose instant at part (a place in the value, "" for a typed leaf)
+// changed: in its call's window (windowed), no clock read by the app
+// matched it, or, where the call had none, keploy saw no read of the app's
+// clock for it; with how to correct it, and no value quoted (values).
+func clientTestRefusal(why, part string, windowed bool, values ...string) bool {
+	which := ""
+	if part != "" {
+		which = " (an instant, " + part + ")"
+	}
+	head := "no clock read by the app matched it" + which + ": "
+	if !windowed {
+		head = "keploy saw no read of the app's clock for its call" + which + ": "
+	}
+	if !strings.HasPrefix(why, head) || !strings.Contains(why, "If your test supplies this value, have it supply the same value in every run") || strings.Contains(why, "template variable") {
+		return false
+	}
+	for _, v := range values {
+		if strings.Contains(why, v) {
+			return false
+		}
+	}
+	return true
+}
+
+// In keploy mock's client tests (a Playwright or CLI test: the harness gives
+// the application its inputs, and keploy has no request place) a changed
+// instant is learned as noise, or an echo, only where its call's window on
+// the application's clock shows it a read of that clock in both runs: the
+// application's own stamp, whole, inside a longer value, as an epoch, as a
+// wall clock of its zone, typed. The lead alone shows no read there: a value
+// the harness gave the application that moved by about the lead ("11:14" ->
+// "11:15", no window) is refused, saying no clock read by the app matched it
+// and how to correct it, as is one outside the window, a time of day (it
+// names no day), a wall clock only one run's span holds in any zone, and a
+// wall clock of no zone that only a zone other than UTC and the
+// application's reads in the window (the harness's "now plus two hours"). A
+// value with no instant is read as in any test. In keploy test (no client
+// test) each of these refused values is noise by the lead or as a fresh
+// value, as before. A refusal where the call had no window says keploy saw
+// no read of the app's clock for it.
+func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing.T) {
+	rec := time.Date(2026, 10, 22, 11, 14, 16, 900_000_000, time.UTC) // the recorded call
+	w := &Window{
+		Rec: Span{From: rec.Add(-900 * time.Millisecond), To: rec},
+		F:   Span{From: rec.Add(60_500 * time.Millisecond), To: rec.Add(61_400 * time.Millisecond)},
+	}
+	const p = "body.at"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	for _, tc := range []struct {
+		name      string
+		rec, live string
+		w         *Window
+		zone      *time.Location // the application's (nil: UTC)
+		noise     bool           // in the client test
+		part      string
+	}{
+		{"the app's stamp", "2026-10-22T11:14:16.473Z", "2026-10-22T11:15:17.950Z", w, nil, true, ""},
+		{"the app's stamp inside a longer value", "sent at 2026-10-22T11:14:16.473Z", "sent at 2026-10-22T11:15:17.950Z", w, nil, true, ""},
+		{"the app's stamp as an epoch", "1792667656473", "1792667717950", w, nil, true, ""},
+		{"the app's stamp as its zone's wall clock", "2026-10-22 16:44:16", "2026-10-22 16:45:17", w, ist, true, ""},
+		{"the app's stamp as UTC's wall clock, the app in another zone", "2026-10-22 11:14:16", "2026-10-22 11:15:17", w, ist, true, ""},
+		{"the app's stamp as its zone's wall clock, the app's zone not known", "2026-10-22 16:44:16", "2026-10-22 16:45:17", w, nil, false, "its characters 1 to 19"},
+		{"the app's stamp, no window", "2026-10-22T11:14:16.473Z", "2026-10-22T11:15:17.950Z", nil, nil, false, "its characters 1 to 24"},
+		{"a slot the harness gave, a minute on", "11:14", "11:15", nil, nil, false, "its characters 1 to 5"},
+		{"a slot the harness gave, in a window", "11:14:16", "11:15:17", w, nil, false, "its characters 1 to 8"},
+		{"a time the harness gave, by the lead, outside the window", "book 2026-10-22T11:20Z", "book 2026-10-22T11:21Z", w, nil, false, "its characters 6 to 22"},
+		{"a wall clock F's span holds in no zone the recording's does", "2026-10-22 16:44:16", "2026-10-22 16:45:30", w, ist, false, "its characters 1 to 19"},
+		// The harness's now plus some hours or minutes, written with no zone:
+		// a wall clock of some zone that is neither UTC nor the app's.
+		{"the harness's now plus two hours, no zone", "2026-10-22 13:14:16", "2026-10-22 13:15:17", w, nil, false, "its characters 1 to 19"},
+		{"the harness's now plus two hours, no zone, the app in India", "2026-10-22 13:14:16", "2026-10-22 13:15:17", w, ist, false, "its characters 1 to 19"},
+		{"the harness's now plus 30 minutes, no zone", "2026-10-22T11:44:16.473", "2026-10-22T11:45:17.950", w, ist, false, "its characters 1 to 23"},
+		{"the harness's now plus 45 minutes, no zone", "2026-10-22 11:59:16", "2026-10-22 12:00:17", w, ist, false, "its characters 1 to 19"},
+		{"the harness's now less 5 hours, no zone", "2026-10-22 06:14:16", "2026-10-22 06:15:17", w, ist, false, "its characters 1 to 19"},
+		{"the harness's now plus 14 hours, no zone", "2026-10-23 01:14:16", "2026-10-23 01:15:17", w, ist, false, "its characters 1 to 19"},
+		{"the harness's now plus two hours, zoned", "2026-10-22T13:14:16Z", "2026-10-22T13:15:17Z", w, ist, false, "its characters 1 to 20"},
+		{"a value with no instant", "a7f3c2", "9c21e0", nil, nil, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln := ClassifyIn(clientTestCacheIn(tc.zone), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, tc.w)[0]
+			if tc.noise {
+				if ln.Kind != KindNoise {
+					t.Fatalf("%q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
+				}
+			} else if ln.Kind != KindUnaccounted || !clientTestRefusal(ln.Why, tc.part, tc.w != nil, tc.rec, tc.live) {
+				t.Fatalf("%q -> %q: %s (%s); want it refused, naming %s, saying keploy saw no read of the app's clock that matched it, and quoting no value", tc.rec, tc.live, ln.Kind, ln.Why, tc.part)
+			}
+			if ln := ClassifyIn(NewDriftCache(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
+				t.Fatalf("keploy test, %q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
+			}
+		})
+	}
+	// An echo of the stamp in the call's own answer, only in the window.
+	resp := []Leaf{{Path: "body.received", Noise: "body.received", Type: String, Value: "2026-10-22T11:14:16.473Z"}}
+	if ln := ClassifyIn(clientTestCache(), []string{p}, str("2026-10-22T11:15:17.950Z"), str("2026-10-22T11:14:16.473Z"), rec, nil, nil, resp, w)[0]; ln.Kind != KindEcho {
+		t.Errorf("an echoed stamp in its window: %s (%s); want an echo", ln.Kind, ln.Why)
+	}
+	if ln := ClassifyIn(clientTestCache(), []string{p}, str("2026-10-22T11:15:17.950Z"), str("2026-10-22T11:14:16.473Z"), rec, nil, nil, resp, nil)[0]; ln.Kind != KindUnaccounted {
+		t.Errorf("an echoed stamp, no window: %s; want it refused", ln.Kind)
+	}
+	// Typed: the window, never the lead.
+	typed := func(at time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
+	}
+	tr, tl := rec.Add(-427*time.Millisecond), rec.Add(61_050*time.Millisecond)
+	if ln := ClassifyIn(clientTestCache(), []string{p}, typed(tl), typed(tr), rec, nil, nil, nil, w)[0]; ln.Kind != KindNoise {
+		t.Errorf("a typed stamp in its window: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+	for _, c := range []struct {
+		name string
+		w    *Window
+		l    time.Time
+	}{{"no window", nil, tl}, {"by the lead, outside the window", w, tl.Add(5 * time.Second)}} {
+		ln := ClassifyIn(clientTestCache(), []string{p}, typed(c.l), typed(tr), rec, nil, nil, nil, c.w)[0]
+		if ln.Kind != KindUnaccounted || !clientTestRefusal(ln.Why, "", c.w != nil) {
+			t.Errorf("a typed stamp, %s: %s (%s); want it refused, saying keploy saw no read of the app's clock that matched it", c.name, ln.Kind, ln.Why)
+		}
+		if c.w == nil {
+			if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(c.l), typed(tr), rec, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
+				t.Errorf("keploy test, a typed stamp the lead moved: %s (%s); want noise", ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
+// In a client test the lead makes no clock read of a value either where it
+// drifted with an earlier exchange's instant: the slot the harness gave the
+// application, sent by an earlier call and again inside a longer value, is
+// that call's variable (followed, compared), not two clock reads of one
+// moment, which in keploy test it is (noise).
+func TestAClientTestFollowsAnInstantTheLeadMoved(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 14, 16, 900_000_000, time.UTC)
+	const p = "body.note"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	call := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Noise: "body.slot", Type: String, Value: "2026-10-22T11:20Z"}, Live: "2026-10-22T11:21Z", Place: "body.slot"}}}}
+	if ln := ClassifyIn(clientTestCache(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "body.slot" {
+		t.Errorf("a client test: %s from %+v (%s); want a variable of mock-1's body.slot", ln.Kind, ln.From, ln.Why)
+	}
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		t.Errorf("keploy test: %s from %+v (%s); want noise, two clock reads the lead moved", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// A client test's cache gives a value the lead moved no clock evidence
+// (DriftCache.ClockReads), and reads a typed instant as a clock read by its
+// call's window alone (DriftCache.InstantClockRead); keploy test's, and a
+// nil cache, read both by the lead as before.
+func TestAClientTestsCacheGivesNoClockEvidenceByTheLead(t *testing.T) {
+	const rec, live = "2026-10-22T11:20Z", "2026-10-22T11:21Z"
+	if got := clientTestCache().ClockReads(rec, live); got != nil {
+		t.Errorf("a client test's clock evidence %v; want none", got)
+	}
+	want := ClockReads(rec, live)
+	if len(want) == 0 {
+		t.Fatalf("ClockReads(%q, %q) is empty: no row", rec, live)
+	}
+	var none *DriftCache
+	for name, dc := range map[string]*DriftCache{"keploy test": NewDriftCache(), "no cache": none} {
+		if got := dc.ClockReads(rec, live); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s's clock evidence %v; want %v", name, got, want)
+		}
+	}
+	at := time.Date(2026, 10, 22, 11, 14, 16, 473_000_000, time.UTC)
+	r, l := InstantLeaf("p", "p", at, time.Millisecond), InstantLeaf("p", "p", at.Add(FullRoundLead), time.Millisecond)
+	if clientTestCache().InstantClockRead(r, l, nil) {
+		t.Error("a client test reads a typed instant the lead moved as a clock read")
+	}
+	if !NewDriftCache().InstantClockRead(r, l, nil) || !none.InstantClockRead(r, l, nil) || !InstantClockRead(r, l, nil) {
+		t.Error("keploy test does not read a typed instant the lead moved as a clock read")
+	}
+	w := &Window{Rec: Span{From: at.Add(-time.Second), To: at}, F: Span{From: at.Add(FullRoundLead - time.Second), To: at.Add(FullRoundLead)}}
+	if !clientTestCache().InstantClockRead(r, l, w) {
+		t.Error("a client test does not read a typed instant in its window as a clock read")
+	}
+}
+
+// holdsRead reads an instant at its own resolution in each run's span; a
+// wall clock of no zone as UTC's or the application's zone's in both runs
+// (summer time too), never another zone's, nor one zone's in one run and
+// another's in the other; a zoned instant in its own zone only; a time of
+// day in no span.
+func TestWindowHoldsRead(t *testing.T) {
+	rec := time.Date(2026, 10, 22, 11, 14, 16, 900_000_000, time.UTC)
+	w := &Window{
+		Rec: Span{From: rec.Add(-900 * time.Millisecond), To: rec},
+		F:   Span{From: rec.Add(60_500 * time.Millisecond), To: rec.Add(61_400 * time.Millisecond)},
+	}
+	read := func(s string) moment {
+		sp := instantSpans(s)
+		if len(sp) != 1 || !sp[0].keyed {
+			t.Fatalf("%q holds %+v", s, sp)
+		}
+		return sp[0].moment()
+	}
+	ny, err := time.LoadLocation("America/New_York") // summer time on 2026-10-22: 4 hours behind
+	if err != nil {
+		t.Fatal(err)
+	}
+	minus5 := time.FixedZone("", -5*3600)
+	for _, c := range []struct {
+		rec, live string
+		zone      *time.Location
+		want      bool
+	}{
+		{"2026-10-22T11:14:16.473Z", "2026-10-22T11:15:17.950Z", nil, true},
+		{"2026-10-22T11:14:16Z", "2026-10-22T11:15:17Z", nil, true},
+		{"2026-10-22T11:14Z", "2026-10-22T11:15Z", nil, true},
+		{"2026-10-22T11:14:15.999Z", "2026-10-22T11:15:17.950Z", nil, false},
+		{"2026-10-22T11:14:16.473Z", "2026-10-22T11:15:18.401Z", nil, false},
+		{"2026-10-22 11:14:16", "2026-10-22 11:15:17", nil, true},
+		{"2026-10-22 11:14:16", "2026-10-22 11:15:17", ist, true},
+		{"2026-10-22 16:44:16", "2026-10-22 16:45:17", ist, true},
+		{"2026-10-22 16:44:16", "2026-10-22 16:45:17", nil, false},
+		{"2026-10-22 16:44:16", "2026-10-22 16:45:17", minus5, false},
+		{"2026-10-22 06:14:16", "2026-10-22 06:15:17", minus5, true},
+		{"2026-10-22 06:14:16", "2026-10-22 06:15:17", ist, false},
+		{"2026-10-22 07:14:16", "2026-10-22 07:15:17", ny, true},
+		{"2026-10-22 06:14:16", "2026-10-22 06:15:17", ny, false},
+		{"2026-10-22 13:14:16", "2026-10-22 13:15:17", ist, false},
+		{"2026-10-22 13:14:16", "2026-10-22 13:15:17", time.FixedZone("", 2*3600), true},
+		{"2026-10-22 16:44:16", "2026-10-22 06:15:17", ist, false},
+		{"2026-10-22 16:44:16", "2026-10-22 11:15:17", ist, false},
+		{"2026-10-22T16:44:16+05:30", "2026-10-22T16:45:17+05:30", nil, true},
+		{"2026-10-22T16:44:16+05:00", "2026-10-22T16:45:17+05:00", ist, false},
+		{"2026-10-22T16:44:16Z", "2026-10-22T16:45:17Z", ist, false},
+		{"2026-10-22T16:44:16Z", "2026-10-22 16:45:17", ist, false},
+		{"11:14:16", "11:15:17", nil, false},
+	} {
+		if got := w.holdsRead(read(c.rec), read(c.live), c.zone); got != c.want {
+			t.Errorf("%q, %q in %v: %v; want %v", c.rec, c.live, c.zone, got, c.want)
+		}
+	}
+	var none *Window
+	if none.holdsRead(read("2026-10-22T11:14:16.473Z"), read("2026-10-22T11:15:17.950Z"), nil) {
+		t.Error("no window holds a read")
 	}
 }

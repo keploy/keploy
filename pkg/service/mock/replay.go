@@ -1837,11 +1837,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	var learnedPool []string
 	var learnErr error
 	if m.learning() {
-		if consumedErr != nil {
-			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
-		} else {
-			learned, learnedPool, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
-		}
+		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, flows, detail.expected)
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what

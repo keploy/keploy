@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -339,4 +340,111 @@ func requestHoldsWhy(where string, asRecorded bool) string {
 		sent = "which keploy test sent with template values in it"
 	}
 	return "the moment it was recorded with stands in " + where + ", " + sent + ", while record's full round saw another value, which the request as sent holds by no rule that gives the recorded one: it may be a pick from the test case's request, by the application's clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// KEPLOY MOCK'S CLIENT TESTS.
+//
+// keploy mock is the mocking framework of client tests (a Playwright test, a
+// CLI test, any harness): the harness gives the application its inputs, and
+// no test case's request reaches keploy, so the learn step has no request
+// place (Earlier.Given) there, and that is no failure to read one. What the
+// harness gave the application may still change between the recording and
+// record's full round (a slot it picks a minute on, a date it writes anew),
+// and a value the application took from it moves then as a read of the
+// clock may, by about F's lead, or with no source keploy sees. So in a
+// client test (DriftCache.ClientTests) the lead shows no read of the
+// application's clock (clockIn, instantClock), and a value with an instant
+// that changed, in any declared layout, is learned as noise or an echo only
+// where each such instant lies, in both runs, within its call's window on the
+// application's clock, as the agent's clock hooks report that clock
+// (Window.holdsRead): the recorded instant after the recording's previous
+// call, or the test's recorded begin, and no later than the call, and F's
+// after the previous call F served, or the test's begin, and no later than
+// the call's arrival; a wall clock of no zone read in UTC or the
+// application's own zone only. That is a read of the application's clock
+// for that call; anything else is refused, and the reason says to have the
+// test supply the value the same in every run where it supplies it
+// (clientTestWhy). A value with no instant is read as in any test: no word
+// of what changed may stand at an earlier place. A value that only reads as
+// an instant of a declared layout (an id of thirteen digits reads as epoch
+// milliseconds) is refused so too where it changed: a false red, which
+// fails closed, never noise. A call with no window (no clock hooks; a call
+// neither an earlier recorded call nor the test's recorded begin precedes)
+// learns no changed instant as noise, and the reason says keploy saw no
+// read of the application's clock for it. Nor does the lead give a variable
+// a client test binds clock evidence (DriftCache.ClockReads).
+
+// holdsRead reports whether rec and live, an instant a value was recorded
+// with and the one F saw in its place, are each a read of its run's clock
+// within w (nil: neither is), at its own resolution: as it names its
+// instant; or, for a wall clock of no zone on both sides, as the wall clock
+// of zone in both runs (wallIn), the zone the application writes one in
+// beside UTC (Tracker.SetAppZone; nil: UTC alone). No other zone: a wall
+// clock any zone reads as the clock's reading is as likely a value the test
+// harness gave the application (the clock's reading plus two hours) as a
+// read of it, and keploy cannot tell them apart, so it is refused whether
+// its text names a zone or not. A time of day names no day and lies in no
+// span.
+func (w *Window) holdsRead(rec, live moment, zone *time.Location) bool {
+	if w == nil || rec.key.day || live.key.day {
+		return false
+	}
+	in := func(r, l time.Time) bool { return w.Rec.holds(r, rec.res) && w.F.holds(l, live.res) }
+	if in(time.Unix(0, rec.key.at).UTC(), time.Unix(0, live.key.at).UTC()) {
+		return true
+	}
+	if rec.zoned || live.zoned || zone == nil {
+		return false
+	}
+	return in(wallIn(rec.key.at, zone), wallIn(live.key.at, zone))
+}
+
+// wallIn is the instant a wall clock of no zone names in zone, at its
+// reading in UTC (a moment's key): its date and time there, as zone's rules
+// give them at that date (summer time too).
+func wallIn(at int64, zone *time.Location) time.Time {
+	t := time.Unix(0, at).UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), zone)
+}
+
+// clientTestUnread says why a drifted value v of a client test, read in its
+// call's window w, is no noise and no echo: an instant of it that changed
+// (v.instants) is no read of the application's clock within w (holdsRead,
+// in the cache's zone); "" where every one is, or none changed.
+func (dc *DriftCache) clientTestUnread(v *valueDrift, w *Window) string {
+	for _, p := range v.instants {
+		if w.holdsRead(p.rec, p.live, dc.zone) {
+			continue
+		}
+		part := ""
+		for _, sp := range instantSpans(v.rec) {
+			if sp.keyed && sp.key == p.rec.key {
+				part = v.rec[sp.start:sp.end]
+				break
+			}
+		}
+		return clientTestWhy(partOf(v.rec, part), w != nil)
+	}
+	return ""
+}
+
+// clientTestWhy is why a drifted value of a client test is refused (read
+// after "<field> changed, and "): no read of the application's clock keploy
+// saw matched its instant, or, where its call had no window (windowed
+// false), keploy saw no clock of the application's for the call at all
+// (part names where the instant stands in the value; "" for a leaf its
+// protocol types as one instant, the value whole); why that refuses it; and
+// how to correct it.
+func clientTestWhy(part string, windowed bool) string {
+	which := ""
+	if part != "" {
+		which = " (an instant, " + part + ")"
+	}
+	what := "no clock read by the app matched it" + which
+	seen := ""
+	if !windowed {
+		what = "keploy saw no read of the app's clock for its call" + which
+		seen = ", and saw none for this call: keploy's clock hooks did not report the application's clock, or no earlier call and no begin of the test bounds the read"
+	}
+	return what + ": keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies, in the recording and in record's full round, within its call's window on the application's clock as keploy's clock hooks report it" + seen + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }

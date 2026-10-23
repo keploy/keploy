@@ -46,7 +46,7 @@ func TestAClockReadInItsCallsWindowIsAClockRead(t *testing.T) {
 			{"RFC 3339 in seconds", func(t time.Time) string { return t.Format(time.RFC3339) }},
 		} {
 			rec, now := form.of(recRead), form.of(live)
-			if c := clockIn(rec, now, w); !c.whole {
+			if c := clockIn(rec, now, w, true); !c.whole {
 				t.Errorf("%v boot, %s: %q -> %q is no clock read in the call's window", boot, form.name, rec, now)
 			}
 			if c := clockOf(rec, now); c.whole {
@@ -76,7 +76,7 @@ func TestWhatIsNoReadInTheCallsWindowIsNoClockRead(t *testing.T) {
 		// In epoch milliseconds, and in RFC 3339 with milliseconds: each at
 		// its own resolution, not the second's.
 		for _, of := range []func(time.Time) string{millis, func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }} {
-			if c := clockIn(of(tc.rec), of(tc.live), w); c.whole {
+			if c := clockIn(of(tc.rec), of(tc.live), w, true); c.whole {
 				t.Errorf("%s: %s -> %s read as a clock read in the call's window", tc.name, of(tc.rec), of(tc.live))
 			}
 		}
@@ -84,12 +84,12 @@ func TestWhatIsNoReadInTheCallsWindowIsNoClockRead(t *testing.T) {
 	// A window with no previous call bounds nothing, nor a span with one
 	// bound.
 	for _, open := range []*Window{nil, {F: w.F}, {Rec: w.Rec}, {Rec: Span{To: w.Rec.To}, F: w.F}, {Rec: w.Rec, F: Span{From: w.F.From}}} {
-		if c := clockIn(millis(recRead), millis(live), open); c.whole {
+		if c := clockIn(millis(recRead), millis(live), open, true); c.whole {
 			t.Errorf("window %+v read a clock read", open)
 		}
 	}
 	// A time of day names no day to place in a window.
-	if c := clockIn(recRead.Format("15:04:05"), live.Format("15:04:05"), w); c.whole {
+	if c := clockIn(recRead.Format("15:04:05"), live.Format("15:04:05"), w, true); c.whole {
 		t.Error("a time of day was placed in the window")
 	}
 }

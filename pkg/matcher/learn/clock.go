@@ -151,7 +151,7 @@ func (w *Window) key() [4]int64 {
 
 // clockOf is clockIn with no call's window: the clock reads that moved by
 // FullRoundLead.
-func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, nil) }
+func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, nil, true) }
 
 // clockIn finds in a drifted value the clock reads that moved by
 // FullRoundLead, or that are reads of each run's clock within the window w
@@ -166,8 +166,10 @@ func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, ni
 // compared at the instant's own resolution, and to the second for finer
 // ones: F's clock is set to each recorded instant plus the lead when the
 // test begins, and how long the app then takes to read its clock is its own
-// (a millisecond read moves by the lead plus that).
-func clockIn(recorded, live string, w *Window) clockSet {
+// (a millisecond read moves by the lead plus that). Without lead (keploy
+// mock's client tests: DriftCache.ClientTests) only the window shows a
+// read: a value the test harness gave the application may move by the lead.
+func clockIn(recorded, live string, w *Window, lead bool) clockSet {
 	c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
 	var at []int
@@ -175,7 +177,7 @@ func clockIn(recorded, live string, w *Window) clockSet {
 		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
 		for k := 0; k < len(rm) && k < len(lm); k++ {
 			rs, ls := recorded[rm[k][0]:rm[k][1]], live[lm[k][0]:lm[k][1]]
-			if rs == ls || !moved(lay, rs, ls) && !w.holds(lay, rs, ls) {
+			if rs == ls || !(lead && moved(lay, rs, ls)) && !w.holds(lay, rs, ls) {
 				continue
 			}
 			rt, rres, _ := lay.read(rs)

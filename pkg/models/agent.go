@@ -595,6 +595,20 @@ const (
 	TestRequestRead       = "read"
 )
 
+// ClientTestsReadHeader is the /mock response header in which an agent says,
+// answering a keploy mock session's MockOutgoing that turns its learn step on
+// (OutgoingOptions.Learn, under the proven switch), that the learn step reads
+// the session's tests as a test harness's client tests (ClientTestsRead):
+// there a changed instant is learned as noise only where its call's window
+// shows it a read of the application's clock. An agent that does not send
+// it, every agent released before it among them, learns a value the harness
+// gave the application as noise where it changed: keploy mock keeps nothing
+// such an agent learned.
+const (
+	ClientTestsReadHeader = "X-Keploy-Client-Tests"
+	ClientTestsRead       = "read"
+)
+
 // UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
 // agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
 // why. The body is still the list that was read, so a client that does not know

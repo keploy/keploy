@@ -415,3 +415,35 @@ func TestTheAgentSaysItReadsATestCasesRequestOnlyWhereItDoes(t *testing.T) {
 		}
 	}
 }
+
+// clientTestsProxy is a proxy whose learn step reads, or does not read, its
+// tests as keploy mock's client tests (coreAgent.ClientTestsReader).
+type clientTestsProxy struct {
+	openerProxy
+	reads bool
+}
+
+func (p *clientTestsProxy) ClientTests() bool { return p.reads }
+
+// The agent says its learn step reads its tests as keploy mock's client
+// tests (models.ClientTestsReadHeader) only under the switch, with a proxy
+// that does.
+func TestTheAgentSaysItReadsClientTestsOnlyWhereItDoes(t *testing.T) {
+	for _, tc := range []struct {
+		on    string
+		proxy coreAgent.Proxy
+		want  bool
+	}{
+		{"1", &clientTestsProxy{reads: true}, true},
+		{"0", &clientTestsProxy{reads: true}, false},
+		{"1", &clientTestsProxy{reads: false}, false},
+		{"1", &openerProxy{}, false},
+	} {
+		t.Setenv(provenswitch.Env, tc.on)
+		a := newReplayAgent()
+		a.Proxy = tc.proxy
+		if got := a.ReadsClientTests(); got != tc.want {
+			t.Errorf("KEPLOY_PROVEN=%s, %T: %v; want %v", tc.on, tc.proxy, got, tc.want)
+		}
+	}
+}

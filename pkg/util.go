@@ -3417,6 +3417,15 @@ type ConsumedScopeReader interface {
 	AgentReadsConsumedPerTestOnly() bool
 }
 
+// ClientTestsReader is an optional extension of the instrumentation keploy
+// mock talks to the agent through: whether the agent said, in its answer to
+// the session's MockOutgoing, that its learn step reads the session's tests
+// as client tests (models.ClientTestsReadHeader). Without it, keploy mock
+// takes the agent for one that does not.
+type ClientTestsReader interface {
+	AgentReadsClientTests() bool
+}
+
 // TestRequestReader is an optional extension of the instrumentation a replay
 // talks to the agent through: whether the agent said, in its answer to the
 // last filter, that its learn step took the test case's request the filter
