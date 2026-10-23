@@ -68,9 +68,12 @@ type MockEntry struct {
 	// each rewrite of mappings.yaml, whatever the switch.
 	Owner string `json:"owner,omitempty" yaml:"owner,omitempty" bson:"owner,omitempty"`
 	// Drift says, on a moved entry, that the move rests on its Owner's
-	// quarantine: the pairing that moved it drifted, so the
-	// Owner was quarantined as keploy/unseparable_write, keploy being unable
-	// to tell the Owner's own write from it. record's judging sets it on the
+	// quarantine: the pairing that moved it drifted, which holds the
+	// recording against its Owner, so the move is kept only while the Owner
+	// does not run. Judging quarantines such an Owner as
+	// keploy/unseparable_write (keploy cannot tell the Owner's own write
+	// from the call), or for a failure of its own; a confirming round that
+	// does not confirm the move undoes it. record's judging sets Drift on the
 	// moves it passes MoveToWorker. A replay under the switch that runs the
 	// Owner (its quarantine no longer applies: its test was edited, or
 	// verdicts.yaml lost its entry) gives the entry back to the Owner's own
