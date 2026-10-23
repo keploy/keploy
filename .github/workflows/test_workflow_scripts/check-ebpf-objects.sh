@@ -21,34 +21,37 @@
 # brings commits that never were main's tip.
 #
 #   PRO_ACCESS_TOKEN=... PR_FROM_FORK=true|false \
-#     bash .github/workflows/test_workflow_scripts/check-ebpf-objects.sh [EBPF_REPO [HOOKS_DIR [KEPLOY_REPO]]]
+#     bash .github/workflows/test_workflow_scripts/check-ebpf-objects.sh [EBPF_REPO [HOOKS_DIR]]
 #
 # EBPF_REPO is https://github.com/keploy/ebpf.git unless given, HOOKS_DIR
-# pkg/agent/hooks/linux, KEPLOY_REPO https://github.com/keploy/keploy.git.
-# The clone holds main's commits and trees and no file content (a blobless
-# clone): a tree names each file by the hash of its bytes, which
-# `git hash-object` gives for the files here, so the trees are all the check
-# reads. It is retried a bounded number of times, each attempt given up once
-# its transfer stays below 1000 B/s for 30 s; a server that refuses the
-# credentials ends it at once.
+# pkg/agent/hooks/linux. The clone holds main's commits and trees and no file
+# content (a blobless clone): a tree names each file by the hash of its
+# bytes, which `git hash-object` gives for the files here, so the trees are
+# all the check reads. It is retried a bounded number of times, each attempt
+# given up once its transfer stays below 1000 B/s for 30 s; a server that
+# refuses the credentials ends it at once.
 #
 # keploy/ebpf is a private repository. PRO_ACCESS_TOKEN must be a token that
 # can read it: git gets it from a credential helper that reads it from the
 # environment, so it is never in a URL, a command line or a file, and the
-# check never prints it. A pull request from a fork (PR_FROM_FORK=true, from
-# the event's pull_request.head.repo.fork) gets no secrets, so with no token
-# it cannot read keploy/ebpf: it passes only if its eBPF files are, byte for
-# byte, those of keploy/keploy's main (a public repository, read with no
-# credentials) at pkg/agent/hooks/linux, which main's own runs check. A fork
-# cannot change them; a maintainer copies them. Anything else with no token,
-# a pull request from a keploy/keploy branch or a push to main, fails: those
-# get the repository's secrets, so a missing token is a broken workflow.
+# check never prints it. With no token, a pull request from a keploy/keploy
+# branch or a push to main fails: those get the repository's secrets, so a
+# missing token is a broken workflow.
+#
+# A pull request from a fork (PR_FROM_FORK=true, from the event's
+# pull_request.head.repo.fork) gets no secrets, so with no token it cannot
+# read keploy/ebpf. Its checkout is the pull request's merge commit, whose
+# first parent is the main commit GitHub made the merge on, a commit whose
+# files main's own run checked. The pull request passes only if HOOKS_DIR's
+# eBPF files are, byte for byte, that commit's: only if it leaves them as
+# main has them. A fork cannot change them; a maintainer copies them. That
+# commit, and not main's tip: main may have changed the files since, and a
+# re-run reuses the merge commit, so a pull request that never touched them
+# would fail for good. The checkout must hold that commit (actions/checkout
+# with fetch-depth: 2); nothing is fetched.
 set -euo pipefail
 repo=${1:-https://github.com/keploy/ebpf.git}
 hooks=${2:-pkg/agent/hooks/linux}
-keploy=${3:-https://github.com/keploy/keploy.git}
-# mainpath is where keploy/keploy's tree holds the files.
-mainpath=pkg/agent/hooks/linux
 fork=${PR_FROM_FORK:-false}
 case $fork in
   true | false) ;;
@@ -71,67 +74,60 @@ mapfile -t names < <(printf '%s\n' "${names[@]}" | LC_ALL=C sort)
 want=""
 for n in "${names[@]}"; do want+="$(git hash-object "$hooks/$n") $n"$'\n'; done
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30
-# git never prompts: with no usable credentials a clone fails at once.
-export GIT_TERMINAL_PROMPT=0
-# pre: git's options before `clone`; none but for keploy/ebpf.
-pre=()
-# clone URL DIR [OPTION...]: a bare, blobless clone of URL's main into DIR.
-# 1 once five attempts have failed, 2 at once if the server refused the
-# credentials (or asked for some and had none): no retry changes that.
-clone() {
-  local url=$1 dir=$2 i
-  shift 2
-  for i in 1 2 3 4 5; do
-    rm -rf "$dir"
-    if git "${pre[@]}" clone -q --bare --filter=blob:none --single-branch --branch main "$@" "$url" "$dir" 2> "$work/clone.err"; then
-      return 0
-    fi
-    cat "$work/clone.err" >&2
-    if grep -qE "fatal: (Authentication failed for|repository '.*' not found|could not read (Username|Password) for)" "$work/clone.err"; then
-      return 2
-    fi
-    [ "$i" -eq 5 ] && return 1
-    echo "clone of $url failed (attempt $i of 5); retrying in $((i * 10))s" >&2
-    sleep $((i * 10))
-  done
-}
-
 if [ -z "${PRO_ACCESS_TOKEN:-}" ] && [ "$fork" = true ]; then
-  rc=0
-  clone "$keploy" "$work/keploy" --depth=1 || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "could not clone $keploy's main, whose eBPF files a pull request from a fork must have" >&2
+  h() { git -C "$hooks" "$@"; }
+  if ! prefix=$(h rev-parse --show-prefix 2> /dev/null); then
+    echo "this pull request is from a fork, and $hooks is not in a git checkout: the check compares" \
+      "its eBPF files with those of the main commit the pull request's merge commit is made on" >&2
     exit 1
   fi
-  # main's "BLOB NAME" for each *_bpfel.o and *_bpfel.go file at mainpath.
-  main=$(git -C "$work/keploy" ls-tree main -- "$mainpath/" |
-    awk -F'\t' -v dir="$mainpath/" '{ split($1, m, " "); n = substr($2, length(dir) + 1) }
+  # HEAD's parents as its commit object names them: a shallow checkout
+  # does not resolve HEAD^1 when it does not hold that commit.
+  mapfile -t parents < <(h cat-file -p HEAD | sed -n '/^$/q; s/^parent //p')
+  if [ ${#parents[@]} -ne 2 ]; then
+    echo "this pull request is from a fork, and the checkout, $(h log -1 --format='%h (%s)' HEAD)," \
+      "has ${#parents[@]} parent(s): it is not the pull request's merge commit, whose first parent" \
+      "is the main commit whose files it must have (actions/checkout's default for a pull request)" >&2
+    exit 1
+  fi
+  base=${parents[0]}
+  if ! h cat-file -e "$base^{tree}" 2> /dev/null; then
+    echo "this pull request is from a fork, and the checkout does not hold $base, the main commit" \
+      "its merge commit is made on, whose eBPF files it must have: check out with fetch-depth: 2" >&2
+    exit 1
+  fi
+  at=$(h log -1 --format='%h (%s)' "$base")
+  spec=()
+  [ -n "$prefix" ] && spec=(-- "$prefix")
+  # base's "BLOB NAME" for each *_bpfel.o and *_bpfel.go file directly in
+  # HOOKS_DIR.
+  main=$(h ls-tree --full-tree "$base" "${spec[@]}" |
+    awk -F'\t' -v dir="$prefix" '{ split($1, m, " "); n = substr($2, length(dir) + 1) }
       m[2] == "blob" && n ~ /_bpfel\.(o|go)$/ { print m[3], n }' | LC_ALL=C sort -k2)
   [ -n "$main" ] && main+=$'\n'
   if [ "$main" = "$want" ]; then
     echo "this pull request is from a fork, which cannot read keploy/ebpf (a private repository);" \
-      "its ${#names[@]} eBPF files of $hooks are, byte for byte, keploy/keploy main's, and main's own runs check those"
+      "its ${#names[@]} eBPF files of $hooks are, byte for byte, those of main at $at," \
+      "the commit its merge commit is made on, and main's own run checked those"
     exit 0
   fi
   declare -A here=() there=()
   for n in "${names[@]}"; do here[$n]=$(git hash-object "$hooks/$n"); done
   while read -r b n; do [ -n "$n" ] && there[$n]=$b; done <<< "$main"
-  echo "this pull request is from a fork, and its eBPF files of $hooks are not keploy/keploy main's:" >&2
+  echo "this pull request is from a fork, and its eBPF files of $hooks are not those of main at $at," \
+    "the commit its merge commit is made on:" >&2
   for n in $(printf '%s\n' "${!here[@]}" "${!there[@]}" | LC_ALL=C sort -u); do
     if [ -z "${there[$n]:-}" ]; then
-      echo "  $n: main has no such file" >&2
+      echo "  $n: main has no such file, this pull request adds it" >&2
     elif [ -z "${here[$n]:-}" ]; then
       echo "  $n: main has it, this pull request removes it" >&2
     elif [ "${here[$n]}" != "${there[$n]}" ]; then
-      echo "  $n: its bytes are not main's" >&2
+      echo "  $n: this pull request changes its bytes" >&2
     fi
   done
   echo "A pull request from a fork cannot change the eBPF objects: they are copied from keploy/ebpf," \
     "which this check cannot read from a fork (it gets no secrets). A maintainer must copy them" \
-    "(keploy/ebpf's README, step 2); leave $mainpath as main has it." >&2
+    "(keploy/ebpf's README, step 2); leave $hooks as main has it." >&2
   exit 1
 fi
 if [ -z "${PRO_ACCESS_TOKEN:-}" ]; then
@@ -141,12 +137,36 @@ if [ -z "${PRO_ACCESS_TOKEN:-}" ]; then
     "(prepare_and_run.yml, run_ebpf_objects)." >&2
   exit 1
 fi
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30
+# git never prompts: with no usable credentials a clone fails at once.
+export GIT_TERMINAL_PROMPT=0
 # The empty helper drops any the runner configured, so this token is the one
 # that answers; the helper reads it from the environment when git asks.
-pre=(-c credential.helper=
-  -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "$PRO_ACCESS_TOKEN"; fi; }; f')
+helper='!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "$PRO_ACCESS_TOKEN"; fi; }; f'
+# clone: a bare, blobless clone of repo's main into $work/ebpf. 1 once five
+# attempts have failed, 2 at once if the server refused the credentials (or
+# asked for some and git had none): no retry changes that.
+clone() {
+  local i
+  for i in 1 2 3 4 5; do
+    rm -rf "$work/ebpf"
+    if git -c credential.helper= -c "credential.helper=$helper" \
+      clone -q --bare --filter=blob:none --single-branch --branch main "$repo" "$work/ebpf" 2> "$work/clone.err"; then
+      return 0
+    fi
+    cat "$work/clone.err" >&2
+    if grep -qE "fatal: (Authentication failed for|repository '.*' not found|could not read (Username|Password) for)" "$work/clone.err"; then
+      return 2
+    fi
+    [ "$i" -eq 5 ] && return 1
+    echo "clone of $repo failed (attempt $i of 5); retrying in $((i * 10))s" >&2
+    sleep $((i * 10))
+  done
+}
 rc=0
-clone "$repo" "$work/ebpf" || rc=$?
+clone || rc=$?
 if [ "$rc" -eq 2 ]; then
   echo "PRO_ACCESS_TOKEN cannot read $repo: the server refused it (above). The token must have read" \
     "access to keploy/ebpf, a private repository." >&2

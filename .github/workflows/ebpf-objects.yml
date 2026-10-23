@@ -17,9 +17,9 @@ name: eBPF objects from keploy/ebpf
 # keploy/ebpf is a private repository: the check reads it with the
 # PRO_ACCESS_TOKEN secret, which must be able to read it. A pull request from
 # a fork gets no secrets, so the caller says whether it is one (from-fork):
-# such a pull request passes only if its eBPF files are keploy/keploy main's,
-# byte for byte, which main's own runs check. Anything else with no token
-# fails.
+# such a pull request passes only if its eBPF files are, byte for byte, those
+# of the main commit its merge commit is made on (the checkout's first
+# parent), which main's own run checked. Anything else with no token fails.
 
 on:
   workflow_call:
@@ -47,7 +47,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
+      # Depth 2: a pull request's checkout is its merge commit, and the
+      # check compares a fork's eBPF files with those of its first parent.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: The check's own cases, against a local keploy/ebpf
         run: bash .github/workflows/test_workflow_scripts/check-ebpf-objects.tests.sh
