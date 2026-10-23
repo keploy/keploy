@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -693,4 +695,250 @@ func TestSpentBackgroundIsInRecordedOrder(t *testing.T) {
 	equalNames(t, "the spent background", mm.SpentBackground(models.HTTP), "w-boot", "w-later", "pool")
 	_, spent := mm.KindBackground(models.HTTP)
 	equalNames(t, "the kind's spent background", spent, "w-boot", "w-later", "pool")
+}
+
+// closeGap drives a view's close and its replacement's install apart, with
+// the manager's seams, never with sleeps: serve (a ServeExactTest or a
+// ServeExactPool) runs on its own goroutine, and stops once it has closed the
+// view in force (closeAhead) and before it installs the next. read then runs
+// in that gap; the install goes on once read waits on the closed view
+// (closedWait), or once read returns without waiting. It reports whether read
+// waited.
+func closeGap(t *testing.T, mm *MockManager, serve, read func()) (waited bool) {
+	t.Helper()
+	closed, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	go1 := func() { once.Do(func() { close(release) }) }
+	mm.exact.beforeInstall = func() {
+		close(closed)
+		<-release
+	}
+	mm.exact.onClosedWait = func() {
+		waited = true
+		go1()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serve()
+	}()
+	<-closed
+	read()
+	// A read that did not wait leaves the install held: let it go.
+	go1()
+	<-done
+	mm.exact.beforeInstall, mm.exact.onClosedWait = nil, nil
+	return waited
+}
+
+// A by-kind spend that lands between a view's close and its replacement's
+// install is no refusal: it waits for the install and spends against the new
+// view, so the kind's last unused recording answers whichever side of a
+// test's boundary the write lands on (the gap is closeAhead's close to
+// installExact's install). The revision has moved by the time it settles, and
+// the recording is spent, not listed unused.
+func TestASpendInAClosedViewSpendsInTheViewThatReplacesIt(t *testing.T) {
+	for _, next := range []struct {
+		name  string
+		serve func(mm *MockManager, ms map[string]*models.Mock)
+	}{
+		{"ServeExactTest", func(mm *MockManager, ms map[string]*models.Mock) {
+			mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+		}},
+		{"ServeExactPool", func(mm *MockManager, ms map[string]*models.Mock) {
+			mm.ServeExactPool("k2", []string{"pool"})
+		}},
+	} {
+		t.Run(next.name, func(t *testing.T) {
+			mm, ms := s12Set(t)
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+			mm.ServeExactWorker([]string{"w-boot"})
+			// A pool view with an ahead: the next serve closes it first
+			// (closeAhead), and installs its replacement later.
+			mm.ServeExactPool("k", []string{"pool"}, ms["own"])
+			rev := mm.Revision()
+			var spent bool
+			var settledAt uint64
+			waited := closeGap(t, mm, func() { next.serve(mm, ms) }, func() {
+				spent = mm.SpendByKind(ms["pool"])
+				settledAt = mm.Revision()
+			})
+			if !waited || !spent {
+				t.Fatalf("a spend between the view's close and the next view's install: waited %v, spent %v; want it to wait for the install and spend there", waited, spent)
+			}
+			if settledAt == rev {
+				t.Fatal("the spend settled with the revision unmoved")
+			}
+			unused, used := mm.KindBackground(models.HTTP)
+			if names := exactNames(unused); slices.Contains(names, "pool") {
+				t.Fatalf("the spent recording is still listed unused: %v", names)
+			}
+			if names := exactNames(used); !slices.Contains(names, "pool") {
+				t.Fatalf("the recording the spend took is not listed spent: %v", names)
+			}
+			if mm.SpendByKind(ms["pool"]) {
+				t.Fatal("the recording was spent twice")
+			}
+		})
+	}
+}
+
+// A consume through a delete door that lands in the same gap waits too, and
+// is settled against the new view: a background recording a test's view shows
+// under S12's rules is spent for the staging, and the next test's call in
+// flight, which the closed pool view would have answered as that test's, is
+// the opened test's own.
+func TestAConsumeInAClosedViewIsSettledInTheViewThatReplacesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mock string
+	}{
+		{"a background recording", "pool"},
+		{"the next test's call in flight", "own"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mm, ms := s12Set(t)
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+			mm.ServeExactWorker([]string{"w-boot"})
+			mm.ServeExactPool("k", []string{"pool"}, ms["own"])
+			var consumed bool
+			waited := closeGap(t, mm,
+				func() { mm.ServeExactTest("T1", []*models.Mock{ms["own"]}) },
+				func() { consumed = mm.DeleteUnFilteredMock(*ms[tc.mock]) })
+			if !waited || !consumed {
+				t.Fatalf("a consume of %s between the view's close and the next view's install: waited %v, consumed %v; want it to wait for the install and be answered there", tc.mock, waited, consumed)
+			}
+			if mm.DeleteUnFilteredMock(*ms[tc.mock]) {
+				t.Fatalf("%s answered twice", tc.mock)
+			}
+		})
+	}
+}
+
+// A parser holds the copy the pool view served of the next test's call in
+// flight (ServedIn, that view's): a consume of it in the gap waits, and the
+// test's view refuses that copy, the revision moved, so the parser reads
+// again and the test's own copy answers.
+func TestAConsumeOfTheClosedViewsCopyIsReadAgain(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"}, ms["own"])
+	copyOf := func() *models.Mock {
+		pt, _ := mm.GetPerTestMocksInWindow()
+		for _, m := range pt {
+			if m.Name == "own" {
+				return m
+			}
+		}
+		return nil
+	}
+	poolCopy := copyOf()
+	if poolCopy == nil || poolCopy.TestModeInfo.ServedIn == 0 {
+		t.Fatalf("the pool view serves no copy of the call in flight: %+v", poolCopy)
+	}
+	rev := mm.Revision()
+	var consumed bool
+	var settledAt uint64
+	waited := closeGap(t, mm,
+		func() { mm.ServeExactTest("T1", []*models.Mock{ms["own"]}) },
+		func() {
+			consumed = mm.DeleteFilteredMock(*poolCopy)
+			settledAt = mm.Revision()
+		})
+	if !waited || consumed || settledAt == rev {
+		t.Fatalf("the pool view's copy consumed in the gap: waited %v, consumed %v, revision moved %v; want it to wait, then be refused with the revision moved", waited, consumed, settledAt != rev)
+	}
+	testCopy := copyOf()
+	if testCopy == nil || testCopy.TestModeInfo.ServedIn == poolCopy.TestModeInfo.ServedIn || !mm.DeleteFilteredMock(*testCopy) {
+		t.Fatalf("read again, the test's copy %+v does not answer", testCopy)
+	}
+}
+
+// The views installExact closes itself (a test after a test, the pool after a
+// test, a test after a pool view with no ahead) hold the consumes and spends
+// that find them closed until the revisions have moved, then release them,
+// and a retry settles in the new view: between the swap and the revisions'
+// move both wait, unreleased.
+func TestAViewInstallExactClosesReleasesItsWaitersAfterTheRevisionsMove(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		before, next func(mm *MockManager, ms map[string]*models.Mock)
+	}{
+		{"a test after a test",
+			func(mm *MockManager, ms map[string]*models.Mock) {
+				mm.ServeExactTest("T0", []*models.Mock{ms["other"]})
+			},
+			func(mm *MockManager, ms map[string]*models.Mock) { mm.ServeExactTest("T1", []*models.Mock{ms["own"]}) }},
+		{"the pool after a test",
+			func(mm *MockManager, ms map[string]*models.Mock) {
+				mm.ServeExactTest("T0", []*models.Mock{ms["other"]})
+			},
+			func(mm *MockManager, ms map[string]*models.Mock) { mm.ServeExactPool("k2", []string{"pool"}) }},
+		{"a test after a pool view with no ahead",
+			func(mm *MockManager, ms map[string]*models.Mock) { mm.ServeExactPool("k", []string{"pool"}) },
+			func(mm *MockManager, ms map[string]*models.Mock) { mm.ServeExactTest("T1", []*models.Mock{ms["own"]}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mm, ms := s12Set(t)
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+			mm.ServeExactWorker([]string{"w-boot"})
+			tc.before(mm, ms)
+			replaced := mm.exactView()
+			var rev uint64
+			waits := map[string]<-chan struct{}{}
+			mm.exact.beforeBump = func(prev *exactView) {
+				if prev != replaced {
+					t.Errorf("the view replaced is %p; want %p", prev, replaced)
+				}
+				rev = mm.Revision()
+				_, waits["spend"] = mm.spendByKindIn(prev, ms["pool"])
+				mk := *ms["pool"]
+				_, waits["consume"] = mm.exactConsumeIn(prev, &mk, true)
+				for name, w := range waits {
+					if w == nil {
+						t.Errorf("a %s in the replaced view settled: it is closed", name)
+						continue
+					}
+					select {
+					case <-w:
+						t.Errorf("a %s in the replaced view was released before the revisions moved", name)
+					default:
+					}
+				}
+			}
+			tc.next(mm, ms)
+			mm.exact.beforeBump = nil
+			if mm.Revision() == rev {
+				t.Fatal("the install moved no revision")
+			}
+			for name, w := range waits {
+				if w == nil {
+					continue
+				}
+				select {
+				case <-w:
+				default:
+					t.Errorf("a %s in the replaced view is never released", name)
+				}
+			}
+			if !mm.SpendByKind(ms["pool"]) {
+				t.Fatal("retried, the spend does not settle in the new view")
+			}
+		})
+	}
+}
+
+// A view that is not closed is settled at once: the gap's wait is only for a
+// closed view (no seam is reached).
+func TestASpendInAnOpenViewDoesNotWait(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	mm.exact.onClosedWait = func() { t.Error("a spend in an open view waited") }
+	defer func() { mm.exact.onClosedWait = nil }()
+	if !mm.SpendByKind(ms["pool"]) {
+		t.Fatal("a spend in an open view was refused")
+	}
 }

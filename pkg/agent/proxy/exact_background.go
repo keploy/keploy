@@ -225,24 +225,49 @@ func (m *MockManager) KindBackground(kind models.Kind) (unused, spent []*models.
 // mk's place, as the delete doors spend a background recording the view shows
 // (exactConsume). False when mk is no background recording of the set, was
 // spent already, or the set is served by today's rules.
+//
+// A spend that finds its view closed (a test's begin or end replacing it) is
+// no refusal: it waits until the replacing view is installed and the
+// revisions moved, and spends against that one (closedWait), as exactConsume
+// does. While a view is in force, its close never refuses a spend.
 func (m *MockManager) SpendByKind(mk *models.Mock) bool {
-	v := m.exactView()
+	var waited *exactView
+	for {
+		v := m.exactView()
+		if v != nil && v == waited {
+			// The view waited on is in force again: none replaces it.
+			return false
+		}
+		spent, wait := m.spendByKindIn(v, mk)
+		if wait == nil {
+			return spent
+		}
+		m.waitReplaced(wait)
+		waited = v
+	}
+}
+
+// spendByKindIn is SpendByKind settled against v. wait, when not nil, says v
+// is closed: nothing was spent, and the spend is to be settled again once
+// wait is closed.
+func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan struct{}) {
 	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) || v.spentBackground(mk.Name) {
-		return false
+		return false, nil
 	}
 	m.prepareOutside()
 	// The view's closed check and the spend are one step, as exactConsume's.
 	v.mu.Lock()
-	verdict := exactRefused
-	if !v.closed {
-		verdict = m.consumeOutside(mk)
+	if wait := v.closedWait(); wait != nil {
+		v.mu.Unlock()
+		return false, wait
 	}
+	verdict := m.consumeOutside(mk)
 	v.mu.Unlock()
 	if verdict != exactServed {
-		return false
+		return false, nil
 	}
 	m.noteExactSpent(mk)
-	return true
+	return true, nil
 }
 
 var _ integrations.ByKindBackground = (*MockManager)(nil)

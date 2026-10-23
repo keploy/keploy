@@ -314,9 +314,11 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	equalNames(t, "without exact serving", sess, "a")
 }
 
-// A consume that read a view before another replaced it lands on the view it
-// read: it answers nothing there, so what the replaced view says it
-// consumed is final.
+// A consume that read a view before another replaced it settles nothing in
+// the view it read: that view is closed, and what it says it consumed is
+// final. It is settled against the view in force instead (closedWait), here
+// the pool's, which does not show the test's mock: refused. A view waited on
+// that comes back in force (none replaces it) refuses at once.
 func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{a}, nil)
@@ -327,10 +329,24 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	mm.ServeExactPool("-", nil)
 	// The race: a consume that loaded v before the swap.
 	mk := *held[0]
+	verdict, wait := mm.exactConsumeIn(v, &mk, true)
+	if verdict != exactRefused || wait == nil {
+		t.Fatalf("a consume in a replaced view: %v, wait %v; want refused, to be settled in the view in force", verdict, wait)
+	}
+	select {
+	case <-wait:
+	default:
+		t.Fatal("the replaced view's replacement is in force, yet a consume of it still waits")
+	}
+	if verdict := mm.exactConsume(&mk, true); verdict != exactRefused {
+		t.Fatalf("a consume of the ended test's mock in the pool's view: %v", verdict)
+	}
+	if _, consumed, _, _ := mm.ExactTestOutcome(); len(consumed) != 0 {
+		t.Fatalf("the replaced view's outcome changed: %v", consumed)
+	}
 	mm.exact.view.Store(v)
-	verdict := mm.exactConsume(&mk, true)
-	if verdict != exactRefused {
-		t.Fatalf("a consume in a replaced view: %v", verdict)
+	if verdict := mm.exactConsume(&mk, true); verdict != exactRefused {
+		t.Fatalf("a consume in a closed view back in force: %v", verdict)
 	}
 	if _, consumed, _, _ := mm.ExactTestOutcome(); len(consumed) != 0 {
 		t.Fatalf("the replaced view's outcome changed: %v", consumed)
