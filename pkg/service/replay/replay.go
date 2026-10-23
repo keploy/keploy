@@ -483,6 +483,13 @@ type Replayer struct {
 	// the app's container of a compose stack kept across sets, which the
 	// next set starts again (P101-c).
 	composeAppStopped bool
+	// composeAppMayHaveRun: the app of a compose stack kept across sets may
+	// have run against the stack's agent, from the first time keploy made
+	// that agent ready (compose starts the app only once it is) on. Before
+	// that, an agent ensureAgentHoldsStoredMocks finds replaced was replaced
+	// under an app that never ran against the one before it (compose's
+	// bring-up retry); after it, the app may have.
+	composeAppMayHaveRun bool
 	// keepAliveStop, under the proven switch, stops the application
 	// --keep-app-alive started once for the run (natively, or with docker
 	// run), waits for it, and says why it had to kill it, "" when it did not
@@ -1006,7 +1013,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	// This run's last set, and its final attempt, are this run's alone.
 	r.keepAliveStop, r.isLastTestSet, r.finalAttempt = nil, false, false
-	r.composeAppStopped = false
+	r.composeAppStopped, r.composeAppMayHaveRun = false, false
 	if effectiveKeepAlive {
 		// Under the proven switch the app runs under a context of its own,
 		// so the last set's end can stop it, and wait for it, before its
@@ -2452,7 +2459,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
+		// Whether this stack's app may have run against its agent before
+		// this set: a stack this set brought up has run nothing yet, and a
+		// stack kept across sets has once keploy made its agent ready.
+		appRanBefore := serveTest && r.composeAppMayHaveRun
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
+		if serveTest {
+			r.composeAppMayHaveRun = true
+		}
 		if errors.Is(err, provenswitch.ErrAgentSwitch) {
 			// The agent and this keploy are on different proven paths: no
 			// verdict of this set could be trusted.
@@ -2525,7 +2539,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Re-register with the replacement, or fail this test set loudly rather
 		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
-			totalConsumedMocks, useMappingBased, testCases, agentWatch); err != nil {
+			totalConsumedMocks, useMappingBased, testCases, agentWatch, appRanBefore); err != nil {
 			return models.TestSetStatusFailed, err
 		}
 	}
@@ -6825,11 +6839,20 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // consumption history (see agentHistoryIncompleteForRun).
 //
 // agentWatch, under the proven switch, is the set's watch of the agent's
-// process (watchAgent). Once the replacement is set up again it keeps to the
-// replacement: the app never ran against the agent it replaced (compose's
-// retry runs only while the app's container was never started), so none of
-// the set's evidence was on that one.
-func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase, agentWatch models.AgentInstanceWatch) error {
+// process (watchAgent). appRanBefore says the application may have run
+// against the stack's agent before this set's bring-up (a stack kept across
+// sets, past its first bring-up, a set run again on it included). Where it
+// may not have, the replacement is the bring-up retry's, which runs only
+// while the app's container was never started: once set up again, the watch
+// keeps to it, and its capture-loss counts are all the set's
+// (agentSetUpAgain), none of the set's evidence having been on the one it
+// replaced. Where it may have, what the app did against the agent replaced,
+// and what that one counted of the app's processes, went with it: the watch
+// says the set's agent was started again, and the bases that outlive a set
+// stay that one's, so each test is charged
+// models.CaptureLossAgentStartedAgain until keploy starts the application
+// anew under the new agent.
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase, agentWatch models.AgentInstanceWatch, appRanBefore bool) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -6933,11 +6956,14 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		}
 		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 	}
-	if agentWatch != nil {
-		agentWatch.Accept()
+	if !appRanBefore {
+		if agentWatch != nil {
+			agentWatch.Accept()
+		}
+		// So do the capture-loss counts: the replacement's are all this
+		// set's.
+		r.agentSetUpAgain(ctx)
 	}
-	// So do the capture-loss counts: the replacement's are all this set's.
-	r.agentSetUpAgain(ctx)
 
 	confirmed, err := r.probeMockStats(ctx)
 	if err != nil {

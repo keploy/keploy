@@ -357,9 +357,10 @@ func (r *Replayer) appStartsAnew() {
 
 // agentSetUpAgain is told the agent process that answers now was set up
 // again in full before the application ran against it (the docker compose
-// bring-up's retry, ensureAgentHoldsStoredMocks): nothing of this set's was
-// on the process it replaced, so every count this one holds is the set's and
-// its application's, counted from its start (nil bases). A read of the counts
+// bring-up's retry, on a stack whose app never ran against the agent it
+// replaced: ensureAgentHoldsStoredMocks): nothing of this set's was on the
+// process it replaced, so every count this one holds is the set's and its
+// application's, counted from its start (nil bases). A read of the counts
 // names it; one that fails leaves the set's tests unread, as a mark that
 // could not be read does.
 func (r *Replayer) agentSetUpAgain(ctx context.Context) {
