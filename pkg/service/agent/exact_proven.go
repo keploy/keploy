@@ -564,6 +564,10 @@ func (a *Agent) ServedBackground() string {
 type testBackground struct {
 	noSibling map[string]bool
 	idle      map[string]bool
+	// keyErrs say, for each background recording two or more of its kind's
+	// exact keys claim (models.ExactKeyErr), why it has no key: it counts as
+	// having siblings. In recorded order of the names read.
+	keyErrs []string
 }
 
 // settleBackground settles the staged set's background under S12's rules, for
@@ -585,14 +589,21 @@ func (a *Agent) settleBackground(ex *models.ExactServing) *testBackground {
 			zap.String("next_step", "fix the error above, or record the test set again if its mocks cannot be read"))
 		byName = nil
 	}
-	return backgroundOf(ex.Worker, ex.Pool, byName)
+	bg := backgroundOf(ex.Worker, ex.Pool, byName)
+	for _, why := range bg.keyErrs {
+		a.logger.Warn("a recording of the test set's background has no exact key: it answers only from its place, and a call made before it misses",
+			zap.String("why", why),
+			zap.String("next_step", "make each parser's exact key decline (ok false) the recordings it does not own"))
+	}
+	return bg
 }
 
 // backgroundOf is the background of a set whose worker scope is worker and
 // whose pool is pool, its recordings by name in byName (testBackground): a
 // worker-scope recording whose kind keys it (models.ExactKeyOf) and that no
 // other data-plane recording of the background shares the key of has no
-// sibling; one byName lacks, or its kind cannot key, has (it stays gated).
+// sibling; one byName lacks, or its kind cannot key, or two of its kind's
+// keys claim (models.ExactKeyErr, in keyErrs), has (it stays gated).
 func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*models.Mock) *testBackground {
 	bg := &testBackground{noSibling: map[string]bool{}, idle: map[string]bool{}}
 	names := append(append([]string(nil), pool...), entryNames(worker)...)
@@ -609,14 +620,28 @@ func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*m
 		}
 		return string(mk.Kind) + "\x00" + k, true
 	}
+	errSeen := map[string]bool{}
+	for _, n := range names {
+		mk := byName[n]
+		if mk == nil || mk.IsProtocolPhase() || errSeen[n] {
+			continue
+		}
+		errSeen[n] = true
+		if err := models.ExactKeyErr(mk); err != nil {
+			bg.keyErrs = append(bg.keyErrs, err.Error())
+		}
+	}
+	// Each recording counts under every key its kind's keys give it, so one
+	// two keys claim (and so keyless itself) is a sibling under either.
 	seen := map[string]bool{}
 	for _, n := range names {
-		if seen[n] {
+		mk := byName[n]
+		if seen[n] || mk == nil || mk.IsProtocolPhase() {
 			continue
 		}
 		seen[n] = true
-		if k, ok := keyOf(byName[n]); ok {
-			keys[k]++
+		for _, k := range models.ExactKeyClaims(mk) {
+			keys[string(mk.Kind)+"\x00"+k]++
 		}
 	}
 	for _, e := range worker {

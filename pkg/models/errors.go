@@ -288,8 +288,11 @@ type MockMismatchReport struct {
 	Concurrent *ConcurrentNote
 	// Answer, under the proven switch, says the call WAS answered, and how;
 	// "" for a miss. AnswerProvisional: record's full round answered it with
-	// ClosestMock, a recording RecordedIn owns (a pairing, S12 v16 §4.1);
-	// Drift says it drifted, Differs naming the leaves learned as noise.
+	// ClosestMock, a recording another test owns (a pairing, S12 v16 §4.1),
+	// which judging then moves to the set's background; RecordedIn stays
+	// empty on an answer (the parser's store names no recording's test), and
+	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
+	// drifted, Differs naming the leaves learned as noise.
 	// AnswerByKind: a background write answered by its kind (§3), unchecked;
 	// Reused says the kind's recordings were used up. An answer never counts
 	// against a test and never lands in a miss list. The proxy's sink copies
@@ -303,9 +306,9 @@ type MockMismatchReport struct {
 	// unused), which the proxy's sink fills from the connection's pid, for a
 	// miss and an answer alike.
 	Source *Origin `json:"source,omitempty" yaml:"source,omitempty"`
-	// RecordedIn is, on an answer (AnswerProvisional), the test that owns
-	// ClosestMock, the recording the call was answered with
-	// (UnmatchedCall.RecordedIn).
+	// RecordedIn is UnmatchedCall.RecordedIn, which the sink copies. No
+	// parser fills it: it stays empty on an answer (see Answer), and on a
+	// miss the replay names the owner (UnmatchedCall.RecordedIn).
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
 }
 

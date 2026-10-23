@@ -505,8 +505,11 @@ type UnmatchedCall struct {
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
 	// Answer, under the proven switch, says the call WAS answered, and how;
 	// "" for a miss. AnswerProvisional: record's full round answered it with
-	// ClosestMock, a recording RecordedIn owns (a pairing, S12 v16 §4.1);
-	// Drift says it drifted, Differs naming the leaves learned as noise.
+	// ClosestMock, a recording another test owns (a pairing, S12 v16 §4.1),
+	// which judging then moves to the set's background; RecordedIn stays
+	// empty on an answer (the parser's store names no recording's test), and
+	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
+	// drifted, Differs naming the leaves learned as noise.
 	// AnswerByKind: a background write answered by its kind (§3), unchecked;
 	// Reused says the kind's recordings were used up. An answer never counts
 	// against a test and never lands in a miss list.

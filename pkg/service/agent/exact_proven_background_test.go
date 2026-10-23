@@ -9,6 +9,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // testQueue is a kind of this test's own, so no parser's registration is
@@ -115,6 +116,55 @@ func (p *backgroundExactProxy) ServeExactBackground(rules string, pool, worker [
 
 func (p *backgroundExactProxy) SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) error {
 	return nil
+}
+
+// A recording two of its kind's exact keys claim has no key: it counts as
+// having siblings, so it stays gated by its place, and the background says
+// why (models.ExactKeyErr), naming the recording. It is a sibling under each
+// key it was given, so a recording one of those keys alone gives the same key
+// stays gated too. A recording one key owns alone, with no sibling, keeps its
+// no-sibling reach.
+func TestBackgroundOfGatesARecordingTwoExactKeysClaim(t *testing.T) {
+	registerTestQueue(t)
+	t.Cleanup(models.RegisterExactKey(testQueue, func(m *models.Mock) (string, bool) {
+		if k := m.Spec.Metadata["also"]; k != "" {
+			return "also " + k, true
+		}
+		return "", false
+	}))
+	claimed := queueMock("claimed", "DeleteMessage rh-1", false)
+	claimed.Spec.Metadata["also"] = "DeleteMessage rh-1"
+	byName := map[string]*models.Mock{
+		"claimed": claimed,
+		"twin":    queueMock("twin", "DeleteMessage rh-1", false),
+		"owned":   queueMock("owned", "ReceiveMessage q", false),
+	}
+	worker := []models.MockEntry{{Name: "claimed", Place: "post-url-1"}, {Name: "twin", Place: "post-url-1"}, {Name: "owned", Place: "post-url-1"}}
+	bg := backgroundOf(worker, nil, byName)
+	if bg.noSibling["claimed"] || bg.noSibling["twin"] || !bg.noSibling["owned"] {
+		t.Fatalf("no sibling: claimed %v, twin %v, owned %v; want the claimed one and its twin gated, the owned one reached", bg.noSibling["claimed"], bg.noSibling["twin"], bg.noSibling["owned"])
+	}
+	if len(bg.keyErrs) != 1 || !strings.Contains(bg.keyErrs[0], "recording claimed") {
+		t.Fatalf("the background says %q; want one error naming the claimed recording", bg.keyErrs)
+	}
+}
+
+// The background is settled by S12's rules only under the proven switch: a
+// staging that names them reaching an agent without it (one run with the
+// switch off, whatever its client sent) settles none, and every worker-scope
+// recording keeps today's gating.
+func TestSettleBackgroundNeedsTheSwitch(t *testing.T) {
+	registerTestQueue(t)
+	a := &Agent{logger: zap.NewNop()}
+	ex := &models.ExactServing{Stage: true, Background: models.RecordedWithS12Routing}
+	t.Setenv("KEPLOY_PROVEN", "")
+	if bg := a.settleBackground(ex); bg != nil {
+		t.Fatalf("without the switch the background is settled: %+v", bg)
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	if bg := a.settleBackground(ex); bg == nil {
+		t.Fatal("under the switch a staging naming S12's rules settles no background")
+	}
 }
 
 // A staging that names S12's rules (models.ExactServing.Background) tells the

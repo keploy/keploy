@@ -1,6 +1,11 @@
 package models
 
-import "sync"
+import (
+	"fmt"
+	"runtime"
+	"strings"
+	"sync"
+)
 
 // WRITE KINDS AND EXACT KEYS (S12 v16 §2.2, §2.3, §3).
 //
@@ -16,8 +21,12 @@ import "sync"
 //     background recording with no sibling may answer from the set's start.
 //
 // A kind nobody registers has neither: none of its writes is answered by
-// kind, and its background recordings keep today's Place gating whole. Each
-// is one registration per kind, from the parser's init function.
+// kind, and its background recordings keep today's Place gating whole. A
+// write kind is one registration per kind, from the parser's init function.
+// A kind may have several exact keys, each for the recordings its parser
+// owns (enterprise's SQS keys the HTTP recordings it serves, and another
+// HTTP parser may key its own): they are tried in registration order, and
+// one that does not own a recording says so (ok false).
 
 // RegisterWriteKind declares how kind's parser names a recorded write's kind,
 // for by-kind answering and record-time routing (S12 v16 §2.2, §3). of
@@ -37,27 +46,55 @@ func WriteKindOf(m *Mock) (string, bool) {
 	return writeKinds.of(m)
 }
 
-// RegisterExactKey declares kind's exact key: two recordings of kind with
-// equal keys are identical siblings under its exact-serving comparator
-// (S12 v16 §2.3's no-sibling rule). key returns false for a recording it
-// cannot key; that recording counts as having siblings, and stays gated by
-// its Place. A kind nobody registers keeps today's Place gating whole.
-// Registration rules as RegisterWriteKind's.
+// RegisterExactKey declares one of kind's exact keys: two recordings of kind
+// with equal keys are identical siblings under its exact-serving comparator
+// (S12 v16 §2.3's no-sibling rule). key returns false for a recording it does
+// not own or cannot key. A kind may have several keys, each registered by the
+// parser that owns the recordings it keys: they are tried in registration
+// order, and the one that keys a recording is its key. A recording no key
+// keys counts as having siblings, and stays gated by its Place; so does one
+// two or more keys claim (ExactKeyErr says which): the registry refuses to
+// pick between them, as an error when it is asked, never as a panic at init.
+// A kind nobody registers keeps today's Place gating whole. Call it from an
+// init function; a nil key panics. The returned function removes this
+// registration alone (tests).
 func RegisterExactKey(kind Kind, key func(*Mock) (string, bool)) (unregister func()) {
-	return exactKeys.register("RegisterExactKey", kind, key)
+	return exactKeys.register(kind, key, callerName(2))
 }
 
-// ExactKeyOf is m's exact key, from its kind's registration: false when none
-// is registered, or when it cannot key m. A registration that keys a
-// recording "" cannot key it.
+// ExactKeyOf is m's exact key, from the one registration of its kind that
+// keys it: false when none is registered, none keys m (or keys it ""), or
+// more than one does (ExactKeyErr).
 func ExactKeyOf(m *Mock) (string, bool) {
-	return exactKeys.of(m)
+	key, ok, _ := exactKeys.of(m)
+	return key, ok
 }
 
-var writeKinds, exactKeys mockNamers
+// ExactKeyErr is why m has no exact key although its kind's registrations
+// key it: two or more of them claim it, named by where each was registered.
+// nil when at most one does. The same recording and registrations give the
+// same error every time.
+func ExactKeyErr(m *Mock) error {
+	_, _, err := exactKeys.of(m)
+	return err
+}
+
+// ExactKeyClaims are the keys m's kind's registrations give it, in
+// registration order: one for a recording one key owns, two or more for one
+// several claim (ExactKeyErr), none otherwise. Siblings are counted by each:
+// a recording two keys claim has no key of its own, and is a sibling under
+// either of the keys it was given.
+func ExactKeyClaims(m *Mock) []string {
+	return exactKeys.claims(m)
+}
+
+var (
+	writeKinds mockNamers
+	exactKeys  exactKeyRegistry
+)
 
 // mockNamers is a registry of one naming function per kind: the
-// RegisterWriteKind and RegisterExactKey registries.
+// RegisterWriteKind registry.
 type mockNamers struct {
 	mu     sync.RWMutex
 	byKind map[Kind]*mockNamer
@@ -112,4 +149,103 @@ func (r *mockNamers) of(m *Mock) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// exactKeyRegistry is the RegisterExactKey registry: each kind's keys, in
+// registration order.
+type exactKeyRegistry struct {
+	mu     sync.RWMutex
+	byKind map[Kind][]*exactKey
+}
+
+// exactKey is one RegisterExactKey registration; its identity is what its
+// unregister removes, and where names the function that registered it.
+type exactKey struct {
+	fn    func(*Mock) (string, bool)
+	where string
+}
+
+// register appends fn to kind's keys (where names its registrant),
+// panicking on a nil fn. The returned function removes exactly this
+// registration: once removed, it does nothing.
+func (r *exactKeyRegistry) register(kind Kind, fn func(*Mock) (string, bool), where string) (unregister func()) {
+	if fn == nil {
+		panic("models.RegisterExactKey(" + string(kind) + "): a nil function")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byKind == nil {
+		r.byKind = map[Kind][]*exactKey{}
+	}
+	k := &exactKey{fn: fn, where: where}
+	r.byKind[kind] = append(r.byKind[kind], k)
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		keys := r.byKind[kind]
+		for i, o := range keys {
+			if o == k {
+				r.byKind[kind] = append(keys[:i:i], keys[i+1:]...)
+				if len(r.byKind[kind]) == 0 {
+					delete(r.byKind, kind)
+				}
+				return
+			}
+		}
+	}
+}
+
+// of is m's key by the one registration of its kind that keys it, every one
+// asked in registration order: false for a nil m, a kind with none, or a
+// mock none keys (or keys ""); false with err when two or more key it.
+func (r *exactKeyRegistry) of(m *Mock) (string, bool, error) {
+	keys, by := r.claimed(m)
+	if len(by) > 1 {
+		return "", false, fmt.Errorf("%d of the %s kind's exact keys key recording %s (registered by %s): keploy does not pick one, so it counts as having identical siblings and answers only from its place; each key must decline (ok false) a recording its parser does not own",
+			len(by), m.Kind, m.Name, strings.Join(by, ", "))
+	}
+	if len(keys) == 0 {
+		return "", false, nil
+	}
+	return keys[0], true, nil
+}
+
+// claims are the keys of claimed.
+func (r *exactKeyRegistry) claims(m *Mock) []string {
+	keys, _ := r.claimed(m)
+	return keys
+}
+
+// claimed asks every registration of m's kind, in registration order, and
+// returns the keys of those that key m (none for a nil m, or a key "") and
+// where each was registered.
+func (r *exactKeyRegistry) claimed(m *Mock) (keys, by []string) {
+	if m == nil {
+		return nil, nil
+	}
+	r.mu.RLock()
+	regs := append([]*exactKey(nil), r.byKind[m.Kind]...)
+	r.mu.RUnlock()
+	for _, k := range regs {
+		got, owns := k.fn(m)
+		if !owns || got == "" {
+			continue
+		}
+		keys = append(keys, got)
+		by = append(by, k.where)
+	}
+	return keys, by
+}
+
+// callerName is the function skip frames above callerName's caller, by its
+// full name ("" when it cannot be told).
+func callerName(skip int) string {
+	pc, _, _, ok := runtime.Caller(skip)
+	if !ok {
+		return ""
+	}
+	if fn := runtime.FuncForPC(pc); fn != nil {
+		return fn.Name()
+	}
+	return ""
 }
