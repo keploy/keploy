@@ -788,20 +788,28 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 
 // earlierRaw are the mocks of the test's recording that came before a
 // request recorded at at, as Classify reads them when no leaf names their
-// values: every mock any parser served earlier in the test, and every mock
-// recorded before it that the scope shows, that was served before the test
-// began, or that the store stages, served or not (visible: a start-up call
-// a kept-alive app never makes again in F is one). Each is read once. The
-// paired mock is not one, and neither is an exchange the learn step served
-// (earlier): its leaves and fixed parts, with what F saw at each, are read
-// instead (earlierOf). A mock served earlier in the test is read as the n-th
-// F served (learn.Raw.ServedAs), in served's order: the order every parser's
-// claim tells the tracker of (learn.Tracker.ServedMock), in which F gave the
-// application its recordings. dc keeps each mock's text for the test, read
-// with its answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
-// disk and that cannot be read back, and why; no mock is then returned, since
-// what it held cannot be told.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
+// values: every mock any parser served earlier in the test (served), every
+// one F served before the test began that is an earlier place of the call's
+// own test and was recorded before it (given: in the previous test, at the
+// start-up, between tests; ofPairedTest), and every mock recorded before it
+// that the scope shows or that the store stages, served or not (visible: a
+// start-up call a kept-alive app never makes again in F is one). Each is
+// read once. The paired mock is not one, and neither is an exchange the
+// learn step served (earlier): its leaves and fixed parts, with what F saw
+// at each, are read instead (earlierOf); where F served the paired mock
+// before the call, givenEarlier reads it for the offset rule alone. A mock
+// F served, in the test or before it, is read as F served it
+// (learn.Raw.ServedIn): at the first and the last of its serves in the one
+// order F served the set's mocks in,
+// across its start-up, its tests and the gaps between them (order, as the
+// read of the places saw it; 0, an order keploy cannot tell, which the
+// offset rule fails closed on). Every other mock F served in the set is a
+// place of the offset rule alone, read only where it needs them
+// (givenEarlier). dc keeps each mock's text for the test, read with its
+// answer (DriftCache.ReadRaw). err names one whose answer the agent parked
+// on disk and that cannot be read back, and why; no mock is then returned,
+// since what it held cannot be told.
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visible []*models.Mock, order learn.Order, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -809,35 +817,41 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 	}
 	read := map[string]bool{}
 	once := func(m *models.Mock) bool {
-		id := m.Name + "\x00" + string(m.Kind) + "\x00" + m.Spec.ReqTimestampMock.String()
+		id := rawID(m)
 		if read[id] {
 			return false
 		}
 		read[id] = true
 		return true
 	}
-	add := func(m *models.Mock, nth int) error {
-		r, err := dc.ReadRaw(m, nth > 0)
+	add := func(m *models.Mock, servedByF bool, span [2]int) error {
+		r, err := dc.ReadRaw(m, servedByF)
 		if err != nil {
 			return fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
 		}
-		if nth > 0 {
-			r = r.ServedAs(nth)
+		if servedByF {
+			r = r.ServedIn(span[0], span[1])
 		}
 		out = append(out, r)
 		return nil
 	}
-	for i, m := range served {
+	for _, m := range served {
 		prev.See(m)
-		if m != nil && !leafed[m.Name] && once(m) {
-			if err := add(m, i+1); err != nil {
+	}
+	for i, list := range [][]*models.Mock{served, given} {
+		spans := order.Spans(list)
+		for k, m := range list {
+			if m == nil || leafed[m.Name] || i == 1 && !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
+				continue
+			}
+			if err := add(m, true, spans[k]); err != nil {
 				return nil, err
 			}
 		}
 	}
 	for _, m := range visible {
 		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) && once(m) {
-			if err := add(m, 0); err != nil {
+			if err := add(m, false, [2]int{}); err != nil {
 				return nil, err
 			}
 		}
@@ -869,30 +883,98 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 	return out, nil
 }
 
+// rawID is a recording's identity as earlierRaw reads each once.
+func rawID(m *models.Mock) string {
+	return m.Name + "\x00" + string(m.Kind) + "\x00" + m.Spec.ReqTimestampMock.String()
+}
+
+// givenEarlier is the learn step's learn.GivenEarlier for the call paired
+// with paired: every mock of set (those F served in the running set before
+// the call, as the read of the places saw it) that earlierRaw reads no place
+// of (read: those it read as F served them, the test's served and its given
+// recorded before the call), each as F served it, by order. The paired mock
+// is one where F served it before the call (in the set: a pool's reusable
+// recording F gave the application at the start-up, or earlier in the
+// test), which earlierRaw never reads: recorded at the call's own instant,
+// it is a place F gave the application alone, never one the recording did.
+// Each is read once for the set, its places alone kept, its text not held
+// (learn.Order.GivenPlaces), a parked answer read back from disk only the
+// first time. The exchanges the learn step served leaf by leaf (earlier:
+// their payloads are read there) are not read again. An answer it cannot
+// read back is an error naming it.
+func givenEarlier(paired *models.Mock, set, served, given []*models.Mock, earlier []learn.Earlier, order learn.Order) learn.GivenEarlier {
+	return func() ([]learn.GivenPlaces, error) {
+		skip := make(map[string]bool, len(earlier))
+		for _, e := range earlier {
+			skip[e.Mock] = true
+		}
+		read := map[string]bool{}
+		for _, m := range served {
+			if m != nil && m.Name != paired.Name {
+				read[rawID(m)] = true
+			}
+		}
+		for _, m := range given {
+			if m != nil && m.Name != paired.Name && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
+				read[rawID(m)] = true
+			}
+		}
+		out := make([]learn.GivenPlaces, 0, len(set))
+		for _, m := range set {
+			if m == nil || skip[m.Name] || read[rawID(m)] {
+				continue
+			}
+			read[rawID(m)] = true
+			g, err := order.GivenPlaces(m)
+			if err != nil {
+				return nil, fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+			}
+			out = append(out, g)
+		}
+		return out, nil
+	}
+}
+
 // inServeOrder is earlier with the payload of each exchange the learn step
-// served leaf by leaf read as the n-th mock F served in the test
-// (learn.Raw.ServedAs), where served (the test's served mocks, in F's order,
-// as earlierRaw reads them) holds its recording; one it does not hold keeps
-// an order keploy cannot tell, which the offset rule fails closed on. A copy:
-// earlier is the round's.
-func inServeOrder(earlier []learn.Earlier, served []*models.Mock) []learn.Earlier {
-	nth := make(map[string]int, len(served))
-	for i, m := range served {
+// served leaf by leaf read as F served it (learn.Raw.ServedIn: the first and
+// the last of its serves in the one order F served the set's mocks in, by
+// order), where mocks (those F served in the test or before it, as
+// earlierRaw reads them) holds its recording; one they do not hold, or
+// order does not number, keeps an order keploy cannot tell, which the
+// offset rule fails closed on. A copy: earlier is the round's. Nothing is
+// numbered where no payload was read.
+func inServeOrder(earlier []learn.Earlier, mocks []*models.Mock, order learn.Order) []learn.Earlier {
+	read := false
+	for _, e := range earlier {
+		read = read || e.Payload.Read()
+	}
+	if !read {
+		return earlier
+	}
+	byID := make(map[string]*models.Mock, len(mocks))
+	var list []*models.Mock
+	for _, m := range mocks {
 		if m == nil {
 			continue
 		}
 		id := m.Name + "\x00" + m.Spec.ReqTimestampMock.String()
-		if _, ok := nth[id]; !ok {
-			nth[id] = i + 1
+		if _, ok := byID[id]; !ok {
+			byID[id] = m
+			list = append(list, m)
 		}
+	}
+	spans := order.Spans(list)
+	span := make(map[*models.Mock][2]int, len(list))
+	for k, m := range list {
+		span[m] = spans[k]
 	}
 	out := append([]learn.Earlier(nil), earlier...)
 	for i, e := range out {
 		if !e.Payload.Read() {
 			continue
 		}
-		if n := nth[e.Payload.Mock()+"\x00"+e.Payload.At().String()]; n > 0 {
-			out[i].Payload = e.Payload.ServedAs(n)
+		if m, ok := byID[e.Payload.Mock()+"\x00"+e.Payload.At().String()]; ok && span[m][0] > 0 {
+			out[i].Payload = e.Payload.ServedIn(span[m][0], span[m][1])
 		}
 	}
 	return out
@@ -963,7 +1045,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			return nil, nil, err
 		}
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
-		test, earlier, served, before := read.test, read.earlier, read.served, read.before
+		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
 		if read.awaiting {
 			// The call came after the test's window opened and before the
 			// filter that opens it brought its test case's request: it
@@ -1059,7 +1141,8 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			for _, s := range staged {
 				prev.See(s)
 			}
-			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(staged, m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
+			given := ofPairedTest(before, m, windows, own)
+			raw, err := earlierRaw(tracker.Drifts(), m, served, given, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...), order, recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
 			var unread recordedUnread
 			if errors.As(err, &unread) {
 				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
@@ -1070,12 +1153,12 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if err != nil {
 				h.Logger.Warn("the learn step cannot read back an earlier recorded answer the agent parked on disk; learning nothing from this call",
 					zap.String("mock", m.Name), zap.Error(err))
-				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of a recording made or served before this call, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			// The exchanges served leaf by leaf, each as the n-th mock F
 			// served, as the payloads among raw are.
-			earlier = inServeOrder(earlier, served)
+			earlier = inServeOrder(earlier, append(append([]*models.Mock(nil), served...), before...), order)
 			// A pool mock's call need not run on the clock F set for a
 			// test (at the start-up and between tests none is set, and a
 			// call made in a test was recorded in none): its clock reads
@@ -1089,7 +1172,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if !own || tracker.ClientTests() {
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
-			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w)
+			learned := learn.ClassifyGiven(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
@@ -1148,6 +1231,10 @@ type learnRead struct {
 	test           uint64
 	earlier        []learn.Earlier
 	served, before []*models.Mock
+	// set and order are F's serving of the running set as the read saw it
+	// (learn.Placed): the places of the offset rule alone (givenEarlier).
+	set   []*models.Mock
+	order learn.Order
 	// awaiting: the running test still awaits its test case's request
 	// (learn.Tracker.Places), and the pass learns nothing from its places.
 	awaiting bool
@@ -1174,6 +1261,8 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			earlier:  snap.Learn.Earlier,
 			served:   snap.Learn.Served,
 			before:   snap.Learn.Before,
+			set:      snap.Learn.Set,
+			order:    snap.Learn.Order,
 			awaiting: snap.Learn.Awaiting,
 			windows:  snap,
 			claimDb:  integrations.WithinRound(mockDb, snap.At),
@@ -1186,7 +1275,8 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 		return learnRead{}, err
 	}
 	r := learnRead{sc: sc, claimDb: mockDb, at: learnPass{rev: rev}}
-	r.test, r.earlier, r.served, r.before, r.awaiting = tracker.Places()
+	p := tracker.Placed()
+	r.test, r.earlier, r.served, r.before, r.awaiting, r.set, r.order = p.Test, p.Earlier, p.Served, p.Before, p.Awaiting, p.Set, p.Order
 	r.windows, _ = mockDb.(integrations.TestWindows)
 	return r, nil
 }

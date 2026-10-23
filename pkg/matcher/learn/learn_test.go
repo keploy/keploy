@@ -1655,7 +1655,7 @@ func TestAReasonIsOneTextForOneInput(t *testing.T) {
 		// of them, in the payload that holds it (unaccounted).
 		{"an unaccounted word in a payload", "x-aaa1", "x-bbb2-ccc3",
 			[]*models.Mock{mk("mock-1", `{"a":"ccc3"}`, nil, -3*time.Second), mk("mock-2", `{"b":"bbb2"}`, nil, -2*time.Second)},
-			"unaccounted |  |  | a word of what record's full round saw in it (its characters 3 to 6) appears earlier in the test, in mock-2"},
+			"unaccounted |  |  | a word of what record's full round saw in it (its characters 3 to 6) appears in an earlier recording, in mock-2"},
 	} {
 		seen := map[string]int{}
 		for i := 0; i < 200; i++ {

@@ -843,7 +843,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
 					at = x.mock + " at " + f
 				}
-				return word(t, recorded) + " appears earlier in the test, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				return word(t, recorded) + " appears in an earlier recording, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
 			}
 		}
 		return ""

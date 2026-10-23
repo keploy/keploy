@@ -29,6 +29,28 @@ type Tracker struct {
 	// move at one moment, so a call near it may be either test's, and its
 	// earlier places may be there.
 	before []*models.Mock
+	// set are the mocks F served in the running set, each once, in the
+	// order F first served it: at its start-up, in its tests and between
+	// them. F gave the application every one of them before any later call,
+	// as much as one served in the call's test: an application that
+	// consumes a message in one test (or at the start-up) may build a value
+	// on it in a later one. Append only, so a read hands out a prefix of it
+	// without a copy (Placed.Set). serves are the numbers of every serve of
+	// each (mockID), in one sequence across the set (1 the first; Order),
+	// and seq the last number given: the order in which F gave the
+	// application its recordings, wherever in the set it gave them. NewSet
+	// forgets them: it replaces serves, never changes it, so an Order read
+	// before keeps the numbers it read. set holds every mock F served in the
+	// set, by pointer, until the set ends: the store keeps each of them for
+	// the set as well, so it holds no text the store does not.
+	set    []*models.Mock
+	serves map[string][]int
+	seq    int
+	// places are the instants of each mock F served in the running set, as
+	// the offset rule reads them (GivenPlaces), read from its recording once
+	// for the set (Order.GivenPlaces): no text of it is kept. NewSet
+	// replaces it.
+	places *setPlaces
 	// outside are the mocks served while no test was open (the start-up,
 	// between tests), by every later test: each is an earlier place of every
 	// test that follows, not of the next one alone. The exact view shows a
@@ -121,7 +143,7 @@ type Tracker struct {
 
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
-	return &Tracker{drifts: NewDriftCache()}
+	return &Tracker{drifts: NewDriftCache(), places: newSetPlaces()}
 }
 
 // NewSet starts the next test set's replay on the same agent: what was served
@@ -141,6 +163,8 @@ func (t *Tracker) NewSet() {
 	t.setEpoch = t.epoch
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
+	t.set, t.serves, t.seq = nil, nil, 0
+	t.places = newSetPlaces()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
@@ -527,8 +551,32 @@ func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 // that opens the test or after. It never waits itself: a caller may read it
 // holding a lock of its own.
 func (t *Tracker) Places() (uint64, []Earlier, []*models.Mock, []*models.Mock, bool) {
+	p := t.Placed()
+	return p.Test, p.Earlier, p.Served, p.Before, p.Awaiting
+}
+
+// Placed is one read of the tracker's places (Places), with F's serving of
+// the running set as that read saw it: every mock F served in the set so far
+// (Set) and the order it served them in (Order).
+type Placed struct {
+	Test           uint64
+	Earlier        []Earlier
+	Served, Before []*models.Mock
+	Awaiting       bool
+	// Set is every mock F served in the running set before the read, each
+	// once, in the order F first served it (Tracker.set): a prefix of the
+	// tracker's own list, which only grows, so no later serve shows in it.
+	Set []*models.Mock
+	// Order is where in the set F served each of them, as of the read.
+	Order Order
+}
+
+// Placed is Places with the set's serving (Placed.Set, Placed.Order), read
+// at one instant. It copies the running test's mocks, those served before it
+// began and those served while no test was open, never the whole set.
+func (t *Tracker) Placed() Placed {
 	if t == nil {
-		return 0, nil, nil, nil, false
+		return Placed{}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -547,7 +595,11 @@ func (t *Tracker) Places() (uint64, []Earlier, []*models.Mock, []*models.Mock, b
 		earlier = append(earlier, *t.given)
 	}
 	earlier = append(append(earlier, t.run...), t.served...)
-	return t.epoch, earlier, append([]*models.Mock(nil), t.mocks...), before, t.awaiting != nil
+	return Placed{
+		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
+		Set:   t.set[:len(t.set):len(t.set)],
+		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places},
+	}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -569,6 +621,14 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 		t.servedAt[i] = at
 	}
 	id := mockID(m)
+	if t.serves == nil {
+		t.serves = map[string][]int{}
+	}
+	if len(t.serves[id]) == 0 {
+		t.set = append(t.set, m)
+	}
+	t.seq++
+	t.serves[id] = append(t.serves[id], t.seq)
 	// Kept between tests too: the next Begin moves it to before.
 	if !t.kept[id] {
 		if t.kept == nil {
@@ -587,6 +647,62 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 		t.outside = append(t.outside, m)
 	}
 	t.mu.Unlock()
+}
+
+// Order is F's serving of the running set as one read of the tracker saw it
+// (Placed): the serves numbered up to the read's last, of the set the read
+// was of (serves, which NewSet replaces and never changes, so a read keeps
+// its set's numbers after the next set begins), and that set's places
+// (GivenPlaces). The zero Order knows no serve.
+type Order struct {
+	t      *Tracker
+	serves map[string][]int
+	upTo   int
+	places *setPlaces
+}
+
+// Of is where F served m in the set, in one sequence across its start-up,
+// its tests and the gaps between them (1 the first serve): the first and the
+// last of its serves the read saw. A mock F served once has one number for
+// both; a mock F served again (a pool's reusable recording) spans every
+// other serve in between. 0, 0 where the read saw no serve of m: an order
+// keploy cannot tell, which the offset rule fails closed on
+// (learn.Raw.ServedIn). The same for every call of the same read, whatever
+// F served since, in this set or after the next began.
+func (o Order) Of(m *models.Mock) (first, last int) {
+	if o.t == nil || m == nil {
+		return 0, 0
+	}
+	o.t.mu.Lock()
+	defer o.t.mu.Unlock()
+	return o.ofLocked(mockID(m))
+}
+
+// Spans is Of of each of ms, in one hold of the tracker's lock.
+func (o Order) Spans(ms []*models.Mock) [][2]int {
+	out := make([][2]int, len(ms))
+	if o.t == nil {
+		return out
+	}
+	o.t.mu.Lock()
+	defer o.t.mu.Unlock()
+	for i, m := range ms {
+		if m != nil {
+			out[i][0], out[i][1] = o.ofLocked(mockID(m))
+		}
+	}
+	return out
+}
+
+// ofLocked is Of of the mock of identity id, o.t.mu held (the running set's
+// serves still grow under it).
+func (o Order) ofLocked(id string) (first, last int) {
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 {
+		return 0, 0
+	}
+	return n[0], n[k-1]
 }
 
 // Drifts is what each value drifted, kept for the running test (Classify),

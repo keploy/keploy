@@ -454,7 +454,9 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	if t := q.Tracker; t != nil {
 		number, open, began := t.State()
 		s.Learn = integrations.LearnRead{Bound: true, Number: number, Open: open, Begun: began}
-		_, s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = t.Places()
+		p := t.Placed()
+		s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = p.Earlier, p.Served, p.Before, p.Awaiting
+		s.Learn.Set, s.Learn.Order = p.Set, p.Order
 		s.Learn.Answered = t.AnsweredMocks()
 	}
 	s.Phase, s.Boundary = m.phaseLocked(v, s.Learn)

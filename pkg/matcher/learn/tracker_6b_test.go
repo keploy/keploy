@@ -17,29 +17,85 @@ func beforeNames(t *Tracker) []string {
 	return out
 }
 
-// A mock served while no test is open (the start-up, between tests) is an
-// earlier place of every later test, once; one served in a test is one of
-// the next test only, as before.
+// A mock served before a test, anywhere in the set (the start-up, an earlier
+// test, between tests), is an earlier place of every later test, once, in the
+// order F first served it: F gave the application every one of them, and an
+// application that consumed one in an earlier test may build a value on it
+// in a later one. Each keeps the number F first served it as, across the set.
 func TestTrackerKeepsWhatWasServedOutsideATestForEveryLaterTest(t *testing.T) {
 	tr := NewTracker()
-	tr.ServedMock(&models.Mock{Name: "startup"})
-	tr.Begin() // test 1
+	startup := &models.Mock{Name: "startup"}
+	tr.ServedMock(startup) // serve 1
+	tr.Begin()             // test 1
 	if got := beforeNames(tr); !reflect.DeepEqual(got, []string{"startup"}) {
 		t.Fatalf("test 1: before %v", got)
 	}
-	tr.ServedMock(&models.Mock{Name: "own-1"})
+	own1 := &models.Mock{Name: "own-1"}
+	tr.ServedMock(own1) // 2
 	tr.End()
-	tr.ServedMock(&models.Mock{Name: "between"})
-	tr.ServedMock(&models.Mock{Name: "startup"}) // served again
+	tr.ServedMock(&models.Mock{Name: "between"}) // 3
+	tr.ServedMock(startup)                       // 4: served again
 	tr.Begin()                                   // test 2
 	if got := beforeNames(tr); !reflect.DeepEqual(got, []string{"own-1", "between", "startup"}) {
 		t.Fatalf("test 2: before %v", got)
 	}
-	tr.ServedMock(&models.Mock{Name: "own-2"})
+	own2 := &models.Mock{Name: "own-2"}
+	tr.ServedMock(own2) // 5
 	tr.End()
 	tr.Begin() // test 3
 	if got := beforeNames(tr); !reflect.DeepEqual(got, []string{"own-2", "startup", "between"}) {
 		t.Fatalf("test 3: before %v, want test 2's own and everything served outside a test", got)
+	}
+	// The set: every mock F served in it, once, in the order it first served
+	// each, and each one's first and last serve, as of the read.
+	p := tr.Placed()
+	var names []string
+	for _, m := range p.Set {
+		names = append(names, m.Name)
+	}
+	if !reflect.DeepEqual(names, []string{"startup", "own-1", "between", "own-2"}) {
+		t.Fatalf("test 3: the set %v, want every mock F served in it, in the order it first served each", names)
+	}
+	want := [][2]int{{1, 4}, {2, 2}, {3, 3}, {5, 5}}
+	if got := p.Order.Spans(p.Set); !reflect.DeepEqual(got, want) {
+		t.Fatalf("test 3: serves %v, want %v", got, want)
+	}
+	if f, l := p.Order.Of(&models.Mock{Name: "never"}); f != 0 || l != 0 {
+		t.Fatalf("a mock F never served is numbered %d..%d", f, l)
+	}
+	// A later serve changes no earlier read: its order and its set stay
+	// what that read saw.
+	tr.ServedMock(startup)                    // 6
+	tr.ServedMock(&models.Mock{Name: "late"}) // 7
+	if f, l := p.Order.Of(startup); f != 1 || l != 4 || len(p.Set) != 4 {
+		t.Fatalf("an earlier read sees a later serve: startup %d..%d, set of %d", f, l, len(p.Set))
+	}
+	if f, l := tr.Placed().Order.Of(startup); f != 1 || l != 6 || len(tr.Placed().Set) != 5 {
+		t.Fatalf("a later read: startup %d..%d, set of %d", f, l, len(tr.Placed().Set))
+	}
+	// A read keeps its set's numbers and places after the next set begins,
+	// so a straggler's verdict does not depend on when NewSet ran; the new
+	// set numbers its own serves from 1, with places of its own.
+	g, err := p.Order.GivenPlaces(own2)
+	if f, l := g.Span(); err != nil || f != 5 || l != 5 || g.Mock() != "own-2" {
+		t.Fatalf("own-2's places served in %d..%d (%v)", f, l, err)
+	}
+	if _, ok := p.Order.places.of[mockID(own2)]; !ok {
+		t.Fatal("own-2's places are not kept for the set")
+	}
+	tr.NewSet()
+	if f, l := p.Order.Of(own2); f != 5 || l != 5 || len(beforeNames(tr)) != 0 || len(tr.Placed().Set) != 0 {
+		t.Fatalf("a read of the previous set lost its order (%d..%d), or the new set keeps its places %v", f, l, beforeNames(tr))
+	}
+	tr.ServedMock(own2)
+	if f, l := tr.Placed().Order.Of(own2); f != 1 || l != 1 {
+		t.Fatalf("the new set's first mock is numbered %d..%d", f, l)
+	}
+	if f, l := p.Order.Of(own2); f != 5 || l != 5 {
+		t.Fatalf("a read of the previous set numbers the new set's serve: %d..%d", f, l)
+	}
+	if q := tr.Placed().Order.places; q == p.Order.places || len(q.of) != 0 {
+		t.Fatal("the new set reads the previous set's places")
 	}
 }
 

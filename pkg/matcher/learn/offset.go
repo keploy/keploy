@@ -3,7 +3,10 @@ package learn
 import (
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // AN INSTANT BUILT ON A SERVED ONE BY AN OFFSET.
@@ -33,16 +36,24 @@ import (
 //     number of elements puts the instant a value is built on at another
 //     index): one the recording
 //     gave the application before the call (recorded before it: hr), and
-//     another that record's full round gave it in the test (served earlier
-//     in it, the payload of an exchange served leaf by leaf too,
-//     Earlier.Payload: hf), where one of the two is not what the other run
+//     another that record's full round gave it before the call (served
+//     earlier in the test, the payload of an exchange served leaf by leaf
+//     too, Earlier.Payload, or before the test in the running set: at its
+//     start-up, in an earlier test, between tests; another recorded test's
+//     too, which this rule alone reads, Raw.OfAnotherTest: hf), where one
+//     of the two is not what the other run
 //     gave it too: hr one F did not give it, or hf one the recording did not
 //     give it before the call, or both what both runs gave it, which F gave
 //     in another order than the recording did (an application that takes
 //     the first or the last of what it received takes the other one then)
-//     or in an order keploy cannot tell (Raw.ServedAs: it fails closed).
-//     Two recordings both runs gave the application in the order the
-//     recording did are no move (F gave it nothing in their place), nor
+//     or in an order keploy cannot tell (Raw.ServedIn: it fails closed).
+//     F's order is one sequence of serves across the set (Order.Of), so a
+//     recording F served before the test and one it served in it are in
+//     order or not as two served in it are; one F served again after the
+//     other (a pool's reusable recording) is in neither order. Two
+//     recordings both runs gave the application in the order the recording
+//     did, each served wholly before the other's first serve, wherever in
+//     the set F gave them, are no move (F gave it nothing in their place), nor
 //     are answers to two calls; or an instant of a part of the test case's request that keploy
 //     test sent with another value than recorded (Earlier.Given). An answer's own clock stamp
 //     and a protocol-phase answer's own clock reads are none (rules 2 and 3:
@@ -69,11 +80,12 @@ import (
 // call, the call its recording answers (callOf; "" of the test case's
 // request); recorded, whether the recording gave the application it before
 // the call (its mock recorded before the call: a place's moment as the
-// recording gave it, hr), and given, whether record's full round gave it in
-// the test (served earlier in it: a place's moment as F gave it, hf); at,
-// when its mock's request was recorded, and nth, where F served it in the
-// test (Raw.ServedAs; 0 where it did not or that is not known): the two
-// orders the two runs gave the application their recordings in.
+// recording gave it, hr), and given, whether record's full round gave it
+// before the call (served earlier in the test or before it in the set: a
+// place's moment as F gave it, hf); at, when its mock's request was
+// recorded, and first and last, the first and the last of F's serves of it
+// in the set (Raw.ServedIn; 0 where it did not or that is not known): the
+// two orders the two runs gave the application their recordings in.
 type offsetPlace struct {
 	m               moment
 	mock            string
@@ -81,24 +93,30 @@ type offsetPlace struct {
 	call            string
 	recorded, given bool
 	at              time.Time
-	nth             int
+	first, last     int
 }
 
 // inRecordedOrder reports whether F gave the application the recordings of
 // the places a and b, both of which both runs gave it, in the order the
-// recording did: then F gave it nothing in the other's place, and a value
-// that moved from one to the other moved by something else. One recording's
-// two places are in its order. Two recordings F gave it in another order, or
-// in one keploy cannot tell (either's not known, or both recorded at one
-// instant), are not: the application may have taken the other one.
+// recording did: every serve of the one the recording gave first came
+// before every serve of the other, so F gave it nothing in the other's
+// place, and a value that moved from one to the other moved by something
+// else. One recording's two places are in its order. Two recordings F gave
+// it in another order, with their serves interleaved (a pool's recording F
+// served at the start-up and again after the other), or in an order keploy
+// cannot tell (either's not known, or both recorded at one instant), are
+// not: the application may have taken the other one.
 func inRecordedOrder(a, b offsetPlace) bool {
 	if a.mock == b.mock && a.at.Equal(b.at) {
 		return true
 	}
-	if a.nth == 0 || b.nth == 0 || a.nth == b.nth || a.at.Equal(b.at) {
+	if a.first == 0 || b.first == 0 || a.at.Equal(b.at) {
 		return false
 	}
-	return a.at.Before(b.at) == (a.nth < b.nth)
+	if b.at.Before(a.at) {
+		a, b = b, a
+	}
+	return a.last < b.first
 }
 
 // offsetKey is a place of an answer, as two recordings of a kind each hold
@@ -150,41 +168,56 @@ func instantLabel(t string, spans []instant, i int) string {
 type offsetPlaces struct {
 	byPlace map[offsetKey][]offsetPlace
 	given   [][2]offsetPlace
+	// unread names a place F gave the application that could not be read
+	// (GivenEarlier): every changed instant the rule reads is refused with
+	// it (offsetFrom).
+	unread string
 }
 
 // offsetPlacesOf reads the places the offset rule reads for a call recorded
-// at at (offsetPlaces): each payload served earlier in the test or recorded
-// before at (raw), and each Earlier.Payload of an exchange served leaf by leaf
-// (served), with stamps and protocol-phase answer clock reads blanked
-// (searched), each place said recorded where its recording came before at
-// and given where F served it in the test; and the parts of the test case's
-// own request keploy test sent with another value than recorded.
-func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw) *offsetPlaces {
+// at at (offsetPlaces): each payload F served before the call or recorded
+// before at (raw), each Earlier.Payload of an exchange served leaf by leaf
+// (served), and each recording F gave the application earlier in the set
+// that neither reads (set, read once for the set: GivenPlaces), with stamps
+// and protocol-phase answer clock reads blanked (searched), each place said
+// recorded where its recording came before at and given where F served it
+// before the call (in the test, before it, or anywhere earlier in the set);
+// and the parts of the test case's own request keploy test sent with
+// another value than recorded.
+func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, set []GivenPlaces) *offsetPlaces {
 	op := &offsetPlaces{byPlace: map[offsetKey][]offsetPlace{}}
-	// One recording read once, whether F gave it the application in the test
-	// as any of its readings says: a payload a leaf-by-leaf exchange gives
-	// and the same recording among raw are one.
+	// One recording read once, whether F gave it the application before
+	// the call as any of its readings says: a payload a leaf-by-leaf
+	// exchange gives, the same recording among raw, and among set are one.
+	// Its serves, where two readings of it number them, span both: an order
+	// read wider than it is fails closed (inRecordedOrder).
 	type payload struct {
-		x     Raw
-		given bool
-		nth   int
+		x           Raw
+		given       bool
+		first, last int
 	}
 	var payloads []*payload
 	byID := map[string]*payload{}
+	merge := func(p *payload, given bool, first, last int) {
+		if !given {
+			first, last = 0, 0
+		}
+		p.given = p.given || given
+		switch {
+		case p.first == 0:
+			p.first, p.last = first, last
+		case first > 0:
+			p.first, p.last = min(p.first, first), max(p.last, last)
+		}
+	}
 	add := func(x Raw, given bool) {
 		id := x.mock + "\x00" + x.at.String()
-		nth := 0
-		if given {
-			nth = x.nth
-		}
 		if p, ok := byID[id]; ok {
-			p.given = p.given || given
-			if p.nth == 0 {
-				p.nth = nth
-			}
+			merge(p, given, x.first, x.last)
 			return
 		}
-		p := &payload{x: x, given: given, nth: nth}
+		p := &payload{x: x}
+		merge(p, given, x.first, x.last)
 		byID[id] = p
 		payloads = append(payloads, p)
 	}
@@ -215,27 +248,28 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw) 
 			add(e.Payload, true)
 		}
 	}
+	var others []GivenPlaces
+	for _, g := range set {
+		if !g.read {
+			continue
+		}
+		if p, ok := byID[g.mock+"\x00"+g.at.String()]; ok {
+			merge(p, true, g.first, g.last)
+			continue
+		}
+		others = append(others, g)
+	}
+	put := func(kp keyedPlace, mock, call string, rat time.Time, given bool, first, last int) {
+		op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mock, where: kp.where, call: call, recorded: rat.Before(at), given: given, at: rat, first: first, last: last})
+	}
 	for _, p := range payloads {
-		x := p.x
-		recorded := x.at.Before(at)
-		text := dc.searched(x, false)[0]
-		answers := hasAnswerField(x.fields)
-		for _, f := range x.fields {
-			if f.key || f.end > len(text) || answers && !answerFields[fieldRoot(f.path)] {
-				continue
-			}
-			own := text[f.start:f.end]
-			where := x.mock + " at " + f.describe()
-			for form, t := range []string{own, dc.rawExtra(own)} {
-				spans := dc.spansOf(t)
-				for si, sp := range spans {
-					if !sp.keyed {
-						continue
-					}
-					k := offsetKey{path: f.path, form: form, layout: sp.layout, label: instantLabel(t, spans, si)}
-					op.byPlace[k] = append(op.byPlace[k], offsetPlace{m: sp.moment(), mock: x.mock, where: where, call: x.call, recorded: recorded, given: p.given, at: x.at, nth: p.nth})
-				}
-			}
+		for _, kp := range dc.keyedPlaces(p.x) {
+			put(kp, p.x.mock, p.x.call, p.x.at, p.given, p.first, p.last)
+		}
+	}
+	for _, g := range others {
+		for _, kp := range g.places {
+			put(kp, g.mock, g.call, g.at, true, g.first, g.last)
 		}
 	}
 	for k, list := range op.byPlace {
@@ -246,6 +280,134 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw) 
 		sort.SliceStable(list, func(i, j int) bool { return list[i].m.key.at < list[j].m.key.at })
 	}
 	return op
+}
+
+// keyedPlace is an instant of a recording where the offset rule reads it:
+// where it stands (offsetKey), its moment, and the field it is in ("<mock>
+// at <field>").
+type keyedPlace struct {
+	k     offsetKey
+	m     moment
+	where string
+}
+
+// keyedPlaces are the instants of x where the offset rule reads them: in
+// each field of its answer (each field, of a kind whose spec holds its
+// request and answer in one), in its text and in its other declared forms,
+// with its stamps and its answer's own clock reads blanked (searched).
+func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
+	var out []keyedPlace
+	text := dc.searched(x, false)[0]
+	answers := hasAnswerField(x.fields)
+	for _, f := range x.fields {
+		if f.key || f.end > len(text) || answers && !answerFields[fieldRoot(f.path)] {
+			continue
+		}
+		own := text[f.start:f.end]
+		where := x.mock + " at " + f.describe()
+		for form, t := range []string{own, dc.rawExtra(own)} {
+			spans := dc.spansOf(t)
+			for si, sp := range spans {
+				if !sp.keyed {
+					continue
+				}
+				out = append(out, keyedPlace{k: offsetKey{path: f.path, form: form, layout: sp.layout, label: instantLabel(t, spans, si)}, m: sp.moment(), where: where})
+			}
+		}
+	}
+	return out
+}
+
+// GivenPlaces is a recording F gave the application earlier in the running
+// set, as the offset rule alone reads it (GivenEarlier): its instants where
+// the rule reads them (keyedPlaces), and none of its text, so that each of
+// the set's recordings is read once for the set (Order.GivenPlaces) and its
+// text is not held; and where F served it in the set (ServedIn).
+type GivenPlaces struct {
+	mock, call  string
+	at          time.Time
+	read        bool
+	first, last int
+	places      []keyedPlace
+}
+
+// PlacesOf is x as the offset rule reads it among the recordings F gave the
+// application earlier in the set (GivenPlaces), served where x is
+// (Raw.ServedIn), read with a cache of its own that it drops. It keeps no
+// part of x's text: every word it keeps is a copy.
+func PlacesOf(x Raw) GivenPlaces {
+	places := NewDriftCache().keyedPlaces(x)
+	for i := range places {
+		k := &places[i]
+		k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
+	}
+	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.read, first: x.first, last: x.last, places: places}
+}
+
+// Mock is the name of g's mock.
+func (g GivenPlaces) Mock() string { return g.mock }
+
+// Read reports whether g's recording was read (Raw.Read).
+func (g GivenPlaces) Read() bool { return g.read }
+
+// Span is where F first and last served g's mock (ServedIn).
+func (g GivenPlaces) Span() (first, last int) { return g.first, g.last }
+
+// ServedIn is g as F served its mock first at the first and last at the last
+// of its serves in the set (Raw.ServedIn).
+func (g GivenPlaces) ServedIn(first, last int) GivenPlaces {
+	g.first, g.last = first, last
+	return g
+}
+
+// placesUnread is rawUnread of the recordings set holds.
+func placesUnread(set []GivenPlaces) string {
+	for _, g := range set {
+		if !g.read {
+			return rawUnread([]Raw{{mock: g.mock}})
+		}
+	}
+	return ""
+}
+
+// setPlaces are the places (GivenPlaces) of each recording F served in one
+// set, each read from its recording once for the set, by its identity
+// (mockID): Order.GivenPlaces.
+type setPlaces struct {
+	mu sync.Mutex
+	of map[string]GivenPlaces
+}
+
+func newSetPlaces() *setPlaces { return &setPlaces{of: map[string]GivenPlaces{}} }
+
+// GivenPlaces is m as the offset rule reads it among the recordings F gave
+// the application earlier in the set (GivenPlaces), served where the read saw
+// F serve it (Of): read from its recording, its answer read back where the
+// agent parked it on disk (ReadRaw), once for the set the read was of, and
+// only its places kept. err names an answer that cannot be read back;
+// nothing is kept of it, nor of a recording that could not be read.
+func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
+	first, last := o.Of(m)
+	id := mockID(m)
+	if c := o.places; c != nil {
+		c.mu.Lock()
+		g, ok := c.of[id]
+		c.mu.Unlock()
+		if ok {
+			return g.ServedIn(first, last), nil
+		}
+	}
+	x, err := ReadRaw(m, true)
+	if err != nil {
+		return GivenPlaces{}, err
+	}
+	g := PlacesOf(x)
+	if c := o.places; c != nil && g.read {
+		c.mu.Lock()
+		c.of[id] = g
+		c.mu.Unlock()
+	}
+	return g.ServedIn(first, last), nil
 }
 
 // fieldRoot is the spec's own field a raw field's path starts in
@@ -276,6 +438,9 @@ type offsetMatch struct {
 	rec, live moment
 	hr, hf    offsetPlace
 	off       time.Duration
+	// unread: a place could not be read (offsetPlaces.unread), and is the
+	// reason (offsetWhy).
+	unread string
 }
 
 // offsetOf reports whether some offset o puts hr+o in rec's unit and hf+o in
@@ -323,6 +488,9 @@ func offsetOf(rec, live, hr, hf int64, rres, lres time.Duration, mod int64) (tim
 func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 	if op == nil {
 		return offsetMatch{}, false
+	}
+	if op.unread != "" && len(pairs) > 0 {
+		return offsetMatch{unread: op.unread}, true
 	}
 	keys := make([]offsetKey, 0, len(op.byPlace))
 	for k := range op.byPlace {
@@ -429,6 +597,9 @@ func offsetBetween(p driftedInstant, hr, hf offsetPlace) (offsetMatch, bool) {
 // in it stand against a moved place, by about how much, why that shows no
 // read of the clock, and how to correct it. It names no value.
 func offsetWhy(m offsetMatch) string {
+	if m.unread != "" {
+		return m.unread
+	}
 	rel := "at"
 	off := m.off
 	switch {

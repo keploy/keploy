@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -298,6 +299,81 @@ func TestALearnStepLateCallKeepsItsEarlierPlaces(t *testing.T) {
 	code, got := r3Send(t, p, mm, opts, "GET /orders/o-9 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
 	if _, noise := r3States(mm)["mock-b"].ReqBodyNoise["url.path.1"]; noise {
 		t.Fatalf("the id that flowed from test 1's create became noise (answered %d %s)", code, got)
+	}
+}
+
+// Through the agent's MockManager, whose served observer tells the learn
+// step's tracker what F served: an application that receives two messages of
+// a queue before the test (at the start-up, in the previous test, or the
+// first before and the second in it) and builds the insert's visible_after
+// on the message it holds (SentTimestamp and a minute). F serving B first,
+// the recording's value is built on A and F's on B: the insert is refused,
+// naming both receives, wherever before the call F served them, never
+// learned as noise. The tracker numbers what the store served across the
+// set (learn.Order), so F's order is told wherever it served them.
+func TestALearnStepReadsWhatTheStoreServedBeforeTheTestAsGiven(t *testing.T) {
+	for _, where := range []string{"at the start-up", "in the previous test", "the first before the test, the second in it"} {
+		t.Run(where, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			now := time.Now()
+			// Early in their minutes, whenever the test runs: a sent time
+			// late in its minute rounds to the minute the value is cut to,
+			// and the echo then names the two receives before the offset
+			// rule does.
+			sentA := now.Truncate(time.Minute).Add(-10*time.Minute + 4*time.Second + 473*time.Millisecond)
+			sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
+			receive := func(name, path string, at, sent time.Time) *models.Mock {
+				return r3Mock(name, at, "GET", path, "", `{"Messages":[{"MessageId":"`+name+`","Attributes":{"SentTimestamp":"`+strconv.FormatInt(sent.UnixMilli(), 10)+`"}}]}`)
+			}
+			minute := func(t time.Time) string { return t.Format("2006-01-02T15:04Z07:00") }
+			a := receive("mock-a", "/queue/a", now.Add(-3*time.Second), sentA)
+			b := receive("mock-b", "/queue/b", now.Add(-2*time.Second), sentB)
+			insert := r3Mock("mock-insert", now.Add(-time.Second), "POST", "/v1/messages", `{"visible_after":"`+minute(sentA.Add(time.Minute))+`"}`, `{}`)
+			for _, m := range []*models.Mock{a, b, insert} {
+				m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+			}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow([]*models.Mock{a, b, insert}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+			mm.SetServedObserver(p.learnTracker.ServedMock) // as setMockManager installs it
+			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+			get := func(path string) {
+				if code, got := r3Send(t, p, mm, opts, "GET "+path+" HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"); code != http.StatusOK {
+					t.Fatalf("GET %s got %d %s", path, code, got)
+				}
+			}
+			switch where {
+			case "at the start-up":
+				get("/queue/b")
+				get("/queue/a")
+				p.ContinueTestErrorCapture()
+			case "in the previous test":
+				p.ContinueTestErrorCapture()
+				get("/queue/b")
+				get("/queue/a")
+				if _, err := p.GetMockErrors(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				p.ContinueTestErrorCapture()
+			case "the first before the test, the second in it":
+				get("/queue/b")
+				p.ContinueTestErrorCapture()
+				get("/queue/a")
+			}
+			body := `{"visible_after":"` + minute(sentB.Add(time.Minute)) + `"}`
+			code, got := r3Send(t, p, mm, opts, "POST /v1/messages HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			said := fmt.Sprintf("%+v", misses)
+			if _, noise := r3States(mm)["mock-insert"].ReqBodyNoise["body.visible_after"]; noise || code == http.StatusOK ||
+				!strings.Contains(said, "mock-a at spec.resp.body holds as the recording gave it") || !strings.Contains(said, "mock-b at spec.resp.body holds, which record's full round gave the application in its place") {
+				t.Fatalf("answered %d %s, misses %s; want the insert refused, built on mock-a and mock-b by an offset", code, got, said)
+			}
+		})
 	}
 }
 

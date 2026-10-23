@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -579,7 +580,10 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 func TestInRecordedOrder(t *testing.T) {
 	t0 := time.Date(2026, 10, 22, 11, 0, 0, 0, time.UTC)
 	at := func(mock string, d time.Duration, nth int) offsetPlace {
-		return offsetPlace{mock: mock, at: t0.Add(d), nth: nth}
+		return offsetPlace{mock: mock, at: t0.Add(d), first: nth, last: nth}
+	}
+	span := func(mock string, d time.Duration, first, last int) offsetPlace {
+		return offsetPlace{mock: mock, at: t0.Add(d), first: first, last: last}
 	}
 	for _, c := range []struct {
 		name string
@@ -596,6 +600,14 @@ func TestInRecordedOrder(t *testing.T) {
 		{"recorded at one instant", at("mock-1", 0, 1), at("mock-2", 0, 2), false},
 		{"recorded at one instant, served the other way", at("mock-1", 0, 2), at("mock-2", 0, 1), false},
 		{"served as one", at("mock-1", 0, 1), at("mock-2", time.Second, 1), false},
+		// A pool's recording F served at the start-up and again after the
+		// other: F gave the application each before the other.
+		{"the first served again after the second", span("mock-1", 0, 1, 8), at("mock-2", time.Second, 7), false},
+		{"the second served before the first, and again", span("mock-2", time.Second, 2, 9), at("mock-1", 0, 5), false},
+		{"the second served before the first's last serve", at("mock-2", time.Second, 4), span("mock-1", 0, 1, 4), false},
+		{"each served wholly before the other", span("mock-1", 0, 1, 3), span("mock-2", time.Second, 4, 9), true},
+		{"each served wholly before the other, b first", span("mock-2", time.Second, 4, 9), span("mock-1", 0, 1, 3), true},
+		{"wholly in the other order", span("mock-1", 0, 4, 9), span("mock-2", time.Second, 1, 3), false},
 	} {
 		if got := inRecordedOrder(c.a, c.b); got != c.want {
 			t.Errorf("%s: %v; want %v", c.name, got, c.want)
@@ -642,6 +654,106 @@ func TestAnInstantBuiltOnAnotherIndexOfAServedListIsRefused(t *testing.T) {
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, off.String()+" after the moment mock-1 at spec.resp.body holds as the recording gave it") || !strings.Contains(ln.Why, "the moment mock-2 at spec.resp.body holds, which record's full round gave the application in its place") {
 				t.Errorf("%s, %s on: %s from %+v (%s); want it refused, built on both answers by %s", row.name, off, ln.Kind, ln.From, ln.Why, off)
 			}
+		}
+	}
+}
+
+// A recording of another recorded test that F gave the application before
+// the call (Raw.OfAnotherTest) is a place of the offset rule, and of no other
+// rule: a date built on what F gave there by an offset is refused, naming it,
+// while a value its recording holds binds no variable of this test's call
+// (only a test's own calls carry its variables), as a place of the test would.
+func TestAnotherTestsRecordingIsAPlaceOfTheOffsetRuleAlone(t *testing.T) {
+	sent := time.Date(2026, 10, 21, 23, 58, 16, 473e6, time.UTC)
+	got := sent.Add(2*time.Minute + 311*time.Millisecond)
+	attrs := func(at time.Time) string {
+		return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}`
+	}
+	receive, delivered := r1Receive(attrs(sent)), r1Receive(attrs(got))
+	delivered.Name = "mock-11"
+	for _, m := range []*models.Mock{receive, delivered} {
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+	}
+	const p = "body.due"
+	day := 24 * time.Hour
+	dc := NewDriftCache()
+	raw := []Raw{dc.RawOf(receive, true).ServedAs(2).OfAnotherTest(), dc.RawOf(delivered, true).ServedAs(1).OfAnotherTest()}
+	ln := ClassifyIn(dc, []string{p}, strLeaf(p, got.Add(-2*day).Format("2006-01-02")), strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), r1Insert, nil, raw, nil, nil)[0]
+	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") {
+		t.Errorf("an offset from another test's recordings: %s (%s); want it refused, naming the receive and the offset", ln.Kind, ln.Why)
+	}
+	const q = "body.user"
+	row := Raw{read: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
+	for _, another := range []bool{false, true} {
+		x := row
+		if another {
+			x = x.OfAnotherTest()
+		}
+		ln := ClassifyIn(NewDriftCache(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
+		if want := map[bool]Kind{false: KindVariable, true: KindNoise}[another]; ln.Kind != want {
+			t.Errorf("another test's %v: %s from %+v (%s); want %s", another, ln.Kind, ln.From, ln.Why, want)
+		}
+	}
+}
+
+// The recordings F gave the application earlier in the set (GivenEarlier)
+// are read only when a changed instant reaches the offset rule, once for the
+// call, and as places of that rule alone; one that cannot be read refuses
+// every changed instant that reaches the rule, naming it, never noise.
+func TestClassifyGivenReadsTheSetOnlyForTheOffsetRule(t *testing.T) {
+	sent := time.Date(2026, 10, 21, 23, 58, 16, 473e6, time.UTC)
+	got := sent.Add(2*time.Minute + 311*time.Millisecond)
+	attrs := func(at time.Time) string {
+		return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}`
+	}
+	receive, delivered := r1Receive(attrs(sent)), r1Receive(attrs(got))
+	delivered.Name = "mock-11"
+	for _, m := range []*models.Mock{receive, delivered} {
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+	}
+	row := Raw{read: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
+	reads := 0
+	set := func(raw []Raw, err error) GivenEarlier {
+		return func() ([]GivenPlaces, error) {
+			reads++
+			var out []GivenPlaces
+			for _, x := range raw {
+				out = append(out, PlacesOf(x))
+			}
+			return out, err
+		}
+	}
+	const p, q = "body.due", "body.user"
+	day := 24 * time.Hour
+	due := func(at time.Time) Shape { return strLeaf(p, at.Add(-2*day).Format("2006-01-02")) }
+	both := func(dc *DriftCache) []Raw {
+		return []Raw{dc.RawOf(receive, true).ServedAs(2), dc.RawOf(delivered, true).ServedAs(1), row.ServedAs(3)}
+	}
+	// A value of no changed instant: the set is not read, and a word of it
+	// in what F gave earlier in the set binds nothing.
+	dc := NewDriftCache()
+	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, nil, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindNoise || reads != 0 {
+		t.Errorf("no changed instant: %s (%s), the set read %d times; want noise, the set unread", ln.Kind, ln.Why, reads)
+	}
+	// A changed instant built on what F gave earlier in the set by an
+	// offset: refused, the set read once for the call.
+	dc = NewDriftCache()
+	ln := ClassifyGiven(dc, []string{p, "body.due2"}, Shape{Leaves: map[string]Leaf{p: due(got).Leaves[p], "body.due2": due(got).Leaves[p]}}, Shape{Leaves: map[string]Leaf{p: due(sent).Leaves[p], "body.due2": due(sent).Leaves[p]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil))
+	if ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") || reads != 1 {
+		t.Errorf("an offset from the set: %s (%s), the set read %d times; want it refused, naming the receive, the set read once", ln[0].Kind, ln[0].Why, reads)
+	}
+	// What cannot be read refuses the changed instant, naming it.
+	for name, c := range map[string]struct {
+		raw  []Raw
+		err  error
+		want string
+	}{
+		"an answer not read back": {nil, errors.New(`read back the recorded answer of "mock-9": gone`), `keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed was built on it: read back the recorded answer of "mock-9"`},
+		"a recording not read":    {[]Raw{{mock: "mock-9"}}, nil, "keploy could not read mock-9"},
+	} {
+		ln := ClassifyGiven(NewDriftCache(), []string{p}, due(got), due(sent), r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, c.want) {
+			t.Errorf("%s: %s (%s); want it refused, naming mock-9", name, ln.Kind, ln.Why)
 		}
 	}
 }

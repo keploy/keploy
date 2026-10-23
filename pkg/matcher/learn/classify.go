@@ -108,16 +108,25 @@ type Raw struct {
 	mock   string
 	at     time.Time
 	served bool
-	// nth is where F served the mock in the test, in the order it served
-	// the test's mocks (ServedAs: 1 the first), 0 where it was not served
-	// or that order is not known: the offset rule (offsetFrom) tells by it
-	// whether F gave the application two recordings both runs gave it in
-	// the order the recording did.
-	nth int
+	// first and last are the first and the last of F's serves of the mock,
+	// in one order across the set's start-up, its tests and the gaps
+	// between them (ServedIn: 1 the first serve; learn.Order.Of), 0 where
+	// it was not served or that order is not known: the offset rule
+	// (offsetFrom) tells by them whether F gave the application two
+	// recordings both runs gave it in the order the recording did.
+	first, last int
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
 	// another's place (the offset rule, offsetFrom).
 	call string
+	// elsewhere: a recording F gave the application before the call that
+	// is no earlier place of the call's own test (OfAnotherTest): another
+	// recorded test's, or one F served in an earlier test than the
+	// previous one. Only the offset rule reads it (offsetPlacesOf), never a
+	// variable's or an echo's search, so that a call of one test binds no
+	// value of another's and is refused for no coincidence with one, while
+	// a value built on what F gave there by an offset is still refused.
+	elsewhere bool
 	// read: the text was read from the mock (RawOf).
 	read bool
 	// text is Text; answerClock is AnswerClock.
@@ -140,7 +149,8 @@ func (r Raw) Mock() string { return r.mock }
 // At is when r's mock's request was recorded.
 func (r Raw) At() time.Time { return r.at }
 
-// Served reports whether r's mock was served earlier in the test.
+// Served reports whether F gave the application r's mock before the call:
+// served earlier in the test, or before it in the running set (ServedAs).
 func (r Raw) Served() bool { return r.served }
 
 // Read reports whether r was read from its mock (RawOf): a Raw that was not
@@ -175,23 +185,63 @@ func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answe
 func (r Raw) WithServed(served bool) Raw {
 	r.served = served
 	if !served {
-		r.nth = 0
+		r.first, r.last = 0, 0
 	}
 	return r
 }
 
-// ServedAs is r as the n-th of the mocks F served in the test, in the order
-// it served them (1 the first): served earlier in the test, with the same
-// text, fields and answer clock reads. A Raw served in an order not known
-// (WithServed, RawOf) stands in any other's place the offset rule reads.
-func (r Raw) ServedAs(n int) Raw {
-	r.served, r.nth = true, max(n, 0)
+// ServedAs is r as served once, the n-th serve of F's in the running set
+// (ServedIn(n, n)).
+func (r Raw) ServedAs(n int) Raw { return r.ServedIn(n, n) }
+
+// ServedIn is r as served by F before the call, in the test or before it,
+// first at its first-th serve in the running set and last at its last-th, in
+// the one order F served the set's mocks in across its start-up, its tests
+// and the gaps between them (learn.Order.Of; 1 the first serve), with the
+// same text, fields and answer clock reads. A Raw served in an order not
+// known (WithServed, RawOf, ServedIn(0, 0), or last before first) stands in
+// any other's place the offset rule reads.
+func (r Raw) ServedIn(first, last int) Raw {
+	r.served, r.first, r.last = true, max(first, 0), max(last, 0)
+	if r.first == 0 || r.last < r.first {
+		r.first, r.last = 0, 0
+	}
 	return r
 }
 
-// Nth is where F served r's mock in the test (ServedAs), 0 where it was not
-// served or that order is not known.
-func (r Raw) Nth() int { return r.nth }
+// Nth is where F first served r's mock (ServedIn), 0 where it was not served
+// or that order is not known.
+func (r Raw) Nth() int { return r.first }
+
+// Span is where F first and last served r's mock (ServedIn), 0, 0 where it
+// was not served or that order is not known.
+func (r Raw) Span() (first, last int) { return r.first, r.last }
+
+// OfAnotherTest is r as a recording F gave the application before the call
+// that is no earlier place of the call's own test (another recorded test's,
+// or one served in an earlier test than the previous one): a place the
+// offset rule reads, and no other rule does (Raw.elsewhere).
+func (r Raw) OfAnotherTest() Raw {
+	r.elsewhere = true
+	return r
+}
+
+// AnotherTests reports whether r is a place the offset rule alone reads
+// (OfAnotherTest).
+func (r Raw) AnotherTests() bool { return r.elsewhere }
+
+// ownPlaces splits raw into the places every rule reads and those the offset
+// rule alone reads (OfAnotherTest), each in raw's order.
+func ownPlaces(raw []Raw) (own, elsewhere []Raw) {
+	for _, x := range raw {
+		if x.elsewhere {
+			elsewhere = append(elsewhere, x)
+			continue
+		}
+		own = append(own, x)
+	}
+	return own, elsewhere
+}
 
 // Kind is what a drifted leaf is learned as.
 type Kind string
@@ -267,8 +317,10 @@ type Learned struct {
 // (design §7.2 step 6). at is when that mock's request was recorded;
 // earlier are the HTTP mocks F served before it in the same test, leaf by
 // leaf, and the test case's own request (Earlier.Given), read as they are;
-// raw every other mock of the test's recording that came before it; resp
-// are the leaves of its recorded answer.
+// raw the other recordings that came before it: recorded before it, or
+// served by F before it in the test, in the previous test, at the start-up
+// or between tests (one marked OfAnotherTest is a place of the offset rule
+// alone); resp are the leaves of its recorded answer.
 //
 //   - Variable: the recorded value appeared earlier in the test's recording,
 //     whatever its type there, in any kind of mock: whole, or a part of it
@@ -312,6 +364,25 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 // lies, in both runs, within w, read on the application's clock: the lead
 // shows no read there (given.go).
 func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window) []Learned {
+	return ClassifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, nil)
+}
+
+// GivenEarlier reads the recordings F gave the application earlier in the
+// running set that no other rule reads (an earlier test's than the previous
+// one, another recorded test's, the call's own paired recording F served
+// before it), each as F served it (GivenPlaces.ServedIn), for the offset rule
+// alone: their places, read once for the set, without their text
+// (Order.GivenPlaces). It is read only where a changed instant reaches that
+// rule, and then once for the call. An error, or a recording it could not
+// read (GivenPlaces.Read), names one whose text cannot be told: every
+// changed instant that reaches the rule is then refused with it, never
+// learned as noise.
+type GivenEarlier func() ([]GivenPlaces, error)
+
+// ClassifyGiven is ClassifyIn with the recordings F gave the application
+// earlier in the set (given; nil: none), which the offset rule reads beside
+// raw's.
+func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -320,11 +391,27 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
 	// The moved places the offset rule reads (offset.go), read once for the
-	// call, and only where a changed instant reaches it.
+	// call, and only where a changed instant reaches it: another recorded
+	// test's too (OfAnotherTest), and those F gave earlier in the set
+	// (given), which no other rule reads.
+	all := raw
+	raw, _ = ownPlaces(raw)
 	var op *offsetPlaces
 	places := func() *offsetPlaces {
 		if op == nil {
-			op = dc.offsetPlacesOf(at, served, raw)
+			var unread string
+			var set []GivenPlaces
+			if given != nil {
+				more, err := given()
+				switch {
+				case err != nil:
+					unread = "keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed was built on it: " + err.Error()
+				default:
+					unread, set = placesUnread(more), more
+				}
+			}
+			op = dc.offsetPlacesOf(at, served, all, set)
+			op.unread = unread
 		}
 		return op
 	}
