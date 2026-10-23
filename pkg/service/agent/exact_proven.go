@@ -483,6 +483,23 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 			stretches[e.Name] = *e.Stretch
 		}
 	}
+	// The run is past every write recorded before the latest recorded begin
+	// of the tests begun since the staging: a write of a test that did not
+	// run (or that the run made elsewhere) holds no stretch shut or open.
+	var reached time.Time
+	for id := range a.testBegun {
+		if at := a.testBegins[id]; at.After(reached) {
+			reached = at
+		}
+	}
+	var passed []string
+	if !reached.IsZero() {
+		for write, at := range a.testEdgeAt {
+			if at.Before(reached) {
+				passed = append(passed, write)
+			}
+		}
+	}
 	has := len(a.testWorker) > 0
 	a.scopeMu.Unlock()
 	ws, ok := es.(coreAgent.ExactWorkerServer)
@@ -493,7 +510,7 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 		return nil
 	}
 	if ss, ok := es.(coreAgent.ExactStretchServer); ok {
-		if err := ss.ServeExactStretches(stretches); err != nil {
+		if err := ss.ServeExactStretches(stretches, passed); err != nil {
 			return err
 		}
 	} else if len(stretches) > 0 {
@@ -504,16 +521,45 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 
 // SetScopeWorker installs the set's worker scope for keploy mock replay
 // (models.ScopeTableReq.Worker): no test owns its mocks, and each of a
-// timer's answers only within its stretch. It is served with the pool that
+// timer's answers only within its stretch. It reads when each write ending a
+// stretch was recorded, from the replay's stored mocks, so the run can tell
+// when it has gone past one (serveWorkerExactly); a write it does not hold
+// ends its stretches only by being answered. It is served with the pool that
 // SetScopePool serves next, once the replay's stage lands.
 func (a *Agent) SetScopeWorker(ctx context.Context, worker []models.MockEntry) error {
 	if err := a.wire.lock(ctx); err != nil {
 		return err
 	}
 	defer a.wire.unlock()
+	var edges []string
+	seen := map[string]bool{}
+	for _, e := range worker {
+		if e.Stretch == nil {
+			continue
+		}
+		for _, w := range []string{e.Stretch.After, e.Stretch.Until} {
+			if w != "" && !seen[w] {
+				seen[w] = true
+				edges = append(edges, w)
+			}
+		}
+	}
+	edgeAt := map[string]time.Time{}
+	if len(edges) > 0 {
+		mocks, err := a.mocksByName(edges)
+		if err != nil {
+			return fmt.Errorf("read when the writes ending a timer's stretches were recorded: %w", err)
+		}
+		for name, mk := range mocks {
+			if mk != nil && !mk.Spec.ReqTimestampMock.IsZero() {
+				edgeAt[name] = mk.Spec.ReqTimestampMock
+			}
+		}
+	}
 	a.scopeMu.Lock()
 	a.testWorker = append([]models.MockEntry(nil), worker...)
 	a.testBegun = map[string]bool{}
+	a.testEdgeAt = edgeAt
 	a.scopeMu.Unlock()
 	return nil
 }

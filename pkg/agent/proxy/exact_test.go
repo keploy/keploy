@@ -1417,7 +1417,7 @@ func TestATimersRecordingAnswersOnlyWithinItsStretch(t *testing.T) {
 		t.Fatalf("the test's write %s is not shown: %v", name, exactNames(pt))
 	}
 
-	mm.ServeExactStretches(stretches)
+	mm.ServeExactStretches(stretches, nil)
 	mm.ServeExactWorker(worker)
 	mm.ServeExactPool("k", nil)
 	shown("before any write", "w-poll-a", "plain")
@@ -1445,13 +1445,13 @@ func TestATimersRecordingAnswersOnlyWithinItsStretch(t *testing.T) {
 	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
 	mm.ServeExactPool("k", nil)
 	shown("the next session, before its worker scope is named")
-	mm.ServeExactStretches(stretches)
+	mm.ServeExactStretches(stretches, nil)
 	mm.ServeExactWorker(worker)
 	mm.ServeExactPool("k", nil)
 	shown("the next session's start", "w-poll-a", "plain")
 
 	// No stretches named: every worker-scope mock shows from its place.
-	mm.ServeExactStretches(nil)
+	mm.ServeExactStretches(nil, nil)
 	mm.ServeExactPool("k", nil)
 	shown("with no stretches", "w-poll-a", "w-poll-b", "w-poll-c", "plain")
 }

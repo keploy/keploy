@@ -4575,12 +4575,12 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
-func (p *Proxy) ServeExactStretches(stretches map[string]models.Stretch) error {
+func (p *Proxy) ServeExactStretches(stretches map[string]models.Stretch, passed []string) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
-	m.ServeExactStretches(stretches)
+	m.ServeExactStretches(stretches, passed)
 	return nil
 }
 

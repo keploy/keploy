@@ -20,6 +20,17 @@ func entryNamesOf(es []models.MockEntry) []string {
 	return out
 }
 
+// stretchesOf is each worker entry's stretch without its Run, and its Run.
+func stretchesOf(worker []models.MockEntry) (map[string]models.Stretch, map[string]string) {
+	st, run := map[string]models.Stretch{}, map[string]string{}
+	for _, e := range worker {
+		s := *e.Stretch
+		run[e.Name], s.Run = s.Run, ""
+		st[e.Name] = s
+	}
+	return st, run
+}
+
 // A test whose page fetched the job list on load (its own call) and then
 // polled it on a timer: the poll its harness reported moves to the worker
 // scope, placed at the test, with the stretch of writes its answer holds in,
@@ -39,9 +50,12 @@ func TestTimerScopeMovesTheReportedCallWithItsStretch(t *testing.T) {
 	if want := []string{"mock-0", "mock-1", "mock-2", "mock-4"}; !reflect.DeepEqual(entryNamesOf(got["test-1"]), want) {
 		t.Fatalf("the test keeps %v, want %v", entryNamesOf(got["test-1"]), want)
 	}
-	want := []models.MockEntry{{Name: "mock-3", Kind: "Http", Place: "test-1", Cause: models.CauseTimer, Stretch: &models.Stretch{After: "mock-2", Until: "mock-4"}}}
-	if !reflect.DeepEqual(worker, want) {
-		t.Fatalf("worker %+v, want %+v", worker, want)
+	stretch, run := stretchesOf(worker)
+	if len(worker) != 1 || worker[0].Name != "mock-3" || worker[0].Place != "test-1" || worker[0].Cause != models.CauseTimer || worker[0].Kind != "Http" {
+		t.Fatalf("worker %+v", worker)
+	}
+	if want := (models.Stretch{After: "mock-2", Until: "mock-4"}); stretch["mock-3"] != want || run["mock-3"] == "" {
+		t.Fatalf("stretch %+v run %q, want %+v and a run", stretch["mock-3"], run["mock-3"], want)
 	}
 }
 
@@ -77,10 +91,7 @@ func TestTimerScopeEndsAStretchOnlyWhereTheAnswerChanged(t *testing.T) {
 	if want := []string{"mock-2", "mock-5", "mock-6"}; !reflect.DeepEqual(entryNamesOf(got["T1"]), want) {
 		t.Fatalf("T1 keeps %v, want %v", entryNamesOf(got["T1"]), want)
 	}
-	stretch := map[string]models.Stretch{}
-	for _, e := range worker {
-		stretch[e.Name] = *e.Stretch
-	}
+	stretch, run := stretchesOf(worker)
 	want := map[string]models.Stretch{
 		"mock-1": {Until: "mock-5"},
 		"mock-3": {Until: "mock-5"},
@@ -89,6 +100,11 @@ func TestTimerScopeEndsAStretchOnlyWhereTheAnswerChanged(t *testing.T) {
 	}
 	if !reflect.DeepEqual(stretch, want) {
 		t.Fatalf("stretches %+v, want %+v", stretch, want)
+	}
+	// The polls that answered alike are one run; the changed answer, and
+	// another call, are runs of their own.
+	if run["mock-1"] != run["mock-3"] || run["mock-1"] == run["mock-7"] || run["mock-1"] == run["mock-4"] || run["mock-7"] == "" {
+		t.Fatalf("runs %v", run)
 	}
 }
 
@@ -106,12 +122,35 @@ func TestTimerScopeJoinsNoAnswerItCannotRead(t *testing.T) {
 		{Method: "GET", Host: "localhost:8083", URL: "/jobs", Body: pollBody, N: 1},
 	}}}
 	_, worker := timerScope(windows, mocks, map[string][]models.MockEntry{"T1": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}})
-	stretch := map[string]models.Stretch{}
-	for _, e := range worker {
-		stretch[e.Name] = *e.Stretch
-	}
+	stretch, run := stretchesOf(worker)
 	if want := map[string]models.Stretch{"mock-0": {Until: "mock-1"}, "mock-2": {After: "mock-1"}}; !reflect.DeepEqual(stretch, want) {
 		t.Fatalf("stretches %+v, want %+v", stretch, want)
+	}
+	if run["mock-0"] == run["mock-2"] {
+		t.Fatalf("two answers it cannot read share run %q", run["mock-0"])
+	}
+}
+
+// A timer that fires once (a check the page makes some seconds after it
+// loads) gives its read to the worker scope and leaves its write with the
+// test: a delayed save stays the test's to make.
+func TestTimerScopeMovesAOnceTimersReadNotItsWrite(t *testing.T) {
+	health := timerKey("GET", "localhost:43900", "/health", pollBody)
+	save := timerKey("POST", "localhost:8083", "/query", "autosave")
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(1), fp: health, ans: "ok"},
+		{name: "mock-1", ts: at(2), fp: save, write: true},
+	}
+	windows := []models.ScopeWindow{{Name: "T1", Timers: []models.TimerCall{
+		{Method: "GET", Host: "localhost:43900", URL: "/health", Body: pollBody, N: 0, Once: true},
+		{Method: "POST", Host: "localhost:8083", URL: "/query", Body: "autosave", N: 0, Once: true},
+	}}}
+	got, worker := timerScope(windows, mocks, map[string][]models.MockEntry{"T1": {{Name: "mock-0"}, {Name: "mock-1"}}})
+	if want := []string{"mock-1"}; !reflect.DeepEqual(entryNamesOf(got["T1"]), want) {
+		t.Fatalf("T1 keeps %v, want %v", entryNamesOf(got["T1"]), want)
+	}
+	if len(worker) != 1 || worker[0].Name != "mock-0" {
+		t.Fatalf("worker %+v, want mock-0 alone", worker)
 	}
 }
 

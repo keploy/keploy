@@ -627,6 +627,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// set, and the next set names its own.
 	m.exact.worker.Store(nil)
 	m.exact.stretch.Store(nil)
+	m.exact.passed.Store(nil)
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
 	// Nor its scope table's pool names (SetPoolNames): until the next

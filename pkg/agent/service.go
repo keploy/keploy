@@ -537,12 +537,14 @@ type ExactWorkerServer interface {
 
 // ExactStretchServer is implemented by a proxy that serves a timer's
 // recordings of the worker scope (models.MockEntry.Cause) only within the
-// stretch of the set's writes each was recorded in (models.Stretch):
-// ServeExactStretches names each such mock's stretch, and each view installed
-// after it shows one only once its After write answered in the staging and
-// while its Until write has not.
+// stretch of the set's writes each answers within (models.Stretch):
+// ServeExactStretches names each such mock's stretch, and the writes ending a
+// stretch that the run has gone past without them (passed). Each view
+// installed after it shows one only once its After write answered in the
+// staging or was passed, and while its Until write has neither; the last of a
+// stretch's run answers again once the rest have.
 type ExactStretchServer interface {
-	ServeExactStretches(stretches map[string]models.Stretch) error
+	ServeExactStretches(stretches map[string]models.Stretch, passed []string) error
 }
 
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under

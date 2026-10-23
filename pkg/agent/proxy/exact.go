@@ -99,6 +99,9 @@ type exactView struct {
 	// of the staging consumed a write (MockManager.consumedInSet).
 	stretch  map[string]models.Stretch
 	answered func(name string) bool
+	// passed is the writes ending a stretch that the run has gone past
+	// without them (ServeExactStretches): each counts as answered.
+	passed map[string]bool
 	// poolKey is the key of that slice: its stateful cursors are its own.
 	poolKey string
 	// cand marks, by position in owned, the recordings the open test shares
@@ -153,8 +156,10 @@ type exactState struct {
 	// each view installed after it shows.
 	worker atomic.Pointer[map[string]struct{}]
 	// stretch is a timer's worker-scope recordings' stretches
-	// (ServeExactStretches), which each view installed after it keeps to.
+	// (ServeExactStretches), which each view installed after it keeps to, and
+	// passed the writes ending them that the run has gone past.
 	stretch atomic.Pointer[map[string]models.Stretch]
+	passed  atomic.Pointer[map[string]bool]
 	// begun is the mocks the tests begun in the current staging own
 	// (StagedOwnerBegun); named, those a miss's diagnosis named
 	// (FindStagedNotOwned), each once.
@@ -930,19 +935,28 @@ func (m *MockManager) ServeExactWorker(names []string) {
 }
 
 // ServeExactStretches names the stretch of the set's writes each of a timer's
-// worker-scope recordings was recorded in (models.MockEntry.Stretch), whole:
-// each view installed after it shows such a recording only once its After
-// write answered a call of the staging and while its Until write has not
+// worker-scope recordings answers within (models.MockEntry.Stretch), whole,
+// and the writes ending a stretch that the run has gone past without them
+// (passed: the run began a test recorded after the write): each view installed
+// after it shows such a recording only once its After write answered a call of
+// the staging or was passed, and while its Until write has not
 // (agent.ExactStretchServer). A worker-scope mock it does not name is shown
 // wherever its place is reached. It installs no view itself.
-func (m *MockManager) ServeExactStretches(stretches map[string]models.Stretch) {
+func (m *MockManager) ServeExactStretches(stretches map[string]models.Stretch, passed []string) {
 	set := make(map[string]models.Stretch, len(stretches))
 	for n, st := range stretches {
 		if n != "" {
 			set[n] = st
 		}
 	}
+	gone := make(map[string]bool, len(passed))
+	for _, n := range passed {
+		if n != "" {
+			gone[n] = true
+		}
+	}
 	m.exact.stretch.Store(&set)
+	m.exact.passed.Store(&gone)
 }
 
 // installExact makes v the view, then tells every parser that keeps an index
@@ -955,6 +969,9 @@ func (m *MockManager) installExact(v *exactView) {
 	}
 	if s := m.exact.stretch.Load(); s != nil && len(*s) > 0 {
 		v.stretch, v.answered = *s, m.consumedInSet
+		if p := m.exact.passed.Load(); p != nil {
+			v.passed = *p
+		}
 	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
@@ -1156,17 +1173,34 @@ func (v *exactView) isWorker(name string) bool {
 }
 
 // inStretch reports whether the run is within the stretch of writes the
-// worker-scope mock name was recorded in (ServeExactStretches): the write
-// recorded before it has answered a call of the staging, and the one recorded
-// after it has not. Its answer is the state those writes left, so a call
-// made before the first or after the second would read a state the
+// worker-scope mock name answers within (ServeExactStretches): the write
+// before it has answered a call of the staging or the run has gone past it,
+// and the one after it has neither. Its answer is the state those writes left,
+// so a call made before the first or after the second would read a state the
 // recording never saw. A mock with no stretch is always within its own.
 func (v *exactView) inStretch(name string) bool {
 	st, ok := v.stretch[name]
 	if !ok || v.answered == nil {
 		return true
 	}
-	return (st.After == "" || v.answered(st.After)) && (st.Until == "" || !v.answered(st.Until))
+	done := func(write string) bool { return v.passed[write] || v.answered(write) }
+	return (st.After == "" || done(st.After)) && (st.Until == "" || !done(st.Until))
+}
+
+// lastOfRun reports whether name is the last of a timer's recordings of one
+// call within its stretch (models.Stretch.Run) still unanswered in the
+// staging: every other recording of its run the view shows has answered.
+func (v *exactView) lastOfRun(name string) bool {
+	st, ok := v.stretch[name]
+	if !ok || st.Run == "" {
+		return false
+	}
+	for n, o := range v.stretch {
+		if n != name && o.Run == st.Run && v.isWorker(n) && !v.spentOutside(n) {
+			return false
+		}
+	}
+	return true
 }
 
 // spentOutside reports whether name, a data-plane recording, was consumed
@@ -1323,12 +1357,21 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	// spent for the staging: it answers at most one request in the set.
 	if (v.test == "" || worker) && !mk.IsProtocolPhase() {
 		m.prepareOutside()
+		// The last of a timer's recordings of one call within its stretch
+		// answers again once the rest of its run have, and is not spent: the
+		// run's recordings all answered alike, so this is the answer the
+		// recording holds for every such call the stretch makes, as the pool
+		// answers a call once, then its last.
+		again := worker && v.lastOfRun(mk.Name)
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
 		v.mu.Lock()
 		verdict := exactRefused
 		if !v.closed {
-			verdict = m.consumeOutside(mk)
+			verdict = exactServed
+			if !again {
+				verdict = m.consumeOutside(mk)
+			}
 		}
 		v.mu.Unlock()
 		if verdict == exactServed {

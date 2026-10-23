@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -70,12 +71,14 @@ func answerOf(mk *models.Mock) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// timerScope moves each recording a test's harness reported a repeating timer
-// made (models.ScopeWindow.Timers) from its test's mapping (byTest) into the
-// set's worker scope. Which recording a report names is read the way the
-// harness counted it: the N-th of the test's calls with its fingerprint, in
-// recorded order. A call made between tests is the pool's and stays there:
-// the pool answers it however often a timer makes it.
+// timerScope moves each recording a test's harness reported a timer made
+// (models.ScopeWindow.Timers) from its test's mapping (byTest) into the set's
+// worker scope: every one a repeating timer made, and a read (not a write) a
+// timer that fires once made; a write such a timer made (a delayed save) stays
+// the test's. Which recording a report names is read the way the harness
+// counted it: the N-th of the test's calls with its fingerprint, in recorded
+// order. A call made between tests is the pool's and stays there: the pool
+// answers it however often a timer makes it.
 //
 // Each moved recording carries Cause models.CauseTimer, its place (the test
 // it was recorded in, whose own recording it follows when a judged commit
@@ -85,19 +88,20 @@ func answerOf(mk *models.Mock) string {
 // recorded order) that answered alike (answerOf) share one stretch, from the
 // last write before the first of them to the first write after the last of
 // them, so a write between them (a session's keep-alive ping) cuts nothing:
-// the recording proves the call read the same on both sides of it. The writes
+// the recording proves the call read the same on both sides of it. They share
+// its Run too: each answers once, then the last again. The writes
 // are the set's HTTP writes no report names (a timer's own write comes as often
 // as its timer fires). mocks are the set's data-plane recordings. It returns
 // byTest less what moved, and the worker scope in recorded order; byTest
 // unchanged and nil when no harness reported a timer.
 func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[string][]models.MockEntry) (map[string][]models.MockEntry, []models.MockEntry) {
-	reported := map[string]map[string]bool{} // test -> "<fingerprint>#<n>"
+	reported := map[string]map[string]bool{} // test -> "<fingerprint>#<n>" -> the timer fires once
 	for _, w := range windows {
 		for _, c := range w.Timers {
 			if reported[w.Name] == nil {
 				reported[w.Name] = map[string]bool{}
 			}
-			reported[w.Name][timerKey(c.Method, c.Host, c.URL, c.Body)+"#"+strconv.Itoa(c.N)] = true
+			reported[w.Name][timerKey(c.Method, c.Host, c.URL, c.Body)+"#"+strconv.Itoa(c.N)] = c.Once
 		}
 	}
 	if len(reported) == 0 {
@@ -126,7 +130,7 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 			}
 			n := seen[mk.fp]
 			seen[mk.fp] = n + 1
-			if want[mk.fp+"#"+strconv.Itoa(n)] {
+			if once, ok := want[mk.fp+"#"+strconv.Itoa(n)]; ok && !(once && mk.write) {
 				timer[e.Name] = true
 				place[e.Name] = test
 				continue
@@ -175,7 +179,8 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 			for j+1 < len(recs) && recs[j+1].ans != "" && recs[j+1].ans == recs[i].ans {
 				j++
 			}
-			st := &models.Stretch{}
+			sum := sha256.Sum256([]byte(fp + "\n" + recs[i].ts.UTC().Format(time.RFC3339Nano)))
+			st := &models.Stretch{Run: hex.EncodeToString(sum[:8])}
 			if k := at(recs[i]); k > 0 {
 				st.After = writes[k-1].name
 			}
