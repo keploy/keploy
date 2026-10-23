@@ -70,6 +70,10 @@ func fillEveryField(v reflect.Value) {
 			f.Set(s)
 		case f.Kind() == reflect.Struct:
 			fillEveryField(f)
+		case f.Kind() == reflect.Pointer && f.Type().Elem().Kind() == reflect.Struct:
+			p := reflect.New(f.Type().Elem())
+			fillEveryField(p.Elem())
+			f.Set(p)
 		default:
 			panic("fillEveryField: a field of kind " + f.Kind().String() + " (" + v.Type().Field(i).Name + "): teach it")
 		}

@@ -1,0 +1,8 @@
+Looking in indexes: http://127.0.0.1:32899/simple/
+WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=32899): Read timed out. (read timeout=3.0)")': /simple/flask/
+WARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=32899): Read timed out. (read timeout=3.0)")': /simple/flask/
+WARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=32899): Read timed out. (read timeout=3.0)")': /simple/flask/
+WARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=32899): Read timed out. (read timeout=3.0)")': /simple/flask/
+WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=32899): Read timed out. (read timeout=3.0)")': /simple/flask/
+ERROR: Could not find a version that satisfies the requirement flask==3.1.2 (from versions: none)
+ERROR: No matching distribution found for flask==3.1.2

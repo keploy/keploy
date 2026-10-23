@@ -6,9 +6,9 @@ inputs:
     required: true
     # This action only handles Unix-style artifacts — the `chmod +x`
     # step below assumes the artifact contains a `keploy` binary (no
-    # `.exe`). Windows consumers (golang_docker_windows.yml,
-    # golang_docker_windows.yml) call actions/download-artifact@v4
-    # directly and handle `keploy.exe` in powershell themselves.
+    # `.exe`). Windows consumers (golang_docker_windows.yml) get
+    # `keploy.exe` through the windows-binary action or download it
+    # directly, and handle it in powershell themselves.
     description: "Name of a Unix-style binary artifact whose contents include a `keploy` binary (e.g. build, build-no-race, build-darwin, latest). Do NOT use this for Windows artifacts (which contain `keploy.exe`)."
 
 outputs:
@@ -19,7 +19,12 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@v4
+    # v8: before v6 a download whose stream stops part-way ends green with
+    # part of keploy on disk, whose first exec then dies ("Killed: 9" on
+    # macOS, run 39760264652), and before v8 a digest mismatch is only a
+    # warning.
+    # check-artifact-downloads.sh says how, and keeps every workflow on v8.
+    - uses: actions/download-artifact@v8
       with:
         name: ${{ inputs.src }}
         path: ${{ inputs.src }}
@@ -28,6 +33,7 @@ runs:
       id: set-path
       shell: bash
       run: |
-        ls -l
+        # The artifact's own directory, so the binary's size is in the log.
+        ls -l "${{ inputs.src }}"
         chmod +x ${{ inputs.src }}/keploy
         echo "path=$PWD/${{ inputs.src }}/keploy" >> $GITHUB_OUTPUT

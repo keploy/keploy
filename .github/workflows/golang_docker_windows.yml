@@ -227,7 +227,7 @@ jobs:
 
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
         if: matrix.config.replay_src != matrix.config.record_src
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.config.replay_src }}
           path: replay-bin

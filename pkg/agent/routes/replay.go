@@ -203,6 +203,12 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		writeErr(http.StatusInternalServerError, err)
 		return
 	}
+	// Under the proven switch, an agent that serves a test the recordings it
+	// shares with the tests that ran beside it says so (a header, which a
+	// client that predates it never reads): the client sends them only then.
+	if s, ok := a.svc.(interface{ ServesExactConcurrent() bool }); ok && provenswitch.On() && s.ServesExactConcurrent() {
+		w.Header().Set(models.ExactConcurrentHeader, models.ExactConcurrentServes)
+	}
 	w.WriteHeader(http.StatusOK)
 	_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 }

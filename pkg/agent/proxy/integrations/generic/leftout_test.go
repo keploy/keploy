@@ -58,8 +58,8 @@ func TestV2_AnExchangeLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 	)
 	spans := &syncMock.Spans{}
 	got, cleared, mgr := pairHoled(t, spans, []chunkEvent{
-		clientChunk("q", reqRead),
-		destChunk("r", respWritten),
+		clientChunk("q", 1, reqRead),
+		destChunk("r", 2, respWritten),
 	})
 
 	if len(got) != 0 {
@@ -100,11 +100,11 @@ func TestV2_TheHalfASplitCarriesOutOfAHoledExchangeIsReported(t *testing.T) {
 	)
 	spans := &syncMock.Spans{}
 	got, _, mgr := pairHoled(t, spans, []chunkEvent{
-		clientChunk("HELLO", helloRead),
-		clientChunk("PING", pingRead),
-		clientChunk("PING2", ping2Read),
-		destChunk("hello-reply", helloReply),
-		destChunk("pong", pong),
+		clientChunk("HELLO", 1, helloRead),
+		clientChunk("PING", 3, pingRead),
+		clientChunk("PING2", 4, ping2Read),
+		destChunk("hello-reply", 2, helloReply),
+		destChunk("pong", 5, pong),
 	})
 
 	if len(got) != 0 {

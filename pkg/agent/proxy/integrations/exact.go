@@ -1,5 +1,7 @@
 package integrations
 
+import "go.keploy.io/server/v3/pkg/models"
+
 // ExactServingReader is an optional MockMemDb capability: a store that can
 // serve each test exactly its own mocks (the proven switch, design v14 §5.2,
 // S12). While it does, every read shows one view, which changes as a test
@@ -44,4 +46,25 @@ func ExactServing(db MockMemDb) bool {
 // hold, so a parser that updates a reusable mock asks MarkMockAsUsed after it.
 func ConsumeRefused(db MockMemDb, name string) bool {
 	return name != "" && ExactServing(db)
+}
+
+// ExactConcurrentReader is an optional MockMemDb capability under exact
+// serving: what the open test's view says of the recordings it shares with
+// the tests whose requests were open beside its own at record time
+// (models.ExactServing.Concurrent, models.Mock.TestModeInfo.Concurrent on the
+// copies it shows). Those recordings answer at most once in the staging, for
+// whichever of the tests makes its call first, and a parser's learn step never
+// learns against one (another of those tests may have made it): it reads here
+// which of them another test took, so a call closest to one is a conflict.
+// Only keploy record's full round shares recordings; every other view has
+// none, and every answer here is empty.
+type ExactConcurrentReader interface {
+	// ClaimantOf is the test that answered a call with the shared recording
+	// name in the current staging, if one did.
+	ClaimantOf(name string) (test string, ok bool)
+	// ExactTakenCandidates are, of the open test's shared recordings of kind
+	// (every kind for ""), those another test answered a call with: the view
+	// shows them no longer, and a parser only compares a call with them. The
+	// manager's copies, in recorded order; read-only.
+	ExactTakenCandidates(kind models.Kind) []*models.Mock
 }

@@ -59,7 +59,7 @@ func TestTheRecordingsStopSaysWhenItKilledTheApp(t *testing.T) {
 	utils.StopStallBudget = 300 * time.Millisecond
 	t.Cleanup(func() { utils.StopStallBudget = budget })
 	if appErr := runNativeAs(t, models.MODE_RECORD, ignores); appErr.AppErrorType != models.ErrCtxCanceled ||
-		!strings.Contains(appErr.StopKilled, "keploy stopped the application at the recording's end and a process of it made no progress on its way out for 300ms of keploy's runnable time") {
+		!strings.Contains(appErr.StopKilled, "keploy stopped the application at the recording's end and a process of it made no progress on its way out for 300ms of its and keploy's runnable time") {
 		t.Fatalf("an app that ignores the interrupt: run ended %+v; want the recording's kill named with the stall", appErr)
 	}
 	if appErr := runNativeAs(t, models.MODE_RECORD, `touch started; exec sleep 600`); appErr.StopKilled != "" {

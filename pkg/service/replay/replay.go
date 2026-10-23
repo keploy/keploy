@@ -1127,6 +1127,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
 			r.setEnd, r.setEndCalls = nil, nil
+			// The set's exact plan is this run's: a run that ends before it
+			// makes one tells its end hooks no earlier set's shares.
+			r.exact = nil
 			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
@@ -2090,10 +2093,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// mocks no test case owns that answer from their place in the set's
 		// run on (models.Mapping.Worker).
 		var workerScope []models.MockEntry
+		// conc: under the proven switch, the set's concurrency as its
+		// mapping states it (models.Mapping.Groups, Shared).
+		var conc *setConcurrency
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
 			// case owns, and a mapping that cannot be read refuses the set.
-			if expectedTestMockMappings, workerScope, windowsWhy, err = r.provenMappings(ctx, testSetID); err != nil {
+			if expectedTestMockMappings, workerScope, conc, windowsWhy, err = r.provenMappingsOf(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
 			useMappingBased = true
@@ -2137,6 +2143,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					mocksWeNeed[n] = true
 				}
 			}
+			// keploy record's full round shares a grouped recording between
+			// its group's tests: whichever test lists it, every one of them
+			// may need it.
+			if r.sharing() && conc != nil {
+				for n := range conc.entries {
+					mocksWeNeed[n] = true
+				}
+			}
 		}
 		// Get all mocks for mapping-based filtering
 		filtered, unfiltered, lookup, skipped, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
@@ -2144,7 +2158,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil, nil, err
 		}
 		if fromWindows {
-			expectedTestMockMappings, workerScope = r.windowOwnership(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
+			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
 		mockLookup = lookup
 		addKinds(filtered)
@@ -2183,6 +2197,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
+			r.exact.share = newSharePlan(conc, workerScope, filtered, unfiltered)
+			// keploy record's full round shares the recordings made while
+			// several tests' requests were open between those tests, when
+			// the agent serves them (models.ExactConcurrentHeader, read
+			// from the StoreMocks just above): each test is then required
+			// to make only its own (definite) recordings. Any other replay,
+			// or an agent that does not say it serves them, keeps the
+			// recorded ownership whole.
+			expectedTestMockMappings = r.planShares(testSetID, expectedTestMockMappings)
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
 			// set, or one keploy does not start, booted before this set.
@@ -2999,6 +3022,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				totalConsumedMocks[m.Name] = m
 			}
 			consumptionUnread = appendOnce(consumptionUnread, name)
+			r.exact.noteShares(name, nil, err)
 			return
 		}
 		early = append(answeredInGap, early...)
@@ -3006,6 +3030,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			totalConsumedMocks[m.Name] = m
 		}
 		noteConsumers(consumers, name, early)
+		r.exact.noteShares(name, early, nil)
 	}
 	finalTestCaseResults := make(map[string]*models.TestResult)
 	itr := 1
@@ -3358,6 +3383,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					totalConsumedMocks[m.Name] = m
 				}
 				noteConsumers(consumers, testCase.Name, consumedMocks)
+				r.exact.noteShares(testCase.Name, consumedMocks, instrumentConsumedFetchErr)
 			}
 
 			r.logger.Debug("test case kind", zap.String("kind", string(testCase.Kind)), zap.String("testcase", testCase.Name), zap.String("testset", testSetID))
@@ -4379,12 +4405,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if err != nil {
 					streamConsumedErr = err
 					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+					r.exact.noteShares(tc.Name, nil, err)
 				} else {
 					for _, m := range consumedMocks {
 						totalConsumedMocks[m.Name] = m
 						mockNames = append(mockNames, m.Name)
 					}
 					noteConsumers(consumers, tc.Name, consumedMocks)
+					r.exact.noteShares(tc.Name, consumedMocks, nil)
 				}
 			}
 
@@ -4604,6 +4632,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					mockNames = append(mockNames, m.Name)
 				}
 				noteConsumers(consumers, tc.Name, additionalMocks)
+				r.exact.noteShares(tc.Name, additionalMocks, drainErr)
 				consumedMocks = append(consumedMocks, additionalMocks...)
 			}
 
@@ -4981,6 +5010,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	resultsComplete := resultsErr == nil && len(scoredTests) >= success+failure+obsolete
+
+	// Under the proven switch, keploy record's full round settles which test
+	// made each call recorded while several tests' requests were open (the
+	// shares, concurrent_shares.go), before any evidence pass and every hook
+	// read the results: what sharing cannot prove charges the tests it may
+	// be, FAILED, with evidence every reader holds. Every other replay says,
+	// on each miss and unconsumed recording of a test recorded beside others,
+	// what keploy knows of that.
+	sharesComplete := resultsComplete && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed)
+	r.logShares(testSetID, r.exact.settleShares(testCaseResults, consumers, sharesComplete, mockLookup))
+	if charged := r.exact.annotateConcurrent(testCaseResults, mockLookup); len(charged) > 0 {
+		r.logger.Error("tests failed: they list a call keploy record's full round could not give to one of the tests recorded beside them ("+provenswitch.Env+"=1); the report says why under unmatched_calls",
+			zap.String("test-set", testSetID), zap.Strings("tests", charged),
+			zap.String("next_step", "record these tests one request at a time"))
+	}
 
 	// Under the proven switch an unconsumed test mock a sibling consumed is
 	// named with that sibling.
@@ -5710,7 +5754,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
-		} else if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
+		} else if err := r.persistLearned(runTestSetCtx, testSetID, r.exact.stripUnresolved(allConsumedAcrossCycles), actualTestMockMappings, r.exact.consumerOf()); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
 		}

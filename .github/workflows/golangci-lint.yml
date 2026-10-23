@@ -43,6 +43,13 @@ jobs:
       - name: Check image registries
         run: bash ./.github/workflows/test_workflow_scripts/check-image-registries.sh
 
+      # No workflow downloads an artifact with a download-artifact older than
+      # v8: before v6 a download that stops part-way ends green with a
+      # truncated file, and before v8 a digest mismatch is only a warning (the
+      # script says how). It needs no Go either.
+      - name: Check artifact downloads
+        run: bash ./.github/workflows/test_workflow_scripts/check-artifact-downloads.sh
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

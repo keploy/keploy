@@ -356,6 +356,26 @@ var (
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
 )
 
+// ClaimantOf and ExactTakenCandidates forward what the store's open test's view says of the recordings it shares
+// with the tests recorded beside it (integrations.ExactConcurrentReader),
+// nothing from a store that says none: a parser's learn step on a view made
+// before exact serving began reads them as it does on the bare manager.
+func (s *scopedMockDb) ClaimantOf(name string) (string, bool) {
+	if cr, ok := s.MockMemDb.(integrations.ExactConcurrentReader); ok {
+		return cr.ClaimantOf(name)
+	}
+	return "", false
+}
+
+func (s *scopedMockDb) ExactTakenCandidates(kind models.Kind) []*models.Mock {
+	if cr, ok := s.MockMemDb.(integrations.ExactConcurrentReader); ok {
+		return cr.ExactTakenCandidates(kind)
+	}
+	return nil
+}
+
+var _ integrations.ExactConcurrentReader = (*scopedMockDb)(nil)
+
 // StagedMocks forwards the store's staged mocks (integrations.StagedReader),
 // none when it keeps none: the learn step's earlier places are the
 // recording's, whatever this view's allowlist shows.
