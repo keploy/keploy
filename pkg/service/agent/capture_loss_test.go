@@ -443,6 +443,18 @@ func TestACallKeployCannotCaptureLeavesTestsNotJudged(t *testing.T) {
 		require.Contains(t, w.Evidence.Reason, "/var/run/postgresql/.s.PGSQL.5432")
 	}
 
+	// Opened before the session's mark (a pool opened as the application
+	// started, the session's reset after it): the mark has it, and every test
+	// is still not judged, as what keploy cannot capture is counted from the
+	// hooks' load.
+	a, _ = wireAgent(t, models.MODE_TEST)
+	a.Hooks = unixHooks{losses: db}
+	require.NoError(t, a.resetSession(context.Background()))
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestMarked").Action)
+	require.Equal(t, db, windowOf(t, a, "o::TestMarked").Evidence.CannotCapture,
+		"a Unix-socket call from before the session's mark is still every test's")
+
 	// Opened mid-run: the tests before it are judged, untouched.
 	a, _ = wireAgent(t, models.MODE_TEST)
 	h := &switchingHooks{}

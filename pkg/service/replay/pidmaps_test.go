@@ -1214,7 +1214,9 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				h := tc.harness(t)
 				h.replayer.config.Test.Mocking = true
 				h.replayer.instrument = !tc.noApp
+				// As Start marks the run before its first application.
 				h.replayer.markPIDMaps(context.Background())
+				h.replayer.appStartsAnew()
 				run := h.run
 				if tc.serving {
 					run = h.runServing
@@ -1249,6 +1251,129 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 			})
 		}
 	}
+}
+
+// composeStartsInstr is a compose stack whose counts are now, and whose
+// app's first failStarts starts are told failed though the daemon carried
+// them out (the start call timed out on a starved daemon: StartComposeApp's
+// hang guard), the app so started losing a process (now becomes lost). Every
+// later start is a docker start of a running container: no start anew.
+type composeStartsInstr struct {
+	*composeInstr
+	mu         sync.Mutex
+	now, lost  models.CaptureLosses
+	failStarts int
+}
+
+func (c *composeStartsInstr) StartComposeApp(context.Context) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.starts++
+	if c.starts <= c.failStarts {
+		c.now = c.lost
+		return false, errors.New(`keploy could not start the application's container "app" again: context deadline exceeded`)
+	}
+	return false, nil
+}
+
+func (c *composeStartsInstr) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now, nil
+}
+
+// Under the proven switch, a compose app's start keploy was told failed, but
+// that the daemon carried out, leaves the app running with what it lost: the
+// set halts, and the next set's start of it is a docker start of a running
+// container, no start anew, so its tests are charged the lost process.
+func TestUnderTheSwitchAComposeStartToldFailedThatRanIsNoStartAnew(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppSubtreeUntracked, models.CaptureLossPIDMap} {
+		t.Run(string(kind), func(t *testing.T) {
+			c := &composeInstr{}
+			h := composeHarness(t, c)
+			ci := &composeStartsInstr{composeInstr: c, failStarts: 1,
+				lost: models.CaptureLosses{{Kind: kind, Count: 1, What: "the latest: pid 41 (worker)"}}}
+			h.replayer.instrumentation = ci
+			h.replayer.config.Test.Mocking = true
+			if s := h.runServing(t); s != models.TestSetStatusPassed {
+				t.Fatalf("set 1: %s, want PASSED", s)
+			}
+			resetResults(h)
+			if s, _ := h.replayer.RunTestSet(context.Background(), "test-set-0", "test-run-0", true); s != models.TestSetStatusAppHalted {
+				t.Fatalf("set 2: %s, want APP_HALTED (its start was told failed)", s)
+			}
+			resetResults(h)
+			if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusFailed || n != 2 {
+				t.Fatalf("set 3: %s, %d of 2 tests charged %s; want FAILED, both: set 2's start ran, so set 3's was no start anew", s, n, kind)
+			}
+		})
+	}
+}
+
+// Under the proven switch, a compose app whose stop failed runs on into the
+// next set, which is charged what it lost; that set's own stop ends it, and
+// the set after, its app started anew, is charged nothing of it.
+func TestUnderTheSwitchAnAppRunsOnOnlyUntilItsStopEndsIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	kind := models.CaptureLossPIDMap
+	c := &composeInstr{stopErr: errors.New("keploy could not interrupt the application's container: context deadline exceeded")}
+	h := composeHarness(t, c)
+	li := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, {{Kind: kind, Count: 1, What: "pid 41"}}}}
+	h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: li}
+	h.replayer.config.Test.Mocking = true
+	if s := h.runServing(t); s != models.TestSetStatusInternalErr {
+		t.Fatalf("set 1: %s, want INTERNAL_ERR (its stop failed)", s)
+	}
+	c.stopErr = nil
+	resetResults(h)
+	if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusFailed || n != 2 {
+		t.Fatalf("set 2: %s, %d charged; want FAILED, 2 (the app ran on)", s, n)
+	}
+	resetResults(h)
+	if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusPassed || n != 0 {
+		t.Fatalf("set 3: %s, %d charged; want PASSED, 0 (set 2's stop ended the app, set 3 started it anew)", s, n)
+	}
+}
+
+// Under the proven switch, a compose stack's first set starts its app after
+// its mark: what was lost before that mark (an earlier stack's processes, or
+// a run's before this one's) is not the app's, and charges none of its tests.
+func TestUnderTheSwitchAComposeAppIsChargedFromItsFirstMark(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppSubtreeUntracked, models.CaptureLossPIDMap} {
+		t.Run(string(kind), func(t *testing.T) {
+			c := &composeInstr{}
+			h := composeHarness(t, c)
+			before := models.CaptureLosses{{Kind: kind, Count: 1, What: "the latest: pid 41 (worker)"}}
+			h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before}}}
+			h.replayer.config.Test.Mocking = true
+			if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusPassed || n != 0 {
+				t.Fatalf("%s, %d tests charged %s; want PASSED, none: it was lost before the set's mark", s, n, kind)
+			}
+		})
+	}
+}
+
+// resetResults gives the harness's next set results of its own, as another
+// test set's would (the harness runs one set's id).
+func resetResults(h *prRun) {
+	h.report.mu.Lock()
+	h.report.results = nil
+	h.report.mu.Unlock()
+}
+
+// chargedWith is how many of the last set's tests were charged kind.
+func chargedWith(h *prRun, kind models.CaptureLossKind) int {
+	n := 0
+	for _, r := range h.report.report.Tests {
+		for _, c := range r.FailureInfo.CaptureIncomplete {
+			if c.Kind == kind {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // Under the proven switch, an application keploy does not start (no -c), as

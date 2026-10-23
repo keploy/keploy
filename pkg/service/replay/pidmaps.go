@@ -72,7 +72,6 @@ type pidMapVerdict struct {
 // one test set.
 func (r *Replayer) markPIDMaps(ctx context.Context) {
 	r.markCaptureLosses(ctx)
-	r.appStartsAnew()
 	r.pidMark = pidMapMark{}
 	r.pidMarked = true
 	reader, ok := r.instrumentation.(PIDMapReader)

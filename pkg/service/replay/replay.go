@@ -941,6 +941,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.lossRunStart, r.lossRunStartSet = nil, false
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
+		r.appStartsAnew() // the run's first application starts after it
 	}
 
 	// --keep-app-alive: start the user app ONCE on the outer errgroup
@@ -2250,10 +2251,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			stopAppBeforeSetEnd = func() string {
 				killed, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
 				r.composeAppStopped = true
-				// A stop that did not end the app (an error but its own
-				// exit) leaves it running, with what it lost, under the next
-				// set's start of it (a docker start of a running container).
-				r.lossAppRunsOn = serveTest && err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn)
 				switch {
 				case errors.Is(err, models.ErrAppExitedOnItsOwn):
 					// The app exited on its own before the set's end:
@@ -2428,6 +2425,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// has taken one (pidMarked: the first test set can end before here).
 		if !serveTest || !r.pidMarked {
 			r.markPIDMaps(ctx)
+			// A stack this set started, or one reused whose app starts for
+			// the first time, starts its app anew; one started again below
+			// is anew only where its start says so.
+			if composeRestart == nil {
+				r.appStartsAnew()
+			}
 		}
 
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
@@ -2443,11 +2446,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// stopped, started again now: this set is staged on the agent and
 		// its pids are marked, so its startup is this set's.
 		if composeRestart != nil {
-			if err := composeRestart.StartComposeApp(ctx); err != nil {
+			anew, err := composeRestart.StartComposeApp(ctx)
+			if err != nil {
+				// The base stays: the daemon may have carried the start out.
 				utils.LogError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
 				return models.TestSetStatusAppHalted, err
 			}
 			r.composeAppStopped = false
+			// Only a start of a container that was not running is a new
+			// app; one that ran on (a stop that did not end it, a start told
+			// failed that the daemon carried out) keeps its base, and what
+			// its processes lost.
+			if anew {
+				r.lossAppRunsOn = false
+				r.appStartsAnew()
+			}
 		}
 
 		// Wait for the user application to become ready before firing the first test.

@@ -645,8 +645,13 @@ func (a *App) signalComposeApp(ctx context.Context, id, signal string) error {
 
 // StartComposeApp starts the app's container of a compose stack again, under
 // the proven switch, after StopComposeApp: its exits are watched as a halt
-// again from then on.
-func (a *App) StartComposeApp(ctx context.Context) error {
+// again from then on. anew says the start started a container that was not
+// running, as an inspect before it read: the app is a new one, and what an
+// earlier one's processes lost is not its. It is false where the container
+// runs already (a stop that did not end it, or a start told failed that the
+// daemon carried out: the start is the daemon's no-op), where the inspect
+// could not tell, and with an error: the app may be the one that ran before.
+func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 	// Under stopMu, as keploy's stops are made and the watch decides
 	// (composeAppDied): a die the watch takes during the start is told
 	// apart by the container running once it is through.
@@ -654,15 +659,19 @@ func (a *App) StartComposeApp(ctx context.Context) error {
 	defer a.composeApp.stopMu.Unlock()
 	id, err := a.composeAppContainer(ctx)
 	if err != nil {
-		return fmt.Errorf("keploy could not tell which container is the application's, to start it again: %w", err)
+		return false, fmt.Errorf("keploy could not tell which container is the application's, to start it again: %w", err)
 	}
+	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
+	info, ierr := a.docker.ContainerInspect(ictx, id)
+	icancel()
+	stopped := ierr == nil && info.ContainerJSONBase != nil && info.State != nil && !info.State.Running
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's
 	// calls are: a wedged daemon cannot hold the set for good.
 	sctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
 	defer cancel()
 	if err := a.docker.ContainerStart(sctx, id, container.StartOptions{}); err != nil {
-		return fmt.Errorf("keploy could not start the application's container %q again: %w", a.container, err)
+		return false, fmt.Errorf("keploy could not start the application's container %q again: %w", a.container, err)
 	}
 	a.composeApp.stopping.Store(false)
-	return nil
+	return stopped, nil
 }

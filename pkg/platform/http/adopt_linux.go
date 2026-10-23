@@ -71,7 +71,14 @@ var (
 	// adopting is set once this process is a child subreaper that reaps
 	// what it adopts.
 	adopting atomic.Bool
+	// cannotAdopt is why this process, asked to adopt the application's
+	// daemons, does not (startAdopting failed, or its reaper stopped): an
+	// end of the application cannot then be told to have ended them.
+	cannotAdopt atomic.Pointer[string]
 )
+
+// noteCannotAdopt keeps why keploy does not adopt the application's daemons.
+func noteCannotAdopt(why string) { cannotAdopt.Store(&why) }
 
 // adoptDaemons makes this process, the CLI whose tree is the run's
 // membership, the child subreaper of its descendants and reaps the ones it
@@ -79,6 +86,7 @@ var (
 func adoptDaemons(logger *zap.Logger) {
 	adoptOnce.Do(func() {
 		if _, err := startAdopting(logger); err != nil {
+			noteCannotAdopt(err.Error())
 			logger.Warn("keploy cannot keep a daemon the application starts in this run: a process the application starts and leaves behind (pg_ctl start, redis-server --daemonize) is reparented away from keploy, and its calls are neither intercepted nor judged; nor does keploy's stop of the application wait for a process of it that outlives the shell that started it (`app & wait`), so what that process does as it stops can come after its test set's end is read",
 				zap.Error(err),
 				zap.String("next_step", "start such a dependency before keploy, where it is an outside dependency, recorded and mocked; or run it in the foreground of the command keploy runs (postgres -D <dir> &, redis-server --daemonize no &), where it stays the command's child; and start the application itself in the foreground of its shell (exec app)"))
@@ -106,6 +114,7 @@ func startAdopting(logger *zap.Logger) (stop func(), err error) {
 			// zombie once it exits: the CLI stops being one, and later
 			// orphans go to init, as before.
 			if r := recover(); r != nil {
+				noteCannotAdopt("keploy stopped reaping the daemons it adopts")
 				adopting.Store(false)
 				_ = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
 				utils.HandleRecovery(logger, r, "keploy stopped reaping the daemons it adopts; daemons the application starts from now on leave the run's tree")
@@ -356,6 +365,11 @@ var (
 // it left runs on.
 var stopLooked atomic.Pointer[func()]
 
+// killWithheld, set by a test, withholds the kill of a stop's daemons, as the
+// kernel holds a killed process that waits in it without progress: the stop
+// then finds them still there once it gives up on them.
+var killWithheld atomic.Bool
+
 // stopStall is the stall a stop of the daemons kills on: stopStallChecks
 // checks of stopCheck, of the time both they and keploy could run; the
 // longest Duration where that is longer.
@@ -411,20 +425,36 @@ type member struct {
 //
 // It returns why it had to kill a daemon that made no progress on its way
 // out, "" when it did not, or when the kill was the user's (Ctrl+C): a
-// shutdown that kill cut is not known; and what of the daemons it left
-// running (leftRunning), "" when none. Each step the daemons take on their
-// way out is a movement of moved, the teardown scope of the run whose app
-// left them (nil: none).
+// shutdown that kill cut is not known; and what of the application it may
+// have left running (left, models.AppError.LeftRunning), "" only where it
+// knows it left nothing: a daemon it cannot see, one the kernel holds after
+// its kill, one a daemon started on its way out (read again once the stop is
+// over), every daemon where it cannot tell its own children from them, and
+// whatever there is where it was asked to adopt them and could not. Each step
+// the daemons take on their way out is a movement of moved, the teardown
+// scope of the run whose app left them (nil: none).
 func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) (why, left string) {
 	if !adopting.Load() {
+		if no := cannotAdopt.Load(); no != nil {
+			return "", "whatever the application left running: keploy cannot tell whether its processes ended (it could not adopt them: " + *no + ")"
+		}
 		return "", ""
 	}
-	daemons, unseen := adoptedRunning(logger)
-	var held []int
+	daemons, unseen, err := adoptedRunning(logger)
+	if err != nil {
+		return "", "every daemon the application left: keploy could not tell its own processes from them (" + err.Error() + "), and stopped none"
+	}
+	var held, after []int
 	if len(daemons) > 0 {
 		why, held = stopAll(logger, daemons, reached, moved)
+		// What a daemon started on its way out is adopted now, and runs;
+		// what keploy cannot see is read as it is now.
+		after, unseen, err = adoptedRunning(logger)
+		if err != nil {
+			return why, "what the application's daemons started as they stopped: keploy could not tell its own processes from them (" + err.Error() + ")"
+		}
 	}
-	return why, leftRunning(unseen, held)
+	return why, leftRunning(unseen, held, after)
 }
 
 // stopAll stops daemons as stopAdopted does: why it had to kill one, and the
@@ -442,15 +472,19 @@ func stopAll(logger *zap.Logger, daemons []int, reached []utils.Reached, moved *
 }
 
 // leftRunning says what of the application's daemons a stop left running:
-// those keploy cannot see (unseen), which it does not stop, and those the
-// kernel holds after their kill (held). "" where none was.
-func leftRunning(unseen, held []int) string {
+// those keploy cannot see (unseen), which it does not stop, those the kernel
+// holds after their kill (held), and those the daemons started on their way
+// out (after). "" where none was.
+func leftRunning(unseen, held, after []int) string {
 	var parts []string
 	if len(unseen) > 0 {
 		parts = append(parts, fmt.Sprintf("daemons keploy cannot see (pids %v)", unseen))
 	}
 	if len(held) > 0 {
 		parts = append(parts, fmt.Sprintf("daemons the kernel holds after their kill (pids %v)", held))
+	}
+	if len(after) > 0 {
+		parts = append(parts, fmt.Sprintf("processes the daemons started as they stopped (pids %v)", after))
 	}
 	return strings.Join(parts, " and ")
 }
@@ -471,12 +505,14 @@ func actingOn(reached []utils.Reached) func(member) bool {
 // own names them) and that run, but keploy itself (an agent whose sudo is
 // gone), what an earlier stop left to the kernel, and what this user may not
 // see, which it says, and returns apart (unseen): it leaves those running.
-func adoptedRunning(logger *zap.Logger) (pids, unseen []int) {
+// An error is a read of its own pidfds that failed: which children are its
+// own cannot be told, so it names none, to stop none.
+func adoptedRunning(logger *zap.Logger) (pids, unseen []int, err error) {
 	children := childPids()
 	held, err := heldPidfds()
 	if err != nil {
 		failedClosed(logger, err)
-		return nil, nil // which are its own cannot be told: stop none
+		return nil, nil, err
 	}
 	self, selfErr := os.Stat("/proc/self/exe")
 	me := os.Getpid()
@@ -500,7 +536,7 @@ func adoptedRunning(logger *zap.Logger) (pids, unseen []int) {
 		}
 		pids = append(pids, pid)
 	}
-	return pids, unseen
+	return pids, unseen, nil
 }
 
 // members is each daemon of pids and every process it runs, now, each named
@@ -576,7 +612,9 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
-		signalAll(ms, syscall.SIGKILL, true, nil)
+		if !killWithheld.Load() {
+			signalAll(ms, syscall.SIGKILL, true, nil)
+		}
 		killed = true
 		meter.Reset()
 		// What is left the kill ends, or the kernel holds: no press

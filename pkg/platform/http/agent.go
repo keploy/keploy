@@ -1882,10 +1882,10 @@ func (a *AgentClient) StopComposeApp(ctx context.Context) (string, error) {
 
 // StartComposeApp starts the app's container of a docker compose stack again
 // after StopComposeApp (app.App.StartComposeApp, P101-c).
-func (a *AgentClient) StartComposeApp(ctx context.Context) error {
+func (a *AgentClient) StartComposeApp(ctx context.Context) (bool, error) {
 	app, err := a.getApp()
 	if err != nil {
-		return err
+		return false, err
 	}
 	return app.StartComposeApp(ctx)
 }

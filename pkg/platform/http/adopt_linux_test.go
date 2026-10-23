@@ -589,7 +589,10 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	// The run's teardown scope: the slow daemon's steps on its way out move
 	// it, which the run's drains wait on.
 	scope := &utils.TeardownScope{}
-	why, _ := stopAdopted(zap.New(core), nil, scope)
+	why, left := stopAdopted(zap.New(core), nil, scope)
+	if left != "" {
+		t.Errorf("the stop ended every daemon and says it left %q running", left)
+	}
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("polite %d, deaf %d, busy %d, churn %d, slow %d", polite, deaf, busy, churn, slow)
@@ -787,5 +790,170 @@ func TestTheDaemonsStallIsItsChecksAndNeverWraps(t *testing.T) {
 	stopCheck, stopStallChecks = 3, math.MaxUint64/2
 	if got := stopStall(); got != math.MaxInt64 {
 		t.Fatalf("a stall past the longest Duration is %v, want the longest", got)
+	}
+}
+
+// A stop that cannot tell its own children from the daemons the application
+// left (its read of its own fd table fails: EMFILE, an fdinfo it cannot read)
+// stops none of them, and says so: the application is not known to have
+// ended.
+func TestAStopThatCannotTellItsOwnSaysWhatItLeftRunning(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	pid := daemonize(t, "exec sleep 120")
+	await(t, "the daemon adopted", func() bool { return parentIs(pid, os.Getpid()) })
+	fdinfoDir = filepath.Join(t.TempDir(), "gone")
+	defer func() { fdinfoDir = "/proc/self/fdinfo" }()
+	_, left := stopAdopted(zap.NewNop(), nil, nil)
+	if !parentIs(pid, os.Getpid()) {
+		t.Fatalf("premise: daemon %d was stopped", pid)
+	}
+	if !strings.Contains(left, "could not tell its own processes") {
+		t.Fatalf("left %q; want it to say keploy could not tell its own processes from the daemons", left)
+	}
+}
+
+// An application that leaves a daemon keploy cannot see (not dumpable: its
+// /proc/<pid>/exe is not this user's to read) ends its run with LeftRunning
+// naming it, as the replay reads the run.
+func TestARunSaysTheDaemonItCannotSeeIsLeftRunning(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("no python3 to make a daemon that is not dumpable")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root sees every daemon")
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	pidFile := filepath.Join(dir, "pid")
+	script := filepath.Join(dir, "d.py")
+	if err := os.WriteFile(script, []byte(`import ctypes, os, signal, sys, time
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+open(sys.argv[2], "w").write(str(os.getpid()))
+open(sys.argv[1], "w").close()
+time.sleep(600)
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	cfg := &config.Config{}
+	cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
+	client := New(zap.NewNop(), nil, cfg)
+	client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
+		`sh -c 'setsid python3 `+script+` `+ready+` `+pidFile+` >/dev/null 2>&1 </dev/null &'; exec sleep 600`, nil,
+		models.SetupOptions{CommandType: string(utils.Native)}))
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan models.AppError, 1)
+	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	cancel(models.ErrAppStoppedForSetEnd)
+	appErr := <-done
+	if !strings.Contains(appErr.LeftRunning, "daemons keploy cannot see") {
+		t.Fatalf("LeftRunning %q (type %q); want the daemon keploy cannot see named", appErr.LeftRunning, appErr.AppErrorType)
+	}
+}
+
+// A daemon whose way out starts a process (a TERM handler that starts one in
+// the background and exits) leaves it adopted once the daemon is gone; the
+// stop, which stops the daemons it found as it began, reads what it adopts
+// again once it is over and says what runs.
+func TestAChildADaemonForksOnItsWayOutIsSaidLeftRunning(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 50
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child")
+	script := filepath.Join(dir, "d.sh")
+	if err := os.WriteFile(script, []byte(`trap 'sh -c "echo \$\$ > $1; exec sleep 300" & sleep 0.3; exit 0' TERM
+: > "$1.ready"
+while :; do sleep 0.05; done
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	daemonize(t, `exec sh "$1" "$2"`, script, child)
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(child + ".ready"); return err == nil })
+	_, left := stopAdopted(zap.NewNop(), nil, nil)
+	b, err := os.ReadFile(child)
+	if err != nil {
+		t.Fatalf("premise: the daemon's way out started no process: %v", err)
+	}
+	cpid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	t.Cleanup(func() { _ = syscall.Kill(cpid, syscall.SIGKILL) })
+	if !parentIs(cpid, os.Getpid()) {
+		t.Fatalf("premise: process %d, which the daemon started on its way out, is not adopted and running", cpid)
+	}
+	if want := fmt.Sprintf("processes the daemons started as they stopped (pids [%d])", cpid); !strings.Contains(left, want) {
+		t.Fatalf("left %q; want %q", left, want)
+	}
+}
+
+// A daemon the kernel holds after its kill (one waiting in it without
+// progress: the kill withheld here) is still there when the stop gives up on
+// it, and the stop says so.
+func TestAStopSaysTheDaemonTheKernelHoldsAfterItsKill(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	killWithheld.Store(true)
+	defer killWithheld.Store(false)
+	ready := filepath.Join(t.TempDir(), "ready")
+	pid := daemonize(t, `trap '' TERM; : > "$1"; exec sleep 120`, ready)
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	_, left := stopAdopted(zap.NewNop(), nil, nil)
+	if want := fmt.Sprintf("daemons the kernel holds after their kill (pids [%d])", pid); !strings.Contains(left, want) {
+		t.Fatalf("left %q; want %q", left, want)
+	}
+}
+
+// Where keploy was asked to adopt the application's daemons and could not (Go
+// without pidfds, a subreaper refused), a stop cannot tell whether the
+// application's processes ended, and says so; where it was never asked (the
+// switch off, an application in a container), it says nothing.
+func TestAStopWhereKeployCannotAdoptSaysItCannotTell(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	if _, left := stopAdopted(zap.NewNop(), nil, nil); left != "" {
+		t.Fatalf("never asked to adopt: left %q, want nothing", left)
+	}
+	noteCannotAdopt("make the CLI a child subreaper: operation not permitted")
+	defer cannotAdopt.Store(nil)
+	_, left := stopAdopted(zap.NewNop(), nil, nil)
+	if !strings.Contains(left, "keploy cannot tell whether its processes ended") || !strings.Contains(left, "operation not permitted") {
+		t.Fatalf("left %q; want it to say keploy cannot tell whether the application's processes ended, and why", left)
 	}
 }

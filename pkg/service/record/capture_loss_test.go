@@ -218,9 +218,15 @@ func TestARecordingWhoseCountCannotBeReadIsNotVerified(t *testing.T) {
 
 func TestARecordingThatLostNothingPasses(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	w, failed, logs := record3(t, &countingInstr{answers: []models.CaptureLosses{pid(3)}})
-	if failed || w.String() != "tainted=[] unverified=[]" || logs.Len() != 0 {
-		t.Fatalf("failed %v, %s, %d ERRORs; want nothing (refusals before capture began are not the recording's)", failed, w, logs.Len())
+	// Refusals of either map from before capture began: a process outside
+	// the application refused an exclusion lives on, but one an earlier
+	// recording of this agent counted is not this one's.
+	excluded := models.CaptureLosses{{Kind: models.CaptureLossPIDMapExcluded, Count: 3}}
+	for _, before := range []models.CaptureLosses{pid(3), excluded} {
+		w, failed, logs := record3(t, &countingInstr{answers: []models.CaptureLosses{before}})
+		if failed || w.String() != "tainted=[] unverified=[]" || logs.Len() != 0 {
+			t.Fatalf("%v: failed %v, %s, %d ERRORs; want nothing (refusals before capture began are not the recording's)", before, failed, w, logs.Len())
+		}
 	}
 }
 
