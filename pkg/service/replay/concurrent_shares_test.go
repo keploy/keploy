@@ -126,6 +126,20 @@ func learned(name string, places ...string) models.MockState {
 	return st
 }
 
+// learnedWords is a consumed state whose learn step learned, at places, only
+// the words that changed (MockState.LearnedWords), with F's values there
+// (MockState.LearnedF): no whole-leaf noise.
+func learnedWords(name string, places ...string) models.MockState {
+	st := used(name)
+	st.LearnedWords = map[string]models.WordsEntry{}
+	st.LearnedF = map[string]map[string]string{name: {}}
+	for _, p := range places {
+		st.LearnedWords[p] = models.WordsEntry{}
+		st.LearnedF[name][p] = "f"
+	}
+	return st
+}
+
 // resultOf is test's last result.
 func (s *shareSet) resultOf(test string) models.TestResult {
 	var out models.TestResult
@@ -430,6 +444,19 @@ func TestSettleSharesAmbiguousClasses(t *testing.T) {
 			t.Fatalf("charged %v; want both", charged)
 		}
 	})
+	t.Run("modulo the words learned", func(t *testing.T) {
+		// The same, the learn step having learned only the words of $2 that
+		// changed: the place is excused as whole noise is.
+		c1 := shMock("c1", 100, "INSERT", "bind.$1=same;bind.$2=t1", "201")
+		c2 := shMock("c2", 200, "INSERT", "bind.$1=same;bind.$2=t2", "23505")
+		s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+			map[string][]models.MockEntry{"a": {shEntry(c1, "g1"), shEntry(c2, "g1")}, "b": {}}, nil, nil, c1, c2)
+		s.run("a", learnedWords("c1", "bind.$2"))
+		s.run("b", used("c2"))
+		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a", "b"}) {
+			t.Fatalf("charged %v; want both", charged)
+		}
+	})
 }
 
 // A conflict (the learn step paired a call of a with a recording b answered
@@ -517,6 +544,16 @@ func TestSettleSharesNeverPinsACandidateTheLearnStepLearnedOn(t *testing.T) {
 		}
 		check(t, s, "a", "ca", "bind.$2")
 		check(t, s, "b", "cb", "bind.$2")
+	})
+	t.Run("words", func(t *testing.T) {
+		// Only the words of $2 that changed: learned on as much as noise is.
+		s := mk()
+		s.run("a", learnedWords("ca", "bind.$2"))
+		s.run("b", used("cb"))
+		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a"}) {
+			t.Fatalf("charged %v; want a", charged)
+		}
+		check(t, s, "a", "ca", "bind.$2")
 	})
 	t.Run("a variable", func(t *testing.T) {
 		s := mk()
@@ -679,6 +716,12 @@ func TestStripUnresolvedDropsWhatWasLearnedOnAnUnpinnedRecording(t *testing.T) {
 	got := s.p.stripUnresolved(map[string]models.MockState{"ca": learned("ca", "bind.$2"), "cb": cb2})
 	if len(got["ca"].ReqBodyNoise) != 1 || got["cb"].ReqBodyNoise != nil || got["cb"].Variables != nil || got["cb"].Binds != nil {
 		t.Fatalf("kept %+v; want ca's (pinned) and nothing of cb's (learned on, so not pinned)", got)
+	}
+	// The same of the words learned and F's values there.
+	ca3, cb3 := learnedWords("ca", "bind.$2"), learnedWords("cb", "bind.$1")
+	got = s.p.stripUnresolved(map[string]models.MockState{"ca": ca3, "cb": cb3})
+	if len(got["ca"].LearnedWords) != 1 || len(got["ca"].LearnedF["ca"]) != 1 || got["cb"].LearnedWords != nil || got["cb"].LearnedF != nil {
+		t.Fatalf("kept %+v; want ca's words and F (pinned) and none of cb's", got)
 	}
 }
 

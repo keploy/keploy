@@ -33,8 +33,9 @@ type ConcurrentKeys struct {
 	Positions func(m *Mock) map[string]string
 	// Shareable reports whether the recording may be shared at all: false,
 	// with why, for one whose recording states what widens its matching
-	// beyond equal values (noise, volatile places, variables, a redacted
-	// value), or one the kind's matching never answers a data call with.
+	// beyond equal values (noise, learned words (MockSpec.LearnedWords),
+	// volatile places, variables, a redacted value), or one the kind's
+	// matching never answers a data call with.
 	// A recording that is not shareable stays the test that lists it.
 	Shareable func(m *Mock) (ok bool, why string)
 	// Describe, when set, is the protocol and the call a charge of the

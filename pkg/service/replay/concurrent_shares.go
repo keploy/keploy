@@ -420,10 +420,16 @@ func (p *exactPlan) noteShares(test string, consumed []models.MockState, readErr
 }
 
 // learnedAt is the places the learn step learned on a consumed recording: its
-// noise, and the bound places of its echo variables, sorted.
+// noise, whole or by the words that changed, and the bound places of its echo
+// variables, sorted. A place whose words were learned is excused as a whole
+// one is: what tells two recordings apart is read only outside every place
+// learned.
 func learnedAt(st models.MockState) []string {
 	set := map[string]bool{}
 	for k := range st.ReqBodyNoise {
+		set[k] = true
+	}
+	for k := range st.LearnedWords {
 		set[k] = true
 	}
 	for _, v := range st.Variables {
@@ -435,19 +441,23 @@ func learnedAt(st models.MockState) []string {
 }
 
 // learnedOn reports whether the learn step learned anything on a consumed
-// recording: noise, a variable, or a value bound at an earlier recording. A
-// shared recording states none of these (models.ConcurrentKeys.Shareable), so
-// any is what the learn step paired a call with it by.
+// recording: noise, whole or by the words that changed, a variable, or a value
+// bound at an earlier recording. A shared recording states none of these
+// (models.ConcurrentKeys.Shareable), so any is what the learn step paired a
+// call with it by.
 func learnedOn(st models.MockState) bool {
-	return len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0
+	return len(st.ReqBodyNoise) > 0 || len(st.LearnedWords) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0
 }
 
 // learnedPlaces is every place the learn step learned on a consumed
-// recording: its noise, and the bound places of its variables and of what it
-// binds at earlier recordings, sorted.
+// recording: its noise, whole or by the words that changed, and the bound
+// places of its variables and of what it binds at earlier recordings, sorted.
 func learnedPlaces(st models.MockState) []string {
 	set := map[string]bool{}
 	for k := range st.ReqBodyNoise {
+		set[k] = true
+	}
+	for k := range st.LearnedWords {
 		set[k] = true
 	}
 	for _, v := range st.Variables {
@@ -1033,8 +1043,9 @@ func (p *exactPlan) setShares(status models.TestSetStatus) (models.SetShares, bo
 
 // stripUnresolved is consumed less what the learn step learned on the shared
 // recordings the settlement did not pin (moved, or left shared): their
-// pairing is not proven, so nothing of it is written onto the recording. The
-// states of the others are kept as they are.
+// pairing is not proven, so nothing of it is written onto the recording, nor
+// F's values there into learned.local.yaml. The states of the others are kept
+// as they are.
 func (p *exactPlan) stripUnresolved(consumed map[string]models.MockState) map[string]models.MockState {
 	if p == nil || p.share == nil || !p.share.sharing {
 		return consumed
@@ -1043,7 +1054,7 @@ func (p *exactPlan) stripUnresolved(consumed map[string]models.MockState) map[st
 	out := make(map[string]models.MockState, len(consumed))
 	for name, st := range consumed {
 		if _, cand := sp.candOf[name]; cand && sp.settled.Pins[name] == "" {
-			st.ReqBodyNoise, st.Variables, st.Binds = nil, nil, nil
+			st.ReqBodyNoise, st.LearnedWords, st.LearnedF, st.Variables, st.Binds = nil, nil, nil, nil, nil
 		}
 		out[name] = st
 	}
