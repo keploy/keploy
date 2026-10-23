@@ -784,7 +784,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		if where == "" {
 			where = "earlier in the test"
 		}
-		return "the moment record's full round saw in it stands " + where + ", while no earlier place holds the moment it was recorded with: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+		return pickUnaccounted(where)
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	// word names t, a word of v's recorded value or of what F saw, by where
@@ -814,6 +814,11 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				// from (Seen.Stamp), unless a stamp F served holds a word
 				// the value took in F (stampsEchoed).
 				if stamped(s) && !keep {
+					continue
+				}
+				// An instant its protocol types has no words: its moments
+				// are the echo's and appearedIn's to read.
+				if s.Leaf.Type == Instant {
 					continue
 				}
 				ed := dc.of(s.Leaf.Value, s.Live)
@@ -861,6 +866,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		}
 	}
 	return ""
+}
+
+// pickUnaccounted is why a drifted value whose moment in record's full round
+// stands at where (earlier in the test), and whose recorded moment no earlier
+// place holds, is refused (unaccounted).
+func pickUnaccounted(where string) string {
+	return "the moment record's full round saw in it stands " + where + ", while no earlier place holds the moment it was recorded with: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // allClock reports whether every ASCII word of t is a clock word of c, on

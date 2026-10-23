@@ -217,6 +217,10 @@ type Learned struct {
 //   - Unaccounted: none of these, and yet the declared readings cannot show
 //     it came from nowhere (unaccounted): refused, never noise.
 //
+// A leaf its protocol types as one instant (Instant) is read whole, never
+// word by word, and is noise only where its provenance shows a read of the
+// application's clock (typed.go).
+//
 // An empty recorded value is never followed: it carries nothing to follow.
 // dc keeps what each value drifted for the test (nil: for this call).
 func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf) []Learned {
@@ -235,6 +239,12 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 	out := make([]Learned, 0, len(drift))
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
+		// A field its protocol types as one instant is compared whole
+		// (typed.go), never word by word.
+		if r.Type == Instant || l.Type == Instant {
+			out = append(out, dc.classifyInstant(r, l, at, served, raw, resp, w))
+			continue
+		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); ok {
@@ -273,7 +283,7 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 // moved, or read in its call's window), in any declared form of the answer,
 // in its case or folded; "" when nowhere. Every value is read so, whatever it
 // looks like: the words of an instant's date and time are words like any
-// other.
+// other. An answer's leaf its protocol types as one instant has none.
 func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 	for i := range readings {
 		words := map[string]bool{}
@@ -291,7 +301,9 @@ func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 			continue
 		}
 		for _, a := range resp {
-			if a.Value == "" {
+			if a.Value == "" || a.Type == Instant {
+				// An answer's instant its protocol types has no words: one
+				// that holds a moment of the value is an echo (Echoes).
 				continue
 			}
 			toks := dc.rawTokens(a.Value)[i]
@@ -1093,7 +1105,14 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			if s.Live == s.Leaf.Value {
 				continue
 			}
-			ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v)
+			var ok, whole bool
+			if s.Leaf.Type == Instant {
+				// An instant its protocol types has no words: what v drifted
+				// with there is its moments (dc.instantSource).
+				ok, whole = dc.instantSource(s, v), s.Leaf.Value == recorded
+			} else {
+				ok, whole = sources(dc.of(s.Leaf.Value, s.Live), v)
+			}
 			if !ok {
 				continue
 			}
@@ -1235,18 +1254,11 @@ func (dc *DriftCache) heldAt(moments []moment, at time.Time, served []Earlier, r
 // the value by where it stands in it, never by its text: a value may be a
 // credential.
 func evidence(v *valueDrift, from Place) string {
-	at := from.Mock + "'s payload"
-	switch {
-	case from.Path != "":
-		at = from.Mock + " at " + from.Path
-	case from.Field != "":
-		at = from.Mock + " at " + from.Field
-	}
+	at := placeAt(from)
 	var found, provenance string
 	switch {
 	case from.Echo:
-		found = "the moment it was recorded with stands in " + at + ", and the moment record's full round saw in it stands earlier in the test too"
-		provenance = "a pick from what the application was given, by its clock, moves as a read of the clock does, so its move shows no read of the clock"
+		found, provenance = echoFound(at), echoProvenance
 	case from.Held == v.rec || from.Held == v.decRec:
 		found = "its recorded value stands whole in " + at
 	default:
@@ -1257,6 +1269,26 @@ func evidence(v *valueDrift, from Place) string {
 	}
 	return found + "; " + provenance + ", so keploy follows it as a value from there. " + correction(from.Mock)
 }
+
+// placeAt names where from stands, as a reason names it: "<mock> at
+// <leaf or field>", or "<mock>'s payload".
+func placeAt(from Place) string {
+	switch {
+	case from.Path != "":
+		return from.Mock + " at " + from.Path
+	case from.Field != "":
+		return from.Mock + " at " + from.Field
+	}
+	return from.Mock + "'s payload"
+}
+
+// echoFound is what the echo found, at at (evidence); echoProvenance why
+// that move shows no read of the clock.
+func echoFound(at string) string {
+	return "the moment it was recorded with stands in " + at + ", and the moment record's full round saw in it stands earlier in the test too"
+}
+
+const echoProvenance = "a pick from what the application was given, by its clock, moves as a read of the clock does, so its move shows no read of the clock"
 
 // notClock says why no read of the application's clock accounts for v.
 func notClock(v *valueDrift) string {
@@ -1319,6 +1351,15 @@ func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, ra
 	if len(v.instants) == 0 {
 		return nil
 	}
+	return echoedInstants(v, dc.earlierMoments(at, served, raw))
+}
+
+// earlierMoments are the moments the earlier places of a call recorded at
+// at hold, as the echo reads them (echoedIn): a payload served earlier in
+// the test or recorded before at (raw), in every form, as it stands, and
+// every value of an exchange F served earlier (served), on either side, as
+// recorded and as F served it, in every form.
+func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
 	var held heldMoments
 	for _, x := range raw {
 		if x.Served || x.At.Before(at) {
@@ -1337,14 +1378,15 @@ func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, ra
 			}
 		}
 	}
-	return echoedInstants(v, &held)
+	return &held
 }
 
 // Echoes are the answer leaves that hold r's recorded value: a scalar equal
 // to it (WholeEcho, a place it can be answered at), and every other place
 // keploy cannot answer it at: a string or a key of the answer's JSON objects
 // (Keys) holding it as a token, in any declared form (rawExtra: decoded,
-// case-folded, inside base64), and an unnamed leaf equal to it.
+// case-folded, inside base64), an instant its protocol types (Instant) that
+// the value holds, in any layout and form, and an unnamed leaf equal to it.
 func Echoes(dc *DriftCache, r Leaf, resp []Leaf) []Leaf {
 	if r.Value == "" {
 		return nil
@@ -1357,6 +1399,16 @@ func Echoes(dc *DriftCache, r Leaf, resp []Leaf) []Leaf {
 		switch {
 		case WholeEcho(r, a), a.Unnamed && a.Value == r.Value:
 			out = append(out, a)
+		case a.Type == Instant:
+			// An answer's instant its protocol types echoes the value
+			// where the value holds that moment, in any layout and form:
+			// it has no words to hold.
+			if t, _, ok := InstantOf(a); ok {
+				m := instantMoment(t)
+				if dc.holdsExact(r.Value, m) || dc.holdsExact(dc.rawExtra(r.Value), m) {
+					out = append(out, a)
+				}
+			}
 		case a.Type == String || a.Type == Keys:
 			if ContainsToken(a.Value, r.Value) {
 				out = append(out, a)

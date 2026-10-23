@@ -94,6 +94,11 @@ import (
 //     whose clock is off by more than the span writes no stamp: its Date
 //     header is searched as any text is.
 //
+// A field its protocol's decoder types as one instant (an Instant leaf: a
+// BSON datetime) is no text: it is compared whole, never word by word, and is
+// noise only by its provenance (typed.go). What this header says of a
+// value's words is of a value the decoder gives as text.
+//
 // The word-level learning build (train/feat/word-level-learn) rewrites
 // ClassifyIn with instant slots: it keeps these rules.
 

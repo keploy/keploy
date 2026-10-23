@@ -270,6 +270,16 @@ func moved(lay clockLayout, recorded, live string) bool {
 	if !ok {
 		return false
 	}
+	return leadMoved(rt, lt, rres, lres, lay.wraps)
+}
+
+// leadMoved reports whether lt, read at resolution lres, is rt, read at
+// rres, moved by FullRoundLead: compared at the coarser of the two
+// resolutions, and to the second for finer ones (F's clock is set to each
+// recorded instant plus the lead when the test begins, and how long the app
+// then takes to read its clock is its own). Of a time of day (wraps), the
+// move is read modulo a day.
+func leadMoved(rt, lt time.Time, rres, lres time.Duration, wraps bool) bool {
 	res := rres
 	if lres > res {
 		res = lres
@@ -278,7 +288,7 @@ func moved(lay clockLayout, recorded, live string) bool {
 		res = time.Second
 	}
 	d := lt.Truncate(res).Sub(rt.Truncate(res))
-	if lay.wraps {
+	if wraps {
 		for d <= -12*time.Hour {
 			d += 24 * time.Hour
 		}
