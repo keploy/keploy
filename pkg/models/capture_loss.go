@@ -15,12 +15,16 @@ type CaptureLossKind string
 const (
 	// CaptureLossPIDMap: the kernel refused a process a place in the agent's
 	// target_namespace_pids (pid_map_insert_failures): its calls were not
-	// intercepted.
+	// intercepted. The process lives on, for as long as the application it is
+	// part of runs (AppLife).
 	CaptureLossPIDMap CaptureLossKind = "pid_map_refused"
 	// CaptureLossPIDMapExcluded: the kernel refused a process a place in the
 	// agent's excluded_pids, so a process that should have been left alone
 	// was not excluded, and its children's calls may have been captured as
-	// the application's.
+	// the application's. Such a process predates the recording (the
+	// pre-existing-process filter excludes those), so it is no part of the
+	// application and outlives it, a restart of it included: counted from the
+	// run's base (runScoped).
 	CaptureLossPIDMapExcluded CaptureLossKind = "pid_map_refused_excluded"
 	// CaptureLossTLSAbort: a client-side TLS handshake with keploy's proxy
 	// failed other than by the client giving it up: the client rejected the
@@ -232,18 +236,25 @@ func (k CaptureLossKind) Evidence() bool {
 // process it lost runs: a test set the same application serves after the one
 // it happened in (--keep-app-alive) is charged it too, from the
 // application's start (SinceWithin's appBase), rather than from the set's
-// own mark. Every other kind is counted from the set's mark, or the run's
-// base (runScoped).
+// own mark. That is a process of the application's that keploy could not
+// place: one the kernel refused a place in the PID map (pid_map_refused), or
+// one the capture could not mark as in the application's subtree
+// (app_subtree_untracked). A process that outlives the application is
+// counted from the run's base instead (runScoped); every other kind from the
+// set's mark.
 func (k CaptureLossKind) AppLife() bool {
-	return k == CaptureLossAppSubtreeUntracked
+	return k == CaptureLossPIDMap || k == CaptureLossAppSubtreeUntracked
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
 // back it was made (SinceWithin): what keploy cannot capture at all over a
 // connection that outlives tests (NotJudged), but for a test's own kind
-// (PerTest), which is counted from the test's mark as every other kind is.
+// (PerTest), which is counted from the test's mark as every other kind is;
+// and a process that outlives the application, which keploy could not
+// classify (process_unclassified: NotJudged) or could not exclude
+// (pid_map_refused_excluded: one that predates the recording).
 func (k CaptureLossKind) runScoped() bool {
-	return (k.NotJudged() || k.Evidence()) && !k.PerTest()
+	return (k.NotJudged() || k.Evidence()) && !k.PerTest() || k == CaptureLossPIDMapExcluded
 }
 
 // Split is l's losses that fail a test (judged) and those that leave it

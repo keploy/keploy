@@ -412,11 +412,40 @@ func TestWhatADownstreamCaptureLostFailsTheTestsItTaints(t *testing.T) {
 			t.Fatalf("%s: text %q lacks %q", tc.k, txt, tc.text)
 		}
 	}
-	// Only an untracked process lasts as long as its application; every
-	// other agent-life kind is counted from the set's base.
-	refused := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 5}}
-	if got := refused.Charged(CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}}, nil, nil, nil); !reflect.DeepEqual(got, CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3}}) {
-		t.Fatalf("pid_map_refused: Charged = %+v, want the 3 since the set's base", got)
+}
+
+// Each kind is charged from the base its loss lasts from: a test's own from
+// the previous test's end; a process of the application's keploy could not
+// place (AppLife) from the running application's start; a process that
+// outlives the application (one keploy could not classify, or could not
+// exclude: it predates the recording) from the run's; every other kind from
+// the set's.
+func TestEachKindIsChargedFromTheBaseItsLossLastsFrom(t *testing.T) {
+	// Now 9; the run began at 1, the running application started at 3, the
+	// set at 5, and the previous test ended at 7.
+	for _, tc := range []struct {
+		k    CaptureLossKind
+		want uint64
+	}{
+		{CaptureLossTLSAbort, 2},
+		{CaptureLossParserStall, 4},
+		{CaptureLossPIDMap, 6},
+		{CaptureLossAppSubtreeUntracked, 6},
+		{CaptureLossPIDMapExcluded, 8},
+		{CaptureLossUnclassified, 8},
+	} {
+		at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: tc.k, Count: n}} }
+		if got := at(9).Charged(at(5), at(3), at(1), at(7)); !reflect.DeepEqual(got, at(tc.want)) {
+			t.Errorf("%s: Charged = %+v, want %d", tc.k, got, tc.want)
+		}
+	}
+	for _, k := range []CaptureLossKind{CaptureLossPIDMap, CaptureLossAppSubtreeUntracked} {
+		if !k.AppLife() || k.runScoped() || k.PerTest() {
+			t.Errorf("%s: AppLife %v, runScoped %v, PerTest %v; want application-life only", k, k.AppLife(), k.runScoped(), k.PerTest())
+		}
+	}
+	if CaptureLossPIDMapExcluded.AppLife() || CaptureLossPIDMapExcluded.NotJudged() || !CaptureLossPIDMapExcluded.runScoped() {
+		t.Error("pid_map_refused_excluded: want judged and run-scoped, not application-life")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1130,85 +1131,99 @@ func (c *composeLossInstr) GetCaptureLosses(ctx context.Context) (models.Capture
 	return c.loss.GetCaptureLosses(ctx)
 }
 
-// Under the proven switch, an app process the capture could not mark
-// (app_subtree_untracked) lives as long as the application that forked it:
-// where that application serves the next test set too (--keep-app-alive, or
-// one keploy does not start), the next set's tests are charged it, though it
-// was forked in the set before, while a loss of the set's own (a parser's
-// stall) stays with its set. Where the next set's application is started
-// anew (keploy's per-set start, or a compose stack's app keploy stops at
-// each set's end and starts again), that set is charged neither.
-func TestUnderTheSwitchAnUntrackedForkTaintsTheSetsItsApplicationServes(t *testing.T) {
+// Under the proven switch, a process keploy could not place taints every
+// test set it lives into. One of the application's (a process the kernel
+// refused a place in the PID map, or one the capture could not mark as in its
+// subtree) lives as long as that application: where it serves the next test
+// set too (--keep-app-alive, or one keploy does not start), the next set's
+// tests are charged it, though it was lost in the set before, while a loss
+// of the set's own (a parser's stall) stays with its set; where the next
+// set's application is started anew (keploy's per-set start, or a compose
+// stack's app keploy stops at each set's end and starts again), that set is
+// not charged it. One that predates the recording, which keploy could not
+// exclude, outlives the application too: every later set is charged it.
+func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	lost := models.CaptureLosses{
-		{Kind: models.CaptureLossAppSubtreeUntracked, Count: 1, What: "the latest: pid 41 (worker)"},
-		{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"},
-	}
-	// The mark and the first set's first test read nothing; its second test
-	// reads both losses, and every read after it the same.
-	answers := []models.CaptureLosses{nil, nil, lost}
-	charged := func(h *prRun) (untracked, stalled int) {
-		for _, r := range h.report.report.Tests {
-			for _, c := range r.FailureInfo.CaptureIncomplete {
-				switch c.Kind {
-				case models.CaptureLossAppSubtreeUntracked:
-					untracked++
-				case models.CaptureLossParserStall:
-					stalled++
+	stall := models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}
+	for _, lost := range []struct {
+		kind    models.CaptureLossKind
+		appLife bool // else it outlives the application
+	}{
+		{models.CaptureLossAppSubtreeUntracked, true},
+		{models.CaptureLossPIDMap, true},
+		{models.CaptureLossPIDMapExcluded, false},
+	} {
+		losses := models.CaptureLosses{{Kind: lost.kind, Count: 1, What: "the latest: pid 41 (worker)"}, stall}
+		sort.Slice(losses, func(i, j int) bool { return losses[i].Kind < losses[j].Kind })
+		// The mark and the first set's first test read nothing; its second
+		// test reads both losses, and every read after it the same.
+		answers := []models.CaptureLosses{nil, nil, losses}
+		charged := func(h *prRun) (process, stalled int) {
+			for _, r := range h.report.report.Tests {
+				for _, c := range r.FailureInfo.CaptureIncomplete {
+					switch c.Kind {
+					case lost.kind:
+						process++
+					case models.CaptureLossParserStall:
+						stalled++
+					}
 				}
 			}
+			return process, stalled
 		}
-		return untracked, stalled
-	}
-	plain := func(t *testing.T) *prRun {
-		h := newPartialRunHarness(t, 2, 0)
-		h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: answers}
-		return h
-	}
-	for _, tc := range []struct {
-		name          string
-		harness       func(t *testing.T) *prRun
-		serving       bool // the sets are served by one agent (serveTest)
-		noApp         bool // keploy starts no application (no -c)
-		wantNext      models.TestSetStatus
-		wantUntracked int
-	}{
-		{"kept alive across sets", plain, true, false, models.TestSetStatusFailed, 2},
-		{"one keploy does not start", plain, false, true, models.TestSetStatusFailed, 2},
-		{"a compose stack's app started again for the next set", func(t *testing.T) *prRun {
-			c := &composeInstr{}
-			h := composeHarness(t, c)
-			h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: answers}}
+		plain := func(t *testing.T) *prRun {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: answers}
 			return h
-		}, true, false, models.TestSetStatusPassed, 0},
-		{"started anew for each set", plain, false, false, models.TestSetStatusPassed, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := tc.harness(t)
-			h.replayer.config.Test.Mocking = true
-			h.replayer.instrument = !tc.noApp
-			h.replayer.markPIDMaps(context.Background())
-			run := h.run
-			if tc.serving {
-				run = h.runServing
-			}
-			if status := run(t); status != models.TestSetStatusFailed {
-				t.Fatalf("the first set: status %s, want FAILED (its second test is tainted)", status)
-			}
-			if u, s := charged(h); u != 1 || s != 1 {
-				t.Fatalf("the first set: %d tests charged the fork, %d the stall; want one each", u, s)
-			}
-			// The next set has results of its own, as another test set's
-			// would (the harness runs one set's id).
-			h.report.mu.Lock()
-			h.report.results = nil
-			h.report.mu.Unlock()
-			status := run(t)
-			if u, s := charged(h); status != tc.wantNext || u != tc.wantUntracked || s != 0 {
-				t.Fatalf("the next set: status %s, %d tests charged the fork, %d the stall; want %s, %d and none",
-					status, u, s, tc.wantNext, tc.wantUntracked)
-			}
-		})
+		}
+		for _, tc := range []struct {
+			name    string
+			harness func(t *testing.T) *prRun
+			serving bool // the sets are served by one agent (serveTest)
+			noApp   bool // keploy starts no application (no -c)
+			kept    bool // the next set's application is this set's
+		}{
+			{"kept alive across sets", plain, true, false, true},
+			{"one keploy does not start", plain, false, true, true},
+			{"a compose stack's app started again for the next set", func(t *testing.T) *prRun {
+				c := &composeInstr{}
+				h := composeHarness(t, c)
+				h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: answers}}
+				return h
+			}, true, false, false},
+			{"started anew for each set", plain, false, false, false},
+		} {
+			t.Run(string(lost.kind)+"/"+tc.name, func(t *testing.T) {
+				h := tc.harness(t)
+				h.replayer.config.Test.Mocking = true
+				h.replayer.instrument = !tc.noApp
+				h.replayer.markPIDMaps(context.Background())
+				run := h.run
+				if tc.serving {
+					run = h.runServing
+				}
+				if status := run(t); status != models.TestSetStatusFailed {
+					t.Fatalf("the first set: status %s, want FAILED (its second test is tainted)", status)
+				}
+				if p, s := charged(h); p != 1 || s != 1 {
+					t.Fatalf("the first set: %d tests charged the process, %d the stall; want one each", p, s)
+				}
+				// The next set has results of its own, as another test set's
+				// would (the harness runs one set's id).
+				h.report.mu.Lock()
+				h.report.results = nil
+				h.report.mu.Unlock()
+				want, wantStatus := 0, models.TestSetStatusPassed
+				if tc.kept || !lost.appLife {
+					want, wantStatus = 2, models.TestSetStatusFailed
+				}
+				status := run(t)
+				if p, s := charged(h); status != wantStatus || p != want || s != 0 {
+					t.Fatalf("the next set: status %s, %d tests charged the process, %d the stall; want %s, %d and none",
+						status, p, s, wantStatus, want)
+				}
+			})
+		}
 	}
 }
 

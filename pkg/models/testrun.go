@@ -249,10 +249,11 @@ type FailureInfo struct {
 	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
 	//     other kind): what the agent lost since the test set began, as this
 	//     test ended. Such a loss taints the test running when it happened
-	//     and every later test of the set (design v14 §3.2); a process lost
-	//     for as long as its application runs (AppLife) taints every test
-	//     since that application started, in this set or an earlier one it
-	//     served (--keep-app-alive).
+	//     and every later test of the set (design v14 §3.2); a process of the
+	//     application's that keploy could not place (AppLife) taints every
+	//     test since that application started, in this set or an earlier one
+	//     it served (--keep-app-alive), and one that outlives the application
+	//     every test since the run began.
 	//   - a test's own kind (CaptureLossKind.PerTest: tls_handshake_failed,
 	//     capture_unread, connection_unrecorded and the others): what the
 	//     agent lost while this test ran, since the previous test ended, for
