@@ -567,12 +567,28 @@ func (r *Replayer) poolBeforeBegin(ctx context.Context, plan *exactPlan, name st
 	return nil
 }
 
-// logNotBegun says why keploy did not begin a test case on its agent under
-// exact serving (poolBeforeBegin, openTestErrorCapture), that the set stops
-// there not judged, and what to do.
-func (r *Replayer) logNotBegun(err error) {
-	utils.LogError(r.logger, err, "keploy did not begin a test case on its agent; the test set stops here, not judged, and the run goes on to the next test set",
-		zap.String("next_step", "check the agent's log for why it did not answer and whether it is still running, then run the test set again"))
+// logStoppedBeforeTest says, where it happens, that keploy stopped a set
+// because it did not begin a test case on its agent under exact serving
+// (poolBeforeBegin, openTestErrorCapture), and why. It says nothing of the
+// set's verdict, which the set's end gives (logNotBegun): an agent that
+// refuses while the app runs on is said even when the set ends with the
+// app's status, or a failed post-script ends it before its end.
+func (r *Replayer) logStoppedBeforeTest(testSetID string, err error) {
+	r.logger.Warn("keploy did not begin a test case on its agent, so it stopped the test-set before that test case",
+		zap.String("test-set", testSetID),
+		zap.String("reason", err.Error()))
+}
+
+// logNotBegun says, at the end of a set keploy stopped because it did not
+// begin a test case on its agent under exact serving (poolBeforeBegin,
+// openTestErrorCapture), that the set is not judged, why, and what to do.
+func (r *Replayer) logNotBegun(testSetID string, err error) {
+	// Not utils.LogError, which drops an error that wraps context.Canceled:
+	// a set marked not judged is always said.
+	r.logger.Error("test-set is not judged: keploy did not begin one of its test cases on its agent, so it stopped the set before that test case; the run goes on to the next test-set",
+		zap.String("test-set", testSetID),
+		zap.String("reason", err.Error()),
+		zap.String("next_step", "check the agent's log for why it did not answer and whether it is still running, then run the test-set again"))
 }
 
 // noteMappingAlwaysUsed says once per run that disableMapping does not apply
