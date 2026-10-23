@@ -25,10 +25,15 @@ type AppError struct {
 	// another's.
 	StopKilled string
 	// LeftRunning, under the proven switch, says what of the application's
-	// daemons its stop left running: one keploy cannot see (not dumpable, or
-	// another user's), which it does not stop, or one the kernel holds after
-	// its kill. The application is then not known to have ended: what it lost
-	// runs on with it. "" when none was.
+	// daemons its stop may have left running, with their pids where it has
+	// them: one keploy cannot see (not dumpable, or another user's), which it
+	// does not stop; one the kernel holds after its kill, this stop's or an
+	// earlier one's; a process a daemon started on its way out; every daemon,
+	// where keploy could not tell its own processes from them, or where its
+	// children kept changing over every read of them; and whatever there is,
+	// where keploy was asked to adopt the application's daemons and could
+	// not. The application is then not known to have ended: what it lost runs
+	// on with it. "" only where keploy knows its stop left nothing.
 	LeftRunning string
 }
 
