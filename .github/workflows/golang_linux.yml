@@ -175,6 +175,52 @@ jobs:
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
+  # A reply MongoDB sends after the app closed its connection is not recorded
+  # as a mock the app read. The app stops while its driver's streaming monitor
+  # has its first awaitable hello waiting (the sample's URI sets
+  # heartbeatFrequencyMS=60000, so it waits 60 s); mongod answers the app's FIN
+  # with ok:0, code 279 ClientDisconnect, which the closed client refuses.
+  # Recorded, replay served it to the app's monitor hello and the driver
+  # cleared its pool. The stock gin-mongo lane stops after the first hello was
+  # answered and passes either way; this one fails a run that stopped too late
+  # to check anything (a recorded awaitable hello). Private parsers (the Mongo
+  # recorder), so not on forks; build binaries only: the released keploy
+  # records the reply.
+  gin_mongo_after_client_close:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    name: gin-mongo reply after the app closed (record_build_replay_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: native-linux
+      - name: Record gin-mongo stopped while its monitor's hello waits, and replay
+        env:
+          RECORD_BIN: ${{ steps.build.outputs.path }}
+          REPLAY_BIN: ${{ steps.build.outputs.path }}
+        run: |
+          cd samples-go/gin-mongo
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/gin_mongo_after_client_close/golang-linux.sh"
+
   dns_dedup_test:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
