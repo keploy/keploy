@@ -353,6 +353,7 @@ func TestWhatStandsBesideAClockReadIsLearned(t *testing.T) {
 		{"a time of day across an instant's edge", wAt.In(plus1).Format(time.RFC3339) + ":30", later.In(plus1).Format(time.RFC3339) + ":45", "s0i:iso8601:d4-d2-d2Td2:d2:d2F+d2:d2 s1r0"},
 		{"an instant after a backslash", `x\` + wAt.Format(time.RFC3339), `x\` + later.Format(time.RFC3339), "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ"},
 		{"a UUID that reads as no instant", "id 00000000-0000-7000-8000-00000000000a x", "id 00000000-0000-7000-8000-00000000000b x", "s1r4"},
+		{"a UUID glued to a word that did not change", "idX" + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref=a1", "idX" + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref=b2", "s2r0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := slotsOf(learnedWords(t, tc.rec, tc.f)); got != tc.slots {
@@ -436,6 +437,7 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"a separator changed", "a, b", "a ,b", whySeparators, nil},
 		{"two clock reads swapped places", wAt.Format(time.RFC3339) + " " + strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.Unix(), 10) + " " + later.Format(time.RFC3339), whyReadOrder, nil},
 		{"swapped ids", "A7K B8L x1", "B8L A7K x2", whyMoved, []string{"A7K", "B8L"}},
+		{"words that moved within their part", "ab-cd x1", "cd-ef x2", whyMoved, nil},
 		{"only the case", "ref=ab12", "ref=AB12", whyCase, nil},
 		{"beyond ASCII in a run", "id café1", "id café2", whyNotASCII, nil},
 		{"beyond ASCII in a run, recorded only", "id café1", "id cafe2", whyNotASCII, nil},
