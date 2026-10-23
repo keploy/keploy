@@ -133,9 +133,13 @@ type claimant struct {
 }
 
 // missCapturer is implemented by a proxy that keeps each test's misses
-// apart, carrying those made between tests into the next test.
+// apart, carrying those made between tests into the next test. Continue opens
+// a test's window, where the proxy's learn tracker begins the test; Withdraw
+// takes back one opened for a test whose begin then failed, so what it holds
+// is carried into the next test's as if it had never opened.
 type missCapturer interface {
 	ContinueTestErrorCapture()
+	WithdrawTestErrorCapture()
 }
 
 func scopeErr(status int, code, msg, remedy string) *models.ScopeError {
@@ -530,17 +534,27 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// The test's end compares the listener's drops with these.
 	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)
-	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
-		a.abandonWindow(id)
-		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
-			"keploy's agent could not open "+id+": "+err.Error(), "check the agent's log")
-	}
 	if capture != nil {
 		// Misses made from here, and those made since the previous test
 		// ended (or before the first test), are this test's: a miss outside
 		// every test is charged to the next test that begins (design v14
-		// §5.1).
+		// §5.1). The window opens before the test's view is installed
+		// (BeginScopeAt), as keploy test's loops open it: opening it is
+		// where the proxy's learn tracker begins the test, and a tracker
+		// that began after the view was installed would file what the view
+		// served before it as the previous test's, so the store's account
+		// of the open test and the tracker's could not be of one test.
 		capture.ContinueTestErrorCapture()
+	}
+	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
+		if capture != nil {
+			// The test did not begin: what its window holds is carried
+			// into the next test's, as if it had never opened.
+			capture.WithdrawTestErrorCapture()
+		}
+		a.abandonWindow(id)
+		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy's agent could not open "+id+": "+err.Error(), "check the agent's log")
 	}
 	if t := a.realTracker(); t != nil {
 		// The mock.real destinations its connections send bytes to from

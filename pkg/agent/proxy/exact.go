@@ -134,6 +134,12 @@ type exactView struct {
 	// (ServedInOpenTest).
 	heard    []*models.Mock
 	heardIDs map[string]bool
+	// stamp is the learn tracker's open test (learn.Tracker.OpenEpoch) as
+	// the test's view was installed (exactState.stampTest), set before the
+	// view is published and never changed: 0 for a pool view, with no
+	// tracker (SetOpenTestEpoch), when the tracker had no test open, and in
+	// a tracker test another test's view was installed in too.
+	stamp uint64
 }
 
 // hear files mk in v's account of what its open test was served (heard),
@@ -193,6 +199,49 @@ type exactState struct {
 	// claims are the shared recordings the tests of the current staging
 	// answered with (exactClaims).
 	claims exactClaims
+	// stamped is which tests' views were installed in the learn tracker's
+	// latest open test a view was installed in (stampTest).
+	stamped atomic.Pointer[stampedTest]
+}
+
+// stampedTest is, of the learn tracker's open test epoch, the test whose
+// view was installed last in it, and whether another test's view was too.
+type stampedTest struct {
+	epoch uint64
+	test  string
+	mixed bool
+}
+
+// stampTest is the stamp of test's view as it is installed (exactView.stamp):
+// the learn tracker's open test (open, learn.Tracker.OpenEpoch; nil when the
+// manager has none), so a reader compares the view's test with the tracker's
+// by number. It is 0 when there is no tracker, when no test is open in it
+// (the view was installed before the tracker's test began, or after it
+// ended), and once two tests' views were installed in one open tracker test,
+// for every view installed in it after that: the tracker began no test for
+// the second, and files the serves of both in the one test. A test's view
+// installed again with no other test's between keeps the stamp.
+func (e *exactState) stampTest(open *func() uint64, test string) uint64 {
+	if open == nil {
+		return 0
+	}
+	n := (*open)()
+	if n == 0 {
+		return 0
+	}
+	for {
+		prev := e.stamped.Load()
+		next := &stampedTest{epoch: n, test: test}
+		if prev != nil && prev.epoch == n {
+			next.mixed = prev.mixed || prev.test != test
+		}
+		if e.stamped.CompareAndSwap(prev, next) {
+			if next.mixed {
+				return 0
+			}
+			return n
+		}
+	}
 }
 
 // exactClaims are, in one staging (stagingEpoch), the shared recordings
@@ -749,6 +798,9 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		v.carried[a.owned.Name] = true
 	}
 	install := func() {
+		// Stamped as it is installed: what the tracker's open test is when
+		// the view starts serving.
+		v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 		m.exact.begun.add(m.stagingEpoch.Load(), owned)
 		m.exact.fired.Store(true)
 		m.exact.last.Store(v)
@@ -1068,22 +1120,23 @@ func (m *MockManager) ConsumedTestMocks() []*models.Mock {
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
 
-// ServedInOpenTest implements integrations.ExactServedReader: every mock a
-// parser was served while the open test's view was installed, of any
-// lifetime and through any door, once each, in the order they came (see
-// exactView.heard); none while no test is open, or with no served observer.
-// The observer is told of a serve before the serve is filed here, and the
-// view a serve is filed in is the one installed before the observer was
-// told: a mock this returns is one the observer has heard of, and one served
-// while this view was the open one.
-func (m *MockManager) ServedInOpenTest() []*models.Mock {
+// ServedInOpenTest implements integrations.ExactServedReader: the open
+// test's view's stamp (exactView.stamp) and every mock a parser was served
+// while the view was installed, of any lifetime and through any door, once
+// each, in the order they came (see exactView.heard), both of the one view
+// loaded once; 0 and none while no test is open, and none with no served
+// observer. The observer is told of a serve before the serve is filed here,
+// and the view a serve is filed in is the one installed before the observer
+// was told: a mock this returns is one the observer has heard of, and one
+// served while this view was the open one.
+func (m *MockManager) ServedInOpenTest() (uint64, []*models.Mock) {
 	v := m.exactView()
 	if v == nil || v.test == "" {
-		return nil
+		return 0, nil
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return append([]*models.Mock(nil), v.heard...)
+	return v.stamp, append([]*models.Mock(nil), v.heard...)
 }
 
 var _ integrations.ExactServedReader = (*MockManager)(nil)
