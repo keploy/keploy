@@ -94,6 +94,33 @@ func TestSessionKeepsNothingItWillNotUse(t *testing.T) {
 	}
 }
 
+// The mocks last stored can be of a test set that has run, whose mock file
+// the replay has rewritten since: they are not stored on the restarted agent
+// again (the next set stores its own), and setting it up goes on. Any other
+// failure to store them still fails.
+func TestSessionReapplyGoesOnPastStoredMocksOfASetThatHasRun(t *testing.T) {
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepStoreMocks, func(context.Context) error {
+		return fmt.Errorf("send request for storemocks: %w", models.ErrPayloadFileReplaced)
+	})
+	s.record(stepMockParams, noteStep(&got, &mu, "params"))
+	s.record(stepAgentReady, noteStep(&got, &mu, "ready"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatalf("reapply: %v", err)
+	}
+	if want := "params ready"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+
+	broken := storeSession(t, "test://"+t.Name()+"/broken", true)
+	broken.record(stepStoreMocks, func(context.Context) error { return fmt.Errorf("agent unreachable") })
+	if err := broken.reapply(context.Background(), zap.NewNop()); err == nil {
+		t.Fatal("reapply went on past mocks it failed to store for another reason")
+	}
+}
+
 // The replayer goes on changing the consumed-mocks map it hands over; the
 // copy recorded is the call as it was made.
 func TestCopyMockParamsSharesNothing(t *testing.T) {

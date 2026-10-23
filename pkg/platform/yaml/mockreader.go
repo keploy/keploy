@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -30,6 +31,10 @@ type MockReader struct {
 	// unterminated is whether the document last read ended at the end of
 	// the file part-way through a line (see Unterminated).
 	unterminated bool
+	// pos is how many bytes of the file have been read; docOff is where in
+	// the file the document last read starts (see DocOffset).
+	pos    int64
+	docOff int64
 }
 
 // NewMockReader creates a reader that accumulates lines until "---" delimiter.
@@ -103,8 +108,12 @@ func (r *MockReader) readNextJSONLine() ([]byte, error) {
 		default:
 		}
 
+		lineStart := r.pos
 		line, err := r.reader.ReadString('\n')
 		r.lineNum++
+		r.pos += int64(len(line))
+		// The line's bytes from its first non-space one: what is returned.
+		r.docOff = lineStart + int64(len(line)-len(strings.TrimLeftFunc(line, unicode.IsSpace)))
 
 		if err != nil {
 			if err == io.EOF {
@@ -141,8 +150,10 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 		// At io.EOF, line is the file's last line when the file does not end
 		// with a newline (and "" when it does). That line is still part of
 		// the document, so it is handled like any other before EOF ends it.
+		lineStart := r.pos
 		line, err := r.reader.ReadString('\n')
 		r.lineNum++
+		r.pos += int64(len(line))
 		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("failed to read line %d: %w", r.lineNum, err)
 		}
@@ -158,6 +169,11 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 		}
 
 		if !(isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(trimmedLine, "#")) {
+			// Every line the document holds is appended as read, so the
+			// document is the file's bytes from its first line on.
+			if buffer.Len() == 0 {
+				r.docOff = lineStart
+			}
 			buffer.WriteString(line)
 			r.unterminated = atEOF && line != ""
 		}
@@ -271,6 +287,20 @@ func (r *MockReader) ReadNextDocJSONBytes() (*NetworkTrafficDocJSON, []byte, err
 // was saved without a final newline. Such a document may be incomplete.
 func (r *MockReader) Unterminated() bool {
 	return r.unterminated
+}
+
+// DocOffset returns where in the file the document last read starts: the bytes
+// ReadNextDocument returned for it are the file's from there on. A caller that
+// keeps the offset and the document's length can read the document again
+// without reading the file up to it.
+func (r *MockReader) DocOffset() int64 {
+	return r.docOff
+}
+
+// Stat returns the FileInfo of the file the reader reads: the file it opened,
+// whatever has since been put at its path.
+func (r *MockReader) Stat() (os.FileInfo, error) {
+	return r.file.Stat()
 }
 
 // Path returns the path of the file the reader reads.

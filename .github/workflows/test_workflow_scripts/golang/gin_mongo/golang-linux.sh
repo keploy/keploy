@@ -335,6 +335,29 @@ if [ "$replay_is_build" = true ]; then
     else
         echo "No Mongo mocks were recorded (a build without the private parsers), so no set has per-test mocks on disk to stage"
     fi
+
+    # keploy test itself leaves each Mongo mock's messages in the mock file
+    # and reads them back only to send the mock to the agent: holding a whole
+    # recording in memory first got the CLI killed on a large one. It logs,
+    # for each set, how many mocks it left there; the sets still have to pass
+    # (the report scan below), on the payloads it read back.
+    if grep -qs '^kind: Mongo$' keploy/test-set-*/mocks.yaml; then
+        left_lines="$(grep -F "left the payloads of the test set's Mongo mocks in its mock file" test_logs.txt || true)"
+        left_sets=0
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            left="$(printf '%s\n' "$line" | grep -o '"mocks": [0-9]*' | grep -o '[0-9]*$' || true)"
+            if [ "${left:-0}" -gt 0 ]; then
+                left_sets=$((left_sets + 1))
+            fi
+        done <<< "$left_lines"
+        if [ "$left_sets" -eq 0 ]; then
+            echo "::error::keploy test left no Mongo mock's payload in its mock file: it held every recorded payload in memory before sending the mocks to the agent"
+            cat test_logs.txt
+            exit 1
+        fi
+        echo "✅ ${left_sets} test set(s) read their Mongo payloads back from the mock file as each mock was sent"
+    fi
 fi
 
 all_passed=true

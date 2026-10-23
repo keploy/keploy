@@ -181,6 +181,19 @@ type MockMutator interface {
 	AfterGetMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error
 }
 
+// MockPayloadMutator is the half of a MockMutator for the payloads a replay
+// leaves in the mock file (models.Mock.LeavePayloadOnDisk): AfterGetMocks gets
+// the mocks without them, and MutateRestoredPayload gets each payload as it is
+// read back to send its mock to the proxy, to change it as AfterGetMocks would
+// have (decrypt it), still without writing plaintext to disk. m is the mock
+// with its payload read back; the rest of it AfterGetMocks has changed already.
+//
+// RunTestSet leaves payloads on disk only for hooks that are no MockMutator or
+// are this too: a MockMutator alone has to see whole mocks.
+type MockPayloadMutator interface {
+	MutateRestoredPayload(ctx context.Context, m *models.Mock) error
+}
+
 // TestSetOrderer is an optional extension to TestHooks.
 // Start and GetSelectedTestSets detect it via type assertion after the
 // natural-sort of test-set IDs; implementations that do not need a custom

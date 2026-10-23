@@ -1207,6 +1207,14 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		cancelStream()
 		return err
 	}
+	// The agent can answer a stream the encoder cut short before the
+	// transport notices; the cut is the error, not the agent's answer to it
+	// (which the legacy retry below would otherwise take for an old agent).
+	if encErr := sent.encodeErr(); encErr != nil {
+		_ = res.Body.Close()
+		cancelStream()
+		return fmt.Errorf("send request for storemocks: %w", encErr)
+	}
 
 	if res.StatusCode == http.StatusBadRequest {
 		_, _ = io.Copy(io.Discard, res.Body)
@@ -1300,6 +1308,20 @@ func encodingName(encoding string) string {
 type mockStreamBytes struct {
 	raw  atomic.Int64
 	wire atomic.Int64
+	// failed is why the encoder stopped itself before the end of the
+	// mocks: a mock's payload it could not read back from its mock file. The
+	// request then fails as the pipe breaks, and this is its cause. A write
+	// that failed because the agent answered early (and the transport closed
+	// the pipe) is not one: the agent's answer is.
+	failed atomic.Pointer[error]
+}
+
+// encodeErr returns why the encoder stopped itself part-way, or nil.
+func (s *mockStreamBytes) encodeErr() error {
+	if p := s.failed.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // countingWriter adds what it writes to n.
@@ -1362,7 +1384,15 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 					}
 				}
 				i++
-				if err := enc.Encode(m); err != nil {
+				// A mock whose payload a replay left in its mock file is
+				// read back here, sent, and dropped: the corpus is never
+				// whole in memory.
+				full, err := m.WithPayload(ctx)
+				if err != nil {
+					sent.failed.Store(&err)
+					return err
+				}
+				if err := enc.Encode(full); err != nil {
 					return err
 				}
 			}
@@ -1406,6 +1436,9 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 
 	res, err := a.client.Do(req)
 	if err != nil {
+		if encErr := sent.encodeErr(); encErr != nil {
+			return nil, nil, fmt.Errorf("send request for storemocks: %w", encErr)
+		}
 		return nil, nil, fmt.Errorf("send request for storemocks: %s", err.Error())
 	}
 	return res, sent, nil
@@ -1418,6 +1451,27 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 // did — acceptable here because it only runs against an old agent that never
 // supported streaming anyway.
 func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	// The single shot holds every mock with its payload, read back from the
+	// mock file for a mock that left it there.
+	withPayloads := func(mocks []*models.Mock) ([]*models.Mock, error) {
+		out := make([]*models.Mock, len(mocks))
+		for i, m := range mocks {
+			full, err := m.WithPayload(ctx)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = full
+		}
+		return out, nil
+	}
+	filtered, err := withPayloads(filtered)
+	if err != nil {
+		return err
+	}
+	unFiltered, err = withPayloads(unFiltered)
+	if err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(models.StoreMocksReq{
 		Filtered:   filtered,

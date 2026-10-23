@@ -1,12 +1,15 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -631,4 +634,148 @@ func TestGetTestSetMocksReadsAnEmptyOrMissingFileAsTheSinglePoolReadersDo(t *tes
 			t.Fatalf("want no mocks, got %s %s %s", poolString(got.Filtered), poolString(got.Unfiltered), poolString(got.AllSession))
 		}
 	})
+}
+
+// onTheWire is m as the agent decodes it from StoreMocks' stream: with its
+// payload read back, gob both ways.
+func onTheWire(t *testing.T, m *models.Mock) *models.Mock {
+	t.Helper()
+	full, err := m.WithPayload(context.Background())
+	if err != nil {
+		t.Fatalf("WithPayload(%s): %v", m.Name, err)
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(full); err != nil {
+		t.Fatalf("gob encode %s: %v", m.Name, err)
+	}
+	var got models.Mock
+	if err := gob.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("gob decode %s: %v", m.Name, err)
+	}
+	return &got
+}
+
+// GetTestSetMocksPayloadOnDisk leaves the Mongo mocks' messages in a yaml or
+// json file, and its pools are GetTestSetMocks' otherwise: the agent gets the
+// same mocks from both, in the same order, and the reports' summaries, read
+// before the mocks are sent, are the same. A gob file's mocks keep their
+// payloads.
+func TestGetTestSetMocksPayloadOnDiskSendsWhatGetTestSetMocksSends(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "") // it would override the format each subtest writes
+	ctx := context.Background()
+	for _, format := range []string{"yaml", "json", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			ys := writeTestSetMocks(t, t.TempDir(), format)
+			for _, c := range testSetMocksCases() {
+				t.Run(c.window+"/"+c.maps, func(t *testing.T) {
+					whole, err := ys.GetTestSetMocks(ctx, "set-0", c.after, c.before, c.mapped, c.needed)
+					if err != nil {
+						t.Fatalf("GetTestSetMocks: %v", err)
+					}
+					onDisk, err := ys.GetTestSetMocksPayloadOnDisk(ctx, "set-0", c.after, c.before, c.mapped, c.needed)
+					if err != nil {
+						t.Fatalf("GetTestSetMocksPayloadOnDisk: %v", err)
+					}
+					left := 0
+					for _, pool := range []struct {
+						name          string
+						whole, onDisk []*models.Mock
+					}{
+						{"Filtered", whole.Filtered, onDisk.Filtered},
+						{"Unfiltered", whole.Unfiltered, onDisk.Unfiltered},
+						{"AllSession", whole.AllSession, onDisk.AllSession},
+						{"AllPerTest", whole.AllPerTest, onDisk.AllPerTest},
+					} {
+						if len(pool.whole) != len(pool.onDisk) {
+							t.Fatalf("%s: %s, want %s", pool.name, poolString(pool.onDisk), poolString(pool.whole))
+						}
+						for i := range pool.whole {
+							if pool.onDisk[i].PayloadOnDisk() {
+								left++
+							}
+							if got, want := models.MockSummaryFromSpec(pool.onDisk[i]), models.MockSummaryFromSpec(pool.whole[i]); got != want {
+								t.Errorf("%s[%d] summary %q, want %q", pool.name, i, got, want)
+							}
+							if got, want := onTheWire(t, pool.onDisk[i]), onTheWire(t, pool.whole[i]); !reflect.DeepEqual(got, want) {
+								t.Errorf("%s[%d] (%s) reaches the agent as\n %+v\nwant\n %+v", pool.name, i, pool.whole[i].Name, got.Spec, want.Spec)
+							}
+						}
+					}
+					if format == "gob" {
+						if left != 0 || onDisk.Payloads != nil {
+							t.Fatalf("a gob file's mocks left %d payloads on disk", left)
+						}
+						return
+					}
+					if left == 0 || onDisk.Payloads == nil {
+						t.Fatalf("no Mongo mock left its messages on disk (Payloads %v)", onDisk.Payloads)
+					}
+				})
+			}
+		})
+	}
+}
+
+// What leaving the payloads on disk is for: a set of large Mongo mocks is held
+// at a small part of what it takes whole.
+func TestGetTestSetMocksPayloadOnDiskHoldsTheSetWithoutItsPayloads(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	doc := strings.Repeat(`{"_id":"0123456789abcdef","name":"an app","docs":"`+strings.Repeat("x", 1000)+`"},`, 64)
+	base := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 200; i++ {
+		m := &models.Mock{
+			Version: models.GetVersion(), Kind: models.Mongo,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "mocks"},
+				ReqTimestampMock: base.Add(time.Duration(i) * time.Second),
+				ResTimestampMock: base.Add(time.Duration(i)*time.Second + time.Millisecond),
+				MongoRequests: []models.MongoRequest{{
+					Header:  &models.MongoHeader{Length: 50, RequestID: int32(i), Opcode: wiremessage.OpMsg},
+					Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"find":"apps"} }`}},
+				}},
+				MongoResponses: []models.MongoResponse{{
+					Header:  &models.MongoHeader{Length: 60, RequestID: int32(i), ResponseTo: int32(i), Opcode: wiremessage.OpMsg},
+					Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"cursor":{"firstBatch":[` + doc + `{}]}} }`}},
+				}},
+			},
+		}
+		if err := ys.InsertMock(ctx, m, "set-0"); err != nil {
+			t.Fatalf("InsertMock: %v", err)
+		}
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	held := func(read func() (models.TestSetMocks, error)) uint64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		set, err := read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(set)
+		if after.HeapAlloc < before.HeapAlloc {
+			return 0
+		}
+		return after.HeapAlloc - before.HeapAlloc
+	}
+	whole := held(func() (models.TestSetMocks, error) {
+		return ys.GetTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+	})
+	onDisk := held(func() (models.TestSetMocks, error) {
+		return ys.GetTestSetMocksPayloadOnDisk(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+	})
+	t.Logf("the set holds %d bytes whole and %d with its payloads on disk", whole, onDisk)
+	if whole < 10<<20 {
+		t.Fatalf("the whole set holds %d bytes; the test needs it to hold at least 10 MiB", whole)
+	}
+	if onDisk*10 > whole {
+		t.Fatalf("with its payloads on disk the set holds %d bytes, more than a tenth of the %d it holds whole", onDisk, whole)
+	}
 }

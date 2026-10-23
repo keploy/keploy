@@ -6394,11 +6394,60 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 		}
 		return filtered, unfiltered, newMockLookup(filtered, allSession), skippedDocs{}, nil
 	}
-	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
+	var set models.TestSetMocks
+	if onDisk, mutate, ok := r.payloadOnDiskReader(); ok {
+		// The set's mocks are sent to the agent, which parks the per-test
+		// ones on its own disk, and nothing before that reads their
+		// payloads: leaving them in the mock file keeps the set from being
+		// whole in memory here (models.Mock.LeavePayloadOnDisk).
+		set, err = onDisk.GetTestSetMocksPayloadOnDisk(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get filtered mocks")
+			return nil, nil, nil, skippedDocs{}, err
+		}
+		if set.Payloads != nil && mutate != nil {
+			set.Payloads.SetPayloadMutator(mutate.MutateRestoredPayload)
+		}
+		if left := payloadsLeftOnDisk(set); left > 0 {
+			r.logger.Info("left the payloads of the test set's Mongo mocks in its mock file; each is read back as its mock is sent to the agent",
+				zap.String("testSetID", testSetID), zap.Int("mocks", left))
+		}
+	} else if set, err = r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed); err != nil {
 		return nil, nil, nil, skippedDocs{}, err
 	}
 	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+}
+
+// payloadsLeftOnDisk counts the set's mocks whose payloads its read left in
+// the mock file: of every per-test candidate and session mock, the pools'
+// mocks are among them.
+func payloadsLeftOnDisk(set models.TestSetMocks) int {
+	left := 0
+	for _, pool := range [][]*models.Mock{set.AllPerTest, set.AllSession} {
+		for _, m := range pool {
+			if m.PayloadOnDisk() {
+				left++
+			}
+		}
+	}
+	return left
+}
+
+// payloadOnDiskReader returns the mock store's read that leaves payloads in
+// the mock file, when the store has one and the hooks can take a payload read
+// back afterwards: hooks that change mocks before they are sent (a
+// MockMutator) must change those payloads too (a MockPayloadMutator), which
+// mutate is then.
+func (r *Replayer) payloadOnDiskReader() (onDisk pkg.TestSetPayloadOnDiskReader, mutate MockPayloadMutator, ok bool) {
+	onDisk, ok = r.mockDB.(pkg.TestSetPayloadOnDiskReader)
+	if !ok {
+		return nil, nil, false
+	}
+	if _, mutates := r.hookImpl.(MockMutator); !mutates {
+		return onDisk, nil, true
+	}
+	mutate, ok = r.hookImpl.(MockPayloadMutator)
+	return onDisk, mutate, ok
 }
 
 // skippedDocs is the documents of a set's mock file the store's decoders

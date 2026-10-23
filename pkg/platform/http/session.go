@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -379,6 +380,13 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 				// logged and the run goes on (the replay's hooks), and
 				// the mocks and readiness after it still matter.
 				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
+				continue
+			}
+			if step.kind == stepStoreMocks && errors.Is(err, models.ErrPayloadFileReplaced) {
+				// The mocks last stored are of a test set that has run:
+				// the replay rewrote its mock file since, and the next
+				// set stores its own.
+				logger.Info("keploy's restarted agent: the mocks last stored are of a test set that has run and whose mock file has been rewritten since, so they are not stored again; the next test set stores its own", zap.Error(err))
 				continue
 			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)

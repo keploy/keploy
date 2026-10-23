@@ -1,5 +1,7 @@
 package models
 
+import "context"
+
 // TestSetMocks is a test set's recorded mocks, split into the pools a replay
 // loads, as read from the set's mock file in one pass.
 type TestSetMocks struct {
@@ -31,4 +33,22 @@ type TestSetMocks struct {
 	// its window, a recorded call this keploy cannot serve, and is judged for
 	// it. A store that reads gob files lists none.
 	SkippedWindowed []WindowedMock
+	// Payloads is where the read left the payloads of the mocks it left on
+	// disk (Mock.LeavePayloadOnDisk), when it left any: a read that keeps
+	// every payload in memory leaves it nil.
+	Payloads PayloadSource
 }
+
+// PayloadSource is the mock file a read left mocks' payloads in.
+type PayloadSource interface {
+	// SetPayloadMutator has mutate change every payload read back from now on
+	// (Mock.WithPayload) before the read returns it: what the replay does to
+	// a mock's payload before sending it, done to each payload as it is read
+	// back instead of to the mock in memory, which holds none.
+	SetPayloadMutator(mutate PayloadMutator)
+}
+
+// PayloadMutator changes m, a mock whose payload was just read back from its
+// mock file, as the replay changes a mock before sending it. It changes only
+// the payload: the rest of m is the mock in memory, already changed.
+type PayloadMutator func(ctx context.Context, m *Mock) error
