@@ -14,7 +14,7 @@ import (
 // A chunk's time is its ReadAt: when the relay read it off the socket (or, for
 // TLS, when the bytes under it were read). The relay forwards in-line, so a
 // chunk is read before its bytes reach the peer, and a test case that used the
-// bytes completed after that. From the read on, a chunk is in one of five
+// bytes completed after that. From the read on, a chunk is in one of six
 // places until its parser has consumed it whole:
 //
 //   - in the layer the forwarder reads through, read off the socket and not
@@ -24,6 +24,9 @@ import (
 //     one Read;
 //   - in the forwarder's hand, from the read until the forwarder's next
 //     iteration, past the push (held);
+//   - set aside: a destination chunk written to a client after its FIN, which
+//     waits for the client's answer before it is pushed or refused
+//     (tee.awaiting, client_took.go);
 //   - on the tee's queue (tee.q);
 //   - delivered: taken off the queue by the drain, in the drain's hand, on the
 //     FakeConn-facing channel, or in the FakeConn partly read (delivered);
@@ -46,9 +49,9 @@ const heldUnstamped int64 = -1
 type teeProgress struct {
 	// held is the stamp (UnixNano) of the chunk the forwarder has read and not
 	// let go of yet: set from its Read, and cleared at the top of the
-	// forwarder's next iteration, once it has queued, refused or stashed the
-	// chunk and told of it. 0 when it holds none, heldUnstamped while it is
-	// stamping one.
+	// forwarder's next iteration, once it has queued, refused, stashed or set
+	// aside the chunk and told of it. 0 when it holds none, heldUnstamped
+	// while it is stamping one.
 	held atomic.Int64
 	// layer is the stamp (UnixNano) of the read under the layer the forwarder
 	// reads through (a TLS layer over a readTrackingConn), when that layer
@@ -97,8 +100,8 @@ func (t *tee) noteCarried(at time.Time) {
 // stamp (heldUnstamped).
 func (t *tee) noteReading() { t.progress.held.Store(heldUnstamped) }
 
-// noteReleased says the forwarder holds no chunk: it queued, refused or
-// stashed the one it read.
+// noteReleased says the forwarder holds no chunk: it queued, refused,
+// stashed or set aside (tee.await) the one it read.
 func (t *tee) noteReleased() { t.progress.held.Store(0) }
 
 // noteLayerGone says nothing the layer the forwarder read through holds will
@@ -134,10 +137,11 @@ func (t *tee) trimDeliveredLocked() {
 }
 
 // oldestUnconsumed is the stamp of the oldest chunk of this direction that its
-// parser has not consumed whole: delivered, queued, in the forwarder's hand,
-// or in the layer it reads through. ok is false when there is none; unstamped
-// is true when the only one is in the forwarder's or the layer's hand, not yet
-// stamped (it can be from any time from now on).
+// parser has not consumed whole: delivered, queued, waiting for the client's
+// answer (tee.awaiting), in the forwarder's hand, or in the layer it reads
+// through. ok is false when there is none; unstamped is true when the only
+// one is in the forwarder's or the layer's hand, not yet stamped (it can be
+// from any time from now on).
 //
 // Both marks are read before the lock, which is what keeps a chunk moving on
 // during the look from being missed; the order of the two loads is not. The
@@ -145,12 +149,15 @@ func (t *tee) trimDeliveredLocked() {
 // it reads again, by when the forwarder has queued every chunk from the reads
 // before (a chunk it hands on over that read takes that read's stamp, or,
 // when the read brought nothing, the forwarder's). The forwarder sets held
-// before it stamps a chunk and clears it once it has queued, refused or
-// stashed it. So when this look read a mark clear, every chunk that was in
-// that hand has left it (onto the queue, which the look reads under the lock,
-// or refused or stashed), and one that comes into it later is stamped no
-// earlier than the look (heldUnstamped). A chunk further on is older than one
-// behind it, so the first place that holds one gives the oldest.
+// before it stamps a chunk and clears it once it has queued, refused,
+// stashed or set aside (to wait) it. So when this look read a mark clear,
+// every chunk that was in that hand has left it (onto the queue, or set
+// aside, which the look reads under the lock, or refused or stashed), and one
+// that comes into it later is stamped no earlier than the look
+// (heldUnstamped). A chunk set aside moves to the queue (a push) before it
+// leaves awaiting (doneAwaiting), so a look under the lock finds it in one of
+// the two. A chunk further on is older than one behind it, so the first place
+// that holds one gives the oldest.
 func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
 	l := t.progress.layer.Load()
 	h := t.progress.held.Load()
@@ -161,6 +168,8 @@ func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
 		at, ok = t.progress.delivered[0].at, true
 	case len(t.q) > 0:
 		at, ok = t.q[0].ReadAt.UnixNano(), true
+	case len(t.awaiting) > 0:
+		at, ok = t.awaiting[0].ReadAt.UnixNano(), true
 	}
 	t.mu.Unlock()
 	if ok {

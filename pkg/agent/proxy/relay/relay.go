@@ -111,6 +111,40 @@ type Relay struct {
 	// was written, so its answer is numbered after them.
 	order *connseq.Upstream
 
+	// client asks the proxy's end of the client connection whether the
+	// client, once it has closed its side, took what the destination's
+	// forwarder wrote to it (client_took.go); nil where it cannot be asked.
+	// The TLS upgrade wraps src later, over this same socket.
+	client clientSocket
+	// clientFIN: a look found the client's FIN at the proxy's socket, as the
+	// client's forwarder read it or before a destination chunk was written,
+	// and clientFINAcked is how many bytes the client's stack had
+	// acknowledged at that look. Both are set under finMu, which also keeps
+	// those two forwarders' looks apart; resolve reads clientFINAcked, set
+	// before the destination's forwarder starts it.
+	finMu          sync.Mutex
+	clientFIN      atomic.Bool
+	clientFINAcked uint64
+	// clientReadsOn: the client acknowledged bytes after that look (it only
+	// half-closed). clientStopped: destination chunks were refused, and no
+	// later one is teed. Set under verdictMu, read without it.
+	clientReadsOn, clientStopped atomic.Bool
+	// verdictMu orders the destination's forwarder against resolve: what
+	// destWritten decides, the chunks set aside (tee.await) and their
+	// settling. resolverDone is non-nil while a resolve waits for the
+	// client's answer, closed once it has settled; awaitingMark is the
+	// forwarder's incomplete-mock mark for the last chunk set aside.
+	verdictMu    sync.Mutex
+	resolverDone chan struct{}
+	awaitingMark string
+	// lastLook is closed by run once both forwarders have returned and a
+	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
+	// next look at the client's socket is the last.
+	lastLook chan struct{}
+	// notTakenChunks and notTakenBytes count the destination chunks the
+	// client did not take, which the parser was not given.
+	notTakenChunks, notTakenBytes atomic.Int64
+
 	// runOnce ensures Run's one-time startup path executes exactly once.
 	runOnce sync.Once
 	// runErr stores the error returned from the first Run. Relay is
@@ -208,6 +242,14 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	}
 	r.src.Store(&src)
 	r.dst.Store(&dst)
+	r.lastLook = make(chan struct{})
+	r.client = clientSocketOf(src)
+	if r.client == nil && canAskClientSockets && src != nil && cfg.Logger != nil {
+		cfg.Logger.Debug("relay: the client conn has no TCP socket under it to ask; what the destination sends "+
+			"once the client has closed is teed as it is written",
+			zap.String("conn", fmt.Sprintf("%T", src)),
+		)
+	}
 
 	// Armed here rather than in run(): the caller registers its abort
 	// hook between New and Run, and an abort in that window must find a
@@ -298,6 +340,13 @@ func (r *Relay) Teed(dir fakeconn.Direction) int64 {
 		return r.teeC2D.acceptedBytes()
 	}
 	return r.teeD2C.acceptedBytes()
+}
+
+// NotTaken is how many destination chunks, and their bytes, the client did not
+// take once it had closed its side (client_took.go): forwarded to it, and not
+// given to the parser. Final once Run has returned.
+func (r *Relay) NotTaken() (chunks, bytes int64) {
+	return r.notTakenChunks.Load(), r.notTakenBytes.Load()
 }
 
 // Directives returns the parser-writable directive channel. Parsers
@@ -556,6 +605,17 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Wait()
 	close(bothDone)
 	graceWG.Wait()
+	// Destination chunks written to the client after its FIN may still wait
+	// for its answer (client_took.go): they are teed or refused before the
+	// tees close.
+	r.awaitClientVerdict()
+	if n := r.notTakenBytes.Load(); n > 0 && r.cfg.Logger != nil {
+		r.cfg.Logger.Debug("relay: the client had closed its side and did not take what the destination sent it after; "+
+			"the parser was not given those bytes (the client's stack acknowledged none of them)",
+			zap.Int64("bytes", n),
+			zap.Int64("chunks", r.notTakenChunks.Load()),
+		)
+	}
 
 	// Both forwarders are gone, so nothing can add to the hold stash
 	// any more. Anything still in it was read from the client and never
@@ -600,11 +660,12 @@ func (r *Relay) run(ctx context.Context) error {
 	return firstErr
 }
 
-// noteCarried tells the owner of a chunk the connection carried, as the
-// forwarder hands it to the tee t, and whether t took it (Config.OnCarried).
-// It runs on t's forwarder, the one goroutine that pushes into t, so t's
-// accepted bytes are, right after a push it took, the position just past the
-// chunk.
+// noteCarried tells the owner of a chunk the connection carried, as it is
+// handed to the tee t, and whether t took it (Config.OnCarried). It runs right
+// after the push, where t's chunks are pushed: on t's forwarder, or, for
+// destination chunks that waited for the client's answer, on the goroutine
+// that settles them (client_took.go), never both at once. So t's accepted
+// bytes are, right after a push it took, the position just past the chunk.
 func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
 	if r.cfg.OnCarried != nil {
 		r.cfg.OnCarried(c.Dir, c.ReadAt, teed, t.acceptedBytes())
@@ -622,7 +683,9 @@ func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
 //     direction's (fakeconn.Chunk.ConnSeq), and a copy of the bytes.
 //  3. Write to dst; stamp the Chunk's WrittenAt after Write returns.
 //  4. Push the Chunk into the tee (non-blocking), with its SeqNo, and tell
-//     the owner it was carried (Config.OnCarried).
+//     the owner it was carried (Config.OnCarried). A destination chunk
+//     written to a client after its FIN may instead be set aside until the
+//     client's answer decides it, or refused (client_took.go).
 //  5. Bump activity.
 //
 // Returns the first read or write error encountered. io.EOF is
@@ -899,29 +962,56 @@ func (r *Relay) forward(
 
 		if n > 0 {
 			dst := *dstPtr.Load()
+			// Whether the client's FIN had reached the proxy before this
+			// destination chunk is written to it (client_took.go): asked
+			// before the Write, so a reset that comes back for it only
+			// counts once the client had closed its side.
+			finBefore := dir == fakeconn.FromDest && r.clientFINBefore()
 			wn, werr := dst.Write(chunk.Bytes)
 			chunk.WrittenAt = time.Now()
 
-			// Tee regardless of Write outcome: the bytes were
-			// observed, the parser gets to see them. If Write failed
-			// the mock is still incomplete because the real peer did
-			// not receive them, so flag it.
-			chunk.SeqNo = seq.Add(1)
-			if r.cfg.beforeTee != nil {
-				r.cfg.beforeTee(dir)
+			// The incomplete-mock mark this chunk's Write earns, set below
+			// once the chunk is teed.
+			mark := ""
+			switch {
+			case werr != nil:
+				mark = "write_error"
+			case wn != n:
+				mark = "short_write"
 			}
-			teed := t.push(chunk)
-			r.noteCarried(t, chunk, teed)
-			// On a successful client→dest tee, signal the supervisor
-			// that a request chunk is in flight and awaiting a mock
-			// emission. This is the "pending work" signal the hang
-			// watchdog needs to distinguish an idle connection (no
-			// pending requests) from a parser that received bytes
-			// but isn't making progress. Drops on the tee don't
-			// trigger the signal — they already mark the mock
-			// incomplete via OnMarkMockIncomplete.
-			if teed && dir == fakeconn.FromClient && r.cfg.OnClientChunkTeed != nil {
-				r.cfg.OnClientChunkTeed()
+			// A destination chunk written to a client that had closed its
+			// side is the parser's only if the client took it
+			// (client_took.go): a client that closed its socket reads
+			// nothing after its FIN, and what it never read is no mock.
+			// Such a chunk waits for the client's answer set aside, while
+			// forwarding goes on; a refused one is neither teed nor told
+			// of (OnCarried), and neither is any later one.
+			fate := fateTee
+			if dir == fakeconn.FromDest {
+				fate = r.destWritten(ctx, t, seq, chunk, finBefore, mark)
+			}
+			if fate == fateTee {
+				// Tee regardless of Write outcome: the bytes were
+				// observed, the parser gets to see them. If Write failed
+				// the mock is still incomplete because the real peer did
+				// not receive them, so flag it.
+				chunk.SeqNo = seq.Add(1)
+				if r.cfg.beforeTee != nil {
+					r.cfg.beforeTee(dir)
+				}
+				teed := t.push(chunk)
+				r.noteCarried(t, chunk, teed)
+				// On a successful client→dest tee, signal the supervisor
+				// that a request chunk is in flight and awaiting a mock
+				// emission. This is the "pending work" signal the hang
+				// watchdog needs to distinguish an idle connection (no
+				// pending requests) from a parser that received bytes
+				// but isn't making progress. Drops on the tee don't
+				// trigger the signal — they already mark the mock
+				// incomplete via OnMarkMockIncomplete.
+				if teed && dir == fakeconn.FromClient && r.cfg.OnClientChunkTeed != nil {
+					r.cfg.OnClientChunkTeed()
+				}
 			}
 
 			if werr != nil {
@@ -936,8 +1026,17 @@ func (r *Relay) forward(
 						zap.Error(werr),
 					)
 				}
-				if r.cfg.OnMarkMockIncomplete != nil {
-					r.cfg.OnMarkMockIncomplete("write_error")
+				// Marked only for a chunk teed now. A chunk set aside
+				// is marked if it is teed in the end (settle). One the
+				// client refused (it had closed its side and reset the
+				// connection, so the Write fails once the reset is in)
+				// is no part of the parser's stream, which ended where
+				// the client stopped (Config.ClientStopped): no mock is
+				// incomplete for it. A mark there would leave out the
+				// next mock the parser emits, which can be one it
+				// captured whole before the client stopped.
+				if fate == fateTee && r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete(mark)
 				}
 				return werr
 			}
@@ -945,8 +1044,8 @@ func (r *Relay) forward(
 				// Short write on a blocking Write is a net.Conn
 				// contract violation, but handle it anyway.
 				short := errors.New("relay: short write on destination socket")
-				if r.cfg.OnMarkMockIncomplete != nil {
-					r.cfg.OnMarkMockIncomplete("short_write")
+				if fate == fateTee && r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete(mark)
 				}
 				return short
 			}
@@ -968,6 +1067,9 @@ func (r *Relay) forward(
 					// answer to the FIN itself among them, since it can come
 					// only once the FIN is forwarded.
 					r.order.ClientClosed()
+					// And looked for at the client's socket, before the
+					// destination can answer it (client_took.go).
+					r.clientFINRead()
 				}
 				return io.EOF
 			}
