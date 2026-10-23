@@ -1751,6 +1751,75 @@ func TestUnderTheSwitchAnAgentStartedAgainIsChargedItsOwnLossesFromItsStart(t *t
 	}
 }
 
+// Under the proven switch, an agent started again whose first answer is a
+// test's read, followed by a set-end read that fails, leaves the next set's
+// mark unread: the application keploy starts anew for that set starts under
+// the new agent, and the bases that outlive a set are taken from the new
+// agent's start (the latest read's process, all it counted: more, never
+// less), not left with the agent gone. A later set the same application runs
+// on into is judged; and what the new agent could not capture at all before
+// a later set's mark is charged to that set's tests.
+func TestUnderTheSwitchAnAppStartedAnewAfterAMarkLostToARestartCountsFromTheNewAgent(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	unix := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "pid 41"}}
+	for _, tc := range []struct {
+		name   string
+		holds  models.CaptureLosses // b2's counts, from its first answer on
+		runsOn bool                 // set 2's application runs on into set 3
+	}{
+		{"the application runs on into the next set", nil, true},
+		{"a call keploy cannot capture at all, the next set's application started anew", unix, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Mocking = true
+			// Reads: 1 the run's mark (a1); set 1: 2 the look at which agent
+			// answers, 3 and 4 one as each test ends (b2 answers the second:
+			// the agent was started again), 5 the set's end, which fails;
+			// set 2 reads nothing before its end (its mark is unknown), 6;
+			// set 3: 7 the look, 8 and 9 its tests, 10 its end.
+			h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}, errAt: map[int]error{5: errors.New("connection reset")}},
+				agent: "a1", restartAt: 4, next: "b2", nextHolds: tc.holds}
+			h.replayer.markPIDMaps(context.Background())
+			h.replayer.appStartsAnew()
+			if s := h.run(t); s == models.TestSetStatusPassed {
+				t.Fatalf("set 1: %s; want it not passed: its agent was started again under it", s)
+			}
+			resetResults(h)
+			if s := h.run(t); s != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+				t.Fatalf("set 2: %s; want INTERNAL_ERR, not judged: its mark could not be read", s)
+			}
+			if tc.runsOn {
+				// Set 2's stop of its application was not waited out.
+				h.replayer.lossAppRunsOn = true
+				h.replayer.lossAppRunsOnWhy = "the stop of set 2's application was not waited out"
+			}
+			resetResults(h)
+			s := h.run(t)
+			restarted := 0
+			for _, r := range h.report.report.Tests {
+				for _, c := range r.FailureInfo.CannotCapture {
+					if c.Kind == models.CaptureLossAgentStartedAgain {
+						restarted++
+					}
+				}
+			}
+			if restarted != 0 {
+				t.Fatalf("set 3: %s, %d tests charged the agent started again; want none: its application started under b2, which every read since answered", s, restarted)
+			}
+			if tc.holds == nil {
+				if s != models.TestSetStatusPassed {
+					t.Fatalf("set 3: %s; want PASSED: b2 counted nothing", s)
+				}
+				return
+			}
+			if n := notJudgedFor(h, models.CaptureLossUnixSocket); n != 2 {
+				t.Fatalf("set 3: %s, %d of 2 tests without a verdict for b2's call over a unix socket; want both: it is counted from b2's start, its mark for set 2 having been lost", s, n)
+			}
+		})
+	}
+}
+
 // notJudgedFor is how many of the last set's tests were left without a
 // verdict for kind.
 func notJudgedFor(h *prRun, kind models.CaptureLossKind) int {

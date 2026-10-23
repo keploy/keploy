@@ -417,8 +417,10 @@ func (r *Replayer) agentStartedBeforeApp(ctx context.Context, agentWatch models.
 	}
 	r.logger.Info("keploy's agent was started again by docker compose's bring-up retry before the application ever ran; what keploy could not capture is counted from the new agent's start",
 		zap.String("agent replaced", replaced), zap.String("agent", agent))
+	// No test of the set has read yet, and the set before's end cleared its
+	// last read (endCaptureLosses): the set's first test counts from this
+	// mark.
 	r.lossMark = captureLossMark{known: true, agent: agent}
-	r.lossLast, r.lossLastRead, r.lossLastAgent = nil, false, ""
 	r.lossAppBase, r.lossAppKept, r.lossRunStart, r.lossRunBase = nil, "", nil, nil
 	r.lossAgent, r.lossBasesAgent = agent, agent
 }
