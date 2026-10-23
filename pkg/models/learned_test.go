@@ -334,6 +334,18 @@ func TestSortWordSlotsOrdersEveryField(t *testing.T) {
 			t.Errorf("SortWordSlots(%v) = %v, want %v", order, got, sorted)
 		}
 	}
+	// The kind orders before the layout: an instant slot before a token
+	// slot of one place, though the token's layout ("") is the lesser.
+	both := []WordSlot{{Seg: 5, Kind: WordSlotInstant, Layout: "iso8601", Skeleton: "d4"}, {Seg: 5, Kind: WordSlotToken}}
+	for _, in := range [][]WordSlot{{both[1], both[0]}, {both[0], both[1]}} {
+		if got := SortWordSlots(in); !reflect.DeepEqual(got, both) {
+			t.Errorf("SortWordSlots(%v) = %v, want %v", in, got, both)
+		}
+	}
+	// No slots are written as an empty list, never as none.
+	if got := SortWordSlots(nil); got == nil || len(got) != 0 {
+		t.Errorf("SortWordSlots(nil) = %#v, want an empty list", got)
+	}
 }
 
 // A merge with nothing on one side is the other side: neither the words nor
