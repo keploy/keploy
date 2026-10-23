@@ -510,3 +510,99 @@ func TestAPairingsClaimLandsOnlyInTheStagingItWasReadIn(t *testing.T) {
 		t.Fatalf("the call was answered %d %s; want the staging in force's mock-x, {\"order\":2}", code, got)
 	}
 }
+
+// gapRound is s12Orders between test-1 and test-2: test-1 (mock-own1's) ran
+// and ended, the store shows the pool view, whose mock-pool answers the gap
+// and is learned onto there, and keploy test opened test-2's capture window
+// (BeginTestCaseCapture): the learn step's test-2 awaits its test case's
+// request, which the filter that opens the test brings (TakeTestRequest)
+// before the store installs test-2's view.
+func gapRound(t *testing.T) (*Proxy, *MockManager) {
+	t.Helper()
+	p, mm := s12Orders(t)
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+	p.ContinueTestErrorCapture()
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	if _, err := p.GetMockErrors(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.BeginTestCaseCapture()
+	return p, mm
+}
+
+// A call that reaches the learn step through the agent's MockManager (one
+// read of the round, RoundSnapshot) after keploy test opened test-2's
+// capture window and before the filter that opens the test brought its test
+// case's request waits for the request, and is learned from as a call made
+// after it: its item that drifted is noise either way, learned onto the
+// pool recording it is answered from, and one the request holds the
+// recorded word of is refused either way. The round's snapshot says the
+// test awaits its request until the request came. A snapshot that dropped
+// it decided the call at once, against a request it could not read: by
+// where the scheduler put the call, two outcomes. The call is ordered
+// before the request through the tracker's OnAwait, through no clock, 200
+// times each.
+func TestACallInATestCasesGapIsLearnedThroughTheRoundAsOneAfterItsRequest(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	call := roundPost(`{"item":"apricot"}`)
+	request := func(q string) *models.TestRequest {
+		return &models.TestRequest{Test: "test-2", Parts: []models.TestRequestPart{
+			{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"},
+			{Name: "body", Recorded: `{"q":"` + q + `"}`, Sent: `{"q":"` + q + `"}`},
+		}}
+	}
+	outcome := func(mm *MockManager, code int, got string) string {
+		return strconv.Itoa(code) + " " + got + ", learned " + strconv.FormatBool(len(r3States(mm)["mock-pool"].ReqBodyNoise) > 0)
+	}
+	awaiting := func(mm *MockManager, p *Proxy) bool {
+		snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+		return ok && snap.Learn.Awaiting
+	}
+	for _, q := range []string{"books", "apple"} {
+		for i := 0; i < 200; i++ {
+			// The request first.
+			p, mm := gapRound(t)
+			if !awaiting(mm, p) {
+				t.Fatal("the round's snapshot does not say test-2 awaits its request after its capture window opened")
+			}
+			p.TakeTestRequest(request(q))
+			if awaiting(mm, p) {
+				t.Fatal("the round's snapshot says test-2 awaits its request after the request came")
+			}
+			code, got := r3Send(t, p, mm, opts, call)
+			after := outcome(mm, code, got)
+			if q == "books" && after != `200 {"order":0}, learned true` || q != "books" && strings.HasPrefix(after, "200 ") {
+				t.Fatalf("q %s, after the request: %s", q, after)
+			}
+			// The call first, in the gap: the request comes once the call
+			// waits for it, never before.
+			p, mm = gapRound(t)
+			waiting := make(chan struct{}, 1)
+			p.learnTracker.OnAwait(func() {
+				select {
+				case waiting <- struct{}{}:
+				default:
+				}
+			})
+			answered := make(chan struct{})
+			gave := make(chan bool, 1)
+			go func() {
+				select {
+				case <-waiting:
+					p.TakeTestRequest(request(q))
+					gave <- true
+				case <-answered:
+					gave <- false
+				}
+			}()
+			code, got = r3Send(t, p, mm, opts, call)
+			close(answered)
+			if !<-gave {
+				t.Fatalf("q %s: the call in the gap was answered (%d %s) without waiting for its test case's request", q, code, got)
+			}
+			if before := outcome(mm, code, got); before != after {
+				t.Fatalf("q %s: in the gap %s, after the request %s: two outcomes by where the call fell", q, before, after)
+			}
+		}
+	}
+}

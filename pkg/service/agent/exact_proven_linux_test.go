@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -1476,4 +1477,70 @@ func TestKeployMockReplayOpensATestWithItsVariablesInOneStep(t *testing.T) {
 	require.False(t, strings.HasPrefix(got, "200 "), "T2's call, which only uses key, was answered %s with T1's value", got)
 	require.Equal(t, 2, p.opened, "a test opened without its variables")
 	require.Zero(t, p.served, "a test opened without its variables")
+}
+
+// requestServingProxy is a servingProxy whose learn step reads a test case's
+// own request (coreAgent.TestRequestTaker): it notes each request it is
+// given, and whose view the store showed as it was.
+type requestServingProxy struct {
+	*servingProxy
+	given []string
+}
+
+func (p *requestServingProxy) BeginTestCaseCapture()    {}
+func (p *requestServingProxy) ContinueTestCaseCapture() {}
+
+func (p *requestServingProxy) TakeTestRequest(req *models.TestRequest) {
+	name := "none"
+	if req != nil {
+		name = req.Test
+	}
+	view := "the pool's"
+	if snap, ok := p.mm.RoundSnapshot(integrations.RoundQuery{}); ok && snap.Test != "" {
+		view = snap.Test + "'s"
+	}
+	p.given = append(p.given, "request "+name+" while the store showed "+view+" view")
+}
+
+var _ coreAgent.TestRequestTaker = (*requestServingProxy)(nil)
+
+// Under exact serving a keploy test case's opening hands its request to the
+// learn step before the store installs the test's view, whatever the
+// opening's outcome: the calls that waited for it in the gap since its
+// capture window opened (learn.Tracker.AwaitRequest) are released, and read
+// as calls made after the request. One the replay sends without a request
+// (a keploy older than its agent) is handed as none, which the learn step
+// reads as a request it could not read. An opening that never handed it
+// left every call in the gap waiting until the window closed, then refused.
+// The test's end hands nothing.
+func TestAnExactOpeningGivesTheLearnStepItsRequestBeforeTheTestsView(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  *models.TestRequest
+		want string
+	}{
+		{"with its request", &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "/own-1", Sent: "/own-1"}}},
+			"request test-1 while the store showed the pool's view"},
+		{"from a keploy older than its agent", nil, "request none while the store showed the pool's view"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := &requestServingProxy{servingProxy: newServingProxy()}
+			a.Proxy = p
+			ctx := context.Background()
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{keyMock("own-1", "/own-1", false, t0)}))
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+				AfterTime: models.BaseTime, BeforeTime: time.Now(),
+				Exact: &models.ExactServing{Stage: true},
+			}))
+			require.Empty(t, p.given, "the set's staging handed the learn step a request")
+			require.NoError(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"own-1"}}, TestRequest: tc.req}))
+			require.Equal(t, []string{tc.want}, p.given, "the exact opening's request, handed to the learn step before the test's view")
+			snap, ok := p.mm.RoundSnapshot(integrations.RoundQuery{})
+			require.True(t, ok)
+			require.Equal(t, "test-1", snap.Test, "the opening installed test-1's view")
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}))
+			require.Equal(t, []string{tc.want}, p.given, "the test's end handed the learn step a request")
+		})
+	}
 }

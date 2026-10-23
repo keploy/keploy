@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -3363,7 +3364,12 @@ func TestLearnMatchAClientTestsBindCarriesNoClockEvidence(t *testing.T) {
 // request waits for the request, and is learned from as a call made after it:
 // its nonce that drifted is noise either way, and one the request holds a
 // word of is refused, naming the request, either way. Each order is forced
-// through the tracker's OnAwait, through no clock, 200 times each.
+// through the tracker's OnAwait, through no clock, 200 times each, from a
+// store read one read after another and from one read in one snapshot of the
+// round (integrations.RoundReader), as the agent's MockManager is under exact
+// serving: there the wait is the snapshot's (RoundSnapshot.Learn.Awaiting),
+// and a pass that dropped it decided the call at once, against a request it
+// could not read.
 func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
 	h, n, opts := learnOn(t)
 	request := func(q string) *models.TestRequest {
@@ -3379,40 +3385,55 @@ func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
 		}
 		return "served " + served.Name
 	}
-	for _, q := range []string{"books", "n-5f2a91"} {
-		for i := 0; i < 200; i++ {
-			// The request first.
-			tr := learn.NewTracker()
-			tr.BeginAwaiting()
-			tr.Give(learn.GivenRequest(request(q)))
-			db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}}
-			after := outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts))
-			if q == "books" && after != "served mock-0" || q != "books" && !strings.Contains(after, "test case test-2 at body.q") {
-				t.Fatalf("q %s, after the request: %s", q, after)
-			}
-			// The call first, in the gap.
-			tr = learn.NewTracker()
-			waiting := make(chan struct{}, 1)
-			tr.OnAwait(func() {
-				select {
-				case waiting <- struct{}{}:
-				default:
+	stores := []struct {
+		name string
+		of   func(*learnDb) integrations.MockMemDb
+	}{
+		{"read one after another", func(ld *learnDb) integrations.MockMemDb { return ld }},
+		{"read in one snapshot of the round", func(ld *learnDb) integrations.MockMemDb {
+			return &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}, test: "test-2"}
+		}},
+	}
+	for _, store := range stores {
+		db := func() integrations.MockMemDb {
+			return store.of(&learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}})
+		}
+		for _, q := range []string{"books", "n-5f2a91"} {
+			for i := 0; i < 200; i++ {
+				// The request first.
+				tr := learn.NewTracker()
+				tr.BeginAwaiting()
+				tr.Give(learn.GivenRequest(request(q)))
+				after := outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, db(), n, opts))
+				if q == "books" && after != "served mock-0" || q != "books" && !strings.Contains(after, "test case test-2 at body.q") {
+					t.Fatalf("%s, q %s, after the request: %s", store.name, q, after)
 				}
-			})
-			tr.BeginAwaiting()
-			db = &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}}
-			got := make(chan string, 1)
-			go func() { got <- outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts)) }()
-			var before string
-			select {
-			case <-waiting:
-				tr.Give(learn.GivenRequest(request(q)))
-				before = <-got
-			case before = <-got:
-				tr.Give(learn.GivenRequest(request(q)))
-			}
-			if before != after {
-				t.Fatalf("q %s: in the gap %s, after the request %s: two outcomes by where the call fell", q, before, after)
+				// The call first, in the gap.
+				tr = learn.NewTracker()
+				waiting := make(chan struct{}, 1)
+				tr.OnAwait(func() {
+					select {
+					case waiting <- struct{}{}:
+					default:
+					}
+				})
+				tr.BeginAwaiting()
+				gapDb := db()
+				got := make(chan string, 1)
+				go func() {
+					got <- outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, gapDb, n, opts))
+				}()
+				var before string
+				select {
+				case <-waiting:
+					tr.Give(learn.GivenRequest(request(q)))
+					before = <-got
+				case before = <-got:
+					tr.Give(learn.GivenRequest(request(q)))
+				}
+				if before != after {
+					t.Fatalf("%s, q %s: in the gap %s, after the request %s: two outcomes by where the call fell", store.name, q, before, after)
+				}
 			}
 		}
 	}
