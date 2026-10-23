@@ -1126,9 +1126,8 @@ func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
 	// A window that closes before the filter brought the request is said at
 	// the default level; one whose request came says nothing.
 	for name, give := range map[string]bool{"closed unread": false, "its request given": true} {
-		p := startedDrainProxy(t, 100)
 		core, logs := observer.New(zapcore.InfoLevel)
-		p.logger = zap.New(core)
+		p := startedDrainProxyLogging(t, 100, zap.New(core))
 		p.learnTracker = learn.NewTracker()
 		p.sayLearnWaits()
 		p.BeginTestCaseCapture()
