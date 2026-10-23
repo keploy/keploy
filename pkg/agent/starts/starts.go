@@ -275,7 +275,7 @@ func (r *Registry) Stamp(m *models.Mock) {
 	if m == nil {
 		return
 	}
-	// The process its call came from (proven switch, S12 v16 §4.4): the
+	// The process its call came from (proven switch): the
 	// sync manager stamped it as its parser handed it over, else here.
 	if provenswitch.On() {
 		r.StampOrigin(m)

@@ -68,7 +68,7 @@ type TestCase struct {
 	// proven switch.
 	Real []string `json:"real,omitempty" bson:"real,omitempty" yaml:"real,omitempty"`
 	// Origin is, under the proven switch, the clock the test case's window
-	// start (HTTPReq/GrpcReq.Timestamp) is on (S12 v16 §2.2); its Comm and Exe
+	// start (HTTPReq/GrpcReq.Timestamp) is on; its Comm and Exe
 	// are unused. Only a record under the switch sets it; a file's is read and
 	// carried whatever the switch (models.Origin). Its file holds it as the
 	// document's origin block (yaml.NetworkTrafficDoc.Origin), so it is yaml

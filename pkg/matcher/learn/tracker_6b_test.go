@@ -213,7 +213,8 @@ func TestTrackerCallWindowIsOneRunOfTheAppsClock(t *testing.T) {
 }
 
 // A call still unanswered when paired was sent is no previous call of
-// paired's: S12 E3 leg (b), run r2's recordings (keploy 6db6cd0f3). The
+// paired's: the queue consumer's lane, leg (b), run r2's recordings (keploy
+// 6db6cd0f3). The
 // consumer read processed_at (13.458) after its duplicate read (mock-6, sent
 // 13.112, answered 13.458619) and sent its insert at 13.459990; post-url-1's
 // handler sent its upsert (mock-8) at 13.459791 between the two, which the

@@ -253,7 +253,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.testWorker, a.testBegun = nil, nil
 		a.testBegunAt, a.testBg = nil, nil
 		a.scopeMu.Unlock()
-		// The previous set's background rules go too (S12 v16 §2.3).
+		// The previous set's background rules go too.
 		if err := a.serveBackgroundExactly(es, "", nil, nil); err != nil {
 			return err
 		}
@@ -296,7 +296,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			}
 		}
 		// Record's full round pairs with the recordings of tests not begun
-		// yet too, which the on-disk store keeps (S12 v16 §4.1).
+		// yet too, which the on-disk store keeps.
 		if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
 			if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
 				return fmt.Errorf("set the test set's recordings of a kind: %w", err)
@@ -470,7 +470,7 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 // shows them. A proxy that has no worker scope (coreAgent.ExactWorkerServer)
 // cannot serve a set that has one.
 //
-// Under S12's background rules (testBg, S12 v16 §2.3) a worker-scope mock
+// Under S12's background rules (testBg) a worker-scope mock
 // with no identical sibling among the set's background answers from the set's
 // start, wherever it is placed (testBackground.noSibling), and the reachable
 // ones are said in the order the view serves them in: the earlier place first

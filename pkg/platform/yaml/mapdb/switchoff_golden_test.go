@@ -16,7 +16,7 @@ import (
 )
 
 // Without the proven switch, mappings.yaml is written byte for byte as the
-// goldens hold it (S12 v16 §4.5): a mock entry without a Reason, and a worker
+// goldens hold it: a mock entry without a Reason, and a worker
 // scope a move gives none, write what keploy wrote before entries had one.
 //
 // To regenerate: KEPLOY_GOLDEN_OUT=<dir> go test -run

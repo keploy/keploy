@@ -220,7 +220,7 @@ func TestTimestampsStampedAtRealBoundary(t *testing.T) {
 		t.Fatalf("expected non-zero SeqNo, got 0")
 	}
 	// The relay took the stamp itself: it is on the proxy's clock, which
-	// is named for the run (S12 v16 §2.2).
+	// is named for the run.
 	if c.ReadClock != fakeconn.ClockProxy {
 		t.Fatalf("the chunk's clock is %s; want proxy", c.ReadClock)
 	}

@@ -417,7 +417,7 @@ type VariableScopes interface {
 	InAheadScope(m *models.Mock) bool
 }
 
-// ExactBackground is exact serving's background (S12 v16 §2.3), which a
+// ExactBackground is exact serving's background, which a
 // parser answers from after the open test's own: the worker scope the run
 // reached (a no-sibling recording from the set's start) and the pool.
 // An optional MockMemDb capability, under the proven switch: the agent's
@@ -432,13 +432,13 @@ type ExactBackground interface {
 	// its usual delete door.
 	Background(kind models.Kind) []*models.Mock
 	// SpentBackground is kind's background recordings this staging consumed,
-	// read-only, in recorded order: what a by-kind reuse answers with (§3).
+	// read-only, in recorded order: what a by-kind reuse answers with.
 	SpentBackground(kind models.Kind) []*models.Mock
 }
 
 // ByKindBackground is an optional MockMemDb capability under S12's background
-// rules: a kind's whole background as answering by kind reads it (S12 v16
-// §2.3, §3). By-kind answers ignore Place. So whether a kind may be answered
+// rules: a kind's whole background as answering by kind reads it. By-kind
+// answers ignore Place. So whether a kind may be answered
 // by kind (every background reply of the kind equal) is decided over all of
 // the kind's background, and a by-kind answer may spend a recording placed
 // after a test the run has not begun yet: neither depends on which places
@@ -478,7 +478,7 @@ func SpendByKind(db MockMemDb, m *models.Mock) bool {
 }
 
 // BackgroundCursor is an optional MockMemDb capability under S12's background
-// rules (S12 v16 §2.3: the pool keeps its recorded reuse and cursor-saturate,
+// rules (the pool keeps its recorded reuse and cursor-saturate,
 // its cursor shared with background callers): the stateful cursor of the
 // staged set's background, its worker scope and its pool, the one its calls
 // between tests advance. Inside a test the store's own MockCursor keeps no
@@ -505,14 +505,14 @@ func BackgroundCursorOf(db MockMemDb) (MockCursor, bool) {
 }
 
 // S12Background reports whether db serves its staged set by S12's background
-// rules (S12 v16 §2.3; BackgroundCursorOf's ok): false for a set served by
+// rules (BackgroundCursorOf's ok): false for a set served by
 // today's rules, and for a store that implements none of them.
 func S12Background(db MockMemDb) bool {
 	_, ok := BackgroundCursorOf(db)
 	return ok
 }
 
-// Pairing is record's full round's pairing (S12 v16 §4.1). It answers only
+// Pairing is record's full round's pairing. It answers only
 // while the session pairs: OutgoingOptions.Learn under the proven switch.
 // An optional MockMemDb capability: the agent's MockManager implements it,
 // and every MockMemDb wrapper must forward it.

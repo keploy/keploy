@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// THE PROCESS A RECORDED CALL CAME FROM (S12 v16 §4.4).
+// THE PROCESS A RECORDED CALL CAME FROM.
 //
 // Under the proven switch every recorded mock names the process that made its
 // call, as its origin's comm and argv[0] (models.Origin.Comm, Exe): a reason
@@ -36,7 +36,8 @@ import (
 // (models.UnnamedPIDNamespace, with the kernel pid), every line that would
 // name the process says so (models.Origin.ProcessText), and the record log
 // says it once, with the remedy. Naming a process from inside a PID
-// namespace of its own is ledgered (S12-NAME-IN-PRIVATE-PIDNS). Only naming
+// namespace of its own is a follow-up (a BPF-stamped comm with the
+// namespace-local pid, or a namespace-inode match). Only naming
 // is so guarded: the registry's starts, which attribute a call by its pid to
 // a worker the scope API registered (by number first, a direct worker's call
 // in keploy's docker mode included), are read as before, whatever the

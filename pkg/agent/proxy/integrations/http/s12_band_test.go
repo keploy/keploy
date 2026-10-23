@@ -37,7 +37,7 @@ func statefulAt(name string, at time.Time) *models.Mock {
 }
 
 // Under S12's background rules the open test's own recordings and the set's
-// background are two bands, never one sequence (S12 v16 §2.3): a test's call
+// background are two bands, never one sequence: a test's call
 // that its own recording is is answered by it, though background recordings of
 // the call were recorded before it; a call only background recordings are
 // advances through them on the background's cursor, the one the calls between
@@ -109,7 +109,7 @@ type s12LearnDb struct {
 func (d *s12LearnDb) BackgroundCursor() (integrations.MockCursor, bool) { return &d.bg, true }
 
 // Under S12's background rules a test learns from its own recordings only
-// (S12 v16 §2.3: own exact, own learn, then background exact): with a test
+// (own exact, own learn, then background exact): with a test
 // open the background answers a call exactly or not at all, and nothing is
 // learned onto it. A call in a test that a pool recording is closer to (fewer
 // drifted leaves) than the test's own is then a miss, as learn.Pair makes any

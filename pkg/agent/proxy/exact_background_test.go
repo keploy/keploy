@@ -424,7 +424,7 @@ func TestALostAnswerReportIsSaidToBeNoMiss(t *testing.T) {
 }
 
 // An async lane's pool recording keeps today's rules under S12's: it is not
-// shown in a test, nor spent there, nor background (S12 v16 §2.1).
+// shown in a test, nor spent there, nor background.
 func TestS12LeavesAnAsyncPoolRecordingOutOfATest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	own := httpCall("own", 0, "/own")
@@ -471,7 +471,7 @@ func TestS12ShowsThePoolInRecordedOrder(t *testing.T) {
 }
 
 // Under S12's rules the background's stateful cursor is the one the calls
-// between tests advance, inside a test too (S12 v16 §2.3: the pool keeps its
+// between tests advance, inside a test too (the pool keeps its
 // recorded reuse and cursor-saturate, its cursor shared with background
 // callers): a mark a call between tests made is read in a test, one a call in
 // a test made is read between tests, while the store's own cursor keeps none
@@ -539,7 +539,7 @@ func TestS12SharesTheBackgroundsCursorBetweenATestAndTheGaps(t *testing.T) {
 // A window's answered calls' reports have room of their own: a background
 // writer answered by its kind more often than a window keeps reports of
 // leaves every miss of the window kept, and a miss's room filled leaves an
-// answer's report kept (S12 v16 §3: by-kind reuse is unbounded). A drain
+// answer's report kept (by-kind reuse is unbounded). A drain
 // empties both.
 func TestAnswersAndMissesHaveRoomOfTheirOwn(t *testing.T) {
 	answer := models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: models.ErrAnswered,
@@ -580,7 +580,7 @@ func TestAnswersAndMissesHaveRoomOfTheirOwn(t *testing.T) {
 }
 
 // Answering by kind reads a kind's whole background, whatever places the run
-// has reached (S12 v16 §2.3: by-kind answers ignore Place; §3: a kind is
+// has reached (by-kind answers ignore Place; a kind is
 // answered by kind only when every background reply of it is equal):
 // KindBackground lists a worker recording placed after a test not begun,
 // which Background, what exact serving reads, hides; and SpendByKind spends it
@@ -642,7 +642,7 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 }
 
 // An async lane's worker-scope recording keeps today's reuse under S12's
-// rules (S12 v16 §2.1): the view shows it, as today, but it is no
+// rules: the view shows it, as today, but it is no
 // background: exact serving's background (Background, SpentBackground) and
 // the kind's whole background (KindBackground) leave it out, and no by-kind
 // answer spends it, whether its place is reached or not.
@@ -674,8 +674,7 @@ func TestS12LeavesAnAsyncWorkerRecordingOutOfTheBackground(t *testing.T) {
 }
 
 // SpentBackground lists the staging's spent background in recorded order,
-// whatever order the calls spent it in: what a by-kind reuse answers with
-// (S12 v16 §3).
+// whatever order the calls spent it in: what a by-kind reuse answers with.
 func TestSpentBackgroundIsInRecordedOrder(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	// The per-test tier, which the trees read first, holds the

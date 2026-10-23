@@ -72,8 +72,8 @@ func TestMoveToWorkerTiesAMoveToItsOwner(t *testing.T) {
 }
 
 // Every rewrite of mappings.yaml without the switch keeps the set's
-// RecordedWith mark and each entry's owner and drift a run with it wrote (S12
-// compat audit A6): the writes keploy record and keploy test make, keploy
+// RecordedWith mark and each entry's owner and drift a run with it wrote:
+// the writes keploy record and keploy test make, keploy
 // test's whole-file Insert included, and a writer that names a mark replaces
 // it.
 func TestTheMarkAndAMovesOwnerSurviveARewriteWithoutTheSwitch(t *testing.T) {

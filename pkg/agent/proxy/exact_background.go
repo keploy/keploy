@@ -10,8 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// S12'S BACKGROUND RULES IN EXACT SERVING (S12 v16 §2.3, §4.1;
-// replay.RegisterS12Serving).
+// S12'S BACKGROUND RULES IN EXACT SERVING (replay.RegisterS12Serving).
 //
 // A set staged under S12's background rules (ServeExactBackground, which the
 // agent calls only for a set an S12 record marked, models.RecordedWithS12Routing,
@@ -192,8 +191,8 @@ var _ integrations.ExactBackground = (*MockManager)(nil)
 // as answering by kind reads it (integrations.ByKindBackground): its
 // data-plane recordings, no async lane's, of the worker scope at every place,
 // reached or not, and of the pool, split into those unused and those this
-// staging spent, each in recorded order. By-kind answers ignore Place (S12
-// v16 §2.3), so its answer does not depend on the places the run has reached.
+// staging spent, each in recorded order. By-kind answers ignore Place, so its
+// answer does not depend on the places the run has reached.
 // nil, nil for a set served by today's rules, and with exact serving off.
 func (m *MockManager) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
 	v := m.exactView()
@@ -286,7 +285,7 @@ func (v *exactView) spentBackground(name string) bool {
 // between tests advance, under the pool views' key (exactCursorKey), which a
 // call inside a test that a background recording answers reads and advances
 // too. The background's recorded sequence is then one whether its calls land
-// inside a test or between tests (S12 v16 §2.3: its cursor is shared with
+// inside a test or between tests (its cursor is shared with
 // background callers). False for a set served by today's rules, and with
 // exact serving off.
 func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {

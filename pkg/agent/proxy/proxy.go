@@ -2644,7 +2644,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if proven {
 		connID := fmt.Sprint(clientConnID)
 		// The process the connection came from, which each mock its parsers
-		// record names (starts.Registry.StampOrigin, S12 v16 §4.4): kept
+		// record names (starts.Registry.StampOrigin): kept
 		// until they are done, as the container key is.
 		starts.Default.NoteOrigin(connID, destInfo.KernelPid)
 		defer starts.Default.ForgetOrigin(connID)
@@ -4183,7 +4183,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// where forgetting at a repair is a false fail.
 		p.getMockManager().NewVariableSet()
 		// Record's full round pairs a call nothing answered with a recording
-		// another test owns (S12 v16 §4.1): only its session sets Learn.
+		// another test owns: only its session sets Learn.
 		p.getMockManager().SetPairing(opts.Learn)
 	}
 
@@ -4674,7 +4674,7 @@ type testErrorAccumulator struct {
 	mu   sync.Mutex
 	errs []error
 	// answers is how many of errs are answered calls' reports
-	// (models.ReportAnswer, S12 v16 §4.1): they have room of their own
+	// (models.ReportAnswer): they have room of their own
 	// (addBounded), so no number of answers crowds out a miss.
 	answers int
 	// read is set, under Proxy.captureMu, when GetMockErrors has read a window
@@ -4811,7 +4811,7 @@ func (p *Proxy) noteMissLost(err error, cause string) {
 	if missCounts(err) {
 		if isAnswerReport(err) {
 			// No miss: an answered call's report, which record's judging
-			// reads, lost where a miss would be (S12 v16 §4.1).
+			// reads, lost where a miss would be.
 			cause = "an answered call's report (no miss) was lost: " + cause
 		}
 		p.missLoss.CompareAndSwap(nil, &cause)
@@ -4826,7 +4826,7 @@ func isAnswerReport(err error) bool {
 }
 
 // isByKindAnswer reports whether err is the report of a background write
-// answered by its kind (models.AnswerByKind, S12 v16 §3): unchecked, read by
+// answered by its kind (models.AnswerByKind): unchecked, read by
 // no judging, only counted in the reports.
 func isByKindAnswer(err error) bool {
 	var pe models.ParserError
@@ -4876,7 +4876,7 @@ func (p *Proxy) pendingDroppedForRoom(err error) {
 // missCounts reports whether a miss counts against a test
 // (models.MockMismatchReport.CountsAgainstTest): one without a report is
 // taken to, as nothing says it does not. So does, for what is lost, an
-// answered call's report (models.ReportAnswer, S12 v16 §4.1) other than one
+// answered call's report (models.ReportAnswer) other than one
 // answered by kind: it counts against nothing, but record's judging reads it
 // (a pairing it bakes), and a read short of one is incomplete. One answered
 // by kind is read by no judging (noteMissLost).
@@ -5443,7 +5443,7 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 // sendMockNotFoundErrorFrom is sendMockNotFoundError for a call from process
 // pid (0 when the redirect gave none). Under the proven switch the report,
 // a miss's or an answer's (models.ReportAnswer), names that process
-// (MockMismatchReport.Source, S12 v16 §4.4) when its parser named none. An
+// (MockMismatchReport.Source) when its parser named none. An
 // answered call (models.ErrAnswered) is stamped as a miss is, and kept for
 // the test's read with the misses, but it is no miss: it is not logged as
 // one.

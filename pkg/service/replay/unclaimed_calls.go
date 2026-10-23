@@ -46,8 +46,8 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models
 
 // splitAnswers splits a read of the calls the agent reports into the misses
 // and the answered calls (models.UnmatchedCall.Answer, proven switch), each in
-// read order: an answer never lands in a miss list, nor changes a status
-// (S12 v16 §3.3). A read with no answer is returned as it is.
+// read order: an answer never lands in a miss list, nor changes a status. A
+// read with no answer is returned as it is.
 func splitAnswers(read []models.UnmatchedCall) (misses, answers []models.UnmatchedCall) {
 	if !slices.ContainsFunc(read, func(c models.UnmatchedCall) bool { return c.Answer != "" }) {
 		return read, nil

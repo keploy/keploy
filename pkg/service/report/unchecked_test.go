@@ -13,7 +13,7 @@ import (
 )
 
 // byKindAnswer is a background write the agent answered by its kind inside
-// the test's window (models.AnswerByKind, S12 v16 §3).
+// the test's window (models.AnswerByKind).
 func byKindAnswer() models.UnmatchedCall {
 	return models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "insert keploy.events", Answer: models.AnswerByKind,
 		WriteKind: "Mongo insert keploy.events", Kind: models.MissInTest}
@@ -22,7 +22,7 @@ func byKindAnswer() models.UnmatchedCall {
 const uncheckedWant = "  post-url-1: 1 background write answered inside its window, unchecked (Mongo insert keploy.events)\n"
 
 // The text report says, under a test's status, the background writes its
-// window answered by their kind, unchecked (S12 v16 §4.4), whatever the
+// window answered by their kind, unchecked, whatever the
 // test's status; a provisional answer (a pairing) says nothing, and a test
 // with no answers prints what it printed before answers existed.
 func TestPrintTests_SaysATestsUncheckedWrites(t *testing.T) {

@@ -33,7 +33,7 @@ func selfSource(t *testing.T) models.Origin {
 }
 
 // The sink names the process that made each call it is told of, a miss and
-// an answered call alike (MockMismatchReport.Source, S12 v16 §4.4), from the
+// an answered call alike (MockMismatchReport.Source), from the
 // call's pid, under the proven switch only: with the switch off a miss names
 // no process, so a report keploy test writes without the switch is as it was.
 // A report whose parser named its process keeps that name.

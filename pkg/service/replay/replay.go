@@ -5074,7 +5074,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
 	}
 	// The text report's line for each test's background writes answered by
-	// their kind, unchecked (S12 v16 §4.4), from its last result as the set
+	// their kind, unchecked, from its last result as the set
 	// ends: once per test, whatever cycles it took.
 	for _, res := range lastResultOfEachTest(testCaseResults) {
 		if line := models.UncheckedLine(res.TestCaseID, res.Answers); line != "" {
@@ -5269,7 +5269,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Under S12's serving what today's rule would require is said, not
 		// required, from what the set's end read (its stop's drain
 		// included): a background call the application stopped making is
-		// not caught (S12 v16 §4.4), and nothing waits for one still to
+		// not caught, and nothing waits for one still to
 		// come.
 		if r.exact != nil && r.exact.background && captureOpened {
 			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks, stopDrained); len(unanswered) > 0 {

@@ -181,7 +181,7 @@ func TestAMappedMocksOriginIsReadWhateverTheSwitch(t *testing.T) {
 }
 
 // A rewrite of a set's mocks without the proven switch keeps every origin a
-// run with it recorded (S12 compat audit A6): the prune (--remove-unused-mocks)
+// run with it recorded: the prune (--remove-unused-mocks)
 // and the noise write-back (--schema-noise-detection without the prune)
 // re-encode each mock they keep from what the readers decoded, so a reader
 // that dropped the block would strip it from the file for good. Every

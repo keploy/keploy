@@ -2,7 +2,7 @@ package replay
 
 import "sync"
 
-// WHO MAY TURN ON S12'S LOOSER SERVING (S12 v16 §2.3; the compatibility
+// WHO MAY TURN ON S12'S LOOSER SERVING (the compatibility
 // audit's B3 and C2).
 //
 // S12's serving is looser than today's for a set's background: the set's end

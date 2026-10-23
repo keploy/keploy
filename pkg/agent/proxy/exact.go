@@ -1198,7 +1198,7 @@ func (v *exactView) shows(mk *models.Mock) bool {
 	if v.test != "" {
 		// Under S12's background rules the pool answers in a test too,
 		// after the test's own and the worker scope (keep); an async
-		// lane's recording keeps today's rules (S12 v16 §2.1).
+		// lane's recording keeps today's rules.
 		return v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
 	_, ok := v.pool[mk.Name]
@@ -1264,7 +1264,7 @@ func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 }
 
 // backgroundOrder appends to out what the view shows of in, in S12's
-// background order (S12 v16 §2.3): what is not background first (the
+// background order: what is not background first (the
 // protocol-phase mocks), in their order; then the worker scope, the earlier
 // place first, delivering before idle, then recorded order (workerOrder);
 // then the pool, in recorded order, whichever trees in came from.

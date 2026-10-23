@@ -152,7 +152,7 @@ func TestUnderTheSwitchAnAgentThatServesTodaysRulesKeepsTheWorkerScopesEnd(t *te
 // (models.MockEntry.Drift), whose owner this run runs, is the owner's own
 // again: the owner's quarantine no longer applies (its test edited, or
 // verdicts.yaml lost its entry), so the set is staged without it in the worker
-// scope and the owner opens with it, as recorded (S12 v16 §4.2, audit B4).
+// scope and the owner opens with it, as recorded (audit B4).
 // With S12's serving enabled or not. An owner the run skips (quarantined),
 // an exact move's owner, and an owner the set no longer has keep the move.
 func TestUnderTheSwitchADriftMoveGoesBackToAnOwnerThatRuns(t *testing.T) {

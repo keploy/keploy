@@ -57,18 +57,18 @@ type MockEntry struct {
 	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
 	// Reason says why keploy placed this entry where it is (a routing at
 	// record, a move by record's judging), in words with its undo; written
-	// under the proven switch only (S12 v16 §4.4). Like every field of an
+	// under the proven switch only. Like every field of an
 	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
 	// the switch.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
 	// Owner is, on a worker-scope entry record's judging moved out of a
 	// test's list (MappingDb.MoveToWorker, under the proven switch), the test
-	// it was moved from: the test whose window recorded it (S12 v16 §4.2; the
+	// it was moved from: the test whose window recorded it (the
 	// compatibility audit's B4). Empty on every other entry. Read and kept by
 	// each rewrite of mappings.yaml, whatever the switch.
 	Owner string `json:"owner,omitempty" yaml:"owner,omitempty" bson:"owner,omitempty"`
 	// Drift says, on a moved entry, that the move rests on its Owner's
-	// quarantine: the pairing that moved it drifted (S12 v16 §4.1), so the
+	// quarantine: the pairing that moved it drifted, so the
 	// Owner was quarantined as keploy/unseparable_write, keploy being unable
 	// to tell the Owner's own write from it. record's judging sets it on the
 	// moves it passes MoveToWorker. A replay under the switch that runs the
@@ -81,7 +81,7 @@ type MockEntry struct {
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
-// record recorded under S12's routing and serving (S12 v16): only such a set
+// record recorded under S12's routing and serving: only such a set
 // is served by S12's looser rules (no worker-scope check at the set's end, the
 // pool inside tests, background writes answered by kind), and only by a build
 // whose judging enables them (replay.RegisterS12Serving), under the proven

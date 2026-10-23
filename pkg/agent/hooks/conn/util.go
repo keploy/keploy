@@ -240,7 +240,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		AppPort: appPort,
 		// Mocks: mocks,
 	}
-	// The clock its window start is on (proven switch, S12 v16 §2.2).
+	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
 
 	if synchronous {
@@ -634,7 +634,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Noise:     map[string][]string{},
 		AppPort:   appPort,
 	}
-	// The clock its window start is on (proven switch, S12 v16 §2.2).
+	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
 
 	select {

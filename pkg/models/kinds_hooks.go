@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// WRITE KINDS AND EXACT KEYS (S12 v16 §2.2, §2.3, §3).
+// WRITE KINDS AND EXACT KEYS.
 //
 // Two declarations a parser makes about its kind's recordings, for a test
 // set's background (the worker scope and the pool), under the proven switch:
@@ -29,7 +29,7 @@ import (
 // one that does not own a recording says so (ok false).
 
 // RegisterWriteKind declares how kind's parser names a recorded write's kind,
-// for by-kind answering and record-time routing (S12 v16 §2.2, §3). of
+// for by-kind answering and record-time routing. of
 // returns the kind ("Mongo insert keploy.events": protocol, operation,
 // db.collection) and true for a write that may be answered by kind; false
 // for anything else. It reads the mock alone and must be cheap. Call it from
@@ -48,7 +48,7 @@ func WriteKindOf(m *Mock) (string, bool) {
 
 // RegisterExactKey declares one of kind's exact keys: two recordings of kind
 // with equal keys are identical siblings under its exact-serving comparator
-// (S12 v16 §2.3's no-sibling rule). key returns false for a recording it does
+// (the no-sibling rule). key returns false for a recording it does
 // not own or cannot key. A kind may have several keys, each registered by the
 // parser that owns the recordings it keys: they are tried in registration
 // order, and the one that keys a recording is its key. A recording no key

@@ -48,7 +48,7 @@ func (d Direction) String() string {
 // ConnSeq's to say (CapturedBefore), never theirs.
 type Chunk struct {
 	Dir Direction
-	// ReadClock is the clock ReadAt is on (S12 v16 §2.2): set only by a
+	// ReadClock is the clock ReadAt is on: set only by a
 	// producer that took the stamp itself, ClockUnset on every other chunk,
 	// which is never trusted. It sits in the padding after Dir, so a chunk
 	// costs no more memory for it (TestChunkSize).
@@ -76,7 +76,7 @@ type Chunk struct {
 	SeqNo     uint64    // monotonic, scoped to (connection, direction)
 }
 
-// Clock is the clock a chunk's ReadAt is on (S12 v16 §2.2). Only a producer
+// Clock is the clock a chunk's ReadAt is on. Only a producer
 // that took the stamp itself sets one; every other chunk is ClockUnset, which
 // is never trusted.
 type Clock uint8
@@ -180,7 +180,7 @@ func ClockID(c Clock) string {
 	return ""
 }
 
-// The stamped-request line (S12 v16 §3.7), the contract between a parser
+// The stamped-request line, the contract between a parser
 // that fixes a request's stamp and a lane that waits on it. keploy/integrations'
 // Mongo v2 recorder logs it, at debug, once it has fixed a complete client
 // message's start (clientMessageStartReadAt), for every op, handshakes

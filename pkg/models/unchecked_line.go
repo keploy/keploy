@@ -6,7 +6,7 @@ import (
 )
 
 // UncheckedLine is the report's line for test's background writes answered by
-// their kind (AnswerByKind, S12 v16 §4.4): how many, where (inside its window,
+// their kind (AnswerByKind): how many, where (inside its window,
 // or in the gap before it), and of which write kinds, in the order they were
 // first answered; "" when answers holds none. keploy test prints it as each
 // set ends, and keploy report under the test's status, from the test's

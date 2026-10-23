@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// S12 v16 §3.3: an answered call (models.UnmatchedCall.Answer) the agent
+// An answered call (models.UnmatchedCall.Answer) the agent
 // reports with the misses is split from them at intake. A test's goes to its
 // TestResult.Answers, the set's (made before its first test or after its
 // last) to its report's SetAnswers and to SetAnswersHook; none lands in a
@@ -149,7 +149,7 @@ func TestSplitAnswersKeepsReadOrder(t *testing.T) {
 }
 
 // The text report says, once per test as its set ends, the background writes
-// its window answered by their kind, unchecked (S12 v16 §4.4): a test whose
+// its window answered by their kind, unchecked: a test whose
 // answers are provisional (a pairing) or none has no line.
 func TestRunTestSet_ATestsUncheckedWritesAreSaidOnce(t *testing.T) {
 	provenOn(t, true)

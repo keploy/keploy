@@ -51,7 +51,7 @@ func TestMoveToWorkerWritesEachMovesReason(t *testing.T) {
 }
 
 // A rewrite of mappings.yaml without the proven switch keeps every Reason a
-// run with it wrote (S12 compat audit A6): each write decodes the file whole
+// run with it wrote: each write decodes the file whole
 // and encodes it back, so a line on an entry the write does not touch stays,
 // on a worker entry and on a test's alike.
 func TestAReasonSurvivesARewriteWithoutTheSwitch(t *testing.T) {

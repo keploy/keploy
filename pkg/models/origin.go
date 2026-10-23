@@ -2,8 +2,8 @@ package models
 
 import "strconv"
 
-// Origin is where a recorded test or call came from, under the proven switch
-// (S12 v16 §2.2, §4.4); nil when recorded without it, and then nothing is
+// Origin is where a recorded test or call came from, under the proven switch;
+// nil when recorded without it, and then nothing is
 // written.
 //
 // Only a record under the switch sets one. A file's origin is read and carried
@@ -68,7 +68,7 @@ func (o *Origin) ProcessText() string {
 
 // FileProcessText is ProcessText as a committed line (mappings.yaml's
 // reasons) names the process: for one keploy would not name, why without its
-// kernel pid, which no committed file holds (S12 v16 §4.4: a pid differs
+// kernel pid, which no committed file holds (a pid differs
 // from one recording to the next).
 func (o *Origin) FileProcessText() string {
 	return o.processText(false)

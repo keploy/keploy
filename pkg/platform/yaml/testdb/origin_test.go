@@ -66,7 +66,7 @@ func TestATestCasesOriginRoundTrips(t *testing.T) {
 
 // A rewrite of a test case without the proven switch (normalize's and the
 // replay's UpdateTestCase; templatize writes a copy of what it read the same
-// way) keeps the origin a record with it wrote (S12 compat audit A6), and a
+// way) keeps the origin a record with it wrote, and a
 // case recorded without one is rewritten without one.
 func TestATestCasesOriginSurvivesARewriteWithoutTheSwitch(t *testing.T) {
 	origin := models.Origin{Clock: "ktime:boot-1.anchor-1"}

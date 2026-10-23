@@ -1741,7 +1741,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// over, while its connection is still open.
 		if provenswitch.On() {
 			containerkey.Default.Stamp(mock)
-			// And the process its call came from (S12 v16 §4.4).
+			// And the process its call came from.
 			starts.Default.StampOrigin(mock)
 		}
 	}

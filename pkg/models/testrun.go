@@ -64,7 +64,7 @@ type TestReport struct {
 	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
 	// SetAnswers are, under the proven switch, the answered calls
 	// (UnmatchedCall.Answer) the set's end charged to the set, no test: made
-	// before its first test or after its last (S12 v16 §4.1). They never fail
+	// before its first test or after its last. They never fail
 	// the set, nor land in UnclaimedCalls. Absent when there is none.
 	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
 }
@@ -176,7 +176,7 @@ type TestResult struct {
 	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
 	// Answers are, under the proven switch, the answered calls
 	// (UnmatchedCall.Answer) charged to this test's window, or to the gap
-	// before it, as misses are (S12 v16 §4.1): a pairing record's full round
+	// before it, as misses are: a pairing record's full round
 	// made, a background write answered by its kind. They never fail the
 	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
 	// none.
@@ -505,12 +505,12 @@ type UnmatchedCall struct {
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
 	// Answer, under the proven switch, says the call WAS answered, and how;
 	// "" for a miss. AnswerProvisional: record's full round answered it with
-	// ClosestMock, a recording another test owns (a pairing, S12 v16 §4.1),
+	// ClosestMock, a recording another test owns (a pairing),
 	// which judging then moves to the set's background; RecordedIn stays
 	// empty on an answer (the parser's store names no recording's test), and
 	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
 	// drifted, Differs naming the leaves learned as noise.
-	// AnswerByKind: a background write answered by its kind (§3), unchecked;
+	// AnswerByKind: a background write answered by its kind, unchecked;
 	// Reused says the kind's recordings were used up. An answer never counts
 	// against a test and never lands in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
@@ -656,10 +656,9 @@ const (
 // MockMismatchReport.Answer, ReportAnswer), under the proven switch.
 const (
 	// AnswerProvisional: record's full round paired the call with a recording
-	// another test owns and answered it with that recording (S12 v16 §4.1).
+	// another test owns and answered it with that recording.
 	AnswerProvisional = "provisional"
-	// AnswerByKind: a background write answered by its write kind (S12 v16
-	// §3), unchecked.
+	// AnswerByKind: a background write answered by its write kind, unchecked.
 	AnswerByKind = "by_kind"
 )
 

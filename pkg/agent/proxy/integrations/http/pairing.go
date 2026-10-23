@@ -12,8 +12,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// pairExactly is record's full round's pairing of an HTTP call (S12 v16
-// §4.1), the step after the open test's own recordings (exactly, or by the
+// pairExactly is record's full round's pairing of an HTTP call, the step
+// after the open test's own recordings (exactly, or by the
 // learn step) and the background (exactly) left the call unanswered: a call
 // that is exactly a recording another test owns is answered with it, which
 // stays its owner's (integrations.ClaimPairing: a claim, no consumption),
@@ -24,7 +24,7 @@ import (
 //
 //   - Exactly only: the strict comparison exact serving answers by
 //     (strictDiff), modulo the noise declared or learned onto the recording.
-//     HTTP never pairs by drift (§4.1, release 1).
+//     HTTP never pairs by drift.
 //   - A poll (an SQS ReceiveMessage) never pairs: it is answered from the
 //     background or not at all.
 //   - A recording that declares variables is the variable pass's, and never
@@ -157,7 +157,7 @@ func sqsPoll(input *req) bool {
 	return false
 }
 
-// reportPairing reports a pairing (models.AnswerProvisional, S12 v16 §4.1):
+// reportPairing reports a pairing (models.AnswerProvisional):
 // the call is x, a recording another test owns (NotOwned, ClosestMock),
 // matched exactly. RecordedIn (the owner) is not the parser's to fill: the
 // store names no recording's test, and judging reads the owner of

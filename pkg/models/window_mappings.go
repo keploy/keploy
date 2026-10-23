@@ -53,7 +53,7 @@ type WindowedMock struct {
 	// no test owns wherever it was recorded.
 	Idle bool
 	// Clock names the clock At is on: the mock's Origin.Clock, "" for an
-	// untrusted stamp (S12 v16 §2.2). WriteKind is its write kind, by its
+	// untrusted stamp. WriteKind is its write kind, by its
 	// parser's registration (WriteKindOf): "" for no by-kind write. Both come
 	// with the mock's origin, which only a record under the proven switch
 	// writes: a mock without one has neither, and its parser is not asked.
@@ -165,7 +165,7 @@ type WindowMappings struct {
 	Worker []MockEntry
 	// Routed is, under DeriveOptions.RouteInFlightWrites, the in-flight
 	// writes the derivation routed to the worker scope rather than to the
-	// test they were in flight into (S12 v16 §2.2), in recorded order: each
+	// test they were in flight into, in recorded order: each
 	// is also in Worker, at the set's start.
 	Routed []RoutedWrite
 }
@@ -180,7 +180,7 @@ type RoutedWrite struct {
 
 // DeriveOptions are the window derivation's options.
 type DeriveOptions struct {
-	// RouteInFlightWrites is S12's routing at record (S12 v16 §2.2): a call
+	// RouteInFlightWrites is S12's routing at record: a call
 	// the in-flight rule gives to the test it was in flight into that is a
 	// by-kind write (WindowedMock.WriteKind) whose request was stamped on the
 	// clock that test's window start was (equal non-empty Clock), is no
@@ -304,7 +304,7 @@ func DeriveWindowMappingsWith(windows []TestWindow, mocks []WindowedMock, opts D
 			if m.InFlight && next < len(ws) && sched.InFlightInto(m.At, m.Res, ws[next].Start) {
 				if opts.routes(m, ws[next]) {
 					// Sent before the test began, on its window's clock:
-					// not the test's (S12 v16 §2.2).
+					// not the test's.
 					out.Worker = append(out.Worker, m.entry())
 					out.Routed = append(out.Routed, RoutedWrite{Mock: m, Test: ws[next].TestCase})
 					continue

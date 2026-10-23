@@ -13,7 +13,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
-// The SQS sample's delivering ReceiveMessage of S12's E2 leg (b), run 1, as
+// The SQS sample's delivering ReceiveMessage of the queue consumer's lane,
+// leg (b), run 1, as
 // keploy recorded it (mock-4): its request's X-Amz-Date, its answer's Date
 // header and a ReceiptHandle whose text ends in the message's epoch second
 // with a fraction. attrs, when not "", is added to the message as its
@@ -287,7 +288,8 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 	}
 }
 
-// r2Hello is a Mongo driver's isMaster handshake as S12 E3 leg (b), run r2,
+// r2Hello is a Mongo driver's isMaster handshake as the queue consumer's
+// lane, leg (b), run r2,
 // recorded it (mock-5, mock-7): sent on a new connection while the lane held
 // Mongo, answered when the hold was released, its localTime the server's
 // clock as it answered.
@@ -311,7 +313,8 @@ func r2Hello(name string, conn int32, asked, answered time.Time, localTime int64
 	}}
 }
 
-// r2Mongo is a Mongo OP_MSG recording of S12 E3 leg (b), run r2: request and
+// r2Mongo is a Mongo OP_MSG recording of the queue consumer's lane, leg (b),
+// run r2: request and
 // answer sections, recorded from asked to answered.
 func r2Mongo(name string, asked, answered time.Time, request []string, answer string) *models.Mock {
 	return &models.Mock{Name: name, Kind: models.Mongo, Spec: models.MockSpec{
@@ -323,7 +326,8 @@ func r2Mongo(name string, asked, answered time.Time, request []string, answer st
 	}}
 }
 
-// S12 E3, leg (b), run r2 (keploy 6db6cd0f3): the consumer read its clock for
+// the queue consumer's lane, leg (b), run r2 (keploy 6db6cd0f3): the consumer
+// read its clock for
 // processed_at (1792694293458, 18:38:13.458) in the millisecond the lane's
 // hold released Mongo, which the driver's handshakes on post-url-1's new
 // connections (mock-5, mock-7) were answered in, each with that millisecond
@@ -717,7 +721,8 @@ func TestAnIdThatReadsAsADateFlowsAsAnId(t *testing.T) {
 	}
 }
 
-// S12 E3, leg (b), the archived runs that failed (r1/legb-archive, keploy
+// the queue consumer's lane, leg (b), the archived runs that failed
+// (r1/legb-archive, keploy
 // 6db6cd0f3, CI shape): the consumer's insert rode a connection the driver
 // opened for it, whose isMaster handshake (mock-6, a config recording) was
 // answered in the millisecond processed_at was read, with that millisecond

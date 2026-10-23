@@ -75,7 +75,7 @@ func answered(m *models.Mock, at time.Duration, status int, body string) *models
 
 // Record's full round pairs an HTTP call nothing else answered with a
 // recording another test owns only when the call is exactly that recording
-// (S12 v16 §4.1: HTTP pairs exactly, never by drift); the first in recorded
+// (HTTP pairs exactly, never by drift); the first in recorded
 // order when recordings of the call hold one answer, none when they, or the
 // background's, hold different ones; a recording claimed once is passed
 // over; a poll (an SQS ReceiveMessage), the open test's own recording and a

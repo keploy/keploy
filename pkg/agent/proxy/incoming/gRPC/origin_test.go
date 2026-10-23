@@ -12,7 +12,7 @@ import (
 
 // A gRPC call the ingress records is a test case whose origin names the
 // proxy's clock, the clock the ingress stamped its request on before it wrote
-// it on to the app (S12 v16 §2.2), under the proven switch only.
+// it on to the app, under the proven switch only.
 func TestRecordIncoming_ATestCaseNamesItsWindowsClock(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		t.Run(map[bool]string{true: "switch on", false: "switch off"}[on], func(t *testing.T) {

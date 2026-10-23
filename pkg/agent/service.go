@@ -536,7 +536,7 @@ type ExactBackgroundServer interface {
 }
 
 // RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
-// round, S12 v16 §4.1) reads, beside what is staged, the set's recordings of
+// round) reads, beside what is staged, the set's recordings of
 // a kind the agent keeps on disk: a test's own are staged only as it opens.
 // SetRecordedOfKind sets where (src visits the on-disk mocks of a kind, in
 // recorded order, decoding one only as visit loads it; nil for none).

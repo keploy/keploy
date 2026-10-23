@@ -699,8 +699,7 @@ func (r *Relay) forward(
 			t.noteReading()
 			chunk.Dir = dir
 			// The relay's own stamp, on the proxy's clock; one another
-			// producer took is on no clock this relay can name (S12 v16
-			// §2.2).
+			// producer took is on no clock this relay can name.
 			chunk.ReadAt, chunk.ReadClock = observedRead(src, time.Now())
 			t.noteCarried(chunk.ReadAt)
 			if dir == fakeconn.FromClient {

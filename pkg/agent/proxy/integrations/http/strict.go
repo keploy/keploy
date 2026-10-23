@@ -328,7 +328,7 @@ func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool
 // among them, the one the pool's order puts first), those of first's band, and
 // the cursor their served marks are kept in. Under S12's background rules
 // (integrations.BackgroundCursorOf) the open test's own recordings (own) and
-// the set's background are two bands, never one sequence (S12 v16 §2.3): when
+// the set's background are two bands, never one sequence: when
 // first is the test's own, only its own answer, with cs as before (which keeps
 // no cursor in a test: each answers once, in recorded order), so no
 // background recording recorded earlier answers the test's own call; else

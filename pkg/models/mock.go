@@ -143,8 +143,8 @@ type Mock struct {
 	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
 	StartRef  string `json:"-" yaml:"-" bson:"-"`
 	// Origin is, under the proven switch, where the call came from: the clock
-	// its ReqTimestampMock is on, and the process that made it (S12 v16 §2.2,
-	// §4.4). Only a record under the switch sets it; a file's is read and
+	// its ReqTimestampMock is on, and the process that made it. Only a record
+	// under the switch sets it; a file's is read and
 	// carried whatever the switch (models.Origin). A recording's file holds it
 	// as its document's origin block (yaml.NetworkTrafficDoc.Origin), so it is
 	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares

@@ -16,7 +16,7 @@ import (
 
 // Without the proven switch, a test report, and the calls no mock answered as
 // the agent hands them to keploy test, are written byte for byte as the
-// goldens hold them (S12 v16 §4.5): a report with no answered calls writes
+// goldens hold them: a report with no answered calls writes
 // what keploy wrote before reports could hold them.
 //
 // To regenerate: KEPLOY_GOLDEN_OUT=<dir> go test -run

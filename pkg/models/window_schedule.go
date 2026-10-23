@@ -13,7 +13,7 @@ type TestWindow struct {
 	Start    time.Time `json:"start"`
 	End      time.Time `json:"end"`
 	// Clock names, under the proven switch, the clock Start is on: the test
-	// case's Origin.Clock (RecordedWindow). "" is untrusted (S12 v16 §2.2).
+	// case's Origin.Clock (RecordedWindow). "" is untrusted.
 	Clock string `json:"clock,omitempty"`
 }
 

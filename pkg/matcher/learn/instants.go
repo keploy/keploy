@@ -56,7 +56,8 @@ import (
 //     (appearedIn, unaccounted) reads it with those instants blanked; the
 //     echo (echoedInstants: the payloads hold the instant F saw too) reads
 //     it as it stands. Two clocks that read one moment are no copy of each
-//     other (S12 E3, leg (b): the consumer's processed_at was read in the
+// other (the queue consumer's lane, leg (b): the consumer's processed_at was
+// read in the
 //     millisecond in which the handshake on the connection the driver opened
 //     for its insert was answered, and that reply's localTime was that
 //     millisecond, in 7 runs of 10). A data-plane answer's instants are

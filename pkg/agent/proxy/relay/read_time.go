@@ -58,8 +58,8 @@ func observedReadAt(conn net.Conn, fallback time.Time) time.Time {
 	return fallback
 }
 
-// observedRead is observedReadAt, and the clock its stamp is on (S12 v16
-// §2.2: trust is decided at the producer): the proxy's (fakeconn.ClockProxy)
+// observedRead is observedReadAt, and the clock its stamp is on (trust is
+// decided at the producer): the proxy's (fakeconn.ClockProxy)
 // when the stamp is this relay's own time.Now, taken as the bytes were read
 // (the fallback, or a read time one of the relay's own wrappers took so:
 // proxyStamped); unset for a read time another producer stamped, which this

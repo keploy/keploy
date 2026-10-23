@@ -166,8 +166,8 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// outgoing call. That is the silent-green case; it gets one line here
 		// whether or not --assert-dependencies was passed.
 		fmt.Fprint(r.out, models.FormatDepNotice(t.Result.DepResult))
-		// Background writes its window answered by their kind, unchecked
-		// (S12 v16 §4.4): a report without answers prints nothing more.
+		// Background writes its window answered by their kind, unchecked: a
+		// report without answers prints nothing more.
 		fmt.Fprint(r.out, uncheckedLines(t))
 		fmt.Fprintln(r.out, "\n--------------------------------------------------------------------")
 	}
@@ -1591,8 +1591,8 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 }
 
 // uncheckedLines is test's line for the background writes its window, or the
-// gap before it, answered by their kind, unchecked (models.UncheckedLine, S12
-// v16 §4.4), indented under its status and newline-ended; "" for a test with
+// gap before it, answered by their kind, unchecked (models.UncheckedLine),
+// indented under its status and newline-ended; "" for a test with
 // none, as every report written without the proven switch has.
 func uncheckedLines(test models.TestResult) string {
 	line := models.UncheckedLine(test.TestCaseID, test.Answers)

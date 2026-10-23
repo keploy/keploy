@@ -8,7 +8,7 @@ import (
 )
 
 // windowClockCtxKey carries, through the capture context, the clock the
-// captured exchange's window start was stamped on (S12 v16 §2.2): the id of
+// captured exchange's window start was stamped on: the id of
 // the clock (fakeconn.ClockID) of the stamp an ingress took before it
 // forwarded the request, which opened the test's window. An ingress that
 // stamps the start on a clock no producer names, or on a fallback, sets none.
@@ -37,7 +37,7 @@ func WindowClockFromContext(ctx context.Context) string {
 // StampOrigin gives tc, under the proven switch, the origin of its window
 // start (models.TestCase.Origin): the clock ctx carries (WithWindowClock).
 // Nothing without the switch, nor when ctx carries no clock: an untrusted
-// start routes nothing (S12 v16 §2.2). Every capture path that builds a test
+// start routes nothing. Every capture path that builds a test
 // case from an exchange an ingress stamped calls it.
 func StampOrigin(ctx context.Context, tc *models.TestCase) {
 	if tc == nil || !provenswitch.On() {

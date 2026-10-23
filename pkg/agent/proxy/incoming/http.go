@@ -1954,7 +1954,7 @@ func isIngressExpectedCloseErr(err error) bool {
 }
 
 // proxyWindowClock is ctx carrying the clock an exchange's window start is on
-// (hooksUtils.WithWindowClock, S12 v16 §2.2): the proxy's. Both HTTP loops
+// (hooksUtils.WithWindowClock): the proxy's. Both HTTP loops
 // stamp a request with the proxy's time.Now as its bytes arrived, and open its
 // window at that stamp before they forward it to the app (OpenWindow), so an
 // egress call the app makes for it is stamped no earlier on that same clock.

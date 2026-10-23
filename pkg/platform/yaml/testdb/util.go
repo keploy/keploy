@@ -374,7 +374,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		LastUpdated: yamlTestcase.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
-		// The clock its window start is on (S12 v16 §2.2): read whatever the
+		// The clock its window start is on: read whatever the
 		// switch, so a rewrite of the case (templatize, normalize, an
 		// update) keeps it; only the proven switch uses it.
 		Origin: yamlTestcase.Origin,

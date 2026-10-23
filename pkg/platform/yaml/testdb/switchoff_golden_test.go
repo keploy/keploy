@@ -16,7 +16,7 @@ import (
 )
 
 // Without the proven switch, a test case's file is written byte for byte as
-// the goldens hold it (S12 v16 §4.5): a test case without an Origin writes
+// the goldens hold it: a test case without an Origin writes
 // what keploy wrote before test cases had one, and reads back without one.
 //
 // To regenerate: KEPLOY_GOLDEN_OUT=<dir> go test -run

@@ -207,8 +207,8 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
 // application and read what it consumed as it stopped (stopped).
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
-	// Under S12's background rules the set's end requires none (S12 v16
-	// §2.3): what a background call answered is judged by record's judging,
+	// Under S12's background rules the set's end requires none: what a
+	// background call answered is judged by record's judging,
 	// and a background call that stops happening is a limit the run says
 	// (unansweredBackground) and NEXT names.
 	if p == nil || p.background {
@@ -344,7 +344,7 @@ func (r *Replayer) confirmBackground(asked string) {
 }
 
 // returnStaleMoves gives each drift move whose owner this run runs back to
-// that owner (S12 v16 §4.2; the compatibility audit's B4): record's judging
+// that owner (the compatibility audit's B4): record's judging
 // moved the recording to the worker scope on a drifted pairing
 // (models.MockEntry.Drift) and quarantined its owner (MockEntry.Owner) as
 // keploy/unseparable_write, keploy being unable to tell the owner's own write

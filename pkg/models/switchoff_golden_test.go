@@ -14,7 +14,7 @@ import (
 
 // Without the proven switch, a mock's and a test case's JSON (a test case is
 // uploaded as JSON) and the recorded test windows a replay sends its agent are
-// byte for byte what the goldens hold (S12 v16 §4.5): a mock or test case
+// byte for byte what the goldens hold: a mock or test case
 // without an Origin, and a window without a Clock, encode as they did before
 // they had one. (Gob, which the agent streams mocks in, names every field of
 // a type in its stream whatever the values, and was never byte-stable: map

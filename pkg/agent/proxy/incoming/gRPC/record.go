@@ -90,7 +90,7 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// The forwarder stamps each client chunk with the proxy's time.Now
 	// before it writes it on (forwardAndTee), so a call's request stamp,
 	// its window's start, is taken before the app sees it, on the proxy's
-	// clock (S12 v16 §2.2).
+	// clock.
 	windowCtx := Utils.WithWindowClock(ctx, fakeconn.NameProxyClock())
 	captureStream := func(stream *pkg.HTTP2Stream) {
 		Utils.CaptureGRPC(windowCtx, logger, t, stream, appPort, synchronous, mapping)

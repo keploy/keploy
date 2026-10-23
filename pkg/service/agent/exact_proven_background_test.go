@@ -37,7 +37,7 @@ func queueMock(name, key string, idle bool) *models.Mock {
 // A worker-scope recording whose kind keys it, and that no other recording
 // of the set's background (its worker scope and its pool) shares the key of,
 // has no identical sibling; identical ones, one the kind cannot key and one
-// not read all have (S12 v16 §2.3's no-sibling rule).
+// not read all have (the no-sibling rule).
 func TestBackgroundOfTellsTheRecordingsWithNoSibling(t *testing.T) {
 	registerTestQueue(t)
 	byName := map[string]*models.Mock{

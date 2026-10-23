@@ -19,7 +19,7 @@ import (
 )
 
 // Both HTTP loops stamp a request on the proxy's clock before they forward
-// it, and hand its capture that clock (S12 v16 §2.2): the window start a
+// it, and hand its capture that clock: the window start a
 // recorded test case's origin names.
 func TestHandleHttp1Connection_TellsTheCaptureTheWindowsClock(t *testing.T) {
 	for _, synchronous := range []bool{true, false} {

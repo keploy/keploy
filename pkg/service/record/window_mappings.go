@@ -208,7 +208,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		return
 	}
 	// A set this build records under S12 (s12Record) is marked so, and its
-	// in-flight writes are routed (S12 v16 §2.2): only S12's serving serves
+	// in-flight writes are routed: only S12's serving serves
 	// a routed write by its kind.
 	marker, s12 := s12Record(db)
 	// The drain joined every goroutine that adds to the collector: derive from
@@ -448,7 +448,7 @@ func s12Record(db MappingDb) (recordedWithMarker, bool) {
 
 // routedReasons writes, on each entry of worker the derivation routed there
 // (routed: in flight into a test, sent before it began, on its window's
-// clock), why, and its undo (MockEntry.Reason, S12 v16 §4.4), and logs each
+// clock), why, and its undo (MockEntry.Reason), and logs each
 // routing once. A test the recording did not keep (kept) is named as one.
 func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEntry, routed []models.RoutedWrite, kept func(id string) bool) {
 	if len(routed) == 0 {
@@ -477,7 +477,7 @@ func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEnt
 	}
 }
 
-// routedReason is the line a routed write's entry carries (S12 v16 §4.4): what
+// routedReason is the line a routed write's entry carries: what
 // it is, the process that sent it, why it is no test's, and its undo. A test
 // the recording did not keep (kept false) owns nothing in mappings.yaml, so
 // the undo is to delete the entry: the call is then no test's, as that test's

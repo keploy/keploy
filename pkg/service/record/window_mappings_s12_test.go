@@ -32,7 +32,7 @@ func (d *markingMappingDB) MarkRecordedWith(_ context.Context, testSetID, featur
 	return nil
 }
 
-// s12Recording is leg (a)'s recording (S12 v16 §5): P, then post-url-1, and
+// s12Recording is leg (a)'s recording: P, then post-url-1, and
 // the consumer's insert mock-6 sent in the gap before post-url-1 and answered
 // inside it, every stamp on one clock.
 func s12Recording(t *testing.T) *windowMappings {
@@ -204,7 +204,7 @@ func TestProcessOfNamesCommAndArgv0(t *testing.T) {
 
 // A routed write whose process keploy would not name, because it runs in a
 // PID namespace of its own, says that in its reason line, with the remedy and
-// without the kernel pid, which no committed file holds (S12 v16 §4.4): two
+// without the kernel pid, which no committed file holds: two
 // recordings of one app commit one line, whatever pid its process had. The
 // record log's line gives the pid.
 func TestARoutedWritesLineSaysKeployRunsInAPIDNamespaceOfItsOwn(t *testing.T) {
