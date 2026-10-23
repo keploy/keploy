@@ -217,6 +217,7 @@ func TestEachLayoutReadsOnlyTheClocksRange(t *testing.T) {
 		}},
 		{"iso8601", readISO, func(t time.Time) string { return t.Format(time.RFC3339) }},
 		{"compact", readCompact, func(t time.Time) string { return t.Format("20060102T150405Z") }},
+		{"iso8601, its date and time joined by a '+'", readISO, func(t time.Time) string { return t.Format("2006-01-02+15:04:05") }},
 	} {
 		if got, _, ok := tc.read(tc.at(in)); !ok || !got.Equal(in) {
 			t.Errorf("%s: %v %v of %q, want %v", tc.name, got, ok, tc.at(in), in)

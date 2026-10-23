@@ -92,6 +92,14 @@ func TestAnInstantOnlyTheDecodedFormShowsIsAClockRead(t *testing.T) {
 	if d := NewDriftCache().of(esc(at), esc(boot)); d.clock.whole {
 		t.Error("by the lead alone, an instant read within the window is a clock read")
 	}
+	// An instant only a base64 run's text shows is read there within the
+	// window too: its words are the value's clock words.
+	b64 := func(t time.Time) string {
+		return base64.StdEncoding.EncodeToString([]byte(`{"at":"` + t.Format(time.RFC3339) + `"}`))
+	}
+	if d := NewDriftCache().ofIn(b64(at), b64(boot), w); !d.clock.live[boot.Format("04")] {
+		t.Errorf("read within the window, the encoded instant's words %v hold no %q", d.clock.live, boot.Format("04"))
+	}
 }
 
 // What b95 refused whole beside a clock read (its (B) gate, gone) is learned
@@ -201,6 +209,11 @@ func TestEscapeClockPeelsOnlyEscapesThatStandForAnEscape(t *testing.T) {
 		{`10\u003G41Z`, "u003G41Z", false},
 		{`10\u003`, "u003", false},
 		{`10\u00413A41Z`, "u00413A41Z", false},
+		// Each escape's own bytes are checked, every one of them.
+		{"10%3G41Z", "3G41Z", false},
+		{"10%GA41Z", "GA41Z", false},
+		{`10\a003A41Z`, "a003A41Z", false},
+		{`10\q41Z`, "q41Z", false},
 	} {
 		set := map[string]bool{"41Z": true}
 		escapeClock(tc.s, set)

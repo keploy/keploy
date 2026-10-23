@@ -342,6 +342,11 @@ func TestSortWordSlotsOrdersEveryField(t *testing.T) {
 			t.Errorf("SortWordSlots(%v) = %v, want %v", in, got, both)
 		}
 	}
+	// The layout orders before the skeleton.
+	two := []WordSlot{{Seg: 6, Kind: WordSlotInstant, Layout: "iso8601", Skeleton: "b"}, {Seg: 6, Kind: WordSlotInstant, Layout: "rfc1123", Skeleton: "a"}}
+	if got := SortWordSlots([]WordSlot{two[1], two[0]}); !reflect.DeepEqual(got, two) {
+		t.Errorf("SortWordSlots = %v, want %v", got, two)
+	}
 	// No slots are written as an empty list, never as none.
 	if got := SortWordSlots(nil); got == nil || len(got) != 0 {
 		t.Errorf("SortWordSlots(nil) = %#v, want an empty list", got)
