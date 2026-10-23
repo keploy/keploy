@@ -54,7 +54,7 @@ type ClientMockStorage struct {
 	// for (refusedOf).
 	refused map[string]bool
 	// leftOut names the mocks this store left out: the Redis mocks of a set
-	// a build without a Redis parser replays (redisskip.Recorded), whose
+	// a build that skips Redis replays (redisskip.Recorded), whose
 	// calls are made for real. Those of them parked on disk stay there, and
 	// every read of the disk that serves, owns or learns from a mock leaves
 	// them out (mocksForParams, mocksByName, diskRecordedBefore); the disk's
@@ -95,6 +95,10 @@ type Agent struct {
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
 	Ip          string
+
+	// leftOutSaid says the agent has told the user, at Warn, that it leaves
+	// Redis mocks out of a replay (sayLeftOut): once per process.
+	leftOutSaid atomic.Bool
 
 	// strictLogOnce de-dupes the "strict mock window enabled" Info log
 	// so it fires at most once per agent process instead of once per
@@ -1081,7 +1085,7 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
-	// A build without a Redis parser leaves the set's Redis mocks out of the
+	// A build that skips Redis leaves the set's Redis mocks out of the
 	// pool: its proxy relays Redis to the real server (redisskip.Recorded).
 	// They are read from the whole set, as keploy test reads it, before any
 	// mock is refused: a connection is judged by its first exchange.
@@ -1106,7 +1110,8 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
 		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered, storage)
 	}
-	sayLeftOut(a.logger, storage.leftOut)
+	a.sayLeftOut(storage.leftOut)
+	answerLeftOut(ctx, storage.leftOut)
 
 	// Derive Lifetime once per mock before they enter the runtime pool.
 	// Idempotent: DeriveLifetime short-circuits when the Lifetime
@@ -1244,7 +1249,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// counted as it is decoded, before any is refused or parked on disk.
 	proven := provenswitch.On()
 	var tally containerkey.RecordedTally
-	// A build without a Redis parser leaves the set's Redis mocks out of the
+	// A build that skips Redis leaves the set's Redis mocks out of the
 	// pool (redisskip.Recorded), decided once the whole set is read: a
 	// Generic mock is judged by its connection's first exchange.
 	redisMocks := redisskip.NewRecorded()
@@ -1323,7 +1328,8 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		storage.noteRefusedAs(r.name, r.protocolPhase)
 	}
 	asyncMocks = storage.withoutLeftOut(asyncMocks)
-	sayLeftOut(a.logger, storage.leftOut)
+	a.sayLeftOut(storage.leftOut)
+	answerLeftOut(ctx, storage.leftOut)
 	if disk != nil {
 		disk.Finalize()
 		statements, err := disk.LoadStatements()
@@ -1446,19 +1452,52 @@ func (s *ClientMockStorage) withoutLeftOut(mocks []*models.Mock) []*models.Mock 
 	return out
 }
 
-// sayLeftOut tells the user, once per stored set, how many Redis mocks the
-// store left out (redisskip.LeftOutNotice), and the first of them in
-// recorded order (mock-2 before mock-10).
-func sayLeftOut(logger *zap.Logger, leftOut map[string]bool) {
-	if len(leftOut) == 0 {
+// sayLeftOut tells the user how many Redis mocks the store left out
+// (redisskip.LeftOutNotice), and the first of them in recorded order (mock-2
+// before mock-10): at Warn for the first stored set that has any, at Debug
+// for every later one, so a run of many test sets that use Redis says it
+// once (leftOutSaid).
+func (a *Agent) sayLeftOut(leftOut map[string]bool) {
+	names := recordedOrder(leftOut)
+	if len(names) == 0 {
 		return
 	}
-	names := make([]string, 0, len(leftOut))
-	for n := range leftOut {
+	fields := []zap.Field{zap.Int("mocks", len(names)), zap.Strings("first", names[:min(len(names), 5)])}
+	if a.leftOutSaid.CompareAndSwap(false, true) {
+		a.logger.Warn(redisskip.LeftOutNotice, append(fields, zap.String("later", "the Redis mocks later test sets hold are left out the same way, said at debug level"))...)
+		return
+	}
+	a.logger.Debug(redisskip.LeftOutNotice, fields...)
+}
+
+// recordedOrder is the names of set, in recorded order (mock-2 before
+// mock-10); nil for an empty set.
+func recordedOrder(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(set))
+	for n := range set {
 		names = append(names, n)
 	}
 	redisskip.SortNames(names)
-	logger.Warn(redisskip.LeftOutNotice, zap.Int("mocks", len(names)), zap.Strings("first", names[:min(len(names), 5)]))
+	return names
+}
+
+// answerLeftOut writes what the store left out of the pool it serves into
+// the store's answer (models.StoreMocksResp), where its context says
+// (models.WithStoreMocksAnswer; the /storemocks route asks): whether this
+// build skips Redis (integrations.SkipsRedis), and the names of the stored
+// mocks it left out, in recorded order. keploy test holds no test to those,
+// by this answer: it never judges for itself which mocks an agent leaves
+// out, since the agent may be another build than it is. The answer is this
+// store's, never another's.
+func answerLeftOut(ctx context.Context, leftOut map[string]bool) {
+	into := models.StoreMocksAnswerOf(ctx)
+	if into == nil {
+		return
+	}
+	into.SkipsRedis, into.LeftOut = integrations.SkipsRedis(), recordedOrder(leftOut)
 }
 
 // noteRefused notes that the store refused mock; before the store is

@@ -44,18 +44,20 @@ func redisRecording() (stored []*models.Mock, mappings map[string][]models.MockE
 // relayed to the real Redis), so under exact serving the set's end does not
 // wait for the boot PING, and test-1 owns its memcached get alone. Every
 // other mock keeps its place. A build with a Redis parser keeps them all.
-func TestARedisMockThisBuildLeavesOutIsNoTestsAndNoWorkerScopes(t *testing.T) {
+func TestARedisMockTheAgentLeavesOutIsNoTestsAndNoWorkerScopes(t *testing.T) {
 	stored, mappings, worker := redisRecording()
-	// A Keploy Enterprise Redis mock this build cannot read (the store
+	// A Keploy Enterprise Redis mock keploy test cannot read (the store
 	// skipped its document) is left out too, and a mapping may name it; a
-	// document of another kind the store skipped is not this build's to
+	// document of another kind the store skipped is not the agent's to
 	// judge.
 	mappings["test-1"] = append(mappings["test-1"], models.MockEntry{Name: "mock-6", Kind: string(models.REDIS)})
 	worker = append(worker, models.MockEntry{Name: "mock-7", Kind: "Foo"})
 	skipped := map[string]models.Kind{"mock-6": models.REDIS, "mock-7": "Foo"}
-	left := leftOutRedis(skipped, stored)
+	// The agent, which skips Redis, says it left the Redis connection's
+	// mocks out; the Enterprise one it was never sent is left out too.
+	left := agentLeftOut(models.StoreMocksResp{SkipsRedis: true, LeftOut: []string{"mock-1", "mock-2", "mock-4"}}, skipped)
 	if want := map[string]bool{"mock-1": true, "mock-2": true, "mock-4": true, "mock-6": true}; !reflect.DeepEqual(left, want) {
-		t.Fatalf("this build leaves out %v, want %v", left, want)
+		t.Fatalf("the agent leaves out %v, want %v", left, want)
 	}
 	kept, keptWorker, unowned := withoutLeftOutRedis(mappings, worker, left)
 	if unowned != 2 {
@@ -83,13 +85,11 @@ func TestARedisMockThisBuildLeavesOutIsNoTestsAndNoWorkerScopes(t *testing.T) {
 		t.Fatalf("under exact serving test-1 owns %v, want [mock-5]", got)
 	}
 
-	integrations.Register(integrations.REDIS, &integrations.Parsers{
-		Initializer: func(*zap.Logger) integrations.Integrations { return nil },
-		Priority:    200,
-	})
-	t.Cleanup(func() { delete(integrations.Registered, integrations.REDIS) })
-	if left := leftOutRedis(skipped, stored); left != nil {
-		t.Fatalf("a build with a Redis parser leaves out %v", left)
+	// An agent that does not skip Redis (Keploy Enterprise's) leaves
+	// nothing out, the Redis documents this keploy could not read
+	// included: keploy test holds its tests to them as recorded.
+	if left := agentLeftOut(models.StoreMocksResp{}, skipped); left != nil {
+		t.Fatalf("with an agent that does not skip Redis keploy test leaves out %v", left)
 	}
 	kept, keptWorker, unowned = withoutLeftOutRedis(mappings, worker, nil)
 	if unowned != 0 {
@@ -101,7 +101,7 @@ func TestARedisMockThisBuildLeavesOutIsNoTestsAndNoWorkerScopes(t *testing.T) {
 }
 
 // Under the switch, a set whose test cases own no recorded call but Redis
-// mocks this build leaves out says that every call to a dependency other
+// mocks the agent leaves out says that every call to a dependency other
 // than Redis misses, and that nothing is wrong when Redis is all they call.
 func TestASetThatOwnsOnlyLeftOutRedisMocksSaysRedisIsRelayed(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
@@ -115,7 +115,7 @@ func TestASetThatOwnsOnlyLeftOutRedisMocksSaysRedisIsRelayed(t *testing.T) {
 }
 
 // Under the switch keploy test plans the set from what the agent holds: a
-// test case whose mapping names only a Redis mock this build leaves out owns
+// test case whose mapping names only a Redis mock the agent leaves out owns
 // nothing, the set says Redis is relayed, and the pool is the memcached mocks
 // alone.
 func TestUnderTheSwitchTheExactPlanHoldsNoLeftOutRedisMock(t *testing.T) {
@@ -147,7 +147,7 @@ func TestUnderTheSwitchTheExactPlanHoldsNoLeftOutRedisMock(t *testing.T) {
 		t.Errorf("the exact plan's pool is %s, want the memcached mocks alone (mock-3,mock-5)", got)
 	}
 	if len(plan.owned["test-1"]) != 0 {
-		t.Errorf("test-1 owns %v, want nothing: its mapping names only a Redis mock this build leaves out", plan.owned["test-1"])
+		t.Errorf("test-1 owns %v, want nothing: its mapping names only a Redis mock the agent leaves out", plan.owned["test-1"])
 	}
 	said := logs.FilterMessageSnippet("no test case of this test set owns a recorded call").All()
 	if len(said) != 1 || !strings.Contains(said[0].Message, "other than Redis") {
@@ -155,12 +155,12 @@ func TestUnderTheSwitchTheExactPlanHoldsNoLeftOutRedisMock(t *testing.T) {
 	}
 }
 
-// Under the switch a Redis mock this build leaves out charges no test, not
+// Under the switch a Redis mock the agent leaves out charges no test, not
 // even one keploy record's full round marked ambiguous, a mark a replay that
 // does not share charges the test that lists it with (annotateConcurrent):
 // the call it recorded is made for real, so what the round could not tell of
 // its recording answers nothing. The set's concurrency, like its mappings, is
-// read without the Redis mocks this build leaves out: its groups and its
+// read without the Redis mocks the agent leaves out: its groups and its
 // other entries stay.
 func TestALeftOutRedisMockMarkedAmbiguousChargesNoTest(t *testing.T) {
 	setSwitch(t, true)
@@ -189,7 +189,7 @@ func TestALeftOutRedisMockMarkedAmbiguousChargesNoTest(t *testing.T) {
 				}
 			}
 		}
-		t.Fatalf("both tests must pass, a Redis mock this build relays charging none: failed %v", failed)
+		t.Fatalf("both tests must pass, a Redis mock the agent relays charging none: failed %v", failed)
 	}
 	plan := h.replayer.exact
 	if plan == nil || plan.share == nil {
@@ -197,18 +197,18 @@ func TestALeftOutRedisMockMarkedAmbiguousChargesNoTest(t *testing.T) {
 	}
 	for _, n := range []string{"mock-4", "mock-1"} {
 		if _, ok := plan.share.conc.entries[n]; ok {
-			t.Errorf("the set's concurrency holds %s, a Redis mock this build leaves out", n)
+			t.Errorf("the set's concurrency holds %s, a Redis mock the agent leaves out", n)
 		}
 	}
 	if _, ok := plan.share.conc.entries["mock-3"]; !ok {
-		t.Errorf("the set's concurrency lost mock-3, the shared memcached get: only what this build leaves out is stripped")
+		t.Errorf("the set's concurrency lost mock-3, the shared memcached get: only what the agent leaves out is stripped")
 	}
 	if _, ok := plan.share.conc.groups["g1"]; !ok {
 		t.Errorf("the set's concurrency lost group g1")
 	}
 }
 
-// The set's concurrency without what this build leaves out: grouped, marked
+// The set's concurrency without what the agent leaves out: grouped, marked
 // and shared entries naming a left-out mock go, the rest and the groups
 // stay; a set left with nothing states no concurrency (nil); with nothing
 // left out it is returned as it is.
@@ -247,8 +247,8 @@ func TestWithoutLeftOutConcurrency(t *testing.T) {
 }
 
 // --update-test-mapping writes each passing test's entries from what the run
-// consumed, and keeps the entries of the Redis mocks this build left out of
-// the replay, as it keeps connection failures': no run of this build
+// consumed, and keeps the entries of the Redis mocks the agent left out of
+// the replay, as it keeps connection failures': no run of a build that skips Redis
 // consumes one, and a keploy with a Redis parser replays them.
 func TestRunTestSetKeepsTheLeftOutRedisMocksMappings(t *testing.T) {
 	h := newPartialRunHarness(t, 2, 0)
@@ -277,7 +277,7 @@ func TestRunTestSetKeepsTheLeftOutRedisMocksMappings(t *testing.T) {
 	}
 }
 
-// --remove-unused-mocks keeps the set's Redis mocks this build left out of
+// --remove-unused-mocks keeps the set's Redis mocks the agent left out of
 // the replay: they went unconsumed because their calls were made for real,
 // so they say nothing about what the application still needs. A Keploy
 // Enterprise Redis mock read from a gob mock file has no config type the
@@ -303,7 +303,7 @@ func TestRunTestSetKeepsTheRedisMocksItLeftOutThroughThePrune(t *testing.T) {
 	}
 	for _, n := range []string{"mock-1", "mock-2", "mock-4", "mock-6"} {
 		if _, ok := h.mocks.kept[n]; !ok {
-			t.Errorf("the prune keeps %v, which lacks %s, a Redis mock this build left out of the replay", stateNames(h.mocks.kept), n)
+			t.Errorf("the prune keeps %v, which lacks %s, a Redis mock the agent left out of the replay", stateNames(h.mocks.kept), n)
 		}
 	}
 	if _, ok := h.mocks.kept["mock-3"]; ok {
@@ -321,7 +321,7 @@ func stateNames(m map[string]models.MockState) []string {
 }
 
 // The agent loads a test's mocks by its mapping as recorded: a test whose
-// mapping names only a Redis mock this build leaves out is loaded by that
+// mapping names only a Redis mock the agent leaves out is loaded by that
 // mapping (the agent leaves the mock out itself), not by its window, which a
 // stripped, empty mapping would have it loaded by.
 func TestTheAgentLoadsATestByItsMappingAsRecorded(t *testing.T) {
@@ -354,4 +354,107 @@ func TestTheAgentLoadsATestByItsMappingAsRecorded(t *testing.T) {
 			}
 		})
 	}
+}
+
+// keploy test takes what the agent leaves out from the agent's answer to the
+// store, never from its own build: a keploy test on macOS or Windows, which
+// links no Redis parser, drives Keploy Enterprise's agent in a Linux
+// container, which records and mocks Redis and leaves nothing out. Its tests
+// then keep the Redis mocks they recorded, under the switch too, where the
+// exact plan has test-1 own its Redis GET: had keploy test stripped it while
+// the agent serves it, test-1 would consume a mock it is not held to, a
+// false red. An agent that skips Redis says so, and its Redis mocks are no
+// test's.
+func TestKeployTestLeavesOutWhatTheAgentSaysItLeftOut(t *testing.T) {
+	if !integrations.SkipsRedis() {
+		t.Fatal("precondition: this test binary must skip Redis, as a keploy test on macOS that links no Redis parser does")
+	}
+	for _, tc := range []struct {
+		name   string
+		answer *models.StoreMocksResp
+		owns   string
+		pool   string
+	}{
+		{"an agent that records and mocks Redis", &models.StoreMocksResp{IsSuccess: true}, "mock-4,mock-5", "mock-1,mock-2,mock-3"},
+		{"an agent that skips Redis", &models.StoreMocksResp{IsSuccess: true, SkipsRedis: true, LeftOut: []string{"mock-1", "mock-2", "mock-4"}}, "mock-5", "mock-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 2, 0)
+			pinWindows(h)
+			h.instr.leftOutAnswer = tc.answer
+			h.mocks.filtered, _, _ = redisRecording()
+			mappingFile(t, h, map[string][]models.MockEntry{"test-1": {
+				{Name: "mock-4", Kind: string(models.GENERIC)}, {Name: "mock-5", Kind: string(models.GENERIC)},
+			}})
+			_ = h.run(t)
+			plan := h.replayer.exact
+			if plan == nil {
+				t.Fatal("precondition: the run made no exact plan")
+			}
+			if got := strings.Join(plan.owned["test-1"], ","); got != tc.owns {
+				t.Errorf("test-1 owns %s, want %s", got, tc.owns)
+			}
+			if got := strings.Join(plan.pool, ","); got != tc.pool {
+				t.Errorf("the exact plan's pool is %s, want %s", got, tc.pool)
+			}
+		})
+	}
+}
+
+// With the switch off, what keploy test keeps of the set's Redis mocks it
+// takes from the agent's answer too. An agent that records Redis (Keploy
+// Enterprise's, in a Linux container under a keploy test on macOS) left
+// nothing out, so a Redis mock no test consumed is unused like any other:
+// --update-test-mapping writes test-1 with what it consumed alone, and
+// --remove-unused-mocks prunes the Redis mocks nothing consumed. An agent
+// that skips Redis keeps them, as TestRunTestSetKeepsTheLeftOutRedisMocks-
+// Mappings and TestRunTestSetKeepsTheRedisMocksItLeftOutThroughThePrune
+// show.
+func TestWithTheSwitchOffKeployTestKeepsOnlyWhatTheAgentLeftOut(t *testing.T) {
+	t.Run("--update-test-mapping", func(t *testing.T) {
+		h := newPartialRunHarness(t, 2, 0)
+		h.instr.leftOutAnswer = &models.StoreMocksResp{IsSuccess: true}
+		h.mocks.filtered, _, _ = redisRecording()
+		h.replayer.hookImpl = prHooks{consumed: []models.MockState{{Name: "mock-5", Kind: models.GENERIC}}}
+		h.replayer.config.Test.UpdateTestMapping = true
+		h.mappings.exists = true
+		h.mappings.onDisk = map[string][]models.MockEntry{
+			"test-1": {{Name: "mock-4", Kind: string(models.GENERIC)}, {Name: "mock-5", Kind: string(models.GENERIC)}},
+			"test-2": {{Name: "mock-5", Kind: string(models.GENERIC)}},
+		}
+		if status := h.run(t); status != models.TestSetStatusPassed {
+			t.Fatalf("precondition: the run should pass, got %q", status)
+		}
+		if h.mappings.last == nil {
+			t.Fatal("precondition: --update-test-mapping wrote no mapping")
+		}
+		for _, tc := range h.mappings.last.TestCases {
+			if tc.ID != "test-1" {
+				continue
+			}
+			var names []string
+			for _, m := range tc.Mocks {
+				names = append(names, m.Name)
+			}
+			if got := strings.Join(names, ","); got != "mock-5" {
+				t.Fatalf("test-1 is written with %q, want what it consumed alone (mock-5): the agent left no Redis mock out", got)
+			}
+		}
+	})
+	t.Run("--remove-unused-mocks", func(t *testing.T) {
+		h := newPartialRunHarness(t, 2, 0)
+		h.instr.leftOutAnswer = &models.StoreMocksResp{IsSuccess: true}
+		h.mocks.filtered, _, _ = redisRecording()
+		h.replayer.config.Test.RemoveUnusedMocks = true
+		_ = h.run(t)
+		if got := h.mocks.pruneCalls(); got != 1 {
+			t.Fatalf("precondition: the run made %d UpdateMocks calls, want 1", got)
+		}
+		for _, n := range []string{"mock-2", "mock-4"} {
+			if _, ok := h.mocks.kept[n]; ok {
+				t.Errorf("the prune keeps %s, a Redis mock nothing consumed, though the agent left none out", n)
+			}
+		}
+	})
 }

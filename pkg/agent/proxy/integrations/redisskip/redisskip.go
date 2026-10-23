@@ -1,12 +1,14 @@
-// Package redisskip is what a keploy without a Redis parser does with Redis:
+// Package redisskip is what a keploy that skips Redis does with Redis:
 // it recognises a Redis client by the first frame it sends, so that the
 // proxy relays the connection to the real Redis instead of recording or
 // mocking it, and it says so once per destination (RedisSkipNotice).
 //
 // Keploy Enterprise records and mocks Redis with a parser of its own,
-// registered as integrations.REDIS. This package registers nothing: the
-// proxy installs its Skip under integrations.REDIS_SKIP only when no REDIS
-// integration is registered (pkg/agent/proxy, InitIntegrations).
+// registered as integrations.REDIS, and claims Redis on every platform
+// (integrations.ClaimRedis), its parser linked there or not. This package
+// registers nothing: the proxy installs its Skip under
+// integrations.REDIS_SKIP only in a build that skips Redis
+// (integrations.SkipsRedis; pkg/agent/proxy, InitIntegrations).
 //
 // # Why the match is strict
 //
@@ -166,20 +168,23 @@ func IsRecordedRedis(m *models.Mock) bool {
 // room to spare.
 const headLen = 64
 
-// LeftOutNotice is what a build without a Redis parser says, once per
-// stored test set with how many, of the set's Redis mocks it leaves out of
-// the replay (LeftOut).
+// LeftOutNotice is what the agent of a build that skips Redis says, at Warn
+// once per process (the first stored test set that has any), with how many,
+// of a set's Redis mocks it leaves out of the replay (LeftOut).
 const LeftOutNotice = "keploy leaves this test set's Redis mocks out of its replay: " +
 	"this keploy relays Redis to the real server instead, so the test set needs its Redis running while it is replayed. " +
 	"To record and mock Redis, use Keploy Enterprise: " + integrations.RedisEnterpriseURL
 
 // Recorded reads a test set's mocks, one at a time, for those this build
-// leaves out of a replay (LeftOut): the mocks of Redis traffic, when it links
-// no Redis parser (nothing registered as integrations.REDIS), so that its
-// proxy relays Redis to the real server. Both ends of a replay read the set
-// so, and they run the same build: the agent leaves those mocks out of the
-// pool it serves, and keploy test holds no test to consuming one, since the
-// call each recorded is made for real.
+// leaves out of a replay (LeftOut): the mocks of Redis traffic, in a build
+// that skips Redis (integrations.SkipsRedis), whose proxy relays Redis to the
+// real server. The agent reads the set so, leaves those mocks out of the pool
+// it serves, and names them in its answer to the store
+// (models.StoreMocksResp): keploy test holds no test to consuming one, the
+// call each recorded being made for real, by what the agent said, never by a
+// reading of its own. The two ends need not be one build: a keploy test on
+// macOS or Windows drives an agent in a Linux container, and an agent image
+// may be of another release than its keploy test.
 //
 // A Generic mock is judged by its connection (Metadata["connID"]), as the
 // proxy judges a connection: by its first frame. A connection whose first
@@ -191,7 +196,7 @@ const LeftOutNotice = "keploy leaves this test set's Redis mocks out of its repl
 // judged alone, and a mock of Keploy Enterprise's Redis parser (models.REDIS)
 // is left out.
 //
-// NewRecorded returns nil in a build that links a Redis parser: a nil
+// NewRecorded returns nil in a build that does not skip Redis: a nil
 // Recorded leaves nothing out.
 type Recorded struct {
 	// first is each connection's first exchange.
@@ -208,10 +213,10 @@ type exchange struct {
 	redis bool
 }
 
-// NewRecorded is a Recorded for this build: nil when it links a Redis
-// parser.
+// NewRecorded is a Recorded for this build: nil when it does not skip Redis
+// (integrations.SkipsRedis).
 func NewRecorded() *Recorded {
-	if _, linked := integrations.Registered[integrations.REDIS]; linked {
+	if !integrations.SkipsRedis() {
 		return nil
 	}
 	return &Recorded{first: map[string]exchange{}, conn: map[string]string{}, alone: map[string]bool{}}

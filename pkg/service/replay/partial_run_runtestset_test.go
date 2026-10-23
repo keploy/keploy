@@ -18,6 +18,8 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/redisskip"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -266,6 +268,11 @@ type prInstr struct {
 	// read of the calls no mock answered during the test that just ran. The
 	// replayer reads them once per test, in test order.
 	mockErrorsFor func() ([]models.UnmatchedCall, error)
+	// leftOutAnswer, when set, is what the stand-in agent's answer to a
+	// store says it leaves out of the pool it serves
+	// (models.StoreMocksResp); unset, it answers as an agent of this build
+	// does (redisskip.LeftOutOf the stored set).
+	leftOutAnswer *models.StoreMocksResp
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -325,11 +332,26 @@ func (f *prInstr) errs() ([]models.UnmatchedCall, error) {
 	}
 	return nil, nil
 }
-func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+func (f *prInstr) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scopeSaid = false
 	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
+	// The stand-in agent's answer, written where the store's context says
+	// (models.WithStoreMocksAnswer), as the agent client writes it:
+	// leftOutAnswer, else what an agent of this build answers.
+	if into := models.StoreMocksAnswerOf(ctx); into != nil {
+		if f.leftOutAnswer != nil {
+			*into = *f.leftOutAnswer
+		} else {
+			var names []string
+			for n := range redisskip.LeftOutOf(filtered, unfiltered) {
+				names = append(names, n)
+			}
+			redisskip.SortNames(names)
+			*into = models.StoreMocksResp{IsSuccess: true, SkipsRedis: integrations.SkipsRedis(), LeftOut: names}
+		}
+	}
 	return nil
 }
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {

@@ -94,14 +94,16 @@ func TestTheStoreLeavesOutTheSetsRedisMocks(t *testing.T) {
 			a := strictAgent(true)
 			a.logger, a.Proxy = zap.New(core), proxy
 			filtered, unfiltered := redisSet()
+			var answer models.StoreMocksResp
+			ctx := models.WithStoreMocksAnswer(context.Background(), &answer)
 			switch path {
 			case "StoreMocks":
-				if err := a.StoreMocks(context.Background(), filtered, unfiltered); err != nil {
+				if err := a.StoreMocks(ctx, filtered, unfiltered); err != nil {
 					t.Fatal(err)
 				}
 			default:
 				header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, unfiltered))
-				if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+				if err := a.StoreMocksStream(ctx, header, dec); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -155,6 +157,11 @@ func TestTheStoreLeavesOutTheSetsRedisMocks(t *testing.T) {
 			if fields := said[0].ContextMap(); fields["mocks"] != int64(3) {
 				t.Errorf("the store said it left out %v mocks, want 3", fields["mocks"])
 			}
+			// The answer to the store names them, in recorded order, for
+			// keploy test to hold no test to them.
+			if !answer.SkipsRedis || strings.Join(answer.LeftOut, ",") != "mock-1,mock-2,mock-4" {
+				t.Errorf("the store's answer is skipsRedis=%v and left out %v, want true and mock-1,mock-2,mock-4", answer.SkipsRedis, answer.LeftOut)
+			}
 			// What the agent says it holds is what it was sent, the mocks
 			// it left out counted in: keploy test's compose guard takes a
 			// count short of that for an agent that lost its mocks.
@@ -175,27 +182,87 @@ func TestTheStoreLeavesOutTheSetsRedisMocks(t *testing.T) {
 	}
 }
 
-// A build that links a Redis parser (Keploy Enterprise's, registered as
-// integrations.REDIS) stores every mock, and says nothing.
-func TestTheStoreKeepsRedisMocksInABuildWithARedisParser(t *testing.T) {
-	integrations.Register(integrations.REDIS, &integrations.Parsers{
-		Initializer: func(*zap.Logger) integrations.Integrations { return nil },
-		Priority:    200,
-	})
-	t.Cleanup(func() { delete(integrations.Registered, integrations.REDIS) })
+// The agent says it leaves Redis mocks out once per process: at Warn for the
+// first stored set that has any, at Debug for every later one, so a run of
+// many test sets that use Redis does not repeat it.
+func TestTheStoreSaysItLeavesRedisMocksOutOncePerProcess(t *testing.T) {
 	RegisterHooks(&captureHook{})
-	core, logs := observer.New(zapcore.InfoLevel)
+	core, logs := observer.New(zapcore.DebugLevel)
 	a := &Agent{logger: zap.New(core)}
-	filtered, unfiltered := redisSet()
-	if err := a.StoreMocks(context.Background(), filtered, unfiltered); err != nil {
-		t.Fatal(err)
+	for i := 0; i < 3; i++ {
+		filtered, unfiltered := redisSet()
+		if err := a.StoreMocks(context.Background(), filtered, unfiltered); err != nil {
+			t.Fatal(err)
+		}
 	}
-	s := loadStorage(t, a)
-	if len(s.filtered) != 3 || len(s.unfiltered) != 2 {
-		t.Fatalf("stored %s and %s, want every mock", names(s.filtered), names(s.unfiltered))
+	said := logs.FilterMessage(redisskip.LeftOutNotice).All()
+	var warns, debugs int
+	for _, e := range said {
+		switch e.Level {
+		case zapcore.WarnLevel:
+			warns++
+		case zapcore.DebugLevel:
+			debugs++
+		}
 	}
-	if logs.FilterMessage(redisskip.LeftOutNotice).Len() != 0 {
-		t.Fatalf("the store said it left Redis mocks out: %v", logs.All())
+	if warns != 1 || debugs != 2 {
+		t.Fatalf("three stored sets said it %d times at warn and %d at debug, want once at warn and twice at debug", warns, debugs)
+	}
+}
+
+// A build that links a Redis parser (Keploy Enterprise's, registered as
+// integrations.REDIS) stores every mock, and says nothing; so does one that
+// claims Redis without its parser (Keploy Enterprise on macOS and Windows,
+// integrations.ClaimRedis). Its answer to the store says it skips no Redis
+// and leaves nothing out.
+func TestTheStoreKeepsRedisMocksInABuildThatDoesNotSkipRedis(t *testing.T) {
+	for _, build := range []string{"a Redis parser registered", "Redis claimed, no parser linked"} {
+		t.Run(build, func(t *testing.T) {
+			if build == "a Redis parser registered" {
+				integrations.Register(integrations.REDIS, &integrations.Parsers{
+					Initializer: func(*zap.Logger) integrations.Integrations { return nil },
+					Priority:    200,
+				})
+				t.Cleanup(func() { delete(integrations.Registered, integrations.REDIS) })
+			} else {
+				t.Cleanup(integrations.ClaimRedis())
+			}
+			for _, path := range []string{"StoreMocks", "StoreMocksStream"} {
+				RegisterHooks(&captureHook{})
+				core, logs := observer.New(zapcore.InfoLevel)
+				a := strictAgent(true)
+				a.logger, a.Proxy = zap.New(core), &asyncProxy{}
+				filtered, unfiltered := redisSet()
+				answer := models.StoreMocksResp{SkipsRedis: true, LeftOut: []string{"stale"}}
+				ctx := models.WithStoreMocksAnswer(context.Background(), &answer)
+				if path == "StoreMocks" {
+					if err := a.StoreMocks(ctx, filtered, unfiltered); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, unfiltered))
+					if err := a.StoreMocksStream(ctx, header, dec); err != nil {
+						t.Fatal(err)
+					}
+				}
+				served, _, err := a.mocksForParams(context.Background(), models.MockFilterParams{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := names(served); got != "mock-2,mock-3,mock-4" {
+					t.Errorf("%s: a test is staged %s, want every per-test mock (mock-2,mock-3,mock-4)", path, got)
+				}
+				if s := loadStorage(t, a); len(s.leftOut) != 0 || len(s.unfiltered) != 2 {
+					t.Errorf("%s: left out %v and stored session mocks %s, want nothing left out and both kept", path, s.leftOut, names(s.unfiltered))
+				}
+				if logs.FilterMessage(redisskip.LeftOutNotice).Len() != 0 {
+					t.Errorf("%s: the store said it left Redis mocks out: %v", path, logs.All())
+				}
+				if answer.SkipsRedis || answer.LeftOut != nil {
+					t.Errorf("%s: the store's answer is skipsRedis=%v and left out %v, want false and nothing", path, answer.SkipsRedis, answer.LeftOut)
+				}
+			}
+		})
 	}
 }
 

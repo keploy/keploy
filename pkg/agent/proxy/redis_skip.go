@@ -12,8 +12,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// Redis in a keploy without a Redis parser (this build, unless Keploy
-// Enterprise links its parser, registered as integrations.REDIS): a
+// Redis in a keploy that skips Redis (integrations.SkipsRedis: this build,
+// unless Keploy Enterprise links its parser or claims Redis): a
 // connection whose client opens with a Redis command (redisskip.Match) is
 // relayed to the real Redis, in record and in test mode, and nothing of it is
 // recorded or mocked. Redis mocks a test set holds (an earlier keploy's,
@@ -57,14 +57,17 @@ func (p *Proxy) said() *redisSkipSaid {
 // parser.
 const redisSkipPriority = math.MinInt
 
-// installRedisSkip installs the Redis skip among p's parsers unless an
-// integration is registered as integrations.REDIS (Keploy Enterprise's Redis
-// parser). It is called from InitIntegrations, once every package's init has
-// run, so whether the skip is installed depends only on what the build links,
-// never on the order in which packages registered their parsers. The skip is
-// p's own: it is not put in integrations.Registered.
+// installRedisSkip installs the Redis skip among p's parsers in a build that
+// skips Redis (integrations.SkipsRedis): one that links no Redis parser
+// (nothing registered as integrations.REDIS) and that no package claimed
+// Redis for (integrations.ClaimRedis, which Keploy Enterprise does on every
+// platform, its Redis parser linked there or not). It is called from
+// InitIntegrations, once every package's init has run, so whether the skip
+// is installed depends only on what the build links, never on the order in
+// which packages registered their parsers or claimed Redis. The skip is p's
+// own: it is not put in integrations.Registered.
 func (p *Proxy) installRedisSkip() {
-	if _, ok := integrations.Registered[integrations.REDIS]; ok {
+	if !integrations.SkipsRedis() {
 		return
 	}
 	p.redisSkipOn.Store(true)

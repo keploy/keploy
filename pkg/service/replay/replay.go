@@ -1973,15 +1973,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// only ones an agent that says so reads consumed entries for (see
 	// consumedForAgent). nil until StoreMocks: then everything is sent.
 	var perTestRegion map[string]struct{}
-	// redisLeftOut names the set's Redis mocks this build leaves out of the
-	// replay (redis_leftout.go), read as the set's mocks are loaded;
+	// redisLeftOut names the set's Redis mocks the agent leaves out of the
+	// replay, by its answer to the store (agentLeftOut, redis_leftout.go);
 	// redisUnowned counts the per-test mapping entries that named one.
 	var redisLeftOut map[string]bool
 	var redisUnowned int
 	// agentTestMockMappings is each test's mapping as recorded, the Redis
-	// mocks this build leaves out included: what the agent is sent to load a
+	// mocks the agent leaves out included: what the agent is sent to load a
 	// test's mocks by. The agent holds none of those (it left them out, or
-	// never had a Keploy Enterprise one this build cannot decode), and a test
+	// never had a Keploy Enterprise one keploy test cannot decode), and a test
 	// whose mapping names only them is still loaded by its mapping (no
 	// per-test mock), not by its window, as a stripped, empty one would be.
 	var agentTestMockMappings map[string][]models.MockEntry
@@ -2172,12 +2172,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if fromWindows {
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
-		// The set's Redis mocks a build without a Redis parser leaves out of
-		// the replay are no test's and no worker scope's (redis_leftout.go).
-		redisLeftOut = leftOutRedis(skipped.kinds, filtered, unfiltered)
-		agentTestMockMappings = expectedTestMockMappings
-		expectedTestMockMappings, workerScope, redisUnowned = withoutLeftOutRedis(expectedTestMockMappings, workerScope, redisLeftOut)
-		conc = withoutLeftOutConcurrency(conc, redisLeftOut)
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
@@ -2207,10 +2201,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			filtered, unfiltered = rebalanceReusableMocks(filtered, unfiltered)
 		}
 
-		if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
+		answer, err := r.storeMocks(ctx, filtered, unfiltered)
+		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return nil, nil, err
 		}
+		// The set's mocks the agent leaves out of the replay (its Redis
+		// mocks, when it skips Redis), as its answer to this store says,
+		// are no test's and no worker scope's (redis_leftout.go).
+		redisLeftOut = agentLeftOut(answer, skipped.kinds)
+		agentTestMockMappings = expectedTestMockMappings
+		expectedTestMockMappings, workerScope, redisUnowned = withoutLeftOutRedis(expectedTestMockMappings, workerScope, redisLeftOut)
+		conc = withoutLeftOutConcurrency(conc, redisLeftOut)
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
 			// The plan is of what the agent serves: none of the mocks it
@@ -5953,7 +5955,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// retain everything (see startupMockCutoff).
 		startupCutoffTime := startupMockCutoff(testCases, pruneBefore)
 
-		// Nor is a Redis mock this build left out of the replay unused: its
+		// Nor is a Redis mock the agent left out of the replay unused: its
 		// call was made for real (redis_leftout.go).
 		keepLeftOutRedis(passingTotalConsumedMocks, redisLeftOut)
 
@@ -6172,8 +6174,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if shouldWriteMappings {
-		// Only a set that holds connection failures, or Redis mocks this
-		// build leaves out, can have mapping entries for them to keep: every
+		// Only a set that holds connection failures, or Redis mocks the
+		// agent leaves out, can have mapping entries for them to keep: every
 		// other set is written as before, with no second read of its mapping
 		// file.
 		if holdsConnFailures(mockKindByName) || len(redisLeftOut) > 0 {

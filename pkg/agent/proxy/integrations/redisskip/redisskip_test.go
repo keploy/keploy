@@ -269,7 +269,7 @@ func TestNoticeOncePerDestination(t *testing.T) {
 // The notice's wording and URL are a contract: Enterprise's and the docs'
 // builders quote them.
 func TestNoticeText(t *testing.T) {
-	const want = "Redis calls are skipped: this keploy records and mocks Redis only in Keploy Enterprise, so calls to this Redis pass through to the real server and are neither recorded nor mocked. To record and mock Redis, use Keploy Enterprise: https://keploy.io/docs/keploy-cloud/cloud-installation/"
+	const want = "Redis calls are skipped: Keploy records and mocks Redis (and Redis-compatible servers) only in Keploy Enterprise, so calls to this Redis pass through to the real server and are neither recorded nor mocked. To record and mock Redis, use Keploy Enterprise: https://keploy.io/docs/keploy-cloud/cloud-installation/"
 	if integrations.RedisSkipNotice != want {
 		t.Fatalf("the notice reads %q, want %q", integrations.RedisSkipNotice, want)
 	}

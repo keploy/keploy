@@ -191,6 +191,49 @@ func TestTheRedisSkipIsInstalledOnlyWithoutARedisParser(t *testing.T) {
 	}
 }
 
+// A build that claims Redis without linking a Redis parser (Keploy
+// Enterprise on macOS and Windows, whose agent runs this proxy natively and
+// records Redis through the Generic parser) installs no Redis skip, says no
+// notice, and records a Redis connection as it did before the skip existed:
+// through the Generic parser. The claim, like a parser's registration, is
+// read when the parsers are set up, so a claim made after the proxy was made
+// (an init that runs later) still keeps the skip out.
+func TestABuildThatClaimsRedisInstallsNoRedisSkip(t *testing.T) {
+	if _, ok := integrations.Registered[integrations.REDIS]; ok {
+		t.Fatal("this build registers a Redis parser; the test assumes it does not")
+	}
+	core, logs := observer.New(zapcore.InfoLevel)
+	up := newFakeRedis(t, nil)
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	p := freshSaid(New(zap.New(core), fakeDestInfo{dest: ipv4Dest(t, up.addr)}, cfg))
+	t.Cleanup(integrations.ClaimRedis())
+	if err := p.InitIntegrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.Integrations[integrations.REDIS_SKIP]; ok {
+		t.Fatal("a build that claims Redis installed the Redis skip")
+	}
+	for _, pp := range p.integrationsPriority {
+		if pp.ParserType == integrations.REDIS_SKIP {
+			t.Fatal("a build that claims Redis has the Redis skip in its parsers' order")
+		}
+	}
+	mocks := make(chan *models.Mock, 64)
+	if err := p.Record(context.Background(), mocks, models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	serveConn(t, p, false, goRedisHello)
+	m := awaitEvent(t, mocks, "the Redis connection's Generic mock")
+	if m.Kind != models.GENERIC || firstRequest(t, m) != goRedisHello {
+		t.Fatalf("the first mock recorded is a %s mock of %q, want the Redis connection's Generic one", m.Kind, firstRequest(t, m))
+	}
+	if got := redisNotices(logs); len(got) != 0 {
+		t.Fatalf("a build that claims Redis said the Redis skip notice: %v", got)
+	}
+}
+
 // In a record, a connection whose client opens with a Redis command is
 // relayed to the real Redis byte for byte and nothing of it is recorded: no
 // mock reaches the recording, while a non-Redis connection to the same

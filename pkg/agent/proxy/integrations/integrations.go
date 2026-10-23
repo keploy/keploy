@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -92,32 +93,69 @@ const (
 
 	// REDIS is the name Keploy Enterprise's Redis parser registers under.
 	// This build has no Redis parser: the name is declared here so that the
-	// proxy can tell whether one is linked (see REDIS_SKIP), and so that
+	// proxy can tell whether one is linked (SkipsRedis), and so that
 	// Enterprise pins its parser's name to this one rather than to a
 	// string of its own.
 	REDIS IntegrationType = "redis"
 	// REDIS_SKIP is the proxy's own stand-in for a Redis parser, installed
-	// only when no integration is registered as REDIS once every package's
-	// init has run (the proxy's InitIntegrations). It records and mocks
-	// nothing: a connection whose client opens with a Redis command is
-	// relayed to the real Redis, in record and in test mode, and the
+	// only in a build that skips Redis (SkipsRedis), read once every
+	// package's init has run (the proxy's InitIntegrations). It records and
+	// mocks nothing: a connection whose client opens with a Redis command
+	// is relayed to the real Redis, in record and in test mode, and the
 	// RedisSkipNotice is logged once per destination. It is never put in
-	// Registered: the proxy adds it to its own parsers, so a build that
-	// links a Redis parser (Keploy Enterprise, whose agent runs this proxy)
-	// never has it, whatever order its packages' inits ran in.
+	// Registered: the proxy adds it to its own parsers, so Keploy
+	// Enterprise, whose agent runs this proxy, never has it, on any
+	// platform, whatever order its packages' inits ran in.
 	REDIS_SKIP IntegrationType = "redis_enterprise_only"
 )
 
 // RedisEnterpriseURL is where the RedisSkipNotice sends a user who wants
-// Redis recorded and mocked: Keploy Enterprise's installation page.
-const RedisEnterpriseURL = "https://keploy.io/docs/keploy-cloud/cloud-installation/"
+// Redis recorded and mocked: Keploy Enterprise's installation page
+// (models.RedisEnterpriseURL, which a read of a test set says too).
+const RedisEnterpriseURL = models.RedisEnterpriseURL
 
-// RedisSkipNotice is the warning a build without a Redis parser logs, once
-// per Redis destination per process, when the application's calls to that
-// Redis are passed through instead of recorded or mocked.
-const RedisSkipNotice = "Redis calls are skipped: this keploy records and mocks Redis only in Keploy Enterprise, " +
+// RedisSkipNotice is the warning a build that skips Redis (SkipsRedis) logs,
+// once per Redis destination per process, when the application's calls to
+// that Redis are passed through instead of recorded or mocked. A server that
+// speaks Redis's protocol (Valkey, KeyDB, Dragonfly, Tile38, ...) is skipped
+// the same way, so it is named too.
+const RedisSkipNotice = "Redis calls are skipped: Keploy records and mocks Redis (and Redis-compatible servers) only in Keploy Enterprise, " +
 	"so calls to this Redis pass through to the real server and are neither recorded nor mocked. " +
 	"To record and mock Redis, use Keploy Enterprise: " + RedisEnterpriseURL
+
+// redisClaimed says a package claimed Redis (ClaimRedis).
+var redisClaimed atomic.Bool
+
+// ClaimRedis says that this build records Redis its own way, so it is not
+// the open-source keploy, which skips Redis (SkipsRedis): Keploy Enterprise,
+// which records and mocks Redis with a parser of its own where it links one
+// (registered as REDIS) and, where it does not (natively on macOS and
+// Windows), records Redis as it records every protocol it has no parser
+// for, through the Generic parser. A build that claims Redis never installs
+// the REDIS_SKIP, and its agent leaves no Redis mock out of a replay, on any
+// platform, whether or not its Redis parser is linked there.
+//
+// Call it from an init of a package that every binary of the build links,
+// on every platform: whether a build skips Redis is read only once every
+// package's init has run, so the order of the inits does not matter. It
+// returns what puts the claim back as it was before the call, for a test; a
+// build never calls it.
+func ClaimRedis() (release func()) {
+	prev := redisClaimed.Swap(true)
+	return func() { redisClaimed.Store(prev) }
+}
+
+// SkipsRedis reports whether this build relays Redis to the real server
+// instead of recording or mocking it (REDIS_SKIP): the open-source keploy,
+// which links no Redis parser (nothing is registered as REDIS) and does not
+// claim Redis (ClaimRedis). Read it once every package's init has run.
+func SkipsRedis() bool {
+	if redisClaimed.Load() {
+		return false
+	}
+	_, linked := Registered[REDIS]
+	return !linked
+}
 
 type Parsers struct {
 	Initializer Initializer
