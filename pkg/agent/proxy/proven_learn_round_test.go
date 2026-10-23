@@ -185,7 +185,7 @@ func TestALearnStepCountsAVoidedAheadAnswerAsSpent(t *testing.T) {
 }
 
 // A claim the learn step decided on one read of the round lands only in that
-// round. Under S12's background rules the pool is learned onto between tests
+// round. Under the background rules the pool is learned onto between tests
 // only: a call read at the start-up, paired with the pool's mock-pool, whose
 // test opens before its claim lands, is looked at again in the test, where
 // the pool answers exactly or not at all. Claimed against the store as it
@@ -229,7 +229,7 @@ func TestALearnStepsClaimLandsOnlyInTheRoundItWasReadIn(t *testing.T) {
 	}
 }
 
-// s12Orders stages, under exact serving with S12's background rules, the
+// s12Orders stages, under exact serving with the background rules, the
 // pool's recording of POST /orders (mock-pool, {"item":"apple"}), recorded
 // outside every test, and each test's own recording of GET /status, inside
 // its recorded window: mock-own1 test-1's, mock-own2 test-2's. The pool view
@@ -256,7 +256,7 @@ func s12Orders(t *testing.T) (*Proxy, *MockManager) {
 	return p, mm
 }
 
-// While the store shows a test's view, S12's background answers a call
+// While the store shows a test's view, the background answers a call
 // exactly or not at all, and no drift is learned onto it, whether the learn
 // tracker has that test open or not: the pool is learned onto between tests
 // only. Two schedules the replay makes put the tracker out of step with the
@@ -265,7 +265,7 @@ func s12Orders(t *testing.T) (*Proxy, *MockManager) {
 // ended on the tracker. Read as between tests there, a drifted call of the
 // test was answered from the pool, its item learned onto mock-pool as
 // noise: a false green. Between tests the same call is learned onto the
-// pool, as S12's rules have it.
+// pool, as the background rules have it.
 func TestALearnStepLearnsNothingOntoThePoolWhileTheStoreShowsATest(t *testing.T) {
 	learnPool := models.OutgoingOptions{Learn: true, LearnPool: true}
 	for _, tc := range []struct {

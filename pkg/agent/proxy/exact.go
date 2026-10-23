@@ -14,7 +14,7 @@ import (
 )
 
 // Exact serving: what a parser may answer a request with, under the proven
-// switch (design v14 §5.2, S12). It is the one path that decides what a
+// switch (design v14 §5.2). It is the one path that decides what a
 // parser sees there, whatever tier a mock was staged in and whatever lifetime
 // its kind derives; the agent turns it on for a replay and moves it at every
 // begin and end of a test.
@@ -105,10 +105,10 @@ type exactView struct {
 	cand []bool
 	// claims is the manager's claims on the shared recordings.
 	claims *exactClaims
-	// bg is the set's background under S12's rules (ServeExactBackground)
+	// bg is the set's background under the background rules (ServeExactBackground)
 	// when the view was installed; nil for today's rules.
 	bg *backgroundState
-	// workerOrder is, under S12's rules, each shown worker-scope mock's
+	// workerOrder is, under the background rules, each shown worker-scope mock's
 	// position in the order ServeExactWorker gave (its place's order, then
 	// delivering before idle, then recorded order).
 	workerOrder map[string]int
@@ -175,7 +175,7 @@ type exactState struct {
 	// each view installed after it shows, with their order in it: one value,
 	// so a view never pairs one call's set with another's order.
 	worker atomic.Pointer[reachedWorker]
-	// bg is the staged set's background under S12's rules
+	// bg is the staged set's background under the background rules
 	// (ServeExactBackground), nil for today's (exact_background.go).
 	bg atomic.Pointer[backgroundState]
 	// poolCursor is the key of the pool view installed last: the cursors
@@ -471,7 +471,7 @@ func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
 func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 
 // ExactServing reports whether the manager serves each test exactly its own
-// mocks (KEPLOY_PROVEN, S12): every read shows one view, which changes as a
+// mocks (KEPLOY_PROVEN): every read shows one view, which changes as a
 // test begins and ends, and a consume the view refuses returns false. A
 // parser that keeps an index across reads (Postgres v3's tier engines) reads
 // it at each dispatch: exact serving can begin after a connection opened.
@@ -490,7 +490,7 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // a worker-scope mock (models.Mapping.Worker) whose place the run has not
 // reached. With none open, it is any test's. Such a miss is the call a
 // recording elsewhere holds, made where it was not recorded, which record's
-// judging reads to bake the recording into the worker scope (S12, a2). For a
+// judging reads to bake the recording into the worker scope (a2). For a
 // miss's diagnosis only: the mock is never handed out, nor served.
 func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
 	return m.findNotOwned(kind, nil, match)
@@ -1033,7 +1033,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if w != nil {
 		v.worker = w.set
 	}
-	// Under S12's background rules the view orders its worker scope as the
+	// Under the background rules the view orders its worker scope as the
 	// agent placed it, and shows the pool in a test (exact_background.go).
 	if bg := m.exact.bg.Load(); bg != nil {
 		v.bg = bg
@@ -1229,7 +1229,7 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 // shows reports whether the view shows mk among the staged mocks: a
 // protocol-phase mock always; a worker-scope mock the run has reached the
 // place of, whether a test is open or not; any other data-plane mock only
-// between tests, and only in the pool slice served, or, under S12's
+// between tests, and only in the pool slice served, or, under the
 // background rules, in a test too when it is the pool's. The open test's own
 // mocks are read from the view itself (unanswered), never from the staged
 // trees.
@@ -1250,7 +1250,7 @@ func (v *exactView) shows(mk *models.Mock) bool {
 		return true
 	}
 	if v.test != "" {
-		// Under S12's background rules the pool answers in a test too,
+		// Under the background rules the pool answers in a test too,
 		// after the test's own and the worker scope (keep); an async
 		// lane's recording keeps today's rules.
 		return v.bg.inPool(mk.Name) && !mk.IsAsync()
@@ -1260,7 +1260,7 @@ func (v *exactView) shows(mk *models.Mock) bool {
 }
 
 // inBackgroundPool reports whether mk, consumed in an open test, is one of
-// the pool's data-plane recordings S12's background rules show there.
+// the pool's data-plane recordings the background rules show there.
 func (v *exactView) inBackgroundPool(mk *models.Mock) bool {
 	return v.test != "" && v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
 }
@@ -1317,7 +1317,7 @@ func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 	return out
 }
 
-// backgroundOrder appends to out what the view shows of in, in S12's
+// backgroundOrder appends to out what the view shows of in, in the
 // background order: what is not background first (the
 // protocol-phase mocks), in their order; then the worker scope, the earlier
 // place first, delivering before idle, then recorded order (workerOrder);
@@ -1554,7 +1554,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// A data-plane recording consumed through a delete door with no test
 	// open, and one of the worker scope's whether a test is open or not, is
 	// spent for the staging: it answers at most one request in the set. So
-	// is one of the pool's a test consumes under S12's background rules:
+	// is one of the pool's a test consumes under the background rules:
 	// the background is the set's, whoever's call it answers.
 	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
 		// The view's closed check and the spend are one step: no begin or
@@ -1729,7 +1729,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 // served pool slice's own, so two keys' calls never share a sequence. In a
 // test no cursor is used (ok false): the test's mocks answer once each, in
 // recorded order, and under today's rules the pool serves no data-plane mock
-// there. Under S12's background rules a background recording that answers a
+// there. Under the background rules a background recording that answers a
 // call in a test is picked with the background's cursor (BackgroundCursor),
 // the one this gives the calls between tests.
 func (m *MockManager) exactCursorKey(key string) (string, bool) {

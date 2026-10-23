@@ -16,7 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
-// roundStore is a set staged under exact serving with S12's background
+// roundStore is a set staged under exact serving with the background
 // rules, as record's full round serves it: T1's own (own, own2), T2's
 // (next, in flight when it began, and next2), T3's (other: a pairing
 // candidate), the pool (pool) and a worker-scope recording (w-boot), and the

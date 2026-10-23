@@ -355,7 +355,7 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 
 // MoveToWorker bakes recordings into the set's worker scope
 // (models.Mapping.Worker), as record's judging does with a call it saw made
-// outside the window that recorded it (design v14 S12, a2): each of moves
+// outside the window that recorded it (design v14, a2): each of moves
 // names a mock and the place it is to answer from (MockEntry.Place). A mock a
 // test case lists leaves that list and joins the scope at that place, with
 // its entry's kind and recorded times; one the scope lists already takes that
@@ -469,7 +469,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 
 // MarkRecordedWith adds feature to what the set's mappings.yaml says keploy
 // record recorded it with (models.Mapping.RecordedWith), keeping every other
-// section as it is: keploy record marks a set an S12 record wrote
+// section as it is: keploy record marks a set a background-routing record wrote
 // (models.RecordedWithS12Routing). A mark the file carries already writes
 // nothing. A set with no mapping file marks none, and says so: a recording
 // that wrote none has nothing to serve by the mark.

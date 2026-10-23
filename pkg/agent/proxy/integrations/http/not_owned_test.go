@@ -59,7 +59,7 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 
 // Under the proven switch, the HTTP parser's miss on a call that is another
 // test's recording reports it as that recording (NotOwned), which record's
-// judging reads to bake it into the worker scope (S12, a2). With the switch
+// judging reads to bake it into the worker scope (a2). With the switch
 // off nothing is named so.
 func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:50001", "localhost:50001"

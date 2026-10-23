@@ -25,7 +25,7 @@ type SetEndHook interface {
 // UnclaimedCalls); none when there were none. Each carries what its parser
 // found of it, as a test's own misses do in its result
 // (UnmatchedCall.NotOwned, ClosestMock): what record's judging reads to bake a
-// recording made elsewhere into the worker scope (design v14 S12, a2). It is
+// recording made elsewhere into the worker scope (design v14, a2). It is
 // a notification: it changes nothing the replayer does.
 type SetCallsHook interface {
 	SetCalls(testSetID string, calls []models.UnmatchedCall)

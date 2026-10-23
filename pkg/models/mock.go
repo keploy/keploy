@@ -291,8 +291,8 @@ type TestModeInfo struct {
 	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
 
-	// ServedIn is, on a copy exact serving serves an open test (KEPLOY_PROVEN,
-	// S12), the number of that test's view; zero on every other mock. A
+	// ServedIn is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
 	// consume of a copy an earlier view served (a previous attempt of the
 	// same test) is refused. Runtime-only, like the fields above.
 	ServedIn uint64 `json:"-" bson:"-"`
@@ -304,8 +304,8 @@ type TestModeInfo struct {
 	// mock names. Runtime-only, like the fields above.
 	StagedSet uint64 `json:"-" bson:"-"`
 
-	// Concurrent is, on a copy exact serving serves an open test (KEPLOY_PROVEN,
-	// S12), set for a recording the test shares with the tests whose
+	// Concurrent is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
 	// requests were open beside its own at record time
 	// (ExactServing.Concurrent): a candidate, answered at most once in the
 	// staging by whichever of them makes its call, never required of the

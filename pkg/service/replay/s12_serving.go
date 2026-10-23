@@ -2,10 +2,10 @@ package replay
 
 import "sync"
 
-// WHO MAY TURN ON S12'S LOOSER SERVING (the compatibility
+// WHO MAY TURN ON THE LOOSER BACKGROUND SERVING (the compatibility
 // audit's B3 and C2).
 //
-// S12's serving is looser than today's for a set's background: the set's end
+// background serving is looser than today's for a set's background: the set's end
 // no longer requires its worker scope answered, the pool answers inside
 // tests, and a background write may be answered by its kind. Each is safe only
 // because record's judging (keploy enterprise's auto-replay: the bake, the
@@ -16,14 +16,14 @@ import "sync"
 //     registers it, so keploy alone, or a keploy relinked without the
 //     judging, serves every set by today's rules and ships nothing looser;
 //   - the proven switch is on;
-//   - the set's mappings.yaml carries the mark of an S12 record
+//   - the set's mappings.yaml carries the mark of a background-routing record
 //     (models.RecordedWithS12Routing in models.Mapping.RecordedWith): a set
 //     recorded before, or by a build without the judging, keeps today's rules
 //     whatever replays it, so an upgrade relaxes no old set.
 
-// RegisterS12Serving declares that this build judges what S12's looser
-// serving answers, and when: enabled is asked as each test set is staged
-// (and by keploy record, before it marks and routes a set), and S12's
+// RegisterS12Serving declares that this build judges what the looser
+// background serving answers, and when: enabled is asked as each test set is staged
+// (and by keploy record, before it marks and routes a set), and background
 // serving runs only while it returns true, under the proven switch, for a set
 // marked models.RecordedWithS12Routing. keploy enterprise registers it, from
 // an init function or before its first record or replay. One registration: a
@@ -50,7 +50,7 @@ func RegisterS12Serving(enabled func() bool) (unregister func()) {
 }
 
 // S12Serving reports whether the registered func (RegisterS12Serving) enables
-// S12's looser serving now: false when none is registered. It says nothing of
+// the looser background serving now: false when none is registered. It says nothing of
 // the switch or of a set's mark, which the caller also needs.
 func S12Serving() bool {
 	s12Serving.mu.RLock()

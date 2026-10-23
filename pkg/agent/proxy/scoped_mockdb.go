@@ -290,7 +290,7 @@ func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
 func (s *scopedMockDb) ExactServing() bool { return integrations.ExactServing(s.MockMemDb) }
 
 // Background, SpentBackground, PairingCandidates and ClaimPairing forward the
-// store's S12 background serving (integrations.ExactBackground, Pairing): a
+// store's background serving (integrations.ExactBackground, Pairing): a
 // view made before exact serving began reads the bare manager's, nil and
 // false from a store that has none.
 func (s *scopedMockDb) Background(kind models.Kind) []*models.Mock {
@@ -651,7 +651,7 @@ func (s *scopedMockDb) resolveCursorScope() {
 	}
 }
 
-// BackgroundCursor forwards the store's background cursor under S12's rules
+// BackgroundCursor forwards the store's background cursor under the background rules
 // (integrations.BackgroundCursor), its keys in this view's scope as every
 // other cursor key of it is (cursorKey): false from a store that has none.
 func (s *scopedMockDb) BackgroundCursor() (integrations.MockCursor, bool) {

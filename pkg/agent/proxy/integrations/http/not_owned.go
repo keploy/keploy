@@ -17,7 +17,7 @@ import (
 // test's, any test's with no test open, or a worker-scope one whose place the
 // run has not reached (integrations.StagedFinder). The call was made where it
 // was not recorded: record's judging reads it to bake the recording into the
-// worker scope (design v14 S12, a2). nil when there is none, or the store
+// worker scope (design v14, a2). nil when there is none, or the store
 // keeps no staged mocks to look in. ctx carries the request's destination as
 // it came (liveDestination).
 func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) *models.Mock {

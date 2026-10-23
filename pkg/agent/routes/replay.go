@@ -310,7 +310,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	}
 	// A set's staging is answered with the background rules it is served by
 	// (models.BackgroundRulesHeader): the replay relaxes today's checks for
-	// it only when the agent says it serves it by S12's.
+	// it only when the agent says it serves it by the background rules.
 	if ex := updateParamsReq.FilterParams.Exact; ex != nil && ex.Stage {
 		if s, ok := a.svc.(interface{ ServedBackground() string }); ok {
 			if rules := s.ServedBackground(); rules != "" {

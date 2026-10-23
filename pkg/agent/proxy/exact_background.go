@@ -10,10 +10,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// S12'S BACKGROUND RULES IN EXACT SERVING (replay.RegisterS12Serving).
+// THE BACKGROUND RULES IN EXACT SERVING (replay.RegisterS12Serving).
 //
-// A set staged under S12's background rules (ServeExactBackground, which the
-// agent calls only for a set an S12 record marked, models.RecordedWithS12Routing,
+// A set staged under the background rules (ServeExactBackground, which the
+// agent calls only for a set a background-routing record marked, models.RecordedWithS12Routing,
 // replayed by a build whose judging enables them) has a background: its worker scope and its pool,
 // the recordings no test owns. Exact serving then differs from today's in
 // four ways, and only for such a set:
@@ -35,7 +35,7 @@ import (
 //
 // Any other set is served exactly as before: none of this applies.
 
-// backgroundState is a staged set's background under S12's rules: its pool
+// backgroundState is a staged set's background under the background rules: its pool
 // and its whole worker scope, by name.
 type backgroundState struct {
 	pool   map[string]struct{}
@@ -64,7 +64,7 @@ func (b *backgroundState) inPool(name string) bool {
 }
 
 // ServeExactBackground sets the rules the staged set's background is served
-// by: S12's when rules is models.RecordedWithS12Routing (with the set's pool
+// by: the background rules when rules is models.RecordedWithS12Routing (with the set's pool
 // and its whole worker scope by name), today's for any other rules (pool and
 // worker unread). It
 // installs no view itself: the next ServeExactTest or ServeExactPool shows it.
@@ -88,7 +88,7 @@ func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) 
 	}
 	m.exact.bg.Store(b)
 	if m.logger != nil {
-		m.logger.Debug("exact serving: the set's background is served by S12's rules",
+		m.logger.Debug("exact serving: the set's background is served by the background rules",
 			zap.Int("pool", len(b.pool)), zap.Int("worker", len(b.worker)))
 	}
 }
@@ -139,13 +139,13 @@ func (m *MockManager) stagedOfKind(kind models.Kind) []*models.Mock {
 }
 
 // isBackgroundRecording reports whether mk is a data-plane recording of v's
-// background (the worker scope or the pool, S12's rules), which an async lane
+// background (the worker scope or the pool, the background rules), which an async lane
 // does not serve: protocol-phase mocks and async lanes keep today's reuse.
 func (v *exactView) isBackgroundRecording(mk *models.Mock) bool {
 	return mk != nil && v.bg.has(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
 }
 
-// Background is, under S12's background rules, kind's background recordings
+// Background is, under the background rules, kind's background recordings
 // the view shows unused (integrations.ExactBackground), in the view's order:
 // the worker scope it shows (the earlier place first, delivering before idle,
 // then recorded order), then the pool, in recorded order. nil for a set
@@ -164,7 +164,7 @@ func (m *MockManager) Background(kind models.Kind) []*models.Mock {
 	return shown
 }
 
-// SpentBackground is, under S12's background rules, kind's background
+// SpentBackground is, under the background rules, kind's background
 // recordings this staging consumed (integrations.ExactBackground), read-only,
 // in recorded order: what an answer by kind reuses once its kind's recordings
 // are used up. nil for a set served by today's rules.
@@ -187,7 +187,7 @@ func (m *MockManager) SpentBackground(kind models.Kind) []*models.Mock {
 
 var _ integrations.ExactBackground = (*MockManager)(nil)
 
-// KindBackground is, under S12's background rules, kind's whole background
+// KindBackground is, under the background rules, kind's whole background
 // as answering by kind reads it (integrations.ByKindBackground): its
 // data-plane recordings, no async lane's, of the worker scope at every place,
 // reached or not, and of the pool, split into those unused and those this
@@ -300,7 +300,7 @@ func (v *exactView) spentBackground(name string) bool {
 	return spent || v.spentOutside(name)
 }
 
-// BackgroundCursor is, under S12's background rules, the stateful cursor of
+// BackgroundCursor is, under the background rules, the stateful cursor of
 // the set's background (integrations.BackgroundCursor): the one the calls
 // between tests advance, under the pool views' key (exactCursorKey), which a
 // call inside a test that a background recording answers reads and advances
@@ -340,7 +340,7 @@ func (m *MockManager) backgroundCursorKey(key string) string {
 var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set
-// served by S12's rules, while the session pairs; nil when none is.
+// served by the background rules, while the session pairs; nil when none is.
 func (m *MockManager) pairing() (*exactView, uint64) {
 	if !m.exact.pairs.Load() {
 		return nil, 0
@@ -387,7 +387,7 @@ func (m *MockManager) ownedElsewhere(v *exactView, name string) bool {
 }
 
 // PairingCandidates is, while the session pairs (record's full round, under
-// the proven switch) in a set served by S12's background rules, kind's
+// the proven switch) in a set served by the background rules, kind's
 // data-plane recordings other tests own that their owners have not consumed
 // and no pairing has claimed (integrations.Pairing), in recorded order: those
 // the trees hold, then those the agent keeps on disk (SetRecordedOfKind),

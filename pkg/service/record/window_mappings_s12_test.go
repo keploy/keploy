@@ -57,7 +57,7 @@ func s12Windows() *windowMappings {
 	return w
 }
 
-// An S12 record (the switch on, S12 serving enabled by a registered func, a
+// A background-routing record (the switch on, background serving enabled by a registered func, a
 // store that keeps the mark) routes a write in
 // flight into a test on its window's clock to the worker scope, at the set's
 // start, with the line that says why and how to undo it, and marks the set.
@@ -90,7 +90,7 @@ func TestWindowMappingsRouteAnInFlightWriteAndMarkTheSet(t *testing.T) {
 }
 
 // Any other recording neither routes nor marks: one no registered func
-// enables S12 serving for (none registered, or one that says no), one
+// enables background serving for (none registered, or one that says no), one
 // without the switch, and one into a store that cannot keep the mark (whose
 // routed write today's rules would serve).
 func TestWindowMappingsRouteOnlyForASetTheyMark(t *testing.T) {
@@ -101,8 +101,8 @@ func TestWindowMappingsRouteOnlyForASetTheyMark(t *testing.T) {
 		enabled *bool
 		store   MappingDb
 	}{
-		{"S12 serving not registered", true, nil, &markingMappingDB{}},
-		{"S12 serving registered off", true, new(false), &markingMappingDB{}},
+		{"background serving not registered", true, nil, &markingMappingDB{}},
+		{"background serving registered off", true, new(false), &markingMappingDB{}},
 		{"no switch", false, new(true), &markingMappingDB{}},
 		{"a store without the mark", true, new(true), &recMappingDB{}},
 	} {
@@ -264,7 +264,7 @@ func TestARoutedWritesLineForATestNotKeptUndoesByDeleting(t *testing.T) {
 }
 
 // A recording made with --sync, or with mapping disabled, derives no test
-// windows: it routes nothing and marks no set for S12's serving, which, under
+// windows: it routes nothing and marks no set for background serving, which, under
 // a build that enables that serving, it says, with how to record one that
 // does. A recording that derives windows says nothing of it.
 func TestARecordingWithNoWindowsSaysItIsNotMarked(t *testing.T) {

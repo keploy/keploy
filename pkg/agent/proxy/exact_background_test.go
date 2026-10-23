@@ -59,16 +59,16 @@ func TestTodaysRulesShowNoBackground(t *testing.T) {
 	if s := mm.SpentBackground(models.HTTP); s != nil {
 		t.Fatalf("today's rules show a spent background: %v", exactNames(s))
 	}
-	// Nor does a set staged under S12's rules without the proven switch.
+	// Nor does a set staged under the background rules without the proven switch.
 	t.Setenv(provenswitch.Env, "")
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	if b := mm.Background(models.HTTP); b != nil {
-		t.Fatalf("S12's rules apply without the switch: %v", exactNames(b))
+		t.Fatalf("the background rules apply without the switch: %v", exactNames(b))
 	}
 }
 
-// Under S12's rules the pool answers in a test too, after the test's own and
+// Under the background rules the pool answers in a test too, after the test's own and
 // the worker scope it reached; a pool recording a test consumes through a
 // delete door is spent for the staging, as the worker scope's is, and listed
 // spent (SpentBackground) until the next staging.
@@ -78,7 +78,7 @@ func TestS12ShowsThePoolInATestAfterOwnAndWorker(t *testing.T) {
 	mm.ServeExactWorker([]string{"w-boot"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	if got := sessionNames(mm); got != "own,w-boot,pool" {
-		t.Fatalf("in a test S12's rules show %s; want own,w-boot,pool", got)
+		t.Fatalf("in a test the background rules show %s; want own,w-boot,pool", got)
 	}
 	equalNames(t, "the background", mm.Background(models.HTTP), "w-boot", "pool")
 	if got := pollFirst(t, mm, "pool"); got != "pool" {
@@ -108,7 +108,7 @@ func TestS12ShowsThePoolInATestAfterOwnAndWorker(t *testing.T) {
 	}
 }
 
-// Under S12's rules the worker scope is shown in the order the agent placed
+// Under the background rules the worker scope is shown in the order the agent placed
 // it (ServeExactWorker's), not the trees' (recorded) order; today's rules keep
 // the trees'.
 func TestS12OrdersTheWorkerScopeAsTheAgentPlacedIt(t *testing.T) {
@@ -122,14 +122,14 @@ func TestS12OrdersTheWorkerScopeAsTheAgentPlacedIt(t *testing.T) {
 	mm.ServeExactWorker([]string{"w-later", "w-boot"})
 	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
 	if got := sessionNames(mm); got != "w-later,w-boot,pool" {
-		t.Fatalf("S12's rules show %s; want the agent's order w-later,w-boot, then the pool", got)
+		t.Fatalf("the background rules show %s; want the agent's order w-later,w-boot, then the pool", got)
 	}
 	if got := pollFirst(t, mm, "w-"); got != "w-later" {
 		t.Fatalf("a parser that takes the first recording took %s; want w-later, placed first", got)
 	}
 }
 
-// Record's full round pairs only while its session pairs (Learn), under S12's
+// Record's full round pairs only while its session pairs (Learn), under the background
 // rules: without Learn, or under today's rules, there is no candidate and no
 // claim.
 func TestPairingIsOffWithoutLearn(t *testing.T) {
@@ -370,12 +370,12 @@ func TestASessionResetForgetsTheBackgroundRules(t *testing.T) {
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	if b := mm.Background(models.HTTP); len(b) == 0 {
-		t.Fatal("precondition: S12's rules show no background")
+		t.Fatal("precondition: the background rules show no background")
 	}
 	mm.ResetForReplaySession()
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	if b := mm.Background(models.HTTP); b != nil {
-		t.Fatalf("after a session reset the background is still served by S12's rules: %v", exactNames(b))
+		t.Fatalf("after a session reset the background is still served by the background rules: %v", exactNames(b))
 	}
 }
 
@@ -423,7 +423,7 @@ func TestALostAnswerReportIsSaidToBeNoMiss(t *testing.T) {
 	}
 }
 
-// An async lane's pool recording keeps today's rules under S12's: it is not
+// An async lane's pool recording keeps today's rules under the background rules: it is not
 // shown in a test, nor spent there, nor background.
 func TestS12LeavesAnAsyncPoolRecordingOutOfATest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -436,7 +436,7 @@ func TestS12LeavesAnAsyncPoolRecordingOutOfATest(t *testing.T) {
 	mm.ServeExactWorker(nil)
 	mm.ServeExactTest("T1", []*models.Mock{own})
 	if got := sessionNames(mm); got != "own,pool" {
-		t.Fatalf("in a test S12's rules show %s; want own,pool (no async lane's)", got)
+		t.Fatalf("in a test the background rules show %s; want own,pool (no async lane's)", got)
 	}
 	equalNames(t, "the background", mm.Background(models.HTTP), "pool")
 	if v := mm.exactView(); v.inBackgroundPool(lane) {
@@ -444,7 +444,7 @@ func TestS12LeavesAnAsyncPoolRecordingOutOfATest(t *testing.T) {
 	}
 }
 
-// Under S12's rules the pool is shown in recorded order whichever trees its
+// Under the background rules the pool is shown in recorded order whichever trees its
 // recordings were staged in, as the background accessor gives it: the
 // earlier-recorded one first whether it or the later one is staged in the
 // per-test tier (one of the two stagings puts them in the trees against
@@ -470,7 +470,7 @@ func TestS12ShowsThePoolInRecordedOrder(t *testing.T) {
 	}
 }
 
-// Under S12's rules the background's stateful cursor is the one the calls
+// Under the background rules the background's stateful cursor is the one the calls
 // between tests advance, inside a test too (the pool keeps its
 // recorded reuse and cursor-saturate, its cursor shared with background
 // callers): a mark a call between tests made is read in a test, one a call in
@@ -489,7 +489,7 @@ func TestS12SharesTheBackgroundsCursorBetweenATestAndTheGaps(t *testing.T) {
 	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
 	bg, ok := mm.BackgroundCursor()
 	if !ok {
-		t.Fatal("S12's rules have no background cursor")
+		t.Fatal("the background rules have no background cursor")
 	}
 	// Between tests: the store's cursor and the background's are one.
 	mm.AdvanceMockCursor("served\x00pool", 0, 2)
@@ -641,7 +641,7 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	}
 }
 
-// An async lane's worker-scope recording keeps today's reuse under S12's
+// An async lane's worker-scope recording keeps today's reuse under the background
 // rules: the view shows it, as today, but it is no
 // background: exact serving's background (Background, SpentBackground) and
 // the kind's whole background (KindBackground) leave it out, and no by-kind
@@ -808,7 +808,7 @@ func TestASpendInAClosedViewBackInForceIsRefused(t *testing.T) {
 
 // A consume through a delete door that lands in the same gap waits too, and
 // is settled against the new view: a background recording a test's view shows
-// under S12's rules is spent for the staging, and the next test's call in
+// under the background rules is spent for the staging, and the next test's call in
 // flight, which the closed pool view would have answered as that test's, is
 // the opened test's own.
 func TestAConsumeInAClosedViewIsSettledInTheViewThatReplacesIt(t *testing.T) {

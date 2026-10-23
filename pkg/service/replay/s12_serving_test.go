@@ -24,27 +24,27 @@ func mustPanicWith(t *testing.T, want string, f func()) {
 	f()
 }
 
-// S12's serving enablement is one registration: a second panics, as does a
+// background serving enablement is one registration: a second panics, as does a
 // nil func; S12Serving is what the registered func returns, false with none;
 // and unregister removes only its own registration.
 func TestRegisterS12ServingIsOneRegistration(t *testing.T) {
 	if S12Serving() {
-		t.Fatal("S12 serving is on before anything registers")
+		t.Fatal("background serving is on before anything registers")
 	}
 	on := false
 	unregister := RegisterS12Serving(func() bool { return on })
 	if S12Serving() {
-		t.Fatal("S12 serving is on while the registered func returns false")
+		t.Fatal("background serving is on while the registered func returns false")
 	}
 	on = true
 	if !S12Serving() {
-		t.Fatal("S12 serving is off while the registered func returns true")
+		t.Fatal("background serving is off while the registered func returns true")
 	}
 	mustPanicWith(t, "registered already", func() { RegisterS12Serving(func() bool { return true }) })
 	mustPanicWith(t, "nil", func() { RegisterS12Serving(nil) })
 	unregister()
 	if S12Serving() {
-		t.Fatal("unregister left S12 serving on")
+		t.Fatal("unregister left background serving on")
 	}
 	again := RegisterS12Serving(func() bool { return true })
 	unregister() // a stale unregister
@@ -53,7 +53,7 @@ func TestRegisterS12ServingIsOneRegistration(t *testing.T) {
 	}
 	again()
 	if S12Serving() {
-		t.Fatal("the second unregister left S12 serving on")
+		t.Fatal("the second unregister left background serving on")
 	}
 }
 

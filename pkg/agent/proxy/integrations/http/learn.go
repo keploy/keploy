@@ -466,7 +466,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	r.windows, _ = mockDb.(integrations.TestWindows)
 	r.inFlight, _ = mockDb.(integrations.InFlightOwner)
 	r.pools, _ = mockDb.(integrations.PoolMembership)
-	// Under S12's background rules a test learns from its own recordings
+	// Under the background rules a test learns from its own recordings
 	// only (own exact, own learn, then background exact): with
 	// a test open the background (the worker scope and the pool the view
 	// shows in it) answers a call exactly or not at all, and no drift of the

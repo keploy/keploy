@@ -916,7 +916,7 @@ func TestANewSessionPlacesNoRecordingByTheLastSessionsWindows(t *testing.T) {
 	}
 }
 
-// Under exact serving (S12: keploy test's agent under the switch), what the
+// Under exact serving (keploy test's agent under the switch), what the
 // learn step learned as a variable rides the consumed mock's state, as on
 // every other door: persistLearned writes it onto the recording.
 func TestALearnStepVariableRidesExactServing(t *testing.T) {

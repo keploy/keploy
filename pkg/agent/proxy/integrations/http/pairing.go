@@ -21,7 +21,7 @@ import (
 // for judging to move it to the set's background. The store offers such
 // recordings (integrations.PairingCandidates) only in a session that pairs:
 // record's full round (OutgoingOptions.Learn), under the proven switch, for a
-// set served by S12's rules. Anywhere else nothing pairs.
+// set served by the background rules. Anywhere else nothing pairs.
 //
 //   - Exactly only: the strict comparison exact serving answers by
 //     (strictDiff), modulo the noise declared or learned onto the recording.

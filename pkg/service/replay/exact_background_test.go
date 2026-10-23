@@ -52,7 +52,7 @@ func stagedBackground(h *prRun) (string, bool) {
 	return ex.Background, ok
 }
 
-// enableS12 registers, for the test, a func that enables S12's serving as on
+// enableS12 registers, for the test, a func that enables background serving as on
 // says; nil registers none.
 func enableS12(t *testing.T, on *bool) {
 	t.Helper()
@@ -63,8 +63,8 @@ func enableS12(t *testing.T, on *bool) {
 	t.Cleanup(RegisterS12Serving(func() bool { return enabled }))
 }
 
-// A set an S12 record marked (recordedWith: s12-routing), replayed while a
-// registered func enables S12's serving, is staged under it, and its end does
+// A set a background-routing record marked (recordedWith: s12-routing), replayed while a
+// registered func enables background serving, is staged under it, and its end does
 // not require its worker scope answered. Replayed with no func registered, or
 // one that says no, or unmarked, or marked only with marks this keploy does
 // not know, it keeps today's rules: its staging names none, and a
@@ -103,7 +103,7 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 			if rules, ok := stagedBackground(h); !ok || rules != tc.rules {
 				t.Fatalf("the staging named background rules %q (staged %v); want %q", rules, ok, tc.rules)
 			}
-			// Under S12's serving the boot call never made is said, not
+			// Under background serving the boot call never made is said, not
 			// required.
 			said := logs.FilterMessageSnippet("background recordings of this test set that its end had not read answered").All()
 			if tc.rules == "" && len(said) != 0 {
@@ -111,7 +111,7 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 			}
 			if tc.rules != "" {
 				if len(said) != 1 {
-					t.Fatalf("S12's serving said %d unanswered-background lines; want one", len(said))
+					t.Fatalf("background serving said %d unanswered-background lines; want one", len(said))
 				}
 				if mocks, _ := said[0].ContextMap()["mocks"].([]interface{}); len(mocks) != 1 || mocks[0] != "mock-boot" {
 					t.Fatalf("the line names %v; want mock-boot", said[0].ContextMap()["mocks"])
@@ -121,10 +121,10 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 	}
 }
 
-// An agent that does not say it serves the staged set by S12's rules (one
+// An agent that does not say it serves the staged set by the background rules (one
 // that predates them, or runs without the switch) serves it by today's, so
 // the replay keeps today's check: the set's end requires its worker scope,
-// and a boot call never made fails the set, though the set is marked and S12's
+// and a boot call never made fails the set, though the set is marked and background
 // serving enabled.
 func TestUnderTheSwitchAnAgentThatServesTodaysRulesKeepsTheWorkerScopesEnd(t *testing.T) {
 	setSwitch(t, true)
@@ -141,10 +141,10 @@ func TestUnderTheSwitchAnAgentThatServesTodaysRulesKeepsTheWorkerScopesEnd(t *te
 		t.Fatalf("set %s; want FAILED: the agent served today's rules, so the boot call is required", got)
 	}
 	if rules, ok := stagedBackground(h); !ok || rules != models.RecordedWithS12Routing {
-		t.Fatalf("the staging named %q (staged %v); want S12's asked for", rules, ok)
+		t.Fatalf("the staging named %q (staged %v); want the background rules asked for", rules, ok)
 	}
 	if h.replayer.exact.background {
-		t.Fatal("the plan kept S12's serving though the agent did not confirm it")
+		t.Fatal("the plan kept background serving though the agent did not confirm it")
 	}
 }
 
@@ -153,7 +153,7 @@ func TestUnderTheSwitchAnAgentThatServesTodaysRulesKeepsTheWorkerScopesEnd(t *te
 // again: the owner's quarantine no longer applies (its test edited, or
 // verdicts.yaml lost its entry), so the set is staged without it in the worker
 // scope and the owner opens with it, as recorded (audit B4).
-// With S12's serving enabled or not. An owner the run skips (quarantined),
+// With background serving enabled or not. An owner the run skips (quarantined),
 // an exact move's owner, and an owner the set no longer has keep the move.
 func TestUnderTheSwitchADriftMoveGoesBackToAnOwnerThatRuns(t *testing.T) {
 	drift := models.MockEntry{Name: "mock-6", Kind: string(models.HTTP), Owner: "test-1", Drift: true,
@@ -170,8 +170,8 @@ func TestUnderTheSwitchADriftMoveGoesBackToAnOwnerThatRuns(t *testing.T) {
 		enabled *bool
 		back    bool
 	}{
-		{"its quarantine gone, S12 enabled", drift, false, false, new(true), true},
-		{"its quarantine gone, S12 not enabled", drift, false, false, nil, true},
+		{"its quarantine gone, background serving enabled", drift, false, false, new(true), true},
+		{"its quarantine gone, background serving not enabled", drift, false, false, nil, true},
 		{"quarantined", drift, true, false, new(true), false},
 		{"refused by the template check (fails unsent)", drift, false, true, new(true), false},
 		{"an exact move", exact, false, false, new(true), false},
@@ -354,7 +354,7 @@ func TestLastResultOfEachTestKeepsTheLastRow(t *testing.T) {
 	}
 }
 
-// Under S12's serving the set's end requires no worker-scope recording
+// Under background serving the set's end requires no worker-scope recording
 // answered; under today's it does.
 func TestUnansweredWorkerIsNoneUnderS12sRules(t *testing.T) {
 	p := &exactPlan{worker: []models.MockEntry{{Name: "w"}}, bootSeen: true}
@@ -363,6 +363,6 @@ func TestUnansweredWorkerIsNoneUnderS12sRules(t *testing.T) {
 	}
 	p.background = true
 	if got := p.unansweredWorker(map[string]models.MockState{}, true); got != nil {
-		t.Fatalf("S12's rules require %v; want none", got)
+		t.Fatalf("the background rules require %v; want none", got)
 	}
 }

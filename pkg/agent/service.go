@@ -183,7 +183,7 @@ type AcceptCounter interface {
 	ListenDrops() (uint64, error)
 }
 
-// ProxyConnCounter is what the agent offers a test's begin and end (S12): the
+// ProxyConnCounter is what the agent offers a test's begin and end: the
 // connections to the proxy, numbered on both sides, and a wait for every call
 // the application had started by a read to be in the proxy's hands. begin and
 // end read ProxyConns, then WaitProxySettled(ctx, counts), then go on to the
@@ -566,11 +566,11 @@ type ExactWorkerServer interface {
 }
 
 // ExactBackgroundServer is implemented by a proxy that serves a test set's
-// background (its worker scope and its pool) by S12's background rules under
+// background (its worker scope and its pool) by the background rules under
 // exact serving (models.RecordedWithS12Routing, replay.RegisterS12Serving):
 // ServeExactBackground sets, at each set's staging, the rules the set is
 // served by, with its pool and its whole worker scope by name; any rules but
-// S12's are today's. A proxy that does not implement it serves every set by
+// the background rules are today's. A proxy that does not implement it serves every set by
 // today's rules, and the agent says so to the replay
 // (models.BackgroundRulesHeader), which then keeps today's checks.
 type ExactBackgroundServer interface {

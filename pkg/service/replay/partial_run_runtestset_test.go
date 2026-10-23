@@ -253,7 +253,7 @@ type prInstr struct {
 	perTestScope bool
 	scopeSaid    bool
 	// oldAgent makes the stand-in agent answer a staging as one that predates
-	// S12 does: saying no background rules (models.BackgroundRulesHeader);
+	// background serving does: saying no background rules (models.BackgroundRulesHeader);
 	// otherwise it says it serves the rules the staging named. backgroundSaid
 	// is what the client took from the last staging's answer.
 	oldAgent       bool

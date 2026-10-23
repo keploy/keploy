@@ -3,8 +3,8 @@ package integrations
 import "go.keploy.io/server/v3/pkg/models"
 
 // ExactServingReader is an optional MockMemDb capability: a store that can
-// serve each test exactly its own mocks (the proven switch, design v14 §5.2,
-// S12). While it does, every read shows one view, which changes as a test
+// serve each test exactly its own mocks (the proven switch, design v14
+// §5.2). While it does, every read shows one view, which changes as a test
 // begins and ends, and a consume the view refuses fails: a test mock that
 // already answered, perhaps on another connection, or a mock the view no
 // longer shows (one read before a test began or ended, one another consume

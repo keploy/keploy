@@ -2103,7 +2103,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// conc: under the proven switch, the set's concurrency as its
 		// mapping states it (models.Mapping.Groups, Shared).
 		var conc *setConcurrency
-		// s12Background: S12's serving serves the set (s12Serves), from its
+		// s12Background: background serving serves the set (s12Serves), from its
 		// mappings.yaml's mark. returnedMoves: the drift moves given back to
 		// an owner this run runs (returnStaleMoves).
 		var s12Background bool
@@ -5211,7 +5211,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// coming; one never made fails the set below.
 		// A set that already failed is red whatever its worker scope did:
 		// nothing waits for it.
-		// Under S12's background rules the set's end requires none of it
+		// Under the background rules the set's end requires none of it
 		// (exactPlan.background): nothing waits for it.
 		checkWorker := r.exact != nil && !r.exact.background && captureOpened && testSetStatus == models.TestSetStatusPassed
 		if checkWorker {
@@ -5280,14 +5280,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if checkWorker && workerUnread == nil {
 			workerMissing = r.exact.unansweredWorker(totalConsumedMocks, stopDrained)
 		}
-		// Under S12's serving what today's rule would require is said, not
+		// Under background serving what today's rule would require is said, not
 		// required, from what the set's end read (its stop's drain
 		// included): a background call the application stopped making is
 		// not caught, and nothing waits for one still to
 		// come.
 		if r.exact != nil && r.exact.background && captureOpened {
 			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks, stopDrained); len(unanswered) > 0 {
-				r.logger.Info("background recordings of this test set that its end had not read answered: S12's serving neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
+				r.logger.Info("background recordings of this test set that its end had not read answered: background serving neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID),
 					zap.Int("count", len(unanswered)),
 					zap.Strings("mocks", unanswered[:min(len(unanswered), 20)]),

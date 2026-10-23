@@ -684,7 +684,7 @@ func TestSources(t *testing.T) {
 		{"one UUID v7 whose time moved by another amount, inside a longer value", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(at.Add(81*time.Second), "def0123456789abcde"), true, false},
 		// An id whose digits read as a date is no unit, nor is a value it
 		// stands inside of: it is followed wherever it went, whatever its
-		// length (S12 K1 review round 2: a rand.Int31 id, a Snowflake id).
+		// length (a rand.Int31 id, a Snowflake id).
 		{"a ten-digit id inside a longer value", "1298498081", "1427131847", "user-1298498081", "user-1427131847", true, false},
 		{"a nineteen-digit id inside a longer value", "1541815603606036480", "1541815603606036999", "ref:1541815603606036480", "ref:1541815603606036999", true, false},
 		{"a ten-digit id, whole", "1298498081", "1427131847", "1298498081", "1427131847", true, true},

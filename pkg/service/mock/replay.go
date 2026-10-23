@@ -979,7 +979,7 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 }
 
 // statefulMocksDisabled is test.disableStatefulMocks, ignored under the proven
-// switch (design v14 §10, a U18 row of S12): a test's own mocks answer once
+// switch (design v14 §10, a U18 row): a test's own mocks answer once
 // each in recorded order, and the pool keeps its cursors. The flip deletes it.
 func (m *mockService) statefulMocksDisabled() bool {
 	if !m.config.Test.DisableStatefulMocks {

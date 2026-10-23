@@ -436,7 +436,7 @@ type ExactBackground interface {
 	SpentBackground(kind models.Kind) []*models.Mock
 }
 
-// ByKindBackground is an optional MockMemDb capability under S12's background
+// ByKindBackground is an optional MockMemDb capability under the background
 // rules: a kind's whole background as answering by kind reads it. By-kind
 // answers ignore Place. So whether a kind may be answered
 // by kind (every background reply of the kind equal) is decided over all of
@@ -477,7 +477,7 @@ func SpendByKind(db MockMemDb, m *models.Mock) bool {
 	return false
 }
 
-// BackgroundCursor is an optional MockMemDb capability under S12's background
+// BackgroundCursor is an optional MockMemDb capability under the background
 // rules (the pool keeps its recorded reuse and cursor-saturate,
 // its cursor shared with background callers): the stateful cursor of the
 // staged set's background, its worker scope and its pool, the one its calls
@@ -504,7 +504,7 @@ func BackgroundCursorOf(db MockMemDb) (MockCursor, bool) {
 	return nil, false
 }
 
-// S12Background reports whether db serves its staged set by S12's background
+// S12Background reports whether db serves its staged set by the background
 // rules (BackgroundCursorOf's ok): false for a set served by
 // today's rules, and for a store that implements none of them.
 func S12Background(db MockMemDb) bool {

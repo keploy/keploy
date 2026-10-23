@@ -16,7 +16,7 @@ import (
 )
 
 // Ownership and exact consumption for keploy test, under the proven switch
-// (design v14 §5.2, S12): the replay hands the agent what each test case
+// (design v14 §5.2): the replay hands the agent what each test case
 // owns, and the agent serves each test case exactly its own mocks, each at
 // most once and in recorded order, through the proxy's exact serving.
 //
@@ -91,7 +91,7 @@ type exactPlan struct {
 	// share is the set's shares (concurrent_shares.go): nil for a set whose
 	// mapping states no concurrency.
 	share *sharePlan
-	// background says S12's serving serves the set (s12Serves): its
+	// background says background serving serves the set (s12Serves): its
 	// staging says so to the agent, and its end does not require its worker
 	// scope answered (unansweredWorker).
 	background bool
@@ -207,7 +207,7 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
 // application and read what it consumed as it stopped (stopped).
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
-	// Under S12's background rules the set's end requires none: what a
+	// Under the background rules the set's end requires none: what a
 	// background call answered is judged by record's judging,
 	// and a background call that stops happening is a limit the run says
 	// (unansweredBackground) and NEXT names.
@@ -300,9 +300,9 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 	return mappings, nil, nil, nil, absent, nil
 }
 
-// s12Serves reports, under the proven switch (the caller's), whether S12's
-// serving serves testSetID (s12_serving.go): its mappings.yaml carries an S12
-// record's mark (recordedWith holds models.RecordedWithS12Routing) and a
+// s12Serves reports, under the proven switch (the caller's), whether background
+// serving serves testSetID (s12_serving.go): its mappings.yaml carries a
+// background-routing record's mark (recordedWith holds models.RecordedWithS12Routing) and a
 // registered func enables it (S12Serving). A marked set this build does not
 // enable it for is served by today's rules, said once per set: every
 // recorded background call answered exactly, and required by its end.
@@ -313,13 +313,13 @@ func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
 	if S12Serving() {
 		return true
 	}
-	r.logger.Info("this test set was recorded under S12's routing and serving (mappings.yaml recordedWith: "+models.RecordedWithS12Routing+"), which this keploy does not enable: its worker scope and pool are served by the rules of a set recorded before S12, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
+	r.logger.Info("this test set was recorded under background routing and serving (mappings.yaml recordedWith: "+models.RecordedWithS12Routing+"), which this keploy does not enable: its worker scope and pool are served by the rules of a set recorded before background serving, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
 		zap.String("testSetID", testSetID),
-		zap.String("next_step", "replay it with the keploy build that recorded it (keploy enterprise), whose judging S12's serving rests on"))
+		zap.String("next_step", "replay it with the keploy build that recorded it (keploy enterprise), whose judging background serving rests on"))
 	return false
 }
 
-// confirmBackground keeps S12's serving for the staged set only when the agent
+// confirmBackground keeps background serving for the staged set only when the agent
 // says, answering its staging, that it serves the set by those rules
 // (pkg.BackgroundRulesReader, models.BackgroundRulesHeader): an agent that
 // predates them, or that runs without the proven switch, serves by today's,
@@ -337,7 +337,7 @@ func (r *Replayer) confirmBackground(asked string) {
 		return
 	}
 	r.exact.background = false
-	r.logger.Warn("keploy's agent does not serve this test set's background by S12's rules, which it was recorded under: the set is judged by today's checks, every recorded background call answered exactly and required by its end ("+provenswitch.Env+"=1)",
+	r.logger.Warn("keploy's agent does not serve this test set's background by the background rules, which it was recorded under: the set is judged by today's checks, every recorded background call answered exactly and required by its end ("+provenswitch.Env+"=1)",
 		zap.String("asked", asked),
 		zap.String("served", served),
 		zap.String("next_step", "run the keploy agent of this keploy build, with "+provenswitch.Env+"=1"))
@@ -770,7 +770,7 @@ func (r *Replayer) noteMappingAlwaysUsed() {
 	r.noteIgnored("disableMapping (--disable-mapping)", "each test case is served exactly the mocks its mapping lists")
 }
 
-// The settings exact serving deletes (design v14 §10, U18 rows of S12):
+// The settings exact serving deletes (design v14 §10, U18 rows):
 // under the proven switch each is ignored, said once per run, and never
 // weakens a verdict. The flip deletes them.
 

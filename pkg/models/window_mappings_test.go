@@ -485,7 +485,7 @@ func routedNames(m WindowMappings) []string {
 	return out
 }
 
-// S12's routing at record: a by-kind write in flight into a
+// background routing at record: a by-kind write in flight into a
 // test that is not the first, whose request was stamped on the clock its
 // window start was, was sent before the test began: it is routed to the worker
 // scope at the set's start, and listed. One on an untrusted clock, on another

@@ -1,9 +1,9 @@
 package http_test
 
-// A replay relaxes today's checks for a test set served by S12's rules only
+// A replay relaxes today's checks for a test set served by the background rules only
 // when the agent's answer to the set's staging says it serves it by them, in
 // the X-Keploy-Background-Rules header of its /updatemockparams answer. An
-// agent released before S12 sends no header. These run the real routes
+// agent released before background serving sends no header. These run the real routes
 // against the real client.
 
 import (
@@ -51,7 +51,7 @@ func TestBackgroundRulesOnlyFromAStagingTheAgentAnswers(t *testing.T) {
 	stage := models.MockFilterParams{Exact: &models.ExactServing{Stage: true, Background: models.RecordedWithS12Routing}}
 	open := models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}
 
-	t.Run("an agent that says S12's is believed for its staging", func(t *testing.T) {
+	t.Run("an agent that says it serves the background rules is believed for its staging", func(t *testing.T) {
 		svc := &backgroundSvc{rules: models.RecordedWithS12Routing}
 		c := newClient(t, serveBackground(t, svc).URL+"/agent")
 		if c.AgentServesBackground() != "" {

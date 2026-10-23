@@ -69,7 +69,7 @@ func TestBackgroundOfTellsTheRecordingsWithNoSibling(t *testing.T) {
 }
 
 // Today's rules reach a worker-scope recording from its place on, in recorded
-// order. S12's reach one with no sibling from the set's start, wherever it is
+// order. The background rules reach one with no sibling from the set's start, wherever it is
 // placed, keep identical siblings gated by their places, and order what they
 // reach by place (the set's start, then each test in the order it began),
 // within a place a delivering answer before an idle one, then recorded order.
@@ -94,14 +94,14 @@ func TestReachableWorkerGatesSiblingsAndOrdersByPlace(t *testing.T) {
 	}
 	got := strings.Join(reachableWorker(worker, begun, begunAt, bg), ",")
 	if want := "boot-poll,t3-delete,boot-idle,t2-poll,t1-poll,t1-idle"; got != want {
-		t.Fatalf("S12's rules reach %s; want %s", got, want)
+		t.Fatalf("the background rules reach %s; want %s", got, want)
 	}
 	if strings.Contains(got, "t3-sibling") {
 		t.Fatal("an identical sibling was reached before its place")
 	}
 }
 
-// backgroundExactProxy is a workerExactProxy that serves S12's background
+// backgroundExactProxy is a workerExactProxy that serves the background
 // rules (coreAgent.ExactBackgroundServer): it keeps each set of rules it is
 // told, with its pool and worker scope.
 type backgroundExactProxy struct {
@@ -181,7 +181,7 @@ func TestBackgroundOfReadsEachExactKeyInItsOwnRegistration(t *testing.T) {
 	}
 }
 
-// The background is settled by S12's rules only under the proven switch: a
+// The background is settled by the background rules only under the proven switch: a
 // staging that names them reaching an agent without it (one run with the
 // switch off, whatever its client sent) settles none, and every worker-scope
 // recording keeps today's gating.
@@ -195,17 +195,17 @@ func TestSettleBackgroundNeedsTheSwitch(t *testing.T) {
 	}
 	t.Setenv("KEPLOY_PROVEN", "1")
 	if bg := a.settleBackground(ex); bg == nil {
-		t.Fatal("under the switch a staging naming S12's rules settles no background")
+		t.Fatal("under the switch a staging naming the background rules settles no background")
 	}
 }
 
-// A staging that names S12's rules (models.ExactServing.Background) tells the
+// A staging that names the background rules (models.ExactServing.Background) tells the
 // proxy so, with the set's pool and whole worker scope, after withdrawing the
 // previous set's; and it reaches a worker-scope recording with no identical
 // sibling from the set's start, though it is placed after a test not begun. A
 // staging that names none is today's: the previous set's rules are withdrawn,
 // none told, and the placed recording waits for its test. A proxy that cannot
-// serve S12's rules is staged by today's, and the agent says so. Without the
+// serve the background rules is staged by today's, and the agent says so. Without the
 // switch nothing is staged exactly.
 func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *testing.T) {
 	defer models.RegisterExactKey(models.HTTP, func(m *models.Mock) (string, bool) {
@@ -218,12 +218,12 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 		wantRules []string
 		reached   []string
 	}{
-		{"S12's rules", true, models.RecordedWithS12Routing,
+		{"the background rules", true, models.RecordedWithS12Routing,
 			[]string{"||", models.RecordedWithS12Routing + "|boot-config|w-delete,w-poll"}, []string{"w-delete", "w-poll"}},
 		{"today's rules", true, "", []string{"||"}, []string{"w-delete"}},
-		{"S12's rules, a proxy that cannot serve them", true, models.RecordedWithS12Routing, nil, []string{"w-delete"}},
+		{"the background rules, a proxy that cannot serve them", true, models.RecordedWithS12Routing, nil, []string{"w-delete"}},
 		// Without the switch nothing is staged exactly: nothing is told.
-		{"S12's rules named without the switch", false, models.RecordedWithS12Routing, nil, nil},
+		{"the background rules named without the switch", false, models.RecordedWithS12Routing, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.on {

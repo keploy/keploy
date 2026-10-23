@@ -258,7 +258,7 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 			// The same miss under the proven switch fails the test, though its
 			// answer matched and it consumed every recorded mock (so the
 			// switch's unconsumed-mock rule does not fail it). Under the
-			// switch only record writes mappings.yaml (S12): the file is
+			// switch only record writes mappings.yaml: the file is
 			// left as recorded, the passing test-2's entry too.
 			name:      "failed under KEPLOY_PROVEN: a call no mock answered, response matched",
 			consumed1: []models.MockState{mongoAt("mock-a", 1010), mongoAt("mock-b", 1020), mongoAt("mock-z", 1030)},
@@ -369,7 +369,7 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 			}
 			onDisk := mappedOnDisk(t, db)
 			if tc.proven {
-				// Under the switch only record writes mappings.yaml (S12).
+				// Under the switch only record writes mappings.yaml.
 				var want map[string][]string
 				if tc.recorded != nil {
 					want = map[string][]string{}
@@ -643,7 +643,7 @@ func TestRunTestSetKeepsTheMappingOfAStreamedPassThatSwallowedAMiss(t *testing.T
 // Under KEPLOY_PROVEN a test whose unanswered calls could not all be read has
 // no verdict (its set is INTERNAL_ERR, O-1): whatever its row says, its
 // consumption is not a pass's. Under the switch the replay writes no mapping
-// at all (S12), --update-test-mapping or not: the passing test-2 keeps its
+// at all, --update-test-mapping or not: the passing test-2 keeps its
 // recorded entry too.
 func TestRunTestSetUnderTheProvenSwitchAnUnreadMissKeepsTheRecordedMapping(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")

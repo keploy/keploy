@@ -510,7 +510,7 @@ type ExactServing struct {
 	// (ExactConcurrentHeader); an agent that predates it ignores it.
 	Concurrent []string `json:"concurrent,omitempty"`
 	// Background names, on the staging call, the rules the set's background
-	// (Worker and Pool) is served by: RecordedWithS12Routing for S12's, which
+	// (Worker and Pool) is served by: RecordedWithS12Routing for the background rules, which
 	// the replay sends only for a set marked so (Mapping.RecordedWith), under
 	// the proven switch, in a build whose judging enables them
 	// (replay.RegisterS12Serving); empty for today's. An agent that predates
@@ -575,8 +575,8 @@ const (
 // BackgroundRulesHeader is the /updatemockparams response header in which an
 // agent says, answering a set's staging call (ExactServing.Stage), the rules
 // it serves the set's background by: RecordedWithS12Routing when it applied
-// S12's (ExactServing.Background), absent for today's. An agent that does not
-// send it, every agent released before S12 among them, serves by today's
+// the background rules (ExactServing.Background), absent for today's. An agent that does not
+// send it, every agent released before background serving among them, serves by today's
 // rules, and the replay then keeps today's checks for the set (its worker
 // scope required by its end) whatever it asked for: never looser than the
 // rules the set was served by.

@@ -15,8 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// Ownership and exact consumption under the proven switch (design v14 §5.2,
-// S12): the agent drives the proxy's exact serving (coreAgent.ExactServer),
+// Ownership and exact consumption under the proven switch (design v14
+// §5.2): the agent drives the proxy's exact serving (coreAgent.ExactServer),
 // the one path that decides what a replay's parsers may answer with.
 //
 //   - A test owns exactly the test mocks its mapping lists: the data-plane
@@ -304,11 +304,11 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		}
 		bg := a.settleBackground(ex)
 		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {
-			// A proxy that cannot serve S12's rules serves the set by
+			// A proxy that cannot serve the background rules serves the set by
 			// today's, and the agent says so (ServedBackground): the replay
 			// keeps today's checks.
-			a.logger.Info("this keploy agent's proxy cannot serve a test set's background by the S12 rules it was recorded under; the set is served by today's rules, which check its worker scope at the set's end",
-				zap.String("next_step", "nothing to do for this run: its checks are today's, and its verdicts hold. This agent's proxy (a mode or a build that predates S12's background serving) serves no set by S12's rules; replay with one that does to have the set served by them"))
+			a.logger.Info("this keploy agent's proxy cannot serve a test set's background by the background rules it was recorded under; the set is served by today's rules, which check its worker scope at the set's end",
+				zap.String("next_step", "nothing to do for this run: its checks are today's, and its verdicts hold. This agent's proxy (a mode or a build that predates background serving) serves no set by the background rules; replay with one that does to have the set served by them"))
 			bg = nil
 		}
 		a.scopeMu.Lock()
@@ -318,7 +318,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.testBegunAt = map[string]int{}
 		a.testBg = bg
 		a.scopeMu.Unlock()
-		// S12's rules with the set's pool and whole worker scope; today's
+		// the background rules with the set's pool and whole worker scope; today's
 		// with neither (they name nothing).
 		if bg != nil {
 			if err := a.serveBackgroundExactly(es, models.RecordedWithS12Routing, ex.Pool, entryNames(ex.Worker)); err != nil {
@@ -470,7 +470,7 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 // shows them. A proxy that has no worker scope (coreAgent.ExactWorkerServer)
 // cannot serve a set that has one.
 //
-// Under S12's background rules (testBg) a worker-scope mock
+// Under the background rules (testBg) a worker-scope mock
 // with no identical sibling among the set's background answers from the set's
 // start, wherever it is placed (testBackground.noSibling), and the reachable
 // ones are said in the order the view serves them in: the earlier place first
@@ -546,7 +546,7 @@ func (a *Agent) notReal(id string, owned []*models.Mock) []*models.Mock {
 
 // ServedBackground is the rules the staged set's background is served by
 // (models.BackgroundRulesHeader): models.RecordedWithS12Routing when its
-// staging settled S12's, "" for today's.
+// staging settled the background rules, "" for today's.
 func (a *Agent) ServedBackground() string {
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
@@ -556,7 +556,7 @@ func (a *Agent) ServedBackground() string {
 	return models.RecordedWithS12Routing
 }
 
-// testBackground is a set's background as its staging settled it under S12's
+// testBackground is a set's background as its staging settled it under the
 // background rules (models.RecordedWithS12Routing): which of its worker-scope mocks
 // have no identical sibling among the set's background (its worker scope and
 // its pool) by their kind's exact key (models.ExactKeyOf), and which answer
@@ -570,7 +570,7 @@ type testBackground struct {
 	keyErrs []string
 }
 
-// settleBackground settles the staged set's background under S12's rules, for
+// settleBackground settles the staged set's background under the background rules, for
 // a staging that names them (models.ExactServing.Background) under the proven
 // switch; nil for today's rules. A mock it cannot read counts as having a
 // sibling: it stays gated by its place.
@@ -663,7 +663,7 @@ func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*m
 
 // reachableWorker is the worker-scope mocks of worker (in recorded order) the
 // set's run has reached: placed at the set's start, or after a test case that
-// has begun (begun); and, under S12's background rules (bg), each with no
+// has begun (begun); and, under the background rules (bg), each with no
 // identical sibling (testBackground.noSibling), wherever it is placed, in the
 // view's order: by place (the set's start for one with no sibling, else the
 // order its place's test case began in, begunAt), then a delivering answer
@@ -709,10 +709,10 @@ func reachableWorker(worker []models.MockEntry, begun map[string]bool, begunAt m
 }
 
 // serveBackgroundExactly tells the proxy the rules the staged set's background
-// is served by (coreAgent.ExactBackgroundServer): S12's when rules is
+// is served by (coreAgent.ExactBackgroundServer): the background rules when rules is
 // models.RecordedWithS12Routing, with the set's pool and its whole worker
-// scope, else today's. A proxy that cannot serve S12's rules serves every set
-// by today's, which need nothing of it: the staging settles no S12 background
+// scope, else today's. A proxy that cannot serve the background rules serves every set
+// by today's, which need nothing of it: the staging settles no background
 // for it (testBg nil), so the agent says it serves today's and the replay
 // keeps today's checks.
 func (a *Agent) serveBackgroundExactly(es coreAgent.ExactServer, rules string, pool, worker []string) error {

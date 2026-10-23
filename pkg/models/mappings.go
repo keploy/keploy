@@ -84,15 +84,15 @@ type MockEntry struct {
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
-// record recorded under S12's routing and serving: only such a set
-// is served by S12's looser rules (no worker-scope check at the set's end, the
+// record recorded under background routing and serving: only such a set
+// is served by the looser background rules (no worker-scope check at the set's end, the
 // pool inside tests, background writes answered by kind), and only by a build
 // whose judging enables them (replay.RegisterS12Serving), under the proven
 // switch. Every other set keeps today's rules (the compatibility audit's B3).
 const RecordedWithS12Routing = "s12-routing"
 
-// MappingDoc is mappings.yaml's document, Mapping, by the name S12's contract
-// gives it (MappingDoc.RecordedWith).
+// MappingDoc is mappings.yaml's document, Mapping, by the name the background-routing
+// contract gives it (MappingDoc.RecordedWith).
 type MappingDoc = Mapping
 
 // WasRecordedWith reports whether m's set carries feature among the marks
@@ -196,7 +196,7 @@ type Mapping struct {
 	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
 	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
 	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
-	// Worker is the set's worker scope (design v14 S12, the founder's D1 to
+	// Worker is the set's worker scope (design v14, the founder's D1 to
 	// D4): the data-plane mocks no test case owns, which the application made
 	// on its own rather than for a test's request (a queue consumer, a timer,
 	// work a test left running), in recorded order, each with its Place.
@@ -235,8 +235,8 @@ type Mapping struct {
 	// a mock no test lists.
 	Shared []MockEntry `json:"shared,omitempty" yaml:"shared,omitempty" bson:"shared,omitempty"`
 	// RecordedWith names, set-wide, what keploy record recorded the set with
-	// that changes how it is served: RecordedWithS12Routing for a set an S12
-	// record wrote (routed at record, its background served by S12's rules).
+	// that changes how it is served: RecordedWithS12Routing for a set a
+	// background-routing record wrote (routed at record, its background served by the background rules).
 	// keploy record writes it under the proven switch. Read and kept by each
 	// rewrite of mappings.yaml, whatever the switch, and by a writer that
 	// names none; omitted when empty, so a file without it is written as

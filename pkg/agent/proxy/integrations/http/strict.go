@@ -300,7 +300,7 @@ func routeMatches(diffs []strictField) bool {
 // last once all were (servedPick, the variable pass's rule). Each recording
 // carries its own served mark, so another caller's calls (other credentials:
 // other recordings) never move it, and a call whose set of recordings grows
-// carries on. Under S12's background rules the open test's own recordings
+// carries on. Under the background rules the open test's own recordings
 // (own) and the set's background are two bands (statefulBand). commit marks
 // it served once the answer is; nil when no mark applies.
 func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
@@ -326,7 +326,7 @@ func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool
 
 // statefulBand is, of group (the stateful recordings that are a call, first
 // among them, the one the pool's order puts first), those of first's band, and
-// the cursor their served marks are kept in. Under S12's background rules
+// the cursor their served marks are kept in. Under the background rules
 // (integrations.BackgroundCursorOf) the open test's own recordings (own) and
 // the set's background are two bands, never one sequence: when
 // first is the test's own, only its own answer, with cs as before (which keeps

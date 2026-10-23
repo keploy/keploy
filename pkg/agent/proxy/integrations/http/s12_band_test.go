@@ -10,7 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// s12TestDb is the store as an open test of a set served by S12's background
+// s12TestDb is the store as an open test of a set served by the background
 // rules sees it: its own cursor keeps none (a test's own recordings answer once
 // each, in recorded order), and its background's cursor (BackgroundCursor) is
 // the one the calls between tests advance.
@@ -36,7 +36,7 @@ func statefulAt(name string, at time.Time) *models.Mock {
 	return m
 }
 
-// Under S12's background rules the open test's own recordings and the set's
+// Under the background rules the open test's own recordings and the set's
 // background are two bands, never one sequence: a test's call
 // that its own recording is is answered by it, though background recordings of
 // the call were recorded before it; a call only background recordings are
@@ -99,7 +99,7 @@ func TestS12StatefulPickKeepsTheTestsOwnApartFromTheBackground(t *testing.T) {
 	}
 }
 
-// s12LearnDb is learnDb serving its set by S12's background rules
+// s12LearnDb is learnDb serving its set by the background rules
 // (integrations.S12Background).
 type s12LearnDb struct {
 	*learnDb
@@ -108,7 +108,7 @@ type s12LearnDb struct {
 
 func (d *s12LearnDb) BackgroundCursor() (integrations.MockCursor, bool) { return &d.bg, true }
 
-// Under S12's background rules a test learns from its own recordings only
+// Under the background rules a test learns from its own recordings only
 // (own exact, own learn, then background exact): with a test
 // open the background answers a call exactly or not at all, and nothing is
 // learned onto it. A call in a test that a pool recording is closer to (fewer
@@ -144,10 +144,10 @@ func TestS12ATestLearnsOnlyFromItsOwn(t *testing.T) {
 			continue
 		}
 		if served != nil || miss == nil || miss.closest != pool || miss.res.Reason != models.MissRequestChanged {
-			t.Fatalf("S12's rules served %v (miss %+v); want a miss naming the pool recording", served, miss)
+			t.Fatalf("the background rules served %v (miss %+v); want a miss naming the pool recording", served, miss)
 		}
 		if len(ld.pooled) != 0 || len(ld.consumed) != 0 {
-			t.Fatalf("S12's rules learned onto the pool %d times and consumed %d of the test's own", len(ld.pooled), len(ld.consumed))
+			t.Fatalf("the background rules learned onto the pool %d times and consumed %d of the test's own", len(ld.pooled), len(ld.consumed))
 		}
 		// The pool recording still answers a call that is it exactly.
 		if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":1,"m":2}`, nil), db, n, opts); served == nil || served.Name != "pool" || miss != nil {
@@ -169,7 +169,7 @@ func TestS12ATestLearnsOnlyFromItsOwn(t *testing.T) {
 // (integrations.RoundReader), as the agent's MockManager is under exact
 // serving: the store shows test's view ("" the pool view), the tracker the
 // query names is read with it, and background says the set is served by
-// S12's background rules. The view holds its per-test tier as test's own;
+// the background rules. The view holds its per-test tier as test's own;
 // its session tier is the pool's (the replay's scope table). A consume
 // through the round lands in s12LearnDb.
 type roundLearnDb struct {
@@ -229,7 +229,7 @@ func (roundLearnScope) Moved() string { return "" }
 
 var _ integrations.RoundReader = (*roundLearnDb)(nil)
 
-// Read from one snapshot of the round (the agent's production path), S12's
+// Read from one snapshot of the round (the agent's production path), the
 // background answers a call exactly or not at all, and nothing is learned
 // onto it, wherever the store shows a test's view: with the tracker's test
 // open in it (in a test), and with the tracker having none open (a boundary:

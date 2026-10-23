@@ -11,7 +11,7 @@ import (
 // A test set's mappings derived from its recorded test windows: what a
 // recording made without --sync maps each test to under the proven switch
 // (design v14 row S3), and what each test owns in a replay under the switch
-// of a set with no mappings.yaml (S12), which the replay never writes.
+// of a set with no mappings.yaml, which the replay never writes.
 
 // RecordedWindow is the window a recorded test case opens when it runs: its
 // [request, response] span, for an HTTP or a gRPC test case. A test case of any
@@ -180,7 +180,7 @@ type RoutedWrite struct {
 
 // DeriveOptions are the window derivation's options.
 type DeriveOptions struct {
-	// RouteInFlightWrites is S12's routing at record: a call
+	// RouteInFlightWrites is background routing at record: a call
 	// the in-flight rule gives to the test it was in flight into that is a
 	// by-kind write (WindowedMock.WriteKind) whose request was stamped on the
 	// clock that test's window start was (equal non-empty Clock), is no
@@ -190,7 +190,7 @@ type DeriveOptions struct {
 	// clock, a call of any other kind (a long poll among them), and one in
 	// flight into the first test (which no gap precedes: it is the start's,
 	// the worker scope's, already) are derived as without it. keploy record
-	// sets it only for a set it marks for S12's background rules
+	// sets it only for a set it marks for the background rules
 	// (RecordedWithS12Routing), which only those rules serve.
 	RouteInFlightWrites bool
 }

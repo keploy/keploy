@@ -111,7 +111,7 @@ type AgentClient struct {
 	consumedPerTest atomic.Bool
 	// stagedBackground holds the background rules the agent's answer to the
 	// last staging call said it serves the set by
-	// (models.BackgroundRulesHeader): "" until one says S12's.
+	// (models.BackgroundRulesHeader): "" until one says the background rules.
 	stagedBackground atomic.Pointer[string]
 	// clientTestsRead holds whether the agent's answer to the last /mock
 	// said its learn step reads the session's tests as keploy mock's client

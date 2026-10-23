@@ -94,8 +94,8 @@ const (
 	// view's ahead: Take.Ahead).
 	TakeConsumed TakeHow = iota + 1
 	// TakeSpent: a delete door or a by-kind spend took a staged recording
-	// for the staging (a call outside every test, the worker scope, S12's
-	// pool in a test), or, ForView, a protocol-phase one until the view
+	// for the staging (a call outside every test, the worker scope, the
+	// background pool in a test), or, ForView, a protocol-phase one until the view
 	// changes.
 	TakeSpent
 	// TakeClaimed: a pairing claimed another test's recording. A claim is
@@ -203,7 +203,7 @@ type RoundSnapshot struct {
 	// Open is Phase == RoundInTest: the one answer a learn step reads to
 	// whether a test is open, and whose recordings are its own.
 	Open bool
-	// Background: the set is served by S12's background rules.
+	// Background: the set is served by the background rules.
 	Background bool
 	// PerTest, Session, Startup and SessionScoped are what
 	// GetPerTestMocksInWindow (and GetFilteredMocks), GetSessionMocks,
@@ -246,7 +246,7 @@ type RoundParts struct {
 	Owners    map[string]RoundOwner
 	Claimants map[string]string
 	// Worker, Pool and BackgroundPool are the view's worker scope, its pool
-	// slice and S12's background pool, by name; never written once read.
+	// slice and the background pool, by name; never written once read.
 	Worker, Pool, BackgroundPool map[string]struct{}
 	// Windows is the staging's recorded test windows; PoolNames the
 	// replay's scope table (nil until sent); WindowStart and WindowEnd the
@@ -336,7 +336,7 @@ func (s RoundSnapshot) InPool(m *models.Mock) (pool, known bool) {
 
 // IsWorker reports whether name is one of the worker scope's recordings the
 // view shows; InPoolSlice whether it is in a pool view's pool slice;
-// InBackgroundPool whether it is S12's background pool's.
+// InBackgroundPool whether it is the background pool's.
 func (s RoundSnapshot) IsWorker(name string) bool {
 	_, ok := s.worker[name]
 	return ok
@@ -359,9 +359,9 @@ var (
 	_ PoolMembership = RoundSnapshot{}
 )
 
-// ExactBackground reports whether, at the snapshot, S12's background
+// ExactBackground reports whether, at the snapshot, the background
 // answers a call exactly or not at all, and no drift is learned onto it: the
-// set is served by S12's background rules and the store shows a test's view,
+// set is served by the background rules and the store shows a test's view,
 // whether the learn tracker has that test open (RoundInTest) or not
 // (RoundBoundary). The pool is learned onto between tests only.
 func (s RoundSnapshot) ExactBackground() bool {

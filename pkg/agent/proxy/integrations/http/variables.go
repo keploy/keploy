@@ -744,7 +744,7 @@ func (h *HTTP) pickHit(hits []*varHit, own func(*models.Mock) bool, mockDb integ
 			stateful = append(stateful, hit.mock)
 		}
 	}
-	// Under S12's background rules the open test's own and the set's
+	// Under the background rules the open test's own and the set's
 	// background are two bands (statefulBand).
 	mocks, cs := statefulBand(first.mock, stateful, own, mockDb, cs)
 	sort.SliceStable(mocks, func(i, j int) bool { return recordedBefore(mocks[i], mocks[j]) })

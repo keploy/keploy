@@ -17,7 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
-// pairingDb is a store in record's full round of a set served by S12's
+// pairingDb is a store in record's full round of a set served by the background
 // rules: it offers other tests' recordings to pair (integrations.Pairing),
 // claims each once, and holds a background (integrations.ByKindBackground).
 // own are the recordings it says are the open test's own
