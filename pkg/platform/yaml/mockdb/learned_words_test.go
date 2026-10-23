@@ -295,3 +295,37 @@ func TestWriteLearnedFiles(t *testing.T) {
 		t.Fatalf("learned.local.yaml:\n%s", local)
 	}
 }
+
+// The set reader Legible reads a set by (registered at init, and
+// ReadSetMocks itself) fails on a mocks file it cannot read or decode, and
+// reads a mocks file whose last mock was cut short with no panic and no
+// log of its own.
+func TestTheSetReaderSaysWhatItCannotRead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	write := func(set, name, data string) string {
+		d := filepath.Join(dir, set)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	if _, err := ReadSetMocks(context.Background(), zap.NewNop(), write("gob", "mocks.gob", "not a gob stream")); err == nil {
+		t.Error("a mocks.gob that is no gob: read")
+	}
+	bad := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\nspec: [1, 2]\n"
+	if _, err := ReadSetMocks(context.Background(), zap.NewNop(), write("bad", "mocks.yaml", bad)); err == nil {
+		t.Error("a mock whose spec is no mapping: read")
+	}
+	none, err := ReadSetMocks(context.Background(), zap.NewNop(), filepath.Join(dir, "absent"))
+	if err != nil || none != nil {
+		t.Errorf("a set with no mocks file: %v, %v", none, err)
+	}
+	cut := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\nspec:\n  metadata: {}\n  req:\n    method: GET\n    url: http://a/x"
+	if _, err := learn.Legible(write("cut", "mocks.yaml", cut)); err != nil {
+		t.Errorf("a set whose last mock was cut short: %v", err)
+	}
+}

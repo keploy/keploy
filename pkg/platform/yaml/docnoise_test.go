@@ -173,3 +173,14 @@ func TestNewDocNoise_CarriesWords(t *testing.T) {
 		t.Fatal("a doc with no words resolves to some")
 	}
 }
+
+// A doc's noise of value noise alone is written: only a doc with no noise of
+// any kind writes none.
+func TestNewDocNoise_KeepsValueNoiseAlone(t *testing.T) {
+	if got := NewDocNoise([]string{"^tok_"}, nil, nil); got == nil || !reflect.DeepEqual(got.Value, []string{"^tok_"}) {
+		t.Fatalf("value noise alone: %+v", got)
+	}
+	if got := NewDocNoise(nil, nil, nil); got != nil {
+		t.Fatalf("no noise: %+v", got)
+	}
+}

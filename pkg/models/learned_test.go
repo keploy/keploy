@@ -308,3 +308,52 @@ func TestMergeWordsKeepsEveryPlace(t *testing.T) {
 		t.Error("the merged map shares its slots with an input")
 	}
 }
+
+// SortWordSlots orders slots by segment, then run, then kind, layout and
+// skeleton, whatever order they come in, a repeat once.
+func TestSortWordSlotsOrdersEveryField(t *testing.T) {
+	want := []WordSlot{
+		{Seg: 1, Run: 0},
+		{Seg: 1, Run: 2},
+		{Seg: 2, Kind: WordSlotInstant, Layout: "epoch", Skeleton: "d10F"},
+		{Seg: 2, Kind: WordSlotInstant, Layout: "iso8601", Skeleton: "d4-d2-d2"},
+		{Seg: 2, Kind: WordSlotInstant, Layout: "iso8601", Skeleton: "d4-d2-d2Td2:d2:d2FZ"},
+		{Seg: 3, Kind: WordSlotRun, Run: 1},
+		{Seg: 3, Kind: WordSlotToken},
+		{Seg: 4, Kind: WordSlotRun},
+		{Seg: 4, Kind: WordSlotInstant, Layout: "uuid", Skeleton: "x8-x4-7x3-vx3-x12"},
+	}
+	// A token takes its segment whole: the run slot at segment 3 goes.
+	sorted := append(append([]WordSlot(nil), want[:5]...), want[6:]...)
+	for _, order := range [][]int{{8, 7, 6, 5, 4, 3, 2, 1, 0}, {3, 8, 0, 6, 2, 7, 5, 1, 4}, {0, 1, 2, 3, 4, 5, 6, 7, 8, 4}} {
+		in := make([]WordSlot, 0, len(order))
+		for _, i := range order {
+			in = append(in, want[i])
+		}
+		if got := SortWordSlots(in); !reflect.DeepEqual(got, sorted) {
+			t.Errorf("SortWordSlots(%v) = %v, want %v", order, got, sorted)
+		}
+	}
+}
+
+// A merge with nothing on one side is the other side: neither the words nor
+// F's values are lost to an empty map.
+func TestAMergeWithOneSideEmptyIsTheOther(t *testing.T) {
+	e := WordsEntry{V: WordsVersion, Digest: "9f2c41d07a3be815", Layout: "4be1c09a5d3e7f21", Slots: []WordSlot{{Seg: 4}}}
+	words := map[string]WordsEntry{"body.note": e}
+	for _, got := range []map[string]WordsEntry{MergeWords(words, nil), MergeWords(nil, words), MergeWords(words, map[string]WordsEntry{})} {
+		if !reflect.DeepEqual(got, words) {
+			t.Errorf("MergeWords with one side empty: %v, want %v", got, words)
+		}
+	}
+	f := map[string]map[string]string{"mock-0": {"body.note": "ORD-1 ref=b2"}}
+	for _, got := range []map[string]map[string]string{MergeLearnedF(f, nil), MergeLearnedF(nil, f), MergeLearnedF(f, map[string]map[string]string{})} {
+		if !reflect.DeepEqual(got, f) {
+			t.Errorf("MergeLearnedF with one side empty: %v, want %v", got, f)
+		}
+	}
+	// A void entry with no digest takes the other side's.
+	if got := MergeWordsEntry(VoidWords(""), WordsEntry{V: WordsVersion, Digest: "1111111111111111", Layout: "2222222222222222", Slots: []WordSlot{{Seg: 1}}}); got.Digest != "1111111111111111" || !got.Void() {
+		t.Errorf("a void entry of no digest merged: %+v, want void with the other's digest", got)
+	}
+}

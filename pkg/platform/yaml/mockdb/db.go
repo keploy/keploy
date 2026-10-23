@@ -889,22 +889,20 @@ func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
 		}
 	}
-	if len(st.LearnedWords) > 0 {
-		words := make(map[string]models.WordsEntry, len(st.LearnedWords))
-		for k, e := range st.LearnedWords {
-			if !varPlaces[k] {
-				words[k] = e
-			}
-		}
-		for k, e := range words {
-			if cur, ok := mock.Spec.LearnedWords[k]; !ok || !reflect.DeepEqual(cur, models.MergeWordsEntry(cur, e)) {
-				added = append(added, k+" (words)")
-			}
-		}
-		if len(words) > 0 {
-			mock.Spec.LearnedWords = models.MergeWords(mock.Spec.LearnedWords, words)
+	// (A state that learned no words merges none: MergeWords of an empty
+	// side is the other.)
+	words := make(map[string]models.WordsEntry, len(st.LearnedWords))
+	for k, e := range st.LearnedWords {
+		if !varPlaces[k] {
+			words[k] = e
 		}
 	}
+	for k, e := range words {
+		if cur, ok := mock.Spec.LearnedWords[k]; !ok || !reflect.DeepEqual(cur, models.MergeWordsEntry(cur, e)) {
+			added = append(added, k+" (words)")
+		}
+	}
+	mock.Spec.LearnedWords = models.MergeWords(mock.Spec.LearnedWords, words)
 	for k := range mock.Spec.ReqBodyNoise {
 		if varPlaces[k] {
 			delete(mock.Spec.ReqBodyNoise, k)
