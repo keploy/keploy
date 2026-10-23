@@ -94,12 +94,14 @@ func runeClass(r rune) (class string, word, joins bool) {
 	}
 	// The scripts partition the runes they hold (Latin, Common and
 	// Inherited are three of them), and every letter and digit is in one.
+	class = "Unknown"
 	for _, name := range scriptNames {
 		if unicode.Is(unicode.Scripts[name], r) {
-			return name, true, false
+			class = name
+			break
 		}
 	}
-	return "Unknown", true, false
+	return class, true, false
 }
 
 // wrun is one run of a segment: [from, to) of the value, and its class.
@@ -168,15 +170,19 @@ func runsOf(s string, a, b int) []wrun {
 		class, word, joins := runeClass(r)
 		last := len(runs) - 1
 		switch {
-		case joins && open:
+		case joins:
+			// A mark joins the run it follows; one that follows none
+			// starts none.
+			if open {
+				runs[last].to = i + size
+			}
+		case !word:
+			open = false
+		case open && runs[last].class == class:
 			runs[last].to = i + size
-		case word && open && runs[last].class == class:
-			runs[last].to = i + size
-		case word:
+		default:
 			runs = append(runs, wrun{from: i, to: i + size, class: class})
 			open = true
-		default:
-			open = false
 		}
 		i += size
 	}
@@ -418,10 +424,9 @@ func learnWords(rec, live string, c clockSet) (models.WordsEntry, string) {
 			spans = append(spans, changedSpan{seg: g, kind: models.WordSlotInstant, lay: rs.lay, r: [2]int{rs.from, rs.to}, l: [2]int{fs.from, fs.to}})
 			continue
 		}
+		// A segment that did not change has its runs alike, none changed:
+		// the run loop learns nothing of it.
 		rt, ft := tr.text(g), tf.text(g)
-		if rt == ft {
-			continue
-		}
 		if sameRunLayout(tr, tf, g) {
 			for j, rr := range rs.runs {
 				fr := fs.runs[j]

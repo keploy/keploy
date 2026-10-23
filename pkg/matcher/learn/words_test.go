@@ -114,10 +114,10 @@ func TestWhatEachSlotAdmits(t *testing.T) {
 			"k=v3": true, "k=a-b.c": true, "k=": false, "k=a b": false, "k=é": false, "j=v3": false,
 		}},
 		{"a run alone, separators around it fixed", "k=-v1-", "k=-v2-", "s1r0", map[string]bool{
-			"k=-x_y-": true, "k=v3": false, "k=-v3": false, "k=--": false, "k=-": false, "k=-v3-x": false, "k=x-v3-": false, "k=-\xff-": false, "k=-\xffa-": false,
+			"k=-x_y-": true, "k=v3": false, "k=-v3": false, "k=--": false, "k=-": false, "k=-v3-x": false, "k=x-v3-": false, "k=-\xff-": false, "k=-\xffa-": false, "k=-\x80-": false,
 		}},
 		{"a segment whose runs drifted", "t V1StGXR8_Z5jdHi6B-myT", "t x9kLq-2mZp_Rt7YwXa3bN", "s1t", map[string]bool{
-			"t abc": true, "t a-b_c.d": true, "t a b": false, "t ab/c": false, "u abc": false, "t ü": false, "t \xffbc": false, "t \xff": false,
+			"t abc": true, "t a-b_c.d": true, "t a b": false, "t ab/c": false, "u abc": false, "t ü": false, "t \xffbc": false, "t \xff": false, "t \x80": false, "t a\x80": false,
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,6 +340,20 @@ func TestTheWordsGuardsAreStable(t *testing.T) {
 	}
 }
 
+// An instant that is no accepted read is refused only where a changed word
+// stands inside it: a token that begins right after it (a JS date's ')')
+// is learned.
+func TestAWordBesideAnInstantThatDidNotMoveIsLearned(t *testing.T) {
+	static := wAt.Add(-time.Hour).Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)"
+	e := learnedWords(t, static+"x-1_a", static+"y-22__b")
+	if got := slotsOf(e); got != "s12t" {
+		t.Fatalf("slots %s, want the token after the date alone", got)
+	}
+	if ok, _ := WordsAdmit(static+"x-1_a", wAt.Format("Mon Jan 02 2006 15:04:05 GMT-0700")+" (Coordinated Universal Time)x-1_a", e); ok {
+		t.Error("the date that did not move admitted to change")
+	}
+}
+
 // What is learned is what a later replay can place (WordsAdmit): a value
 // whose recorded instants are too many to try every way of placing its
 // instant slots is refused when it is learned, saying so, never learned to
@@ -402,6 +416,9 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"swapped ids", "A7K B8L x1", "B8L A7K x2", whyMoved, []string{"A7K", "B8L"}},
 		{"only the case", "ref=ab12", "ref=AB12", whyCase, nil},
 		{"beyond ASCII in a run", "id café1", "id café2", whyNotASCII, nil},
+		{"beyond ASCII in a run, recorded only", "id café1", "id cafe2", whyNotASCII, nil},
+		{"beyond ASCII in a run, in F only", "id cafe1", "id café2", whyNotASCII, nil},
+		{"a run that changed its script", "id 订单-A7", "id XY-A7", whyScript, nil},
 		{"beyond ASCII where the runs drifted", "id 订单A7", "id 订单-B8x", whyScript, nil},
 		{"after a percent escape", "q=a%20ref1", "q=a%20ref2", whyEscape, nil},
 		{"a token holding a percent", "t a%b-c_1", "t a%b_c-d_2", whyEscape, nil},
