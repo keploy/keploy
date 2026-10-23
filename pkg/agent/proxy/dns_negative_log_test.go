@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/dnsnegative"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -145,7 +145,7 @@ func TestRecordSaysOnceThatItPassedOnAnUpstreamNXDOMAIN(t *testing.T) {
 		if m["qtype"] != qt || m["answer"] != "NXDOMAIN" || m["upstream"] != upstream {
 			t.Errorf("line %d says qtype %v, answer %v, upstream %v; want %s, NXDOMAIN, %s", i, m["qtype"], m["answer"], m["upstream"], qt, upstream)
 		}
-		if m["next_step"] != nextStepDotlessNative {
+		if m["next_step"] != dnsnegative.NextStepDotlessNative {
 			t.Errorf("line %d for the dotless name %s gives the next step %q; want the hint that it is likely a container or compose service name", i, name, m["next_step"])
 		}
 	}
@@ -153,7 +153,7 @@ func TestRecordSaysOnceThatItPassedOnAnUpstreamNXDOMAIN(t *testing.T) {
 	// The count of the 10 answers not logged one by one is said when the
 	// recording stops: at DEBUG, since they repeat the lines above.
 	_ = p.SetGracefulShutdown(context.Background())
-	got := logs.FilterMessageSnippet("without an INFO line of their own").All()
+	got := logs.FilterMessage(dnsnegative.MsgCount).All()
 	if len(got) != 1 || got[0].Level != zapcore.DebugLevel || got[0].ContextMap()["repeats"] != uint64(10) || got[0].ContextMap()["debug_lookups"] != uint64(0) {
 		t.Fatalf("the stop logged %+v; want one DEBUG count of 10 repeats, no lookup past the limit", got)
 	}
@@ -181,98 +181,6 @@ func TestRecordSaysSoForAnAnswerFromKeploysDNSCache(t *testing.T) {
 	}
 	if up := lines[1].ContextMap()["upstream"]; up != net.JoinHostPort(host, port) {
 		t.Fatalf("the cache hit's line names the resolver %v; want the one that gave the cached answer, %s", up, net.JoinHostPort(host, port))
-	}
-}
-
-// negativeEntry is an answer from the upstream resolver at upstream, with
-// rcode and no records.
-func negativeEntry(rcode int, upstream string) dnsCacheEntry {
-	return dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: rcode}}, FromUpstream: true, upstream: upstream}
-}
-
-// Which unresolved answers a recording gives an INFO line, and with what next
-// step; which a DEBUG line only; and which none. Only an NXDOMAIN is ever
-// routine: a search-list candidate's is the resolver walking its list (a
-// compose name "db" is asked as db.corp.example.com. first on a host that
-// searches corp.example.com, then as db., which resolves), a reverse lookup's
-// is what a private address has, and gRPC's service-config probe NXDOMAINs in
-// every healthy gRPC app; an INFO line for any of them would read as a
-// failure in a run that has none. A SERVFAIL ends musl's lookup at the
-// candidate, so it is the lookup's outcome wherever it comes, but for a
-// reverse lookup's, which is never a step of the app's own. A name with no
-// dot gets the container-name hint whatever the answer, by where keploy runs.
-// A name a resolver asks before its search domains (its dots reach ndots) says
-// the search may yet find it. Under Docker's ndots:0 musl never searches, so a
-// name inside a search domain is the app's own.
-func TestRecordLogsANegativeAnswerByWhatItTellsTheUser(t *testing.T) {
-	const upstream = "192.0.2.53:53"
-	corp := []string{".", "corp.example.com"} // "search ." (systemd-resolved's stub) names no domain
-	k8s := []string{"default.svc.cluster.local", "svc.cluster.local", "cluster.local"}
-	nx := negativeEntry(dns.RcodeNameError, upstream)
-	for _, tc := range []struct {
-		name   string
-		search []string
-		ndots  int
-		docker bool
-		q      dns.Question
-		resp   dnsCacheEntry
-		level  zapcore.Level // the line's level; zapcore.InvalidLevel: no line
-		next   string
-	}{
-		{"a dotless name, NXDOMAIN, native: INFO, the Docker-network hint", corp, 1, false, dns.Question{Name: "mongoDb.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepDotlessNative},
-		{"a dotless name, SERVFAIL, native: INFO, the Docker-network hint", nil, 0, false, dns.Question{Name: "mongoDb.", Qtype: dns.TypeA}, negativeEntry(dns.RcodeServerFailure, upstream), zapcore.InfoLevel, nextStepDotlessNative},
-		{"a dotless name, REFUSED, native: INFO, the Docker-network hint", corp, 1, false, dns.Question{Name: "redis.", Qtype: dns.TypeA}, negativeEntry(dns.RcodeRefused, upstream), zapcore.InfoLevel, nextStepDotlessNative},
-		{"a dotless name, NXDOMAIN, agent in Docker: INFO, the agent's network", nil, 0, true, dns.Question{Name: "mongo.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepDotlessDocker},
-		{"a dotless name, NXDOMAIN, in a pod: INFO, no such Service", k8s, 5, false, dns.Question{Name: "mongo.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepDotlessK8s},
-		{"a dotless name, SERVFAIL, in a pod: INFO, no such Service", k8s, 5, false, dns.Question{Name: "mongo.", Qtype: dns.TypeA}, negativeEntry(dns.RcodeServerFailure, upstream), zapcore.InfoLevel, nextStepDotlessK8s},
-		{"a dotless name, a search domain named svc.: no pod", []string{"svc.example.com"}, 1, false, dns.Question{Name: "mongo.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepDotlessNative},
-		{"a dotted name, NXDOMAIN, no search domain: INFO, check the name", nil, 0, false, dns.Question{Name: "no-such-host.example.invalid.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepNoSuchName},
-		{"a dotted name, NXDOMAIN, only search .: INFO, check the name", []string{"."}, 0, false, dns.Question{Name: "no-such-host.example.invalid.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepNoSuchName},
-		{"a dotted name asked before the search domains (ndots:1): INFO, the search may find it", corp, 1, false, dns.Question{Name: "db.prod.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepNoSuchName + nextStepSearchMayFind},
-		{"a dotless name asked before the search domains (Docker's ndots:0): INFO, the hint, the search may find it", corp, 0, true, dns.Question{Name: "ldap.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepDotlessDocker + nextStepSearchMayFind},
-		{"a name in a search domain no resolver made (Docker's ndots:0, musl): INFO", corp, 0, true, dns.Question{Name: "payments.corp.example.com.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepNoSuchName + nextStepSearchMayFind},
-		{"a dotted name asked after the search domains (ndots:5): INFO, check the name", k8s, 5, false, dns.Question{Name: "api.example.invalid.", Qtype: dns.TypeA}, nx, zapcore.InfoLevel, nextStepNoSuchName},
-		{"a dotted name, SERVFAIL: INFO, the resolver failed", corp, 1, false, dns.Question{Name: "flaky.example.com.", Qtype: dns.TypeAAAA}, negativeEntry(dns.RcodeServerFailure, upstream), zapcore.InfoLevel, nextStepResolverError},
-		{"a search-list candidate, NXDOMAIN: DEBUG", corp, 1, false, dns.Question{Name: "db.Corp.Example.com.", Qtype: dns.TypeA}, nx, zapcore.DebugLevel, ""},
-		{"a search-list candidate, SERVFAIL: INFO", corp, 1, false, dns.Question{Name: "db.corp.example.com.", Qtype: dns.TypeA}, negativeEntry(dns.RcodeServerFailure, upstream), zapcore.InfoLevel, nextStepResolverError},
-		{"a search-list candidate, REFUSED: INFO", corp, 1, false, dns.Question{Name: "db.corp.example.com.", Qtype: dns.TypeA}, negativeEntry(dns.RcodeRefused, upstream), zapcore.InfoLevel, nextStepResolverError},
-		{"a reverse lookup, NXDOMAIN: DEBUG", corp, 1, false, dns.Question{Name: "5.0.17.172.in-addr.arpa.", Qtype: dns.TypePTR}, nx, zapcore.DebugLevel, ""},
-		{"an IPv6 reverse lookup, NXDOMAIN: DEBUG", corp, 1, false, dns.Question{Name: "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.", Qtype: dns.TypePTR}, nx, zapcore.DebugLevel, ""},
-		{"a reverse lookup, SERVFAIL: DEBUG", corp, 1, false, dns.Question{Name: "5.0.17.172.in-addr.arpa.", Qtype: dns.TypePTR}, negativeEntry(dns.RcodeServerFailure, upstream), zapcore.DebugLevel, ""},
-		{"gRPC's service-config probe, SERVFAIL: DEBUG", corp, 1, false, dns.Question{Name: "_grpc_config.upstream.", Qtype: dns.TypeTXT}, negativeEntry(dns.RcodeServerFailure, upstream), zapcore.DebugLevel, ""},
-		{"gRPC's service-config probe, NXDOMAIN: DEBUG", corp, 1, false, dns.Question{Name: "_grpc_config.upstream.", Qtype: dns.TypeTXT}, nx, zapcore.DebugLevel, ""},
-		{"the search domain itself is no candidate: INFO", corp, 1, false, dns.Question{Name: "corp.example.com.", Qtype: dns.TypeMX}, nx, zapcore.InfoLevel, nextStepNoSuchName + nextStepSearchMayFind},
-		{"a resolved name: none", corp, 1, false, dns.Question{Name: "example.org.", Qtype: dns.TypeA}, dnsCacheEntry{Msg: &dns.Msg{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeA, Class: dns.ClassINET}, A: net.IPv4(192, 0, 2, 1)}}}, FromUpstream: true, upstream: upstream}, zapcore.InvalidLevel, ""},
-		{"NODATA (NOERROR, no records): none", corp, 1, false, dns.Question{Name: "example.org.", Qtype: dns.TypeAAAA}, negativeEntry(dns.RcodeSuccess, upstream), zapcore.InvalidLevel, ""},
-		{"keploy's own SERVFAIL when no resolver answered: none (logged as an error where it is made)", corp, 1, false, dns.Question{Name: "mongoDb.", Qtype: dns.TypeA}, dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure}}}, zapcore.InvalidLevel, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			core, logs := observer.New(zapcore.DebugLevel)
-			p := &Proxy{logger: zap.New(core), dnsSearch: tc.search, dnsNdots: tc.ndots, IsDocker: tc.docker}
-			for i := 0; i < 3; i++ {
-				p.noteNegativeAnswer(tc.q, tc.resp)
-			}
-			all := logs.FilterField(zap.String("query", tc.q.Name)).All()
-			if tc.level == zapcore.InvalidLevel {
-				if len(all) != 0 {
-					t.Fatalf("logged %+v; want no line", all)
-				}
-				return
-			}
-			if len(all) != 1 || all[0].Level != tc.level {
-				t.Fatalf("three answers logged %+v; want one %s line", all, tc.level)
-			}
-			m := all[0].ContextMap()
-			if m["qtype"] != dns.TypeToString[tc.q.Qtype] || m["answer"] != dns.RcodeToString[tc.resp.Rcode] || m["upstream"] != upstream {
-				t.Errorf("the line says qtype %v, answer %v, upstream %v; want %s, %s, %s", m["qtype"], m["answer"], m["upstream"], dns.TypeToString[tc.q.Qtype], dns.RcodeToString[tc.resp.Rcode], upstream)
-			}
-			if next, _ := m["next_step"].(string); next != tc.next {
-				t.Errorf("the line's next step is %q; want %q", next, tc.next)
-			}
-			if r, _ := m["routine"].(string); (r != "") != (tc.level == zapcore.DebugLevel) {
-				t.Errorf("the line's routine reason is %q at %s; a DEBUG line says why it is routine, an INFO line does not", r, tc.level)
-			}
-		})
 	}
 }
 
@@ -304,8 +212,8 @@ func TestRecordSaysNothingOfASearchListWalkThatResolves(t *testing.T) {
 // like a candidate's: a redundant expansion of it (the name with a search
 // domain appended that it already ends in) shows the app asked for it.
 // Kubernetes' ndots:5 asks the candidates first and the name last; a host's
-// ndots:1 asks a dotted name first and the candidates after, so its answer is
-// taken from keploy's DNS cache when the expansion shows what it was.
+// ndots:1 asks a dotted name first and the candidates after, so its line
+// waits for the search, which fails too.
 func TestRecordSaysSoForAMissingNameInsideASearchDomain(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -321,13 +229,13 @@ func TestRecordSaysSoForAMissingNameInsideASearchDomain(t *testing.T) {
 				"mongodb.default.svc.cluster.local.svc.cluster.local.",
 				"mongodb.default.svc.cluster.local.cluster.local.",
 				"mongodb.default.svc.cluster.local.",
-			}, nextStepNoSuchName},
+			}, dnsnegative.NextStepNoSuchName},
 		{"a host, ndots:1: the name first", []string{"corp.example.com"}, 1,
 			"Payments.corp.example.com.", []string{
 				"Payments.corp.example.com.",
 				"Payments.corp.example.com.corp.example.com.",
 				"Payments.corp.example.com.corp.example.com.", // again, from the cache: learning it again counts nothing
-			}, nextStepNoSuchName}, // the search failed too: no "may find it"
+			}, dnsnegative.NextStepNoSuchName + dnsnegative.NextStepSearchFailed}, // the search failed too, and the line says so
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, port, stop := rcodeUpstream(t, dns.RcodeNameError)
@@ -347,129 +255,10 @@ func TestRecordSaysSoForAMissingNameInsideASearchDomain(t *testing.T) {
 			// The line said in another light is no answer of its own: nothing
 			// is counted for it, however often it is learned.
 			_ = p.SetGracefulShutdown(context.Background())
-			if got := logs.FilterMessageSnippet("without an INFO line of their own").All(); len(got) != 0 {
+			if got := logs.FilterMessage(dnsnegative.MsgCount).All(); len(got) != 0 {
 				t.Fatalf("the walk held no line back, yet the stop logged a count: %+v", got)
 			}
 		})
-	}
-}
-
-// The same name and type with a different answer is a lookup of its own: a
-// name that NXDOMAINs and then SERVFAILs tells the user two things.
-func TestRecordLogsEachAnswerToALookupOnce(t *testing.T) {
-	core, logs := observer.New(zapcore.InfoLevel)
-	p := &Proxy{logger: zap.New(core)}
-	q := dns.Question{Name: "payments.internal.", Qtype: dns.TypeA}
-	for _, rc := range []int{dns.RcodeNameError, dns.RcodeServerFailure, dns.RcodeNameError, dns.RcodeServerFailure} {
-		p.noteNegativeAnswer(q, negativeEntry(rc, "192.0.2.53:53"))
-	}
-	var answers []string
-	for _, e := range logs.FilterField(zap.String("query", q.Name)).All() {
-		answers = append(answers, e.ContextMap()["answer"].(string))
-	}
-	if len(answers) != 2 || answers[0] != "NXDOMAIN" || answers[1] != "SERVFAIL" {
-		t.Fatalf("NXDOMAIN, SERVFAIL, NXDOMAIN, SERVFAIL logged the answers %v; want [NXDOMAIN SERVFAIL]", answers)
-	}
-}
-
-// The lookups logged are the app's names, so they are bounded: a client
-// resolving a fresh name per request must flood neither the log nor the
-// agent's memory for the life of the recording. Past the INFO bound one line
-// says the rest go to DEBUG, they do, and the count is logged when the
-// recording stops: at INFO with a next step when lookups the user has not
-// seen came since the last count, at DEBUG when only repeats did, and not at
-// all when nothing moved. Past the tracking bound, answers are only counted.
-func TestRecordBoundsTheNegativeAnswersItLogsAndCountsTheRest(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
-	p := &Proxy{logger: zap.New(core)}
-	const past = 50
-	entry := negativeEntry(dns.RcodeNameError, "192.0.2.53:53")
-	name := func(i int) dns.Question {
-		return dns.Question{Name: "req-" + strconv.Itoa(i) + ".tenant.example.", Qtype: dns.TypeA}
-	}
-	for i := 0; i < negativeAnswerLogMax+past; i++ {
-		p.noteNegativeAnswer(name(i), entry)
-	}
-	const repeats = 3
-	for i := 0; i < repeats; i++ {
-		p.noteNegativeAnswer(name(0), entry)
-	}
-
-	if got := len(negativeAnswerLinesAt(logs, zapcore.InfoLevel)); got != negativeAnswerLogMax {
-		t.Fatalf("%d distinct lookups answered NXDOMAIN logged %d INFO lines; want the bound, %d", negativeAnswerLogMax+past, got, negativeAnswerLogMax)
-	}
-	if got := len(negativeAnswerLinesAt(logs, zapcore.DebugLevel)); got != past {
-		t.Fatalf("the %d lookups past the INFO bound logged %d DEBUG lines; want one each", past, got)
-	}
-	if got := logs.FilterMessageSnippet("it logs the rest at DEBUG").All(); len(got) != 1 || got[0].Level != zapcore.InfoLevel ||
-		got[0].ContextMap()["limit"] != int64(negativeAnswerLogMax) || got[0].ContextMap()["next_step"] != nextStepSeeDebug {
-		t.Fatalf("the bound reached logged %+v; want one INFO line saying the rest go to DEBUG, with the limit and how to see them", got)
-	}
-
-	count := func() []observer.LoggedEntry {
-		return logs.FilterMessageSnippet("without an INFO line of their own").All()
-	}
-	if len(count()) != 0 {
-		t.Fatalf("the count was logged before the recording stopped: %+v", count())
-	}
-	_ = p.SetGracefulShutdown(context.Background()) // the recording stops
-	_ = p.SetGracefulShutdown(context.Background())
-	got := count()
-	if len(got) != 1 || got[0].Level != zapcore.InfoLevel || got[0].ContextMap()["next_step"] != nextStepSeeDebug {
-		t.Fatalf("two stops logged %+v; want one INFO count, with how to see the lookups", got)
-	}
-	if m := got[0].ContextMap(); m["repeats"] != uint64(repeats) || m["debug_lookups"] != uint64(past) || m["untracked_answers"] != uint64(0) || m["lookups_logged"] != int64(negativeAnswerLogMax) {
-		t.Fatalf("the count says %+v; want repeats %d, debug_lookups %d, untracked_answers 0, lookups_logged %d", m, repeats, past, negativeAnswerLogMax)
-	}
-	p.noteNegativeAnswer(name(1), entry) // only a repeat moves
-	_ = p.SetGracefulShutdown(context.Background())
-	if got := count(); len(got) != 2 || got[1].Level != zapcore.DebugLevel || got[1].ContextMap()["repeats"] != uint64(repeats+1) {
-		t.Fatalf("a count only repeats moved is logged again at DEBUG: want a second line, DEBUG, repeats %d; got %+v", repeats+1, got)
-	}
-	p.noteNegativeAnswer(name(negativeAnswerLogMax+past), entry) // a lookup past the limit moves
-	_ = p.SetGracefulShutdown(context.Background())
-	if got := count(); len(got) != 3 || got[2].Level != zapcore.InfoLevel || got[2].ContextMap()["debug_lookups"] != uint64(past+1) {
-		t.Fatalf("a new lookup past the limit brings the count back to INFO: want a third line, INFO, debug_lookups %d; got %+v", past+1, got)
-	}
-
-	// Past the tracking bound nothing more is held, and the answers are counted.
-	for i := 0; i < negativeAnswerTrackMax+past; i++ {
-		p.noteNegativeAnswer(name(i), entry)
-	}
-	if got := len(p.negativeAnswers.named.seen); got != negativeAnswerTrackMax {
-		t.Fatalf("the set of lookups logged holds %d after %d distinct names; want its bound, %d", got, negativeAnswerTrackMax+past, negativeAnswerTrackMax)
-	}
-	if got := len(negativeAnswerLinesAt(logs, zapcore.DebugLevel)); got != negativeAnswerTrackMax-negativeAnswerLogMax {
-		t.Fatalf("%d DEBUG lines for lookups past the INFO bound; want one for each the set holds, %d", got, negativeAnswerTrackMax-negativeAnswerLogMax)
-	}
-	_ = p.SetGracefulShutdown(context.Background())
-	if m := count()[3].ContextMap(); m["debug_lookups"] != uint64(negativeAnswerTrackMax-negativeAnswerLogMax) || m["untracked_answers"] != uint64(past) {
-		t.Fatalf("the count says %+v; want debug_lookups %d and untracked_answers %d", m, negativeAnswerTrackMax-negativeAnswerLogMax, past)
-	}
-	for i := 0; i < repeats; i++ { // answers it does not track move the count at DEBUG
-		p.noteNegativeAnswer(name(negativeAnswerTrackMax), entry)
-	}
-	_ = p.SetGracefulShutdown(context.Background())
-	if got := count(); len(got) != 5 || got[4].Level != zapcore.DebugLevel || got[4].ContextMap()["untracked_answers"] != uint64(past+repeats) {
-		t.Fatalf("answers to an untracked lookup are counted at DEBUG: want a fifth line, DEBUG, untracked_answers %d; got %+v", past+repeats, got)
-	}
-
-	// The routine lookups' DEBUG lines, and the names learned as asked, are
-	// bounded the same way.
-	core, logs = observer.New(zapcore.DebugLevel)
-	p = &Proxy{logger: zap.New(core), dnsSearch: []string{"svc.cluster.local"}, dnsNdots: 5}
-	for i := 0; i < negativeAnswerTrackMax+past; i++ {
-		p.noteNegativeAnswer(dns.Question{Name: "req-" + strconv.Itoa(i) + ".svc.cluster.local.", Qtype: dns.TypeA}, entry)
-		p.noteNegativeAnswer(dns.Question{Name: "req-" + strconv.Itoa(i) + ".svc.cluster.local.svc.cluster.local.", Qtype: dns.TypeA}, entry)
-	}
-	if got := len(p.negativeAnswers.routine.seen); got != negativeAnswerTrackMax || p.negativeAnswers.routine.pastMax == 0 {
-		t.Fatalf("the set of routine lookups logged holds %d, and counted %d answers past it; want it full at its bound, %d, and the rest counted", got, p.negativeAnswers.routine.pastMax, negativeAnswerTrackMax)
-	}
-	if got := len(p.negativeAnswers.asked); got != negativeAnswerTrackMax {
-		t.Fatalf("the names learned as asked hold %d after %d; want them full at their bound, %d", got, negativeAnswerTrackMax+past, negativeAnswerTrackMax)
-	}
-	if got := len(negativeAnswerLinesAt(logs, zapcore.DebugLevel)) + len(negativeAnswerLinesAt(logs, zapcore.InfoLevel)); got > 2*negativeAnswerTrackMax {
-		t.Fatalf("%d lines for %d lookups; the two sets bound them to %d", got, 2*(negativeAnswerTrackMax+past), 2*negativeAnswerTrackMax)
 	}
 }
 
@@ -484,33 +273,6 @@ func negativeAnswerLinesAt(logs *observer.ObservedLogs, level zapcore.Level) []o
 	return out
 }
 
-// Each recording logs its own: a lookup the last recording logged is logged
-// again in the next (Record calls ResetRecordedDNSMocks), and neither the last
-// one's count nor the names it learned carry over.
-func TestEachRecordingLogsItsOwnNegativeAnswers(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
-	p := &Proxy{logger: zap.New(core), dnsSearch: []string{"corp.example.com"}}
-	q := dns.Question{Name: "mongoDb.", Qtype: dns.TypeA}
-	entry := negativeEntry(dns.RcodeNameError, "192.0.2.53:53")
-	p.noteNegativeAnswer(q, entry)
-	p.noteNegativeAnswer(q, entry)
-	p.noteNegativeAnswer(dns.Question{Name: "pay.corp.example.com.corp.example.com.", Qtype: dns.TypeA}, entry)
-
-	p.ResetRecordedDNSMocks()
-
-	p.noteNegativeAnswer(q, entry)
-	if got := negativeAnswerLines(logs, zapcore.InfoLevel, q.Name); len(got) != 2 {
-		t.Fatalf("the same lookup in two recordings logged %d lines; want one in each", len(got))
-	}
-	if p.negativeAnswers.wasAsked("pay.corp.example.com.") {
-		t.Fatal("a name the last recording learned the app asked as given carried over")
-	}
-	_ = p.SetGracefulShutdown(context.Background())
-	if got := logs.FilterMessageSnippet("without an INFO line of their own").All(); len(got) != 0 {
-		t.Fatalf("the second recording held nothing back, yet logged a count: %+v (the first recording's repeat carried over)", got)
-	}
-}
-
 // keploy test does not take this path: a negative answer it passes on (with
 // mocking off) is not recording's to explain.
 func TestReplayDoesNotLogTheRecordingsNegativeAnswerLine(t *testing.T) {
@@ -523,107 +285,6 @@ func TestReplayDoesNotLogTheRecordingsNegativeAnswerLine(t *testing.T) {
 	}
 	if got := negativeAnswerLinesAt(logs, zapcore.InfoLevel); len(got) != 0 {
 		t.Fatalf("replay logged %+v", got)
-	}
-}
-
-// Under Docker's ndots:0 a resolver asks every name as given first. glibc then
-// tries the search domains, whose candidates come after the name's own
-// NXDOMAIN, which keploy's cache still holds: those are routine. musl tries
-// none, so a name inside a search domain the app asks with no failed name
-// before it is the app's own, and gets its INFO line.
-func TestRecordUnderDockersNdots0TellsCandidatesFromTheAppsNames(t *testing.T) {
-	host, port, stop := rcodeUpstream(t, dns.RcodeNameError)
-	defer stop()
-	p, logs := recordingDNSProxy(t, host, port)
-	p.dnsSearch, p.dnsNdots, p.IsDocker = []string{"corp.example.com"}, 0, true
-
-	askDNS(t, p, "nope.", dns.TypeA)                      // glibc: the name as given
-	askDNS(t, p, "nope.corp.example.com.", dns.TypeA)     // then its candidate
-	askDNS(t, p, "payments.corp.example.com.", dns.TypeA) // musl: the app's own, alone
-
-	var info []string
-	for _, e := range negativeAnswerLinesAt(logs, zapcore.InfoLevel) {
-		info = append(info, e.ContextMap()["query"].(string))
-	}
-	if len(info) != 2 || info[0] != "nope." || info[1] != "payments.corp.example.com." {
-		t.Fatalf("logged INFO lines for %v; want [nope. payments.corp.example.com.]", info)
-	}
-	if got := negativeAnswerLines(logs, zapcore.DebugLevel, "nope.corp.example.com."); len(got) != 1 {
-		t.Fatalf("the candidate of a name that failed just before logged %d DEBUG lines; want 1", len(got))
-	}
-}
-
-// The ServeDNS goroutines note answers concurrently: the INFO bound and the
-// one line that says it was reached hold however they interleave.
-func TestRecordBoundsItsLinesUnderConcurrentLookups(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
-	p := &Proxy{logger: zap.New(core)}
-	entry := negativeEntry(dns.RcodeNameError, "192.0.2.53:53")
-	const lookups = 2 * negativeAnswerLogMax
-	var wg sync.WaitGroup
-	for i := 0; i < lookups; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			q := dns.Question{Name: "req-" + strconv.Itoa(i) + ".tenant.example.", Qtype: dns.TypeA}
-			p.noteNegativeAnswer(q, entry)
-			p.noteNegativeAnswer(q, entry)
-		}()
-	}
-	wg.Wait()
-	if got := len(negativeAnswerLinesAt(logs, zapcore.InfoLevel)); got != negativeAnswerLogMax {
-		t.Fatalf("%d concurrent lookups logged %d INFO lines; want %d", lookups, got, negativeAnswerLogMax)
-	}
-	if got := len(negativeAnswerLinesAt(logs, zapcore.DebugLevel)); got != lookups-negativeAnswerLogMax {
-		t.Fatalf("%d concurrent lookups logged %d DEBUG lines; want %d", lookups, got, lookups-negativeAnswerLogMax)
-	}
-	if got := logs.FilterMessageSnippet("it logs the rest at DEBUG").Len(); got != 1 {
-		t.Fatalf("the bound reached logged %d lines saying so; want 1", got)
-	}
-	if got := p.negativeAnswers.named.repeats; got != lookups {
-		t.Fatalf("counted %d repeats; want %d", got, lookups)
-	}
-}
-
-// In a pod (ndots:5) a resolver walks the search domains before the name as
-// given: each later candidate follows the earlier ones' NXDOMAINs, still in
-// keploy's cache, and is routine; the name as given comes last and is the
-// lookup's outcome. musl asks a name whose dots reach ndots as given only, so
-// a StatefulSet member's name in another namespace, which lies in the search
-// domain svc.cluster.local, is the app's own: no earlier candidate came.
-func TestRecordInAPodTellsTheResolversWalkFromTheAppsName(t *testing.T) {
-	k8s := []string{"default.svc.cluster.local", "svc.cluster.local", "cluster.local"}
-	for _, tc := range []struct {
-		name    string
-		queries []string
-		info    string // the one query logged at INFO
-	}{
-		{"glibc, an external name: the candidates, then the name", []string{
-			"api.example.invalid.default.svc.cluster.local.",
-			"api.example.invalid.svc.cluster.local.",
-			"api.example.invalid.cluster.local.",
-			"api.example.invalid.",
-		}, "api.example.invalid."},
-		{"musl, a StatefulSet member in another namespace: the name alone", []string{
-			"mongo-0.mongo.prod.svc.cluster.local.",
-		}, "mongo-0.mongo.prod.svc.cluster.local."},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			host, port, stop := rcodeUpstream(t, dns.RcodeNameError)
-			defer stop()
-			p, logs := recordingDNSProxy(t, host, port)
-			p.dnsSearch, p.dnsNdots = k8s, 5
-			for _, q := range tc.queries {
-				askDNS(t, p, q, dns.TypeA)
-			}
-			info := negativeAnswerLinesAt(logs, zapcore.InfoLevel)
-			if len(info) != 1 || info[0].ContextMap()["query"] != tc.info {
-				t.Fatalf("the queries %v logged %+v at INFO; want one line, for %s", tc.queries, info, tc.info)
-			}
-			if got := len(negativeAnswerLinesAt(logs, zapcore.DebugLevel)); got != len(tc.queries)-1 {
-				t.Fatalf("%d DEBUG lines; want one for each candidate, %d", got, len(tc.queries)-1)
-			}
-		})
 	}
 }
 
@@ -656,33 +317,120 @@ func TestCaptureDNSUpstreamReadsNdots(t *testing.T) {
 	}
 }
 
-// A candidate keeps its class for the recording. Its repeats come from
-// keploy's DNS cache, and the earlier candidate's answer, the evidence that
-// made it routine, may expire from the cache between two steps of a later
-// walk: that must not turn a healthy run's candidate into an INFO line.
-func TestRecordKeepsACandidateRoutineWhenItsEvidenceExpires(t *testing.T) {
-	host, port, stop := splitUpstream(t, "api.example.com.")
+// The same name in another case is the same lookup: DNS names are
+// case-insensitive, and keploy's DNS cache is not, so "mongodb." is answered
+// by the resolver again after "MongoDb.", and noted again.
+func TestRecordSaysOnceForANameAskedInTwoCases(t *testing.T) {
+	host, port, stop := rcodeUpstream(t, dns.RcodeNameError)
 	defer stop()
 	p, logs := recordingDNSProxy(t, host, port)
-	p.dnsSearch, p.dnsNdots = []string{"default.svc.cluster.local", "svc.cluster.local", "cluster.local"}, 5
-	walk := []string{
-		"api.example.com.default.svc.cluster.local.",
-		"api.example.com.svc.cluster.local.",
-		"api.example.com.cluster.local.",
-		"api.example.com.",
+	askDNS(t, p, "MongoDb.", dns.TypeA)
+	askDNS(t, p, "mongodb.", dns.TypeA)
+	if got := negativeAnswerLinesAt(logs, zapcore.InfoLevel); len(got) != 1 {
+		t.Fatalf("MongoDb. then mongodb. logged %d INFO lines; want 1: %+v", len(got), got)
 	}
-	for _, q := range walk {
-		askDNS(t, p, q, dns.TypeA)
-	}
-	// The next request's walk, at the moment the first candidate's cached
-	// answer expires: the second is still cached, its evidence is gone.
-	p.dnsCache.Remove(generateCacheKey(walk[0], dns.TypeA))
-	askDNS(t, p, walk[1], dns.TypeA)
+}
 
+// A name glibc and Go ask as given before the search domains (its dots reach
+// ndots) that one of them resolves is a healthy run: the line keploy would
+// give the name's NXDOMAIN waits for the search, which found it.
+func TestRecordSaysNothingOfANameItsSearchFound(t *testing.T) {
+	host, port, stop := splitUpstream(t, "svc.prod.corp.example.com.")
+	defer stop()
+	p, logs := recordingDNSProxy(t, host, port)
+	p.dnsSearch, p.dnsNdots = []string{"corp.example.com"}, 1
+	askDNS(t, p, "svc.prod.", dns.TypeA)
+	askDNS(t, p, "svc.prod.corp.example.com.", dns.TypeA)
+	_ = p.SetGracefulShutdown(context.Background())
 	if got := negativeAnswerLinesAt(logs, zapcore.InfoLevel); len(got) != 0 {
-		t.Fatalf("a healthy pod's walk logged %+v at INFO", got)
+		t.Fatalf("a name its search found logged %+v at INFO", got)
 	}
-	if got := p.negativeAnswers.routine.repeats; got != 1 {
-		t.Fatalf("the candidate's answer from the cache counted %d routine repeats; want 1", got)
+	if got := negativeAnswerLines(logs, zapcore.DebugLevel, "svc.prod."); len(got) != 1 || got[0].ContextMap()["routine"] != dnsnegative.RoutineFound {
+		t.Fatalf("the name as given logged %+v at DEBUG; want one line saying the search found it", got)
+	}
+}
+
+// musl asks a name whose dots reach ndots as given only, so a missing name in
+// the first search domain, which a walk of a shorter name would also ask
+// first, gets no search after it: when the app asks for it again, twice,
+// with no step of a walk between, keploy says so, at INFO, from its DNS
+// cache. (Once is not enough: another lookup started between two steps of
+// a walk looks the same.)
+func TestRecordSaysSoWhenTheAppAsksAgainWithNoSearchBetween(t *testing.T) {
+	host, port, stop := rcodeUpstream(t, dns.RcodeNameError)
+	defer stop()
+	p, logs := recordingDNSProxy(t, host, port)
+	p.dnsSearch, p.dnsNdots = []string{"corp.example.com"}, 1
+	askDNS(t, p, "payments.corp.example.com.", dns.TypeA)
+	askDNS(t, p, "payments.corp.example.com.", dns.TypeA) // the app retries
+	if got := negativeAnswerLinesAt(logs, zapcore.InfoLevel); len(got) != 0 {
+		t.Fatalf("a lookup a walk may yet explain logged %+v at INFO", got)
+	}
+	askDNS(t, p, "payments.corp.example.com.", dns.TypeA) // and again
+	got := negativeAnswerLines(logs, zapcore.InfoLevel, "payments.corp.example.com.")
+	if len(got) != 1 || got[0].ContextMap()["next_step"] != dnsnegative.NextStepNoSuchName+dnsnegative.NextStepSearchSkipped {
+		t.Fatalf("the app asking again logged %+v at INFO; want one line, saying its resolver searched it nowhere in between", got)
+	}
+}
+
+// A lookup still held when the recording stops is logged then, before the
+// count.
+func TestRecordLogsWhatItHoldsWhenTheRecordingStops(t *testing.T) {
+	host, port, stop := rcodeUpstream(t, dns.RcodeNameError)
+	defer stop()
+	p, logs := recordingDNSProxy(t, host, port)
+	p.dnsSearch, p.dnsNdots = []string{"corp.example.com"}, 1
+	askDNS(t, p, "nope.example.invalid.", dns.TypeA)
+	_ = p.SetGracefulShutdown(context.Background())
+	got := negativeAnswerLines(logs, zapcore.InfoLevel, "nope.example.invalid.")
+	if len(got) != 1 || got[0].ContextMap()["next_step"] != dnsnegative.NextStepNoSuchName+dnsnegative.NextStepSearchUnseen {
+		t.Fatalf("the stop logged %+v at INFO; want the held lookup, saying keploy did not see its search", got)
+	}
+}
+
+// A capture that sees the app's lookups without the relay (the enterprise
+// proxyless DNS capture) notes them in the recording's own log: what it holds
+// is logged when the recording stops, and the next recording starts afresh.
+func TestRecordSharesItsNegativeAnswerLogWithACapture(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	p := &Proxy{logger: zap.New(core)}
+	l := p.DNSNegativeLog()
+	cfg := dnsnegative.Config{Search: []string{"corp.example.com"}, Ndots: 1}
+	note := func(name string) {
+		q := dns.Question{Name: name, Qtype: dns.TypeA}
+		t := l.Ask(zap.New(core), cfg, "", q)
+		l.Note(zap.New(core), cfg, t, dnsnegative.Answer{Question: q, Rcode: dns.RcodeNameError, Upstream: "127.0.0.53:53"})
+	}
+	note("nope.example.invalid.")
+	_ = p.SetGracefulShutdown(context.Background())
+	if got := negativeAnswerLines(logs, zapcore.InfoLevel, "nope.example.invalid."); len(got) != 1 || got[0].Message != dnsnegative.MsgObserved {
+		t.Fatalf("the stop logged %+v; want the capture's held lookup, in its words", got)
+	}
+	p.ResetRecordedDNSMocks()
+	for i := 0; i < 3; i++ { // the app asks again, twice
+		note("nope.example.invalid.")
+	}
+	if got := negativeAnswerLines(logs, zapcore.InfoLevel, "nope.example.invalid."); len(got) != 2 {
+		t.Fatalf("the next recording logged the lookup %d times in all; want once in each", len(got))
+	}
+}
+
+// Another lookup of a name that starts between two steps of the first one's
+// walk, its A and then its AAAA answered from keploy's DNS cache, is no
+// retry: the first walk's search decides, and finds the name.
+func TestRecordTakesNoOverlappingLookupForARetry(t *testing.T) {
+	host, port, stop := splitUpstream(t, "svc.prod.corp.example.com.")
+	defer stop()
+	p, logs := recordingDNSProxy(t, host, port)
+	p.dnsSearch, p.dnsNdots = []string{"corp.example.com"}, 1
+	askDNS(t, p, "svc.prod.", dns.TypeA)    // the first lookup, asked as given
+	askDNS(t, p, "svc.prod.", dns.TypeAAAA) //
+	askDNS(t, p, "svc.prod.", dns.TypeA)    // another lookup, from the cache
+	askDNS(t, p, "svc.prod.", dns.TypeAAAA) //
+	askDNS(t, p, "svc.prod.corp.example.com.", dns.TypeA)
+	askDNS(t, p, "svc.prod.corp.example.com.", dns.TypeAAAA)
+	_ = p.SetGracefulShutdown(context.Background())
+	if got := negativeAnswerLinesAt(logs, zapcore.InfoLevel); len(got) != 0 {
+		t.Fatalf("a name its search found logged %+v at INFO", got)
 	}
 }

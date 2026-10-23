@@ -33,6 +33,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/acceptcount"
 	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
+	"go.keploy.io/server/v3/pkg/agent/proxy/dnsnegative"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
@@ -392,11 +393,12 @@ type Proxy struct {
 	// replaced, by ResetRecordedDNSMocks.
 	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
-	// negativeAnswers is what the recording has logged of the negative DNS
-	// answers it passed on to the app (noteNegativeAnswer): once per
-	// (name, qtype, answer), bounded, the rest counted. Emptied by
-	// ResetRecordedDNSMocks.
-	negativeAnswers negativeAnswers
+	// negativeAnswers is what the recording has logged of the DNS answers
+	// that did not resolve the app's lookups (noteNegativeAnswer,
+	// DNSNegativeLog): once per (name, qtype, answer), bounded, the rest
+	// counted. Logged and counted at the stop (SetGracefulShutdown), started
+	// afresh by ResetRecordedDNSMocks.
+	negativeAnswers dnsnegative.Log
 
 	// The DNS servers, set by startDNSServers before anything serves or
 	// stops them.
@@ -1563,7 +1565,7 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 	if p.nodataRelayLogged != nil {
 		p.nodataRelayLogged.Purge()
 	}
-	p.negativeAnswers.reset()
+	p.negativeAnswers.Reset()
 	p.logger.Debug("DNS deduplication trackers reset")
 }
 
@@ -1589,7 +1591,7 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 		p.asyncEngine.LogReport(p.logger)
 	}
 	p.logSelfCalls()
-	p.logNegativeAnswers()
+	p.negativeAnswers.Stop(p.logger)
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	// Flush any in-flight packet capture so the test-set's pcap is
 	// finalised before the agent is allowed to exit.

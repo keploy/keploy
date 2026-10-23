@@ -14,6 +14,7 @@ import (
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/dnsnegative"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -354,6 +355,13 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	for _, question := range r.Question {
 		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
+		// Recording tells the log of unresolved answers of the question as
+		// it comes: it may be the next step of a search-list walk a held
+		// lookup waits on, and its answer is noted below.
+		var asked dnsnegative.Ticket
+		if mode == models.MODE_RECORD {
+			asked = p.negativeAnswers.Ask(p.logger, p.negativeAnswerConfig(), "", question)
+		}
 
 		var resp dnsCacheEntry
 		found := false
@@ -379,9 +387,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		// Recording passes the resolver's negative answers on to the app
 		// unchanged, from the cache as well as from the resolver: say so,
-		// once per lookup.
+		// once per lookup. Noted before the answer is written: the app's
+		// next question, a step of its resolver's walk, must find it noted.
 		if mode == models.MODE_RECORD {
-			p.noteNegativeAnswer(question, resp)
+			p.noteNegativeAnswer(question, resp, asked)
 		}
 		if rd != nil {
 			rd.bookDNSAnswer(question, resp.Answer)
@@ -447,43 +456,8 @@ func udpAnswerSize(r *dns.Msg) int {
 // had a mock. A name carrying only ONE search suffix is NOT redundant: it is
 // a real name, and its miss is still worth reporting.
 func (p *Proxy) isRedundantSearchExpansion(name string) bool {
-	_, ok := p.redundantExpansionBase(name)
+	_, ok := dnsnegative.RedundantExpansionBase(p.dnsSearch, name)
 	return ok
-}
-
-// redundantExpansionBase is the name a redundant search-list expansion
-// (isRedundantSearchExpansion) was expanded from, as the app gave it to its
-// resolver: name without the search domain it appended, in name's own case.
-// ok is false when name is no redundant expansion.
-func (p *Proxy) redundantExpansionBase(name string) (base string, ok bool) {
-	if len(p.dnsSearch) == 0 || name == "" {
-		return "", false
-	}
-	fqdn := dns.Fqdn(name)
-	q := strings.ToLower(fqdn)
-	for _, s := range p.dnsSearch {
-		s = strings.ToLower(strings.TrimSuffix(dns.Fqdn(s), "."))
-		if s == "" {
-			continue
-		}
-		suffix := "." + s + "."
-		if !strings.HasSuffix(q, suffix) {
-			continue
-		}
-		// Strip the trailing ".s", keeping the final dot, and ask whether
-		// what remains still ends in the same suffix.
-		if !strings.HasSuffix(q[:len(q)-len(s)-1], suffix) {
-			continue
-		}
-		// Lower-casing keeps a DNS name's length (its presentation form is
-		// ASCII), so the cut falls at the same place in fqdn; a name it
-		// would not keep is given lower-cased.
-		if len(fqdn) != len(q) {
-			fqdn = q
-		}
-		return fqdn[:len(fqdn)-len(s)-1], true
-	}
-	return "", false
 }
 
 func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
@@ -719,7 +693,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 // grpc-go's default (dns) resolver issues one per target. The record has no
 // bearing on the RPCs keploy captures, and its absence is the normal answer.
 func isGrpcServiceConfigProbe(q dns.Question) bool {
-	return q.Qtype == dns.TypeTXT && strings.HasPrefix(strings.ToLower(q.Name), "_grpc_config.")
+	return dnsnegative.IsGrpcServiceConfigProbe(q)
 }
 
 func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
