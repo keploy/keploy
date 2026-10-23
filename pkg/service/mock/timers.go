@@ -59,6 +59,31 @@ func timerKey(method, host, target, body string) string {
 	return method + " " + host + " " + target + " " + body
 }
 
+// sessionOf is the session an HTTP mock's call was made in: the hex SHA-256 of
+// its Cookie and Authorization headers. Two recordings of one call made in
+// different sessions (another user's login) answer different callers: a
+// replay call matches the one of its own session only. Empty for any other
+// kind, and for a call that sends neither.
+func sessionOf(mk *models.Mock) string {
+	if mk == nil || mk.Kind != models.HTTP || mk.Spec.HTTPReq == nil {
+		return ""
+	}
+	var cookie, auth string
+	for k, v := range mk.Spec.HTTPReq.Header {
+		switch {
+		case strings.EqualFold(k, "Cookie"):
+			cookie = v
+		case strings.EqualFold(k, "Authorization"):
+			auth = v
+		}
+	}
+	if cookie == "" && auth == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(cookie + "\n" + auth))
+	return hex.EncodeToString(sum[:])
+}
+
 // answerOf is an HTTP mock's recorded answer, as one value two recordings of a
 // call share only when they answered alike: the hex SHA-256 of its status code
 // and body. Empty for any other kind and for an answer whose body was not kept
@@ -84,8 +109,9 @@ func answerOf(mk *models.Mock) string {
 // it was recorded in, whose own recording it follows when a judged commit
 // keeps or drops it), and its stretch: where in the set's writes its answer
 // holds. A write bounds that stretch only where the call's recorded answer
-// changed across it: consecutive recordings of one call (one fingerprint, in
-// recorded order) that answered alike (answerOf) share one stretch, from the
+// changed across it: consecutive recordings of one call made in one session
+// (one fingerprint and one sessionOf, in recorded order) that answered alike
+// (answerOf) share one stretch, from the
 // last write before the first of them to the first write after the last of
 // them, so a write between them (a session's keep-alive ping) cuts nothing:
 // the recording proves the call read the same on both sides of it. They share
@@ -157,19 +183,22 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 	at := func(mk capturedMock) int {
 		return sort.Search(len(writes), func(i int) bool { return writes[i].ts.After(mk.ts) })
 	}
-	// Each call's recordings in recorded order, joined into runs that answered
-	// alike: a run's stretch is from the write before its first to the write
-	// after its last.
+	// Each call's recordings in each session, in recorded order, joined into
+	// runs that answered alike: a run's stretch is from the write before its
+	// first to the write after its last. A recording of another session is
+	// never in the run: a replay call cannot match it, so it must not count
+	// as the run's to answer.
 	byCall := map[string][]capturedMock{}
 	var calls []string
 	for _, mk := range ordered {
 		if !timer[mk.name] {
 			continue
 		}
-		if _, ok := byCall[mk.fp]; !ok {
-			calls = append(calls, mk.fp)
+		call := mk.fp + "\x00" + mk.sess
+		if _, ok := byCall[call]; !ok {
+			calls = append(calls, call)
 		}
-		byCall[mk.fp] = append(byCall[mk.fp], mk)
+		byCall[call] = append(byCall[call], mk)
 	}
 	stretch := map[string]*models.Stretch{}
 	for _, fp := range calls {

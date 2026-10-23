@@ -188,3 +188,38 @@ func TestCallFingerprintNamesTheCallAsTheHarnessDoes(t *testing.T) {
 		t.Fatalf("a Mongo mock got %q %v", fp, write)
 	}
 }
+
+// Recordings of one call made in two sessions (another user's login) never
+// share a run, though they answered alike: a replay call matches the one of
+// its own session only, so the other must not count as the run's to answer.
+func TestTimerScopeKeepsEachSessionsRecordingsInARunOfTheirOwn(t *testing.T) {
+	poll := timerKey("POST", "localhost:8083", "/query", pollBody)
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(1), fp: poll, ans: "none", sess: "admin"},
+		{name: "mock-1", ts: at(2), fp: poll, ans: "none", sess: "viewer"},
+		{name: "mock-2", ts: at(3), fp: poll, ans: "none", sess: "viewer"},
+	}
+	windows := []models.ScopeWindow{
+		{Name: "T1", Timers: []models.TimerCall{{Method: "POST", Host: "localhost:8083", URL: "/query", Body: pollBody, N: 0}}},
+		{Name: "T2", Timers: []models.TimerCall{{Method: "POST", Host: "localhost:8083", URL: "/query", Body: pollBody, N: 0}, {Method: "POST", Host: "localhost:8083", URL: "/query", Body: pollBody, N: 1}}},
+	}
+	_, worker := timerScope(windows, mocks, map[string][]models.MockEntry{"T1": {{Name: "mock-0"}}, "T2": {{Name: "mock-1"}, {Name: "mock-2"}}})
+	_, run := stretchesOf(worker)
+	if run["mock-1"] != run["mock-2"] || run["mock-0"] == run["mock-1"] {
+		t.Fatalf("runs %v: want mock-1 and mock-2 in one, mock-0 in its own", run)
+	}
+}
+
+// sessionOf names a call's session by its Cookie and Authorization headers.
+func TestSessionOf(t *testing.T) {
+	with := func(h map[string]string) *models.Mock {
+		return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Header: h}}}
+	}
+	a, b := sessionOf(with(map[string]string{"Cookie": "jwt=a"})), sessionOf(with(map[string]string{"cookie": "jwt=b"}))
+	if a == "" || a == b || sessionOf(with(map[string]string{"Accept": "*/*"})) != "" {
+		t.Fatalf("sessions %q %q", a, b)
+	}
+	if sessionOf(with(map[string]string{"Authorization": "Bearer x"})) == sessionOf(with(map[string]string{"Authorization": "Bearer y"})) {
+		t.Fatal("two bearer tokens are one session")
+	}
+}

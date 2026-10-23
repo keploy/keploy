@@ -375,7 +375,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 		protocol := provenswitch.On() && mk.IsProtocolPhase()
 		fp, write := callFingerprint(mk)
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef, fp: fp, write: write, ans: answerOf(mk)})
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef, fp: fp, write: write, ans: answerOf(mk), sess: sessionOf(mk)})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -1106,8 +1106,10 @@ type capturedMock struct {
 	// (models.IsReadCall): what can end a timer's stretch.
 	write bool
 	// ans is an HTTP call's recorded answer (answerOf): a timer's recordings
-	// that answered alike share one stretch.
-	ans string
+	// that answered alike share one stretch. sess is the session it was made
+	// in (sessionOf): only recordings of one session share a run.
+	ans  string
+	sess string
 }
 
 // stagingSetID returns the staging set name record captures into while recording
