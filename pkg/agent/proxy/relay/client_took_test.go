@@ -308,6 +308,32 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 			t.Fatalf("marked %q for the refused chunk's Write, want nothing", m)
 		}
 	})
+	t.Run("every chunk set aside refused at once: each counted, and none left aside", func(t *testing.T) {
+		// Three chunks wait for the client's answer when the connection
+		// closes with none of them acknowledged. Each is counted as not
+		// taken, and each leaves the set-aside list, so the capture
+		// watermark lets go of all three, not only of the first.
+		h := newTookHarness(finned(100))
+		for _, b := range []string{"one", "two", "three"} {
+			if f := h.write(bg, b, ""); f != fateAwaiting {
+				t.Fatalf("%s: fate %d, want set aside", b, f)
+			}
+		}
+		h.sock.set(closed(100))
+		h.settled(t)
+		if chunks, bytes := h.r.NotTaken(); chunks != 3 || bytes != 11 {
+			t.Fatalf("%d chunks (%d bytes) not taken, want all three (11 bytes)", chunks, bytes)
+		}
+		if n := h.t.awaitingLen(); n != 0 {
+			t.Fatalf("%d chunks still set aside after the client refused them all, want none", n)
+		}
+		if _, _, held := h.t.oldestUnconsumed(); held {
+			t.Fatal("the capture watermark still waits for a refused chunk")
+		}
+		if q := h.queued(); len(q) != 0 || h.stops.Load() != 1 {
+			t.Fatalf("queued %q, %d stops; want nothing queued, once", q, h.stops.Load())
+		}
+	})
 	t.Run("acknowledged, then closed: never refused", func(t *testing.T) {
 		h := newTookHarness(finned(100), closed(130))
 		h.write(bg, "first", "")
