@@ -652,7 +652,7 @@ type valueDrift struct {
 	// wholes are the value whole, recorded, in each declared form.
 	wholes map[string]bool
 	// wpieces are the changed pieces of its words (wordPieces), as it stands
-	// and decoded: what the glued test reads (gluedPieces).
+	// and decoded: what the glued test reads (glueOf).
 	wpieces []wpiece
 	// words and wordsWhy are what record's full round learns of its words
 	// (learnWords), read once (DriftCache.Words).

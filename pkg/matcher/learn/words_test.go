@@ -550,6 +550,8 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		// Read as words, the rest of such an instant would be held fixed.
 		{"an epoch's fraction that moved otherwise, its seconds fixed", "ts " + strconv.FormatInt(wAt.Unix(), 10) + ".123", "ts " + strconv.FormatInt(wAt.Unix(), 10) + ".456", whyInstant, nil},
 		{"a date whose day alone changed", "on 2026-10-21", "on 2026-10-25", whyInstant, nil},
+		// What is held fixed comes after the slot here.
+		{"a date whose year alone changed", "on 2026-10-21", "on 2027-10-21", whyInstant, nil},
 		{"a UUID recorded with a variant keploy does not read, F's one it does", "id " + uuid7Of(wAt, "abc123456789abcdef", 'c', false), "id " + uuid7Of(later, "def0123456789abcde", '8', false), whyVariant, nil},
 		{"a UUID in F of a variant keploy does not read, the recorded one it does", "id " + uuid7Of(wAt, "abc123456789abcdef", '8', false), "id " + uuid7Of(later, "def0123456789abcde", 'c', false), "a time-ordered UUID in it has a variant keploy does not read", nil},
 		{"an instant written otherwise", strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.UnixMilli(), 10), whySkeleton, nil},
@@ -692,7 +694,7 @@ func TestGluedContainment(t *testing.T) {
 	} {
 		pa, _ := changedPiece(tc.a[0], tc.a[1])
 		pb, _ := changedPiece(tc.b[0], tc.b[1])
-		if got := gluedPieces(pa, pb); got != tc.want {
+		if got, _ := glueOf(wpiece{run: pa}, wpiece{run: pb}); got != tc.want {
 			t.Errorf("%s: glued %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -882,10 +884,10 @@ func TestAShortPieceLandsInAFreshHexAtTheStatedRates(t *testing.T) {
 	one, two := 0, 0
 	for i := 0; i < n; i++ {
 		c := run{hexOf(), hexOf()}
-		if gluedPieces(c, run{"7", "8"}) {
+		if g, _ := glueOf(wpiece{run: c}, wpiece{run: run{"7", "8"}}); g {
 			one++
 		}
-		if gluedPieces(c, run{"17", "18"}) {
+		if g, _ := glueOf(wpiece{run: c}, wpiece{run: run{"17", "18"}}); g {
 			two++
 		}
 	}
@@ -1589,6 +1591,10 @@ func TestAWordInsideAUUIDMayBeChance(t *testing.T) {
 		// A group of the UUID that is a word of the other: they share a word,
 		// a tie found before any glue.
 		{"a group of the UUID", [2]string{ur, uf}, [2]string{ur[24:], uf[24:]}, models.RefusedTie, false},
+		// Glued inside the piece of a value whose parts changed, and of a
+		// segment whose runs changed: no UUID's, no chance.
+		{"inside a value whose parts changed", [2]string{"ORD1042", "ORD 2077"}, [2]string{"1042", "2077"}, models.RefusedContainment, false},
+		{"inside a segment whose runs changed", [2]string{"note INV1042", "note INV-2077"}, [2]string{"1042", "2077"}, models.RefusedContainment, false},
 	} {
 		for _, ab := range [][2][2]string{{tc.a, tc.b}, {tc.b, tc.a}} {
 			dc := NewDriftCache()
@@ -1605,6 +1611,19 @@ func TestAWordInsideAUUIDMayBeChance(t *testing.T) {
 	}
 	if (*DriftCache)(nil).TieChance([2]string{ur, uf}, [2]string{"a", "b"}, nil) != true {
 		t.Error("a nil cache reads no chance")
+	}
+	// A UUID read within the call's window, its clock not moved by the lead,
+	// is one there too: the chance is read in the window. Read with none, it
+	// is plain runs, and a word inside one of them is no UUID's.
+	wr, wf := uuid7Of(wAt, "1234561234a5678901", '8', false), uuid7Of(wAt.Add(40*time.Second), "3216544321b5678902", '9', false)
+	win := &Window{Rec: Span{From: wAt.Add(-time.Second), To: wAt.Add(time.Second)}, F: Span{From: wAt.Add(39 * time.Second), To: wAt.Add(41 * time.Second)}}
+	for _, ab := range [][2][2]string{{{wr, wf}, {"a", "b"}}, {{"a", "b"}, {wr, wf}}} {
+		if dc := NewDriftCache(); dc.TieOf(ab[0], ab[1], win) != TiePartial || !dc.TieChance(ab[0], ab[1], win) {
+			t.Errorf("a UUID read within the call's window (%v): no tie by chance", ab)
+		}
+	}
+	if NewDriftCache().TieChance([2]string{wr, wf}, [2]string{"a", "b"}, nil) {
+		t.Error("a UUID read by no clock: a word inside its runs called chance")
 	}
 	// From an earlier call: its UUID, this call's word.
 	earlier := []Earlier{{Mock: "mock-0", Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.id", Type: String, Value: ur}, Live: uf, Place: "body.id"}}}}

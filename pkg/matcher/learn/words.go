@@ -496,7 +496,7 @@ func learnWords(rec, live string, c clockSet) (models.WordsEntry, string) {
 // word that moved, changed only its case, stands right after an escape, or is part of an instant that is no accepted clock read (or of a
 // time-ordered UUID glued to a word); and between the slots of the value, a
 // changed word that repeats, or one glued inside another (the changed piece,
-// class-bounded: gluedPieces). An instant slot is a clock read: it is
+// class-bounded: glueOf). An instant slot is a clock read: it is
 // checked with the others only as a UUID's.
 func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet) string {
 	recWords, liveWords := wordsAt(tr), wordsAt(tf)
@@ -775,12 +775,6 @@ func pieceIn(c, p run) bool {
 	return false
 }
 
-// gluedPieces reports whether either of two changed pieces lies inside the
-// other (pieceIn): the two drifted values are glued, one carried inside the
-// other ("ORD123" and "123", "INV1042" and "ORD1042", "p12x1042" and
-// "1042").
-func gluedPieces(a, b run) bool { return pieceIn(a, b) || pieceIn(b, a) }
-
 // wpiece is a changed piece of a drifted value's words (changedPiece), and
 // whether it is a time-ordered UUID's.
 type wpiece struct {
@@ -789,8 +783,9 @@ type wpiece struct {
 }
 
 // glueOf says how two changed pieces stand: glued when either lies inside
-// the other (gluedPieces), and chance when each that holds the other is a
-// time-ordered UUID's. A UUID's random digits hold a short word now and then
+// the other (pieceIn), the two drifted values one carried inside the other
+// ("ORD123" and "123", "INV1042" and "ORD1042", "p12x1042" and "1042"); and
+// chance when each that holds the other is a time-ordered UUID's. A UUID's random digits hold a short word now and then
 // by chance at one place recorded and live: over 20,000 seeded UUIDv7s
 // each, beside a word of one letter that changed about 1.6% of them, of one
 // digit 0.3%, of two digits 0.01%. keploy cannot tell that from a word cut
@@ -1023,7 +1018,7 @@ const (
 	// value of the call.
 	TieWhole
 	// TiePartial: one carries the other, or a part of it, inside a longer
-	// value (sources), or glued (gluedPieces): keploy cannot follow it.
+	// value (sources), or glued (glueOf): keploy cannot follow it.
 	TiePartial
 )
 

@@ -624,9 +624,12 @@ func TestTheLearnPlansTies(t *testing.T) {
 					t.Fatalf("served %v miss %+v, want refused saying %q", served, miss, tc.refused)
 				}
 				// Only a glue inside a UUID's random digits says it may be
-				// chance.
+				// chance, and a tie's reason ends where its rule's text does.
 				if strings.Contains(miss.res.Why, learn.UUIDChance) != strings.Contains(tc.refused, learn.UUIDChance) {
 					t.Fatalf("refused saying %q, want chance said %v", miss.res.Why, strings.Contains(tc.refused, learn.UUIDChance))
+				}
+				if strings.Contains(tc.refused, "keploy cannot follow") && !strings.HasSuffix(miss.res.Why, tc.refused) {
+					t.Fatalf("refused saying %q, want it to end %q", miss.res.Why, tc.refused)
 				}
 				// The rule that refused it, on the miss's report
 				// (models.UnmatchedCall.Refused): what enterprise's tools/emeasure
@@ -703,6 +706,50 @@ func TestAnObfuscatedValueIsExcusedAtLearn(t *testing.T) {
 	}
 	if got := db.consumed[0].Spec.LearnedWords; len(got) != 1 || got["body.note"].Digest == "" {
 		t.Fatalf("words at %v, want body.note's alone", got)
+	}
+}
+
+// A word inside a time-ordered UUID read within the call's window (its clock
+// not moved by the lead) may stand there by chance, which the refusal says,
+// at two places of one call and against a test case's value: the chance is
+// read in the call's window, where the UUID is one, as the tie is.
+func TestAWordInsideAUUIDReadInTheCallsWindowMayBeChance(t *testing.T) {
+	v7 := func(at time.Time, r string) string {
+		h := fmt.Sprintf("%012x", at.UnixMilli())
+		return h[:8] + "-" + h[8:12] + "-7" + r[:3] + "-a" + r[3:6] + "-" + r[6:18]
+	}
+	recRead := learnAt.Add(time.Millisecond)
+	offset := learn.FullRoundLead + 2*time.Second - 40*time.Second // F's clock: not moved by the lead
+	servedPrev := learnAt.Add(40 * time.Second)
+	fRead := servedPrev.Add(offset + time.Millisecond)
+	ur, uf := v7(recRead, "1234561234a5678901"), v7(fRead, "3216544321b5678902")
+	for _, tc := range []struct {
+		name, rec, f, refused string
+		given                 []variables.Binding
+	}{
+		{"two places", `{"id":"` + ur + `","n":"a"}`, `{"id":"` + uf + `","n":"b"}`, "keploy cannot follow as one value: " + learn.UUIDChance, nil},
+		{"a test case's value", `{"id":"` + ur + `"}`, `{"id":"` + uf + `"}`, "which keploy cannot follow: " + learn.UUIDChance,
+			[]variables.Binding{{Name: "n", Recorded: "a", Value: "b", Given: true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			prev := learnRecorded("mock-p", 0, "GET", "/v1/health", "", nil, `{}`)
+			m := learnRecorded("mock-0", 2*time.Millisecond, "POST", "/v1/items", tc.rec, nil, `{}`)
+			db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{m}, staged: []*models.Mock{prev}}}
+			if tc.given != nil {
+				db.table.Start(tc.given)
+			}
+			tr := learn.NewTracker()
+			tr.Begin()
+			tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+			tr.ServedMockAt(prev, servedPrev)
+			call := live("POST", "/v1/items", tc.f, nil)
+			call.arrived = servedPrev.Add(2 * time.Millisecond)
+			served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts)
+			if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, tc.refused) || miss.res.Refused != models.RefusedContainment {
+				t.Fatalf("served %v miss %+v err %v, want refused as containment saying %q", served, miss, err, tc.refused)
+			}
+		})
 	}
 }
 
