@@ -196,8 +196,10 @@ type TestsReceipt struct {
 	// Live and Mocked are, under the proven switch, where the run's calls to
 	// local listeners went, each row naming the test open then (none:
 	// outside every test): a listener of the run's own process tree, called
-	// live (models.LiveRow), and any other local listener, recorded and
-	// mocked (models.MockedRow). keploy's summary lists them.
+	// live, or a local dependency keploy relayed live instead of recording it
+	// (models.LiveRow, its Relayed and Container set), and any other local
+	// listener, recorded and mocked (models.MockedRow). keploy's summary
+	// lists them.
 	Live   []models.LiveRow   `yaml:"live,omitempty" json:"live,omitempty"`
 	Mocked []models.MockedRow `yaml:"mocked,omitempty" json:"mocked,omitempty"`
 	// Real is, under the proven switch, what the run saw of mock.real beyond

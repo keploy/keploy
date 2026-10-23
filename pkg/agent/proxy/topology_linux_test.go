@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -801,7 +803,10 @@ func (s chanSink) NoteMocked(r models.MockedRow) {
 // handleConnection lists a local destination as mocked only when the call
 // goes on to be recorded or answered from mocks, in a record and a replay
 // alike: a session that passes connections through lists nothing. A
-// container destination is listed by its container key.
+// container destination is listed by its container key. The row is listed
+// once keploy has read the client's first frame and knows a parser records
+// or mocks the call (mockedNote): the client sends one (a line), as every
+// client keploy records does before it waits for an answer.
 func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testing.T) {
 	for _, tc := range []struct {
 		mode        models.Mode
@@ -855,7 +860,7 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- p.handleConnection(ctx, src) }()
-			if _, err := app.Write([]byte("ping")); err != nil {
+			if _, err := app.Write([]byte("ping\r\n")); err != nil {
 				t.Fatal(err)
 			}
 			if tc.passthrough {
@@ -959,6 +964,111 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 			}
 			if got := p.RealRun().Reached; len(got) != 1 {
 				t.Fatalf("the REAL destination was not reached: %v", got)
+			}
+		})
+	}
+}
+
+// Under the switch, in keploy mock's run, a Redis connection the Redis skip
+// relays to the real Redis is reached for real and nothing of it is
+// recorded or mocked: it is listed live, relayed by the skip, never mocked,
+// in a record and in a replay, each time it carries the client's bytes (a
+// connection a pool keeps open across tests is listed for each test that
+// used it), by its program for a listener outside the run's tree, by its
+// key for a container. A connection to the same listener that a parser
+// records (a memcached-style get) is listed mocked, as before; and one a
+// record's parsing kill switch relays is listed live, never mocked.
+func TestUnderTheSwitchARelayedRedisIsListedLiveNotMocked(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "container:redis:6379@aaaaaaaaaaaa"
+	for _, tc := range []struct {
+		mode           models.Mode
+		container, tls bool
+	}{
+		{models.MODE_RECORD, false, false}, {models.MODE_TEST, false, false},
+		{models.MODE_RECORD, true, false}, {models.MODE_TEST, true, false},
+		{models.MODE_RECORD, false, true}, {models.MODE_TEST, false, true},
+	} {
+		t.Run(fmt.Sprintf("%s/container=%v/tls=%v", tc.mode, tc.container, tc.tls), func(t *testing.T) {
+			recorded.reset()
+			t.Cleanup(recorded.reset)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			var cfg *tls.Config
+			if tc.tls {
+				cfg = newTestServerTLSConfig(t, nil)
+			}
+			up := newFakeRedis(t, cfg)
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			if tc.container {
+				containerkey.Default = containerkey.NewKeyer(containerAt{addr: up.addr, c: containerkey.Container{ID: "r1", Image: "redis:7.4", Port: 6379, Fingerprint: "aaaaaaaaaaaa"}})
+			} else {
+				containerkey.Default = containerkey.NewKeyer(containerAt{})
+			}
+			dest := ipv4Dest(t, up.addr)
+			dest.KernelPid = uint32(os.Getpid())
+			var p *Proxy
+			if tc.mode == models.MODE_RECORD {
+				p, _ = recordProxy(t, zap.NewNop(), up.addr)
+			} else {
+				p = replayProxy(t, zap.NewNop(), up.addr)
+			}
+			p.DestInfo = fakeDestInfo{dest: dest}
+			// keploy mock's run, whose tree is another process: this test
+			// process, which owns the Redis's listener, is outside it.
+			p.mockMode, p.appPID = true, uint32(hold(t).Process.Pid)
+			s := &rowSink{}
+			p.SetTopologySink(s)
+
+			_ = serveConn(t, p, tc.tls, goRedisHello, goRedisPing)
+			want := models.LiveRow{Exe: exe, Port: uint16(dest.Port), Relayed: string(integrations.REDIS_SKIP)}
+			if tc.container {
+				want = models.LiveRow{Container: key, Port: uint16(dest.Port), Relayed: string(integrations.REDIS_SKIP)}
+			}
+			live, mocked := s.rows()
+			if len(mocked) != 0 || len(live) < 2 {
+				t.Fatalf("the relayed Redis is listed live=%+v mocked=%+v, want a live row for each of its two requests and no mocked one", live, mocked)
+			}
+			for _, r := range live {
+				if r != want {
+					t.Fatalf("the relayed Redis is listed live %+v, want %+v", r, want)
+				}
+			}
+			if tc.mode != models.MODE_RECORD || tc.container || tc.tls {
+				return
+			}
+			_ = serveConn(t, p, false, "get k\r\n")
+			wantMocked := models.MockedRow{Addr: up.addr, PID: os.Getpid(), Exe: exe, Port: uint16(dest.Port)}
+			if _, mocked := s.rows(); len(mocked) != 1 || mocked[0] != wantMocked {
+				t.Fatalf("the recorded connection is listed mocked=%+v, want %+v", mocked, wantMocked)
+			}
+
+			// The parsing kill switch relays what it would record: live.
+			util.DefaultKillSwitch.Trip()
+			t.Cleanup(util.DefaultKillSwitch.Reset)
+			ks := &rowSink{}
+			p.SetTopologySink(ks)
+			_ = serveConn(t, p, false, "get k\r\n")
+			live, mocked = ks.rows()
+			wantKilled := models.LiveRow{Exe: exe, Port: uint16(dest.Port), Relayed: relayedParsingDisabled}
+			if len(mocked) != 0 || len(live) == 0 || live[0] != wantKilled {
+				t.Fatalf("a connection the kill switch relays is listed live=%+v mocked=%+v, want live %+v and no mocked row", live, mocked, wantKilled)
+			}
+
+			// So does one to a MySQL port, which the MySQL path relays under
+			// the kill switch.
+			if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true, MysqlPorts: []uint32{dest.Port}}); err != nil {
+				t.Fatal(err)
+			}
+			ms := &rowSink{}
+			p.SetTopologySink(ms)
+			_ = serveConn(t, p, false, "get k\r\n")
+			live, mocked = ms.rows()
+			if len(mocked) != 0 || len(live) == 0 || live[0] != wantKilled {
+				t.Fatalf("a MySQL-port connection the kill switch relays is listed live=%+v mocked=%+v, want live %+v and no mocked row", live, mocked, wantKilled)
 			}
 		})
 	}

@@ -2831,10 +2831,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	// From here the connection is recorded, or answered from mocks: under
 	// the proven switch a local destination is listed mocked (design v14
-	// §3.1). In a replay, now; in a record, once the probe has said what
-	// the connection is (below).
+	// §3.1), once keploy knows it records or mocks it (mockedNote): when
+	// MySQL takes it, when a parser does, or as the connection ends before
+	// either (a failure); never when the Redis skip or the parsing kill
+	// switch relays it. In a replay the note is made now; in a record, once
+	// the probe has said what the connection is (below).
+	var mocked *mockedNote
+	defer func() { mocked.note() }()
 	if proven && rule.Mode == models.MODE_TEST {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		mocked = &mockedNote{p: p, dstAddr: dstAddr, port: destInfo.Port, outside: outside, ctrKey: ctrKey}
 	}
 	if p.synchronous {
 		outgoingOpts.Synchronous = true
@@ -2870,7 +2875,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// one keploy relays (relayServerFirst): it is reached for real, and
 	// nothing of it is recorded.
 	if proven && rule.Mode != models.MODE_TEST && (probe == nil || probe.Reason != reasonServerFirst && probe.Reason != reasonRefusedAtAccept) {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		mocked = &mockedNote{p: p, dstAddr: dstAddr, port: destInfo.Port, outside: outside, ctrKey: ctrKey}
 	}
 	if err != nil {
 		switch {
@@ -2898,6 +2903,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if probe.IsMySQL {
+		// A record's kill switch has recordMySQLOutgoing relay the connection
+		// raw: listed live, as at the parsers' dispatch below. (A switch that
+		// flips between this read and that one lists the connection as it
+		// stood here.)
+		if rule.Mode != models.MODE_TEST && util.DefaultKillSwitch.Enabled() {
+			srcConn = mocked.relayed(srcConn, relayedParsingDisabled)
+		} else {
+			mocked.note()
+		}
 		if rule.Mode != models.MODE_TEST {
 			// probeMysql already dialed when it had to read the
 			// upstream greeting; dstConn then replays those bytes.
@@ -3536,13 +3550,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("generic", generic),
 	)
 
-	// A Redis connection in a build without a Redis parser: relayed to the
+	// A Redis connection in a build that skips Redis: relayed to the
 	// real Redis in record and in test mode, recording nothing and serving
 	// no mock (redis_skip.go). A replay has dialled nothing yet; it reaches
 	// the destination the way a record did above, at the address a name
 	// the recording's DNS answered has now (dns_live.go).
 	if parserType == integrations.REDIS_SKIP {
-		return p.serveRedisSkip(parserCtx, logger, dstAddr, srcConn, &dstConn, func() (net.Conn, string, error) {
+		// Reached for real, and nothing of it recorded: listed live, not
+		// mocked, for each test the connection carries a call in
+		// (mockedNote.relayed).
+		src := mocked.relayed(srcConn, string(integrations.REDIS_SKIP))
+		return p.serveRedisSkip(parserCtx, logger, dstAddr, src, &dstConn, func() (net.Conn, string, error) {
 			addr := dstAddr
 			if isTLS {
 				addr = dstCfg.Addr
@@ -3578,8 +3596,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if rule.Mode == models.MODE_RECORD && util.DefaultKillSwitch.Enabled() {
 		logger.Debug("record-mode parsing kill switch tripped; routing to passthrough",
 			zap.String("parser", string(parserType)), zap.Bool("generic", generic))
-		return p.globalPassThrough(parserCtx, srcConn, dstConn)
+		// Reached for real, and nothing of it recorded: listed live.
+		return p.globalPassThrough(parserCtx, mocked.relayed(srcConn, relayedParsingDisabled), dstConn)
 	}
+
+	// Any other connection is handed to a parser from here, which records
+	// it or answers it from mocks: listed mocked. A record's parser that
+	// declines the connection after reading from it relays the rest of it
+	// raw (relayDeclinedConn), and is listed mocked all the same: a mocked
+	// row for a connection nothing was recorded of, left for a follow-up. (A
+	// supervisor that retires a parser mid-connection has recorded its mocks
+	// so far; the test cases after it are left out.)
+	mocked.note()
 
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))

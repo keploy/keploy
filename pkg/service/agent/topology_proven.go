@@ -17,8 +17,10 @@ var _ proxyPkg.TopologySink = (*Agent)(nil)
 
 // Where the run's calls to local listeners went, under the proven switch
 // (design v14 §3.1; release1-cut §5.1 items 3 and 8): the proxy relays a call
-// to a listener the run's own process tree owns (LIVE) and records or mocks
-// a call to any other local listener (mocked-local), and tells the wire
+// to a listener the run's own process tree owns (LIVE), relays one to a local
+// dependency it does not record (LIVE, models.LiveRow.Relayed: a Redis the
+// open-source keploy skips, a record's parsing kill switch), and records or
+// mocks a call to any other local listener (mocked-local), and tells the wire
 // (proxy.TopologySink), which names the test open at that moment on each row.
 // The rows reach the CLI with the run's windows, each as a window of its own
 // (models.ScopeWindow.Live, .Mocked), and its receipts carry them to keploy's

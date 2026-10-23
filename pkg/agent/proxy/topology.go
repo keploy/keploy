@@ -73,6 +73,69 @@ func (p *Proxy) noteMockedLocal(dstAddr string, port uint32, outside *models.Moc
 	}
 }
 
+// mockedNote is a connection's mocked-local row (noteMockedLocal), listed once
+// keploy knows it records the connection or answers it from mocks: when the
+// MySQL path or a parser takes it, or as the connection ends before either
+// does (a failure: the destination is still a local one keploy would have
+// recorded or mocked). A connection the Redis skip, or a record's parsing
+// kill switch, relays to its destination is reached for real and nothing of
+// it is recorded, so it is listed live instead (relayed). A connection that
+// sends nothing keploy can choose a parser by (under five bytes) is listed
+// only as it ends. A nil note lists nothing: without the proven switch, or
+// for a record's connection keploy relays as server-first; outside keploy
+// mock's runs nothing is listed either (noteMockedLocal, relayed).
+type mockedNote struct {
+	p       *Proxy
+	dstAddr string
+	port    uint32
+	outside *models.MockedRow
+	ctrKey  string
+	done    bool
+}
+
+// note lists n's row, once.
+func (n *mockedNote) note() {
+	if n == nil || n.done {
+		return
+	}
+	n.done = true
+	n.p.noteMockedLocal(n.dstAddr, n.port, n.outside, n.ctrKey)
+}
+
+// relayedParsingDisabled is LiveRow.Relayed for a record's connection the
+// parsing kill switch (util.DefaultKillSwitch) relays.
+const relayedParsingDisabled = "parsing_disabled"
+
+// relayed is conn, the connection n is the note of, as it is relayed live
+// to its destination (why: what relays it, LiveRow.Relayed) instead of
+// recorded or mocked: its destination is never listed mocked, and is listed
+// live each time the caller's bytes are read (liveReader), so a connection a
+// client keeps open across tests (a pool's) is listed for every test that
+// used it. The destination is named as its mocked row would name it: a
+// container by its key, a listener outside the run's tree by its program;
+// any other is not listed, and conn is returned as it is. A nil note lists
+// nothing.
+func (n *mockedNote) relayed(conn net.Conn, why string) net.Conn {
+	if n == nil || n.done {
+		return conn
+	}
+	n.done = true
+	s := n.p.topologySink()
+	if s == nil || !n.p.mockMode {
+		return conn
+	}
+	row := models.LiveRow{Port: uint16(n.port), Relayed: why}
+	switch {
+	case n.ctrKey != "":
+		row.Container = n.ctrKey
+	case n.outside != nil:
+		row.Exe = n.outside.Exe
+	default:
+		return conn
+	}
+	return &liveReader{Conn: conn, sink: s, row: row}
+}
+
 // liveConn tells the sink about a LIVE call: conn, the caller's end of a
 // call relayed to a listener another process of the run's tree owns, says so
 // each time it reads the caller's bytes, so a connection a client keeps open
