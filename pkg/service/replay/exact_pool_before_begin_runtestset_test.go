@@ -20,13 +20,17 @@ import (
 // capture window opened ("begin", "continue": the agent's learn tracker
 // begins the test there) and each one read ("end": GetMockErrors, where the
 // tracker ends it). failPool fails the pool calls it answers true for, by
-// their number (1 for the set's first).
+// their number (1 for the set's first). failOpen fails the capture windows
+// it answers true for ("begin-failed", "continue-failed"), by their number
+// (1 for the set's first test).
 type viewInstr struct {
 	*prInstr
 	failPool func(n int) bool
+	failOpen func(n int) bool
 
 	mu     sync.Mutex
 	pools  int
+	opens  int
 	events []string
 }
 
@@ -37,12 +41,23 @@ func (v *viewInstr) note(e string) {
 }
 
 func (v *viewInstr) BeginTestErrorCapture(context.Context) error {
-	v.note("begin")
-	return nil
+	return v.open("begin")
 }
 
 func (v *viewInstr) ContinueTestErrorCapture(context.Context) error {
-	v.note("continue")
+	return v.open("continue")
+}
+
+func (v *viewInstr) open(what string) error {
+	v.mu.Lock()
+	v.opens++
+	n := v.opens
+	v.mu.Unlock()
+	if v.failOpen != nil && v.failOpen(n) {
+		v.note(what + "-failed")
+		return errors.New("the agent did not open the capture window")
+	}
+	v.note(what)
 	return nil
 }
 
@@ -231,8 +246,8 @@ func TestAPoolCallTheAgentDidNotTakeIsMadeAgainBeforeTheNextTestBegins(t *testin
 }
 
 // When the agent takes no pool call at all after a test case, the set stops
-// failing closed, before the next test case begins: an internal error, never
-// a pass, and no later test case is asked of the agent.
+// failing closed, before the next test case begins: not judged, saying why,
+// never a pass, and no later test case is asked of the agent.
 func TestASetWhosePoolTheAgentNeverTakesStopsBeforeTheNextTestBegins(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -253,6 +268,12 @@ func TestASetWhosePoolTheAgentNeverTakesStopsBeforeTheNextTestBegins(t *testing.
 			}
 			if bad := overATestView(events); bad != "" {
 				t.Errorf("a test began over a test's view, %s: %v", bad, events)
+			}
+			if h.report.report == nil || !strings.Contains(h.report.report.FailureReason, "not judged: keploy could not serve the test set's pool after test case test-1") {
+				t.Errorf("the report does not say the set is not judged because test-1's pool was not served: %+v", h.report.report)
+			}
+			if !h.replayer.notJudged("test-set-0") {
+				t.Errorf("the set is not marked not judged, so the run would stop after it: %v", events)
 			}
 		})
 	}
@@ -308,5 +329,171 @@ func TestAPoolTheAgentTookIsNotServedAgainBeforeTheNextTestBegins(t *testing.T) 
 				t.Fatalf("pool calls between the test cases %v; want [1 1]: %v", got, events)
 			}
 		})
+	}
+}
+
+// beginOnly is v as an agent that predates Continue: every test case opens
+// its capture window with Begin.
+type beginOnly struct {
+	*prInstr
+	v *viewInstr
+}
+
+func (b beginOnly) BeginTestErrorCapture(ctx context.Context) error {
+	return b.v.BeginTestErrorCapture(ctx)
+}
+
+func (b beginOnly) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	return b.v.GetMockErrors(ctx)
+}
+
+func (b beginOnly) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	return b.v.UpdateMockParams(ctx, params)
+}
+
+// notBegunReported fails t unless the set's report says it is not judged
+// because test was not begun, and the run marks the set not judged (so the
+// run goes on to its next set).
+func notBegunReported(t *testing.T, h *prRun, test string, events []string) {
+	t.Helper()
+	if h.report.report == nil {
+		t.Fatalf("no report was persisted: %v", events)
+	}
+	if want := "not judged: keploy's agent did not begin test case " + test; !strings.Contains(h.report.report.FailureReason, want) {
+		t.Errorf("the report's reason %q does not say %q: %v", h.report.report.FailureReason, want, events)
+	}
+	if !h.replayer.notJudged("test-set-0") {
+		t.Errorf("the set is not marked not judged, so the run would stop after it: %v", events)
+	}
+}
+
+// Under exact serving, a test case whose capture window the agent does not
+// open (where the agent's learn tracker begins it) stops the set before its
+// view is asked for, on the main loop and on the streaming pass, for a set's
+// first test (begin) and a later one (continue, or begin on an agent that
+// predates continue). The set is not judged, its report says why, and the
+// run goes on to the next set. Before, the failure was logged at debug and
+// the test case's view was served anyway: the tracker stayed where it was
+// and filed the serves of the test case's view as the test before's.
+func TestATestCaseTheAgentCannotBeginStopsTheSetBeforeItsViewIsServed(t *testing.T) {
+	for _, loop := range []struct {
+		name     string
+		streamed []string
+	}{
+		{name: "the main loop"},
+		{name: "the streaming pass", streamed: []string{"test-1", "test-2", "test-3"}},
+	} {
+		for _, tc := range []struct {
+			name, failed, test string
+			n                  int
+			beginOnly          bool
+		}{
+			{name: "the set's first test", failed: "begin-failed", test: "test-1", n: 1},
+			{name: "a later test", failed: "continue-failed", test: "test-2", n: 2},
+			{name: "a later test on an agent that predates continue", failed: "begin-failed", test: "test-2", n: 2, beginOnly: true},
+		} {
+			t.Run(loop.name+"/"+tc.name, func(t *testing.T) {
+				h, vi := exactViewRun(t, nil, loop.streamed...)
+				vi.failOpen = func(n int) bool { return n == tc.n }
+				if tc.beginOnly {
+					h.replayer.instrumentation = beginOnly{prInstr: h.instr, v: vi}
+				}
+				status := h.run(t)
+				events := vi.trace()
+				if !hasEvent(events, tc.failed) {
+					t.Fatalf("precondition: %s's capture window did not fail to open (%s): %v", tc.test, tc.failed, events)
+				}
+				if status != models.TestSetStatusInternalErr {
+					t.Errorf("the set reported %q; want %q: %v", status, models.TestSetStatusInternalErr, events)
+				}
+				for _, e := range events {
+					if e == "test:"+tc.test || e == "test:test-3" {
+						t.Errorf("%s was asked of the agent after %s's capture window failed to open: %v", e, tc.test, events)
+					}
+				}
+				notBegunReported(t, h, tc.test, events)
+			})
+		}
+	}
+}
+
+// A test case the main loop did not begin stops the set's streaming pass
+// too: no streamed test case is begun or served after it.
+func TestATestCaseTheMainLoopDidNotBeginStopsTheStreamingPass(t *testing.T) {
+	h, vi := exactViewRun(t, nil, "test-3")
+	vi.failOpen = func(n int) bool { return n == 1 }
+	status := h.run(t)
+	events := vi.trace()
+	if !hasEvent(events, "begin-failed") {
+		t.Fatalf("precondition: test-1's capture window did not fail to open: %v", events)
+	}
+	if status != models.TestSetStatusInternalErr {
+		t.Errorf("the set reported %q; want %q: %v", status, models.TestSetStatusInternalErr, events)
+	}
+	for _, e := range events {
+		if strings.HasPrefix(e, "test:") || e == "continue" {
+			t.Errorf("%s came after test-1 was not begun: %v", e, events)
+		}
+	}
+}
+
+// A capture call cut short by the run's user stopping it is the user's stop,
+// not keploy's failure: the set is USER_ABORT, never INTERNAL_ERR.
+func TestACaptureCallTheUsersStopCutsShortIsTheStop(t *testing.T) {
+	for _, loop := range []struct {
+		name     string
+		streamed []string
+	}{
+		{name: "the main loop"},
+		{name: "the streaming pass", streamed: []string{"test-1", "test-2", "test-3"}},
+	} {
+		t.Run(loop.name, func(t *testing.T) {
+			h, vi := exactViewRun(t, nil, loop.streamed...)
+			vi.failOpen = func(n int) bool {
+				if n != 2 {
+					return false
+				}
+				h.cancel()
+				return true
+			}
+			status := h.run(t)
+			events := vi.trace()
+			if !hasEvent(events, "continue-failed") {
+				t.Fatalf("precondition: test-2's capture window did not fail to open: %v", events)
+			}
+			if status != models.TestSetStatusUserAbort {
+				t.Errorf("the set reported %q; want %q: %v", status, models.TestSetStatusUserAbort, events)
+			}
+			if hasEvent(events, "test:test-2") {
+				t.Errorf("test-2 was asked of the agent after its capture window failed to open: %v", events)
+			}
+		})
+	}
+}
+
+// Without the switch the capture window stays best-effort: one the agent
+// does not open degrades to the old behaviour, every test case still opens
+// its own (begin, then continue), and the set runs on.
+func TestACaptureWindowTheAgentDoesNotOpenIsBestEffortWithoutTheSwitch(t *testing.T) {
+	setSwitch(t, false)
+	h := newPartialRunHarness(t, 3, 0)
+	vi := &viewInstr{prInstr: h.instr, failOpen: func(int) bool { return true }}
+	h.replayer.instrumentation = vi
+	status := h.run(t)
+	events := vi.trace()
+	if status != models.TestSetStatusPassed {
+		t.Errorf("the set reported %q; want %q: %v", status, models.TestSetStatusPassed, events)
+	}
+	if got := len(h.report.results); got != 3 {
+		t.Errorf("recorded %d test results; want 3: %v", got, events)
+	}
+	var opens []string
+	for _, e := range events {
+		if strings.HasSuffix(e, "-failed") {
+			opens = append(opens, e)
+		}
+	}
+	if want := []string{"begin-failed", "continue-failed", "continue-failed"}; strings.Join(opens, " ") != strings.Join(want, " ") {
+		t.Errorf("the capture calls were %v; want %v: %v", opens, want, events)
 	}
 }

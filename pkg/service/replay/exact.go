@@ -567,6 +567,14 @@ func (r *Replayer) poolBeforeBegin(ctx context.Context, plan *exactPlan, name st
 	return nil
 }
 
+// logNotBegun says why keploy did not begin a test case on its agent under
+// exact serving (poolBeforeBegin, openTestErrorCapture), that the set stops
+// there not judged, and what to do.
+func (r *Replayer) logNotBegun(err error) {
+	utils.LogError(r.logger, err, "keploy did not begin a test case on its agent; the test set stops here, not judged, and the run goes on to the next test set",
+		zap.String("next_step", "check the agent's log for why it did not answer and whether it is still running, then run the test set again"))
+}
+
 // noteMappingAlwaysUsed says once per run that disableMapping does not apply
 // under the proven switch.
 func (r *Replayer) noteMappingAlwaysUsed() {
