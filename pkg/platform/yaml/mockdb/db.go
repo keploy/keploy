@@ -1928,6 +1928,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 	hasContent := false
 	connFailures := 0
+	// redisNotRead counts the Redis mocks this keploy cannot read
+	// (warnRedisNotRead).
+	redisNotRead := 0
 	var deps models.MockDepsCheck
 	for {
 		doc, readErr, decodeErr := nextDoc(reader, logger, false)
@@ -1948,6 +1951,13 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 		}
 		if len(doc.mocks) == 0 {
 			addSkippedDoc(&out, doc.raw, readerIsJSON, doc.incomplete, doc.name, doc.kind)
+			// A Redis document a build that reads Redis mocks (Keploy
+			// Enterprise's mapper) skipped is no Redis mock this keploy
+			// cannot read, and one the file ends part-way through is said
+			// as such (reportIncompleteTail).
+			if doc.kind == models.REDIS && !doc.incomplete && !hasMapperForKind(models.REDIS) {
+				redisNotRead++
+			}
 		}
 		for _, mock := range doc.mocks {
 			if mock.Kind == models.ConnectionFailure {
@@ -1957,6 +1967,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			deps.Add(mock) // after routing, as the gob reader
 		}
 	}
+	warnRedisNotRead(logger, testSetID, redisNotRead)
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 	warnUnmetRequirements(logger, testSetID, reader.Path(), deps.Unmet())
 

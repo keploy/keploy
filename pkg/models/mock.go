@@ -32,6 +32,13 @@ func init() {
 	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.ObjectID", bson.ObjectID{})
 }
 
+// RedisEnterpriseURL is where keploy sends a user who wants Redis recorded
+// and mocked: Keploy Enterprise's installation page. A keploy that skips
+// Redis (integrations.SkipsRedis) says it in the notices it logs
+// (integrations.RedisSkipNotice), and so does a read of a test set that holds
+// Redis mocks it cannot read.
+const RedisEnterpriseURL = "https://keploy.io/docs/keploy-cloud/cloud-installation/"
+
 type Kind string
 
 const (

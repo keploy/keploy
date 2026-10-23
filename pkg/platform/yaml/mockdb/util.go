@@ -654,7 +654,8 @@ func validatePostgresV3Spec(s *models.PostgresV3Spec) error {
 
 // DecodeMocks decodes YAML mock documents into mocks. A document it cannot
 // read (a kind this keploy does not know, a connection failure it cannot
-// replay) is skipped, with an ERROR that says why.
+// replay) is skipped, with an ERROR that says why; a Redis one at Debug
+// (logUnknownKind: the read of a test set says once how many it skipped).
 func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
 	return decodeMocks(yamlMocks, logger, false)
 }
@@ -1132,10 +1133,18 @@ func skipConnFailure(logger *zap.Logger, name string, err error, rewrite bool) {
 // not one of them: it is empty or commented out, and says so. A rewrite keeps
 // the document as written and reports it at Debug (see skipConnFailure). The
 // caller's logger names the mock file.
+//
+// A Redis mock (one Keploy Enterprise recorded) is not one of them: Keploy
+// records and mocks Redis only in Keploy Enterprise, so a test set that
+// holds them is one this keploy replays without them, and a read of one is
+// expected. The read of the set says so once (warnRedisNotRead) instead of
+// an error per document.
 func logUnknownKind(logger *zap.Logger, name string, kind models.Kind, rewrite bool) {
 	switch {
 	case rewrite:
 		logger.Debug("kept as written: a mock document this keploy cannot read", zap.String("kind", string(kind)), zap.String("mock", name))
+	case kind == models.REDIS:
+		logger.Debug("skipping a Redis mock: Keploy reads Redis mocks only in Keploy Enterprise", zap.String("kind", string(kind)), zap.String("mock", name))
 	case kind == "":
 		utils.LogError(logger, nil, "skipping a mock document with no kind (empty or commented out)",
 			zap.String("mock", name),
@@ -1147,6 +1156,29 @@ func logUnknownKind(logger *zap.Logger, name string, kind models.Kind, rewrite b
 			zap.String("keploy_version", keployVersion()),
 			zap.String("next_step", "upgrade keploy, use keploy enterprise, or re-record the test set"))
 	}
+}
+
+// warnRedisNotRead logs, once per read of a test set's mocks (a run that
+// reads a set twice says it twice), that the set holds n Redis mocks (Keploy
+// Enterprise's) this keploy cannot read (logUnknownKind), so none of them is
+// replayed. What keploy does with the set's Redis calls instead is the
+// agent's to say (the Redis skip relays them to the real server, and says so
+// once per destination).
+func warnRedisNotRead(logger *zap.Logger, testSetID string, n int) {
+	if n == 0 {
+		return
+	}
+	logger.Warn(fmt.Sprintf("%s holds %d Redis %s this keploy does not read: Keploy records and mocks Redis (and Redis-compatible servers) only in Keploy Enterprise, so none of them is replayed. To record and mock Redis, use Keploy Enterprise: %s",
+		testSetID, n, plural(n, "mock", "mocks"), models.RedisEnterpriseURL),
+		zap.String("testSetID", testSetID), zap.Int("mocks", n))
+}
+
+// plural is one when n is 1, many otherwise.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // warnConnFailuresNotReplayed logs, once per read of a test set's mocks, that
