@@ -415,3 +415,113 @@ func TestRunTestSetReportsPerTestMocksItDoesNotLoad(t *testing.T) {
 		})
 	}
 }
+
+// sessionMongoMock is a session Mongo mock whose response carries an
+// encrypted value, as a recording with secret protection on holds one.
+func sessionMongoMock() *models.Mock {
+	return &models.Mock{
+		Version: models.GetVersion(), Kind: models.Mongo,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "config"},
+			MongoRequests: []models.MongoRequest{{
+				Header:  &models.MongoHeader{Length: 50, RequestID: 1, Opcode: 2013},
+				Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"find":"apps"} }`}},
+			}},
+			MongoResponses: []models.MongoResponse{{
+				Header:  &models.MongoHeader{Length: 60, RequestID: 2, ResponseTo: 1, Opcode: 2013},
+				Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"token":"ENC:ciphertext"} }`}},
+			}},
+		},
+	}
+}
+
+// payloadHooks is a MockMutator that is a MockPayloadMutator too, as the hook
+// that decrypts recorded secrets is: AfterGetMocks gets the mocks without the
+// payloads left on disk, and each payload is decrypted as it is read back.
+type payloadHooks struct {
+	mutatingHooks
+	sawMongoMessage *atomic.Bool
+}
+
+func (h payloadHooks) AfterGetMocks(ctx context.Context, filtered, unfiltered []*models.Mock) error {
+	for _, m := range append(append([]*models.Mock(nil), filtered...), unfiltered...) {
+		for _, r := range m.Spec.MongoResponses {
+			if r.Message != nil {
+				h.sawMongoMessage.Store(true)
+			}
+		}
+	}
+	return h.mutatingHooks.AfterGetMocks(ctx, filtered, unfiltered)
+}
+
+func (payloadHooks) MutateRestoredPayload(_ context.Context, m *models.Mock) error {
+	for _, r := range m.Spec.MongoResponses {
+		if msg, ok := r.Message.(*models.MongoOpMessage); ok {
+			for i, s := range msg.Sections {
+				msg.Sections[i] = strings.ReplaceAll(s, "ENC:ciphertext", "plaintext")
+			}
+		}
+	}
+	return nil
+}
+
+// A replay leaves a Mongo mock's messages in the mock file until the agent
+// gets the mock, when hooks that change mocks before they are sent can change
+// a payload read back too: the agent is handed the mock without it, and
+// reading it back decrypts it. Hooks that can only change whole mocks get
+// them whole, as before.
+func TestRunTestSetLeavesMongoPayloadsOnDiskUntilTheAgentGetsThem(t *testing.T) {
+	storedMongo := func(t *testing.T, h *prRun) *models.Mock {
+		t.Helper()
+		for _, m := range append(append([]*models.Mock(nil), h.instr.storedFiltered...), h.instr.storedUnfiltered...) {
+			if m.Kind == models.Mongo {
+				return m
+			}
+		}
+		t.Fatal("the agent was not handed the Mongo mock")
+		return nil
+	}
+	sections := func(t *testing.T, m *models.Mock) string {
+		t.Helper()
+		full, err := m.WithPayload(context.Background())
+		if err != nil {
+			t.Fatalf("WithPayload: %v", err)
+		}
+		return strings.Join(full.Spec.MongoResponses[0].Message.(*models.MongoOpMessage).Sections, "")
+	}
+
+	t.Run("payload mutator", func(t *testing.T) {
+		h := newPartialRunHarness(t, 1, 0)
+		useYAMLMocks(t, h, sessionMongoMock())
+		var saw atomic.Bool
+		h.replayer.hookImpl = payloadHooks{
+			mutatingHooks:   mutatingHooks{mutate: func(_, _ []*models.Mock) {}},
+			sawMongoMessage: &saw,
+		}
+		_ = h.run(t)
+		if saw.Load() {
+			t.Fatal("AfterGetMocks saw a Mongo mock's messages: they were not left on disk")
+		}
+		m := storedMongo(t, h)
+		if !m.PayloadOnDisk() {
+			t.Fatal("the Mongo mock was handed over with its payload in memory")
+		}
+		if got := sections(t, m); !strings.Contains(got, "plaintext") || strings.Contains(got, "ENC:") {
+			t.Fatalf("the payload read back is %q; want it decrypted", got)
+		}
+	})
+
+	t.Run("whole-mock mutator", func(t *testing.T) {
+		h := newPartialRunHarness(t, 1, 0)
+		useYAMLMocks(t, h, sessionMongoMock())
+		h.replayer.hookImpl = mutatingHooks{mutate: func(_, _ []*models.Mock) {}}
+		_ = h.run(t)
+		m := storedMongo(t, h)
+		if m.PayloadOnDisk() {
+			t.Fatal("a MockMutator that cannot change a payload read back got the Mongo mock without it")
+		}
+		if got := sections(t, m); !strings.Contains(got, "ENC:ciphertext") {
+			t.Fatalf("the payload is %q; want it as recorded", got)
+		}
+	})
+}

@@ -166,6 +166,11 @@ type Mock struct {
 	// at serve time; set only for spilled per-test mocks by the agent disk store.
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+
+	// payloadLoader reads back the payload a replay left in the mock file
+	// (LeavePayloadOnDisk); set only while it is there. Unexported, so gob
+	// ignores it: a mock goes on the wire only with its payload (WithPayload).
+	payloadLoader PayloadLoader
 }
 
 // Pooled reports whether the replay mock manager has stored m in a pool that
@@ -1118,6 +1123,8 @@ func (m *Mock) DeepCopy() *Mock {
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
+	// And the one of a payload left on disk: a copy is sent with it.
+	c.payloadLoader = m.payloadLoader
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

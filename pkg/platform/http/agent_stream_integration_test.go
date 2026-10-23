@@ -41,6 +41,7 @@ type stubSvc struct {
 	filtered    int
 	unfiltered  int
 	names       []string
+	mocks       []*models.Mock
 }
 
 func (s *stubSvc) StoreMocks(_ context.Context, f, u []*models.Mock) error {
@@ -62,6 +63,7 @@ func (s *stubSvc) StoreMocksStream(_ context.Context, h models.MockStreamHeader,
 		}
 		s.mu.Lock()
 		s.names = append(s.names, m.Name)
+		s.mocks = append(s.mocks, &m)
 		s.mu.Unlock()
 	}
 	s.mu.Lock()
@@ -251,4 +253,66 @@ func TestStoreMocks_SendsUncompressedToAnAgentThatDoesNotAcceptZstd(t *testing.T
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	require.Equal(t, mockNamesOf(mocks), svc.names)
+}
+
+// payloadOnDiskMock is a Mongo mock whose messages a replay left in its mock
+// file, read back by load.
+func payloadOnDiskMock(t *testing.T, name string, load models.PayloadLoader) *models.Mock {
+	t.Helper()
+	m := &models.Mock{Name: name, Kind: models.Mongo, Spec: models.MockSpec{
+		MongoRequests:  []models.MongoRequest{{Header: &models.MongoHeader{RequestID: 1}, Message: &models.MongoOpMessage{Sections: []string{"request"}}}},
+		MongoResponses: []models.MongoResponse{{Header: &models.MongoHeader{ResponseTo: 1}, Message: &models.MongoOpMessage{Sections: []string{"response"}}}},
+	}}
+	require.True(t, m.LeavePayloadOnDisk(load))
+	return m
+}
+
+// A mock whose payload a replay left in its mock file reaches the agent with
+// it: StoreMocks reads it back as it sends the mock.
+func TestStoreMocks_SendsAMockWhosePayloadIsOnDiskWithIt(t *testing.T) {
+	svc := &stubSvc{}
+	r := chi.NewRouter()
+	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	readBack := func(_ context.Context, m *models.Mock) error {
+		m.Spec.MongoRequests = []models.MongoRequest{{Header: &models.MongoHeader{RequestID: 1}, Message: &models.MongoOpMessage{Sections: []string{"request"}}}}
+		m.Spec.MongoResponses = []models.MongoResponse{{Header: &models.MongoHeader{ResponseTo: 1}, Message: &models.MongoOpMessage{Sections: []string{"response read back"}}}}
+		return nil
+	}
+	onDisk := payloadOnDiskMock(t, "m1", readBack)
+	client := newClient(t, srv.URL+"/agent")
+	require.NoError(t, client.StoreMocks(context.Background(), []*models.Mock{onDisk}, []*models.Mock{{Name: "u1", Kind: models.DNS}}))
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	require.Len(t, svc.mocks, 2)
+	got := svc.mocks[0]
+	require.Equal(t, "m1", got.Name)
+	require.Len(t, got.Spec.MongoResponses, 1)
+	require.Equal(t, []string{"response read back"}, got.Spec.MongoResponses[0].Message.(*models.MongoOpMessage).Sections)
+	require.True(t, onDisk.PayloadOnDisk(), "the mock in memory still holds no payload")
+}
+
+// A payload that cannot be read back fails StoreMocks with why, and is not
+// taken for an agent that predates the stream: no legacy retry.
+func TestStoreMocks_FailsAPayloadItCannotReadBack(t *testing.T) {
+	svc := &stubSvc{}
+	r := chi.NewRouter()
+	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	gone := payloadOnDiskMock(t, "m1", func(context.Context, *models.Mock) error {
+		return fmt.Errorf("%w: test", models.ErrPayloadFileReplaced)
+	})
+	client := newClient(t, srv.URL+"/agent")
+	err := client.StoreMocks(context.Background(), []*models.Mock{{Name: "f0", Kind: models.HTTP}, gone}, nil)
+	require.ErrorIs(t, err, models.ErrPayloadFileReplaced)
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	require.Zero(t, svc.legacyCalls, "the cut stream was retried as legacy framing")
+	require.Zero(t, svc.streamCalls, "the agent took a cut stream as whole")
 }

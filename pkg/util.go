@@ -3408,6 +3408,16 @@ type TestSetMocksReader interface {
 	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
 }
 
+// TestSetPayloadOnDiskReader is an optional extension of a TestSetMocksReader
+// for a caller that only sends the mocks on: GetTestSetMocks that leaves the
+// payloads it can in the mock file (models.Mock.LeavePayloadOnDisk), so the
+// pools hold the mocks without them and each is read back only as the mock is
+// sent. Its pools are what GetTestSetMocks returns for the same arguments, but
+// for the payloads, and Payloads says where they are.
+type TestSetPayloadOnDiskReader interface {
+	GetTestSetMocksPayloadOnDisk(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages
