@@ -1136,15 +1136,15 @@ func TestEachRunesClass(t *testing.T) {
 		{'１', "Common", true, false},
 		{'ー', "Common", true, false},
 		{'µ', "Common", true, false},
-		{'́', "", false, true}, // a combining acute: Mn, Inherited
-		{'ั', "", false, true}, // a Thai vowel mark: Mn, the Thai script
-		{'ि', "", false, true}, // a Devanagari vowel sign: Mc
-		{'⃝', "", false, true}, // an enclosing circle: Me
-		{'‍', "", false, true}, // the zero-width joiner: Cf, Inherited
+		{'\u0301', "", false, true}, // a combining acute: Mn, Inherited
+		{'\u0e31', "", false, true}, // a Thai vowel mark: Mn, the Thai script
+		{'\u093f', "", false, true}, // a Devanagari vowel sign: Mc
+		{'\u20dd', "", false, true}, // an enclosing circle: Me
+		{'\u200d', "", false, true}, // the zero-width joiner: Cf, Inherited
 		{'-', "", false, false},
 		{'€', "", false, false},
 		{'—', "", false, false},
-		{' ', "", false, false},
+		{'\u00a0', "", false, false},
 		{'\u0080', "", false, false},
 		{'\u007f', "", false, false},
 	} {
@@ -1166,15 +1166,15 @@ func TestRunsSplitByClass(t *testing.T) {
 		{"订单A7K已发货", []string{"订单:Han", "A7K:Latin", "已发货:Han"}},
 		{"ナー12", []string{"ナ:Katakana", "ー:Common", "12:Latin"}},
 		{"µ5", []string{"µ:Common", "5:Latin"}},
-		{"caféx", []string{"caféx:Latin"}},
+		{"cafe\u0301x", []string{"cafe\u0301x:Latin"}},
 		{"a.b@c~d!e*f$g^h%i", []string{"a:Latin", "b:Latin", "c:Latin", "d:Latin", "e:Latin", "f:Latin", "g:Latin", "h:Latin", "i:Latin"}},
 		// A mark joins the run before it, of whatever class; one that
 		// follows no run starts none.
-		{"caféx", []string{"caféx:Latin"}},
-		{"กัx", []string{"กั:Thai", "x:Latin"}},
-		{"a‍b", []string{"a‍b:Latin"}},
-		{"́ab", []string{"ab:Latin"}},
-		{"a-́b", []string{"a:Latin", "b:Latin"}},
+		{"cafe\u0301x", []string{"cafe\u0301x:Latin"}},
+		{"ก\u0e31x", []string{"ก\u0e31:Thai", "x:Latin"}},
+		{"a\u200db", []string{"a\u200db:Latin"}},
+		{"\u0301ab", []string{"ab:Latin"}},
+		{"a-\u0301b", []string{"a:Latin", "b:Latin"}},
 		{"a€b—c", []string{"a:Latin", "b:Latin", "c:Latin"}},
 		{"ab１２cd", []string{"ab:Latin", "１２:Common", "cd:Latin"}},
 	} {

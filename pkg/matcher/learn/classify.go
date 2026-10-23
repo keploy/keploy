@@ -840,7 +840,7 @@ func (dc *DriftCache) ofInBy(rec, live string, w *Window, lead bool) *valueDrift
 		dclock = clockInBy(d.decRec, d.decLive, w, lead)
 		merge(dclock)
 	}
-	forms, _, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
 	for _, f := range forms[1:] {
 		merge(clockInBy(f[0], f[1], w, lead))
@@ -1428,9 +1428,11 @@ func escapeClock(s string, set map[string]bool) {
 	i := 0
 	for _, seg := range segmentsBy(s, isWord) {
 		w := seg.text
-		if seg.word && i > 0 && (s[i-1] == '%' || s[i-1] == '\\') {
+		// (A word after any other byte, or after an escape that stands for
+		// no '%' or '\\', peels nothing: the switch below says so.)
+		if seg.word && i > 0 {
 			x, after := w, s[i-1]
-			for depth := 0; depth < 4 && after != 0 && !set[w]; depth++ {
+			for depth := 0; depth < 4; depth++ {
 				var code, rest string
 				switch {
 				case after == '%' && len(x) > 2 && hexDigit(x[0]) && hexDigit(x[1]):

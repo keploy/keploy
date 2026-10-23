@@ -153,6 +153,24 @@ func TestEscapeClockPeelsOnlyEscapesThatStandForAnEscape(t *testing.T) {
 		{`10%5Cn41Z`, "5Cn41Z", true},
 		// "%41" is an "A": no escape after it.
 		{"10%413A41Z", "413A41Z", false},
+		// Up to four escapes are peeled, each standing for the next: five are not.
+		{"10%25253A41Z", "25253A41Z", true},
+		{"10%2525253A41Z", "2525253A41Z", true},
+		{"10%252525253A41Z", "252525253A41Z", false},
+		{`10\u00253A41Z`, "u00253A41Z", true},
+		{`10\u005Cn41Z`, "u005Cn41Z", true},
+		{`10%5Cu003A41Z`, "5Cu003A41Z", true},
+		// Each escape is read after its own byte, in full.
+		{`10\3A41Z`, "3A41Z", false},
+		{"10%u003A41Z", "u003A41Z", false},
+		{"10%n41Z", "n41Z", false},
+		{"10-3A41Z", "3A41Z", false},
+		{"10%A", "A", false},
+		{`10\uG03A41Z`, "uG03A41Z", false},
+		{`10\u0G3A41Z`, "u0G3A41Z", false},
+		{`10\u00GA41Z`, "u00GA41Z", false},
+		{`10\u003G41Z`, "u003G41Z", false},
+		{`10\u003`, "u003", false},
 		{`10\u00413A41Z`, "u00413A41Z", false},
 	} {
 		set := map[string]bool{"41Z": true}

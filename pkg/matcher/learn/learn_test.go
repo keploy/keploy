@@ -949,6 +949,7 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 		{name: "an id inside base64 JSON", rec: b64u(`{"ref":"A7K29QXM"}`), live: b64u(`{"ref":"Zq81Lm0X"}`), earlier: earlier("A7K29QXM", "Zq81Lm0X")},
 		{name: "a whole clock value, base64-encoded", rec: b64s("2026-10-14T10:00:41Z"), live: b64s("2026-10-14T10:01:42Z"), earlier: earlier("2026-10-14T10:00:41Z", "2026-10-14T10:01:42Z")},
 		{name: "a whole clock value, percent-encoded", rec: "2026-10-14T10%3A00%3A41Z", live: "2026-10-14T10%3A01%3A42Z", earlier: earlier("2026-10-14T10:00:41Z", "2026-10-14T10:01:42Z")},
+		{name: "an id inside a quoted-printable value", rec: "x=3DA7K29QXM", live: "x=3DZq81Lm0X", earlier: earlier("A7K29QXM", "Zq81Lm0X")},
 		{name: "a JWT whose iat is the epoch second an earlier call sent whole",
 			rec:     "Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436042}`) + "." + b64u("\x01\x02\x03\xfe\xff"),
 			live:    "Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436103}`) + "." + b64u("\x07\x08\x09\xfa\xfb"),
