@@ -97,6 +97,31 @@ func (p *threadProbe) moved() bool {
 	return moved
 }
 
+// ProcessProgress returns a function that reports whether process pid, or a
+// process it runs (and theirs), has made progress since the function was last
+// called, by the rule a stage of teardown work is judged by: one of their
+// tasks scheduled, a process of them started or reaped, or one running or
+// waiting to run now. The first call, and one that cannot tell, report true.
+// It is how a process that keeps others waiting while a tool it started runs
+// (the trust-store lock's holder) tells them whether the tool is getting on
+// or wedged.
+func ProcessProgress(pid int) (moved func() bool) {
+	var last schedMark
+	seen := false
+	return func() bool {
+		var m schedMark
+		markProcess(&m, pid, map[int]bool{})
+		if m.tasks == 0 && !seen {
+			return true // cannot tell
+		}
+		runnable := m.runnable
+		m.runnable = false // compared by what the kernel has counted alone
+		moved := !seen || runnable || m != last
+		last, seen = m, true
+		return moved
+	}
+}
+
 // describe reads how the stage's thread stands: its state (stat), and the
 // kernel function it sleeps in (wchan), which the kernel gives as "0" for a
 // thread that runs, and to a reader it does not let see kernel addresses.

@@ -3,10 +3,13 @@
 package utils
 
 import (
+	"bufio"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -351,5 +354,65 @@ func TestTheEscalationWaitsForAStageThatPausesButProgresses(t *testing.T) {
 	}
 	if st := helper.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGKILL {
 		t.Fatalf("the helper ended with %v, want it killed (SIGKILL)\n%s", helper.ProcessState, out.String())
+	}
+}
+
+// ProcessProgress tells a process that sleeps from one that runs: a cat
+// blocked reading its stdin has made no progress between two looks, and has
+// once it has been woken to copy a line; one that has exited has changed too.
+func TestProcessProgressTellsASleepingProcessFromARunningOne(t *testing.T) {
+	cmd := exec.Command("cat")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no cat: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	out := bufio.NewReader(outPipe)
+	// Up and asleep in its read: its first line copied, then nothing more.
+	if _, err := in.Write([]byte("up\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := out.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	moved := ProcessProgress(cmd.Process.Pid)
+	if !moved() {
+		t.Fatal("the first look reported no progress")
+	}
+	// Once it sleeps in its read again (S, with nothing to wake it), a look
+	// takes in what it did on its way there, and the next one sees nothing
+	// new.
+	stat := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/stat"
+	for {
+		b, err := os.ReadFile(stat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st, _, _, ok := parseTaskStat(b); ok && st == 'S' {
+			break
+		}
+	}
+	moved()
+	if moved() {
+		t.Fatal("a process asleep in a read was reported making progress")
+	}
+	if _, err := in.Write([]byte("again\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := out.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	if !moved() {
+		t.Fatal("a process that was woken to copy a line was reported making no progress")
 	}
 }

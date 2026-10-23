@@ -127,6 +127,13 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Running Unit Tests
+        # Here, and not in the race step below: pkg/agent/proxy/tls's
+        # TestConcurrentKeytoolEditsLoseNothing has agents in processes of
+        # their own edit one keystore with the runner's real keytool, 20
+        # trials of two imports beside two deletes, about 400 JVMs one at a
+        # time under keploy's trust-store lock (over a minute).
+        env:
+          KEPLOY_TEST_KEYTOOL_CONCURRENCY: "1"
         run: go test ./...
 
       # The hooks package's root tests skip in the run above, which is the

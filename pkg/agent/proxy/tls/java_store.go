@@ -1,7 +1,6 @@
 package tls
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +28,8 @@ import (
 // So the keystore is decided in one place (resolveJavaStore), the install
 // records the one it used (nativeInstall.java), and the teardown deletes from
 // exactly that one. The sweep of the retired static CA finds its keystores
-// with the same resolver.
+// with the same resolver. Every edit of a keystore, whoever makes it, is made
+// on a copy under the host-wide trust-store lock (editJavaKeystore).
 
 // javaStorePass is the password of every JDK's cacerts as shipped.
 const javaStorePass = "changeit"
@@ -141,25 +140,21 @@ func dedupJavaStores(stores []javaStore) []javaStore {
 }
 
 // importJavaCA imports the certificate at caPath into js under alias, unless
-// js already holds alias. An error says keytool did not import it; keytool
-// writes a keystore only once an import has succeeded, so a keytool that ran
-// to its own failure left js as it was.
+// js already holds alias. nil says js holds alias now. An error says js is as
+// it was: the import is made on a copy of the keystore, which replaces it only
+// once the import is complete and checked (editJavaKeystore).
 func importJavaCA(ctx context.Context, logger *zap.Logger, js javaStore, caPath, alias string) error {
 	logger.Debug("importing the keploy CA into the JDK keystore",
 		zap.String("keytool", js.keytool), zap.String("caCertsPath", js.cacerts), zap.String("caPath", caPath), zap.String("alias", alias))
-
-	if isJavaCAExistWithTool(ctx, js.keytool, alias, javaStorePass, js.cacerts) {
+	_, changed, err := editJavaKeystore(ctx, logger, js, keystoreEdit{alias: alias, certFile: caPath})
+	if err != nil {
+		return fmt.Errorf("did not import the keploy CA into %s: %w", js.cacerts, err)
+	}
+	if !changed {
 		logger.Debug("Java detected and CA already exists", zap.String("path", js.cacerts))
 		return nil
 	}
-
-	cmd := exec.CommandContext(ctx, js.keytool, "-import", "-trustcacerts", "-keystore", js.cacerts, "-storepass", javaStorePass, "-noprompt", "-alias", alias, "-file", caPath)
-	out, err := cmd.CombinedOutput()
-	utils.BootStep("keytool -import is over")
-	if err != nil {
-		return fmt.Errorf("keytool did not import the keploy CA into %s: %w: %s", js.cacerts, err, bytes.TrimSpace(out))
-	}
-	logger.Debug("Java detected and successfully imported CA", zap.String("path", js.cacerts), zap.String("output", string(out)))
+	logger.Debug("Java detected and successfully imported CA", zap.String("path", js.cacerts))
 	return nil
 }
 
@@ -168,22 +163,31 @@ func importJavaCA(ctx context.Context, logger *zap.Logger, js javaStore, caPath,
 // JDK goes on trusting the CA of a run that is over. A keystore that does not
 // hold the alias (its import failed, or someone removed it already) is not one.
 func removeJavaAlias(ctx context.Context, logger *zap.Logger, js javaStore, alias string) {
-	out, err := exec.CommandContext(ctx, js.keytool, "-delete", "-alias", alias, "-keystore", js.cacerts, "-storepass", javaStorePass, "-noprompt").CombinedOutput()
-	if err == nil {
+	held, changed, err := editJavaKeystore(ctx, logger, js, keystoreEdit{alias: alias})
+	switch {
+	case err == nil && changed:
 		logger.Debug("removed this run's CA from the JDK keystore", zap.String("alias", alias), zap.String("cacerts", js.cacerts))
 		return
+	case err == nil:
+		logger.Debug("this run's CA is not in the JDK keystore; nothing to remove", zap.String("alias", alias), zap.String("cacerts", js.cacerts))
+		return
+	}
+	if held == aliasUnknown {
+		// The edit never read the keystore (the lock, or the copy, failed):
+		// read it as it is. A keystore is only ever replaced whole, so a read
+		// needs no lock.
+		held = javaAliasHeld(ctx, js, alias)
 	}
 	msg := "could not remove this run's CA from the JDK keystore; that JDK trusts it until the alias is deleted"
-	switch javaAliasHeld(ctx, js, alias) {
+	switch held {
 	case aliasAbsent:
-		logger.Debug("this run's CA is not in the JDK keystore; nothing to remove", zap.String("alias", alias), zap.String("cacerts", js.cacerts))
+		logger.Debug("this run's CA is not in the JDK keystore; nothing to remove", zap.String("alias", alias), zap.String("cacerts", js.cacerts), zap.NamedError("edit_error", err))
 		return
 	case aliasUnknown:
 		msg = "could not remove this run's CA from the JDK keystore, nor read the keystore to see whether it holds it; if it does, that JDK trusts it until the alias is deleted"
 	}
 	logger.Warn(msg,
-		zap.String("alias", alias), zap.String("cacerts", js.cacerts), zap.String("keytool", js.keytool),
-		zap.ByteString("output", bytes.TrimSpace(out)), zap.Error(err),
+		zap.String("alias", alias), zap.String("cacerts", js.cacerts), zap.String("keytool", js.keytool), zap.Error(err),
 		zap.String("next_step", fmt.Sprintf(`"%s" -delete -alias %s -keystore "%s" -storepass %s`, js.keytool, alias, js.cacerts, javaStorePass)))
 }
 
@@ -196,22 +200,17 @@ const (
 	aliasUnknown                  // keytool cannot read the keystore
 )
 
-// javaAliasHeld lists js with keytool and looks for alias among the entries it
-// prints, each on a line of its own that starts with its name: one keytool
-// run, whether the keystore holds it or not (as on a host whose trust-store
-// update rebuilds the JDK keystore from the system store, Fedora's or
-// Temurin's, and so dropped keploy's import already).
+// javaAliasHeld lists js with keytool (listJavaAliases) and looks for alias
+// among its entries: one keytool run, whether the keystore holds it or not (as
+// on a host whose trust-store update rebuilds the JDK keystore from the system
+// store, Fedora's or Temurin's, and so dropped keploy's import already).
 func javaAliasHeld(ctx context.Context, js javaStore, alias string) aliasHeld {
-	out, err := exec.CommandContext(ctx, js.keytool, "-list", "-keystore", js.cacerts, "-storepass", javaStorePass).Output()
+	aliases, err := listJavaAliases(ctx, ctx, js.keytool, js.cacerts)
 	if err != nil {
 		return aliasUnknown
 	}
-	alias = strings.ToLower(alias)
-	for _, l := range strings.Split(strings.ToLower(string(out)), "\n") {
-		l = strings.TrimSpace(l)
-		if l == alias || strings.HasPrefix(l, alias+",") || strings.HasPrefix(l, alias+" ") {
-			return aliasPresent
-		}
+	if aliases[strings.ToLower(alias)] {
+		return aliasPresent
 	}
 	return aliasAbsent
 }

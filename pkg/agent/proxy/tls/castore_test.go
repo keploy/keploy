@@ -11,25 +11,24 @@ import (
 
 func TestEphemeralStore_DoesNotPersist(t *testing.T) {
 	s := ephemeralStore{}
-	if s.persistsKey() {
-		t.Fatal("ephemeral store must not report persistence")
-	}
 	ca, err := s.loadOrGenerate(zap.NewNop())
 	if err != nil || ca == nil {
 		t.Fatalf("ephemeral loadOrGenerate: ca=%v err=%v", ca, err)
+	}
+	if ca.persisted {
+		t.Fatal("an ephemeral CA must not report persistence")
 	}
 }
 
 func TestFileStore_PersistsAndReuses(t *testing.T) {
 	dir := t.TempDir()
 	s := &fileStore{dir: dir, label: "test"}
-	if !s.persistsKey() {
-		t.Fatal("file store must report persistence")
-	}
-
 	first, err := s.loadOrGenerate(zap.NewNop())
 	if err != nil {
 		t.Fatalf("first loadOrGenerate: %v", err)
+	}
+	if !first.persisted {
+		t.Fatal("a CA the file store wrote must report persistence")
 	}
 	// The key file exists and is owner-only on unix.
 	keyPath := filepath.Join(dir, caKeyFileName)
@@ -124,3 +123,82 @@ func TestSelectCAStore(t *testing.T) {
 		t.Error("in-cluster with no key dir should fall back to the ephemeral store")
 	}
 }
+
+// A fileStore CA that could not be kept on disk is this run's alone, and the
+// native install must treat it so: its teardown removes it from the Windows
+// ROOT store and the JDK keystore, as it does an ephemeral CA's. Only a CA the
+// next run will load again is kept installed. fileStore hands out a fresh CA
+// it could not persist when its directory cannot be made, when the key cannot
+// be written (an unremovable leftover where the key goes), and when the
+// certificate cannot be; and the store still said it persisted its key, so
+// the install recorded nothing to remove, and every such run left one more
+// trusted root behind.
+func TestFileStoreCAThatIsNotOnDiskIsRemovedAtTeardown(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		breakStore func(t *testing.T, dir string) string // returns the store's dir
+	}{{
+		name: "the key directory cannot be made",
+		breakStore: func(t *testing.T, dir string) string {
+			p := filepath.Join(dir, "a-file")
+			if err := os.WriteFile(p, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(p, "ca")
+		},
+	}, {
+		name: "the key cannot be written",
+		breakStore: func(t *testing.T, dir string) string {
+			if err := os.MkdirAll(filepath.Join(dir, caKeyFileName, "leftover"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		},
+	}, {
+		name: "the certificate cannot be written",
+		breakStore: func(t *testing.T, dir string) string {
+			if err := os.MkdirAll(filepath.Join(dir, caCertFileName, "leftover"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &fileStore{dir: tc.breakStore(t, t.TempDir()), label: "test"}
+			ca, err := s.loadOrGenerate(zap.NewNop())
+			if err != nil {
+				t.Fatalf("loadOrGenerate: %v", err)
+			}
+			next, err := s.loadOrGenerate(zap.NewNop())
+			if err != nil {
+				t.Fatalf("loadOrGenerate again: %v", err)
+			}
+			if next.fp == ca.fp {
+				t.Fatal("the CA was kept after all; the test's breakage is wrong")
+			}
+			if keptInstalled(ca) {
+				t.Fatal("a CA the next run cannot load is kept installed after this run: its teardown removes nothing, and it stays trusted")
+			}
+		})
+	}
+	// And one that is on disk is kept, so the next run reuses its install.
+	s := &fileStore{dir: t.TempDir(), label: "test"}
+	ca, err := s.loadOrGenerate(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keptInstalled(ca) {
+		t.Fatal("a persisted CA is removed at teardown; the next run, which reuses it, would prompt again")
+	}
+	again, err := s.loadOrGenerate(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.fp != ca.fp || !keptInstalled(again) {
+		t.Fatal("a reloaded persisted CA is not kept installed")
+	}
+}
+
+// keptInstalled reports whether a Windows native install of ca is kept at
+// the teardown (windowsNativeInstall).
+func keptInstalled(ca *caState) bool { return !windowsNativeInstall(ca, runAlias(ca)).remove }

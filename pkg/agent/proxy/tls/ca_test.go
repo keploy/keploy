@@ -22,6 +22,7 @@ import (
 
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -825,20 +826,21 @@ func TestGenerateTrustStore_RejectsTruncatedTrailingBlock(t *testing.T) {
 	}
 }
 
-// An install the stop cuts short is still removed by the teardown. The stop
-// cancels the context the install runs under, which kills the trust store's
-// update (update-ca-certificates) once this run's anchor is already written;
-// any other failure of the update leaves the anchor written just the same.
-// The install recorded what it wrote only once the update had succeeded, so
-// TeardownNativeCA removed nothing and the anchor stayed trusted -- for a
-// run whose CA key is gone -- until the next start's sweep.
+// An install that does not finish is still removed by the teardown. The
+// trust store's update (update-ca-certificates) runs once this run's anchor
+// is already written, and when it fails, or a stop ends its wait for the
+// trust-store lock, the anchor stays written. The install recorded what it
+// wrote only once the update had succeeded, so TeardownNativeCA removed
+// nothing and the anchor stayed trusted -- for a run whose CA key is gone --
+// until the next start's sweep.
 func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the trust-store anchors are Linux's")
 	}
+	trustStoreLockForTest(t)
 	store, bin := t.TempDir(), t.TempDir()
 	update := filepath.Join(bin, "keploy-test-update-ca")
-	// The update the stop killed: it ends in failure.
+	// The update that does not finish: it ends in failure.
 	if err := os.WriteFile(update, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -856,8 +858,8 @@ func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err == nil {
-		t.Fatal("the install succeeded with a trust-store update that failed")
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, ""); err == nil || !strings.Contains(err.Error(), "keploy-test-update-ca failed") {
+		t.Fatalf("setupNativeForApp = %v; want the trust-store update's failure", err)
 	}
 	anchor := filepath.Join(store, runCertFileName(ca))
 	if _, err := os.Stat(anchor); err != nil {
@@ -868,6 +870,90 @@ func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 	if _, err := os.Stat(anchor); !os.IsNotExist(err) {
 		t.Fatalf("the teardown left this run's anchor %s in the trust store (stat: %v)", anchor, err)
 	}
+}
+
+// warnedWith reports whether logs holds a Warn whose field key is want.
+func warnedWith(logs *observer.ObservedLogs, key, want string) bool {
+	for _, e := range logs.All() {
+		if v, _ := e.ContextMap()[key].(string); e.Level == zapcore.WarnLevel && v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// A teardown that cannot remove this run's anchor from the system trust store
+// (for any reason but its not being there) says so at Warn, naming the file:
+// the system goes on trusting the CA of a run that is over. It used to say
+// nothing.
+func TestTeardownWarnsWhenItCannotRemoveThisRunsAnchor(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the trust-store anchors are Linux's")
+	}
+	update := nativeTrustStoreForTest(t)
+	t.Setenv("PATH", update) // no JDK
+	t.Setenv("JAVA_HOME", "")
+	ca, err := generateRunCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, ""); err != nil {
+		t.Fatalf("setupNativeForApp: %v", err)
+	}
+	anchor := filepath.Join(caStorePath[0], runCertFileName(ca))
+	// What stands at the anchor's path cannot be removed: a directory with a
+	// file in it (root or not, os.Remove fails on it).
+	if err := os.Remove(anchor); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(anchor, "held"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zapcore.WarnLevel)
+	TeardownNativeCA(zap.New(core))
+	if !warnedWith(logs, "path", anchor) {
+		t.Fatalf("no Warn naming the anchor %s the teardown could not remove; Warn and above logged: %v", anchor, logs.All())
+	}
+}
+
+// A teardown that removed this run's anchor but cannot rebuild the trust
+// bundle without it says so at Warn: the bundle trusts the CA until its next
+// rebuild. It used to be a Debug line.
+func TestTeardownWarnsWhenTheTrustBundleRebuildFails(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the trust-store anchors are Linux's")
+	}
+	update := nativeTrustStoreForTest(t)
+	t.Setenv("PATH", update) // no JDK
+	t.Setenv("JAVA_HOME", "")
+	// The store's update succeeds for the install and fails once failing exists.
+	failing := filepath.Join(t.TempDir(), "failing")
+	script := "#!/bin/sh\n[ -e '" + failing + "' ] && { echo 'update-ca-certificates: cannot write the bundle' >&2; exit 1; }\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(update, "keploy-test-update-ca"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ca, err := generateRunCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, ""); err != nil {
+		t.Fatalf("setupNativeForApp: %v", err)
+	}
+	if err := os.WriteFile(failing, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zapcore.WarnLevel)
+	TeardownNativeCA(zap.New(core))
+	anchor := filepath.Join(caStorePath[0], runCertFileName(ca))
+	if _, err := os.Stat(anchor); !os.IsNotExist(err) {
+		t.Fatalf("the teardown left the anchor %s (stat: %v)", anchor, err)
+	}
+	for _, e := range logs.All() {
+		if removed, ok := e.ContextMap()["removed"].([]interface{}); ok && len(removed) == 1 && removed[0] == anchor {
+			return
+		}
+	}
+	t.Fatalf("no Warn that the trust bundle still trusts the removed anchor %s; Warn and above logged: %v", anchor, logs.All())
 }
 
 // TestCertForClient_NoSNINamesDestinationIP: a client that dialled an IP literal

@@ -1,12 +1,18 @@
 package tls
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,16 +21,113 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// keytoolFails says which of a fake keytool's commands fail.
-type keytoolFails struct{ delete, importing bool }
+// keytoolFails says which of a fake keytool's commands fail, and where one of
+// its runs stops until the test lets it go on.
+type keytoolFails struct {
+	delete, importing bool
+	// exportFailsOnCopies makes -exportcert fail on keploy's copies of a
+	// keystore though the alias is there.
+	exportFailsOnCopies bool
+	// importDropsOthers makes -import write back only the entry it adds, as
+	// a keytool that read a keystore cut short would.
+	importDropsOthers bool
+	// hold, when set, stops the run of hold.op on hold.alias (see keytoolHold).
+	hold *keytoolHold
+}
 
-// fakeKeytool is a keytool that keeps a keystore as one alias per line, and
-// each entry's certificate next to the keystore's real file (as
-// <real path>.<alias>.pem), so a keystore reached through a link is the same
-// keystore. It answers -list (of the keystore, or of one -alias), -import,
-// -exportcert -rfc and -delete as keytool does, and logs every call to log.
-// fail makes -delete fail though the alias is there, or -import fail having
-// written nothing (a keystore keploy may not write, say).
+// keytoolHold stops a fake keytool run part way, as a real one is stopped by
+// a kill or by the scheduler: the run of op ("-import", "-delete", or "-list"
+// with alias "" for a list of the whole keystore, which stops before it reads
+// it) on alias, the first times runs of it (1 unless set before the JDK is
+// made). midWrite stops it once it has truncated the keystore it was given and
+// before it writes it again (where a kill leaves a real keytool's keystore
+// truncated); otherwise it stops once it has read the keystore and before it
+// truncates it (where another keytool's write is lost under its own).
+//
+// A held run writes a line to the FIFO reached and waits for a line on the
+// FIFO release (on fds 7 and 8: fd 3 is the trust-store lock a keytool run
+// inherits); the test blocks on each, never on a clock. The test holds both
+// FIFOs open for reading and writing until it ends, so a run never blocks
+// opening one, and a run still held when the test ends (it failed, or timed
+// out and died) reads the end of release and goes on: no fake keytool outlives
+// its test.
+type keytoolHold struct {
+	op, alias        string
+	midWrite         bool
+	times            int
+	reached, release string
+	reachedF         *os.File
+	releaseF         *os.File
+	reachedLines     *bufio.Reader
+}
+
+// newKeytoolHold makes the two FIFOs of a hold of op on alias.
+func newKeytoolHold(t *testing.T, op, alias string, midWrite bool) *keytoolHold {
+	t.Helper()
+	dir := t.TempDir()
+	h := &keytoolHold{op: op, alias: alias, midWrite: midWrite, times: 1,
+		reached: filepath.Join(dir, "reached"), release: filepath.Join(dir, "release")}
+	for _, p := range []string{h.reached, h.release} {
+		if err := syscallMkfifo(p); err != nil {
+			t.Skipf("the fake keytool's hold needs a FIFO: %v", err)
+		}
+	}
+	var err error
+	if h.reachedF, err = os.OpenFile(h.reached, os.O_RDWR, 0); err != nil {
+		t.Fatal(err)
+	}
+	if h.releaseF, err = os.OpenFile(h.release, os.O_RDWR, 0); err != nil {
+		t.Fatal(err)
+	}
+	h.reachedLines = bufio.NewReader(h.reachedF)
+	t.Cleanup(func() {
+		_ = h.releaseF.Close()
+		_ = h.reachedF.Close()
+	})
+	return h
+}
+
+// waitReached blocks until a held run has stopped, or fails the test if the
+// operation that was to make that run ends first (done is closed, or sends its
+// error).
+func (h *keytoolHold) waitReached(t *testing.T, done <-chan error) {
+	t.Helper()
+	reached := make(chan string, 1)
+	go func() {
+		l, _ := h.reachedLines.ReadString('\n')
+		reached <- l
+	}()
+	select {
+	case <-reached:
+	case err := <-done:
+		// Let the read above return.
+		_, _ = h.reachedF.WriteString("ended\n")
+		<-reached
+		t.Fatalf("the operation ended before its keytool run on %s reached the hold: %v", h.alias, err)
+	}
+}
+
+// letGo lets a held run go on.
+func (h *keytoolHold) letGo(t *testing.T) {
+	t.Helper()
+	if _, err := h.releaseF.WriteString("go\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeKeytool is a keytool that keeps a keystore in a file as the real one
+// does in the ways keploy depends on: a run reads the whole keystore, makes its
+// one change, and writes the whole keystore back in place (truncating the file
+// it was given, then writing it); a keystore that was cut short (no "#end"
+// line, as a real keystore without its integrity hash) is refused. Each entry
+// is a line: the alias, lowercased as JKS does, a space, and the certificate's
+// PEM body on one line. It answers -list (of the whole keystore, each entry
+// as keytool prints it, or with -rfc as an "Alias name:" line; or of one
+// -alias), -import,
+// -exportcert -rfc and -delete, and logs every call to log. fail makes -delete
+// fail though the alias is there, -import fail having written nothing (a
+// keystore keploy may not write, say), or -exportcert fail on keploy's copies;
+// fail.hold stops one run part way.
 //
 // The commands it runs are given by absolute path: the tests that use it leave
 // on PATH only the fake JDKs and a fake trust-store update, so no real keytool,
@@ -36,53 +139,100 @@ func fakeKeytool(t *testing.T, log string, fail keytoolFails) string {
 		if err != nil {
 			t.Skipf("the fake keytool needs %s: %v", name, err)
 		}
-		return p
+		return "'" + p + "'"
 	}
-	cat, readlink := tool("cat"), tool("readlink")
+	cat, sed, tr, grep := tool("cat"), tool("sed"), tool("tr"), tool("grep")
 	flag := func(b bool) string {
 		if b {
 			return "1"
 		}
 		return "0"
 	}
+	holdOp, holdAlias, holdMid, holdTimes, reached, release := "", "", "0", "0", "", ""
+	if h := fail.hold; h != nil {
+		holdOp, holdAlias, holdMid, holdTimes, reached, release = h.op, strings.ToLower(h.alias), flag(h.midWrite), strconv.Itoa(h.times), h.reached, h.release
+	}
 	return `#!/bin/sh
+while case $1 in -J*) true;; *) false;; esac; do shift; done
 op=$1; shift
-ks=; al=; f=
+ks=; al=; f=; rfc=0
 while [ $# -gt 0 ]; do
   case $1 in
     -keystore) ks=$2; shift;;
     -alias) al=$2; shift;;
     -file) f=$2; shift;;
+    -rfc) rfc=1;;
   esac
   shift
 done
+al=$(printf '%s' "$al" | ` + tr + ` 'A-Z' 'a-z')
 echo "$op keystore=$ks alias=$al" >> '` + log + `'
-has() {
-  [ -f "$ks" ] || return 1
-  while IFS= read -r l; do [ "$l" = "$al" ] && return 0; done < "$ks"
-  return 1
+held=0
+if [ "$op" = '` + holdOp + `' ] && [ "$al" = '` + holdAlias + `' ]; then
+  n=$(` + cat + ` '` + reached + `.count' 2>/dev/null || echo 0)
+  if [ "$n" -lt ` + holdTimes + ` ]; then
+    held=1; echo $((n+1)) > '` + reached + `.count'
+    exec 8< '` + release + `'
+  fi
+fi
+load() {
+  [ -f "$ks" ] || { echo "keytool error: java.io.FileNotFoundException: $ks (No such file or directory)"; exit 1; }
+  all=$(` + cat + ` "$ks") || exit 1
+  case $all in
+    *'#end') ;;
+    *) echo "keytool error: java.io.IOException: Keystore was tampered with, or password was incorrect"; exit 1;;
+  esac
+  entries=$(printf '%s\n' "$all" | ` + grep + ` -v '^#end$')
 }
-real=$('` + readlink + `' -f "$ks")
+has() { printf '%s\n' "$entries" | ` + grep + ` -q "^$al "; }
+hold() {
+  [ $held = 1 ] || return 0
+  [ ` + holdMid + ` = 1 ] && : > "$ks"
+  exec 7<> '` + reached + `'
+  echo reached >&7
+  exec 7>&-
+  read _ <&8
+}
+store() {
+  hold
+  { [ -n "$1" ] && printf '%s\n' "$1"; echo '#end'; } > "$ks"
+}
 case $op in
   -list)
+    hold
+    load
     if [ -z "$al" ]; then
       echo "Keystore type: JKS"
-      [ -f "$ks" ] && while IFS= read -r l; do echo "$l, Oct 23, 2026, trustedCertEntry,"; done < "$ks"
+      echo
+      printf '%s\n' "$entries" | while read -r a b; do
+        [ -n "$a" ] || continue
+        if [ $rfc = 1 ]; then printf 'Alias name: %s\nEntry type: trustedCertEntry\n\n' "$a"
+        else printf '%s, Oct 23, 2026, trustedCertEntry,\n' "$a"; fi
+      done
       exit 0
     fi
-    has;;
+    has || { echo "keytool error: java.lang.Exception: Alias <$al> does not exist"; exit 1; };;
   -import)
+    load
     [ ` + flag(fail.importing) + ` = 1 ] && { echo "keytool error: java.io.FileNotFoundException: $ks (Read-only file system)"; exit 1; }
     has && { echo "keytool error: java.lang.Exception: Certificate not imported, alias <$al> already exists"; exit 1; }
-    echo "$al" >> "$ks"; '` + cat + `' "$f" > "$real.$al.pem";;
-  -exportcert) has || exit 1; '` + cat + `' "$real.$al.pem";;
+    body=$(` + sed + ` -e '1d' -e '$d' "$f" | ` + tr + ` -d '\n')
+    [ ` + flag(fail.importDropsOthers) + ` = 1 ] && entries=
+    if [ -n "$entries" ]; then store "$entries
+$al $body"; else store "$al $body"; fi
+    echo "Certificate was added to keystore";;
+  -exportcert)
+    load
+    case $ks in *.keploy-edit-*) [ ` + flag(fail.exportFailsOnCopies) + ` = 1 ] && { echo "keytool error: java.lang.OutOfMemoryError"; exit 1; };; esac
+    has || exit 1
+    echo '-----BEGIN CERTIFICATE-----'
+    printf '%s\n' "$entries" | ` + grep + ` "^$al " | ` + sed + ` 's/^[^ ]* //'
+    echo '-----END CERTIFICATE-----';;
   -delete)
+    load
     has || { echo "keytool error: java.lang.Exception: Alias <$al> does not exist"; exit 1; }
     [ ` + flag(fail.delete) + ` = 1 ] && { echo "keytool error: java.io.FileNotFoundException: $ks (Permission denied)"; exit 1; }
-    keep=
-    while IFS= read -r l; do [ "$l" = "$al" ] || keep="$keep$l
-"; done < "$ks"
-    printf '%s' "$keep" > "$ks";;
+    store "$(printf '%s\n' "$entries" | ` + grep + ` -v "^$al ")";;
   *) exit 2;;
 esac
 `
@@ -98,8 +248,9 @@ type fakeJDK struct {
 // makeFakeJDKAt lays out a JDK at home: bin/java, which prints java.home as a
 // JVM does (the JDK's real home, which the JVM derives from its own
 // executable), bin/keytool (fakeKeytool, failing as fail says), and
-// lib/security/cacerts. With sharedStore set, cacerts is a link to it, as
-// Debian's and Ubuntu's JDKs link theirs to /etc/ssl/certs/java/cacerts.
+// lib/security/cacerts, an empty keystore. With sharedStore set, cacerts is a
+// link to it, as Debian's and Ubuntu's JDKs link theirs to
+// /etc/ssl/certs/java/cacerts.
 func makeFakeJDKAt(t *testing.T, home, sharedStore string, fail keytoolFails) fakeJDK {
 	t.Helper()
 	for _, d := range []string{filepath.Join(home, "bin"), filepath.Join(home, "lib", "security")} {
@@ -117,9 +268,7 @@ func makeFakeJDKAt(t *testing.T, home, sharedStore string, fail keytoolFails) fa
 		}
 		j.store = sharedStore
 	}
-	if err := os.WriteFile(j.store, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeKeystore(t, j.store, nil)
 	java := "#!/bin/sh\necho '    java.home = " + home + "' >&2\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(home, "bin", "java"), []byte(java), 0o755); err != nil {
 		t.Fatal(err)
@@ -128,6 +277,29 @@ func makeFakeJDKAt(t *testing.T, home, sharedStore string, fail keytoolFails) fa
 		t.Fatal(err)
 	}
 	return j
+}
+
+// writeFakeKeystore writes a fake keystore holding entries (alias to
+// certificate PEM), in fakeKeytool's format.
+func writeFakeKeystore(t *testing.T, store string, entries map[string][]byte) {
+	t.Helper()
+	var b strings.Builder
+	aliases := make([]string, 0, len(entries))
+	for a := range entries {
+		aliases = append(aliases, a)
+	}
+	sort.Strings(aliases)
+	for _, a := range aliases {
+		block, _ := pem.Decode(entries[a])
+		if block == nil {
+			t.Fatalf("the certificate for %s is not PEM", a)
+		}
+		b.WriteString(strings.ToLower(a) + " " + base64.StdEncoding.EncodeToString(block.Bytes) + "\n")
+	}
+	b.WriteString("#end\n")
+	if err := os.WriteFile(store, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // linkThroughAlternatives puts java and keytool in a usr/bin under root as
@@ -159,13 +331,21 @@ func aliasesIn(t *testing.T, store string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Fields(string(b))
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) > 0 && f[0] != "#end" {
+			out = append(out, f[0])
+		}
+	}
+	return out
 }
 
+// holds reports whether a fake keystore holds alias (JKS aliases are
+// lowercase).
 func holds(t *testing.T, store, alias string) bool {
 	t.Helper()
 	for _, a := range aliasesIn(t, store) {
-		if a == alias {
+		if a == strings.ToLower(alias) {
 			return true
 		}
 	}
@@ -173,7 +353,9 @@ func holds(t *testing.T, store, alias string) bool {
 }
 
 // nativeTrustStoreForTest points the system trust store at a fresh directory
-// and its update at a command that succeeds, in bin, until the test ends. It
+// (and its bundle at a file there), its update at a command that succeeds, in
+// bin, and the trust-store lock
+// at a file of the test's own (trustStoreLockForTest), until the test ends. It
 // also gives back, at the end, what a successful install changes for the rest
 // of the process: the runtimes' CA variables (SetEnvForPath points them into
 // this test's directories) and the CA's readiness.
@@ -187,12 +369,15 @@ func nativeTrustStoreForTest(t *testing.T) (bin string) {
 	if err := os.WriteFile(filepath.Join(bin, "keploy-test-update-ca"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldPaths, oldCmds := caStorePath, caStoreUpdateCmd
+	oldPaths, oldCmds, oldBundles, oldMarker := caStorePath, caStoreUpdateCmd, legacyCABundlePaths, legacyRebuildMarker
 	caStorePath, caStoreUpdateCmd = []string{store + "/"}, []string{"keploy-test-update-ca"}
+	state := t.TempDir() // the bundle and the rebuild's marker: not in the anchor directory, and none unless a test writes one
+	legacyCABundlePaths, legacyRebuildMarker = []string{filepath.Join(state, "ca-certificates.crt")}, filepath.Join(state, "keploy", "retired-ca-rebuild-owed")
 	t.Cleanup(func() {
-		caStorePath, caStoreUpdateCmd = oldPaths, oldCmds
+		caStorePath, caStoreUpdateCmd, legacyCABundlePaths, legacyRebuildMarker = oldPaths, oldCmds, oldBundles, oldMarker
 		recordNativeInstall(nil)
 	})
+	trustStoreLockForTest(t)
 	return bin
 }
 
@@ -250,7 +435,7 @@ func TestTeardownRemovesTheJDKAliasFromTheKeystoreTheInstallUsed(t *testing.T) {
 				t.Fatal(err)
 			}
 			alias := runAlias(ca)
-			if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, override); err != nil {
+			if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, override); err != nil {
 				t.Fatalf("setupNativeForApp: %v", err)
 			}
 			if !holds(t, want.store, alias) {
@@ -296,12 +481,7 @@ func TestLegacyJDKAliasSweepFindsTheKeystoreThroughAlternatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(j.store, []byte(legacyCAAlias+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(j.store+"."+legacyCAAlias+".pem", retired.certPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeKeystore(t, j.store, map[string][]byte{legacyCAAlias: retired.certPEM})
 
 	// What SweepLegacyCA does, for this fingerprint.
 	ctx := context.Background()
@@ -332,7 +512,7 @@ func TestTeardownWarnsWhenItCannotRemoveTheJDKAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := runAlias(ca)
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err != nil {
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, ""); err != nil {
 		t.Fatalf("setupNativeForApp: %v", err)
 	}
 	core, logs := observer.New(zapcore.WarnLevel)
@@ -368,13 +548,11 @@ func TestTeardownDoesNotWarnWhenTheJDKAliasIsAlreadyGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err != nil {
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, ""); err != nil {
 		t.Fatalf("setupNativeForApp: %v", err)
 	}
 	// Someone (keploy ca clean, an operator) removed it already.
-	if err := os.WriteFile(j.store, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeKeystore(t, j.store, nil)
 	core, logs := observer.New(zapcore.WarnLevel)
 	TeardownNativeCA(zap.New(core))
 	if n := logs.Len(); n != 0 {
@@ -431,7 +609,7 @@ func TestTeardownLeavesAKeystoreWhoseImportWasRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err != nil {
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, 0, ""); err != nil {
 		t.Fatalf("setupNativeForApp: a refused JDK import must not fail the install: %v", err)
 	}
 	before, _ := os.ReadFile(j.keytool)
@@ -453,6 +631,7 @@ func TestImportJavaCAUsesTheJDKsOwnKeytool(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the fake JDK is /bin/sh scripts")
 	}
+	trustStoreLockForTest(t)
 	root := t.TempDir()
 	j := makeFakeJDKAt(t, filepath.Join(root, "opt", "jdk-21"), "", keytoolFails{})
 	onPath := makeFakeJDKAt(t, filepath.Join(root, "usr", "lib", "jvm", "default"), "", keytoolFails{})
@@ -542,40 +721,49 @@ func TestResolveJavaStore(t *testing.T) {
 	})
 }
 
-// An import the stop cuts short (its context cancelled: keytool may be killed
-// while it writes) stays in the run's record, so the teardown still deletes
-// from that keystore whatever the import left there.
-func TestTeardownStillRemovesAnImportTheStopCutShort(t *testing.T) {
+// An import the stop cuts short (its context cancelled) leaves the keystore as
+// it was: the import is made on a copy, which replaces the keystore only once
+// it is complete (editJavaKeystore). So the run's record holds no JDK keystore,
+// and its teardown runs no keytool there.
+func TestAnImportTheStopCutShortLeavesNothingToRemove(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the trust-store anchors are Linux's; the fake JDK is /bin/sh scripts")
 	}
 	update := nativeTrustStoreForTest(t)
 	j := makeFakeJDKAt(t, filepath.Join(t.TempDir(), "opt", "jdk-21"), "", keytoolFails{})
+	writeFakeKeystore(t, j.store, map[string][]byte{"debian:one.pem": testCACertPEM()})
+	before, err := os.ReadFile(j.store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", update)
 
 	ca, err := generateRunCA()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The stop came before the import's keytool could run.
+	// The stop came before the import could run.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := setupNativeForApp(ctx, zap.NewNop(), ca, nil, 0, j.home); err == nil {
+	if err := setupNativeForApp(ctx, zap.NewNop(), ca, 0, j.home); err == nil {
 		t.Fatal("an install whose context was cancelled succeeded")
 	}
+	if after, _ := os.ReadFile(j.store); !bytes.Equal(before, after) {
+		t.Fatalf("a cut-short import changed the keystore:\n%s", after)
+	}
 	installedNativeMu.Lock()
-	rec := installedNative
 	var got javaStore
-	if rec != nil {
-		got = rec.java
+	if installedNative != nil {
+		got = installedNative.java
 	}
 	installedNativeMu.Unlock()
-	if want := (javaStore{keytool: filepath.Join(j.home, "bin", "keytool"), cacerts: j.store}); got != want {
-		t.Fatalf("after a cut-short import the run's record holds JDK keystore %+v, want %+v", got, want)
+	if got != (javaStore{}) {
+		t.Fatalf("after a cut-short import the run's record holds JDK keystore %+v; it holds nothing of this run's", got)
 	}
+	logBefore, _ := os.ReadFile(j.keytool)
 	TeardownNativeCA(zap.NewNop())
-	if log, _ := os.ReadFile(j.keytool); !strings.Contains(string(log), "-delete keystore="+j.store) {
-		t.Fatalf("the teardown did not delete from the keystore a cut-short import may have written:\n%s", log)
+	if logAfter, _ := os.ReadFile(j.keytool); len(logAfter) != len(logBefore) {
+		t.Fatalf("the teardown ran keytool for an import that changed nothing:\n%s", logAfter[len(logBefore):])
 	}
 }
 
@@ -587,6 +775,7 @@ func TestJavaAliasProbeAgainstRealKeytool(t *testing.T) {
 	if err != nil {
 		t.Skip("no keytool on PATH")
 	}
+	trustStoreLockForTest(t)
 	dir := t.TempDir()
 	js := javaStore{keytool: keytool, cacerts: filepath.Join(dir, "cacerts")}
 	caPath := filepath.Join(dir, "ca.crt")

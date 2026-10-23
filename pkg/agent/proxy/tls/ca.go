@@ -260,7 +260,7 @@ func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPID int, javaHomeOverride string) error {
 	// Establish this run's CA (fresh in memory, or reused from the per-pod /
 	// per-user backend) and publish it before anything signs or installs it.
-	ca, store, err := loadOrGenerateActiveCA(logger, isDocker)
+	ca, err := loadOrGenerateActiveCA(logger, isDocker)
 	if err != nil {
 		return err
 	}
@@ -277,7 +277,7 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 
 	// Native Mode
 	logger.Debug("Detected Native Mode. Installing to system store...")
-	return setupNativeForApp(ctx, logger, ca, store, appPID, javaHomeOverride)
+	return setupNativeForApp(ctx, logger, ca, appPID, javaHomeOverride)
 }
 
 // SetupCaCertEnv extracts the run CA's public certificate to a temp file and
@@ -872,12 +872,11 @@ func recordNativeInstall(n *nativeInstall) {
 	installedNativeMu.Unlock()
 }
 
-// recordNativeJava sets the JDK keystore in n, this run's record: js just
-// before the import into it, so that an import the stop cuts short (ctx
-// cancelled: keytool may be killed while it writes) is still removed by the
-// teardown; the zero javaStore once keytool has refused the import, which
-// leaves the keystore as it was (keytool writes a keystore only once an import
-// has succeeded), so the teardown has nothing to delete there.
+// recordNativeJava sets the JDK keystore in n, this run's record, once the
+// import into it has succeeded. An import that failed left the keystore as it
+// was (editJavaKeystore), so the teardown has nothing to delete there. The
+// teardown runs after the install has returned (the proxy's start, then its
+// shutdown), so it never reads a record an import is still to set.
 func recordNativeJava(n *nativeInstall, js javaStore) {
 	installedNativeMu.Lock()
 	n.java = js
@@ -890,20 +889,31 @@ func recordNativeJava(n *nativeInstall, js javaStore) {
 // truststore the client sets (SetupCaCertEnv), so a missing or failing
 // keytool must not fail CA setup for a run that may not even use Java.
 func importNativeJava(ctx context.Context, logger *zap.Logger, n *nativeInstall, js javaStore, caPath, alias string) {
-	recordNativeJava(n, js)
 	if err := importJavaCA(ctx, logger, js, caPath, alias); err != nil {
-		logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		if ctx.Err() == nil {
-			recordNativeJava(n, javaStore{})
+		if ctx.Err() != nil {
+			logger.Debug("the stop cut short the import of the keploy CA into the Java keystore, which is left as it was", zap.Error(err))
+			return
 		}
+		logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
+		return
 	}
+	recordNativeJava(n, js)
+}
+
+// windowsNativeInstall is the record of a Windows install of ca: removed at
+// the teardown unless ca is persisted, so that the next run reuses it (and its
+// ROOT-store entry, whose prompt then fires at most once). A CA its store
+// could not persist is this run's alone, and is removed like an ephemeral
+// one.
+func windowsNativeInstall(ca *caState, alias string) *nativeInstall {
+	return &nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !ca.persisted}
 }
 
 // setupNativeForApp is the PID-aware native-install path. It installs this run's
 // generated CA public certificate into the OS trust store under a unique
 // filename for the duration of the run (removed at teardown; crashed-run copies
 // are inert because the key died with the process and are swept at next start).
-func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, appPID int, javaHomeOverride string) error {
+func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, appPID int, javaHomeOverride string) error {
 	// Resolve the target JDK's java.home once, up front. Order:
 	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
 	//   2. /proc/<appPID>/environ JAVA_HOME, then /proc/<appPID>/exe.
@@ -970,9 +980,9 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		// in the ROOT store is removed by this run's teardown however the
 		// install ends (removeWindowsCAByName finds nothing to remove when it
 		// added nothing). A persisted per-user CA is kept across runs (so the
-		// ROOT-store prompt fires at most once); an ephemeral one is removed
-		// at teardown.
-		installed := &nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()}
+		// ROOT-store prompt fires at most once); any other is removed at
+		// teardown (windowsNativeInstall).
+		installed := windowsNativeInstall(ca, alias)
 		recordNativeInstall(installed)
 
 		// Install certificate using certutil
@@ -1014,9 +1024,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// install leaves in the trust store -- an anchor, the JDK alias -- is
 	// removed by this run's teardown (TeardownNativeCA) however the install
 	// ends: also when it fails part way, or the stop cuts it short (the stop
-	// cancels ctx, which kills the store's update after the anchors are
-	// written). Recorded only once the update had succeeded, such an install
-	// left its anchor trusted until the next run's sweep.
+	// cancels ctx, which ends the store's update's wait for the trust-store
+	// lock after the anchors are written). Recorded only once the update had
+	// succeeded, such an install left its anchor trusted until the next run's
+	// sweep.
 	installed := &nativeInstall{certFile: certFileName, alias: alias, remove: true}
 	recordNativeInstall(installed)
 	var finalCAPath string
@@ -1047,7 +1058,7 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	}
 
 	// Update the system store
-	if err := updateCaStore(ctx); err != nil {
+	if err := updateCaStore(ctx, logger); err != nil {
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
@@ -1079,10 +1090,11 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 
 // TeardownNativeCA removes the CA this run installed into the OS trust store so
 // trust does not persist after the run. It is called from the proxy's shutdown
-// path, where the run's context is already cancelled — so it runs the trust-store
-// and keytool commands under its own short-lived context rather than the dead
-// one. Safe to call when nothing was installed (docker/k8s modes, or a persisted
-// per-user CA): it is then a no-op.
+// path, where the run's context is already cancelled — so it runs its
+// commands under contexts of its own rather than the dead one (see below for
+// which are bounded by a clock and why). Safe to call when
+// nothing was installed (docker/k8s modes, or a persisted per-user CA): it is
+// then a no-op.
 func TeardownNativeCA(logger *zap.Logger) {
 	// A copy, taken under the lock the install writes the record under
 	// (recordNativeJava).
@@ -1097,9 +1109,6 @@ func TeardownNativeCA(logger *zap.Logger) {
 	if !recorded || !n.remove {
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	var removed []string
 	if n.certFile != "" {
@@ -1123,17 +1132,38 @@ func TeardownNativeCA(logger *zap.Logger) {
 		// keploy-mitm-<id>.crt, removed directly here, so a full bundle rebuild is
 		// unnecessary. --fresh is reserved for `keploy ca clean`, where pruning
 		// stale hash-links of a generically-named legacy anchor matters.
-		if err := refreshCaStore(ctx, false); err != nil {
+		//
+		// With no clock of its own: the rebuild waits for any other keploy
+		// agent's change of the trust state (the trust-store lock), however
+		// long their queue, and once it starts runs to its end. How long the
+		// teardown may take is the CLI's to judge, by its progress
+		// (utils.BeginTeardownWork); anchors are a Linux store's, where the
+		// CLI sees it.
+		if err := refreshCaStore(context.Background(), logger, false); err != nil {
 			logger.Warn("removed this run's CA from the system trust store, but could not rebuild the trust bundle without it; the bundle trusts it until its next rebuild",
 				zap.Strings("removed", removed), zap.Error(err))
 		}
 	}
 	// From the keystore the install imported into: the one it recorded, not
-	// one found again now by other rules.
+	// one found again now by other rules. With no clock either, where the CLI
+	// sees the teardown's progress: the edit may wait for other agents' edits
+	// (the lock), and nothing that cuts it short harms the keystore
+	// (editJavaKeystore). Where it does not see it (not on Linux), it never
+	// kills a teardown for want of progress, so a wedged keytool would hang
+	// the stop for ever: there a deadline bounds the edit, which abandons only
+	// keploy's copy of the keystore.
 	if n.java.keytool != "" {
-		removeJavaAlias(ctx, logger, n.java, n.alias)
+		jdk := context.Background()
+		if !utils.TeardownProgressSeen() {
+			var cancel context.CancelFunc
+			jdk, cancel = context.WithTimeout(jdk, 30*time.Second)
+			defer cancel()
+		}
+		removeJavaAlias(jdk, logger, n.java, n.alias)
 	}
 	if runtime.GOOS == "windows" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		removeWindowsCAByName(ctx, logger, n.cn)
 	}
 }
@@ -1381,25 +1411,42 @@ func commandExists(cmd string) bool {
 	return err == nil
 }
 
-func updateCaStore(ctx context.Context) error {
-	commandRun := false
-	for _, cmd := range caStoreUpdateCmd {
-		if commandExists(cmd) {
-			commandRun = true
-			c := exec.CommandContext(ctx, cmd)
-			_, err := c.CombinedOutput()
+// updateCaStore rebuilds the system trust store from its anchors with the
+// first of caStoreUpdateCmd this host has, under the trust-store lock: on
+// Debian and Ubuntu update-ca-certificates' hook (ca-certificates-java) runs
+// a JVM that rewrites the JDK keystore /etc/ssl/certs/java/cacerts, which no
+// keploy edit of that keystore (editJavaKeystore) may run beside. The wait for
+// the lock ends with ctx, or behind a holder that makes no progress
+// (lockTrustStore); once the lock is held the rebuild runs to its end, never
+// killed (past storeToolCeiling it is left running and waited for no longer:
+// runStoreCommandWithin), and keeps the lock while it runs, so that no other
+// agent's edit starts while its hook writes; its progress is a step for the
+// processes queued behind it.
+func updateCaStore(ctx context.Context, logger *zap.Logger) error {
+	return withTrustStoreLock(ctx, logger, func(locked context.Context) error {
+		// A start stopped while it waited does not begin a rebuild its
+		// teardown is about to undo.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("did not update the system trust store: %w", context.Cause(ctx))
+		}
+		for _, cmd := range caStoreUpdateCmd {
+			if !commandExists(cmd) {
+				continue
+			}
+			out, err := runStoreCommandWithin(storeCommand(locked, cmd), storeToolCeiling)
 			utils.BootStep(cmd + " is over") // the trust store's update
 			if err != nil {
-				return err
+				return fmt.Errorf("%s failed: %w: %s", cmd, err, bytes.TrimSpace(out))
 			}
-			break
+			return nil
 		}
-	}
-	if !commandRun {
-		return fmt.Errorf("no valid CA store tools command found")
-	}
-	return nil
+		return errNoTrustStoreTool
+	})
 }
+
+// errNoTrustStoreTool is updateCaStore's error on a host with none of the
+// trust-store rebuild tools (caStoreUpdateCmd).
+var errNoTrustStoreTool = errors.New("no valid CA store tools command found")
 
 func getCaPaths() ([]string, error) {
 	var caPaths []string
@@ -1412,30 +1459,6 @@ func getCaPaths() ([]string, error) {
 		return nil, fmt.Errorf("no valid CA store path found")
 	}
 	return caPaths, nil
-}
-
-func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bool {
-	return isJavaCAExistWithTool(ctx, "keytool", alias, storepass, cacertsPath)
-}
-
-// isJavaCAExistWithTool checks whether the given alias already exists in
-// cacertsPath, using a specific keytool executable.
-//
-// The split vs isJavaCAExist exists so callers with a resolved
-// $javaHome/bin/keytool (importJavaCA) use the SAME keytool for
-// the existence check as for the import — otherwise a PATH keytool's
-// different default store format or cacerts layout can produce a false
-// negative and we'd re-import over and over across agent restarts.
-func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, cacertsPath string) bool {
-	cmd := exec.CommandContext(ctx, keytoolBin, "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
-	err := cmd.Run()
-	utils.BootStep("keytool -list is over")
-	select {
-	case <-ctx.Done():
-		return false
-	default:
-	}
-	return err == nil
 }
 
 // installWindowsCA installs the CA certificate into a Windows trust store.

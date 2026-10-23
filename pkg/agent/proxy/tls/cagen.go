@@ -44,6 +44,9 @@ type caState struct {
 	signer  crypto.Signer     // CA private key, passed to CertForClient
 	fp      [32]byte          // sha256(der), used to label the keploy-root JKS alias
 	runID   string            // short random id; part of the CN, install filename and JDK alias
+	// persisted says the next run loads this CA again (fileStore): its
+	// native install is then kept at the teardown, not removed.
+	persisted bool
 }
 
 // activeCA is the CA the agent signs MITM leaves with for this run. It is set

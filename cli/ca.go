@@ -37,14 +37,14 @@ func caCleanCmd(ctx context.Context, logger *zap.Logger) *cobra.Command {
 	cleanCmd := &cobra.Command{
 		Use:     "clean",
 		Short:   "Remove the retired static Keploy MITM CA from this host's trust store",
-		Example: "sudo keploy ca clean --fresh",
+		Example: "sudo -E keploy ca clean --fresh",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			logger.Info("removing the retired static Keploy MITM CA from this host (matched by fingerprint)")
 			ptls.SweepLegacyCAAggressive(ctx, logger, fresh)
-			logger.Info("done. If anything could not be removed, re-run with sudo so the system trust store is writable.")
+			logger.Info("done. If anything could not be removed, re-run with sudo -E so the system trust store is writable.")
 			return nil
 		},
 	}
-	cleanCmd.Flags().BoolVar(&fresh, "fresh", false, "rebuild the system trust bundle from scratch after removal (update-ca-certificates --fresh on Debian/Ubuntu)")
+	cleanCmd.Flags().BoolVar(&fresh, "fresh", false, "rebuild the system trust bundle from scratch (update-ca-certificates --fresh on Debian/Ubuntu); on Linux the bundle is rebuilt either way")
 	return cleanCmd
 }

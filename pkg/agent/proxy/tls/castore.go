@@ -28,13 +28,12 @@ const (
 // caStore abstracts where this run's CA signing key lives.
 type caStore interface {
 	// loadOrGenerate returns the CA for this run, reusing a persisted one when
-	// the backend keeps the key on disk, otherwise minting a fresh one.
+	// the backend keeps the key on disk, otherwise minting a fresh one. The
+	// CA's persisted says whether the next run will load it again: that, not
+	// the backend, decides whether the native teardown removes its install (a
+	// persisted per-user Windows CA keeps it, so the user is not prompted
+	// again; any other CA's is removed, windowsNativeInstall).
 	loadOrGenerate(logger *zap.Logger) (*caState, error)
-	// persistsKey reports whether the key is kept across runs. It drives whether
-	// native teardown removes the system-store install: an ephemeral run removes
-	// what it installed, while a persisted per-user Windows CA keeps its install
-	// so the user is not re-prompted on the next run.
-	persistsKey() bool
 }
 
 // selectCAStore picks the storage backend for this process.
@@ -114,18 +113,20 @@ func windowsCAKeyDir(logger *zap.Logger) string {
 type ephemeralStore struct{}
 
 func (ephemeralStore) loadOrGenerate(_ *zap.Logger) (*caState, error) { return generateRunCA() }
-func (ephemeralStore) persistsKey() bool                              { return false }
 
 // fileStore loads a persisted CA from an agent-only directory, generating and
 // persisting a fresh one the first time. The key file is created 0600 with
 // O_EXCL|O_NOFOLLOW under a 0700 directory; a reload verifies ownership and mode
 // before trusting the key (see writeKeyFileSecurely / verifyKeyFileSecure).
+//
+// A CA it hands out is persisted only when the next load will find it: loaded
+// from the directory, or with its key and certificate both written there. One
+// it could not write is this run's alone (persisted false), and the run says
+// so at Warn.
 type fileStore struct {
 	dir   string
 	label string
 }
-
-func (fileStore) persistsKey() bool { return true }
 
 func (s *fileStore) loadOrGenerate(logger *zap.Logger) (*caState, error) {
 	if err := ensureKeyDir(s.dir); err != nil {
@@ -139,6 +140,7 @@ func (s *fileStore) loadOrGenerate(logger *zap.Logger) (*caState, error) {
 
 	if ca, ok := s.tryLoad(logger, keyPath, certPath); ok {
 		logger.Debug("reusing the persisted "+s.label+" MITM CA", zap.String("run_id", ca.runID))
+		ca.persisted = true
 		return ca, nil
 	}
 
@@ -161,10 +163,18 @@ func (s *fileStore) loadOrGenerate(logger *zap.Logger) (*caState, error) {
 		return ca, nil
 	}
 	if err := os.WriteFile(certPath, ca.certPEM, 0644); err != nil {
-		logger.Debug("could not write the persisted CA certificate", zap.String("path", certPath), zap.Error(err))
+		// Without its certificate the next load cannot use the key: take the
+		// key back too, so no private key is left at rest for nothing.
+		if rmErr := os.Remove(keyPath); rmErr != nil {
+			logger.Debug("could not remove the CA key whose certificate could not be written", zap.String("path", keyPath), zap.Error(rmErr))
+		}
+		logger.Warn("could not persist the MITM CA certificate; using the CA in memory for this run only",
+			zap.String("path", certPath), zap.Error(err))
+		return ca, nil
 	}
 	logger.Info("generated and persisted the "+s.label+" MITM CA",
 		zap.String("run_id", ca.runID), zap.String("dir", s.dir))
+	ca.persisted = true
 	return ca, nil
 }
 
@@ -209,12 +219,11 @@ func ensureKeyDir(dir string) error {
 // loadOrGenerateActiveCA selects the backend, establishes the run CA and
 // publishes it as the active CA. It returns the CA so the caller can install its
 // public half and hand it to the client.
-func loadOrGenerateActiveCA(logger *zap.Logger, isDocker bool) (*caState, caStore, error) {
-	store := selectCAStore(logger, isDocker)
-	ca, err := store.loadOrGenerate(logger)
+func loadOrGenerateActiveCA(logger *zap.Logger, isDocker bool) (*caState, error) {
+	ca, err := selectCAStore(logger, isDocker).loadOrGenerate(logger)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to establish the MITM CA: %w", err)
+		return nil, fmt.Errorf("failed to establish the MITM CA: %w", err)
 	}
 	setActiveCA(ca)
-	return ca, store, nil
+	return ca, nil
 }
