@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -59,7 +60,8 @@ import (
 // of what it read reads again.
 
 // exactView is what exact serving shows. It is replaced, never changed,
-// except for which of its test mocks have answered (mu).
+// except for which of its test mocks have answered and what its open test
+// was served (mu).
 type exactView struct {
 	// test is the open test's ID; "" while no test is open.
 	test string
@@ -122,6 +124,39 @@ type exactView struct {
 	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
 	outside *outsideAnswers
 	epoch   *atomic.Uint64
+	// heard is every mock a parser was served while the view was installed,
+	// as the served observer was told of it (observeServed): of any lifetime
+	// (the test's own, a protocol-phase or reusable one, one spent through a
+	// delete door, a worker-scope one), through any door, a serve whose
+	// claim then failed included, once each by identity (learn.MockID,
+	// heardIDs), in the order they came. Kept only while there is an
+	// observer (the proven switch), and read only of a test view
+	// (ServedInOpenTest).
+	heard    []*models.Mock
+	heardIDs map[string]bool
+}
+
+// hear files mk in v's account of what its open test was served (heard),
+// once by identity (learn.MockID, the tracker's). A pool view files nothing:
+// its account would be read by no one (ServedInOpenTest reads a test view's
+// only), and the start-up's and the gaps' serves would each build an entry
+// kept until the view is replaced. A replaced view's account is read by no
+// one either; a serve read in it before it was replaced is filed there.
+func (v *exactView) hear(mk *models.Mock) {
+	if v == nil || v.test == "" {
+		return
+	}
+	id := learn.MockID(mk)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.heardIDs[id] {
+		return
+	}
+	if v.heardIDs == nil {
+		v.heardIDs = map[string]bool{}
+	}
+	v.heardIDs[id] = true
+	v.heard = append(v.heard, mk)
 }
 
 // exactState is a manager's exact serving: off until the agent turns it on
@@ -1032,6 +1067,26 @@ func (m *MockManager) ConsumedTestMocks() []*models.Mock {
 }
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
+
+// ServedInOpenTest implements integrations.ExactServedReader: every mock a
+// parser was served while the open test's view was installed, of any
+// lifetime and through any door, once each, in the order they came (see
+// exactView.heard); none while no test is open, or with no served observer.
+// The observer is told of a serve before the serve is filed here, and the
+// view a serve is filed in is the one installed before the observer was
+// told: a mock this returns is one the observer has heard of, and one served
+// while this view was the open one.
+func (m *MockManager) ServedInOpenTest() []*models.Mock {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]*models.Mock(nil), v.heard...)
+}
+
+var _ integrations.ExactServedReader = (*MockManager)(nil)
 
 // ClaimantOf implements integrations.ExactConcurrentReader: the test that
 // answered a call with the shared recording name in the current staging.

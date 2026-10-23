@@ -331,6 +331,33 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// ExactServedReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (the proven switch), with a served
+// observer (the learn tracker's ServedMock). ServedInOpenTest returns every
+// mock a parser was served while the open test's view was installed, of any
+// lifetime and through any door (the test's own, a protocol-phase or
+// reusable one, one spent through a delete door, a worker-scope one), a serve
+// whose claim was refused included (the tracker hears those too), once each
+// by learn.MockID, in the order they came; none while no test is open. The
+// test's own mocks the pool view answered before the test's view was
+// installed (in flight when it began: InFlightIntoOpenTest) are in
+// ConsumedTestMocks and not here: they were served before the test opened.
+//
+// The store tells the observer of each serve before it files it here, and
+// files it in the view that was installed when the observer was told, and the
+// replay begins the tracker's test before it installs the test's view. So a
+// learn step that reads the tracker's Epoch, then this, then the tracker's
+// Test, and finds the two epochs equal, finds every mock this returns among
+// the tracker's served in its running test. One this returns that the
+// tracker files only before its running test (in Test's before, not in its
+// served) says the store's open test is not the tracker's: a test begun over
+// the last one's view. When the epochs differ, a test's end and the next
+// one's begin, or a new set, landed between the reads, and the reads are of
+// no one test. A matcher must only read them: they answer nothing.
+type ExactServedReader interface {
+	ServedInOpenTest() []*models.Mock
+}
+
 // StagedFinder is an optional MockMemDb extension under exact serving (the
 // proven switch): the name of a staged mock of kind that the open view does
 // not show and no call of the set consumed, for which match reports true: a
