@@ -199,7 +199,12 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := streamer.StoreMocksStream(r.Context(), header, dec); err != nil {
+	// The store writes what of the set it leaves out of the pool it serves
+	// (its Redis mocks, in a build that skips Redis) into the answer: keploy
+	// test holds no test to those by this answer, never by a judging of its
+	// own, since it may be another build than this agent.
+	resp := models.StoreMocksResp{IsSuccess: true}
+	if err := streamer.StoreMocksStream(models.WithStoreMocksAnswer(r.Context(), &resp), header, dec); err != nil {
 		writeErr(http.StatusInternalServerError, err)
 		return
 	}
@@ -210,7 +215,9 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(models.ExactConcurrentHeader, models.ExactConcurrentServes)
 	}
 	w.WriteHeader(http.StatusOK)
-	_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
+	if err := gob.NewEncoder(w).Encode(resp); err != nil {
+		utils.LogError(a.logger, err, "failed to encode the storemocks answer")
+	}
 }
 
 func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {

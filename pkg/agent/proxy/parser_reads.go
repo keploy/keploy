@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -106,6 +107,22 @@ type parserReads struct {
 	// not read when last looked at, in stream order.
 	unread []carriedChunk
 	head   int
+
+	// live, once set (listLive), lists the connection live at each client
+	// chunk carried from then on that the parser had not read: its parser was
+	// retired before it recorded anything of it (mockedNote.retired). Read
+	// without mu: carried runs on the relay's forwarder for every chunk.
+	live atomic.Pointer[liveListing]
+}
+
+// liveListing is how parserReads lists its connection live (listLive): list
+// lists it, and from is where the parser's client stream stood as it was
+// set. A client chunk teed to the parser and ending there or before it was
+// read by the parser before it was retired; listLive's own call of list
+// lists it, so carried does not list it again.
+type liveListing struct {
+	list func()
+	from int64
 }
 
 // unrecordedConn is the connection's syncMock.UnrecordedConn.
@@ -173,6 +190,11 @@ func (p *parserReads) recordingStopped(at time.Time) {
 // `at`, teed to the parser or not, ending at `through` in its stream when it
 // was.
 func (p *parserReads) carried(dir fakeconn.Direction, at time.Time, teed bool, through int64) {
+	if dir == fakeconn.FromClient {
+		if l := p.live.Load(); l != nil && (!teed || through > l.from) {
+			l.list()
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.returned {
@@ -196,6 +218,29 @@ func (p *parserReads) carried(dir fakeconn.Direction, at time.Time, teed bool, t
 	}
 	// Teed after the return, or refused: not recorded.
 	p.conn.Note(at)
+}
+
+// listLive lists the connection live with live (mockedNote.retired's func),
+// once now, and at each client chunk carried from then on that the parser
+// had not read (carried): the relay tells of a chunk after it teed it, so
+// the chunk the parser was retired on can be told of after this, and it is
+// listed by the call here, not again. A chunk the parser had read only part
+// of is listed again, which the agent lists once for its test. A nil live
+// lists nothing.
+func (p *parserReads) listLive(live func()) {
+	if live == nil {
+		return
+	}
+	var from int64
+	p.mu.Lock()
+	if p.client != nil {
+		from = p.client.ReadThrough()
+	}
+	p.mu.Unlock()
+	// Stored first: a chunk the relay carries between the two is listed by
+	// carried, not lost.
+	p.live.Store(&liveListing{list: live, from: from})
+	live()
 }
 
 // keep adds a client chunk the parser may yet read, and lets go of those it

@@ -374,3 +374,62 @@ func TestParserReads_ARunCoversItsChunksWhicheverWayTheirStampsLie(t *testing.T)
 		t.Errorf("left out %v, want %v", r.conn.spans, want)
 	}
 }
+
+// A connection listed live (listLive) is listed once at once, and once at
+// each client chunk carried from then on that the parser had not read: one
+// teed past where its client stream stood, or one the tee refused. The chunk
+// the parser was retired on, told of only after the listing, is listed by the
+// listing alone, and no server chunk is listed.
+func TestParserReads_AListedLiveConnectionIsListedAtEachClientChunkTheParserHadNotRead(t *testing.T) {
+	r := newReadsUnderTest()
+	retiredOn := r.tee(fakeconn.FromClient, 7) // teed, read whole, then retired
+	r.streams.read.Store(7)
+	queued := r.tee(fakeconn.FromClient, 5) // teed, never read
+	var listed int
+	r.listLive(func() { listed++ })
+	if listed != 1 {
+		t.Fatalf("listed %d time(s) as it was set, want once", listed)
+	}
+	r.carried(fakeconn.FromClient, msAfter(0), true, retiredOn)
+	if listed != 1 {
+		t.Fatalf("the chunk the parser read before it was retired was listed again (%d listings)", listed)
+	}
+	r.carried(fakeconn.FromClient, msAfter(1), true, queued)
+	if listed != 2 {
+		t.Fatalf("a chunk teed past where the parser had read was not listed (%d listings, want 2)", listed)
+	}
+	r.carried(fakeconn.FromDest, msAfter(2), true, r.tee(fakeconn.FromDest, 5))
+	r.carried(fakeconn.FromDest, msAfter(3), false, r.streams.teed[fakeconn.FromDest].Load())
+	if listed != 2 {
+		t.Fatalf("a chunk from the server was listed (%d listings, want 2)", listed)
+	}
+	r.carried(fakeconn.FromClient, msAfter(4), false, queued) // refused by the tee
+	if listed != 3 {
+		t.Fatalf("a client chunk the tee refused was not listed (%d listings, want 3)", listed)
+	}
+}
+
+// A client chunk the tee refused once the parser was retired (its streams
+// closed) moves the stream nothing: it ends where the stream stood, which is
+// where the parser had read through when it was retired. It is still listed.
+func TestParserReads_AListedLiveConnectionIsListedAtAClientChunkTheTeeRefused(t *testing.T) {
+	r := newReadsUnderTest()
+	stood := r.tee(fakeconn.FromClient, 7)
+	r.streams.read.Store(7) // the parser read all of it, then was retired
+	var listed int
+	r.listLive(func() { listed++ })
+	r.carried(fakeconn.FromClient, msAfter(0), false, stood)
+	if listed != 2 {
+		t.Fatalf("listed %d time(s), want twice: as it was set, and at the client chunk the tee refused", listed)
+	}
+}
+
+// listLive with nothing to list lists nothing, then or later.
+func TestParserReads_ListLiveWithNothingToListListsNothing(t *testing.T) {
+	r := newReadsUnderTest()
+	r.listLive(nil)
+	if r.live.Load() != nil {
+		t.Fatal("a nil listing was stored")
+	}
+	r.carry(fakeconn.FromClient, 0, 5) // must not panic
+}

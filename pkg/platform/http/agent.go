@@ -1182,7 +1182,25 @@ func (a *AgentClient) whileAgentRuns(ctx context.Context) (context.Context, func
 // to reject the stream is old enough to have handled single-shot before — and
 // predates the large-corpus recordings streaming exists for — so the fallback
 // is safe; a genuine bad-request 400 simply fails again on the retry.
-func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (retErr error) {
+//
+// The agent's answer, what of the set it leaves out of the pool it serves
+// (models.StoreMocksResp), is written where ctx says
+// (models.WithStoreMocksAnswer), on success only: it is this call's answer,
+// never another's. An agent whose answer predates it, the legacy framing's
+// included, says it leaves nothing out, and leaves nothing out.
+func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	resp, err := a.storeMocks(ctx, filtered, unFiltered)
+	if err != nil {
+		return err
+	}
+	if into := models.StoreMocksAnswerOf(ctx); into != nil {
+		*into = resp
+	}
+	return nil
+}
+
+// storeMocks is StoreMocks, returning the agent's answer.
+func (a *AgentClient) storeMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (_ models.StoreMocksResp, retErr error) {
 	// The callers strip what the agent does not hold (models.AgentBound) at
 	// the source, so their counts agree with what is sent; this is the same
 	// rule again, for a caller that did not.
@@ -1205,7 +1223,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	res, sent, err := a.storeMocksStream(streamCtx, filtered, unFiltered, encoding)
 	if err != nil {
 		cancelStream()
-		return err
+		return models.StoreMocksResp{}, err
 	}
 
 	if res.StatusCode == http.StatusBadRequest {
@@ -1218,8 +1236,9 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 
 	defer cancelStream()
 	defer res.Body.Close()
-	if err := decodeStoreMocksResp(res); err != nil {
-		return err
+	resp, err := decodeStoreMocksResp(res)
+	if err != nil {
+		return models.StoreMocksResp{}, err
 	}
 	a.concurrentServing.Store(res.Header.Get(models.ExactConcurrentHeader) == models.ExactConcurrentServes)
 	a.logger.Info("stored the mocks on the agent",
@@ -1228,7 +1247,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		zap.Int64("sentBytes", sent.wire.Load()),
 		zap.String("encoding", encodingName(encoding)),
 		zap.Duration("took", time.Since(start)))
-	return nil
+	return resp, nil
 }
 
 // storeMocksEncodingProbeTimeout bounds the /health request that asks the agent
@@ -1417,40 +1436,43 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 // StoreMocks). It buffers the whole corpus in memory the way the pre-#4327 path
 // did — acceptable here because it only runs against an old agent that never
 // supported streaming anyway.
-func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (models.StoreMocksResp, error) {
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(models.StoreMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
 	}); err != nil {
 		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks (legacy)")
-		return fmt.Errorf("gob encode request for storemocks (legacy): %s", err.Error())
+		return models.StoreMocksResp{}, fmt.Errorf("gob encode request for storemocks (legacy): %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), &buf)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create legacy request for storemocks")
-		return fmt.Errorf("create legacy request for storemocks: %s", err.Error())
+		return models.StoreMocksResp{}, fmt.Errorf("create legacy request for storemocks: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/x-gob")
 	req.Header.Set("Accept", "application/x-gob")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send legacy request for storemocks: %s", err.Error())
+		return models.StoreMocksResp{}, fmt.Errorf("send legacy request for storemocks: %s", err.Error())
 	}
 	defer res.Body.Close()
-	if err := decodeStoreMocksResp(res); err != nil {
-		return err
+	resp, err := decodeStoreMocksResp(res)
+	if err != nil {
+		return models.StoreMocksResp{}, err
 	}
 	a.concurrentServing.Store(res.Header.Get(models.ExactConcurrentHeader) == models.ExactConcurrentServes)
-	return nil
+	return resp, nil
 }
 
-// decodeStoreMocksResp reads the agent's single AgentResp gob reply, shared by
-// the streaming and legacy paths so their response handling is identical.
-func decodeStoreMocksResp(res *http.Response) error {
+// decodeStoreMocksResp reads the agent's single gob reply (an AgentResp from
+// an agent that predates models.StoreMocksResp, which decodes into it by its
+// fields' names), shared by the streaming and legacy paths so their response
+// handling is identical.
+func decodeStoreMocksResp(res *http.Response) (models.StoreMocksResp, error) {
 	// Non-2xx? Try to decode anyway; if that fails, return status text.
 	// An OLD agent reaches the decode failure here on every error: its gob
 	// encode aborted on the `error` interface field, having already written a
@@ -1461,20 +1483,20 @@ func decodeStoreMocksResp(res *http.Response) error {
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		var fail models.AgentResp
 		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
-			return fmt.Errorf("storemocks http %d", res.StatusCode)
+			return models.StoreMocksResp{}, fmt.Errorf("storemocks http %d", res.StatusCode)
 		}
 		if msg := fail.ErrorMsg; msg != "" {
-			return fmt.Errorf("storemocks failed (status %d): %s", res.StatusCode, msg)
+			return models.StoreMocksResp{}, fmt.Errorf("storemocks failed (status %d): %s", res.StatusCode, msg)
 		}
-		return fmt.Errorf("storemocks http %d", res.StatusCode)
+		return models.StoreMocksResp{}, fmt.Errorf("storemocks http %d", res.StatusCode)
 	}
 
-	var mockResp models.AgentResp
+	var mockResp models.StoreMocksResp
 	if err := gob.NewDecoder(res.Body).Decode(&mockResp); err != nil {
-		return fmt.Errorf("decode gob response for storemocks: %s", err.Error())
+		return models.StoreMocksResp{}, fmt.Errorf("decode gob response for storemocks: %s", err.Error())
 	}
 	if err := mockResp.Err(); err != nil {
-		return fmt.Errorf("storemocks failed: %w", err)
+		return models.StoreMocksResp{}, fmt.Errorf("storemocks failed: %w", err)
 	}
 	// IsSuccess is checked too, so this path cannot disagree with
 	// agentRespErr about what a failure is. A 2xx carrying IsSuccess:false
@@ -1483,9 +1505,9 @@ func decodeStoreMocksResp(res *http.Response) error {
 	// success wrote IsSuccess:true just the same -- so this rejects nothing
 	// real today and stops a 200-shaped failure reading as success.
 	if !mockResp.IsSuccess {
-		return fmt.Errorf("storemocks failed: agent reported failure with status %d and no message", res.StatusCode)
+		return models.StoreMocksResp{}, fmt.Errorf("storemocks failed: agent reported failure with status %d and no message", res.StatusCode)
 	}
-	return nil
+	return mockResp, nil
 }
 
 func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) (retErr error) {
@@ -1737,6 +1759,47 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 		return nil, fmt.Errorf("failed to decode the capture losses: %w", err)
 	}
 	return losses, nil
+}
+
+// GetRelayedLive fetches GET /agent/relayed: the connections the agent
+// relayed live to a dependency instead of answering them from a recording,
+// per reason and destination (and a replay's DNS lookups the live resolver
+// answered, per query too), each counted since it started
+// (models.RelayedLives). An agent older than the route (404) or one that
+// cannot count them (501) gives models.ErrRelayedLiveUnsupported, which is
+// "unknown", not "none".
+func (a *AgentClient) GetRelayedLive(ctx context.Context) (models.RelayedLives, error) {
+	url := fmt.Sprintf("%s/relayed", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask the agent which connections it relayed to a live server: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for relayed")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrRelayedLiveUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get the connections relayed live", res, rawBody)
+	}
+	var rows models.RelayedLives
+	if err := json.NewDecoder(res.Body).Decode(&rows); err != nil {
+		return nil, fmt.Errorf("failed to decode the connections relayed live: %w", err)
+	}
+	if rows == nil {
+		// A 200 whose body is null says nothing was relayed only if the
+		// agent says so: an empty list. null is no count.
+		return nil, fmt.Errorf("%w: the agent answered null", models.ErrRelayedLiveUnsupported)
+	}
+	return rows, nil
 }
 
 // GetUnchargedCaptureLosses asks the agent what it could not capture since

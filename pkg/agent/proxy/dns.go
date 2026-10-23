@@ -192,6 +192,14 @@ type dnsCacheEntry struct {
 	// true if the response came from upstream resolution or a recorded mock.
 	// false if we synthesized defaults (fallback).
 	FromUpstream bool
+	// Mocked: the response is a recorded mock's (findDNSMock).
+	Mocked bool
+	// Resolver is, for a response a live resolver gave (forwarded, or
+	// resolved to record it), that resolver's address (host:port); "" for
+	// a recorded mock's and a synthesized one. A replay that hands the
+	// application such an answer counts the lookup relayed live
+	// (relayedLive): it reached a live dependency, not the recording.
+	Resolver string
 }
 
 const (
@@ -286,6 +294,13 @@ func (p *Proxy) shouldLogNodataRelay(key string) bool {
 	return true
 }
 
+// dnsQuery is a DNS question as relayedLive names a lookup: the name, without
+// its trailing dot and in lower case (DNS names are case-insensitive), and
+// the record type, "redis-b A".
+func dnsQuery(question dns.Question) string {
+	return strings.ToLower(strings.TrimSuffix(dns.Fqdn(question.Name), ".")) + " " + dnsTypeString(question.Qtype)
+}
+
 func generateCacheKey(name string, qtype uint16) string {
 	return fmt.Sprintf("%s-%s", dns.Fqdn(name), dns.TypeToString[qtype])
 }
@@ -367,12 +382,29 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
 			if shouldCacheDNSResponse(mode, resp) {
-				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
+				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream, Mocked: resp.Mocked, Resolver: resp.Resolver}
 				p.dnsCache.Add(key, cached)
 			}
 		}
 		if rd != nil {
 			rd.bookDNSAnswer(question, resp.Answer)
+		}
+		// A replay's lookup answered with a live resolver's answer, cached
+		// or not, reached a live dependency: counted, so keploy mock replay
+		// claims no isolation for the run (relayedLive). One of a name
+		// mock.real lists is mock.real's.
+		if mode == models.MODE_TEST && resp.Resolver != "" {
+			reason := models.RelayedDNS
+			if _, listed := rd.listedNameOf(question.Name); listed {
+				reason = models.RelayedReal
+			}
+			p.relayed.noteLookup(reason, resp.Resolver, dnsQuery(question))
+		}
+		// In a replay, every answer handed out, cached or not, says whose
+		// its addresses are: a mocked name's or their own (dns_live.go),
+		// for the Redis skip's dial, when it is installed.
+		if mode == models.MODE_TEST && p.redisSkipOn.Load() {
+			p.dnsAnswered.answered(question.Name, resp)
 		}
 
 		// Apply flags from the first response (DNS messages normally contain a single question)
@@ -493,7 +525,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// deliberately skips non-Success rcodes, so its absence is correct
 		// rather than a recording gap. See the mock-miss report below.
 		upstreamSaysNameDoesNotExist := false
-		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
+		if fwdResp, resolver, fwdErr := p.forwardDNSUpstreamVia(question); fwdErr == nil && fwdResp != nil {
 			// A RcodeSuccess response splits into two cases by answer count:
 			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
 			// a non-success rcode falls through to the #2006 steering below.
@@ -505,7 +537,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 						zap.String("qtype", dns.TypeToString[question.Qtype]),
 						zap.Int("rcode", fwdResp.Rcode),
 						zap.Int("answers", len(fwdResp.Answer)))
-					return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+					return dnsCacheEntry{Msg: fwdResp, FromUpstream: true, Resolver: resolver}
 				}
 				// NODATA — NOERROR + zero answer RRs: a *valid* negative answer
 				// ("the name exists but has no record of this type"), distinct
@@ -550,7 +582,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 						zap.String("query", question.Name),
 						zap.String("qtype", dns.TypeToString[question.Qtype]))
 				}
-				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true, Resolver: resolver}
 			}
 			// Upstream returned a genuinely negative answer: NXDOMAIN,
 			// SERVFAIL, or any other non-success rcode (REFUSED, NOTIMP,
@@ -568,7 +600,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]),
 					zap.Int("rcode", fwdResp.Rcode))
-				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true, Resolver: resolver}
 			}
 			// ONLY NXDOMAIN. This branch also covers SERVFAIL, REFUSED,
 			// NOTIMP and FORMERR, which mean the resolver could not or would
@@ -835,6 +867,7 @@ func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger
 				},
 			},
 			FromUpstream: true,
+			Mocked:       true,
 		}
 
 		if mock.Spec.DNSResp != nil {
@@ -949,6 +982,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 	var (
 		in         *dns.Msg
+		answeredBy string
 		resolveErr error
 	)
 
@@ -993,6 +1027,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 		if resp != nil {
 			in = resp
+			answeredBy = addr
 			resolveErr = nil
 			break
 		}
@@ -1008,6 +1043,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	resp := dnsCacheEntry{
 		Msg:          in,
 		FromUpstream: true,
+		Resolver:     answeredBy,
 	}
 
 	// If no session, we still return resolved response but skip recording.

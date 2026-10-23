@@ -272,6 +272,8 @@ func (c *treeRealConn) CloseWrite() error {
 // failure.
 func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader, dec realdeps.Decision, dstAddr string, connID int64, predialed *util.Predialed) error {
 	logger := p.logger.With(zap.Int64("Client ConnectionID", connID), zap.String("destination", dstAddr), zap.String("real", dec.Label))
+	// Sent to the live destination, reached or not (relayedLive).
+	p.relayed.note(models.RelayedReal, dstAddr)
 	// Exactly the address the app dialed, with no loopback-family fallback
 	// and no budget of keploy's: a fallback could reach an address mock.real
 	// does not list, count it reached under the listed label, and let a
@@ -330,13 +332,13 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 // SERVFAIL, so the app's resolver sees the failure as it is and is never
 // steered to keploy's own address.
 func (p *Proxy) realDNS(question dns.Question) dnsCacheEntry {
-	fwd, err := p.forwardDNSUpstream(question)
+	fwd, resolver, err := p.forwardDNSUpstreamVia(question)
 	if err != nil || fwd == nil {
 		utils.LogError(p.logger, err, "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL",
 			append(dnsQuestionFields(question), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))...)
 		return dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure, RecursionAvailable: true}}}
 	}
-	return dnsCacheEntry{Msg: fwd, FromUpstream: true}
+	return dnsCacheEntry{Msg: fwd, FromUpstream: true, Resolver: resolver}
 }
 
 // bookDNSAnswer notes, for the run's mock.real names, which addresses keploy's

@@ -13,15 +13,32 @@ package models
 // child process): keploy relays it to that process, so the call and what
 // it returns are live, never recorded, and outside what a replay proves.
 // A call a process makes to its own listener (an in-process test server)
-// is relayed too, and is not listed.
+// is relayed too, and is not listed. It is also a call to a local
+// dependency outside the run's tree that keploy relays to it instead of
+// recording or mocking it (Relayed): a Redis, in a keploy that records and
+// mocks Redis only in Keploy Enterprise.
 type LiveRow struct {
 	// Test is the ID of the test open when the call sent its bytes; "" when
 	// none was.
 	Test string `json:"test,omitempty" yaml:"test,omitempty"`
-	// Exe is the listener's program, as its process's executable names it.
+	// Exe is the listener's program, as its process's executable names it;
+	// "" for a container (Container), or when keploy could not tell which
+	// process holds the listener.
 	Exe string `json:"exe" yaml:"exe"`
+	// Container names a container destination by its container key, as a
+	// MockedRow does; empty for any other.
+	Container string `json:"container,omitempty" yaml:"container,omitempty"`
 	// Port is the port the call was made to.
 	Port uint16 `json:"port" yaml:"port"`
+	// Relayed is, for a dependency outside the run's tree keploy relays to
+	// instead of recording or mocking it, what relayed it:
+	// "redis_enterprise_only" (a Redis this keploy neither records nor
+	// mocks), "parsing_disabled" (a record's parsing kill switch),
+	// "parser_declined" (a record's parser that took the connection and then
+	// declined it), "parser_retired" (a record's connection whose parser the
+	// supervisor retired before it recorded anything of it). Empty for a
+	// listener of the run's tree.
+	Relayed string `json:"relayed,omitempty" yaml:"relayed,omitempty"`
 }
 
 // MockedRow is a call keploy records, and a replay answers from the

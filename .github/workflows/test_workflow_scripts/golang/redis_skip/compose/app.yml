@@ -1,0 +1,19 @@
+# The compose cell's app (../golang-compose-linux.sh), the file keploy record
+# and keploy test run: the lane's app (../app) in a container, on the lane's
+# network, reaching Redis A and Redis B by their compose service names
+# (deps.yml).
+services:
+  app:
+    image: redisskip-app:lane
+    container_name: redisskip-app
+    environment:
+      REDIS_A: redis-a:6379
+      REDIS_B: redis-b:6379
+    ports:
+      - "8098:8098"
+    networks:
+      - lane
+networks:
+  lane:
+    name: redisskip-lane
+    external: true

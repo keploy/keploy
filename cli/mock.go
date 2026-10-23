@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	mockSvc "go.keploy.io/server/v3/pkg/service/mock"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -24,7 +25,10 @@ func init() {
 // Enterprise re-registers "mock" to add cloud-registry subcommands
 // (download/upload/patch); it composes these OSS record/replay builders under
 // its own parent, so keep MockRecord/MockReplay exported and free of AddFlags
-// calls (the parent's loop adds flags — double registration panics).
+// calls (the parent's loop adds flags — double registration panics). So the
+// Long text below is the open-source parent's alone: it says this keploy
+// does not mock Redis (the Redis skip, pkg/agent/proxy/redis_skip.go), which
+// Enterprise does.
 func Mock(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mock",
@@ -33,11 +37,17 @@ func Mock(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 suite runs without the real dependencies — a language-agnostic VCR/WireMock at
 the network layer.
 
+Redis is the exception: this open-source keploy neither records nor mocks
+Redis. It passes Redis calls through to the real server in record and in
+replay, so a Redis your suite calls must be running and reachable during
+keploy mock replay too. Keploy Enterprise records and mocks Redis:
+` + models.RedisEnterpriseURL + `
+
 Examples:
   # Record the dependency calls pytest makes into the "default" mock set
   keploy mock record -c "pytest"
 
-  # Replay them (dependencies can be offline)
+  # Replay them (every dependency but Redis can be offline)
   keploy mock replay -c "pytest"
 
   # A named set, refreshed on a merge to main, appending any new calls

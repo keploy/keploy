@@ -63,7 +63,7 @@ func TestRecordViaSupervisorDoesNotWarnAgainAboutAStopTheParserReported(t *testi
 			go func() {
 				defer close(done)
 				_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), stoppingParser{err: c.err}, "test",
-					make(chan *models.Mock, 8), &errgroup.Group{}, zap.New(core), 1, 2, models.OutgoingOptions{})
+					make(chan *models.Mock, 8), &errgroup.Group{}, zap.New(core), 1, 2, models.OutgoingOptions{}, nil)
 			}()
 
 			fallback := func() *observer.ObservedLogs {

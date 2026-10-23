@@ -77,7 +77,7 @@ func TestRecordViaSupervisor_AnUpstreamIdleCloseLeavesNothingOut(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), httpint.New(logger), integrations.HTTP,
-			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
+			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{}, nil)
 	}()
 
 	if _, err := clientApp.Write([]byte("GET /one HTTP/1.1\r\nHost: upstream\r\n\r\n")); err != nil {
@@ -183,7 +183,7 @@ func TestRecordViaSupervisor_TheExchangeAParserStopsOnMeetsTheSpanAfterIt(t *tes
 	done := make(chan error, 1)
 	go func() {
 		done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), httpint.New(logger), integrations.HTTP,
-			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
+			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{}, nil)
 	}()
 
 	if _, err := clientApp.Write([]byte("GET /one HTTP/1.1\r\nHost: upstream\r\n\r\n")); err != nil {

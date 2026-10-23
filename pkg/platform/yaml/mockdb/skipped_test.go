@@ -2,11 +2,16 @@ package mockdb
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A read gives each document its decoders skipped whose request time it can
@@ -78,4 +83,99 @@ func TestSkippedWindowedReadsWhatEveryRecordingWrites(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A test set Keploy Enterprise recorded holds Redis mocks this keploy cannot
+// read: Keploy records and mocks Redis only in Keploy Enterprise, so reading
+// them is expected, not an error. The read says so once for the set, at
+// Warn, with how many and where to get Redis recorded and mocked, and logs
+// no ERROR, however many Redis documents the set holds.
+func TestAReadOfRedisMocksSaysOnceThatItReadsNone(t *testing.T) {
+	redisDoc := map[string]func(name string) string{
+		"yaml": func(name string) string {
+			return "---\nversion: api.keploy.io/v1beta1\nkind: Redis\nname: " + name + "\nspec:\n    metadata:\n        type: mocks\n    reqTimestampMock: 2026-10-08T11:12:00.01Z\n"
+		},
+		"json": func(name string) string {
+			return `{"version":"api.keploy.io/v1beta1","kind":"Redis","name":"` + name + `","spec":{"metadata":{"type":"mocks"},"reqTimestampMock":"2026-10-08T11:12:00.01Z"}}` + "\n"
+		},
+	}
+	for format, doc := range redisDoc {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			writePruneFixture(t, dir, format, []*models.Mock{pruneHTTPMock(1), pruneHTTPMock(2)}, doc("mock-r1")+doc("mock-r2")+doc("mock-r3"))
+			core, logs := observer.New(zapcore.DebugLevel)
+			if got := readSet(t, zap.New(core), dir, format); len(got) != 2 {
+				t.Fatalf("want the two HTTP mocks read and the Redis ones skipped, read %d", len(got))
+			}
+			if errs := logs.FilterLevelExact(zapcore.ErrorLevel).All(); len(errs) != 0 {
+				t.Fatalf("reading Redis mocks logged %d ERRORs, want none: %v", len(errs), errs)
+			}
+			warns := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("Redis").All()
+			if len(warns) != 1 {
+				t.Fatalf("want one warning for the set's Redis mocks, got %v", logs.All())
+			}
+			msg, f := warns[0].Message, warns[0].ContextMap()
+			for _, want := range []string{pruneSet, "3 Redis mocks", "only in Keploy Enterprise", "none of them is replayed", models.RedisEnterpriseURL} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the warning must say %q; got %q", want, msg)
+				}
+			}
+			if f["mocks"] != int64(3) || f["testSetID"] != pruneSet {
+				t.Errorf("the warning's fields are %v, want mocks=3 and the set", f)
+			}
+		})
+	}
+}
+
+// A build that reads Redis mocks (Keploy Enterprise, whose YAML mapper
+// decodes them) says nothing of not reading them, of a json mock file's
+// either, which the mapper does not read; and a Redis document the file ends
+// part-way through is said as a cut document, not as a Redis mock this
+// keploy does not read.
+func TestAReadSaysNothingOfRedisMocksABuildThatReadsThemSkipped(t *testing.T) {
+	redisJSON := func(name string) string {
+		return `{"version":"api.keploy.io/v1beta1","kind":"Redis","name":"` + name + `","spec":{"metadata":{"type":"mocks"},"reqTimestampMock":"2026-10-08T11:12:00.01Z"}}` + "\n"
+	}
+	t.Run("a build with a Redis mapper", func(t *testing.T) {
+		clearRegistry(t)
+		RegisterMockYAMLMapper(models.REDIS, MockYAMLMapper{
+			Encode: func(*models.Mock, *yaml.NetworkTrafficDoc) error { return nil },
+			Decode: func(*yaml.NetworkTrafficDoc, *models.Mock) error { return nil },
+		})
+		dir := t.TempDir()
+		writePruneFixture(t, dir, "json", []*models.Mock{pruneHTTPMock(1), pruneHTTPMock(2)}, redisJSON("mock-r1")+redisJSON("mock-r2"))
+		core, logs := observer.New(zapcore.DebugLevel)
+		if got := readSet(t, zap.New(core), dir, "json"); len(got) != 2 {
+			t.Fatalf("precondition: want the two HTTP mocks read, read %d", len(got))
+		}
+		if said := logs.FilterMessageSnippet("this keploy does not read").All(); len(said) != 0 {
+			t.Fatalf("a build that reads Redis mocks said it does not read them: %v", said)
+		}
+	})
+	t.Run("a cut Redis document", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writePruneFixture(t, dir, "yaml", []*models.Mock{pruneHTTPMock(1), pruneHTTPMock(2)}, "")
+		fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fh.WriteString("---\nversion: api.keploy.io/v1beta1\nkind: Redis\nname: mock-cut\nspec:\n    metadata:\n        type: moc"); err != nil {
+			t.Fatal(err)
+		}
+		_ = fh.Close()
+		core, logs := observer.New(zapcore.DebugLevel)
+		_ = readSet(t, zap.New(core), dir, "yaml")
+		if said := logs.FilterMessageSnippet("this keploy does not read").All(); len(said) != 0 {
+			t.Fatalf("a cut Redis document was said as a Redis mock this keploy does not read: %v", said)
+		}
+		cut := 0
+		for _, e := range incompleteWarnings(logs) {
+			if e.ContextMap()["mock"] == "mock-cut" {
+				cut++
+			}
+		}
+		if cut != 1 {
+			t.Fatalf("precondition: the cut Redis document was said cut %d times, want once: %v", cut, logs.All())
+		}
+	})
 }

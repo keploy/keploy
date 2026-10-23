@@ -61,6 +61,55 @@ type AgentResp struct {
 	IsSuccess bool   `json:"isSuccess"`
 }
 
+// StoreMocksResp is the agent's answer to /storemocks: AgentResp's fields,
+// and what of the stored set the agent leaves out of the pool it serves. A
+// gob value decodes by its fields' names, so an agent that predates it,
+// which answers an AgentResp, says it leaves nothing out (it does not), and
+// a client that predates it reads the AgentResp fields alone.
+type StoreMocksResp struct {
+	ErrorMsg  string
+	IsSuccess bool
+	// SkipsRedis says the agent relays Redis to the real server instead of
+	// recording or mocking it (the open-source keploy: integrations.SkipsRedis),
+	// so it serves none of the set's Redis mocks, those keploy test could not
+	// read and send included (a Keploy Enterprise Redis mock, in a keploy
+	// that cannot decode one).
+	SkipsRedis bool
+	// LeftOut names the stored mocks the agent leaves out of the pool it
+	// serves (its Redis mocks, when SkipsRedis), in recorded order.
+	LeftOut []string
+}
+
+// Err is the failure the answer reports, as AgentResp.Err reads it.
+func (r StoreMocksResp) Err() error {
+	return AgentResp{ErrorMsg: r.ErrorMsg, IsSuccess: r.IsSuccess}.Err()
+}
+
+// storeMocksAnswerKey is the context key of WithStoreMocksAnswer.
+type storeMocksAnswerKey struct{}
+
+// WithStoreMocksAnswer is ctx carrying into, where a store of a test set's
+// mocks given ctx writes the answer to that one store, so that its caller
+// reads the answer of its own call, never another's (a store the client's
+// session makes again, an agent started again in its place). Two write it:
+// the agent's store (its StoreMocks and StoreMocksStream) sets SkipsRedis
+// and LeftOut on the answer its /storemocks route sends; the keploy agent
+// client overwrites into whole with the answer it decoded, on success only.
+// It travels in ctx, the one exception AGENTS.md allows beside ErrGroupKey,
+// so that an instrumentation that wraps the client keeps it as long as it
+// passes ctx on, which every wrapper must. A store that writes nothing
+// leaves into as it was: by its zero value, nothing left out.
+func WithStoreMocksAnswer(ctx context.Context, into *StoreMocksResp) context.Context {
+	return context.WithValue(ctx, storeMocksAnswerKey{}, into)
+}
+
+// StoreMocksAnswerOf is where a StoreMocks given ctx writes the agent's
+// answer (WithStoreMocksAnswer); nil when ctx carries none.
+func StoreMocksAnswerOf(ctx context.Context) *StoreMocksResp {
+	into, _ := ctx.Value(storeMocksAnswerKey{}).(*StoreMocksResp)
+	return into
+}
+
 // UnmarshalJSON accepts both the current string form and the legacy form a
 // pre-fix agent emits for "error" (an encoded error interface — `{}` in
 // practice, or `null` on success). Without this a NEW CLI talking to an OLD

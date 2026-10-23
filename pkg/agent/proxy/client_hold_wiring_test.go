@@ -80,7 +80,7 @@ func TestRecordViaSupervisorArmsTheClientWriteHold(t *testing.T) {
 		go func() {
 			_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, "test",
 				make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
-				models.OutgoingOptions{})
+				models.OutgoingOptions{}, nil)
 		}()
 		return clientApp, destSvc
 	}

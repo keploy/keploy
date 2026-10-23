@@ -72,7 +72,7 @@ keploy record -c "python main.py"
 ```
 
 ## 🧪 Lancer les tests
-Arrêtez la base de données, Redis, Kafka ou tout autre service que votre application utilise. Keploy n'en n'a pas besoin durant les tests.
+Arrêtez la base de données, Redis, Kafka ou tout autre service que votre application utilise. Keploy n'en n'a pas besoin durant les tests. (Avec la version open source de Keploy, installée par `install.sh --oss`, Redis fait exception : elle ne l'enregistre ni ne le simule, il doit donc rester joignable pendant les tests.)
 ```zsh
 keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```

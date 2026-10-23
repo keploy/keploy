@@ -269,7 +269,7 @@ func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.
 	}
 	go func() {
 		h.done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, integrations.HTTP,
-			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
+			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{}, nil)
 	}()
 	return h
 }

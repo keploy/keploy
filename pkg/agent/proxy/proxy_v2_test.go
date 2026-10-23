@@ -195,7 +195,7 @@ func newDesyncFeedHarnessCtx(t *testing.T, parent context.Context, parser integr
 		defer close(done)
 		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, "test",
 			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
-			models.OutgoingOptions{})
+			models.OutgoingOptions{}, nil)
 	}()
 
 	h := &desyncFeedHarness{

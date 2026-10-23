@@ -85,7 +85,7 @@ func startHeldConnection(t *testing.T, mgr *syncMock.SyncMockManager) (net.Conn,
 	go func() {
 		defer close(done)
 		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, "test",
-			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2, models.OutgoingOptions{})
+			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2, models.OutgoingOptions{}, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -237,7 +237,7 @@ func TestCaptureWatermark_ATestCaseIsLetGoOnlyOnceWhatTheParserNeverReadIsLeftOu
 	go func() {
 		defer close(done)
 		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, "test",
-			make(chan *models.Mock, 8), &errgroup.Group{}, zap.New(logged), 1, 2, models.OutgoingOptions{})
+			make(chan *models.Mock, 8), &errgroup.Group{}, zap.New(logged), 1, 2, models.OutgoingOptions{}, nil)
 	}()
 	t.Cleanup(func() {
 		logged.Release()

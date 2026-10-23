@@ -66,6 +66,17 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// RelayedLiveReporter is the optional extension implemented by a proxy that
+// counts the connections it relayed live to a dependency instead of answering
+// them from a recording (models.RelayedLives): the Redis skip's, the agent's
+// pass-through's, mock.real's, and the DNS lookups of a replay its DNS
+// answered with the live resolver's answer. An agent whose proxy does not
+// implement it answers "unknown" (models.ErrRelayedLiveUnsupported), never
+// "none relayed".
+type RelayedLiveReporter interface {
+	RelayedLive() models.RelayedLives
+}
+
 // CaptureLossDrainer is the optional extension implemented by hooks whose
 // counts of capture losses are fed by reports the kernel makes: before a read
 // of them, DrainCaptureLosses waits until every report made before it has

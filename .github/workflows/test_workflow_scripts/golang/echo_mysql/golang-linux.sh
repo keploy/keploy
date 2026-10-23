@@ -395,6 +395,24 @@ if [[ "$all_passed" != "true" || $REPLAY_RC -ne 0 ]]; then
   exit 1
 fi
 
+# A keploy without a Redis parser passes Redis through and says so
+# (integrations.RedisSkipNotice). This lane's only dependency is MySQL, so no
+# record or replay log may say it: the skip claimed a MySQL connection, and
+# nothing of it was recorded or mocked.
+no_redis_skip() {
+  if grep -l "Redis calls are skipped" "$@" 2>/dev/null; then
+    echo "::error::keploy said Redis calls were skipped on a lane whose only dependency is MySQL"
+    grep -n "Redis calls are skipped" "$@" | head -5
+    return 1
+  fi
+}
+section "No Redis skip on a MySQL lane"
+if ! no_redis_skip urlShort_*.txt test_logs.txt; then
+  endsec
+  exit 1
+fi
+endsec
+
 if json_pass_supported; then
   section "Replay (json)"
   sudo rm -f /tmp/keploy-logs.txt
@@ -421,6 +439,7 @@ if json_pass_supported; then
     cat test_logs_json.txt
     exit 1
   fi
+  no_redis_skip test_logs_json.txt || exit 1
   echo "All tests passed (yaml + json)"
 else
   echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"

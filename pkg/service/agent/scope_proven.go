@@ -1035,9 +1035,10 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	return ev, nil
 }
 
-// mocksByName finds every stored mock named, resident or on disk. A name the
-// stored set does not have is an error: the mapping names a recording that
-// is not loaded, so whether the test made that call cannot be told.
+// mocksByName finds every stored mock named, resident or on disk, but those
+// the store refused or left out. A name the stored set does not have is an
+// error: the mapping names a recording that is not loaded, so whether the
+// test made that call cannot be told.
 func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	out := make(map[string]*models.Mock, len(names))
 	v, ok := a.clientMocks.Load(uint64(0))
@@ -1049,8 +1050,9 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	s.mu.RLock()
 	for _, n := range names {
 		// A mock the store refused was said as it was refused: it answers
-		// nothing (refusedOf).
-		if _, refused := s.refused[n]; !refused {
+		// nothing (refusedOf). One it left out, the proxy never serving it,
+		// was said as it was left out: its call is made for real.
+		if _, refused := s.refused[n]; !refused && !s.leftOut[n] {
 			want[n] = true
 		}
 	}

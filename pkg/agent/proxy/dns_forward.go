@@ -144,8 +144,16 @@ func (p *Proxy) hasDNSUpstream() bool {
 // emitted by the caller. Keeping this function stateless makes it
 // trivially safe to call concurrently from the UDP and TCP DNS servers.
 func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
+	resp, _, err := p.forwardDNSUpstreamVia(question)
+	return resp, err
+}
+
+// forwardDNSUpstreamVia is forwardDNSUpstream, with the address (host:port)
+// of the resolver whose response it returns: a replay that hands the
+// application that answer has had its lookup answered live (relayedLive).
+func (p *Proxy) forwardDNSUpstreamVia(question dns.Question) (*dns.Msg, string, error) {
 	if !p.hasDNSUpstream() {
-		return nil, fmt.Errorf("no upstream DNS resolver configured")
+		return nil, "", fmt.Errorf("no upstream DNS resolver configured")
 	}
 
 	// Only forward types we know how to relay sensibly. Everything
@@ -160,9 +168,9 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	// accidentally start answering DNSSEC queries we can't sign.
 	if !isForwardableQType(question.Qtype) {
 		if qtypeName, ok := dns.TypeToString[question.Qtype]; ok && qtypeName != "" {
-			return nil, fmt.Errorf("qtype %s not forwarded", qtypeName)
+			return nil, "", fmt.Errorf("qtype %s not forwarded", qtypeName)
 		}
-		return nil, fmt.Errorf("qtype %d not forwarded", question.Qtype)
+		return nil, "", fmt.Errorf("qtype %d not forwarded", question.Qtype)
 	}
 
 	// dns.Client.Timeout is the per-exchange wall-clock cap. We also
@@ -223,13 +231,13 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 		if resp == nil {
 			continue
 		}
-		return resp, nil
+		return resp, addr, nil
 	}
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)
 	}
-	return nil, lastErr
+	return nil, "", lastErr
 }
 
 // isForwardableQType is the allowlist of DNS query types the

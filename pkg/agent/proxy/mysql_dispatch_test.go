@@ -125,7 +125,7 @@ func TestMySQLProbeBranchRoutesByShouldRecordViaSupervisor(t *testing.T) {
 			if err := p.recordMySQLOutgoing(gctx, srcConn, destConn, mocks, errGrp,
 				zap.NewNop(), 1, 2, models.OutgoingOptions{
 					DstCfg: &models.ConditionalDstCfg{Addr: destConn.RemoteAddr().String()},
-				}, upgrader); err != nil {
+				}, upgrader, nil); err != nil {
 				t.Fatalf("recordMySQLOutgoing: %v", err)
 			}
 
@@ -235,7 +235,7 @@ func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
 
 	go func() {
 		_ = p.recordMySQLOutgoing(ctx, proxySide, dstConn, make(chan *models.Mock, 1), errGrp,
-			zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader)
+			zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader, nil)
 	}()
 
 	if _, err := appSide.Write([]byte("ping")); err != nil {
@@ -331,7 +331,7 @@ func TestRecordMySQLOutgoing_TLSUpgradeRebindsTheCallersConn(t *testing.T) {
 	errGrp, gctx := errgroup.WithContext(ctx)
 
 	if err := p.recordMySQLOutgoing(gctx, srcConn, dstConn, make(chan *models.Mock, 8), errGrp,
-		zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader); err != nil {
+		zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader, nil); err != nil {
 		t.Fatalf("recordMySQLOutgoing: %v", err)
 	}
 	if parser.upgradeErr != nil {
@@ -429,7 +429,7 @@ func TestMySQLProbeBranchHonoursTheKillSwitch(t *testing.T) {
 			_ = p.recordMySQLOutgoing(gctx, srcConn, destConn, make(chan *models.Mock, 8), errGrp,
 				zap.NewNop(), 1, 2, models.OutgoingOptions{
 					DstCfg: &models.ConditionalDstCfg{Addr: destConn.RemoteAddr().String()},
-				}, upgrader)
+				}, upgrader, nil)
 
 			if called, _, _ := parser.snapshot(); called {
 				t.Fatal("the parser was invoked with the record-mode kill switch tripped — " +
@@ -527,7 +527,7 @@ func TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose(t *testing.T) {
 		_ = p.recordMySQLOutgoing(gctx, srcConn, dstConn, make(chan *models.Mock, 8), errGrp,
 			zap.NewNop(), 1, 2, models.OutgoingOptions{
 				DstCfg: &models.ConditionalDstCfg{Addr: dstConn.RemoteAddr().String()},
-			}, nil)
+			}, nil, nil)
 	}()
 
 	if _, err := appConn.Write([]byte("REQUEST")); err != nil {

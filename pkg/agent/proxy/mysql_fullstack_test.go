@@ -187,7 +187,7 @@ func runFullStackMySQL(t *testing.T, wrapDest func(net.Conn, *zap.Logger) (net.C
 		svErr <- p.recordMySQLOutgoing(gctx, clientConn, destConn, rawMocks, errGrp, logger,
 			1, 2, models.OutgoingOptions{
 				DstCfg: &models.ConditionalDstCfg{Addr: addr},
-			}, upgrader)
+			}, upgrader, nil)
 	}()
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?tls=skip-verify&timeout=20s&readTimeout=20s",

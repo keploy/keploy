@@ -53,10 +53,42 @@ configure this.
 | MySQL | Handshake, auth | `COM_STMT_PREPARE` *(Phase 2.5)* |
 | Postgres v2 | `StartupMessage`, `PasswordMessage`, `SASLInitialResponse`, `SASLResponse`, `GSSResponse`, `Authentication`; session queries `SET`/`SHOW`/`DEALLOCATE`/`DISCARD`/`RESET`/`UNLISTEN`/`select version()`/`select current_schema()`; empty-query `Parse` (driver PS-cache probe) | Non-empty `Parse` (prepared-statement registration) |
 | Mongo v2 | `hello`, `isMaster`, `ping`, SCRAM (`saslStart`/`saslContinue`), `buildInfo`, `getLog`, `hostInfo`, `listDatabases` | — |
-| Redis | `HELLO`, `AUTH`, `SELECT`, `CLIENT *`, `INFO`, `CONFIG`, `COMMAND`, `SUBSCRIBE*`, `RESET` | — |
+| Redis *(Keploy Enterprise's parser)* | `HELLO`, `AUTH`, `SELECT`, `CLIENT *`, `INFO`, `CONFIG`, `COMMAND`, `SUBSCRIBE*`, `RESET` | — |
 | gRPC v2 | `/grpc.reflection.v1.*`, `/grpc.reflection.v1alpha.*` | — |
 | Kafka | `ApiVersions`, `Metadata`, `SaslHandshake`, `SaslAuthenticate`, `FindCoordinator`, `JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup`, `CreateTopics`/`DeleteTopics`, `DescribeConfigs`/`AlterConfigs`, `InitProducerId` | — |
 | Generic / DNS | Everything | — |
+
+Redis is recorded and mocked only by Keploy Enterprise. OSS keploy (the
+`install.sh --oss` build) writes no Redis mock: a connection whose client
+opens with a Redis command is relayed to the real Redis in record and in
+test mode, and the agent warns once per Redis destination
+(`integrations.RedisSkipNotice`, which links
+`integrations.RedisEnterpriseURL`). Redis-compatible servers (Valkey,
+KeyDB, Dragonfly, Tile38, ...) speak the same protocol and are relayed the
+same way. A build skips Redis (`integrations.SkipsRedis`) unless it links a
+Redis parser or claims Redis (`integrations.ClaimRedis`): Keploy Enterprise
+claims it on every platform, so its macOS and Windows builds, which link no
+Redis parser, record Redis through the Generic parser as before.
+
+A test set's Redis mocks are left out of its replay: the Generic ones an
+older OSS keploy recorded of Redis traffic, and Keploy Enterprise's. The
+agent decides which, and names them in its answer to keploy test's store of
+the set's mocks (`models.StoreMocksResp`); keploy test holds no test to
+them by that answer, never by a judging of its own, since keploy test and
+the agent can be different builds (keploy test on macOS or Windows drives
+an agent in a Linux container). The agent says at warn level, once per
+process, how many it left out of the first test set that has any.
+Enterprise Redis mocks in a yaml or json mock file, which OSS keploy cannot
+decode, are said once per test set at warn level, with how many. No test
+is held to them, and `--remove-unused-mocks` and `--update-test-mapping`
+keep them and their mapping entries, so Keploy Enterprise still replays
+its own Redis mocks after an OSS replay. Such a test set needs its Redis
+running at replay. When keploy's DNS answered the name the application
+reached a Redis by from the recording, and the name no longer has that
+address, the Redis is dialled at the name's address at replay. A Redis the
+application reached through an HTTP `CONNECT` proxy at record is dialled
+directly at replay, so in a network that lets the application out only
+through that proxy, keploy test cannot reach it.
 
 If your protocol isn't listed, the mock is per-test by default. If
 you believe a request should be session- or connection-scoped but
