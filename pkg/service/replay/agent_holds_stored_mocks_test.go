@@ -393,6 +393,39 @@ func TestAgentStartedBeforeApp_CountsTheRetrysReplacementsLossesFromItsStart(t *
 	}
 }
 
+// Under the proven switch, a set whose mark and bases were read from the
+// compose bring-up retry's replacement already (its stack came up after the
+// retry, and was marked once it was up) is counted from that mark: what the
+// replacement counted before it, before the application started, is not the
+// set's tests', and the bases stay as they are. One of each base's kinds,
+// each counted before the mark.
+func TestAgentStartedBeforeApp_LeavesBasesReadFromTheRetrysReplacementAsTheyAre(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	before := models.CaptureLosses{
+		{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"},
+		{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 1, What: "pid 12"},
+		{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/run/app.sock"},
+	}
+	f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", losses: before, beforeApp: "b2"}
+	r := newRearmReplayer(f.rearmInstr)
+	r.instrumentation = f
+	r.lossMark, r.lossMarked = captureLossMark{at: before, known: true, agent: "b2"}, true
+	r.lossAppBase, r.lossRunStart, r.lossRunBase = before, before, before
+	r.lossAgent, r.lossBasesAgent = "b2", "b2"
+	r.agentStartedBeforeApp(context.Background(), nil)
+	if !reflect.DeepEqual(r.lossBases(), models.LossBases{Set: before, App: before, Run: before, Capture: before}) {
+		t.Fatalf("the bases became %+v; want them left at the mark", r.lossBases())
+	}
+	charged, err := r.testCaptureLosses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(charged) != 0 {
+		t.Fatalf("the first test is charged %+v of what the agent counted before the set's mark; want nothing", charged)
+	}
+}
+
 // replacedAtCheckInstr is a compose stack kept across sets (composeInstr)
 // whose agent names itself in its capture-loss reads, as the keploy agent
 // client's do. Its counts become lost from the read numbered lossAt (from 1)

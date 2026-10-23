@@ -1820,7 +1820,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 			ret.StopKilled = stopKilled
 		}
 		// On a run that ended with a type (a stop's, an exit's): a clean
-		// return carries no error to read it from.
+		// return carries no error to read it from. Not a stop's alone: an
+		// application that exited on its own has its daemons stopped too,
+		// and its set's end says what of them was left (the set is not
+		// judged on its tests then, and no set follows it).
 		if ret.AppErrorType != "" {
 			ret.LeftRunning = leftRunning
 		}

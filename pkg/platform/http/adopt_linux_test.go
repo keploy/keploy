@@ -823,7 +823,10 @@ func TestAStopThatCannotTellItsOwnSaysWhatItLeftRunning(t *testing.T) {
 
 // An application that leaves a daemon keploy cannot see (not dumpable: its
 // /proc/<pid>/exe is not this user's to read) ends its run with LeftRunning
-// naming it, as the replay reads the run.
+// naming it, as the replay reads the run: whether keploy's stop at the set's
+// end ended the run, or the application exited on its own (a run that ended
+// with a type other than a stop's, whose set's end still says what of it was
+// left).
 func TestARunSaysTheDaemonItCannotSeeIsLeftRunning(t *testing.T) {
 	if !inOwnProcess(t) {
 		return
@@ -839,11 +842,12 @@ func TestARunSaysTheDaemonItCannotSeeIsLeftRunning(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	dir := t.TempDir()
-	ready := filepath.Join(dir, "ready")
-	pidFile := filepath.Join(dir, "pid")
-	script := filepath.Join(dir, "d.py")
-	if err := os.WriteFile(script, []byte(`import ctypes, os, signal, sys, time
+	for _, ownExit := range []bool{false, true} {
+		dir := t.TempDir()
+		ready := filepath.Join(dir, "ready")
+		pidFile := filepath.Join(dir, "pid")
+		script := filepath.Join(dir, "d.py")
+		if err := os.WriteFile(script, []byte(`import ctypes, os, signal, sys, time
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
@@ -851,29 +855,40 @@ open(sys.argv[2], "w").write(str(os.getpid()))
 open(sys.argv[1], "w").close()
 time.sleep(600)
 `), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if b, err := os.ReadFile(pidFile); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
+			t.Fatal(err)
 		}
-	})
-	cfg := &config.Config{}
-	cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
-	client := New(zap.NewNop(), nil, cfg)
-	client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
-		`sh -c 'setsid python3 `+script+` `+ready+` `+pidFile+` >/dev/null 2>&1 </dev/null &'; exec sleep 600`, nil,
-		models.SetupOptions{CommandType: string(utils.Native)}))
-	ctx, cancel := context.WithCancelCause(context.Background())
-	done := make(chan models.AppError, 1)
-	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
-	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
-	cancel(models.ErrAppStoppedForSetEnd)
-	appErr := <-done
-	if !strings.Contains(appErr.LeftRunning, "daemons keploy cannot see") {
-		t.Fatalf("LeftRunning %q (type %q); want the daemon keploy cannot see named", appErr.LeftRunning, appErr.AppErrorType)
+		t.Cleanup(func() {
+			if b, err := os.ReadFile(pidFile); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			}
+		})
+		then := "exec sleep 600"
+		if ownExit {
+			then = "until [ -e " + ready + " ]; do sleep 0.05; done; exit 3"
+		}
+		cfg := &config.Config{}
+		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
+		client := New(zap.NewNop(), nil, cfg)
+		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
+			`sh -c 'setsid python3 `+script+` `+ready+` `+pidFile+` >/dev/null 2>&1 </dev/null &'; `+then, nil,
+			models.SetupOptions{CommandType: string(utils.Native)}))
+		ctx, cancel := context.WithCancelCause(context.Background())
+		done := make(chan models.AppError, 1)
+		go func() { done <- client.Run(ctx, models.RunOptions{}) }()
+		await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+		if !ownExit {
+			cancel(models.ErrAppStoppedForSetEnd)
+		}
+		appErr := <-done
+		cancel(nil)
+		if ownExit && appErr.AppErrorType == models.ErrCtxCanceled {
+			t.Fatalf("the application's own exit ended its run as a stop's (%+v)", appErr)
+		}
+		if !strings.Contains(appErr.LeftRunning, "daemons keploy cannot see") {
+			t.Fatalf("own exit %v: LeftRunning %q (type %q); want the daemon keploy cannot see named", ownExit, appErr.LeftRunning, appErr.AppErrorType)
+		}
 	}
 }
 
@@ -1184,6 +1199,17 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 		t.Fatalf("threads that could not be read read as children %+v", got)
 	}
 	if err := os.Remove(filepath.Join(root, "101", "task")); err != nil {
+		t.Fatal(err)
+	}
+	// A stat that says Z and does not parse, and is no task's release: one
+	// cut short, its parent there, or its parent 0 and its group not -1.
+	for _, line := range []string{fmt.Sprintf("112 (sh) Z %d 112", me), "112 (sh) Z 0 112"} {
+		stat(112, line)
+		if got, err := procChildrenIn(root, me); err == nil {
+			t.Fatalf("the stat %q read as a process gone, children %+v", line, got)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(root, "112")); err != nil {
 		t.Fatal(err)
 	}
 	// A stat that is there and cannot be read.

@@ -380,7 +380,12 @@ func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 }
 
 // reaped reports whether a stat line is a task's being released: its parent
-// and group, the two fields after its state, gone (0 and -1).
+// and group, the two fields after its state, gone (0 and -1). The group's -1
+// is the one field of such a line utils.ParseProcStat refuses, so a line the
+// kernel wrote that says Z and does not parse is always one; both fields are
+// asked all the same, so a line that does not parse for another reason (a
+// read cut short, a parent of 0 included, or no stat line at all) is no
+// process gone, but one keploy could not read (procStat's error).
 func reaped(line []byte) bool {
 	end := bytes.LastIndexByte(line, ')')
 	if end < 0 {

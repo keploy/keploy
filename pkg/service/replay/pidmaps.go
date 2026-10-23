@@ -337,7 +337,13 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 // new one counts: those bases are taken from it too, the run's from its start
 // (nil: every count it holds is this run's, its process having started
 // during it), and what keploy cannot capture at all from the mark, as at the
-// run's first application.
+// run's first application. The process asked is the latest read's
+// (lossAgent): the mark's own wherever the mark was read, as no read falls
+// between a mark and the application's start. They differ only where the
+// mark could not be read (the set's tests then cannot be counted, and say
+// so): the bases are then the latest read's process's from its start, all it
+// counted (more, never less), not left with a process gone, which would
+// leave every later test unjudged until the application starts anew again.
 func (r *Replayer) appStartsAnew() {
 	if r.lossAppRunsOn {
 		r.lossAppRunsOn = false
@@ -399,7 +405,11 @@ func (r *Replayer) agentStartedBeforeApp(ctx context.Context, agentWatch models.
 		return
 	}
 	if !otherAgent(r.lossMark.agent, agent) && !otherAgent(r.lossBasesAgent, agent) {
-		return // the set's bases are this one's already
+		// The set's mark and bases are this one's already (the set's stack
+		// came up after the retry and was marked once it was up): what it
+		// counted before the mark, before the application started, is not
+		// the set's tests'.
+		return
 	}
 	replaced := r.lossMark.agent
 	if replaced == "" || replaced == agent {
@@ -428,7 +438,12 @@ func (r *Replayer) lossBases() models.LossBases {
 // test so counted is charged models.CaptureLossAgentStartedAgain, which
 // leaves it without a verdict. The set's mark is never older than the bases
 // that outlive the set, so a mark of another process comes with bases of
-// another process, which restarted names.
+// another process, which restarted names. So does a read of another process
+// than the read before it (the mark, or the set's last test's): the bases
+// are never newer than that read either (each is the latest read's process
+// as it is taken: noteLossAgent, appStartsAnew, agentStartedBeforeApp), and
+// an agent process never answers again once another has, so the callers'
+// checks of the read before need not name the restart themselves.
 func (r *Replayer) lossBasesAt(agent string) (models.LossBases, *models.AgentReplacement) {
 	b := r.lossBases()
 	if otherAgent(r.lossMark.agent, agent) {
@@ -497,11 +512,8 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 	bases, restarted := r.lossBasesAt(agent)
 	if otherAgent(fromAgent, agent) {
 		// What this agent counted is all since the previous read: it
-		// started after it.
+		// started after it. lossBasesAt has named the restart already.
 		from = nil
-		if restarted == nil {
-			restarted = &models.AgentReplacement{First: fromAgent, Next: agent}
-		}
 	}
 	r.lossLast, r.lossLastRead, r.lossLastAgent = now, true, agent
 	charged := now.Charged(bases, from)
@@ -618,10 +630,13 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	}
 	// A base another agent process answered counts nothing of this one's,
 	// which started after it: all this one counted is since (nil), and what
-	// the one before counted after its last read cannot be told.
+	// the one before counted after its last read cannot be told. notFrom's
+	// agent is fromAgent where a test read, and the bases' (no newer than
+	// the mark's: lossBasesAt) where none did, so a from of another process
+	// comes with a notFrom of another process, which names the restart.
 	var restarted *models.AgentReplacement
 	if otherAgent(fromAgent, agent) {
-		from, restarted = nil, &models.AgentReplacement{First: fromAgent, Next: agent}
+		from = nil
 	}
 	if otherAgent(notFromAgent, agent) {
 		notFrom, restarted = nil, &models.AgentReplacement{First: notFromAgent, Next: agent}
