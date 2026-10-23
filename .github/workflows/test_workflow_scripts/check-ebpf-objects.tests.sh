@@ -1,7 +1,9 @@
 #!/bin/bash
 # check-ebpf-objects.tests.sh: check-ebpf-objects.sh against a keploy/ebpf of
 # its own, a local repository served blobless (file://, uploadpack.allowFilter)
-# as GitHub serves the real one. Its main has a build from before the
+# as GitHub serves the real one. The check is given the https URL it clones in
+# CI, https://github.com/keploy/ebpf.git, which the cases' git configuration
+# maps to that repository (insteadOf). Its main has a build from before the
 # kernel-loads lane (zero), a build the lane was added under (one), a build
 # after it (two), and a branch merged without squashing (x, then four); a
 # pull request off it has a fifth build (three). The hooks directory passes
@@ -9,7 +11,9 @@
 # a mix of two builds, with the pull request's files, with the merged branch's
 # first build, with a file main never had, and with no file at all. A token
 # the server refuses, whichever way it says so, ends the check after one
-# attempt; a server error is tried again. With no token, unset or empty as
+# attempt; a server error or a rate limit (429) is tried again, at most five
+# attempts in all, waiting 10, 20, 30 and 40 s between them (a sleep in bin/
+# records each wait and returns at once). With no token, unset or empty as
 # GitHub gives a missing secret, a check that is not a fork's fails and
 # clones nothing, as does a PR_FROM_FORK that is neither true nor false.
 #
@@ -29,13 +33,14 @@
 # clone it tells the helpers to store the credentials, as git does after one
 # GitHub accepted. It records the token on any git command line, and in any
 # file of the check's temporary directory, home or working directory, or one
-# under /tmp or /dev/shm written since the case began (scan), before or after
-# a clone; a case fails on either, on the token in such a file once the check
-# has ended, and on the token in the check's output. The token is looked for
-# as it is and in base64, at each of the three byte alignments (so also as
-# an Authorization header gives it, x-access-token:TOKEN), in both
-# alphabets. The wrapper can also refuse a clone in each of the ways GitHub
-# and git refuse credentials, or fail the first clone as a server error does.
+# under /tmp or /dev/shm written since the case began (scan), just before or
+# just after each clone; a case fails on either, on the token in such a file
+# once the check has ended, and on the token in the check's output. The token
+# is looked for as it is and in base64, at each of the three byte alignments
+# (so also as an Authorization header gives it, x-access-token:TOKEN), in
+# both alphabets. The wrapper can also refuse a clone in each of the ways GitHub
+# and git refuse credentials, fail the first clone as a server error or a
+# rate limit does, or fail every clone as a server that is down does.
 #
 #   bash .github/workflows/test_workflow_scripts/check-ebpf-objects.tests.sh
 set -euo pipefail
@@ -84,7 +89,8 @@ git -C "$src" merge -q --no-ff -m "merge feature" feature
 git -C "$src" checkout -q -b pr
 build three
 git -C "$src" checkout -q main
-url="file://$src"
+printf '[url "file://%s"]\n\tinsteadOf = https://github.com/keploy/ebpf.git\n' "$src" >> "$work/gitconfig"
+url=https://github.com/keploy/ebpf.git
 
 # keploy/keploy: main has build one of every file at pkg/agent/hooks/linux,
 # beside a file of another kind and one elsewhere that the check must not
@@ -129,11 +135,12 @@ co() {
 
 # scan: the files that hold one of $SHIM_NEEDLES: any under $SHIM_SCAN, and
 # any under /tmp and /dev/shm (of less than 16 MB) written since $SHIM_MARK.
-# There it skips each directory that has not changed since then: writing a
-# file changes its directory, and making a directory changes its parent. So
-# a /tmp of a million files (a shared box's) is not read whole for each
-# case; it misses only a file written in an older directory below one that
-# did not change.
+# There it skips each directory that has not changed since then: creating,
+# renaming or removing an entry changes a directory, so a file created since
+# then is in a changed directory. So a /tmp of a million files (a shared
+# box's) is not read whole for each case. It misses a file rewritten in place
+# in a directory that did not change, and one created in a directory below
+# one that did not change.
 cat > "$work/scan" <<'EOF'
 #!/bin/bash
 set -f
@@ -154,13 +161,14 @@ chmod +x "$work/scan"
 # of $SHIM_NEEDLES is in its arguments; and for a clone, "prompts" if git may
 # prompt for credentials, "helper:" with the password git's helpers give for
 # github.com under its -c options (or "none"), and "file-has-token" if scan
-# finds one in a file before or after it. A clone that succeeds has the
-# helpers store the credentials, as git does once GitHub accepts them. With
-# SHIM_REFUSE it refuses the clone instead, as GitHub refuses a token that
-# cannot read the repository (notfound), is not valid (auth) or may not read
-# it (forbidden: an organization's SSO), or as git does when no helper gives
-# a username (username) or a password (password); or (blip) fails the first
-# clone as a server error does, and runs the next.
+# finds one in a file just before or just after it. A clone that succeeds
+# has the helpers store the credentials, as git does once GitHub accepts
+# them. With SHIM_REFUSE it refuses the clone instead, as GitHub refuses a
+# token that cannot read the repository (notfound), is not valid (auth) or
+# may not read it (forbidden: an organization's SSO), or as git does when no
+# helper gives a username (username) or a password (password); or fails the
+# first clone as a server error (blip) or a rate limit (ratelimit) does, and
+# runs the next; or fails every clone as a server that is down does (down).
 real=$(command -v git)
 mkdir -p "$work/bin"
 cat > "$work/bin/git" <<EOF
@@ -220,6 +228,18 @@ case ${SHIM_REFUSE:-} in
     echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 403" >&2
     rc=128
     ;;
+  down)
+    echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 502" >&2
+    rc=128
+    ;;
+  ratelimit)
+    if [ "$(grep -c '^helper:' "$SHIM_LOG")" -le 1 ]; then
+      echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 429" >&2
+      rc=128
+    else
+      clone
+    fi
+    ;;
   blip)
     if [ "$(grep -c '^helper:' "$SHIM_LOG")" -le 1 ]; then
       echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 502" >&2
@@ -229,7 +249,7 @@ case ${SHIM_REFUSE:-} in
     fi
     ;;
   *)
-    echo "bin/git: SHIM_REFUSE is '$SHIM_REFUSE', none of notfound, auth, username, password, forbidden, blip" >&2
+    echo "bin/git: SHIM_REFUSE is '$SHIM_REFUSE', none of notfound, auth, username, password, forbidden, down, ratelimit, blip" >&2
     exit 2
     ;;
 esac
@@ -238,6 +258,10 @@ infile && leak=1
 exit "$rc"
 EOF
 chmod +x "$work/bin/git"
+# bin/sleep: the check waits between attempts only through sleep, found on
+# PATH; this one records "sleep N" in $SHIM_LOG and returns at once.
+printf '#!/bin/bash\necho "sleep $*" >> "$SHIM_LOG"\n' > "$work/bin/sleep"
+chmod +x "$work/bin/sleep"
 
 failed=0
 # hooks NAME BUILD...: a hooks directory NAME holding, for each file, the
@@ -255,8 +279,9 @@ hooks() {
 # PATTERN. It runs with a temporary directory, home and working directory of
 # its own, under $run; neither its output, a git command line it runs, nor a
 # file under $run, or one under /tmp or /dev/shm written since the case
-# began (scan), while it clones or once it has ended, holds the token in any
-# of its forms (needles). Its clones are recorded in $work/shim.log.
+# began (scan), just before or just after each clone or once it has ended,
+# holds the token in any of its forms (needles). Its clones and waits are
+# recorded in $work/shim.log.
 run="$work/run"
 export SHIM_NEEDLES="${needles[*]}" SHIM_SCAN="$run" SHIM_MARK="$work/mark"
 expect() {
@@ -281,7 +306,8 @@ expect() {
     failed=1
   fi
 }
-# clones NAME WANT: the last case's clones are recorded as WANT (one line each).
+# clones NAME WANT: the last case's clones and waits are recorded as WANT (one
+# line each).
 clones() {
   local got; got=$(paste -sd' ' "$work/shim.log")
   if [ "$got" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: clones recorded '$got', want '$2'"; failed=1; fi
@@ -309,20 +335,28 @@ declare -A refusal=([notfound]="fatal: repository '[^']*' not found" [auth]="fat
   [forbidden]="fatal: unable to access '[^']*': The requested URL returned error: 403")
 for r in notfound auth username password forbidden; do
   expect "a refused token ($r)" 1 "${refusal[$r]}
-PRO_ACCESS_TOKEN cannot read file://.*: the server refused it" "$work/hooks-old" "${same[@]}" SHIM_REFUSE="$r"
+PRO_ACCESS_TOKEN cannot read https://.*: the server refused it" "$work/hooks-old" "${same[@]}" SHIM_REFUSE="$r"
   clones "a refused token ($r) is not tried again" "helper:token"
 done
-# Not a refusal: waits its 10 s and clones again.
+# Not a refusal: a server error or a rate limit waits and clones again, at
+# most five times in all, each wait 10 s longer.
 expect "a server error is tried again" 0 "The requested URL returned error: 502
-clone of file://.* failed \(attempt 1 of 5\); retrying in 10s
+clone of https://.* failed \(attempt 1 of 5\); retrying in 10s
 the 8 eBPF files of .* are keploy/ebpf main's at [0-9a-f]+ \(two\)" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=blip
-clones "a server error is tried again: two clones" "helper:token helper:token"
+clones "a server error is tried again: two clones" "helper:token sleep 10 helper:token"
+expect "a rate limit is tried again" 0 "returned error: 429
+clone of https://.* failed \(attempt 1 of 5\); retrying in 10s
+the 8 eBPF files of .* are keploy/ebpf main's at [0-9a-f]+ \(two\)" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=ratelimit
+clones "a rate limit is tried again: two clones" "helper:token sleep 10 helper:token"
+expect "a server down five times" 1 "attempt 4 of 5\); retrying in 40s
+.*could not clone https://.*'s main \(5 attempts\)$" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=down
+clones "a server down: five clones, waits growing" "helper:token sleep 10 helper:token sleep 20 helper:token sleep 30 helper:token sleep 40 helper:token"
 # GitHub gives a missing or withheld secret as an empty variable.
 for t in unset empty; do
   tok=(); [ "$t" = empty ] && tok=(PRO_ACCESS_TOKEN=)
-  expect "no token ($t), not a fork" 1 "PRO_ACCESS_TOKEN is empty or not set: this check reads file://" "$work/hooks-old" PR_FROM_FORK=false "${tok[@]}"
+  expect "no token ($t), not a fork" 1 "PRO_ACCESS_TOKEN is empty or not set: this check reads https://" "$work/hooks-old" PR_FROM_FORK=false "${tok[@]}"
   clones "no token ($t), not a fork: nothing is cloned" ""
-  expect "no token ($t), no PR_FROM_FORK" 1 "PRO_ACCESS_TOKEN is empty or not set: this check reads file://" "$work/hooks-old" "${tok[@]}"
+  expect "no token ($t), no PR_FROM_FORK" 1 "PRO_ACCESS_TOKEN is empty or not set: this check reads https://" "$work/hooks-old" "${tok[@]}"
   clones "no token ($t), no PR_FROM_FORK: nothing is cloned" ""
 done
 expect "a PR_FROM_FORK that is not true or false" 1 "PR_FROM_FORK is 'yes': it must be true or false" "$work/hooks-old" "${same[@]}" PR_FROM_FORK=yes
