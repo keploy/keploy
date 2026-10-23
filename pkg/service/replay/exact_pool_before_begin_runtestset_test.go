@@ -196,6 +196,9 @@ func TestAFailedStreamedTestEndsWithThePoolServed(t *testing.T) {
 			if bad := overATestView(events); bad != "" {
 				t.Errorf("a test began over a test's view, %s: %v", bad, events)
 			}
+			if got := poolCallsBetweenTests(events); len(got) != 2 || got[0] != 1 || got[1] != 1 {
+				t.Errorf("pool calls between the test cases %v; want [1 1], one on the failed exit: %v", got, events)
+			}
 		})
 	}
 }
@@ -262,4 +265,48 @@ func hasEvent(events []string, e string) bool {
 		}
 	}
 	return false
+}
+
+// poolCallsBetweenTests is, for each test asked of the agent after the first,
+// the pool calls made since the test before it was asked for, taken or not.
+func poolCallsBetweenTests(events []string) []int {
+	var out []int
+	n, seen := 0, false
+	for _, e := range events {
+		switch {
+		case strings.HasPrefix(e, "test:"):
+			if seen {
+				out = append(out, n)
+			}
+			n, seen = 0, true
+		case e == "pool" || e == "pool-failed":
+			n++
+		}
+	}
+	return out
+}
+
+// A pool call the agent took as a test case ended is not made again before
+// the next one begins: one pool call between two test cases, on the main loop
+// and on the streaming pass. Serving the pool again would install a new pool
+// view between them, and what the first answered of the next test's calls in
+// flight (its ahead) would be lost from what the next test opens with.
+func TestAPoolTheAgentTookIsNotServedAgainBeforeTheNextTestBegins(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		streamed []string
+	}{
+		{name: "the main loop"},
+		{name: "the streaming pass", streamed: []string{"test-1", "test-2", "test-3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, vi := exactViewRun(t, nil, tc.streamed...)
+			h.run(t)
+			events := vi.trace()
+			got := poolCallsBetweenTests(events)
+			if len(got) != 2 || got[0] != 1 || got[1] != 1 {
+				t.Fatalf("pool calls between the test cases %v; want [1 1]: %v", got, events)
+			}
+		})
+	}
 }

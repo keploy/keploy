@@ -4428,15 +4428,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// agent serves the pool from then on, on every exit, before the
 			// test case's consumption and misses are read (as the main loop
 			// serves it once its test case has its answer), so the next test
-			// case never begins over this one's view. A failed pool call is
-			// returned once, and served again at the next one's loop head
-			// (poolBeforeBegin).
-			poolServed := false
+			// case never begins over this one's view. Each exit calls it
+			// once and leaves the iteration (continue or break). A failed
+			// pool call is returned, and served again at the next one's loop
+			// head (poolBeforeBegin).
 			endStream := func() error {
-				if poolServed {
-					return nil
-				}
-				poolServed = true
 				rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
 				for _, s := range streamingTests[i+1:] {
 					rest = append(rest, s.testCase)
