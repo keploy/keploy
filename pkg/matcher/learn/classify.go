@@ -132,10 +132,11 @@ type Raw struct {
 	// elsewhere: a recording F gave the application before the call that
 	// is no earlier place of the call's own test (OfAnotherTest): another
 	// recorded test's, or one F served in an earlier test than the
-	// previous one. Only the offset rule reads it (offsetPlacesOf), never a
-	// variable's or an echo's search, so that a call of one test binds no
-	// value of another's and is refused for no coincidence with one, while
-	// a value built on what F gave there by an offset is still refused.
+	// previous one. Only the offset rule (offsetPlacesOf) and the word rule
+	// (givenWhy) read it, never a variable's or an echo's search, so that
+	// a call of one test binds no value of another's, while a value built
+	// on what F gave there by an offset, or copied from its answer word for
+	// word, is refused, naming it.
 	elsewhere bool
 	// read: the text was read from the mock (RawOf).
 	read bool
@@ -230,18 +231,19 @@ func (r Raw) Span() (first, last int) { return r.first, r.last }
 // OfAnotherTest is r as a recording F gave the application before the call
 // that is no earlier place of the call's own test (another recorded test's,
 // or one served in an earlier test than the previous one): a place the
-// offset rule reads, and no other rule does (Raw.elsewhere).
+// offset rule and the word rule read, and no other rule does
+// (Raw.elsewhere).
 func (r Raw) OfAnotherTest() Raw {
 	r.elsewhere = true
 	return r
 }
 
-// AnotherTests reports whether r is a place the offset rule alone reads
-// (OfAnotherTest).
+// AnotherTests reports whether r is a place the offset rule and the word
+// rule alone read (OfAnotherTest).
 func (r Raw) AnotherTests() bool { return r.elsewhere }
 
 // ownPlaces splits raw into the places every rule reads and those the offset
-// rule alone reads (OfAnotherTest), each in raw's order.
+// rule and the word rule alone read (OfAnotherTest), each in raw's order.
 func ownPlaces(raw []Raw) (own, elsewhere []Raw) {
 	for _, x := range raw {
 		if x.elsewhere {
@@ -330,7 +332,7 @@ type Learned struct {
 // raw the other recordings that came before it: recorded before it, or
 // served by F before it in the test, in the previous test, at the start-up
 // or between tests (one marked OfAnotherTest is a place of the offset rule
-// alone); resp are the leaves of its recorded answer.
+// and the word rule alone); resp are the leaves of its recorded answer.
 //
 //   - Variable: the recorded value appeared earlier in the test's recording,
 //     whatever its type there, in any kind of mock: whole, or a part of it
@@ -347,7 +349,10 @@ type Learned struct {
 //   - Noise otherwise: not compared, its type still enforced.
 //
 //   - Unaccounted: none of these, and yet the declared readings cannot show
-//     it came from nowhere (unaccounted): refused, never noise.
+//     it came from nowhere (unaccounted): refused, never noise. So is one a
+//     word of which F gave the application in another test (givenWhy): a
+//     value copied from another test's answer word for word is followed
+//     nowhere, and refused naming it.
 //
 // A leaf its protocol types as one instant (Instant) is read whole, never
 // word by word, and is noise only where its provenance shows a read of the
@@ -381,17 +386,18 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 // running set that no other rule reads (an earlier test's than the previous
 // one, another recorded test's, the call's own paired recording F served
 // before it), each as F served it (GivenPlaces.ServedIn), for the offset rule
-// alone: their places, read once for the set, without their text
-// (Order.GivenPlaces). It is read only where a changed instant reaches that
-// rule, and then once for the call. An error, or a recording it could not
-// read (GivenPlaces.Read), names one whose text cannot be told: every
-// changed instant that reaches the rule is then refused with it, never
-// learned as noise.
+// and the word rule alone: their places and their answers' words, read once
+// for the set, without their text (Order.GivenPlaces). It is read only where
+// a changed instant reaches the offset rule, or a word of what changed
+// reaches the word rule (givenWhy), and then once for the call. An error, or
+// a recording it could not read (GivenPlaces.Read), names one whose text
+// cannot be told: every changed instant or word that reaches either rule is
+// then refused with it, never learned as noise.
 type GivenEarlier func() ([]GivenPlaces, error)
 
 // ClassifyGiven is ClassifyIn with the recordings F gave the application
-// earlier in the set (given; nil: none), which the offset rule reads beside
-// raw's.
+// earlier in the set (given; nil: none), which the offset rule and the word
+// rule read beside raw's.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
@@ -401,9 +407,9 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
 	// The moved places the offset rule reads (offset.go), read once for the
-	// call, and only where a changed instant reaches it: another recorded
-	// test's too (OfAnotherTest), and those F gave earlier in the set
-	// (given), which no other rule reads.
+	// call, and only where a changed instant or word reaches it or the word
+	// rule (givenWhy): another recorded test's too (OfAnotherTest), and
+	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
 	raw, _ = ownPlaces(raw)
 	var op *offsetPlaces
@@ -415,7 +421,7 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 				more, err := given()
 				switch {
 				case err != nil:
-					unread = "keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed was built on it: " + err.Error()
+					unread = "keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
 				default:
 					unread, set = placesUnread(more), more
 				}
@@ -464,8 +470,10 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 				// An instant of it built on a moved place by an offset, before
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
-			} else {
-				why = unaccounted(dc, v, at, served, raw)
+			} else if why = unaccounted(dc, v, at, served, raw); why == "" {
+				// Nor a word of it in what F gave the application in
+				// another test.
+				why = givenWhy(dc, v, at, served, raw, places)
 			}
 			// In keploy mock's client tests, a changed instant only where the
 			// call's window shows it a read of the application's clock.

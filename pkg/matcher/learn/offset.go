@@ -170,8 +170,13 @@ type offsetPlaces struct {
 	given   [][2]offsetPlace
 	// unread names a place F gave the application that could not be read
 	// (GivenEarlier): every changed instant the rule reads is refused with
-	// it (offsetFrom).
+	// it (offsetFrom), and every word the word rule reads (givenWhy).
 	unread string
+	// words are the answers' words of each recording F gave the application
+	// before the call that no earlier place of the call's own test is
+	// (Raw.OfAnotherTest, and set's), in raw's order, then set's: the word
+	// rule reads them (givenWhy).
+	words []givenWords
 }
 
 // offsetPlacesOf reads the places the offset rule reads for a call recorded
@@ -248,15 +253,24 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			add(e.Payload, true)
 		}
 	}
+	for _, x := range raw {
+		if x.read && x.elsewhere {
+			op.words = append(op.words, dc.wordsOf(x))
+		}
+	}
 	var others []GivenPlaces
 	for _, g := range set {
 		if !g.read {
 			continue
 		}
 		if p, ok := byID[g.mock+"\x00"+g.at.String()]; ok {
+			// Read among raw already: as an earlier place of the call's own
+			// test, which every rule reads (unaccounted), or as another
+			// test's, whose words are read above.
 			merge(p, true, g.first, g.last)
 			continue
 		}
+		op.words = append(op.words, g.words)
 		others = append(others, g)
 	}
 	put := func(kp keyedPlace, mock, call string, rat time.Time, given bool, first, last int) {
@@ -293,12 +307,14 @@ type keyedPlace struct {
 
 // keyedPlaces are the instants of x where the offset rule reads them: in
 // each field of its answer (each field, of a kind whose spec holds its
-// request and answer in one), in its text and in its other declared forms,
+// request and answer in one; none, of a recording that holds no answer
+// apart from its request: answerApart), in its text and in its other
+// declared forms,
 // with its stamps and its answer's own clock reads blanked (searched).
 func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
 	var out []keyedPlace
 	text := dc.searched(x, false)[0]
-	answers := hasAnswerField(x.fields)
+	answers := answerApart(x.fields)
 	for _, f := range x.fields {
 		if f.key || f.end > len(text) || answers && !answerFields[fieldRoot(f.path)] {
 			continue
@@ -319,29 +335,122 @@ func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
 }
 
 // GivenPlaces is a recording F gave the application earlier in the running
-// set, as the offset rule alone reads it (GivenEarlier): its instants where
-// the rule reads them (keyedPlaces), and none of its text, so that each of
-// the set's recordings is read once for the set (Order.GivenPlaces) and its
-// text is not held; and where F served it in the set (ServedIn).
+// set, as the offset rule and the word rule read it (GivenEarlier): its
+// instants where the offset rule reads them (keyedPlaces), the words of its
+// answer (givenWords), and none of its text, so that each of the set's
+// recordings is read once for the set (Order.GivenPlaces) and its text is
+// not held; and where F served it in the set (ServedIn).
 type GivenPlaces struct {
 	mock, call  string
 	at          time.Time
 	read        bool
 	first, last int
 	places      []keyedPlace
+	words       givenWords
 }
 
-// PlacesOf is x as the offset rule reads it among the recordings F gave the
-// application earlier in the set (GivenPlaces), served where x is
-// (Raw.ServedIn), read with a cache of its own that it drops. It keeps no
-// part of x's text: every word it keeps is a copy.
+// PlacesOf is x as the offset rule and the word rule read it among the
+// recordings F gave the application earlier in the set (GivenPlaces), served
+// where x is (Raw.ServedIn), read with a cache of its own that it drops. It
+// keeps no part of x's text: every word it keeps is a copy.
 func PlacesOf(x Raw) GivenPlaces {
-	places := NewDriftCache().keyedPlaces(x)
+	dc := NewDriftCache()
+	places := dc.keyedPlaces(x)
 	for i := range places {
 		k := &places[i]
 		k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
 	}
-	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.read, first: x.first, last: x.last, places: places}
+	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.read, first: x.first, last: x.last, places: places, words: dc.wordsOf(x)}
+}
+
+// givenWords are the words of a recording's answer where the word rule
+// reads them (answerWords), of a recording F gave the application before
+// the call that no earlier place of the call's own test is (another recorded
+// test's, or one F gave earlier in the running set: Raw.OfAnotherTest,
+// GivenEarlier): each reading's distinct words, sorted, and apart those its
+// answer's stamps alone hold (stamped), and none of its text. at is when its
+// request was recorded.
+type givenWords struct {
+	mock           string
+	at             time.Time
+	words, stamped [][]string
+}
+
+// wordsOf is x's givenWords, every word a copy.
+func (dc *DriftCache) wordsOf(x Raw) givenWords {
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at}
+	plain := dc.answerWords(x, false)
+	kept := plain
+	if len(x.stamps) > 0 {
+		kept = dc.answerWords(x, true)
+	}
+	for i := range plain {
+		g.words = append(g.words, sortedWords(plain[i], nil))
+		g.stamped = append(g.stamped, sortedWords(kept[i], plain[i]))
+	}
+	return g
+}
+
+// sortedWords are the words of set that minus does not hold, each a copy,
+// sorted.
+func sortedWords(set, minus map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for w := range set {
+		if !minus[w] {
+			out = append(out, strings.Clone(w))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// holds reports whether g's answer holds t in reading i, a word of its
+// stamps too where keep says they are searched as any text (stampsEchoed).
+func (g givenWords) holds(i int, t string, keep bool) bool {
+	for _, list := range [][][]string{g.words, g.stamped} {
+		if i < len(list) {
+			if k := sort.SearchStrings(list[i], t); k < len(list[i]) && list[i][k] == t {
+				return true
+			}
+		}
+		if !keep {
+			break
+		}
+	}
+	return false
+}
+
+// answerWords are the words of x's answer in every declared form, by
+// reading, where the word rule reads a recording F gave the application
+// (givenWords): of each field of its answer, its keys too (of a kind whose
+// spec holds its request and its answer in one field, or a recording with
+// no fields read, its whole text: answerApart), with its stamps (unless
+// keep) and its answer's own clock reads blanked, as searchedTokens reads a
+// payload (rules 2 and 3). What F gives the application is an answer, never
+// a request the application sent in another test: a recording that holds no
+// answer apart from its request has no words here.
+func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
+	if !answerApart(x.fields) {
+		return dc.searchedTokens(x, keep)
+	}
+	if keep {
+		x.stamps = nil
+	}
+	text := blankStamps(x.text, x.stamps)
+	keys := clockKeys(x)
+	var forms []string
+	for _, f := range x.fields {
+		if f.end > len(text) || !answerFields[fieldRoot(f.path)] {
+			continue
+		}
+		for _, form := range textForms(text[f.start:f.end]) {
+			if len(keys) > 0 {
+				form = blankSpans(form, func(sp instant) bool { return sp.keyed && keys[sp.key] })
+			}
+			forms = append(forms, form)
+		}
+	}
+	return tokensOfForms(forms)
 }
 
 // Mock is the name of g's mock.
@@ -419,12 +528,16 @@ func fieldRoot(path string) string {
 	return path
 }
 
-// hasAnswerField reports whether one of fields stands in one of the spec's
-// answer fields (answerFields): a kind whose spec holds its request and its
-// answer in one field has none, and all its fields are read.
-func hasAnswerField(fields []rawField) bool {
+// answerApart reports whether the spec fields stand in holds its answer
+// apart from its request: one of them stands in one of the spec's answer
+// fields or request fields (answerFields, requestFields), and only those of
+// its answer are read. A recording of such a kind that holds no answer (a
+// generic parser's frames the application sent, that nothing answered) gave
+// the application nothing. A kind whose spec holds its request and its
+// answer in one field has neither, and all its fields are read.
+func answerApart(fields []rawField) bool {
 	for _, f := range fields {
-		if answerFields[fieldRoot(f.path)] {
+		if root := fieldRoot(f.path); answerFields[root] || requestFields[root] {
 			return true
 		}
 	}

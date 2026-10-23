@@ -2,6 +2,7 @@ package learn
 
 import (
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -659,11 +660,13 @@ func TestAnInstantBuiltOnAnotherIndexOfAServedListIsRefused(t *testing.T) {
 }
 
 // A recording of another recorded test that F gave the application before
-// the call (Raw.OfAnotherTest) is a place of the offset rule, and of no other
-// rule: a date built on what F gave there by an offset is refused, naming it,
-// while a value its recording holds binds no variable of this test's call
-// (only a test's own calls carry its variables), as a place of the test would.
-func TestAnotherTestsRecordingIsAPlaceOfTheOffsetRuleAlone(t *testing.T) {
+// the call (Raw.OfAnotherTest) is a place of the offset rule and the word
+// rule, and of no other: a date built on what F gave there by an offset is
+// refused, naming it, and so is a value its recording holds, which binds no
+// variable of this test's call (only a test's own calls carry its
+// variables), as a place of the test would: it is refused, naming it, never
+// noise.
+func TestAnotherTestsRecordingIsAPlaceOfTheOffsetAndWordRulesAlone(t *testing.T) {
 	sent := time.Date(2026, 10, 21, 23, 58, 16, 473e6, time.UTC)
 	got := sent.Add(2*time.Minute + 311*time.Millisecond)
 	attrs := func(at time.Time) string {
@@ -690,17 +693,130 @@ func TestAnotherTestsRecordingIsAPlaceOfTheOffsetRuleAlone(t *testing.T) {
 			x = x.OfAnotherTest()
 		}
 		ln := ClassifyIn(NewDriftCache(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
-		if want := map[bool]Kind{false: KindVariable, true: KindNoise}[another]; ln.Kind != want {
+		if want := map[bool]Kind{false: KindVariable, true: KindUnaccounted}[another]; ln.Kind != want || another && !strings.Contains(ln.Why, "appears in pg-3, a recording F gave the application before the call that is another test's") {
 			t.Errorf("another test's %v: %s from %+v (%s); want %s", another, ln.Kind, ln.From, ln.Why, want)
 		}
 	}
 }
 
+// receiveOf is the receive r1Receive records, of the message id, recorded at
+// at.
+func receiveOf(name, id string, at time.Time) *models.Mock {
+	m := r1Receive("")
+	m.Name = name
+	m.Spec.HTTPResp.Body = strings.Replace(m.Spec.HTTPResp.Body, "ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323", id, 1)
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(time.Second)
+	return m
+}
+
+// A value copied word for word from the answer of a recording F gave the
+// application in another test (the queue's: F gave the consumer another
+// test's message, whose id it writes) is refused, naming that recording,
+// never noise: a word the value holds now, found in any such answer; a word
+// it was recorded with, found in one recorded before the call, which the
+// recording gave the application too. The answer is read, never the request
+// the application sent in that test, and never a recording made after the
+// call for what the value was recorded with.
+func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
+	const p = "body.message_id"
+	recID, liveID := "ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323", "0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"
+	before, after := r1Insert.Add(-time.Minute), r1Insert.Add(time.Minute)
+	sentOnly := receiveOf("mock-20", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", after)
+	sentOnly.Spec.HTTPReq.Body = strings.Replace(sentOnly.Spec.HTTPReq.Body, `"WaitTimeSeconds":4`, `"WaitTimeSeconds":4,"After":"`+liveID+`"`, 1)
+	// An answer whose Date header, its own clock stamp, alone holds the
+	// word "17" of the value's "slot-17" (rules 2 and 3).
+	stamped := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", after)
+	stamped.Spec.HTTPResp.Header["Date"] = after.Format(http.TimeFormat)
+	if !strings.Contains(stamped.Spec.HTTPResp.Header["Date"], ":17 ") {
+		t.Fatalf("the stamp %q holds no word 17", stamped.Spec.HTTPResp.Header["Date"])
+	}
+	for _, row := range []struct {
+		name      string
+		m         *models.Mock
+		rec, live string
+		want      string // "" noise
+	}{
+		{"a word of the value in another test's answer's own clock stamp alone", stamped, "slot-03", "slot-17", ""},
+		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording F gave the application before the call that is another test's"},
+		{"the recorded id in another test's answer recorded before the call", receiveOf("mock-13", recID, before), recID, liveID, "a word of its recorded value (its characters 1 to 8) appears in mock-13, a recording F gave the application before the call that is another test's"},
+		{"the recorded id in another test's answer recorded after the call", receiveOf("mock-14", recID, after), recID, liveID, ""},
+		{"the live id in another test's request alone", sentOnly, recID, liveID, ""},
+	} {
+		for _, viaSet := range []bool{false, true} {
+			dc := NewDriftCache()
+			x := dc.RawOf(row.m, true).ServedAs(3)
+			var ln Learned
+			if viaSet {
+				reads := 0
+				ln = ClassifyGiven(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+					reads++
+					return []GivenPlaces{PlacesOf(x)}, nil
+				})[0]
+				if reads != 1 {
+					t.Errorf("%s, F gave it earlier in the set: the set read %d times; want once", row.name, reads)
+				}
+			} else {
+				ln = ClassifyIn(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, []Raw{x.OfAnotherTest()}, nil, nil)[0]
+			}
+			if row.want == "" {
+				if ln.Kind != KindNoise {
+					t.Errorf("%s (set %v): %s (%s); want noise", row.name, viaSet, ln.Kind, ln.Why)
+				}
+				continue
+			}
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.want) || !strings.Contains(ln.Why, "otherwise it flowed from "+row.m.Name) {
+				t.Errorf("%s (set %v): %s (%s); want it refused: %s", row.name, viaSet, ln.Kind, ln.Why, row.want)
+			}
+		}
+	}
+}
+
+// A recording of a kind that holds its answer apart from its request that
+// holds no answer (a generic parser's frames the application sent, that
+// nothing answered) gave the application nothing (answerApart): the offset
+// rule reads no place of it and the word rule no word, so a value that
+// changed to a word the application sent there in another test is noise,
+// while the same text in its answer is a place of both, and refused.
+func TestARecordingThatHoldsNoAnswerGaveTheApplicationNothing(t *testing.T) {
+	const p = "body.user"
+	frame := func(o models.OriginType, data string) []models.Payload {
+		return []models.Payload{{Origin: o, Message: []models.OutputBinary{{Type: "utf-8", Data: data}}}}
+	}
+	for _, answered := range []bool{false, true} {
+		m := &models.Mock{Name: "gen-1", Kind: models.GENERIC, Spec: models.MockSpec{
+			GenericRequests:  frame(models.FromClient, "SET user u-77 at 2026-10-22T11:13:16Z"),
+			ReqTimestampMock: r1Insert.Add(-time.Minute), ResTimestampMock: r1Insert.Add(-time.Minute + time.Millisecond)}}
+		if answered {
+			m.Spec.GenericResponses = frame(models.FromServer, "VALUE user u-77 at 2026-10-22T11:13:16Z")
+		}
+		dc := NewDriftCache()
+		x := dc.RawOf(m, true).ServedAs(2)
+		places := dc.keyedPlaces(x)
+		if len(places) > 0 != answered {
+			t.Errorf("answered %v: %d places of the offset rule (%+v)", answered, len(places), places)
+		}
+		for _, kp := range places {
+			if fieldRoot(kp.k.path) != "ResponseBin" {
+				t.Errorf("answered %v: a place of the offset rule in what the application sent: %s", answered, kp.k.path)
+			}
+		}
+		ln := ClassifyIn(dc, []string{p}, strLeaf(p, "u-77"), strLeaf(p, "u-12"), r1Insert, nil, []Raw{x.OfAnotherTest()}, nil, nil)[0]
+		switch {
+		case !answered && ln.Kind != KindNoise:
+			t.Errorf("a word the application sent in another test: %s (%s); want noise", ln.Kind, ln.Why)
+		case answered && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "appears in gen-1, a recording F gave the application before the call that is another test's")):
+			t.Errorf("a word F answered in another test: %s (%s); want it refused, naming gen-1", ln.Kind, ln.Why)
+		}
+	}
+}
+
 // The recordings F gave the application earlier in the set (GivenEarlier)
-// are read only when a changed instant reaches the offset rule, once for the
-// call, and as places of that rule alone; one that cannot be read refuses
-// every changed instant that reaches the rule, naming it, never noise.
-func TestClassifyGivenReadsTheSetOnlyForTheOffsetRule(t *testing.T) {
+// are read only when a changed instant reaches the offset rule or a word of
+// what changed the word rule, once for the call, and as places of those
+// rules alone: a word of a value in one is refused, naming it, never bound;
+// one that cannot be read refuses every changed instant or word that reaches
+// either rule, naming it, never noise.
+func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	sent := time.Date(2026, 10, 21, 23, 58, 16, 473e6, time.UTC)
 	got := sent.Add(2*time.Minute + 311*time.Millisecond)
 	attrs := func(at time.Time) string {
@@ -729,14 +845,28 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetRule(t *testing.T) {
 	both := func(dc *DriftCache) []Raw {
 		return []Raw{dc.RawOf(receive, true).ServedAs(2), dc.RawOf(delivered, true).ServedAs(1), row.ServedAs(3)}
 	}
-	// A value of no changed instant: the set is not read, and a word of it
-	// in what F gave earlier in the set binds nothing.
+	// A value a place of the call's own test accounts for: the set is not
+	// read, and it is a variable of that place.
 	dc := NewDriftCache()
-	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, nil, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindNoise || reads != 0 {
-		t.Errorf("no changed instant: %s (%s), the set read %d times; want noise, the set unread", ln.Kind, ln.Why, reads)
+	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{row}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindVariable || reads != 0 {
+		t.Errorf("a place of the test's own: %s (%s), the set read %d times; want a variable, the set unread", ln.Kind, ln.Why, reads)
+	}
+	// A value a place of the call's own test refuses (a word of it there):
+	// the set is not read.
+	dc = NewDriftCache()
+	own := Raw{read: true, mock: "pg-5", at: r1Insert.Add(-time.Second), text: `{"params":["77"]}`}
+	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{own}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "pg-5") || reads != 0 {
+		t.Errorf("refused by a place of the test's own: %s (%s), the set read %d times; want it refused, naming pg-5, the set unread", ln.Kind, ln.Why, reads)
+	}
+	// A value of no changed instant whose word F gave earlier in the set:
+	// refused, naming it, never bound; the set read once for the call.
+	dc = NewDriftCache()
+	if ln := ClassifyGiven(dc, []string{q, "body.user2"}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-77").Leaves[q], "body.user2": strLeaf(q, "u-77").Leaves[q]}}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-12").Leaves[q], "body.user2": strLeaf(q, "u-12").Leaves[q]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil)); ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "appears in pg-3, a recording F gave the application before the call that is another test's") || ln[1].Kind != KindUnaccounted || reads != 1 {
+		t.Errorf("a word F gave earlier in the set: %s (%s), the set read %d times; want it refused, naming pg-3, the set read once", ln[0].Kind, ln[0].Why, reads)
 	}
 	// A changed instant built on what F gave earlier in the set by an
 	// offset: refused, the set read once for the call.
+	reads = 0
 	dc = NewDriftCache()
 	ln := ClassifyGiven(dc, []string{p, "body.due2"}, Shape{Leaves: map[string]Leaf{p: due(got).Leaves[p], "body.due2": due(got).Leaves[p]}}, Shape{Leaves: map[string]Leaf{p: due(sent).Leaves[p], "body.due2": due(sent).Leaves[p]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil))
 	if ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") || reads != 1 {
@@ -748,12 +878,18 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetRule(t *testing.T) {
 		err  error
 		want string
 	}{
-		"an answer not read back": {nil, errors.New(`read back the recorded answer of "mock-9": gone`), `keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed was built on it: read back the recorded answer of "mock-9"`},
+		"an answer not read back": {nil, errors.New(`read back the recorded answer of "mock-9": gone`), `keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: read back the recorded answer of "mock-9"`},
 		"a recording not read":    {[]Raw{{mock: "mock-9"}}, nil, "keploy could not read mock-9"},
 	} {
-		ln := ClassifyGiven(NewDriftCache(), []string{p}, due(got), due(sent), r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
-		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, c.want) {
-			t.Errorf("%s: %s (%s); want it refused, naming mock-9", name, ln.Kind, ln.Why)
+		for _, leaf := range []string{p, q} {
+			live, rec := due(got), due(sent)
+			if leaf == q {
+				live, rec = strLeaf(q, "u-77"), strLeaf(q, "u-12")
+			}
+			ln := ClassifyGiven(NewDriftCache(), []string{leaf}, live, rec, r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, c.want) {
+				t.Errorf("%s, at %s: %s (%s); want it refused, naming mock-9", name, leaf, ln.Kind, ln.Why)
+			}
 		}
 	}
 }

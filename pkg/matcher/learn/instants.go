@@ -1083,10 +1083,19 @@ func tokensOfForms(forms []string) []map[string]bool {
 // kind whose spec holds its request and answer in one field (Postgres v3)
 // has none: no clock read of its answer is told (rule 2), and its instants
 // are followed.
-var answerFields = func() map[string]bool {
+var answerFields = jsonNames(answerFieldNames)
+
+// requestFields are the JSON names of the fields of a mock's spec that hold
+// its request, of each kind that holds its answer in an answerFields field:
+// a recording of one of them that holds no answer (a generic parser's frames
+// the application sent, that nothing answered) gave the application nothing.
+var requestFields = jsonNames(requestFieldNames)
+
+// jsonNames are the JSON names of the fields of models.MockSpec named.
+func jsonNames(named []string) map[string]bool {
 	out := map[string]bool{}
 	st := reflect.TypeOf(models.MockSpec{})
-	for _, name := range answerFieldNames {
+	for _, name := range named {
 		f, ok := st.FieldByName(name)
 		if !ok {
 			// TestEveryAnswerFieldIsAnAnswer names it.
@@ -1099,10 +1108,13 @@ var answerFields = func() map[string]bool {
 		out[tag] = true
 	}
 	return out
-}()
+}
 
 // answerFieldNames are the Go names of answerFields.
 var answerFieldNames = []string{"GenericResponses", "HTTPResp", "MongoResponses", "PostgresResponsesV2", "GRPCResp", "MySQLResponses", "DNSResp", "HTTP2Resp"}
+
+// requestFieldNames are the Go names of requestFields.
+var requestFieldNames = []string{"GenericRequests", "HTTPReq", "MongoRequests", "PostgresRequestsV2", "GRPCReq", "MySQLRequests", "DNSReq", "HTTP2Req"}
 
 // answerClock are the moments of a protocol-phase mock's answer's own clock
 // reads (rule 2), of payload (its spec as RawOf reads it, dropKeys applied)

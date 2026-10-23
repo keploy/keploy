@@ -2872,9 +2872,10 @@ func TestLearnMatchReadsThePairedRecordingFServedBeforeTheCall(t *testing.T) {
 }
 
 // A mock F served in the previous test but recorded after a pool call is no
-// earlier place of the call's for any rule but the offset rule: a value of
-// the call that changed to a word that mock holds is not refused as one that
-// came from there, nor bound to it.
+// earlier place of the call's for any rule but the offset rule and the word
+// rule: a value of the call that changed to a word of that mock's answer is
+// bound to nothing, and is refused naming it (keploy follows no value of
+// another test's), never learned as noise.
 func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testing.T) {
 	h, n, opts := learnOn(t)
 	opts.LearnPool = true
@@ -2890,8 +2891,9 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || miss != nil || len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.counter": {}}) {
-		t.Fatalf("served %v miss %+v; want body.counter learned as noise, mock-1 read by no rule but the offset rule", got, miss)
+	if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.pooled) != 0 ||
+		!strings.Contains(miss.res.Why, "a word of what record's full round saw in it (its characters 1 to 2) appears in mock-1, a recording F gave the application before the call that is another test's") {
+		t.Fatalf("served %v miss %+v; want body.counter refused naming mock-1, never noise nor bound", got, miss)
 	}
 }
 

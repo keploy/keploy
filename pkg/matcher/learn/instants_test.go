@@ -565,7 +565,9 @@ func sameSet(a, b []string) bool {
 // Every field of a mock's spec that holds an answer is one answerClock reads
 // as the answer's: a new parser's answer field must be named there, or its
 // answers' clock reads would be read as its request's (followed: a false
-// red).
+// red). So is every field that holds a request, among requestFields: a new
+// parser's recording that holds no answer would otherwise be read whole, as
+// if its request were something it gave the application (answerApart).
 func TestEveryAnswerFieldIsAnAnswer(t *testing.T) {
 	named := map[string]bool{}
 	st := reflect.TypeOf(models.MockSpec{})
@@ -578,11 +580,25 @@ func TestEveryAnswerFieldIsAnAnswer(t *testing.T) {
 	if len(answerFields) != len(answerFieldNames) {
 		t.Errorf("answerFields holds %d JSON names for %d fields", len(answerFields), len(answerFieldNames))
 	}
+	asked := map[string]bool{}
+	for _, n := range requestFieldNames {
+		if _, ok := st.FieldByName(n); !ok {
+			t.Errorf("models.MockSpec has no field %s", n)
+		}
+		asked[n] = true
+	}
+	if len(requestFields) != len(requestFieldNames) {
+		t.Errorf("requestFields holds %d JSON names for %d fields", len(requestFields), len(requestFieldNames))
+	}
 	for i := 0; i < st.NumField(); i++ {
 		n := st.Field(i).Name
 		answer := strings.HasSuffix(n, "Resp") || strings.Contains(n, "Response")
 		if answer != named[n] {
 			t.Errorf("models.MockSpec.%s: an answer %v, named as one %v", n, answer, named[n])
+		}
+		request := strings.HasSuffix(n, "Req") || strings.Contains(n, "Request")
+		if request != asked[n] {
+			t.Errorf("models.MockSpec.%s: a request %v, named as one %v", n, request, asked[n])
 		}
 	}
 }

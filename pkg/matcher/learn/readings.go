@@ -792,21 +792,8 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		return pickUnaccounted(where)
 	}
 	keep := dc.stampsEchoed(v, served, raw)
-	// word names t, a word of v's recorded value or of what F saw, by where
-	// it stands, never by its text.
-	word := func(t string, recorded bool) string {
-		if recorded {
-			return "a word of its recorded value (" + partOf(v.rec, t) + ")"
-		}
-		return "a word of what record's full round saw in it (" + partOf(v.live, t) + ")"
-	}
-	check := func(i int, t string, recorded, moved bool) string {
-		// A word of a run counts unless it is a clock word itself; a word
-		// lost or gained, unless it only regrouped words the other side
-		// holds (clockWord).
-		if moved && allClock(t, recorded, v.clock) || !moved && clockWord(t, recorded, v, v.clock) {
-			return ""
-		}
+	word := v.wordOf
+	return v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
 			// test of the set: the set's start-up's. The test case's own
@@ -854,29 +841,76 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 		}
 		return ""
+	})
+}
+
+// givenWhy says why a drifted value (v) that no earlier place of the call's
+// own test accounts for (unaccounted) cannot be learned as noise either, ""
+// when it can: a word of what it changed (eachChanged) stands in the answer
+// of a recording F gave the application before the call that no earlier
+// place of its own test is (another recorded test's, or one F gave earlier
+// in the running set: places().words, read only where a word of what
+// changed asks): a word v holds now in any of them; a word it held when
+// recorded in one recorded before the call (at), which the recording gave
+// the application before it too. keploy follows no value of another test's
+// (only a test's own calls carry its variables), so a value copied word for
+// word from what F gave there is refused, never noise, naming where; and so
+// is every such word where one of them could not be read (unread). Stamps
+// are searched as any text where the call's own places say so
+// (stampsEchoed).
+func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
+	keep, kept := false, false
+	return v.eachChanged(func(i int, t string, recorded bool) string {
+		op := places()
+		if op.unread != "" {
+			return op.unread
+		}
+		for _, g := range op.words {
+			if recorded && !g.at.Before(at) {
+				continue
+			}
+			if !kept {
+				keep, kept = dc.stampsEchoed(v, served, raw), true
+			}
+			if g.holds(i, t, keep) {
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording F gave the application before the call that is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+			}
+		}
+		return ""
+	})
+}
+
+// wordOf names t, a word of v's recorded value (recorded) or of what F saw,
+// by where it stands, never by its text.
+func (v *valueDrift) wordOf(t string, recorded bool) string {
+	if recorded {
+		return "a word of its recorded value (" + partOf(v.rec, t) + ")"
 	}
-	// Each set of words is checked in the order its words stand in the
-	// value (inOrder), never in a set's: the first one found names the place
-	// and the reason.
+	return "a word of what record's full round saw in it (" + partOf(v.live, t) + ")"
+}
+
+// eachChanged hands find each word of what v changed, in each reading (i),
+// as recorded or as F saw it (recorded), until find says why one cannot be
+// noise, and says that ("" when it says so of none): the words it lost,
+// those it gained, then every word of its runs (runsBy) as recorded and as
+// F saw them. A word of a run counts unless it is a clock word itself; a
+// word lost or gained, unless it only regrouped words the other side holds
+// (clockWord). Each set of words is handed in the order its words stand in
+// the value (inOrder), never in a set's: the first one found names the
+// place and the reason.
+func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) string) string {
 	for i := range readings {
-		for _, t := range v.inOrder(v.lost[i], true) {
-			if why := check(i, t, true, false); why != "" {
-				return why
-			}
-		}
-		for _, t := range v.inOrder(v.gained[i], false) {
-			if why := check(i, t, false, false); why != "" {
-				return why
-			}
-		}
-		for _, t := range v.inOrder(v.movedRec[i], true) {
-			if why := check(i, t, true, true); why != "" {
-				return why
-			}
-		}
-		for _, t := range v.inOrder(v.movedLive[i], false) {
-			if why := check(i, t, false, true); why != "" {
-				return why
+		for _, set := range []struct {
+			words           map[string]bool
+			recorded, moved bool
+		}{{v.lost[i], true, false}, {v.gained[i], false, false}, {v.movedRec[i], true, true}, {v.movedLive[i], false, true}} {
+			for _, t := range v.inOrder(set.words, set.recorded) {
+				if set.moved && allClock(t, set.recorded, v.clock) || !set.moved && clockWord(t, set.recorded, v, v.clock) {
+					continue
+				}
+				if why := find(i, t, set.recorded); why != "" {
+					return why
+				}
 			}
 		}
 	}
