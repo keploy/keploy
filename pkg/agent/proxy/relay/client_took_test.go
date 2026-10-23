@@ -11,11 +11,14 @@ import (
 )
 
 // scriptedSocket answers the relay's looks at the client's socket from a
-// script, in order; the last answer repeats.
+// script, in order; the last answer repeats. written says wrote, the bytes
+// written to the socket in all (or that it cannot say, blind).
 type scriptedSocket struct {
 	mu     sync.Mutex
 	script []clientLook
 	asked  int
+	wrote  uint64
+	blind  bool
 }
 
 func (s *scriptedSocket) look() clientLook {
@@ -24,6 +27,19 @@ func (s *scriptedSocket) look() clientLook {
 	i := min(s.asked, len(s.script)-1)
 	s.asked++
 	return s.script[i]
+}
+
+func (s *scriptedSocket) written() (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wrote, !s.blind
+}
+
+// wrote adds n bytes to what was written to the socket.
+func (s *scriptedSocket) write(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wrote += uint64(n)
 }
 
 func (s *scriptedSocket) looks() int {
@@ -46,14 +62,14 @@ func closed(acked uint64) clientLook { return clientLook{said: clientClosed, ack
 
 var unknown = clientLook{said: clientUnknown}
 
-// What a look at the client's socket says of chunks written after the look
-// that found its FIN (clientFINAcked 100): a byte acknowledged since decides
-// first, and says the client reads on, whatever the socket says next; a closed
-// connection with nothing acknowledged since refuses; a client that has
+// What a look at the client's socket says of a chunk written once 100 bytes
+// had been written to the socket: an acknowledgement of a byte of it decides
+// first, and says the client took it, whatever the socket says next; a closed
+// connection with none of it acknowledged refuses it; a client that has
 // answered neither way is waited for, unless the look is the last; a socket
-// that cannot say refuses nothing.
-func TestVerdictOfALookAtTheClientsSocket(t *testing.T) {
-	r := &Relay{clientFINAcked: 100}
+// that cannot say refuses nothing. An acknowledgement of the bytes before the
+// chunk, all 100 of them, takes nothing.
+func TestChunkVerdictOfALookAtTheClientsSocket(t *testing.T) {
 	for _, row := range []struct {
 		l    clientLook
 		last bool
@@ -61,15 +77,16 @@ func TestVerdictOfALookAtTheClientsSocket(t *testing.T) {
 	}{
 		{finned(100), false, verdictNone},
 		{finned(100), true, verdictAsBefore},
-		{finned(101), false, verdictReadsOn},
+		{finned(101), false, verdictTaken},
 		{closed(100), false, verdictRefused},
 		{closed(100), true, verdictRefused},
-		{closed(130), false, verdictReadsOn},
+		{closed(130), false, verdictTaken},
+		{closed(99), false, verdictRefused},
 		{unknown, false, verdictAsBefore},
 		{open(100), false, verdictAsBefore},
 	} {
-		if got := r.verdictOf(row.l, row.last); got != row.want {
-			t.Errorf("verdictOf(%+v, last %v) = %d, want %d", row.l, row.last, got, row.want)
+		if got := chunkVerdict(row.l, 100, row.last); got != row.want {
+			t.Errorf("chunkVerdict(%+v, 100, last %v) = %d, want %d", row.l, row.last, got, row.want)
 		}
 	}
 }
@@ -100,8 +117,10 @@ type carriedChunk struct {
 	through int64
 }
 
+// newTookHarness's socket has had as many bytes written to it as its first
+// answer says were acknowledged: the client had taken all it was sent.
 func newTookHarness(script ...clientLook) *tookHarness {
-	h := &tookHarness{sock: &scriptedSocket{script: script}}
+	h := &tookHarness{sock: &scriptedSocket{script: script, wrote: script[0].acked}}
 	h.t = newTee(fakeconn.FromDest, 1<<20, 16, time.Second, func() bool {
 		at, _, ok := h.t.oldestUnconsumed()
 		if !ok {
@@ -131,8 +150,20 @@ func newTookHarness(script ...clientLook) *tookHarness {
 // write is the destination's forwarder writing chunk b to the client, whose
 // Write earned mark: what becomes of it.
 func (h *tookHarness) write(ctx context.Context, b string, mark string) chunkFate {
-	finBefore := h.r.clientFINBefore()
-	return h.r.destWritten(ctx, h.t, &h.seq, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte(b), ReadAt: time.Now()}, finBefore, mark)
+	finBefore, from := h.r.clientFINBefore()
+	h.sock.write(len(b))
+	return h.r.destWritten(ctx, h.t, &h.seq, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte(b), ReadAt: time.Now()}, finBefore, from, mark)
+}
+
+// queuedWithin waits until the tee has queued want, in order.
+func (h *tookHarness) queuedWithin(t *testing.T, want ...string) {
+	t.Helper()
+	for limit := time.Now().Add(10 * time.Second); !equal(h.queued(), want); {
+		if time.Now().After(limit) {
+			t.Fatalf("queued %q, want %q", h.queued(), want)
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
 }
 
 // settled waits until no resolve waits for the client's answer.
@@ -184,14 +215,14 @@ func equal(a, b []string) bool {
 // socket says (client_took.go). Until a look before a write finds the client's
 // FIN, every chunk is teed at once, whatever the socket says after. A chunk
 // written once the FIN was found is set aside, and so is every chunk after it,
-// until the client's answer, waited for off the forwarding path, decides them
-// all, in order: teed if the client acknowledged a byte since that look
-// (and every later chunk teed at once), refused if the connection closed with
-// none (and every later chunk refused at once, the relay saying so once). The
-// relay's end or the recording's stop makes the next look the last, and a
-// client that has answered neither way by then, or a socket that cannot say,
-// refuses nothing. The incomplete-mock mark of a chunk set aside is set only
-// if it is teed.
+// each judged by its own bytes, in order: teed once the client acknowledged a
+// byte of it, refused if the connection closed with none of it acknowledged
+// (and every later chunk refused at once, the relay saying so once). Once
+// the relay read the client's end to its end, a look that finds the
+// connection closed finds the FIN. The relay's end or the recording's stop
+// makes the next look the last, and a chunk the client has answered neither
+// way for by then, or a socket that cannot say, refuses nothing. The
+// incomplete-mock mark of a chunk set aside is set only if it is teed.
 func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 	bg := context.Background()
 	t.Run("no FIN before the write: teed at once, one look each, whatever comes after", func(t *testing.T) {
@@ -242,33 +273,54 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 			t.Fatalf("marked %q for a chunk the client refused, want nothing", m)
 		}
 	})
-	t.Run("FIN before the write, then a byte acknowledged: teed, and every later chunk at once", func(t *testing.T) {
+	t.Run("FIN before the write, then a byte of it acknowledged: teed; the next chunk waits for its own", func(t *testing.T) {
+		// A half-closed client that reads a chunk, then closes its socket:
+		// the chunk it took is teed, the one sent after it is refused.
 		h := newTookHarness(finned(100), finned(100), finned(101))
 		if f := h.write(bg, "first", ""); f != fateAwaiting {
 			t.Fatalf("fate %d, want set aside", f)
 		}
 		h.settled(t)
-		if q := h.queued(); !equal(q, []string{"first"}) || !h.r.clientReadsOn.Load() || h.stops.Load() != 0 {
-			t.Fatalf("queued %q, reads on %v, %d stops", q, h.r.clientReadsOn.Load(), h.stops.Load())
+		if q := h.queued(); !equal(q, []string{"first"}) || h.stops.Load() != 0 {
+			t.Fatalf("queued %q, %d stops; want first teed", q, h.stops.Load())
 		}
-		h.sock.set(closed(101))
-		if f := h.write(bg, "later", ""); f != fateTee || h.sock.looks() != 0 {
-			t.Fatalf("after the client read on: fate %d with %d looks, want teed at once with no look", f, h.sock.looks())
+		h.sock.set(finned(105))
+		if f := h.write(bg, "later", ""); f != fateAwaiting {
+			t.Fatalf("a chunk after one the client took: fate %d, want set aside for its own answer", f)
+		}
+		h.sock.set(closed(105))
+		h.settled(t)
+		if q := h.queued(); !equal(q, []string{"first"}) || h.stops.Load() != 1 || h.r.notTakenBytes.Load() != 5 {
+			t.Fatalf("queued %q, %d stops, %d bytes not taken; want later refused", q, h.stops.Load(), h.r.notTakenBytes.Load())
 		}
 	})
-	t.Run("acknowledged since the FIN, then closed: never refused", func(t *testing.T) {
+	t.Run("acknowledged in part, then closed: the chunks taken are teed, the rest refused", func(t *testing.T) {
+		h := newTookHarness(finned(100))
+		h.write(bg, "one", "")
+		h.write(bg, "two", "")
+		h.write(bg, "three", "write_error")
+		h.sock.set(closed(104))
+		h.settled(t)
+		if q := h.queued(); !equal(q, []string{"one", "two"}) || h.stops.Load() != 1 || h.r.notTakenBytes.Load() != 5 {
+			t.Fatalf("queued %q, %d stops, %d bytes not taken; want one and two (a byte of two acknowledged), three refused", q, h.stops.Load(), h.r.notTakenBytes.Load())
+		}
+		if m := h.gotMarks(); len(m) != 0 {
+			t.Fatalf("marked %q for the refused chunk's Write, want nothing", m)
+		}
+	})
+	t.Run("acknowledged, then closed: never refused", func(t *testing.T) {
 		h := newTookHarness(finned(100), closed(130))
 		h.write(bg, "first", "")
 		h.settled(t)
-		if q := h.queued(); !equal(q, []string{"first"}) || !h.r.clientReadsOn.Load() || h.stops.Load() != 0 {
-			t.Fatalf("queued %q, reads on %v, %d stops; want teed", q, h.r.clientReadsOn.Load(), h.stops.Load())
+		if q := h.queued(); !equal(q, []string{"first"}) || h.stops.Load() != 0 {
+			t.Fatalf("queued %q, %d stops; want teed", q, h.stops.Load())
 		}
 	})
-	t.Run("what the FIN itself acknowledged is not reading on", func(t *testing.T) {
+	t.Run("what the FIN itself acknowledged takes nothing", func(t *testing.T) {
 		// A first chunk written before the FIN; the FIN carries the
-		// acknowledgement of all the client had received, and the look that
-		// finds it counts from there.
-		h := newTookHarness(open(0), finned(40), finned(40), closed(40))
+		// acknowledgement of all the client had received, which is all
+		// written before the next chunk.
+		h := newTookHarness(open(0), finned(6), finned(6), closed(6))
 		if f := h.write(bg, "before", ""); f != fateTee {
 			t.Fatalf("a chunk written before the FIN: fate %d, want teed", f)
 		}
@@ -276,6 +328,35 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 		h.settled(t)
 		if h.stops.Load() != 1 || h.r.notTakenBytes.Load() != 5 {
 			t.Fatalf("%d stops, %d bytes not taken; want the chunk after the FIN refused", h.stops.Load(), h.r.notTakenBytes.Load())
+		}
+	})
+	t.Run("the FIN read, then a look that finds the connection closed: the FIN is found", func(t *testing.T) {
+		// The closed client reset on a chunk written as its FIN came in,
+		// before the relay read the FIN: the look as the relay reads it
+		// finds the connection closed. The answer to the forwarded FIN is
+		// written to a closed connection, its Write fails, and it is
+		// refused, with no mark.
+		h := newTookHarness(closed(10))
+		h.r.clientFINRead()
+		if !h.r.clientFIN.Load() {
+			t.Fatal("the FIN not found")
+		}
+		if f := h.write(bg, "answer", "write_error"); f != fateAwaiting {
+			t.Fatalf("fate %d, want set aside", f)
+		}
+		h.settled(t)
+		if q := h.queued(); len(q) != 0 || h.stops.Load() != 1 {
+			t.Fatalf("queued %q, %d stops; want refused", q, h.stops.Load())
+		}
+		if m := h.gotMarks(); len(m) != 0 {
+			t.Fatalf("marked %q, want nothing", m)
+		}
+	})
+	t.Run("a socket that cannot say how much was written: teed as before", func(t *testing.T) {
+		h := newTookHarness(finned(10), closed(10))
+		h.sock.blind = true
+		if f := h.write(bg, "a", ""); f != fateTee {
+			t.Fatalf("fate %d, want teed", f)
 		}
 	})
 	t.Run("chunks written while the answer is awaited are set aside behind, and settled in order", func(t *testing.T) {
@@ -297,7 +378,14 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 		if q := h.queued(); len(q) != 0 || h.t.awaitingLen() != 3 {
 			t.Fatalf("queued %q with %d aside while the client has not answered, want nothing queued, 3 aside", q, h.t.awaitingLen())
 		}
-		h.sock.set(finned(1))
+		// one (bytes 0-2) and two (3-5) are taken: they are teed, in order,
+		// while three waits for its own answer, with its mark.
+		h.sock.set(finned(4))
+		h.queuedWithin(t, "one", "two")
+		if n, m := h.t.awaitingLen(), h.gotMarks(); n != 1 || len(m) != 0 {
+			t.Fatalf("%d aside, marked %q, while three is unanswered; want 1, nothing", n, m)
+		}
+		h.sock.set(finned(12))
 		h.settled(t)
 		if q := h.queued(); !equal(q, []string{"one", "two", "three"}) || h.t.awaitingLen() != 0 {
 			t.Fatalf("queued %q, %d aside; want all three, in order", q, h.t.awaitingLen())
@@ -336,8 +424,8 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 		h.write(bg, "one", "short_write")
 		close(h.r.lastLook)
 		h.settled(t)
-		if q := h.queued(); !equal(q, []string{"one"}) || h.stops.Load() != 0 || h.r.clientReadsOn.Load() {
-			t.Fatalf("queued %q, %d stops, reads on %v; want teed as before, not reading on", q, h.stops.Load(), h.r.clientReadsOn.Load())
+		if q := h.queued(); !equal(q, []string{"one"}) || h.stops.Load() != 0 {
+			t.Fatalf("queued %q, %d stops; want teed as before", q, h.stops.Load())
 		}
 		if m := h.gotMarks(); !equal(m, []string{"short_write"}) {
 			t.Fatalf("marked %q, want short_write", m)
@@ -375,7 +463,7 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 			t.Fatalf("queued %q, %d stops; want teed", q, h.stops.Load())
 		}
 	})
-	t.Run("after a verdict as before, the next chunk waits for the client's answer again, from the same look", func(t *testing.T) {
+	t.Run("after a verdict as before, the next chunk waits for the client's answer again", func(t *testing.T) {
 		h := newTookHarness(finned(20), unknown)
 		h.write(bg, "a", "")
 		h.settled(t)
@@ -390,7 +478,7 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 	})
 	t.Run("no socket to ask: teed", func(t *testing.T) {
 		r := &Relay{}
-		if fin := r.clientFINBefore(); fin || r.destWritten(bg, nil, nil, fakeconn.Chunk{}, fin, "") != fateTee {
+		if fin, from := r.clientFINBefore(); fin || r.destWritten(bg, nil, nil, fakeconn.Chunk{}, fin, from, "") != fateTee {
 			t.Fatal("not teed")
 		}
 	})
@@ -415,8 +503,8 @@ func TestTheRelaysEndWaitsForTheClientsAnswer(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the relay did not end once the client answered")
 	}
-	if q := h.queued(); !equal(q, []string{"one"}) || !h.r.clientReadsOn.Load() {
-		t.Fatalf("queued %q, reads on %v; want teed, reading on", q, h.r.clientReadsOn.Load())
+	if q := h.queued(); !equal(q, []string{"one"}) {
+		t.Fatalf("queued %q, want teed", q)
 	}
 }
 
@@ -428,8 +516,8 @@ func TestAChunkSetAsideHoldsTheCaptureWatermark(t *testing.T) {
 	bg := context.Background()
 	stamp := time.Unix(100, 0)
 	write := func(h *tookHarness) {
-		finBefore := h.r.clientFINBefore()
-		if f := h.r.destWritten(bg, h.t, &h.seq, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("one"), ReadAt: stamp}, finBefore, ""); f != fateAwaiting {
+		finBefore, from := h.r.clientFINBefore()
+		if f := h.r.destWritten(bg, h.t, &h.seq, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("one"), ReadAt: stamp}, finBefore, from, ""); f != fateAwaiting {
 			t.Fatalf("fate %d, want set aside", f)
 		}
 	}
@@ -469,6 +557,8 @@ type lockedLooks struct {
 	unlocked atomic.Int32
 }
 
+func (s *lockedLooks) written() (uint64, bool) { return s.l.acked, true }
+
 func (s *lockedLooks) look() clientLook {
 	if s.r.finMu.TryLock() {
 		s.r.finMu.Unlock()
@@ -478,20 +568,33 @@ func (s *lockedLooks) look() clientLook {
 }
 
 // The client's forwarder's look as it reads the FIN and the destination's
-// forwarder's look before a write are taken under finMu, and the one that
-// finds the FIN keeps what the client had acknowledged then.
+// forwarder's look before a write are taken under finMu. A closed connection
+// is the FIN found only once the relay has read the client's end to its end:
+// before, it is a reset with no FIN before it.
 func TestTheForwardersLooksForTheFINTakeItsLock(t *testing.T) {
 	r := &Relay{lastLook: make(chan struct{})}
 	s := &lockedLooks{r: r, l: open(3)}
 	r.client = s
 	r.clientFINRead()
-	if r.clientFINBefore() {
+	if fin, _ := r.clientFINBefore(); fin {
 		t.Fatal("the FIN found while the socket said the client had sent none")
 	}
-	s.l = finned(5)
+	r = &Relay{lastLook: make(chan struct{})}
+	s = &lockedLooks{r: r, l: closed(3)}
+	r.client = s
+	if fin, _ := r.clientFINBefore(); fin {
+		t.Fatal("a reset found as the FIN while the relay had not read the client's end to its end")
+	}
 	r.clientFINRead()
-	if !r.clientFINBefore() || r.clientFINAcked != 5 {
-		t.Fatalf("FIN found %v with %d acknowledged, want found with 5", r.clientFIN.Load(), r.clientFINAcked)
+	if fin, from := r.clientFINBefore(); !fin || from != 3 {
+		t.Fatalf("FIN found %v from %d, want found from 3: the relay read the client's end to its end", fin, from)
+	}
+	r = &Relay{lastLook: make(chan struct{})}
+	s = &lockedLooks{r: r, l: finned(5)}
+	r.client = s
+	r.clientFINRead()
+	if fin, from := r.clientFINBefore(); !fin || from != 5 {
+		t.Fatalf("FIN found %v from %d, want found from 5", fin, from)
 	}
 	if n := s.unlocked.Load(); n != 0 {
 		t.Fatalf("%d of the forwarders' looks ran without finMu", n)

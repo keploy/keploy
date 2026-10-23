@@ -117,24 +117,24 @@ type Relay struct {
 	// The TLS upgrade wraps src later, over this same socket.
 	client clientSocket
 	// clientFIN: a look found the client's FIN at the proxy's socket, as the
-	// client's forwarder read it or before a destination chunk was written,
-	// and clientFINAcked is how many bytes the client's stack had
-	// acknowledged at that look. Both are set under finMu, which also keeps
-	// those two forwarders' looks apart; resolve reads clientFINAcked, set
-	// before the destination's forwarder starts it.
-	finMu          sync.Mutex
-	clientFIN      atomic.Bool
-	clientFINAcked uint64
-	// clientReadsOn: the client acknowledged bytes after that look (it only
-	// half-closed). clientStopped: destination chunks were refused, and no
-	// later one is teed. Set under verdictMu, read without it.
-	clientReadsOn, clientStopped atomic.Bool
+	// client's forwarder read it or before a destination chunk was written.
+	// Set under finMu, which also keeps those two forwarders' looks apart.
+	// clientEOF: the client's forwarder read the client's end to its end
+	// (io.EOF), so a look that finds the connection closed finds the FIN.
+	finMu                sync.Mutex
+	clientFIN, clientEOF atomic.Bool
+	// clientStopped: destination chunks were refused, and no later one is
+	// teed. Set under verdictMu, read without it.
+	clientStopped atomic.Bool
 	// verdictMu orders the destination's forwarder against resolve: what
 	// destWritten decides, the chunks set aside (tee.await) and their
-	// settling. resolverDone is non-nil while a resolve waits for the
-	// client's answer, closed once it has settled; awaitingMark is the
-	// forwarder's incomplete-mock mark for the last chunk set aside.
+	// settling. awaitingFrom is, for each chunk set aside, in order, how many
+	// bytes had been written to the client's socket before it. resolverDone
+	// is non-nil while a resolve waits for the client's answer, closed once
+	// no chunk is set aside; awaitingMark is the forwarder's incomplete-mock
+	// mark for the last chunk set aside.
 	verdictMu    sync.Mutex
+	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
 	// lastLook is closed by run once both forwarders have returned and a
@@ -963,10 +963,16 @@ func (r *Relay) forward(
 		if n > 0 {
 			dst := *dstPtr.Load()
 			// Whether the client's FIN had reached the proxy before this
-			// destination chunk is written to it (client_took.go): asked
-			// before the Write, so a reset that comes back for it only
-			// counts once the client had closed its side.
-			finBefore := dir == fakeconn.FromDest && r.clientFINBefore()
+			// destination chunk is written to it, and how many bytes had
+			// been written to the client's socket before it (client_took.go):
+			// asked before the Write, so a reset that comes back for it only
+			// counts once the client had closed its side, and only an
+			// acknowledgement of its own bytes counts as the client taking
+			// it.
+			finBefore, from := false, uint64(0)
+			if dir == fakeconn.FromDest {
+				finBefore, from = r.clientFINBefore()
+			}
 			wn, werr := dst.Write(chunk.Bytes)
 			chunk.WrittenAt = time.Now()
 
@@ -988,7 +994,7 @@ func (r *Relay) forward(
 			// of (OnCarried), and neither is any later one.
 			fate := fateTee
 			if dir == fakeconn.FromDest {
-				fate = r.destWritten(ctx, t, seq, chunk, finBefore, mark)
+				fate = r.destWritten(ctx, t, seq, chunk, finBefore, from, mark)
 			}
 			if fate == fateTee {
 				// Tee regardless of Write outcome: the bytes were

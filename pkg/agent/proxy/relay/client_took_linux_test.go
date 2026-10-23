@@ -821,27 +821,22 @@ func TestTheClientsAnswerIsWaitedForOffTheForwardingPath(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the destination's stream did not end once the client's socket said it read on")
 	}
-	if !r.clientReadsOn.Load() {
-		t.Fatal("the relay did not take the client to read on")
-	}
 }
 
-// The relay also looks at the client's socket as it reads the client's FIN,
-// before it forwards the FIN (clientFINRead). Later acknowledgements are
-// counted from what the client's stack had acknowledged at that look. Here a
-// half-closed client acknowledges bytes that were in flight at its FIN once
-// the relay has read the FIN, and before the destination's next write. That
-// shows it reads on, so the chunk written next is teed, even though the
-// connection then closes with nothing more acknowledged. A relay that counted
-// from its look before that write lost the acknowledgement and refused the
-// chunk.
-func TestAnAcknowledgementAfterTheClientsFINShowsItReadsOn(t *testing.T) {
+// Each chunk written after the client's FIN is judged by its own bytes: an
+// acknowledgement of bytes written before it takes none of it. Here a
+// half-closed client's FIN comes in with 100 bytes in flight, its stack
+// acknowledges them after the relay read the FIN and before the destination
+// answers, and the connection then closes with nothing more acknowledged: the
+// answer is refused. Judged from what was acknowledged at the look that found
+// the FIN, the acknowledgement of the bytes in flight took the answer.
+func TestAnAcknowledgementOfBytesWrittenBeforeAChunkTakesNoneOfIt(t *testing.T) {
 	t.Parallel()
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
 	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: time.Minute}, proxyClient, connseq.NewUpstream(proxyServer))
-	// The client's FIN is in, with 100 bytes acknowledged.
-	sock := &scriptedSocket{script: []clientLook{finned(100)}}
+	// The client's FIN is in, with 100 of the 200 bytes written acknowledged.
+	sock := &scriptedSocket{script: []clientLook{finned(100)}, wrote: 200}
 	r.client = sock
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -863,24 +858,25 @@ func TestAnAcknowledgementAfterTheClientsFINShowsItReadsOn(t *testing.T) {
 	if _, err := server.Write([]byte(answer)); err != nil {
 		t.Fatal(err)
 	}
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
-	got := make([]byte, len(answer))
-	if _, err := io.ReadFull(app, got); err != nil || string(got) != answer {
-		t.Fatalf("the half-closed client read %q, %v", got, err)
+	for limit := time.Now().Add(10 * time.Second); r.teeD2C.awaitingLen() == 0; {
+		if time.Now().After(limit) {
+			t.Fatal("the answer was not set aside")
+		}
+		time.Sleep(50 * time.Microsecond)
 	}
 	// The connection closes with nothing more acknowledged.
 	sock.set(closed(200))
 	_ = server.Close()
 	select {
 	case s := <-streams:
-		if s != answer {
-			t.Fatalf("the destination's stream carried %q, want the answer: the client acknowledged bytes after its FIN", s)
+		if s != "" {
+			t.Fatalf("the destination's stream carried %q, want nothing: none of the answer was acknowledged", s)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the destination's stream did not end")
 	}
-	if chunks, bytes := r.NotTaken(); chunks != 0 || !r.clientReadsOn.Load() {
-		t.Fatalf("%d chunks (%d bytes) not taken, reads on %v; want none refused, the client reading on", chunks, bytes, r.clientReadsOn.Load())
+	if chunks, bytes := r.NotTaken(); chunks != 1 || bytes != int64(len(answer)) {
+		t.Fatalf("%d chunks (%d bytes) not taken, want the answer's 1 (%d)", chunks, bytes, len(answer))
 	}
 }
 
@@ -1089,6 +1085,8 @@ type slowLastLook struct {
 	last <-chan struct{}
 }
 
+func (l *slowLastLook) written() (uint64, bool) { return l.s.written() }
+
 func (l *slowLastLook) look() clientLook {
 	select {
 	case <-l.last:
@@ -1161,7 +1159,195 @@ func TestAClientThatNeverAnswersHasItsAnswerTeedBeforeTheRelayEnds(t *testing.T)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the relay did not end")
 	}
-	if r.clientReadsOn.Load() || r.clientStopped.Load() {
-		t.Fatalf("reads on %v, stopped %v; want neither: the client never answered", r.clientReadsOn.Load(), r.clientStopped.Load())
+	if r.clientStopped.Load() {
+		t.Fatal("stopped; want not: the client never answered")
+	}
+}
+
+// bytesAcked is how many of the bytes written to the socket under c its peer's
+// stack has acknowledged (TCP_INFO tcpi_bytes_acked).
+func bytesAcked(t *testing.T, c net.Conn) uint64 {
+	t.Helper()
+	rc, err := c.(syscall.Conn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acked uint64
+	if err := rc.Control(func(fd uintptr) {
+		info, gerr := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+		if gerr != nil {
+			t.Error(gerr)
+			return
+		}
+		acked = info.Bytes_acked
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return acked
+}
+
+// Each chunk the destination sends after the client's FIN is judged on its
+// own: teed once the client's stack acknowledged a byte of it, refused once
+// the connection closes with none of it acknowledged. Here a half-closed
+// client reads the first answer whole, its stack acknowledges it, and then
+// the client closes its socket; the destination sends a second answer, which
+// the closed socket resets. The first is teed, the second is not: the client
+// never read it. A relay that took the first acknowledgement to mean the
+// client reads on from then on recorded the second.
+func TestAHalfClosedClientThatReadsThenClosesHasWhatCameAfterRefused(t *testing.T) {
+	t.Parallel()
+	first, second := strings.Repeat("1", 100), strings.Repeat("2", 100)
+	for round := 0; round < 20; round++ {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		src := &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}
+		r := New(Config{Logger: zap.NewNop()}, src, connseq.NewUpstream(proxyServer))
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); _ = r.Run(ctx) }()
+		streams := make(chan string, 1)
+		go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+		if _, err := app.Write([]byte("req")); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
+			t.Fatalf("round %d: the destination read %q, %v; want the request and the FIN", round, got, err)
+		}
+		if _, err := server.Write([]byte(first)); err != nil {
+			t.Fatal(err)
+		}
+		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		got := make([]byte, len(first))
+		if _, err := io.ReadFull(app, got); err != nil || string(got) != first {
+			t.Fatalf("round %d: the half-closed client read %q, %v", round, got, err)
+		}
+		// The client's stack has acknowledged the first answer.
+		for limit := time.Now().Add(5 * time.Second); bytesAcked(t, proxyClient) < uint64(len(first)); {
+			if time.Now().After(limit) {
+				t.Fatalf("round %d: %d bytes acknowledged after 5s, want %d", round, bytesAcked(t, proxyClient), len(first))
+			}
+			time.Sleep(20 * time.Microsecond)
+		}
+		_ = app.Close()
+		if _, err := server.Write([]byte(second)); err != nil {
+			t.Fatal(err)
+		}
+		awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the closed client resets the second answer")
+		_ = server.Close()
+		select {
+		case s := <-streams:
+			if s != first {
+				t.Fatalf("round %d: the destination's stream carried %q, want only the first answer, which the client read", round, s)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("round %d: the destination's stream did not end", round)
+		}
+		if chunks, bytes := r.NotTaken(); chunks == 0 || bytes != int64(len(second)) {
+			t.Fatalf("round %d: %d chunks (%d bytes) not taken, want the second answer's %d bytes", round, chunks, bytes, len(second))
+		}
+		cancel()
+		<-done
+	}
+}
+
+// finInFlightConn is the proxy's end of the client connection whose first
+// Write first runs hook (after the relay's look before that Write), and whose
+// Reads after the first wait for release.
+type finInFlightConn struct {
+	*proxyutil.Conn
+	reads, writes atomic.Int32
+	release       chan struct{}
+	hook          func()
+}
+
+func (c *finInFlightConn) Read(p []byte) (int, error) {
+	if c.reads.Add(1) > 1 {
+		<-c.release
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *finInFlightConn) Write(p []byte) (int, error) {
+	if c.writes.Add(1) == 1 && c.hook != nil {
+		c.hook()
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *finInFlightConn) NetConn() net.Conn { return c.Conn }
+
+// A closed client whose FIN reaches the proxy's socket between the relay's
+// look and its Write of a destination chunk: that chunk is teed, as before
+// (the relay could learn of the FIN only once it had handed the chunk on).
+// The client resets on it, before the relay has read the FIN, so the look as
+// the relay reads the FIN finds the connection closed, not the FIN. The FIN
+// came in order (the relay read io.EOF, not a reset), and a chunk written to a
+// closed connection reaches no one: the destination's answer to the forwarded
+// FIN is refused, the stream ends where the client stopped, and no mock is
+// marked incomplete for the answer's failed Write.
+func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *testing.T) {
+	t.Parallel()
+	answer := strings.Repeat("A", 64)
+	for round := 0; round < 20; round++ {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		c := &finInFlightConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: make(chan struct{})}
+		c.hook = func() {
+			_ = app.Close()
+			for limit := time.Now().Add(5 * time.Second); tcpState(t, proxyClient) != unix.BPF_TCP_CLOSE_WAIT && time.Now().Before(limit); {
+				time.Sleep(20 * time.Microsecond)
+			}
+		}
+		var mu sync.Mutex
+		var marks []string
+		var stops atomic.Int32
+		r := New(Config{
+			Logger:               zap.NewNop(),
+			OnMarkMockIncomplete: func(m string) { mu.Lock(); marks = append(marks, m); mu.Unlock() },
+			ClientStopped:        func() { stops.Add(1) },
+		}, c, connseq.NewUpstream(proxyServer))
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); _ = r.Run(ctx) }()
+		streams := make(chan string, 1)
+		go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+		if _, err := app.Write([]byte("req")); err != nil {
+			t.Fatal(err)
+		}
+		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if got := make([]byte, 3); func() bool { _, err := io.ReadFull(server, got); return err != nil }() {
+			t.Fatalf("round %d: the destination did not read the request", round)
+		}
+		if _, err := server.Write([]byte("inflight")); err != nil {
+			t.Fatal(err)
+		}
+		awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the closed client resets the chunk written as its FIN came in")
+		close(c.release)
+		if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
+			t.Fatalf("round %d: the destination read %d bytes, %v, want the forwarded FIN", round, len(rest), err)
+		}
+		_, _ = server.Write([]byte(answer))
+		_ = server.Close()
+		select {
+		case s := <-streams:
+			if s != "inflight" {
+				t.Fatalf("round %d: the destination's stream carried %q, want only the chunk written as the FIN came in", round, s)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("round %d: the destination's stream did not end", round)
+		}
+		cancel()
+		<-done
+		mu.Lock()
+		if len(marks) != 0 || stops.Load() != 1 {
+			t.Fatalf("round %d: marked %q, the relay said the client stopped %d times; want no mark, once", round, marks, stops.Load())
+		}
+		mu.Unlock()
 	}
 }

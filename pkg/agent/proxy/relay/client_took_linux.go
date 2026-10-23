@@ -17,12 +17,15 @@ const canAskClientSockets = true
 // tcpClientSocket is the proxy's end of a client connection that is a TCP
 // socket. Its look asks the socket for its TCP_INFO: the state, and
 // tcpi_bytes_acked, how many of the bytes written to it its peer has
-// acknowledged in all (Linux 4.1 and later). Made once per connection, with its
-// question, so a look allocates nothing. The client's forwarder looks as it
-// reads the client's end and the destination's forwarder before it writes,
-// one at a time (Relay.finMu) and only until the FIN is found; resolve looks
-// while chunks wait for the client's answer, only after. No two looks run at
-// once.
+// acknowledged in all (Linux 4.1 and later). Its written adds to that
+// SIOCOUTQ, the bytes written to it its peer has not acknowledged yet. Made
+// once per connection, with its questions, so neither allocates. The client's
+// forwarder looks as it reads the client's end and the destination's
+// forwarder before it writes, one at a time (Relay.finMu) and only until the
+// FIN is found; resolve looks while chunks wait for the client's answer, only
+// after. No two looks run at once. written is the destination's forwarder's,
+// once the FIN is found, and may run while resolve looks: it has an answer of
+// its own.
 //
 // The states (include/net/tcp_states.h, as golang.org/x/sys/unix names them)
 // the socket can be in while the relay asks it: ESTABLISHED, the client has
@@ -38,19 +41,32 @@ const canAskClientSockets = true
 // sent first (FIN_WAIT1, FIN_WAIT2, CLOSING) come only when the destination
 // closed first: the relay forwards its FIN, and by then the destination's
 // forwarder has returned and writes nothing more. Only the look as the relay
-// reads the client's FIN can find them then, and it finds no FIN: CLOSING (the
-// client's FIN came before the client acknowledged the proxy's) reads as open,
-// and a FIN_WAIT2 socket that takes the client's FIN goes to CLOSE (its
-// TIME_WAIT is a socket of its own, which keploy does not hold), which reads
-// as closed. Neither sets the FIN found, and no chunk is written after, so
-// none waits (a chunk waits only once the client's FIN was found before it was
-// written, and that FIN came first).
+// reads the client's FIN can find them then: CLOSING (the client's FIN came
+// before the client acknowledged the proxy's) reads as open, and a FIN_WAIT2
+// socket that takes the client's FIN goes to CLOSE (its TIME_WAIT is a socket
+// of its own, which keploy does not hold), which reads as closed, and, the
+// relay having read the FIN, as the FIN found. No chunk is written after
+// either, so none waits.
 type tcpClientSocket struct {
-	rc  syscall.RawConn
-	ask func(fd uintptr)
+	rc         syscall.RawConn
+	ask, count func(fd uintptr)
 	// info and got are the answer to the last look, got what it says.
 	info unix.TCPInfo
 	got  clientLook
+	// winfo, unsent, wrote and wroteOK are the answer to the last written.
+	winfo   unix.TCPInfo
+	unsent  int32
+	wrote   uint64
+	wroteOK bool
+}
+
+// tcpInfo is TCP_INFO for the socket fd, into info; false when the socket
+// cannot say.
+func tcpInfo(fd uintptr, info *unix.TCPInfo) bool {
+	size := uint32(unix.SizeofTCPInfo)
+	_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, fd, unix.IPPROTO_TCP, unix.TCP_INFO,
+		uintptr(unsafe.Pointer(info)), uintptr(unsafe.Pointer(&size)), 0)
+	return errno == 0
 }
 
 // clientSocketOf is the TCP socket under the client conn c, through the conns
@@ -65,7 +81,7 @@ func clientSocketOf(c net.Conn) clientSocket {
 				return nil
 			}
 			s := &tcpClientSocket{rc: rc}
-			s.ask = s.lookAt
+			s.ask, s.count = s.lookAt, s.countAt
 			return s
 		}
 		u, ok := c.(interface{ NetConn() net.Conn })
@@ -88,9 +104,7 @@ func (s *tcpClientSocket) look() clientLook {
 }
 
 func (s *tcpClientSocket) lookAt(fd uintptr) {
-	size := uint32(unix.SizeofTCPInfo)
-	if _, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, fd, unix.IPPROTO_TCP, unix.TCP_INFO,
-		uintptr(unsafe.Pointer(&s.info)), uintptr(unsafe.Pointer(&size)), 0); errno != 0 {
+	if !tcpInfo(fd, &s.info) {
 		return
 	}
 	switch s.info.State {
@@ -100,5 +114,45 @@ func (s *tcpClientSocket) lookAt(fd uintptr) {
 		s.got = clientLook{said: clientFinned, acked: s.info.Bytes_acked}
 	default:
 		s.got = clientLook{said: clientOpen, acked: s.info.Bytes_acked}
+	}
+}
+
+// How many times written asks again while the client's acknowledgements move
+// between its two questions.
+const writtenTries = 8
+
+func (s *tcpClientSocket) written() (uint64, bool) {
+	s.wrote, s.wroteOK = 0, false
+	if err := s.rc.Control(s.count); err != nil {
+		return 0, false
+	}
+	return s.wrote, s.wroteOK
+}
+
+// countAt is written's question: tcpi_bytes_acked counts from the first byte
+// written (snd_una less the first sequence number), SIOCOUTQ is what was
+// written beyond snd_una (write_seq less snd_una), so the two add up to every
+// byte written (and the proxy's FIN, once sent). Two questions, between which
+// an acknowledgement can move snd_una: tcpi_bytes_acked is asked on either
+// side of SIOCOUTQ, and the sum is exact when it did not move. When it moves
+// on every try, the sum with the later count is no less than the bytes
+// written: a chunk is then judged from no earlier than its first byte, which
+// can cost a chunk the client took, never tee one it did not.
+func (s *tcpClientSocket) countAt(fd uintptr) {
+	for try := 0; try < writtenTries; try++ {
+		if !tcpInfo(fd, &s.winfo) {
+			return
+		}
+		before := s.winfo.Bytes_acked
+		if _, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, unix.SIOCOUTQ, uintptr(unsafe.Pointer(&s.unsent))); errno != 0 || s.unsent < 0 {
+			return
+		}
+		if !tcpInfo(fd, &s.winfo) {
+			return
+		}
+		s.wrote, s.wroteOK = s.winfo.Bytes_acked+uint64(s.unsent), true
+		if s.winfo.Bytes_acked == before {
+			return
+		}
 	}
 }
