@@ -175,8 +175,11 @@ func goUsesPidfds() error {
 // own names, and returns their pids. Each is reaped through a pidfd opened on
 // it, so a pid that was reaped and reused meanwhile is never waited for in
 // its place; and the pidfds held are read after those are opened, so a child
-// of this process that was a zombie then is named by its own.
+// of this process that was a zombie then is named by its own. It waits for a
+// read of the children that settles to be over (reaping).
 func reapAdopted(logger *zap.Logger) []int {
+	reaping.Lock()
+	defer reaping.Unlock()
 	type opened struct{ pid, fd int }
 	var zombies []opened
 	children, err := childPids()
@@ -288,11 +291,14 @@ func childPids() ([]int, error) {
 
 // child is a process whose parent this process is, as a read of /proc found
 // it: its pid, its start time, and whether it has exited and waits to be
-// reaped (a zombie).
+// reaped (a zombie: every thread of it exited, not its main thread alone);
+// thread, a thread of it that runs where its main thread has exited, which
+// what it runs is read through (0 where its main thread runs).
 type child struct {
 	pid    int
 	start  uint64
 	zombie bool
+	thread int
 }
 
 // procChildren is every process whose parent this process is, from a scan of
@@ -300,9 +306,12 @@ type child struct {
 // those in pid order and resumes each part of the listing from the pid it
 // stopped at, never from a count of the entries before it, so a process that
 // exists for the whole listing is in it, however many exit meanwhile
-// (fs/proc/base.c, proc_pid_readdir). An error is a read that failed: of
-// /proc, or of a listed process's stat, but for one that is gone by then (it
-// exited and was reaped).
+// (fs/proc/base.c, proc_pid_readdir). One whose stat says Z is a zombie only
+// where no thread of it runs: a process whose main thread exited while
+// another runs on ("Zl" in ps) runs (utils.RunningThread). An error is a read
+// that failed: of /proc, of a listed process's stat, or of a zombie-looking
+// one's threads, but for one that is gone by then (it exited and was
+// reaped).
 func procChildren() ([]child, error) { return procChildrenIn("/proc", os.Getpid()) }
 
 // procChildrenIn is procChildren of process parent, read from the /proc at
@@ -330,7 +339,15 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 		if gone || st.PPID != parent {
 			continue
 		}
-		out = append(out, child{pid: pid, start: st.StartTime, zombie: st.State == 'Z'})
+		c := child{pid: pid, start: st.StartTime}
+		if st.State == 'Z' {
+			tid, runs, err := utils.RunningThread(root, pid)
+			if err != nil {
+				return nil, fmt.Errorf("read the threads of process %d, whose main thread exited: %w", pid, err)
+			}
+			c.zombie, c.thread = !runs, tid
+		}
+		out = append(out, c)
 	}
 	return out, nil
 }
@@ -338,7 +355,8 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 // procStat reads process pid's stat from the /proc at root
 // (utils.ParseProcStat); gone says it is not there: it exited and was reaped
 // before, or while, it was read (a task being reaped reads as state X, dead,
-// its parent and group gone: 0 and -1).
+// or Z, its parent and group gone: 0 and -1, which no line of a process that
+// is there has).
 func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	b, err := os.ReadFile(root + "/" + strconv.Itoa(pid) + "/stat")
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
@@ -347,14 +365,29 @@ func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	if err != nil {
 		return utils.ProcStat{}, false, err
 	}
-	if statState(b) == 'X' {
+	state := statState(b)
+	if state == 'X' {
 		return utils.ProcStat{}, true, nil
 	}
 	st, ok := utils.ParseProcStat(b)
 	if !ok {
+		if state == 'Z' && reaped(b) {
+			return utils.ProcStat{}, true, nil
+		}
 		return utils.ProcStat{}, false, fmt.Errorf("its stat line does not parse: %q", b)
 	}
 	return st, false, nil
+}
+
+// reaped reports whether a stat line is a task's being released: its parent
+// and group, the two fields after its state, gone (0 and -1).
+func reaped(line []byte) bool {
+	end := bytes.LastIndexByte(line, ')')
+	if end < 0 {
+		return false
+	}
+	f := bytes.Fields(line[end+1:])
+	return len(f) >= 3 && string(f[1]) == "0" && string(f[2]) == "-1"
 }
 
 // statState is the state letter of a stat line, the field after the command
@@ -380,29 +413,51 @@ var settleScans = 16
 // variable for the tests of a read that never settles.
 var scanChildren = procChildren
 
+// reaping is held by the reaper for each of its passes (reapAdopted), and by
+// a read of the children that settles (settledChildren) for all of its
+// scans: no adopted child is reaped while that read runs, so one that exits
+// during it stays, a zombie, in every scan after its exit.
+var reaping sync.Mutex
+
 // settledChildren is this process's children as a read that settled found
-// them: procChildren, repeated until two scans in a row find the same ones
-// running (by pid and start time), the last of them; settled is false where
-// settleScans scans did not. A process becomes this one's child only when its
-// parent exits. One whose parent exited during a scan, too late for the scan
-// to see it as this process's, has a parent that some scan found running: if
-// the next did not, the two differ and the read goes on to a scan that sees
-// the child, this process's for the whole of it; if the next found the parent
-// running too, the read returns that parent among the running. So a settled
-// read that leaves out a running child names, as running, the process it
-// came from: it is never empty while something runs.
+// them: procChildren, repeated until two scans in a row find the same ones,
+// each by its pid and start time and by whether it runs or has exited (a
+// zombie), the last of them; settled is false where settleScans scans did
+// not. The reaper reaps none of them while it reads (reaping).
+//
+// A process becomes this one's child when its parent exits, or an ancestor
+// between them does: an orphan goes to its nearest ancestor that is a child
+// subreaper, this process. So a child X that runs once a settled read is over
+// but is not in its last scan came while that scan ran, at the exit of a
+// process E: a child of this one, or a deeper descendant whose ancestor A,
+// then running, is one. That child (E, or A) is in the last scan, by the
+// listing's order (procChildren): it was this one's before that scan began,
+// or it came during it, the same case again, earlier; and no reap took it
+// away. It was this one's in time for the scan before to list it, or the two
+// differ. Each read it as it was then: the one before running, the last
+// running, or, where it read it once it exited, a zombie. So the two scans
+// differ, or the last lists it running: the last scan of a settled read
+// lists, running, an ancestor of every running child it left out, and it is
+// never empty while one runs. A descendant of a process of keploy's own
+// (os/exec's children, the agent among them, whose own Wait may reap them
+// while the read runs) is no daemon of the application's, and is left out of
+// this.
 func settledChildren() (children []child, settled bool, err error) {
-	var prev map[[2]uint64]bool
+	reaping.Lock()
+	defer reaping.Unlock()
+	var prev map[[3]uint64]bool
 	for i := 0; i < settleScans; i++ {
 		cs, err := scanChildren()
 		if err != nil {
 			return nil, false, err
 		}
-		now := make(map[[2]uint64]bool, len(cs))
+		now := make(map[[3]uint64]bool, len(cs))
 		for _, c := range cs {
-			if !c.zombie {
-				now[[2]uint64{uint64(c.pid), c.start}] = true
+			exited := uint64(0)
+			if c.zombie {
+				exited = 1
 			}
+			now[[3]uint64{uint64(c.pid), c.start, exited}] = true
 		}
 		if prev != nil && maps.Equal(prev, now) {
 			return cs, true, nil
@@ -686,10 +741,11 @@ type adoptedRead struct {
 // adoptedRunning reads this process's children (settledChildren) for the
 // ones it adopted (no pidfd of its own names them) and that run, but keploy
 // itself (an agent whose sudo is gone); those it may not see, and those an
-// earlier stop left to the kernel, it says, and returns apart. An error is a
-// read that failed, of its children or of its own pidfds: which of its
-// children run, or which are its own, cannot be told, so it names none, to
-// stop none.
+// earlier stop left to the kernel, it says, and returns apart. One whose main
+// thread exited while another runs on runs, and what it runs is read through
+// that thread (child.thread). An error is a read that failed, of its children
+// or of its own pidfds: which of its children run, or which are its own,
+// cannot be told, so it names none, to stop none.
 func adoptedRunning(logger *zap.Logger) (adoptedRead, error) {
 	children, settled, err := settledChildren()
 	if err != nil {
@@ -710,7 +766,7 @@ func adoptedRunning(logger *zap.Logger) (adoptedRead, error) {
 			read.held = append(read.held, c.pid)
 			continue
 		}
-		exe, err := os.Stat("/proc/" + strconv.Itoa(c.pid) + "/exe")
+		exe, err := os.Stat(exePath(c))
 		if err != nil {
 			logger.Info("keploy cannot see what a daemon the application left running is (it is not dumpable, or another user's), and leaves it running",
 				zap.Int("pid", c.pid), zap.Error(err))
@@ -725,9 +781,20 @@ func adoptedRunning(logger *zap.Logger) (adoptedRead, error) {
 	return read, nil
 }
 
+// exePath is where what child c runs is read: its /proc/<pid>/exe, or, where
+// its main thread exited while another runs on (whose exe reads as none, its
+// memory gone with it), that of the thread that runs.
+func exePath(c child) string {
+	if c.thread != 0 {
+		return "/proc/" + strconv.Itoa(c.pid) + "/task/" + strconv.Itoa(c.thread) + "/exe"
+	}
+	return "/proc/" + strconv.Itoa(c.pid) + "/exe"
+}
+
 // members is each daemon of pids and every process it runs, now, each named
-// by a pidfd; a process that is gone, or whose pid names another process by
-// the time its pidfd is opened, is left out.
+// by a pidfd; a process that is gone, or has exited (every thread of it,
+// utils.Exited), or whose pid names another process by the time its pidfd is
+// opened, is left out.
 func members(pids []int) []member {
 	var ms []member
 	seen := map[int]bool{}
@@ -738,7 +805,7 @@ func members(pids []int) []member {
 		}
 		seen[pid] = true
 		before, ok := utils.ReadProcStat(pid)
-		if !ok || before.State == 'Z' || before.PPID != parent {
+		if !ok || before.PPID != parent || utils.Exited(pid, before) {
 			return
 		}
 		fd, err := openPidfd(pid)

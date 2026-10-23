@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1034,14 +1035,19 @@ func TestAStopsReadNeverMissesADaemonWhileOthersAreReaped(t *testing.T) {
 }
 
 // A read of keploy's children settles once two scans in a row find the same
-// ones running, and returns the last; one whose children keep changing over
-// every scan it makes is not settled, and the stop then says that what the
-// application left running cannot be told, however little it found.
+// ones, each running or exited (a zombie) as before, and returns the last;
+// one whose children keep changing over every scan it makes is not settled,
+// and the stop then says that what the application left running cannot be
+// told, however little it found. A child that exits during the read is a
+// change, and stays in every scan after (no reap takes it away while the read
+// runs): one that came and exited while the read ran, leaving its own child
+// to keploy in its place, keeps the read from settling on nothing before the
+// scan that lists that child.
 func TestAReadOfTheChildrenSettlesOrSaysItCannotTell(t *testing.T) {
 	scan, scans := scanChildren, settleScans
 	t.Cleanup(func() { scanChildren, settleScans = scan, scans })
 	a, b := child{pid: 101, start: 7}, child{pid: 102, start: 9}
-	script := [][]child{{a}, {a, b}, {a, b, {pid: 103, zombie: true}}}
+	script := [][]child{{a}, {a, b}, {a, b, {pid: 103, zombie: true}}, {a, b, {pid: 103, zombie: true}}}
 	n := 0
 	scanChildren = func() ([]child, error) {
 		cs := script[min(n, len(script)-1)]
@@ -1049,8 +1055,37 @@ func TestAReadOfTheChildrenSettlesOrSaysItCannotTell(t *testing.T) {
 		return cs, nil
 	}
 	got, settled, err := settledChildren()
-	if err != nil || !settled || n != 3 || len(got) != 3 {
-		t.Fatalf("settledChildren = %v, settled %v, err %v after %d scans; want the third scan's, settled (a zombie is no change)", got, settled, err, n)
+	if err != nil || !settled || n != 4 || len(got) != 3 {
+		t.Fatalf("settledChildren = %v, settled %v, err %v after %d scans; want the fourth scan's, settled (a zombie that appears is a change, one that stays is none)", got, settled, err, n)
+	}
+	// A child that ran is a zombie in the next scan: a change.
+	script = [][]child{{a}, {{pid: 101, start: 7, zombie: true}}, {{pid: 101, start: 7, zombie: true}}}
+	n = 0
+	if _, settled, err := settledChildren(); err != nil || !settled || n != 3 {
+		t.Fatalf("settled %v, err %v after %d scans; want settled at the third: the child that exited is a change", settled, err, n)
+	}
+	// A child T the first scan missed (it came to keploy after the scan
+	// passed its pid) exits during the second, which lists it a zombie, and
+	// its child X comes to keploy at a pid the second had passed: the first
+	// two list nothing running, yet differ; the third lists X.
+	tz, x := child{pid: 500, start: 3, zombie: true}, child{pid: 400, start: 4}
+	script = [][]child{{}, {tz}, {tz, x}, {tz, x}}
+	n = 0
+	got, settled, err = settledChildren()
+	if err != nil || !settled || n != 4 || !slices.Contains(got, x) {
+		t.Fatalf("settledChildren = %v, settled %v, err %v after %d scans; want settled on the fourth, X running in it, never on the first two's nothing", got, settled, err, n)
+	}
+	// No reap runs while the read does: a zombie it lists stays, and none
+	// is reaped between two scans it compares.
+	scanChildren = func() ([]child, error) {
+		if reaping.TryLock() {
+			reaping.Unlock()
+			t.Error("a scan of the read ran while the reaper could reap")
+		}
+		return nil, nil
+	}
+	if _, _, err := settledChildren(); err != nil {
+		t.Fatal(err)
 	}
 	// A child adopted at every scan: never two the same.
 	n = 0
@@ -1077,9 +1112,11 @@ func TestAReadOfTheChildrenSettlesOrSaysItCannotTell(t *testing.T) {
 
 // The scan of /proc reads each listed process's stat: one that is gone by
 // then (its directory, or its stat, no longer there; a task being reaped,
-// state X) is no child; one that is this process's child, a zombie or not,
-// is; a stat that cannot be read otherwise is the scan's error, never a
-// shorter list.
+// state X, or Z with its parent and group gone) is no child; one that is
+// this process's child, a zombie or not, is, and one whose stat says Z is a
+// zombie only where none of its threads runs (its main thread may have
+// exited while another runs on); a stat that cannot be read otherwise is the
+// scan's error, never a shorter list.
 func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 	root := t.TempDir()
 	me := 4242
@@ -1096,6 +1133,34 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 	stat(101, fmt.Sprintf("101 (sh) Z %d 101 101 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 778 0 0\n", me))
 	stat(102, "102 (other) S 1 102 102 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 779 0 0\n")
 	stat(103, "103 (sleep) X 0 -1 -1 0 -1 4227084 96 0 0 0 0 0 0 0 35 15 0 0 4979432 0 0\n")
+	// A process whose main thread exited while another runs on ("Zl"): its
+	// stat says Z, a thread of it does not. And one whose every thread has
+	// exited, its main thread's task left.
+	task := func(pid, tid int, state byte) {
+		dir := filepath.Join(root, strconv.Itoa(pid), "task", strconv.Itoa(tid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		line := fmt.Sprintf("%d (worker) %c %d %d %d 0 -1 0 0 0 0 0 0 0 0 0 20 0 2 0 780 0 0\n", tid, state, me, pid, pid)
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stat(106, fmt.Sprintf("106 (worker) Z %d 106 106 0 -1 0 0 0 0 0 0 0 0 0 20 0 2 0 780 0 0\n", me))
+	task(106, 106, 'Z')
+	task(106, 107, 'S')
+	stat(108, fmt.Sprintf("108 (worker) Z %d 108 108 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 781 0 0\n", me))
+	task(108, 108, 'Z')
+	task(108, 109, 'X')
+	// A thread, and a process, being released: Z, its parent and group gone.
+	released := "%d (sleep) Z 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n"
+	if err := os.MkdirAll(filepath.Join(root, "108", "task", "110"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "108", "task", "110", "stat"), []byte(fmt.Sprintf(released, 110)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stat(111, fmt.Sprintf(released, 111))
 	if err := os.MkdirAll(filepath.Join(root, "104"), 0o755); err != nil { // gone: no stat
 		t.Fatal(err)
 	}
@@ -1106,10 +1171,20 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []child{{pid: 100, start: 777}, {pid: 101, start: 778, zombie: true}}
+	want := []child{{pid: 100, start: 777}, {pid: 101, start: 778, zombie: true}, {pid: 106, start: 780, thread: 107}, {pid: 108, start: 781, zombie: true}}
 	sort.Slice(got, func(i, j int) bool { return got[i].pid < got[j].pid })
 	if !slices.Equal(got, want) {
 		t.Fatalf("children %+v, want %+v", got, want)
+	}
+	// The threads of one whose stat says Z that cannot be read.
+	if err := os.WriteFile(filepath.Join(root, "101", "task"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := procChildrenIn(root, me); err == nil {
+		t.Fatalf("threads that could not be read read as children %+v", got)
+	}
+	if err := os.Remove(filepath.Join(root, "101", "task")); err != nil {
+		t.Fatal(err)
 	}
 	// A stat that is there and cannot be read.
 	if err := os.MkdirAll(filepath.Join(root, "105", "stat"), 0o755); err != nil {
@@ -1242,6 +1317,126 @@ func TestAZombieNotReapedYetIsNothingLeftRunning(t *testing.T) {
 	await(t, "the daemon exited, adopted", func() bool { return zombieOf(pid, os.Getpid()) })
 	if _, left := stopAdopted(zap.NewNop(), nil, nil); left != "" {
 		t.Fatalf("left %q; want nothing: daemon %d exited, a zombie not reaped yet", left, pid)
+	}
+}
+
+// The reaper reaps under the lock a read of the children holds for all of
+// its scans (reaping), so no reap lands between two scans the read compares.
+func TestTheReaperReapsUnderTheLockAReadOfTheChildrenHolds(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	var held, free atomic.Int32
+	reap := waitAdopted
+	// Set before the reaper starts, which reads it.
+	waitAdopted = func(fd int) (int32, error) {
+		if reaping.TryLock() {
+			reaping.Unlock()
+			free.Add(1)
+		} else {
+			held.Add(1)
+		}
+		return reap(fd)
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	pid := daemonize(t, "exit 0")
+	await(t, "the daemon reaped", func() bool { _, ok := utils.ReadProcStat(pid); return !ok })
+	if held.Load() == 0 || free.Load() != 0 {
+		t.Fatalf("%d reaps under the lock, %d without it; want every one under it", held.Load(), free.Load())
+	}
+}
+
+// zombieLeaderEnv makes this test binary, started with it set to a file's
+// path, a process whose main thread exits while another runs on, writing a
+// count to that file as it runs: its stat says Z, as ps says Zl, and it
+// runs.
+const zombieLeaderEnv = "KEPLOY_TEST_MAIN_THREAD_EXITS"
+
+func init() {
+	beat := os.Getenv(zombieLeaderEnv)
+	if beat == "" {
+		return
+	}
+	// init runs on the main thread: the goroutine stays on it.
+	runtime.LockOSThread()
+	go func() {
+		for n := 1; ; n++ {
+			_ = os.WriteFile(beat, []byte(strconv.Itoa(n)), 0o644)
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	for {
+		if _, err := os.Stat(beat); err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The main thread alone exits (exit, not exit_group).
+	_, _, _ = syscall.RawSyscall(syscall.SYS_EXIT, 0, 0, 0)
+}
+
+// beatOf is the count a process zombieLeaderEnv started wrote last; -1 where
+// it has written none.
+func beatOf(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return -1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// A daemon whose main thread exited while another thread runs on ("Zl" in
+// ps: its stat says Z) runs: the stop stops it, and says it left nothing,
+// rather than take it for a zombie that runs nothing, which it would neither
+// stop nor say it left running, the next set then moving the application's
+// base while it runs. What it runs is read through the thread that runs (its
+// main thread's exe reads as none), so it is told from keploy's own.
+func TestAStopStopsADaemonWhoseMainThreadExited(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	// A copy of this binary: what keploy itself runs is not the
+	// application's.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "daemon")
+	self, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, self, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	beat := filepath.Join(dir, "beat")
+	// No collection (a stop of the world would wait for ever on the main
+	// thread, which holds a P it never gives back), and Ps to spare.
+	pid := daemonize(t, `exec env `+zombieLeaderEnv+`="$1" GOGC=off GOMAXPROCS=4 "$2" -test.run=^$`, beat, bin)
+	me := os.Getpid()
+	await(t, "the daemon adopted, its main thread exited", func() bool {
+		st, ok := utils.ReadProcStat(pid)
+		return ok && st.PPID == me && st.State == 'Z'
+	})
+	first := beatOf(beat)
+	await(t, "the daemon's other thread running", func() bool { return beatOf(beat) > first+2 })
+	_, left := stopAdopted(zap.NewNop(), nil, nil)
+	if st, ok := utils.ReadProcStat(pid); ok && st.PPID == me && !utils.Exited(pid, st) {
+		t.Fatalf("the daemon %d (its main thread exited, another running) runs on after the stop, which said it left %q", pid, left)
+	}
+	if left != "" {
+		t.Fatalf("left %q; want nothing: the stop ended the daemon", left)
 	}
 }
 
