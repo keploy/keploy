@@ -436,12 +436,15 @@ func TestAgentStartedBeforeApp_NamesTheAgentReplacedFromTheBasesWhenTheMarkDoesN
 	t.Setenv(provenswitch.Env, "1")
 	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}
 	a1 := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 7"}}
+	// lossAgent is what a real run holds by then: a mark read from b2 notes b2
+	// (markCaptureLosses calls noteLossAgent), and a failed read notes nothing.
 	for _, tc := range []struct {
-		name string
-		mark captureLossMark
+		name      string
+		mark      captureLossMark
+		lossAgent string
 	}{
-		{"the set's mark read failed", captureLossMark{err: errors.New("the agent did not answer")}},
-		{"the set's mark read from the replacement", captureLossMark{at: lost, known: true, agent: "b2"}},
+		{"the set's mark read failed", captureLossMark{err: errors.New("the agent did not answer")}, "a1"},
+		{"the set's mark read from the replacement", captureLossMark{at: lost, known: true, agent: "b2"}, "b2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", losses: lost, beforeApp: "b2"}
@@ -451,7 +454,7 @@ func TestAgentStartedBeforeApp_NamesTheAgentReplacedFromTheBasesWhenTheMarkDoesN
 			r.logger = zap.New(core)
 			r.lossMark, r.lossMarked = tc.mark, true
 			r.lossAppBase, r.lossRunStart, r.lossRunBase = a1, a1, a1
-			r.lossAgent, r.lossBasesAgent = "a1", "a1"
+			r.lossAgent, r.lossBasesAgent = tc.lossAgent, "a1"
 			r.agentStartedBeforeApp(context.Background(), nil)
 			said := logs.FilterMessageSnippet("bring-up retry before the application ever ran").
 				FilterField(zap.String("agent replaced", "a1")).FilterField(zap.String("agent", "b2"))
