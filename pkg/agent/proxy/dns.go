@@ -192,6 +192,12 @@ type dnsCacheEntry struct {
 	// true if the response came from upstream resolution or a recorded mock.
 	// false if we synthesized defaults (fallback).
 	FromUpstream bool
+
+	// upstream is the resolver (host:port) that gave the answer, when
+	// recordDNSMock asked one: what the line about a negative answer names
+	// (noteNegativeAnswer). Kept in the cached copy, so a cache hit names it
+	// too.
+	upstream string
 }
 
 const (
@@ -367,9 +373,15 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
 			if shouldCacheDNSResponse(mode, resp) {
-				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
+				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream, upstream: resp.upstream}
 				p.dnsCache.Add(key, cached)
 			}
+		}
+		// Recording passes the resolver's negative answers on to the app
+		// unchanged, from the cache as well as from the resolver: say so,
+		// once per lookup.
+		if mode == models.MODE_RECORD {
+			p.noteNegativeAnswer(question, resp)
 		}
 		if rd != nil {
 			rd.bookDNSAnswer(question, resp.Answer)
@@ -435,10 +447,20 @@ func udpAnswerSize(r *dns.Msg) int {
 // had a mock. A name carrying only ONE search suffix is NOT redundant: it is
 // a real name, and its miss is still worth reporting.
 func (p *Proxy) isRedundantSearchExpansion(name string) bool {
+	_, ok := p.redundantExpansionBase(name)
+	return ok
+}
+
+// redundantExpansionBase is the name a redundant search-list expansion
+// (isRedundantSearchExpansion) was expanded from, as the app gave it to its
+// resolver: name without the search domain it appended, in name's own case.
+// ok is false when name is no redundant expansion.
+func (p *Proxy) redundantExpansionBase(name string) (base string, ok bool) {
 	if len(p.dnsSearch) == 0 || name == "" {
-		return false
+		return "", false
 	}
-	q := strings.ToLower(dns.Fqdn(name))
+	fqdn := dns.Fqdn(name)
+	q := strings.ToLower(fqdn)
 	for _, s := range p.dnsSearch {
 		s = strings.ToLower(strings.TrimSuffix(dns.Fqdn(s), "."))
 		if s == "" {
@@ -450,12 +472,18 @@ func (p *Proxy) isRedundantSearchExpansion(name string) bool {
 		}
 		// Strip the trailing ".s", keeping the final dot, and ask whether
 		// what remains still ends in the same suffix.
-		base := q[:len(q)-len(s)-1]
-		if strings.HasSuffix(base, suffix) {
-			return true
+		if !strings.HasSuffix(q[:len(q)-len(s)-1], suffix) {
+			continue
 		}
+		// Lower-casing keeps a DNS name's length (its presentation form is
+		// ASCII), so the cut falls at the same place in fqdn; a name it
+		// would not keep is given lower-cased.
+		if len(fqdn) != len(q) {
+			fqdn = q
+		}
+		return fqdn[:len(fqdn)-len(s)-1], true
 	}
-	return false
+	return "", false
 }
 
 func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
@@ -949,6 +977,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 	var (
 		in         *dns.Msg
+		answeredBy string
 		resolveErr error
 	)
 
@@ -993,6 +1022,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 		if resp != nil {
 			in = resp
+			answeredBy = addr
 			resolveErr = nil
 			break
 		}
@@ -1008,6 +1038,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	resp := dnsCacheEntry{
 		Msg:          in,
 		FromUpstream: true,
+		upstream:     answeredBy,
 	}
 
 	// If no session, we still return resolved response but skip recording.
@@ -1017,10 +1048,12 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
 	// These are often noise from search domain expansion or external transient issues.
-	// Silent on this path: negatives are not deduped via recordedDNSMocks (we only
-	// add successful responses there), so they re-enter recordDNSMock every 30s
-	// once the dnsCache TTL elapses. A debug log here would fill the agent log
-	// for the full lifetime of a recording session against a chatty client.
+	// The answer still goes to the app unchanged, and ServeDNS says so
+	// (noteNegativeAnswer), once per (name, qtype, answer) a recording: the
+	// negatives are not deduped via recordedDNSMocks (we only add successful
+	// responses there), so they re-enter recordDNSMock every 30s once the
+	// dnsCache TTL elapses, and a line here would fill the agent log for the
+	// full lifetime of a recording session against a chatty client.
 	if in.Rcode != dns.RcodeSuccess {
 		return resp, nil
 	}

@@ -392,6 +392,12 @@ type Proxy struct {
 	// replaced, by ResetRecordedDNSMocks.
 	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
+	// negativeAnswers is what the recording has logged of the negative DNS
+	// answers it passed on to the app (noteNegativeAnswer): once per
+	// (name, qtype, answer), bounded, the rest counted. Emptied by
+	// ResetRecordedDNSMocks.
+	negativeAnswers negativeAnswers
+
 	// The DNS servers, set by startDNSServers before anything serves or
 	// stops them.
 	tcpDNS, udpDNS *dnsServer
@@ -473,6 +479,11 @@ type Proxy struct {
 	// name.S.S. That shape is decidable from the name alone, whatever
 	// upstream says, and nothing answers it, so capture never recorded it.
 	dnsSearch []string
+	// dnsNdots is resolv.conf's ndots, read with dnsSearch: a resolver tries
+	// a name with fewer dots in the search domains before as given, one with
+	// as many or more as given first (isSearchListCandidate). Read only when
+	// dnsSearch is, and of use only with a search domain.
+	dnsNdots int
 	// dnsForwardTimeout caps how long a single upstream Exchange is
 	// allowed to block. Short by design — a flaky resolver must never
 	// stall the app's DNS lookup. On timeout we fall through to the
@@ -1533,9 +1544,10 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 
 // ResetRecordedDNSMocks clears the per-session DNS deduplication trackers.
 // This should be called when starting a new recording session so DNS mocks are
-// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice is
-// re-surfaced for the new session instead of being suppressed by state left
-// over from the previous one.
+// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice, and
+// the once-per-(name,qtype,answer) line about a negative answer passed on
+// (noteNegativeAnswer), are re-surfaced for the new session instead of being
+// suppressed by state left over from the previous one.
 //
 // Purges in place rather than reallocating. expirable.NewLRU with a non-zero
 // TTL starts a janitor goroutine whose done channel is never closed (see the
@@ -1551,6 +1563,7 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 	if p.nodataRelayLogged != nil {
 		p.nodataRelayLogged.Purge()
 	}
+	p.negativeAnswers.reset()
 	p.logger.Debug("DNS deduplication trackers reset")
 }
 
@@ -1576,6 +1589,7 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 		p.asyncEngine.LogReport(p.logger)
 	}
 	p.logSelfCalls()
+	p.logNegativeAnswers()
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	// Flush any in-flight packet capture so the test-set's pcap is
 	// finalised before the agent is allowed to exit.

@@ -82,6 +82,7 @@ func (p *Proxy) captureDNSUpstream() {
 	// recognisable without a round trip. Captured even when every
 	// nameserver is filtered out below, since the two are independent.
 	p.dnsSearch = append([]string(nil), config.Search...)
+	p.dnsNdots = config.Ndots
 
 	// resolv.conf has no port syntax per RFC — config.Port is populated
 	// from an "options" line or defaults to "53". We compare by string
