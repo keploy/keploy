@@ -50,6 +50,11 @@ const canAskClientSockets = true
 type tcpClientSocket struct {
 	rc         syscall.RawConn
 	ask, count func(fd uintptr)
+	// askInfo and askUnsent are the socket's two questions, TCP_INFO
+	// (tcpInfo) and SIOCOUTQ (unsentOf). A test answers them from a script,
+	// to move the client's acknowledgements between them.
+	askInfo   func(fd uintptr, info *unix.TCPInfo) bool
+	askUnsent func(fd uintptr, n *int32) bool
 	// info and got are the answer to the last look, got what it says.
 	info unix.TCPInfo
 	got  clientLook
@@ -69,6 +74,14 @@ func tcpInfo(fd uintptr, info *unix.TCPInfo) bool {
 	return errno == 0
 }
 
+// unsentOf is SIOCOUTQ for the socket fd, into n: the bytes written to it
+// that its peer has not acknowledged yet, sent or not (write_seq less
+// snd_una); false when the socket cannot say.
+func unsentOf(fd uintptr, n *int32) bool {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, unix.SIOCOUTQ, uintptr(unsafe.Pointer(n)))
+	return errno == 0 && *n >= 0
+}
+
 // clientSocketOf is the TCP socket under the client conn c, through the conns
 // that wrap one and say so (NetConn: util.Conn, *tls.Conn, the proxy's
 // trackedConn and recordConn); nil for a conn that is not a TCP socket, which
@@ -80,7 +93,7 @@ func clientSocketOf(c net.Conn) clientSocket {
 			if err != nil {
 				return nil
 			}
-			s := &tcpClientSocket{rc: rc}
+			s := &tcpClientSocket{rc: rc, askInfo: tcpInfo, askUnsent: unsentOf}
 			s.ask, s.count = s.lookAt, s.countAt
 			return s
 		}
@@ -104,7 +117,7 @@ func (s *tcpClientSocket) look() clientLook {
 }
 
 func (s *tcpClientSocket) lookAt(fd uintptr) {
-	if !tcpInfo(fd, &s.info) {
+	if !s.askInfo(fd, &s.info) {
 		return
 	}
 	switch s.info.State {
@@ -140,14 +153,14 @@ func (s *tcpClientSocket) written() (uint64, bool) {
 // can cost a chunk the client took, never tee one it did not.
 func (s *tcpClientSocket) countAt(fd uintptr) {
 	for try := 0; try < writtenTries; try++ {
-		if !tcpInfo(fd, &s.winfo) {
+		if !s.askInfo(fd, &s.winfo) {
 			return
 		}
 		before := s.winfo.Bytes_acked
-		if _, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, unix.SIOCOUTQ, uintptr(unsafe.Pointer(&s.unsent))); errno != 0 || s.unsent < 0 {
+		if !s.askUnsent(fd, &s.unsent) {
 			return
 		}
-		if !tcpInfo(fd, &s.winfo) {
+		if !s.askInfo(fd, &s.winfo) {
 			return
 		}
 		s.wrote, s.wroteOK = s.winfo.Bytes_acked+uint64(s.unsent), true

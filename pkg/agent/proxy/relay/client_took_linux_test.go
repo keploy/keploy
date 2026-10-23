@@ -1351,3 +1351,271 @@ func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *
 		mu.Unlock()
 	}
 }
+
+// countedSocket is a client socket whose two questions, TCP_INFO and
+// SIOCOUTQ, are answered from a model of the kernel: total bytes written to
+// it in all, and acked, how many of them the client's stack had acknowledged
+// as each question was asked, in turn (the last repeats). SIOCOUTQ says what
+// was written beyond that. asked counts the questions.
+type countedSocket struct {
+	total uint64
+	acked []uint64
+	asked int
+}
+
+func (c *countedSocket) at() uint64 {
+	a := c.acked[min(c.asked, len(c.acked)-1)]
+	c.asked++
+	return a
+}
+
+func (c *countedSocket) socket() *tcpClientSocket {
+	s := &tcpClientSocket{
+		askInfo: func(_ uintptr, info *unix.TCPInfo) bool {
+			*info = unix.TCPInfo{Bytes_acked: c.at()}
+			return true
+		},
+		askUnsent: func(_ uintptr, n *int32) bool {
+			*n = int32(c.total - c.at())
+			return true
+		},
+	}
+	s.count = s.countAt
+	return s
+}
+
+// How many bytes written counts, from its two questions: the client's
+// acknowledgements, and the bytes written beyond them. Acknowledgements can
+// move between the two. While they hold, the sum is every byte written. When
+// they move between the questions of one try, it asks again, and a try in
+// which they held is exact. When they move on every try, it takes the sum
+// with the later count, which is no less than the bytes written: a chunk is
+// then judged from no earlier than its first byte (a chunk the client did
+// not take is never teed). A question the socket cannot answer says so.
+func TestWrittenCountsEveryByteWrittenToTheClientsSocket(t *testing.T) {
+	t.Parallel()
+	const total = 1000
+	count := func(c *countedSocket) (uint64, bool) {
+		s := c.socket()
+		s.countAt(0)
+		return s.wrote, s.wroteOK
+	}
+	t.Run("acknowledgements hold: acknowledged and not, one try", func(t *testing.T) {
+		c := &countedSocket{total: total, acked: []uint64{400}}
+		if n, ok := count(c); n != total || !ok || c.asked != 3 {
+			t.Fatalf("written %d (ok %v) on %d questions, want %d on one try's 3", n, ok, c.asked, total)
+		}
+	})
+	t.Run("they move once, then hold: the try they held is exact", func(t *testing.T) {
+		// The first try: 400 acknowledged, 550 beyond the 450 acknowledged
+		// as SIOCOUTQ is asked, 500 acknowledged after: 1050, too many.
+		c := &countedSocket{total: total, acked: []uint64{400, 450, 500}}
+		if n, ok := count(c); n != total || !ok || c.asked != 6 {
+			t.Fatalf("written %d (ok %v) on %d questions, want %d on the second try", n, ok, c.asked, total)
+		}
+	})
+	t.Run("they move on every try: no fewer than were written", func(t *testing.T) {
+		acked := make([]uint64, 3*writtenTries)
+		for i := range acked {
+			acked[i] = uint64(10 * i)
+		}
+		c := &countedSocket{total: total, acked: acked}
+		n, ok := count(c)
+		if !ok || n < total || c.asked != 3*writtenTries {
+			t.Fatalf("written %d (ok %v) on %d questions, want no fewer than %d after %d tries", n, ok, c.asked, total, writtenTries)
+		}
+	})
+	t.Run("a question the socket cannot answer: it cannot say", func(t *testing.T) {
+		for _, failing := range []string{"TCP_INFO", "SIOCOUTQ"} {
+			s := (&countedSocket{total: total, acked: []uint64{400}}).socket()
+			if failing == "TCP_INFO" {
+				s.askInfo = func(uintptr, *unix.TCPInfo) bool { return false }
+			} else {
+				s.askUnsent = func(uintptr, *int32) bool { return false }
+			}
+			s.countAt(0)
+			if s.wroteOK {
+				t.Fatalf("%s failed: written says %d, want it to say it cannot say", failing, s.wrote)
+			}
+		}
+	})
+}
+
+// dialSmallWindow is a loopback client connection whose client end (app) has
+// a small receive buffer, so what the proxy's end writes to it fills it while
+// it does not read, and whose proxy's end (proxyClient) has a send buffer
+// that holds far more: the proxy's writes return while the client has
+// acknowledged little of them.
+func dialSmallWindow(t *testing.T) (app, proxyClient net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	accepted := make(chan net.Conn, 1)
+	go func() { c, _ := ln.Accept(); accepted <- c }()
+	d := net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, 2048) }); err != nil {
+			return err
+		}
+		return serr
+	}}
+	app, err = d.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxyClient = <-accepted; proxyClient == nil {
+		t.Fatal("accept failed")
+	}
+	t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close() })
+	if err := proxyClient.(*net.TCPConn).SetWriteBuffer(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	return app, proxyClient
+}
+
+// writtenTo is how many bytes were written to the socket under c in all, as
+// the test asks it, apart from the relay's own count: the bytes its peer
+// acknowledged (TCP_INFO) and those beyond (SIOCOUTQ), on a try in which the
+// acknowledgements did not move.
+func writtenTo(t *testing.T, c net.Conn) uint64 {
+	t.Helper()
+	rc, err := c.(syscall.Conn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n uint64
+	if err := rc.Control(func(fd uintptr) {
+		for try := 0; ; try++ {
+			if try == 1000 {
+				t.Error("the acknowledgements moved on each of 1000 tries")
+				return
+			}
+			before, ierr := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+			unsent, uerr := unix.IoctlGetInt(int(fd), unix.SIOCOUTQ)
+			after, aerr := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+			if ierr != nil || uerr != nil || aerr != nil {
+				t.Errorf("TCP_INFO: %v, %v; SIOCOUTQ: %v", ierr, aerr, uerr)
+				return
+			}
+			if before.Bytes_acked == after.Bytes_acked {
+				n = after.Bytes_acked + uint64(unsent)
+				return
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// On a real socket, written counts the bytes the client's stack has not
+// acknowledged yet as well as those it has: here most of what the proxy
+// wrote waits in its send queue while the client, its window full, reads
+// nothing.
+func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
+	t.Parallel()
+	_, proxyClient := dialSmallWindow(t)
+	s := clientSocketOf(proxyClient)
+	const n = 128 << 10
+	if _, err := proxyClient.Write(make([]byte, n)); err != nil {
+		t.Fatal(err)
+	}
+	if l := s.look(); l.acked >= n {
+		t.Fatalf("the client acknowledged %d of the %d bytes, want fewer: its window is small and it reads nothing", l.acked, n)
+	}
+	if got, ok := s.written(); !ok || got != n {
+		t.Fatalf("written %d (ok %v), want the %d bytes written", got, ok, n)
+	}
+}
+
+// A chunk written after the client's FIN, while the client has not yet
+// acknowledged all of the one before it, is judged from where it starts: after
+// every byte written before it, acknowledged or not. Here a half-closed client
+// with a small window reads part of a long answer and closes its socket with
+// the rest unread, and with a second answer behind it that it never read. The
+// client's acknowledgements of the first answer move on after the second is
+// written, and never reach the second. The part of the first answer the
+// client took is teed; the second answer is refused. A count of only the
+// acknowledged bytes judged the second answer from inside the first and, once
+// the client acknowledged more of the first, recorded the second.
+func TestAChunkBehindOneThatIsNotAcknowledgedYetIsJudgedFromItsOwnFirstByte(t *testing.T) {
+	t.Parallel()
+	first, second := strings.Repeat("1", 48<<10), strings.Repeat("2", 1<<10)
+	app, proxyClient := dialSmallWindow(t)
+	proxyServer, server := loopbackPair(t)
+	r := New(Config{Logger: zap.NewNop()}, proxyClient, connseq.NewUpstream(proxyServer))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	streams := make(chan string, 1)
+	go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+	if _, err := app.Write([]byte("req")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
+		t.Fatalf("the destination read %q, %v; want the request and the FIN", got, err)
+	}
+	writtenAll := func(want uint64, what string) {
+		t.Helper()
+		for limit := time.Now().Add(5 * time.Second); writtenTo(t, proxyClient) != want; {
+			if time.Now().After(limit) {
+				t.Fatalf("%s: the relay wrote %d bytes to the client in 5s, want %d", what, writtenTo(t, proxyClient), want)
+			}
+			time.Sleep(50 * time.Microsecond)
+		}
+	}
+	if _, err := server.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	writtenAll(uint64(len(first)), "the first answer")
+	if _, err := server.Write([]byte(second)); err != nil {
+		t.Fatal(err)
+	}
+	writtenAll(uint64(len(first)+len(second)), "the second answer")
+	// The client reads part of the first answer, until its stack has
+	// acknowledged more than it had once the second was written.
+	behind := bytesAcked(t, proxyClient)
+	if behind >= uint64(len(first)) {
+		t.Fatalf("the client acknowledged %d bytes before it read any, want fewer than the first answer's %d", behind, len(first))
+	}
+	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 512)
+	for read := 0; bytesAcked(t, proxyClient) <= behind; {
+		if read >= len(first)/2 {
+			t.Fatalf("the client read %d bytes and its stack acknowledged no more than %d", read, behind)
+		}
+		n, err := app.Read(buf)
+		if err != nil {
+			t.Fatalf("the client read: %v", err)
+		}
+		read += n
+	}
+	// It closes with bytes unread: a reset, with the second answer never
+	// acknowledged.
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the client closed with bytes unread")
+	if acked := bytesAcked(t, proxyClient); acked >= uint64(len(first)) {
+		t.Fatalf("the client acknowledged %d bytes, want fewer than the first answer's %d", acked, len(first))
+	}
+	_ = server.Close()
+	select {
+	case got := <-streams:
+		if got == "" || !strings.HasPrefix(first, got) {
+			t.Fatalf("the destination's stream carried %d bytes (the second answer's in it: %v), want a part of the first answer, which the client was reading", len(got), strings.Contains(got, "2"))
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the destination's stream did not end")
+	}
+	if chunks, bytes := r.NotTaken(); chunks == 0 || bytes < int64(len(second)) {
+		t.Fatalf("%d chunks (%d bytes) not taken, want the second answer's %d bytes among them", chunks, bytes, len(second))
+	}
+}
