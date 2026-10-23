@@ -116,8 +116,14 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		tok := rand.Text() // its own each run: a token ended stays ended
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
 		defer done()
-		for _, n := range []string{"test-1", "test-2"} {
-			svc.tc <- &models.TestCase{Name: n}
+		// Each in a stretch of its own, before every span another test
+		// recorded (newStretch): a test case with no window is left out by
+		// every span (WasMockOrphanedFor).
+		at := newStretch()
+		for i, n := range []string{"test-1", "test-2"} {
+			req := at.Add(time.Duration(i) * time.Millisecond)
+			svc.tc <- &models.TestCase{Name: n, HTTPReq: models.HTTPReq{Timestamp: req},
+				HTTPResp: models.HTTPResp{Timestamp: req.Add(time.Microsecond)}}
 		}
 		endRecordingStreams(tok)
 		_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))

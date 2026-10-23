@@ -632,7 +632,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if undecodable != nil {
 			// Leave out the test cases recorded over the exchange rather
 			// than save them without its mock (routes/record.go checks
-			// WasMockOrphanedInWindow).
+			// WasMockOrphanedFor).
 			if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
 				mgr.RecordOrphanWindow(reqTimestamp, resTimestamp)
 			}

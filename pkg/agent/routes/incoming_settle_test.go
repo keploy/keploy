@@ -932,10 +932,119 @@ func TestHandleIncoming_LeavesOutATestCaseOfARecordingThatEnded(t *testing.T) {
 		close(tcs)
 		return streamedNames(t, resp)
 	}
-	if got := session(tc("of-the-ended-recording", inFlightSince), tc("resolved-before-the-end", resolvedSince), tc("of-this-session", inFlightSince.Add(time.Millisecond))); len(got) != 1 || got[0] != "of-this-session" {
+	// A gRPC test case's request time is its GrpcReq's (TestCase.Window), its
+	// HTTP one zero.
+	grpcTC := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT,
+			GrpcReq: models.GrpcReq{Timestamp: at}, GrpcResp: models.GrpcResp{Timestamp: at.Add(time.Millisecond)}}
+	}
+	if got := session(tc("of-the-ended-recording", inFlightSince), tc("resolved-before-the-end", resolvedSince),
+		grpcTC("grpc-of-the-ended-recording", inFlightSince), tc("of-this-session", inFlightSince.Add(time.Millisecond))); len(got) != 1 || got[0] != "of-this-session" {
 		t.Fatalf("streamed %v, want only the test case of no request the last recording's stop found", got)
 	}
 	if got := session(tc("the-same-time-later", inFlightSince)); len(got) != 1 {
 		t.Fatalf("the session after it streamed %v: it still left out what the last recording's stop found", got)
+	}
+}
+
+// A scoped span of unrecorded traffic leaves out of the recording only the
+// test cases its scope names (by the process that served each), and those
+// whose serving process the capture could not tell; a test case another
+// process served is streamed though it overlaps the span, and so is one that
+// began after the span's back-dated end. The summary counts the test cases
+// each span's reason left out. No clock: the stream is read to its end, and
+// the summary once the handler has returned.
+func TestHandleIncoming_AScopedSpanLeavesOutOnlyTheTestCasesItsScopeNames(t *testing.T) {
+	at := newStretch() // its spans must not reach another test's test cases
+	const reason = "TLS of TGID 7 not decrypted"
+	end := syncmgr.Get().OpenScopedOrphanWindow(at, func(servedBy uint32, _ time.Time) bool { return servedBy == 7 }, reason)
+	end(at.Add(10 * time.Second)) // the loss ended then, learned of later
+
+	core, logs := observer.New(zap.DebugLevel)
+	tcs := make(chan *models.TestCase, 8)
+	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		a.HandleIncoming(w, r)
+	}))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	tc := func(name string, from time.Duration, servedBy uint32) *models.TestCase {
+		s := at.Add(from)
+		return &models.TestCase{Name: name, ServedBy: servedBy, HTTPReq: models.HTTPReq{Timestamp: s},
+			HTTPResp: models.HTTPResp{Timestamp: s.Add(time.Millisecond)}}
+	}
+	tcs <- tc("its-own", time.Second, 7)
+	tcs <- tc("another-process", 2*time.Second, 8)
+	tcs <- tc("no-server", 3*time.Second, 0)
+	tcs <- tc("after-its-end", 11*time.Second, 7)
+	close(tcs)
+
+	names := streamOf(t, resp)
+	var got []string
+	for name := range names {
+		got = append(got, name)
+	}
+	if want := []string{"another-process", "after-its-end"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("streamed %v, want %v", got, want)
+	}
+	<-done
+	sums := logs.FilterMessage("agent: recording complete").All()
+	if len(sums) != 1 {
+		t.Fatalf("%d recording-complete summaries, want 1", len(sums))
+	}
+	by, _ := sums[0].ContextMap()["tcs_left_out_by_scoped_reason"].(map[string]int)
+	if by[reason] != 2 {
+		t.Fatalf("the summary counts %v by reason, want %q: 2", sums[0].ContextMap()["tcs_left_out_by_scoped_reason"], reason)
+	}
+	left := logs.FilterMessageSnippet("TC suppressed").All()
+	if len(left) != 2 {
+		t.Fatalf("%d test cases said left out, want 2", len(left))
+	}
+	for _, e := range left {
+		rs, _ := e.ContextMap()["orphan_reasons"].([]interface{})
+		if len(rs) != 1 || rs[0] != reason {
+			t.Fatalf("a test case left out says reasons %v, want [%q]", e.ContextMap()["orphan_reasons"], reason)
+		}
+	}
+}
+
+// A gRPC test case is judged by its own window (its request's and response's
+// times; its HTTP ones are zero, which every span check took as no claim): one
+// inside a span of unrecorded traffic is left out as an HTTP one is, and one
+// outside it is streamed.
+func TestHandleIncoming_AGRPCTestCaseInsideASpanIsLeftOut(t *testing.T) {
+	at := newStretch() // its spans must not reach another test's test cases
+	syncmgr.Get().RecordOrphanWindow(at, at.Add(10*time.Second))
+	tcs := make(chan *models.TestCase, 4)
+	a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	grpc := func(name string, from time.Duration) *models.TestCase {
+		s := at.Add(from)
+		return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: s},
+			GrpcResp: models.GrpcResp{Timestamp: s.Add(time.Millisecond)}}
+	}
+	tcs <- grpc("grpc-inside", time.Second)
+	tcs <- grpc("grpc-after", 20*time.Second)
+	close(tcs)
+	var got []string
+	for name := range streamOf(t, resp) {
+		got = append(got, name)
+	}
+	if strings.Join(got, ",") != "grpc-after" {
+		t.Fatalf("streamed %v, want only [grpc-after]: a gRPC test case inside a span was saved without its mocks", got)
 	}
 }

@@ -148,3 +148,34 @@ func TestMakeAgentReady_NoReadinessFileOn503(t *testing.T) {
 		t.Fatalf("after CA ready: expected agent.ready on disk: %v", err)
 	}
 }
+
+// The session summary's tally of the reasons scoped spans left test cases out
+// for names the first reasonTallyMax reasons and counts every later one in
+// other, however many test cases each left out.
+func TestTheReasonTallyNamesItsFirstReasonsAndCountsTheRest(t *testing.T) {
+	var r reasonTally
+	if got := r.summary(); got == nil || len(got) != 0 {
+		t.Fatalf("an empty tally summarises as %v, want an empty map", got)
+	}
+	for i := 0; i < reasonTallyMax+3; i++ {
+		why := "reason " + strings.Repeat("x", i)
+		r.note(why)
+		r.note(why)
+	}
+	got := r.summary()
+	if len(got) != reasonTallyMax {
+		t.Fatalf("the tally names %d reasons, want %d", len(got), reasonTallyMax)
+	}
+	for why, n := range got {
+		if n != 2 {
+			t.Fatalf("the tally counts %d test cases for %q, want 2", n, why)
+		}
+	}
+	if r.other != 6 {
+		t.Fatalf("the tally counts %d test cases under other reasons, want 6 (3 reasons, 2 each)", r.other)
+	}
+	r.note("reason ") // a named one: still counted by name
+	if got := r.summary()["reason "]; got != 3 {
+		t.Fatalf("a named reason noted again counts %d, want 3", got)
+	}
+}

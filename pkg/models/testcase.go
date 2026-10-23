@@ -74,6 +74,16 @@ type TestCase struct {
 	// control plane. json/yaml/bson "-" so it never lands in stored test-case
 	// files or the upload body.
 	SourcePod string `json:"-" yaml:"-" bson:"-"`
+	// ServedBy is a transient, never-persisted tag: the process that served
+	// the test case's request, by its TGID in the initial PID namespace, as the
+	// capture numbers it; 0 when the capture cannot tell. The record route
+	// judges by it which of the scoped spans of unrecorded traffic can have
+	// stranded the test case (syncMock.WasMockOrphanedFor): a loss only some
+	// processes' test cases can need leaves the others in. Set from the
+	// capture context (conn.WithServedBy) by a capture that knows the
+	// connection's process; json/yaml/bson "-" keeps it out of stored files
+	// and uploads.
+	ServedBy uint32 `json:"-" yaml:"-" bson:"-"`
 	// SchemaKey is the canonical static-dedup fingerprint of this test case,
 	// stamped by the enterprise capture hook when cross-pod dedup is on. It
 	// rides only the agent→control-plane upload (JSON) so the recording owner
@@ -106,6 +116,22 @@ func (tc *TestCase) CompletedAt() time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// Window is when the test case's request came and its response went, as the
+// agent stamped them, by its kind: a gRPC test case's are its GrpcReq's and
+// GrpcResp's (its HTTP ones are zero), every other's its HTTPReq's and
+// HTTPResp's. The record route judges a test case's spans of unrecorded
+// traffic, and its hold the settling of its verdict, by this window, so a
+// gRPC test case is judged by its own times, never by zero ones.
+func (tc *TestCase) Window() (req, resp time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+	if tc.Kind == GRPC_EXPORT {
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
 }
 
 type NoiseParams struct {

@@ -192,8 +192,9 @@ func (h *TestCaseHold) EarliestStarts(fn func(namespace, pod string, start time.
 	earliest := make(map[podKey]time.Time, 1)
 	for _, e := range h.q {
 		k := podKey{e.Namespace, e.Pod}
-		if at, ok := earliest[k]; !ok || e.TC.HTTPReq.Timestamp.Before(at) {
-			earliest[k] = e.TC.HTTPReq.Timestamp
+		req, _ := e.TC.Window()
+		if at, ok := earliest[k]; !ok || req.Before(at) {
+			earliest[k] = req
 		}
 	}
 	for k, at := range earliest {
@@ -295,7 +296,8 @@ func (h *TestCaseHold) stalled(e *heldEntry, now time.Duration) time.Duration {
 	w, ok := h.w.(HeldProgressor)
 	var p uint64
 	if ok {
-		p = w.HeldProgress(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp)
+		req, resp := e.TC.Window()
+		p = w.HeldProgress(e.Namespace, e.Pod, req, resp)
 	}
 	if ok && (!e.counted || p != e.progress) {
 		if e.counted {
@@ -309,7 +311,7 @@ func (h *TestCaseHold) stalled(e *heldEntry, now time.Duration) time.Duration {
 // final reports whether e's verdict is final: settled, and past its fence
 // when the watermark has one (Fenced), which it opens the first time.
 func (h *TestCaseHold) final(e *heldEntry) bool {
-	if !h.w.Settled(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp) {
+	if req, resp := e.TC.Window(); !h.w.Settled(e.Namespace, e.Pod, req, resp) {
 		return false
 	}
 	f, ok := h.w.(Fenced)
@@ -329,7 +331,8 @@ func (h *TestCaseHold) heldBy(e *heldEntry) fmt.Stringer {
 	if !ok {
 		return nil
 	}
-	return x.HeldBy(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp, e.fence)
+	req, resp := e.TC.Window()
+	return x.HeldBy(e.Namespace, e.Pod, req, resp, e.fence)
 }
 
 // testCaseSize is about how many bytes a test case holds.

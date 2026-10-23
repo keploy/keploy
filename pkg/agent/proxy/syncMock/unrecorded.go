@@ -104,8 +104,10 @@ type Spans struct {
 // joined it (into, on the joined one).
 type openSpan struct {
 	start time.Time
-	refs  int
-	into  *openSpan
+	// end is the latest end its closers gave (OpenUntil).
+	end  time.Time
+	refs int
+	into *openSpan
 }
 
 // spansKeepOnJoin is how many closed spans are left once the cap forces a join:
@@ -230,8 +232,20 @@ func joinNearest(spans []pressureRange, keep int) []pressureRange {
 // calling it leaves the span open, which is right for traffic that stays
 // unrecorded until the recording ends. A zero start is ignored (a no-op closer).
 func (s *Spans) Open(start time.Time) func() {
+	end := s.OpenUntil(start)
+	return func() { end(time.Time{}) }
+}
+
+// OpenUntil is Open whose closer ends the span at the end it is given (a zero
+// end is the time it runs, on the wall clock), clamped to the span's own
+// start: the caller may know when the traffic stopped better than when it
+// learns of it. An end later than the closer's call is kept: the caller's
+// clock, the test cases', can be ahead of a wall clock stepped back since, and
+// a later end leaves out more, never fewer. A span joined past the cap ends at
+// the latest end its closers give, each clamped to its own start.
+func (s *Spans) OpenUntil(start time.Time) func(end time.Time) {
 	if s == nil || start.IsZero() {
-		return func() {}
+		return func(time.Time) {}
 	}
 	start = wallTime(start)
 	r := &openSpan{start: start, refs: 1}
@@ -257,13 +271,23 @@ func (s *Spans) Open(start time.Time) func() {
 	s.mu.Unlock()
 
 	var once sync.Once
-	return func() {
+	return func(end time.Time) {
 		once.Do(func() {
+			if end.IsZero() {
+				end = time.Now()
+			}
+			end = wallTime(end)
+			if end.Before(start) {
+				end = start // this closer's own start, not a joined host's
+			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			root := r
 			if r.into != nil {
 				root = r.into
+			}
+			if end.After(root.end) {
+				root.end = end
 			}
 			if root.refs--; root.refs > 0 {
 				return
@@ -276,7 +300,7 @@ func (s *Spans) Open(start time.Time) func() {
 					break
 				}
 			}
-			s.addClosedLocked(root.start, time.Now())
+			s.addClosedLocked(root.start, root.end)
 		})
 	}
 }
@@ -306,6 +330,30 @@ func (s *Spans) Overlaps(start, end time.Time) (bool, int) {
 	now := wallTime(time.Now())
 	for _, r := range s.open { // still open: to now
 		if !r.start.After(end) && !now.Before(start) {
+			count++
+		}
+	}
+	return count > 0, count
+}
+
+// overlapsFromStart is Overlaps for a test case's window judged against spans
+// of unrecorded traffic (WasMockOrphanedFor): an open span covers every time
+// from its start, not only to the wall clock's now, which a step of the wall
+// clock can put before a test case the capture stamped on its own clock.
+func (s *Spans) overlapsFromStart(start, end time.Time) (bool, int) {
+	if s == nil || start.IsZero() || end.IsZero() {
+		return false, 0
+	}
+	start, end = wallTime(start), wallTime(end)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	i := sort.Search(len(s.closed), func(k int) bool { return !s.closed[k].end.Before(start) })
+	for ; i < len(s.closed) && !s.closed[i].start.After(end); i++ {
+		count++
+	}
+	for _, r := range s.open {
+		if !r.start.After(end) {
 			count++
 		}
 	}

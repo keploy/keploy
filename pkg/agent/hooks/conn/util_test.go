@@ -560,3 +560,54 @@ func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T)
 		})
 	}
 }
+
+// The process that serves a connection, carried on its capture context
+// (WithServedBy), is stamped on each test case built from it, HTTP and gRPC,
+// and is 0 where nothing carried one: the record route judges a scoped span
+// of unrecorded traffic by it (TestCase.ServedBy), and takes 0 as stranded by
+// every span.
+func TestCaptureStampsTheServingProcessFromItsContext(t *testing.T) {
+	ctx := WithServedBy(context.Background(), 4242)
+	if got := ServedByFromContext(ctx); got != 4242 {
+		t.Fatalf("ServedByFromContext = %d, want 4242", got)
+	}
+	if got := ServedByFromContext(context.Background()); got != 0 {
+		t.Fatalf("ServedByFromContext of a context that carries none = %d, want 0", got)
+	}
+	capture := func(ctx context.Context) *models.TestCase {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, "http://localhost:8080/x", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: &trackCloser{Reader: bytes.NewReader(nil)}}
+		tcs := make(chan *models.TestCase, 1)
+		Capture(ctx, zap.NewNop(), tcs, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, true, false, 8080)
+		select {
+		case tc := <-tcs:
+			return tc
+		default:
+			t.Fatal("Capture built no test case")
+			return nil
+		}
+	}
+	if tc := capture(ctx); tc.ServedBy != 4242 {
+		t.Fatalf("an HTTP test case's ServedBy = %d, want 4242", tc.ServedBy)
+	}
+	if tc := capture(context.Background()); tc.ServedBy != 0 {
+		t.Fatalf("an HTTP test case built with no serving process has ServedBy %d, want 0", tc.ServedBy)
+	}
+	origHook := GRPCCaptureHook
+	defer func() { GRPCCaptureHook = origHook }()
+	GRPCCaptureHook = nil
+	tcs := make(chan *models.TestCase, 1)
+	CaptureGRPC(ctx, zap.NewNop(), tcs, &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}, 9090, false, false)
+	select {
+	case tc := <-tcs:
+		if tc.ServedBy != 4242 {
+			t.Fatalf("a gRPC test case's ServedBy = %d, want 4242", tc.ServedBy)
+		}
+	default:
+		t.Fatal("CaptureGRPC built no test case")
+	}
+}
