@@ -52,6 +52,16 @@ type Seen struct {
 	// in: AnswerStamp, instants.go rule 3), which no value came from. Its
 	// words are searched for nothing; the echo reads it as it stands.
 	Stamp bool
+	// Undeclared: the leaf is a test case's request body, or a leaf of it,
+	// one side of which declares no media type (no Content-Type) and is
+	// read as text by its bytes (plainText, GivenRequest); both sides are
+	// then searched so, the declared one too. Bytes that frame its
+	// words (a protobuf's tag and length) may be printable and glued to a
+	// word ("BAs17"), and keploy cannot tell them from the words: a word of
+	// what changed found in it glued to the bytes around it is refused
+	// (unaccounted), as one found there as a word is, never learned as
+	// noise. A body that declares a text media type is read by its words.
+	Undeclared bool
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,

@@ -1119,5 +1119,59 @@ func TestARequestBodyOfNoDeclaredTypeIsReadWhereItsBytesAreText(t *testing.T) {
 	}
 }
 
+// A request body that declares no media type, read as text by its bytes,
+// may still be a protobuf whose tags and lengths are printable ("BA", field
+// 8 of length 65, before "s17"): a word of what changed that it holds glued
+// to the bytes around it is refused, the reason naming the body as one that
+// declares no media type, never learned as noise, as the same bytes declared
+// application/x-protobuf are refused too. A body declared text is read by
+// its words, a glued word no word of it; the base64 a binary part keeps
+// frames no words; and a value the body does not hold is noise.
+func TestAWordGluedInARequestBodyOfNoDeclaredTypeIsRefused(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
+	const p = "body.slot"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	request := func(ct, part, body string) []Earlier {
+		parts := []models.TestRequestPart{{Name: part, Recorded: body, Sent: body}}
+		if ct != "" {
+			// "recorded|sent" where the sides declare apart.
+			rec, sent, apart := strings.Cut(ct, "|")
+			if !apart {
+				sent = rec
+			}
+			parts = append(parts, models.TestRequestPart{Name: "header.Content-Type", Recorded: rec, Sent: sent})
+		}
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: parts})}
+	}
+	v17, v18 := "s17"+strings.Repeat("x", 62), "s18"+strings.Repeat("x", 62)
+	framed := "BA" + v17 + "BA" + v18
+	const glued = "glued to the bytes around it, in a body that declares no media type (no Content-Type)"
+	for _, row := range []struct {
+		name, ct, part, body, rec, live string
+		kind                            Kind
+		why                             string
+	}{
+		{"a word glued to printable framing", "", "body", framed, "s17", "s18", KindUnaccounted, "in test case test-1 at body, " + glued},
+		{"a whole field glued to printable framing", "", "body", framed, v17, v18, KindUnaccounted, "in test case test-1 at body, " + glued},
+		{"an id's word glued to printable framing", "", "body", "BAa3f1c2d4-1111-2222-3333-444455556666" + strings.Repeat("y", 29),
+			"a3f1c2d4-1111-2222-3333-444455556666", "b3f1c2d4-1111-2222-3333-444455556666", KindUnaccounted, "in test case test-1 at body, " + glued},
+		{"its bytes as base64", "", "binary", base64.StdEncoding.EncodeToString([]byte(framed)), "s17", "s18", KindUnaccounted, "in test case test-1 at binary{text}, " + glued},
+		{"a JSON leaf's word glued", "", "body", `{"slot":"BAs17"}`, "s17", "s18", KindUnaccounted, "in test case test-1 at body.slot, " + glued},
+		{"the same bytes declared a protobuf", "application/x-protobuf", "body", framed, "s17", "s18", KindUnaccounted, mediaUnread("application/x-protobuf")},
+		{"recorded declared text, sent declaring none", "text/plain|", "body", framed, "s17", "s18", KindUnaccounted, "in test case test-1 at body, " + glued},
+		{"the same bytes declared text", "text/plain", "body", framed, "s17", "s18", KindNoise, ""},
+		{"a value it does not hold", "", "body", framed, "n-5f2a91", "n-77c0d3", KindNoise, ""},
+		{"a word of the base64 only", "", "binary", base64.StdEncoding.EncodeToString([]byte("text here")), "dGV4", "dGV5", KindNoise, ""},
+	} {
+		req := request(row.ct, row.part, row.body)
+		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(row.live), shape(row.rec), at, req, nil, nil, nil)[0]
+		if ln.Kind != row.kind || !strings.Contains(ln.Why, row.why) {
+			t.Errorf("%s: %s (%s); want %s naming %q", row.name, ln.Kind, ln.Why, row.kind, row.why)
+		}
+	}
+}
+
 // jsonType is a test case's request's Content-Type part declaring JSON.
 var jsonType = models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}

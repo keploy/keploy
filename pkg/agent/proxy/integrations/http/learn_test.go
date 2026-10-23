@@ -3701,6 +3701,46 @@ func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
 	}
 }
 
+// On the HTTP learn step, a test case's request whose body declares no media
+// type, read as text by its bytes, refuses a call's value that changed and
+// that it holds glued to the bytes around it (a protobuf's printable tag and
+// length before it, "BA"), naming the body as one that declares no media
+// type: keploy cannot tell such framing from words. The same bytes declared
+// text are read by their words, which hold no word of the value: noise.
+func TestLearnMatchRefusesAWordGluedInARequestBodyOfNoDeclaredType(t *testing.T) {
+	h, n, opts := learnOn(t)
+	call := live("POST", "/v1/nonce", `{"nonce":"n-77c0d3"}`, nil)
+	body := "BAn-5f2a91" + strings.Repeat("x", 55)
+	for _, row := range []struct {
+		name, ct, want string
+	}{
+		{"declaring no media type", "", "in test case test-2 at body, glued to the bytes around it, in a body that declares no media type (no Content-Type)"},
+		{"declared text", "text/plain", "served mock-0"},
+	} {
+		parts := []models.TestRequestPart{{Name: "body", Recorded: body, Sent: body}}
+		if row.ct != "" {
+			parts = append(parts, models.TestRequestPart{Name: "header.Content-Type", Recorded: row.ct, Sent: row.ct})
+		}
+		tr := learn.NewTracker()
+		tr.BeginAwaiting()
+		tr.Give(learn.GivenRequest(&models.TestRequest{Test: "test-2", Parts: parts}))
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}}
+		served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts)
+		got := ""
+		switch {
+		case err != nil:
+			got = "error " + err.Error()
+		case miss != nil:
+			got = "miss " + miss.res.Why
+		case served != nil:
+			got = "served " + served.Name
+		}
+		if !strings.Contains(got, row.want) {
+			t.Errorf("%s: %s; want %q", row.name, got, row.want)
+		}
+	}
+}
+
 // An exchange served leaf by leaf carries its recording's payload
 // (learn.Earlier.Payload), its answer read, for the learn step's offset rule.
 func TestAnExchangeServedLeafByLeafCarriesItsPayload(t *testing.T) {

@@ -769,7 +769,11 @@ func nonASCIIRuns(s string) []string {
 // reading: ids it holds in another order, or once more, are words of what
 // changed too; a word at its own place on both sides is not. keploy cannot
 // tell whether such a word came from there, and refuses rather than learn
-// it as noise.
+// it as noise. In a test case's request body that declares no media type,
+// read as text by its bytes (Seen.Undeclared), such a word glued to the
+// bytes around it ("s17" of "BAs17") is refused too: keploy cannot tell a
+// protobuf's printable tag and length from a word, and never reads such a
+// body more loosely than the same bytes declared, which it cannot read.
 //
 // And an instant of what changed whose moment F saw is one an earlier place
 // holds (echoedIn: a pick from served data, by the clock), while no earlier
@@ -830,6 +834,9 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
 					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
 				}
+				if s.Undeclared && gluedIn(ed, t, recorded) {
+					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
+				}
 			}
 		}
 		for _, x := range raw {
@@ -874,6 +881,22 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		}
 	}
 	return ""
+}
+
+// gluedIn reports whether a declared form of a place's value (ed), as
+// recorded or as it stands now, holds t anywhere: inside a longer word too,
+// glued to the bytes around it.
+func gluedIn(ed *valueDrift, t string, recorded bool) bool {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	for _, f := range ed.forms {
+		if strings.Contains(f[side], t) {
+			return true
+		}
+	}
+	return false
 }
 
 // pickUnaccounted is why a drifted value whose moment in record's full round

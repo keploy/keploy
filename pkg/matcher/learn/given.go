@@ -83,8 +83,10 @@ const strayRequest = "the test case's request reached the agent while no test wa
 // leaves: whether a declared body is text is read from what the request
 // declares, never from the look of its bytes. A body that declares no media
 // type (no Content-Type) is read as text where its bytes are text
-// (plainText); one whose bytes are not is a place that could not be read
-// (undeclaredUnread).
+// (plainText), its leaves marked so (Seen.Undeclared): a word of what
+// changed glued in it to the bytes around it is refused, as keploy cannot
+// tell printable framing bytes from words; one whose bytes are not text is
+// a place that could not be read (undeclaredUnread).
 func GivenRequest(req *models.TestRequest) Earlier {
 	if req == nil {
 		return Earlier{Mock: givenPlace(""), Given: true, Unread: unsentRequest}
@@ -124,6 +126,7 @@ func GivenRequest(req *models.TestRequest) Earlier {
 				return Earlier{Mock: e.Mock, Given: true, Unread: why}
 			}
 		}
+		from := len(e.Seen)
 		switch {
 		case part.Name == "url":
 			if leaves, rn, sn, ok := urlSeen(part.Recorded, part.Sent); ok {
@@ -154,6 +157,16 @@ func GivenRequest(req *models.TestRequest) Earlier {
 			}
 		}
 		e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: part.Name, Noise: part.Name, Type: String, Value: part.Recorded}, Live: part.Sent})
+		if undeclaredBody(part, recMedia, sentMedia) {
+			// Read as text by its bytes: a word glued to the bytes around
+			// it is refused too (Seen.Undeclared). Not the base64 a binary
+			// part keeps, whose letters frame no words.
+			for k := from; k < len(e.Seen); k++ {
+				if e.Seen[k].Leaf.Path != "binary" {
+					e.Seen[k].Undeclared = true
+				}
+			}
+		}
 		if n, ok := paramName(part.Name); ok {
 			name(n, part.Recorded, part.Sent)
 		}
@@ -265,6 +278,16 @@ func bodyUnread(part, value, media string) string {
 		return ""
 	}
 	return undeclaredUnread
+}
+
+// undeclaredBody reports whether part is a body ("body", or "binary" once
+// decoded) that one of its sides, holding one, reads as text by its bytes
+// (plainText): that side declares no media type (no Content-Type).
+func undeclaredBody(part models.TestRequestPart, recMedia, sentMedia string) bool {
+	if part.Name != "body" && part.Name != "binary" {
+		return false
+	}
+	return part.Recorded != "" && recMedia == "" || part.Sent != "" && sentMedia == ""
 }
 
 // plainText reports whether s, a body that declares no media type, is text
