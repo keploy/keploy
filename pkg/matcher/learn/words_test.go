@@ -437,6 +437,10 @@ func TestWhatStandsBesideAClockReadIsLearned(t *testing.T) {
 		{"an instant after a backslash", `x\` + wAt.Format(time.RFC3339), `x\` + later.Format(time.RFC3339), "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ"},
 		{"a UUID that reads as no instant", "id 00000000-0000-7000-8000-00000000000a x", "id 00000000-0000-7000-8000-00000000000b x", "s1r4"},
 		{"a UUID glued to a word that did not change", "idX" + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref=a1", "idX" + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref=b2", "s2r0"},
+		// An instant other than a UUID's is a clock read, which carries no piece: a
+		// word that changed as its digits did is learned beside it.
+		{"a word that changed as an instant's digits did", "at " + wAt.Format(time.RFC3339) + " n 28", "at " + later.Format(time.RFC3339) + " n 29", "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ s3r0"},
+		{"a word that changed as an instant's digits did, before it", "n 28 at " + wAt.Format(time.RFC3339), "n 29 at " + later.Format(time.RFC3339), "s1r0 s3i:iso8601:d4-d2-d2Td2:d2:d2FZ"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := slotsOf(learnedWords(t, tc.rec, tc.f)); got != tc.slots {
