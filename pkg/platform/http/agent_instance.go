@@ -172,11 +172,12 @@ func (a *AgentClient) WatchAgentInstance() models.AgentInstanceWatch {
 // AgentStartedBeforeApp reports whether the agent process instance
 // (models.AgentInstanceHeader) is one docker compose's bring-up retry started
 // in place of keploy's agent while the application's container had never
-// started, and this client set up again (setUpRestartedAgent): the
-// application ran against none of the process it replaced, so what this one
-// counts is all of the application's run. False for any other process, an
-// agent docker or kubelet started again under a running application
-// included, and for "" (an answer that names none).
+// started, and this client went on to set up again once it answered
+// (setUpRestartedAgent), whether or not that setup took: the application ran
+// against none of the process it replaced, so what this one counts is all of
+// the application's run. False for any other process, an agent docker or
+// kubelet started again under a running application included, and for ""
+// (an answer that names none).
 func (a *AgentClient) AgentStartedBeforeApp(instance string) bool {
 	return instancesAt(agentHost(a.conf.Agent.AgentURI)).wasStartedBeforeApp(instance)
 }

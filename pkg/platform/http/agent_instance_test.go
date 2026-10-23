@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,6 +244,55 @@ func TestARestartedAgentSetUpAgainIsTheOneAWatchKeepsTo(t *testing.T) {
 		t.Fatalf("replacement %+v (%v), want b, then c", rep, replaced)
 	}
 	for _, instance := range []string{"a", "c", ""} {
+		if client.AgentStartedBeforeApp(instance) {
+			t.Fatalf("agent process %q is noted as started by the retry before the app ran", instance)
+		}
+	}
+	client.session().end()
+}
+
+// The agent docker compose started again in its bring-up's retry is noted as
+// started before the app ran as soon as it answers, whether or not its setup
+// after takes: the app ran against none of the agent it replaced either way.
+// Here the setup fails at its last step (the agent latched a CA setup failure
+// and refuses to release the app). Were the agent noted only once its setup
+// took, the replay would take it for one started again under the running app
+// (its stored-mocks check finds no mocks held and stores them again): every
+// test charged the agent started again, the set left without a verdict.
+func TestARestartedAgentIsTheRetrysWhetherOrNotItsSetUpTakes(t *testing.T) {
+	client, agent := newRestartingClient(t, true)
+	t.Cleanup(func() { instances.Delete(agentHost(client.conf.Agent.AgentURI)) })
+	agent.mu.Lock()
+	agent.instance = "a"
+	agent.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	grp, gctx := errgroup.WithContext(ctx)
+	gctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+
+	outgoing, err := client.GetOutgoing(gctx, models.OutgoingOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MakeAgentReadyForDockerCompose(gctx); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := recv(t, outgoing); m == nil || m.Name != "mock-1" {
+		t.Fatalf("first mock: %+v", m)
+	}
+
+	agent.mu.Lock()
+	agent.instance = "b" // compose started the agent again
+	agent.refuse["/agent/agent/ready"] = 2
+	agent.mu.Unlock()
+	err = client.setUpRestartedAgent(gctx)
+	if err == nil || !strings.Contains(err.Error(), agentCASetupFailed) {
+		t.Fatalf("setting the restarted agent up: %v; want it refused at the agent's readiness (%s)", err, agentCASetupFailed)
+	}
+	if !client.AgentStartedBeforeApp("b") {
+		t.Fatal("the agent the retry started again is not noted as started before the app ran once its setup failed")
+	}
+	for _, instance := range []string{"a", ""} {
 		if client.AgentStartedBeforeApp(instance) {
 			t.Fatalf("agent process %q is noted as started by the retry before the app ran", instance)
 		}

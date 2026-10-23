@@ -426,6 +426,50 @@ func TestAgentStartedBeforeApp_LeavesBasesReadFromTheRetrysReplacementAsTheyAre(
 	}
 }
 
+// Under the proven switch, the log that says the compose bring-up retry's
+// replacement is counted from its start names the agent it replaced from the
+// set's bases when the set's mark does not name it: the mark's read failed
+// (it names no agent), or the mark was read from the replacement while the
+// application's and the run's bases were read from the agent before it. The
+// set is counted from the replacement's start either way.
+func TestAgentStartedBeforeApp_NamesTheAgentReplacedFromTheBasesWhenTheMarkDoesNot(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}
+	a1 := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 7"}}
+	for _, tc := range []struct {
+		name string
+		mark captureLossMark
+	}{
+		{"the set's mark read failed", captureLossMark{err: errors.New("the agent did not answer")}},
+		{"the set's mark read from the replacement", captureLossMark{at: lost, known: true, agent: "b2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", losses: lost, beforeApp: "b2"}
+			r := newRearmReplayer(f.rearmInstr)
+			r.instrumentation = f
+			core, logs := observer.New(zapcore.InfoLevel)
+			r.logger = zap.New(core)
+			r.lossMark, r.lossMarked = tc.mark, true
+			r.lossAppBase, r.lossRunStart, r.lossRunBase = a1, a1, a1
+			r.lossAgent, r.lossBasesAgent = "a1", "a1"
+			r.agentStartedBeforeApp(context.Background(), nil)
+			said := logs.FilterMessageSnippet("bring-up retry before the application ever ran").
+				FilterField(zap.String("agent replaced", "a1")).FilterField(zap.String("agent", "b2"))
+			if said.Len() != 1 {
+				t.Fatalf("%d of %d logs say the retry's agent b2 counts from its start, naming a1 as the agent it replaced; want 1: %+v",
+					said.Len(), logs.Len(), logs.AllUntimed())
+			}
+			charged, err := r.testCaptureLosses(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(charged, lost) {
+				t.Fatalf("the first test is charged %+v; want %+v, all b2 lost from its start", charged, lost)
+			}
+		})
+	}
+}
+
 // replacedAtCheckInstr is a compose stack kept across sets (composeInstr)
 // whose agent names itself in its capture-loss reads, as the keploy agent
 // client's do. Its counts become lost from the read numbered lossAt (from 1)
