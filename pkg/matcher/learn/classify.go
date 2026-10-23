@@ -115,11 +115,14 @@ type Place struct {
 	Run bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
-	// Glued: the value was found inside the leaf's by the glued test (B1)
-	// alone, a changed piece of one inside a changed piece of the other: what
-	// names the rule that refuses it (models.RefusedContainment). Never with
-	// Whole.
+	// Glued: the value was found inside the leaf's by the glued test alone,
+	// a changed piece of one inside a changed piece of the other: what names
+	// the rule that refuses it (models.RefusedContainment). Never with Whole.
 	Glued bool
+	// Chance: Glued, and each changed piece the glued test found inside
+	// another stands inside a time-ordered UUID's, where a word may stand by
+	// chance among its random digits (learn.UUIDChance says so for a person).
+	Chance bool
 	// Window is when the mock's call made its clock reads (Earlier.Window);
 	// nil: by the lead alone.
 	Window *Window
@@ -650,7 +653,7 @@ type valueDrift struct {
 	wholes map[string]bool
 	// wpieces are the changed pieces of its words (wordPieces), as it stands
 	// and decoded: what the glued test reads (gluedPieces).
-	wpieces []run
+	wpieces []wpiece
 	// words and wordsWhy are what record's full round learns of its words
 	// (learnWords), read once (DriftCache.Words).
 	wordsOnce sync.Once
@@ -1045,28 +1048,30 @@ var (
 // minute share their time group). Every other shared changed word is a value
 // that flowed.
 func sources(e, v *valueDrift) (found, whole bool) {
-	found, whole, _ = sourcesBy(e, v)
+	found, whole, _, _ = sourcesBy(e, v)
 	return found, whole
 }
 
-// sourcesBy is sources, and whether the glued test (B1) alone found the two
-// tied (glued): no other test of sources does. It names the rule that ties
-// them (models.RefusedContainment when glued), and decides nothing more.
-func sourcesBy(e, v *valueDrift) (found, whole, glued bool) {
+// sourcesBy is sources, and whether the glued test alone found the two tied
+// (glued): no other test of sources does; and of a glue, whether each
+// changed piece it found inside another stands inside a time-ordered UUID's
+// (chance: glueOf). It names the rule that ties them
+// (models.RefusedContainment when glued), and decides nothing more.
+func sourcesBy(e, v *valueDrift) (found, whole, glued, chance bool) {
 	if e.rec == v.rec {
-		return true, true, false
+		return true, true, false, false
 	}
 	// The same value whole in another reading (decoded, a base64 run's
 	// text): it flowed, and cannot be bound there.
 	for w := range v.wholes {
 		if e.wholes[w] {
-			return true, false, false
+			return true, false, false, false
 		}
 	}
 	// A whole clock read standing whole in the other's base64 text (a
 	// JWT's iat): a whole repeated value, as in a payload.
 	if e.clock.whole && v.b64Holds(e) || v.clock.whole && e.b64Holds(v) {
-		return true, false, false
+		return true, false, false, false
 	}
 	for i := range readings {
 		lost, gained := false, false
@@ -1083,7 +1088,7 @@ func sourcesBy(e, v *valueDrift) (found, whole, glued bool) {
 			}
 		}
 		if lost && gained {
-			return true, false, false
+			return true, false, false, false
 		}
 	}
 	drifted := func(p run, rec, live string) bool {
@@ -1091,26 +1096,31 @@ func sourcesBy(e, v *valueDrift) (found, whole, glued bool) {
 	}
 	for _, p := range v.pieces {
 		if !isClock(p, v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
-			return true, false, false
+			return true, false, false, false
 		}
 	}
 	for _, p := range e.pieces {
 		if !isClock(p, e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
-			return true, false, false
+			return true, false, false, false
 		}
 	}
-	// Glued (B1): a changed piece of one lies inside a changed piece of the
+	// Glued: a changed piece of one lies inside a changed piece of the
 	// other, class-bounded, at one offset recorded and live, from the
 	// container's start or its end ("INV1042" and "ORD1042", "ORD123" and
-	// "123", "p12x1042" and "1042"). Collapsed clock reads are no pieces.
+	// "123", "p12x1042" and "1042"). Collapsed clock reads other than UUIDs
+	// are no pieces. Chance holds while every glue found is inside a UUID's.
+	chance = true
 	for _, a := range v.wpieces {
 		for _, b := range e.wpieces {
-			if gluedPieces(a, b) {
-				return true, false, true
+			if g, c := glueOf(a, b); g {
+				glued, chance = true, chance && c
 			}
 		}
 	}
-	return false, false, false
+	if glued {
+		return true, false, true, chance
+	}
+	return false, false, false, false
 }
 
 // appeared is the earlier place of the test's recording the drifted value
@@ -1140,7 +1150,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			if s.Live == s.Leaf.Value {
 				continue
 			}
-			ok, whole, glued := sourcesBy(dc.of(s.Leaf.Value, s.Live), v)
+			ok, whole, glued, chance := sourcesBy(dc.of(s.Leaf.Value, s.Live), v)
 			if !ok {
 				continue
 			}
@@ -1160,7 +1170,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 			if r < rank {
 				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name, Glued: glued, Window: e.Window}, r
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name, Glued: glued, Chance: glued && chance, Window: e.Window}, r
 			}
 			if rank == 0 {
 				return best, true

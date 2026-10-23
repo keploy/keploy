@@ -389,11 +389,12 @@ const (
 	whyInstant    = "a word of it that changed is part of an instant that did not move as F's clock moves it, and keploy would hold the rest of that instant as recorded, which a later run's clock changes"
 	whyZone       = "a word of it that changed is part of an instant written in another zone than when it was recorded, which F's clock does not account for"
 	whyGluedUUID  = "a time-ordered UUID in it that changed is glued to a letter or digit"
-	whyVariant    = "a time-ordered UUID in it has a variant keploy does not read (N18)"
+	whyVariant    = "a time-ordered UUID in it was recorded with a variant keploy does not read"
 	whyUUIDCase   = "a time-ordered UUID in it mixes upper and lower case"
 	whySkeleton   = "an instant in it is written otherwise than when it was recorded (another layout of its digits, names or zone), which F's clock does not account for"
 	whyRepeat     = "the same changed word repeats in it"
 	whyGlued      = "a word of it that changed is glued inside another word of it that changed"
+	whyChance     = "a word of it that changed stands inside a time-ordered UUID of it that changed, at one place recorded and live: " + UUIDChance
 	whySame       = "it did not change"
 )
 
@@ -592,8 +593,11 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 	// Between the slots of the value: a changed word that repeats (the same
 	// word recorded, or live, at two of its slots), and one whose changed
 	// piece is glued inside another's. Two instants other than UUIDs are
-	// clock reads, which may repeat (N2) and carry no piece; a UUID repeats,
-	// and holds a piece, as any word does.
+	// clock reads, which may repeat (they are never held equal) and carry no
+	// piece; a UUID repeats, and holds a piece, as any word does. A glue
+	// that may be chance is said only when no pair of its slots refuses the
+	// value for certain.
+	chance := false
 	for i := range spans {
 		for j := i + 1; j < len(spans); j++ {
 			a, b := spans[i], spans[j]
@@ -604,15 +608,30 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 				return whyRepeat
 			}
 			// A UUID's random part is no clock's: a word glued inside it
-			// carries it (a short id cut from the UUID).
+			// carries it (a short id cut from the UUID), or stands there by
+			// chance, which keploy cannot tell apart: the reason says both.
 			pa, oka := changedPiece(a.recText(rec), a.liveText(live))
 			pb, okb := changedPiece(b.recText(rec), b.liveText(live))
-			if oka && okb && gluedPieces(pa, pb) {
-				return whyGlued
+			if !oka || !okb {
+				continue
+			}
+			if glued, maybe := glueOf(wpiece{pa, isUUID(a)}, wpiece{pb, isUUID(b)}); glued {
+				if !maybe {
+					return whyGlued
+				}
+				chance = true
 			}
 		}
 	}
+	if chance {
+		return whyChance
+	}
 	return ""
+}
+
+// isUUID reports whether a slot is a time-ordered UUID's instant.
+func isUUID(c changedSpan) bool {
+	return c.kind == models.WordSlotInstant && c.lay == uuidLayout
 }
 
 // clockOnly reports whether a slot is an instant other than a UUID's: a
@@ -762,6 +781,30 @@ func pieceIn(c, p run) bool {
 // "1042").
 func gluedPieces(a, b run) bool { return pieceIn(a, b) || pieceIn(b, a) }
 
+// wpiece is a changed piece of a drifted value's words (changedPiece), and
+// whether it is a time-ordered UUID's.
+type wpiece struct {
+	run
+	uuid bool
+}
+
+// glueOf says how two changed pieces stand: glued when either lies inside
+// the other (gluedPieces), and chance when each that holds the other is a
+// time-ordered UUID's. A UUID's random digits hold a short word now and then
+// by chance at one place recorded and live: over 20,000 seeded UUIDv7s
+// each, beside a word of one letter that changed about 1.6% of them, of one
+// digit 0.3%, of two digits 0.01%. keploy cannot tell that from a word cut
+// from the UUID, so such a glue is refused as any other, and its reason
+// says it may be chance (UUIDChance).
+func glueOf(a, b wpiece) (glued, chance bool) {
+	bInA, aInB := pieceIn(a.run, b.run), pieceIn(b.run, a.run)
+	return bInA || aInB, (!bInA || a.uuid) && (!aInB || b.uuid)
+}
+
+// UUIDChance says, for a person, why a glue inside a time-ordered UUID
+// (TieChance, Place.Chance) may be no flow at all.
+const UUIDChance = "it may be cut from the UUID, or stand there by chance among the UUID's random digits (a word of one or two characters does now and then), and keploy cannot tell which"
+
 // wordPieces are the changed pieces of a drifted value (rec, live; c, its
 // clock reads as it stands): of each run that changed in a segment whose
 // runs stand alike, of each other segment that changed whole, and of each
@@ -769,33 +812,33 @@ func gluedPieces(a, b run) bool { return pieceIn(a, b) || pieceIn(b, a) }
 // alike. Any other collapsed clock read is no piece: what drifted with F's
 // clock is no value that flowed. A UUID's random part is no clock's, so a
 // value glued inside it (a short id cut from it) carries it.
-func wordPieces(rec, live string, c clockSet) []run {
+func wordPieces(rec, live string, c clockSet) []wpiece {
 	tr, tf := tokens(rec, live, c)
-	var out []run
-	add := func(r, f string) {
+	var out []wpiece
+	add := func(r, f string, uuid bool) {
 		if p, ok := changedPiece(r, f); ok {
-			out = append(out, p)
+			out = append(out, wpiece{p, uuid})
 		}
 	}
 	if !sameParts(tr, tf) {
-		add(rec, live)
+		add(rec, live, false)
 		return out
 	}
 	for g, rs := range tr.segs {
 		if rs.inst >= 0 {
 			if rs.lay == uuidLayout {
-				add(tr.text(g), tf.text(g))
+				add(tr.text(g), tf.text(g), true)
 			}
 			continue
 		}
 		// (A segment that did not change gives no piece: each of its runs
 		// is unchanged.)
 		if !sameRunLayout(tr, tf, g) {
-			add(tr.text(g), tf.text(g))
+			add(tr.text(g), tf.text(g), false)
 			continue
 		}
 		for j := range rs.runs {
-			add(tr.runText(g, j), tf.runText(g, j))
+			add(tr.runText(g, j), tf.runText(g, j), false)
 		}
 	}
 	return out
@@ -1019,7 +1062,7 @@ func (dc *DriftCache) TieClass(a, b [2]string, w *Window) string {
 	if instantOnly(va.rec, va.live, va.clock) && instantOnly(vb.rec, vb.live, vb.clock) {
 		return ""
 	}
-	found, _, glued := sourcesBy(va, vb)
+	found, _, glued, _ := sourcesBy(va, vb)
 	switch {
 	case !found:
 		return ""
@@ -1027,6 +1070,19 @@ func (dc *DriftCache) TieClass(a, b [2]string, w *Window) string {
 		return models.RefusedContainment
 	}
 	return models.RefusedTie
+}
+
+// TieChance reports whether the tie TieOf finds between drifted values a and
+// b of one call is the glued test's alone, with each changed piece it finds
+// inside another standing inside a time-ordered UUID's (glueOf): a word that
+// may stand there by chance among the UUID's random digits, as UUIDChance
+// says for a person. It decides nothing: TieOf decides.
+func (dc *DriftCache) TieChance(a, b [2]string, w *Window) bool {
+	if dc == nil {
+		dc = NewDriftCache()
+	}
+	_, _, glued, chance := sourcesBy(dc.ofIn(a[0], a[1], w), dc.ofIn(b[0], b[1], w))
+	return glued && chance
 }
 
 // RefusalClass names the word-level rule behind a reason Words gives for a
@@ -1040,7 +1096,7 @@ func RefusalClass(why string) string {
 	switch why {
 	case whyRepeat:
 		return models.RefusedTie
-	case whyGlued:
+	case whyGlued, whyChance:
 		return models.RefusedContainment
 	}
 	return ""

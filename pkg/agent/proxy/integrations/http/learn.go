@@ -1201,12 +1201,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
 			case !from.Whole:
 				// Tied to the earlier place's value in part: a partial tie, or
-				// a changed piece glued inside it (B1).
+				// a changed piece glued inside it.
 				p.refused = models.RefusedTie
 				if from.Glued {
 					p.refused = models.RefusedContainment
 				}
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				if from.Chance {
+					why += ": " + learn.UUIDChance
+				}
+				return p, why
 			case from.Var == "":
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 			case !own || !from.Own:
@@ -1308,6 +1312,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	return p, ""
 }
 
+// chanceOf is what a partial tie's reason adds when the glued test alone tied
+// the two values, inside a time-ordered UUID (learn.DriftCache.TieChance):
+// that it may be chance.
+func chanceOf(dc *learn.DriftCache, a, b [2]string, w *learn.Window) string {
+	if dc.TieChance(a, b, w) {
+		return ": " + learn.UUIDChance
+	}
+	return ""
+}
+
 // tiePlaces reads the ties between the places learnPlan learned words at
 // (slots: noise, echoes, variables used here), and between each and the test
 // case's values (given), design r9 §2, the instant check first
@@ -1343,9 +1357,9 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 			// A value recorded equal to the key's, and another now, is a
 			// value of its own (two counters both at 1 when recorded are two
 			// values): no tie. One that carries the key's inside it is.
-			if dc.TieOf([2]string{g.Recorded, g.Value}, value(a), w) == learn.TiePartial {
-				p.refused = dc.TieClass([2]string{g.Recorded, g.Value}, value(a), w)
-				return a.l.Recorded.Path + " carries the test case's " + g.Name + " inside it, with more beside it that changed, which keploy cannot follow (N8)"
+			if gv := [2]string{g.Recorded, g.Value}; dc.TieOf(gv, value(a), w) == learn.TiePartial {
+				p.refused = dc.TieClass(gv, value(a), w)
+				return a.l.Recorded.Path + " carries the test case's " + g.Name + " inside it, with more beside it that changed, which keploy cannot follow" + chanceOf(dc, gv, value(a), w)
 			}
 		}
 		for j := i + 1; j < len(slots); j++ {
@@ -1355,7 +1369,7 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 				continue
 			case learn.TiePartial:
 				p.refused = dc.TieClass(value(a), value(b), w)
-				return a.l.Recorded.Path + " and " + b.l.Recorded.Path + " changed together, the one carried inside the other or glued to it, which keploy cannot follow as one value (N8)"
+				return a.l.Recorded.Path + " and " + b.l.Recorded.Path + " changed together, the one carried inside the other or glued to it, which keploy cannot follow as one value" + chanceOf(dc, value(a), value(b), w)
 			}
 			// One recorded value, whole, at both places: one value of the
 			// call when F saw one value at both (twins), two values that were

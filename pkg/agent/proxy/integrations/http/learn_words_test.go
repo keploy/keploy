@@ -545,6 +545,9 @@ func TestTheLearnPlansTies(t *testing.T) {
 		return h[:8] + "-" + h[8:12] + "-7" + r[:3] + "-a" + r[3:6] + "-" + r[6:18]
 	}
 	rv7, fv7 := v7(learnAt, "abc123456789abcdef"), v7(later, "def0123456789abcde")
+	// One letter of their last group, between digits, is "a" and then "b" at
+	// one place: a word "a" that changed to "b" stands inside them.
+	cr7, cf7 := v7(learnAt, "1234561234a5678901"), v7(later, "3216544321b5678902")
 	for _, tc := range []struct {
 		name     string
 		method   string
@@ -560,16 +563,21 @@ func TestTheLearnPlansTies(t *testing.T) {
 		// varName is the name of the one call-local variable learned.
 		varName string
 	}{
-		{name: "a partial tie", method: "POST", path: "/a", rec: `{"note":"ORD-123","id":"123"}`, f: `{"note":"ORD-456","id":"456"}`, refused: "(N8)", class: models.RefusedTie},
-		{name: "a piece glued to a word", method: "POST", path: "/a", rec: `{"note":"ORD123","id":"123"}`, f: `{"note":"ORD456","id":"456"}`, refused: "(N8)", class: models.RefusedContainment},
-		{name: "a piece in two places", method: "POST", path: "/a", rec: `{"inv":"INV1042","ord":"ORD1042"}`, f: `{"inv":"INV2077","ord":"ORD2077"}`, refused: "(N8)", class: models.RefusedContainment},
-		{name: "an end-aligned piece", method: "POST", path: "/a", rec: `{"p":"p12x1042","id":"1042"}`, f: `{"p":"p9x5678","id":"5678"}`, refused: "(N8)", class: models.RefusedContainment},
+		{name: "a partial tie", method: "POST", path: "/a", rec: `{"note":"ORD-123","id":"123"}`, f: `{"note":"ORD-456","id":"456"}`, refused: "keploy cannot follow as one value", class: models.RefusedTie},
+		{name: "a piece glued to a word", method: "POST", path: "/a", rec: `{"note":"ORD123","id":"123"}`, f: `{"note":"ORD456","id":"456"}`, refused: "keploy cannot follow as one value", class: models.RefusedContainment},
+		{name: "a piece in two places", method: "POST", path: "/a", rec: `{"inv":"INV1042","ord":"ORD1042"}`, f: `{"inv":"INV2077","ord":"ORD2077"}`, refused: "keploy cannot follow as one value", class: models.RefusedContainment},
+		{name: "an end-aligned piece", method: "POST", path: "/a", rec: `{"p":"p12x1042","id":"1042"}`, f: `{"p":"p9x5678","id":"5678"}`, refused: "keploy cannot follow as one value", class: models.RefusedContainment},
+		// Inside a time-ordered UUID's random digits: cut from it, or there by
+		// chance, which the reason says.
+		{name: "a word inside a UUID", method: "POST", path: "/a", rec: `{"id":"` + cr7 + `","n":"a"}`, f: `{"id":"` + cf7 + `","n":"b"}`, refused: "keploy cannot follow as one value: " + learn.UUIDChance, class: models.RefusedContainment},
+		{name: "a test case's value inside a UUID", method: "POST", path: "/a", rec: `{"id":"` + cr7 + `"}`, f: `{"id":"` + cf7 + `"}`,
+			given: []variables.Binding{{Name: "n", Recorded: "a", Value: "b", Given: true}}, refused: "which keploy cannot follow: " + learn.UUIDChance, class: models.RefusedContainment},
 		{name: "glued in one leaf", method: "POST", path: "/a", rec: `{"note":"Invoice INV1042 for order 1042"}`, f: `{"note":"Invoice INV2077 for order 2077"}`, refused: "glued inside another", class: models.RefusedContainment},
 		{name: "a repeat in one leaf", method: "POST", path: "/a", rec: `{"note":"id=x1 ref=x1"}`, f: `{"note":"id=y2 ref=y2"}`, refused: "repeats", class: models.RefusedTie},
 		{name: "a test case's value inside a place", method: "POST", path: "/a", rec: `{"note":"note ORD1042"}`, f: `{"note":"note ORD2077"}`,
-			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "(N8)", class: models.RefusedContainment},
+			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "which keploy cannot follow", class: models.RefusedContainment},
 		{name: "a test case's value as a word of a place", method: "POST", path: "/a", rec: `{"note":"note INV1042 paid"}`, f: `{"note":"note INV2077 paid"}`,
-			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "(N8)", class: models.RefusedTie},
+			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "which keploy cannot follow", class: models.RefusedTie},
 		// Twins are one variable of the call, which binds only at a place a
 		// variable can stand: two form fields that held one value are
 		// refused, never learned apart (each place's own words would let
@@ -615,6 +623,11 @@ func TestTheLearnPlansTies(t *testing.T) {
 			if tc.refused != "" {
 				if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, tc.refused) {
 					t.Fatalf("served %v miss %+v, want refused saying %q", served, miss, tc.refused)
+				}
+				// Only a glue inside a UUID's random digits says it may be
+				// chance.
+				if strings.Contains(miss.res.Why, learn.UUIDChance) != strings.Contains(tc.refused, learn.UUIDChance) {
+					t.Fatalf("refused saying %q, want chance said %v", miss.res.Why, strings.Contains(tc.refused, learn.UUIDChance))
 				}
 				// The rule that refused it, on the miss's report
 				// (models.UnmatchedCall.Refused): what E-measure counts.
@@ -772,14 +785,25 @@ func TestAVariableWhoseWordsCannotBeLearnedIsRefused(t *testing.T) {
 // A value an earlier call of the test sent, which a later call sends inside
 // a longer value, is refused (a variable keploy cannot follow there), and the
 // miss names the rule that tied the two: containment when only the glued
-// test (B1) finds the earlier value inside it, a tie when it stands there as
-// a word.
+// test finds the earlier value inside it, a tie when it stands there as a
+// word. A word glued inside an earlier call's time-ordered UUID may be there
+// by chance, which the reason says.
 func TestACrossCallRefusalNamesItsRule(t *testing.T) {
+	later := learnAt.Add(learn.FullRoundLead)
+	v7 := func(at time.Time, r string) string {
+		h := fmt.Sprintf("%012x", at.UnixMilli())
+		return h[:8] + "-" + h[8:12] + "-7" + r[:3] + "-a" + r[3:6] + "-" + r[6:18]
+	}
+	cr7, cf7 := v7(learnAt, "1234561234a5678901"), v7(later, "3216544321b5678902")
 	for _, tc := range []struct {
 		name, rec, live, class string
+		// earlier is what the earlier call sent, recorded and live.
+		earlier [2]string
+		chance  bool
 	}{
-		{"glued to a word", "ORD1042", "ORD2077", models.RefusedContainment},
-		{"as a word", "ORD-1042", "ORD-2077", models.RefusedTie},
+		{"glued to a word", "ORD1042", "ORD2077", models.RefusedContainment, [2]string{"1042", "2077"}, false},
+		{"as a word", "ORD-1042", "ORD-2077", models.RefusedTie, [2]string{"1042", "2077"}, false},
+		{"inside a UUID", "a", "b", models.RefusedContainment, [2]string{cr7, cf7}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
@@ -787,15 +811,18 @@ func TestACrossCallRefusalNamesItsRule(t *testing.T) {
 			tr.Begin()
 			ctx := learn.WithTracker(context.Background(), tr)
 			db := &learnDb{perTest: []*models.Mock{
-				learnRecorded("mock-0", 0, "POST", "/v1/invoices", `{"id":"1042"}`, nil, `{"ok":true}`),
+				learnRecorded("mock-0", 0, "POST", "/v1/invoices", `{"id":"`+tc.earlier[0]+`"}`, nil, `{"ok":true}`),
 				learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"order":"`+tc.rec+`"}`, nil, `{}`),
 			}}
-			if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/invoices", `{"id":"2077"}`, nil), db, n, opts); served == nil {
+			if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/invoices", `{"id":"`+tc.earlier[1]+`"}`, nil), db, n, opts); served == nil {
 				t.Fatalf("precondition: %+v", miss)
 			}
 			served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"`+tc.live+`"}`, nil), db, n, opts)
 			if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "inside a longer value") {
 				t.Fatalf("served %v miss %+v, want refused as inside a longer value", served, miss)
+			}
+			if strings.Contains(miss.res.Why, learn.UUIDChance) != tc.chance {
+				t.Fatalf("refused saying %q, want chance said %v", miss.res.Why, tc.chance)
 			}
 			var report models.MockMismatchReport
 			miss.explain(&report)

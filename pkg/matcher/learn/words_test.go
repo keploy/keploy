@@ -531,8 +531,8 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"after a backslash escape", `q=a\ref1`, `q=a\ref2`, whyEscape, nil},
 		{"a UUID glued to a word at its end", uuid7Of(wAt, "abc123456789abcdef", 'a', false) + "x", uuid7Of(later, "def0123456789abcde", 'b', false) + "x", whyGluedUUID, nil},
 		// A UUID's random part is no clock's: a word that carries a group of it
-		// is glued inside it.
-		{"a word glued inside a UUID's random part", "id " + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref a123", "id " + uuid7Of(later, "def0123456789abcde", 'b', false) + " ref b012", whyGlued, nil},
+		// is glued inside it, which may also be chance.
+		{"a word glued inside a UUID's random part", "id " + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref a123", "id " + uuid7Of(later, "def0123456789abcde", 'b', false) + " ref b012", whyChance, nil},
 		{"only the case", "ref=ab12", "ref=AB12", whyCase, nil},
 		{"beyond ASCII in a run", "id café1", "id café2", whyNotASCII, nil},
 		{"beyond ASCII in a run, recorded only", "id café1", "id cafe2", whyNotASCII, nil},
@@ -678,7 +678,7 @@ func TestGluedContainment(t *testing.T) {
 		{"end-aligned: p12x1042 and 1042", [2]string{"p12x1042", "p9x5678"}, [2]string{"1042", "5678"}, true},
 		{"start-aligned: 1042x12q and 1042", [2]string{"1042x12q", "5678x9q"}, [2]string{"1042", "5678"}, true},
 		{"either order", [2]string{"123", "456"}, [2]string{"ORD123", "ORD456"}, true},
-		{"no class boundary (N17)", [2]string{"12347", "56785"}, [2]string{"1234", "5678"}, false},
+		{"no class boundary", [2]string{"12347", "56785"}, [2]string{"1234", "5678"}, false},
 		{"another offset live", [2]string{"x1042y", "xy5678"}, [2]string{"1042", "5678"}, false},
 		{"unrelated", [2]string{"3f2b8c1e9a4d", "a7c4e2d10b3f"}, [2]string{"17", "18"}, false},
 		// At one offset from the start, the recorded container ending there; at
@@ -842,7 +842,7 @@ func TestAGluedValueOfAnEarlierCallIsFound(t *testing.T) {
 // word that repeats is a tie, one glued inside another containment, and
 // every other reason no tie rule.
 func TestRefusalClass(t *testing.T) {
-	for why, want := range map[string]string{whyRepeat: models.RefusedTie, whyGlued: models.RefusedContainment, whyParts: "", whyGluedUUID: "", whyMoved: "", whyInstant: "", "": ""} {
+	for why, want := range map[string]string{whyRepeat: models.RefusedTie, whyGlued: models.RefusedContainment, whyChance: models.RefusedContainment, whyParts: "", whyGluedUUID: "", whyMoved: "", whyInstant: "", "": ""} {
 		if got := RefusalClass(why); got != want {
 			t.Errorf("RefusalClass(%q) = %q, want %q", why, got, want)
 		}
@@ -864,11 +864,11 @@ func TestRefusalClass(t *testing.T) {
 	}
 }
 
-// The seeded rates of N16: a changed piece of one or two digits lands,
-// class-bounded and anchored, inside a fresh 32-hex value at the rates the
-// design states (about 3.4e-3 and 1.1e-5 per value). Counted over seeded
-// values, so the count is the same on every run.
-func TestN16CoincidenceRates(t *testing.T) {
+// The seeded rates of a coincidental glue: a changed piece of one or two
+// digits lands, class-bounded and anchored, inside a fresh 32-hex value at
+// the rates the design states (about 3.4e-3 and 1.1e-5 per value). Counted
+// over seeded values, so the count is the same on every run.
+func TestAShortPieceLandsInAFreshHexAtTheStatedRates(t *testing.T) {
 	r := rand.New(rand.NewSource(16))
 	hexOf := func() string {
 		const digits = "0123456789abcdef"
@@ -896,7 +896,7 @@ func TestN16CoincidenceRates(t *testing.T) {
 	if rateTwo > 1e-4 {
 		t.Errorf("a two-digit piece hits %.2e of fresh 32-hex values, want about 1.1e-5", rateTwo)
 	}
-	t.Logf("N16: one digit %.2e, two digits %.2e, over %d seeded values", rateOne, rateTwo, n)
+	t.Logf("one digit %.2e, two digits %.2e, over %d seeded values", rateOne, rateTwo, n)
 }
 
 // An entry that does not hold is void, with its reason: it fails closed.
@@ -1505,6 +1505,172 @@ func TestAChangedIDOfEveryLengthIsLearned(t *testing.T) {
 	} {
 		if got := slotsOf(learnedWords(t, tc[0], tc[1])); got != tc[2] {
 			t.Errorf("%q -> %q: slots %s, want %s", tc[0], tc[1], got, tc[2])
+		}
+	}
+}
+
+// glueOf: two pieces are glued when either lies inside the other, and the
+// glue may be chance when each that holds the other is a UUID's.
+func TestGlueOfSaysAUUIDsChance(t *testing.T) {
+	c, p, q := run{"x1a2y", "x1b2y"}, run{"a", "b"}, run{"z", "w"}
+	for _, tc := range []struct {
+		name          string
+		a, b          wpiece
+		glued, chance bool
+	}{
+		{"inside a UUID", wpiece{c, true}, wpiece{p, false}, true, true},
+		{"inside a UUID, the other order", wpiece{p, false}, wpiece{c, true}, true, true},
+		{"inside a word", wpiece{c, false}, wpiece{p, false}, true, false},
+		{"a UUID's inside a word", wpiece{c, false}, wpiece{p, true}, true, false},
+		{"a UUID's inside a word, the other order", wpiece{p, true}, wpiece{c, false}, true, false},
+		{"inside each other, one a UUID's", wpiece{c, true}, wpiece{c, false}, true, false},
+		{"inside each other, the other a UUID's", wpiece{c, false}, wpiece{c, true}, true, false},
+		{"inside each other, both UUIDs'", wpiece{c, true}, wpiece{c, true}, true, true},
+		{"apart", wpiece{c, true}, wpiece{q, false}, false, false},
+	} {
+		glued, chance := glueOf(tc.a, tc.b)
+		if glued != tc.glued || glued && chance != tc.chance {
+			t.Errorf("%s: glued %v chance %v, want %v %v", tc.name, glued, chance, tc.glued, tc.chance)
+		}
+	}
+}
+
+// chanceUUIDs are two time-ordered UUIDs, recorded and live, one letter of
+// whose last group, between digits, is "a" and then "b" at one place: a
+// word "a" that changed to "b" stands inside them, cut from them or by
+// chance.
+func chanceUUIDs() (string, string) {
+	return uuid7Of(wAt, "1234561234a5678901", '8', false), uuid7Of(wAt.Add(FullRoundLead), "3216544321b5678902", '9', false)
+}
+
+// A word inside a time-ordered UUID's random digits, at one place recorded
+// and live, is refused as glued within a value, across two places and from
+// an earlier call, and the reason says it may be chance; a word glued
+// inside another word, or found by another test beside it, is not called
+// chance.
+func TestAWordInsideAUUIDMayBeChance(t *testing.T) {
+	ur, uf := chanceUUIDs()
+	if _, why := NewDriftCache().Words("id "+ur+" n a", "id "+uf+" n b", nil); why != whyChance {
+		t.Errorf("in one value: %q, want %q", why, whyChance)
+	}
+	// A value that, past such a glue, holds a word glued inside another or a
+	// word that repeats is refused for that, which is no chance.
+	for _, tc := range [][3]string{
+		{"id " + ur + " n a inv INV1042 ord ORD1042", "id " + uf + " n b inv INV2077 ord ORD2077", whyGlued},
+		{"id " + ur + " n a ref=x1 id=x1", "id " + uf + " n b ref=y2 id=y2", whyRepeat},
+	} {
+		if _, why := NewDriftCache().Words(tc[0], tc[1], nil); why != tc[2] {
+			t.Errorf("%q -> %q: %q, want %q", tc[0], tc[1], why, tc[2])
+		}
+	}
+	if RefusalClass(whyChance) != models.RefusedContainment || !strings.Contains(whyChance, UUIDChance) {
+		t.Errorf("the reason %q is named %q", whyChance, RefusalClass(whyChance))
+	}
+	for _, tc := range []struct {
+		name   string
+		a, b   [2]string
+		class  string
+		chance bool
+	}{
+		{"a word inside a UUID", [2]string{ur, uf}, [2]string{"a", "b"}, models.RefusedContainment, true},
+		{"a word glued inside a word", [2]string{"INV1042", "INV2077"}, [2]string{"ORD1042", "ORD2077"}, models.RefusedContainment, false},
+		// One piece inside the UUID and another glued inside a word: no
+		// chance, in either order of the pieces.
+		{"inside a UUID and a word", [2]string{ur + " INV1042", uf + " INV2077"}, [2]string{"a 1042", "b 2077"}, models.RefusedContainment, false},
+		{"inside a word and a UUID", [2]string{ur + " INV1042", uf + " INV2077"}, [2]string{"1042 a", "2077 b"}, models.RefusedContainment, false},
+		// A group of the UUID that is a word of the other: they share a word,
+		// a tie found before any glue.
+		{"a group of the UUID", [2]string{ur, uf}, [2]string{ur[24:], uf[24:]}, models.RefusedTie, false},
+	} {
+		for _, ab := range [][2][2]string{{tc.a, tc.b}, {tc.b, tc.a}} {
+			dc := NewDriftCache()
+			if got := dc.TieOf(ab[0], ab[1], nil); got != TiePartial {
+				t.Fatalf("%s: tie %v, want partial", tc.name, got)
+			}
+			if got := dc.TieClass(ab[0], ab[1], nil); got != tc.class {
+				t.Errorf("%s: class %q, want %q", tc.name, got, tc.class)
+			}
+			if got := dc.TieChance(ab[0], ab[1], nil); got != tc.chance {
+				t.Errorf("%s: chance %v, want %v", tc.name, got, tc.chance)
+			}
+		}
+	}
+	if (*DriftCache)(nil).TieChance([2]string{ur, uf}, [2]string{"a", "b"}, nil) != true {
+		t.Error("a nil cache reads no chance")
+	}
+	// From an earlier call: its UUID, this call's word.
+	earlier := []Earlier{{Mock: "mock-0", Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.id", Type: String, Value: ur}, Live: uf, Place: "body.id"}}}}
+	rec := Shape{Leaves: map[string]Leaf{"body.n": {Path: "body.n", Type: String, Value: "a"}}}
+	live := Shape{Leaves: map[string]Leaf{"body.n": {Path: "body.n", Type: String, Value: "b"}}}
+	got := Classify(nil, []string{"body.n"}, live, rec, wAt.Add(time.Second), earlier, nil, nil)
+	if got[0].Kind != KindVariable || got[0].From.Whole || !got[0].From.Glued || !got[0].From.Chance {
+		t.Fatalf("learned %+v, want a variable glued inside mock-0's UUID, by chance", got[0])
+	}
+	earlier[0].Seen[0].Leaf.Value, earlier[0].Seen[0].Live = "INV1042", "INV2077"
+	rec.Leaves["body.n"], live.Leaves["body.n"] = Leaf{Path: "body.n", Type: String, Value: "ORD1042"}, Leaf{Path: "body.n", Type: String, Value: "ORD2077"}
+	got = Classify(nil, []string{"body.n"}, live, rec, wAt.Add(time.Second), earlier, nil, nil)
+	if got[0].Kind != KindVariable || !got[0].From.Glued || got[0].From.Chance {
+		t.Fatalf("learned %+v, want a variable glued inside mock-0's value, not by chance", got[0])
+	}
+}
+
+// The chance of a short word inside a time-ordered UUID, measured over
+// seeded values: of a UUIDv7 that changed beside a word of one letter, of
+// one digit or of two digits that changed, the share whose changed piece
+// lies inside the UUID's (the glue keploy refuses: about 1.5%, 0.3% and
+// none). Each such value is refused, within one value and across two
+// places, and its reason says it may be chance. Counted over seeded values,
+// so the counts are the same on every run.
+func TestAShortWordInsideAUUIDIsRefusedAtTheMeasuredRateSayingSo(t *testing.T) {
+	r := rand.New(rand.NewSource(7))
+	later := wAt.Add(FullRoundLead)
+	hexOf := func(n int) string {
+		const digits = "0123456789abcdef"
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = digits[r.Intn(16)]
+		}
+		return string(b)
+	}
+	const n, checked = 20000, 300
+	for _, tc := range []struct {
+		word   [2]string
+		lo, hi float64
+	}{
+		{[2]string{"a", "b"}, 0.010, 0.022},
+		{[2]string{"7", "8"}, 0.001, 0.006},
+		{[2]string{"41", "42"}, 0, 0.0005},
+	} {
+		word, _ := changedPiece(tc.word[0], tc.word[1])
+		hits := 0
+		for i := 0; i < n; i++ {
+			ur, uf := uuid7(wAt, hexOf(18)), uuid7(later, hexOf(18))
+			u, _ := changedPiece(ur, uf)
+			glued, chance := glueOf(wpiece{u, true}, wpiece{word, false})
+			if !glued {
+				if i < checked {
+					// Neither refused in one value nor tied across two.
+					if _, why := NewDriftCache().Words("id "+ur+" n "+tc.word[0], "id "+uf+" n "+tc.word[1], nil); why != "" {
+						t.Errorf("%v: %s beside it refused: %s", tc.word, ur, why)
+					}
+				}
+				continue
+			}
+			hits++
+			if !chance {
+				t.Errorf("%v inside %s: no chance", tc.word, ur)
+			}
+			if _, why := NewDriftCache().Words("id "+ur+" n "+tc.word[0], "id "+uf+" n "+tc.word[1], nil); why != whyChance {
+				t.Errorf("%v inside %s, in one value: %q, want %q", tc.word, ur, why, whyChance)
+			}
+			if dc := NewDriftCache(); dc.TieOf([2]string{ur, uf}, tc.word, nil) != TiePartial || !dc.TieChance([2]string{ur, uf}, tc.word, nil) {
+				t.Errorf("%v inside %s, across two places: no tie by chance", tc.word, ur)
+			}
+		}
+		if rate := float64(hits) / n; rate < tc.lo || rate > tc.hi {
+			t.Errorf("%v: %.4f of %d UUIDs hold it, want %.4f to %.4f", tc.word, rate, n, tc.lo, tc.hi)
+		} else {
+			t.Logf("%v: %.4f of %d UUIDs hold it", tc.word, rate, n)
 		}
 	}
 }
