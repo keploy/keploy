@@ -13,9 +13,24 @@ name: eBPF objects from keploy/ebpf
 # required by its gate, the one required check: a check that only warned
 # would let a conflict resolved back to the old objects merge green. It takes
 # seconds, so it runs whatever the change.
+#
+# keploy/ebpf is a private repository: the check reads it with the
+# PRO_ACCESS_TOKEN secret, which must be able to read it. A pull request from
+# a fork gets no secrets, so the caller says whether it is one (from-fork):
+# such a pull request passes only if its eBPF files are keploy/keploy main's,
+# byte for byte, which main's own runs check. Anything else with no token
+# fails.
 
 on:
   workflow_call:
+    inputs:
+      from-fork:
+        description: "true for a pull request whose head is a fork's branch (it gets no secrets)"
+        type: boolean
+        default: false
+    secrets:
+      PRO_ACCESS_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -38,4 +53,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/check-ebpf-objects.tests.sh
 
       - name: The hooks' eBPF files are one keploy/ebpf main commit's
+        env:
+          PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
+          PR_FROM_FORK: ${{ inputs.from-fork }}
         run: bash .github/workflows/test_workflow_scripts/check-ebpf-objects.sh
