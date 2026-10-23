@@ -1396,10 +1396,8 @@ func tiePlaces(tracker *learn.Tracker, test uint64, m *models.Mock, p *pairing, 
 			p.refused = models.RefusedTie
 			return first.Recorded.Path + " holds one value with another place of the call, at a place keploy cannot bind it (a form or multipart field)"
 		}
-		words, ok := p.words[first.Recorded.Path]
-		if !ok {
-			return "keploy learned no words of " + first.Recorded.Path
-		}
+		// A group's places are noise, whose words learnPlan learned.
+		words := p.words[first.Recorded.Path]
 		v := models.MockVariable{Recorded: first.Recorded.Value, Bind: bind, Echo: true, Words: &words}
 		for _, i := range members[g] {
 			use, ok := learn.VarPlace(slots[i].l.Recorded, jsonReq)

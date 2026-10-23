@@ -308,6 +308,41 @@ func TestTiePlacesRefusesTwinsLearnedApart(t *testing.T) {
 	}
 }
 
+// Two groups of twins whose binds name one variable name each are named in
+// the places' sorted order, so a run names them alike every time: the
+// first in sorted order takes the name, the other the next free one.
+func TestTwinGroupsAreNamedInTheirPlacesOrder(t *testing.T) {
+	leaf := func(path, rec, live string) learn.Learned {
+		return learn.Learned{Kind: learn.KindNoise, Recorded: learn.Leaf{Path: path, Type: learn.String, Value: rec}, Live: learn.Leaf{Path: path, Type: learn.String, Value: live}}
+	}
+	slots := []slotPlace{
+		{l: leaf("header.x-b", "q-7777", "q-3333"), kind: learn.KindNoise},
+		{l: leaf("body.item.id", "q-7777", "q-3333"), kind: learn.KindNoise},
+		{l: leaf("header.x-a", "o-1111", "o-9999"), kind: learn.KindNoise},
+		{l: leaf("body.id", "o-1111", "o-9999"), kind: learn.KindNoise},
+	}
+	for i := 0; i < 20; i++ {
+		p := pairing{words: map[string]models.WordsEntry{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, f: map[string]map[string]string{"mock-0": {}}}
+		for _, s := range slots {
+			p.words[s.l.Recorded.Path] = *wordsOf(t, s.l.Recorded.Value, s.l.Live.Value)
+			p.f["mock-0"][s.l.Recorded.Path] = s.l.Live.Value
+		}
+		tr := learn.NewTracker()
+		if why := tiePlaces(tr, 0, &models.Mock{Name: "mock-0"}, &p, append([]slotPlace(nil), slots...), nil, true, map[string]bool{}, nil); why != "" {
+			t.Fatalf("refused: %s", why)
+		}
+		if len(p.words) != 0 || len(p.vars) != 2 || p.vars["id"].Bind != "body.id" || p.vars["id-2"].Bind != "body.item.id" {
+			t.Fatalf("run %d: words %v variables %+v, want id bound at body.id and id-2 at body.item.id", i, p.words, p.vars)
+		}
+		if !reflect.DeepEqual(p.vars["id"].Use, []string{"header.x-a"}) || !reflect.DeepEqual(p.vars["id-2"].Use, []string{"header.x-b"}) {
+			t.Fatalf("run %d: uses %v and %v", i, p.vars["id"].Use, p.vars["id-2"].Use)
+		}
+		if want := map[string]string{"body.id": "o-9999", "body.item.id": "q-3333"}; !reflect.DeepEqual(p.f["mock-0"], want) {
+			t.Fatalf("run %d: F's values %v, want %v", i, p.f["mock-0"], want)
+		}
+	}
+}
+
 // A replay after F honours the words F learned before the matcher (the
 // learn step's own pass, learnedMatch): a fresh ref is served, a regressed
 // amount goes on to the matcher, which refuses it too.
@@ -578,6 +613,12 @@ func TestTheLearnPlansTies(t *testing.T) {
 					if !reflect.DeepEqual(v, *tc.variable) {
 						t.Fatalf("variable %+v, want %+v", v, *tc.variable)
 					}
+				}
+				// F's value stays at the variable's bind alone (its words'
+				// leaf in learned.local.yaml); a place it is used at holds
+				// none of its own.
+				if want := map[string]map[string]string{"mock-0": {"body.id": fv7}}; !reflect.DeepEqual(got.LearnedF(), want) {
+					t.Fatalf("F's values %v, want %v", got.LearnedF(), want)
 				}
 				// Replayed: one fresh v7 at both places is served; two, or a
 				// value that is no v7, is not.
