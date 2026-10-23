@@ -1,6 +1,7 @@
 package starts
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,7 +15,8 @@ import (
 // THE PROCESS A RECORDED CALL CAME FROM.
 //
 // Under the proven switch every recorded mock names the process that made its
-// call, as its origin's comm and argv[0] (models.Origin.Comm, Exe): a reason
+// call, as its origin's comm and argv[0] (models.Origin.Comm, Exe; a program a
+// go run built, by that go run: programOf): a reason
 // line that routes or moves a call names it, and a miss or an answered call
 // names it too (models.UnmatchedCall.Source). No committed file holds more of
 // its command line: the whole of it, with its secrets redacted
@@ -305,7 +307,7 @@ func (r *Registry) nameOf(pid uint32) procName {
 	}
 	n.comm = comm
 	if len(argv) > 0 {
-		n.exe = exeOf(argv[0])
+		n.exe = r.programOf(cmd, pid, argv[0])
 	}
 	line := strings.Join(containerkey.RedactArgs(argv), " ")
 	if !bornKnown {
@@ -362,6 +364,92 @@ func (o *origins) logProcess(pid uint32, n procName, line string) {
 			zap.String("cmdline", line))
 	}
 }
+
+// programOf is what a committed file holds of process pid's program
+// (models.Origin.Exe), argv0 its argv[0]. A program the go tool built for a
+// go run and runs as its child is named by that go run: `go run` and its
+// target, without its build flags (goRunOf), read from its parent's command
+// line. Its own argv[0] is the binary the go tool built, in a dir it makes for
+// that one run (/tmp/go-build<random>/b001/exe/<name>) or, once built, in the
+// go build cache (<GOCACHE>/<hash>-d/<name>): a path the user never typed,
+// which changes from one record to the next, so a committed line naming it
+// would change with each. Any other program is its argv[0] (exeOf), as is one
+// whose parent cannot be read.
+func (r *Registry) programOf(cmd Commander, pid uint32, argv0 string) string {
+	if parent, ok := r.proc.Parent(pid); ok && parent != 0 && parent != pid {
+		if _, argv, read := cmd.Command(parent); read {
+			if run, ok := goRunOf(argv); ok {
+				return run
+			}
+		}
+	}
+	return exeOf(argv0)
+}
+
+// goRunOf names the program a go run runs, argv the go tool's command line:
+// "go run " and its target, the package (`.`, `./cmd/server`,
+// `example.com/cmd@v1.2.0`) or the .go files it names, as the command gives
+// them, redacted as argv[0] is (containerkey.RedactArgs). Never a build flag
+// nor its value: a -ldflags value can carry a key. "go run" alone when keploy
+// cannot tell which word is the target: a flag it does not know may take the
+// next word as its value, so no word is named rather than a value. ok is
+// false when argv is not a go run.
+func goRunOf(argv []string) (string, bool) {
+	if len(argv) < 2 || filepath.Base(argv[0]) != "go" || argv[1] != "run" {
+		return "", false
+	}
+	i := 2
+	for i < len(argv) {
+		w := argv[i]
+		if w == "--" {
+			i++
+			break
+		}
+		if len(w) < 2 || w[0] != '-' {
+			break
+		}
+		name := strings.TrimPrefix(w[1:], "-")
+		switch {
+		case strings.Contains(name, "="):
+			i++
+		case goRunBoolFlags[name]:
+			i++
+		case goRunValueFlags[name]:
+			i += 2
+		default:
+			return "go run", true
+		}
+	}
+	if i >= len(argv) {
+		return "go run", true
+	}
+	end := i + 1
+	if strings.HasSuffix(argv[i], ".go") {
+		for end < len(argv) && strings.HasSuffix(argv[end], ".go") {
+			end++
+		}
+	}
+	return "go run " + strings.Join(containerkey.RedactArgs(argv[i:end]), " "), true
+}
+
+// goRunBoolFlags and goRunValueFlags are go run's own flags (the go tool's
+// build flags, its cover flags and -exec): a bool flag is one word, a flag
+// that takes a value is two unless written -flag=value.
+var (
+	goRunBoolFlags = map[string]bool{
+		"a": true, "asan": true, "buildvcs": true, "cover": true, "json": true,
+		"linkshared": true, "modcacherw": true, "msan": true, "n": true,
+		"race": true, "trimpath": true, "v": true, "work": true, "x": true,
+	}
+	goRunValueFlags = map[string]bool{
+		"C": true, "asmflags": true, "buildmode": true, "compiler": true,
+		"covermode": true, "coverpkg": true, "debug-actiongraph": true,
+		"debug-runtime-trace": true, "debug-trace": true, "exec": true,
+		"gccgoflags": true, "gcflags": true, "installsuffix": true,
+		"ldflags": true, "mod": true, "modfile": true, "overlay": true,
+		"p": true, "pgo": true, "pkgdir": true, "tags": true, "toolexec": true,
+	}
+)
 
 // exeOf is what a committed file may hold of a process's argv[0]
 // (models.Origin.Exe): a process that sets its own title (setproctitle, a

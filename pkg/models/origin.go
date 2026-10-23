@@ -25,7 +25,10 @@ type Origin struct {
 	// fakeconn.ClockID's: "proxy:<agent run>", "ktime:<boot id>.<anchor>".
 	Clock string `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
 	// Comm and Exe are, on a mock, the process that made the call: its comm
-	// and argv[0]. No more of its command line is ever stored.
+	// and argv[0]; for a program a go run built, whose argv[0] is a path in
+	// the go tool's build dir that differs on every run, that go run and its
+	// target in place of argv[0] (`go run .`), never its build flags. No
+	// more of its command line is ever stored.
 	Comm string `json:"comm,omitempty" yaml:"comm,omitempty" bson:"comm,omitempty"`
 	Exe  string `json:"exe,omitempty" yaml:"exe,omitempty" bson:"exe,omitempty"`
 	// Unnamed is why Comm and Exe are empty on a mock or a call whose

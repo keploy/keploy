@@ -3,11 +3,14 @@
 package starts
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -174,5 +177,81 @@ func TestSysProcSaysWhereThisProcessRuns(t *testing.T) {
 		if (sysProc{root: private}).KernelPidsLocal() {
 			t.Fatal("a root whose own entry is a private namespace's read as the kernel's")
 		}
+	}
+}
+
+// hostLocal is this host's /proc, read by the pids of this test's own PID
+// namespace: a process the test starts tells its pid in that namespace.
+type hostLocal struct{ sysProc }
+
+func (hostLocal) KernelPidsLocal() bool { return true }
+
+// A program a real go run built runs from the go tool's build dir for that
+// one run, or from the go build cache once built: its argv[0] is a path that
+// differs from one run to the next. keploy names it by its go run, `go run .`,
+// the same for two runs, its build flags left out.
+func TestAGoRunProgramIsNamedByItsGoRunOnThisHost(t *testing.T) {
+	gobin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go tool on PATH to run a program with")
+	}
+	dir := t.TempDir()
+	for name, text := range map[string]string{
+		"go.mod":  "module example.com/orders\n\ngo 1.21\n",
+		"main.go": "package main\n\nimport (\n\t\"fmt\"\n\t\"io\"\n\t\"os\"\n)\n\nvar key string\n\nfunc main() {\n\tfmt.Println(os.Getpid())\n\t_, _ = io.Copy(io.Discard, os.Stdin)\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func() (argv0, exe string) {
+		cmd := exec.Command(gobin, "run", "-ldflags=-X=main.key=s3cret", ".")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GOFLAGS=", "GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off")
+		cmd.Stderr = os.Stderr
+		// The go tool and the program it runs are one process group,
+		// killed whole however the test ends.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		})
+		line, err := bufio.NewReader(out).ReadString('\n')
+		if err != nil {
+			t.Fatalf("the go run's program said no pid: %v", err)
+		}
+		pid, err := strconv.ParseUint(strings.TrimSpace(line), 10, 32)
+		if err != nil {
+			t.Fatalf("the go run's program said %q", line)
+		}
+		_, argv, _ := (sysProc{}).Command(uint32(pid))
+		if len(argv) > 0 {
+			argv0 = argv[0]
+		}
+		_, exe, ok := New(hostLocal{}, 0).ProcessOf(uint32(pid))
+		if !ok {
+			t.Fatalf("pid %d could not be read", pid)
+		}
+		_ = in.Close()
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("the go run ended with %v", err)
+		}
+		return argv0, exe
+	}
+	firstArgv0, first := run()
+	secondArgv0, second := run()
+	if first != "go run ." || second != first {
+		t.Fatalf("two go runs of the app are named %q and %q; want both %q (their argv[0]s: %q, %q)", first, second, "go run .", firstArgv0, secondArgv0)
 	}
 }

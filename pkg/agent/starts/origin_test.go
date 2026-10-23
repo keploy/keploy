@@ -207,6 +207,85 @@ func TestAnOriginsExeIsArgv0Redacted(t *testing.T) {
 	}
 }
 
+// A program a go run built is named by that go run, `go run` and its
+// target, never by the binary's path in the go tool's build dir, which
+// differs on every record: two records of the same app write the same reason
+// line and the same origin. Its build flags are never named (a -ldflags
+// value can carry a key). The go tool itself, a program another process
+// started, and one whose parent cannot be read keep their argv[0].
+func TestAGoRunProgramIsNamedByItsGoRun(t *testing.T) {
+	record := func(dir string, goPid, appPid uint32, goArgv ...string) (*models.Origin, string) {
+		c := newCommander()
+		c.spawn(goPid, 1, at(0), "/usr/local/go/bin/go")
+		c.spawn(appPid, goPid, at(5), dir+"/b001/exe/orders")
+		c.comm[goPid], c.argv[goPid] = "go", goArgv
+		c.comm[appPid], c.argv[appPid] = "orders", []string{dir + "/b001/exe/orders", "--port", "8080"}
+		r := New(c, 0)
+		r.NoteOrigin("7", appPid)
+		m := &models.Mock{Name: "mock-1", Spec: models.MockSpec{Metadata: map[string]string{"connID": "7"}}, Origin: &models.Origin{Clock: "proxy:run-1"}}
+		r.StampOrigin(m)
+		return m.Origin, models.NewWindowedMock(m).FileProcess()
+	}
+	first, firstLine := record("/tmp/go-build2463177086", 300, 301, "go", "run", "-ldflags=-X=main.key=s3cret", ".")
+	second, secondLine := record("/tmp/go-build981100412", 900, 912, "/usr/local/go/bin/go", "run", "-ldflags=-X=main.key=s3cret", ".")
+	if want := "`orders` (`go run .`)"; firstLine != want || secondLine != firstLine {
+		t.Fatalf("the two records name the app %q and %q; want both %q", firstLine, secondLine, want)
+	}
+	if first == nil || second == nil || *first != *second || first.Exe != "go run ." {
+		t.Fatalf("the two records' origins are %+v and %+v; want both go run .", first, second)
+	}
+
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"go", "run", "."}, "go run ."},
+		{[]string{"go", "run", "./cmd/server", "--port", "8080"}, "go run ./cmd/server"},
+		{[]string{"go", "run", "main.go", "handlers.go", "serve", "x.go"}, "go run main.go handlers.go"},
+		{[]string{"go", "run", "-race", "-tags", "dev", "-ldflags", "-X main.key=s3cret", "./cmd/server"}, "go run ./cmd/server"},
+		{[]string{"go", "run", "-C", "svc", "--gcflags=all=-N -l", "--exec", "qemu", "-mod=vendor", "."}, "go run ."},
+		{[]string{"go", "run", "-v", "--", "./cmd/x", "-v"}, "go run ./cmd/x"},
+		{[]string{"go", "run", "example.com/tool", "--token", "s3cret"}, "go run example.com/tool"},
+		// Its target is redacted as argv[0] is: a word that reads as a
+		// credential (user/pw@host) is never committed, a module's
+		// version included.
+		{[]string{"go", "run", "example.com/tool@v1.2.0"}, "go run " + containerkey.RedactedText},
+		// A flag keploy does not know may take the next word as its
+		// value: no word is named.
+		{[]string{"go", "run", "-future", "s3cret", "."}, "go run"},
+		{[]string{"go", "run", "-tags"}, "go run"},
+	} {
+		got, ok := goRunOf(tc.argv)
+		if !ok || got != tc.want {
+			t.Errorf("goRunOf(%q) = %q, %v; want %q", tc.argv, got, ok, tc.want)
+		}
+		if strings.Contains(got, "s3cret") {
+			t.Errorf("goRunOf(%q) names a flag's value: %q", tc.argv, got)
+		}
+	}
+	for _, argv := range [][]string{nil, {"go"}, {"go", "build", "."}, {"gofmt", "run", "."}, {"./run", "run", "."}} {
+		if got, ok := goRunOf(argv); ok {
+			t.Errorf("goRunOf(%q) = %q; want no go run", argv, got)
+		}
+	}
+
+	c := newCommander()
+	c.spawn(300, 1, at(0), "/usr/local/go/bin/go")
+	c.comm[300], c.argv[300] = "go", []string{"go", "run", "."}
+	c.spawn(301, 300, at(5), "/tmp/go-build1/b001/exe/orders")
+	c.comm[301], c.argv[301] = "orders", []string{"/tmp/go-build1/b001/exe/orders"}
+	// The app's own child, and a process whose parent cannot be read.
+	c.spawn(302, 301, at(9), "/tmp/go-build1/b001/exe/orders")
+	c.comm[302], c.argv[302] = "orders", []string{"/tmp/go-build1/b001/exe/orders", "worker"}
+	c.comm[303], c.argv[303] = "orders", []string{"/tmp/go-build1/b001/exe/orders"}
+	r := New(c, 0)
+	for pid, want := range map[uint32]string{300: "go", 301: "go run .", 302: "/tmp/go-build1/b001/exe/orders", 303: "/tmp/go-build1/b001/exe/orders"} {
+		if _, exe, ok := r.ProcessOf(pid); !ok || exe != want {
+			t.Errorf("pid %d is named %q, %v; want %q", pid, exe, ok, want)
+		}
+	}
+}
+
 // A process whose birth cannot be read is not cached: a later process reusing
 // its pid is named as itself. Its command line is logged all the same, once
 // per pid, and again for a reused pid's other command line.
