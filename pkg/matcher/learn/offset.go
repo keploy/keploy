@@ -37,9 +37,13 @@ import (
 //     in it, the payload of an exchange served leaf by leaf too,
 //     Earlier.Payload: hf), where one of the two is not what the other run
 //     gave it too: hr one F did not give it, or hf one the recording did not
-//     give it before the call. Two recordings both runs gave the application
-//     are no move (F gave it nothing in their place), nor are answers to two
-//     calls; or an instant of a part of the test case's request that keploy
+//     give it before the call, or both what both runs gave it, which F gave
+//     in another order than the recording did (an application that takes
+//     the first or the last of what it received takes the other one then)
+//     or in an order keploy cannot tell (Raw.ServedAs: it fails closed).
+//     Two recordings both runs gave the application in the order the
+//     recording did are no move (F gave it nothing in their place), nor
+//     are answers to two calls; or an instant of a part of the test case's request that keploy
 //     test sent with another value than recorded (Earlier.Given). An answer's own clock stamp
 //     and a protocol-phase answer's own clock reads are none (rules 2 and 3:
 //     no value came from one), nor is what the application itself sent, or
@@ -66,13 +70,35 @@ import (
 // request); recorded, whether the recording gave the application it before
 // the call (its mock recorded before the call: a place's moment as the
 // recording gave it, hr), and given, whether record's full round gave it in
-// the test (served earlier in it: a place's moment as F gave it, hf).
+// the test (served earlier in it: a place's moment as F gave it, hf); at,
+// when its mock's request was recorded, and nth, where F served it in the
+// test (Raw.ServedAs; 0 where it did not or that is not known): the two
+// orders the two runs gave the application their recordings in.
 type offsetPlace struct {
 	m               moment
 	mock            string
 	where           string
 	call            string
 	recorded, given bool
+	at              time.Time
+	nth             int
+}
+
+// inRecordedOrder reports whether F gave the application the recordings of
+// the places a and b, both of which both runs gave it, in the order the
+// recording did: then F gave it nothing in the other's place, and a value
+// that moved from one to the other moved by something else. One recording's
+// two places are in its order. Two recordings F gave it in another order, or
+// in one keploy cannot tell (either's not known, or both recorded at one
+// instant), are not: the application may have taken the other one.
+func inRecordedOrder(a, b offsetPlace) bool {
+	if a.mock == b.mock && a.at.Equal(b.at) {
+		return true
+	}
+	if a.nth == 0 || b.nth == 0 || a.nth == b.nth || a.at.Equal(b.at) {
+		return false
+	}
+	return a.at.Before(b.at) == (a.nth < b.nth)
 }
 
 // offsetKey is a place of an answer, as two recordings of a kind each hold
@@ -141,16 +167,24 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw) 
 	type payload struct {
 		x     Raw
 		given bool
+		nth   int
 	}
 	var payloads []*payload
 	byID := map[string]*payload{}
 	add := func(x Raw, given bool) {
 		id := x.mock + "\x00" + x.at.String()
+		nth := 0
+		if given {
+			nth = x.nth
+		}
 		if p, ok := byID[id]; ok {
 			p.given = p.given || given
+			if p.nth == 0 {
+				p.nth = nth
+			}
 			return
 		}
-		p := &payload{x: x, given: given}
+		p := &payload{x: x, given: given, nth: nth}
 		byID[id] = p
 		payloads = append(payloads, p)
 	}
@@ -199,7 +233,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw) 
 						continue
 					}
 					k := offsetKey{path: f.path, form: form, layout: sp.layout, label: instantLabel(t, spans, si)}
-					op.byPlace[k] = append(op.byPlace[k], offsetPlace{m: sp.moment(), mock: x.mock, where: where, call: x.call, recorded: recorded, given: p.given})
+					op.byPlace[k] = append(op.byPlace[k], offsetPlace{m: sp.moment(), mock: x.mock, where: where, call: x.call, recorded: recorded, given: p.given, at: x.at, nth: p.nth})
 				}
 			}
 		}
@@ -284,7 +318,8 @@ func offsetOf(rec, live, hr, hf int64, rres, lres time.Duration, mod int64) (tim
 // parts first, then the answers' places, in the order the places are read,
 // each place the recording gave the application (recorded) against each
 // another recording of its call F gave it there (given), by moment, where
-// not both are what both runs gave it. ok is false when none is.
+// not both are what both runs gave it in the order the recording did
+// (inRecordedOrder). ok is false when none is.
 func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 	if op == nil {
 		return offsetMatch{}, false
@@ -334,12 +369,13 @@ func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 				}
 				for j := from; j < to; j++ {
 					// hf given by F, an answer to hr's call, and not both
-					// what both runs gave the application: a recording F
-					// gave in the test and the recording before the call is
+					// what both runs gave the application in the order the
+					// recording did: two recordings F gave in the test and
+					// the recording gave before the call, in one order, are
 					// no place F gave in another's (and neither is one
 					// recording's two instants).
 					hr, hf := list[i], list[j]
-					if !hf.given || hf.call != hr.call || hr.given && hf.recorded {
+					if !hf.given || hf.call != hr.call || hr.given && hf.recorded && inRecordedOrder(hr, hf) {
 						continue
 					}
 					if m, ok := offsetBetween(p, list[i], list[j]); ok {

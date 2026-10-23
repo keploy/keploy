@@ -2645,6 +2645,96 @@ func TestLearnMatchAnOwnCallInFlightReadsEveryEarlierRecording(t *testing.T) {
 	}
 }
 
+// The learn step reads the order F served the test's mocks in (the tracker's
+// served mocks) into the offset rule. Two receives of one queue, both
+// recorded before the insert and both served before it in F, A recorded
+// first: the insert's visible_after is the first message's SentTimestamp and
+// a minute, to the minute. F serving B first, the recording's value is built
+// on A and F's on B: refused, naming both. F serving A first, as recorded, F
+// gave the application nothing in the other's place: the move is the lead's,
+// learned as noise. Through the payloads any parser served, and through the
+// exchanges the learn step served leaf by leaf (inServeOrder).
+func TestLearnMatchReadsTheOrderFServedTheTestsMocksIn(t *testing.T) {
+	sentA := learnAt.Add(-4*time.Minute + 473*time.Millisecond)
+	sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
+	receive := func(name string, at time.Duration, sent time.Time) *models.Mock {
+		m := learnRecorded(name, at, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"`+name+`","Attributes":{"SentTimestamp":"`+strconv.FormatInt(sent.UnixMilli(), 10)+`"}}]}`)
+		m.Spec.HTTPResp.Header["Date"] = learnAt.Add(-time.Hour).Format(http.TimeFormat)
+		return m
+	}
+	minute := func(t time.Time) string { return t.Format("2006-01-02T15:04Z07:00") }
+	for _, tc := range []struct {
+		name    string
+		bFirst  bool
+		leafA   bool
+		refused bool
+	}{
+		{"F served B first", true, false, true},
+		{"F served A first, as recorded", false, false, false},
+		{"F served B first, A leaf by leaf", true, true, true},
+		{"F served A first, as recorded, A leaf by leaf", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			a, b := receive("mock-0", 0, sentA), receive("mock-1", time.Millisecond, sentB)
+			insert := learnRecorded("mock-2", 4*time.Millisecond, "POST", "/v1/messages", `{"visible_after":"`+minute(sentA.Add(time.Minute))+`"}`, nil, `{}`)
+			db := &learnDb{perTest: []*models.Mock{insert}}
+			tr := learn.NewTracker()
+			tr.Begin()
+			first, second := a, b
+			if tc.bFirst {
+				first, second = b, a
+			}
+			served := learnAt.Add(40 * time.Second)
+			tr.ServedMockAt(first, served)
+			tr.ServedMockAt(second, served.Add(time.Millisecond))
+			if tc.leafA {
+				// The learn step served A leaf by leaf: its exchange holds
+				// its payload, and raw does not.
+				test, _, _, _ := tr.Test()
+				tr.Served(test, learn.Earlier{Mock: a.Name, At: a.Spec.ReqTimestampMock, Own: true, Payload: learn.RawOf(a, true)})
+			}
+			in := live("POST", "/v1/messages", `{"visible_after":"`+minute(sentB.Add(time.Minute))+`"}`, nil)
+			in.arrived = served.Add(2 * time.Millisecond)
+			got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refused {
+				if got != nil || miss == nil || !strings.Contains(miss.res.Why, "mock-0 at spec.resp.body holds as the recording gave it") || !strings.Contains(miss.res.Why, "mock-1 at spec.resp.body holds, which record's full round gave the application in its place") {
+					t.Fatalf("served %v miss %+v; want refused, built on mock-0 and mock-1 by an offset", got, miss)
+				}
+				return
+			}
+			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			}
+		})
+	}
+}
+
+// inServeOrder reads each leafed exchange's payload as the n-th mock F served
+// (its first serve), leaves one F's served mocks do not hold in an order
+// keploy cannot tell, and leaves the round's slice as it was.
+func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
+	a, b, c := learnRecorded("mock-0", 0, "GET", "/a", "", nil, `{}`), learnRecorded("mock-1", time.Millisecond, "GET", "/b", "", nil, `{}`), learnRecorded("mock-2", 2*time.Millisecond, "GET", "/c", "", nil, `{}`)
+	earlier := []learn.Earlier{
+		{Mock: a.Name, At: a.Spec.ReqTimestampMock, Payload: learn.RawOf(a, true)},
+		{Mock: b.Name, At: b.Spec.ReqTimestampMock, Payload: learn.RawOf(b, true)},
+		{Mock: c.Name, At: c.Spec.ReqTimestampMock, Payload: learn.RawOf(c, true)},
+		{Given: true},
+	}
+	got := inServeOrder(earlier, []*models.Mock{nil, b, a, b})
+	if n := []int{got[0].Payload.Nth(), got[1].Payload.Nth(), got[2].Payload.Nth(), got[3].Payload.Nth()}; !reflect.DeepEqual(n, []int{3, 2, 0, 0}) {
+		t.Fatalf("payloads served as %v; want [3 2 0 0]", n)
+	}
+	for i, e := range earlier {
+		if e.Payload.Nth() != 0 {
+			t.Fatalf("the round's earlier[%d] was changed: %d", i, e.Payload.Nth())
+		}
+	}
+}
+
 // At start-up F's clock runs the lead past the earliest recording from when
 // keploy froze it, before the app booted: a start-up call's clock read moved
 // by the lead and the boot's difference, which the lead alone does not read.

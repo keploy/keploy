@@ -108,6 +108,12 @@ type Raw struct {
 	mock   string
 	at     time.Time
 	served bool
+	// nth is where F served the mock in the test, in the order it served
+	// the test's mocks (ServedAs: 1 the first), 0 where it was not served
+	// or that order is not known: the offset rule (offsetFrom) tells by it
+	// whether F gave the application two recordings both runs gave it in
+	// the order the recording did.
+	nth int
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
 	// another's place (the offset rule, offsetFrom).
@@ -168,8 +174,24 @@ func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answe
 // fields and answer clock reads.
 func (r Raw) WithServed(served bool) Raw {
 	r.served = served
+	if !served {
+		r.nth = 0
+	}
 	return r
 }
+
+// ServedAs is r as the n-th of the mocks F served in the test, in the order
+// it served them (1 the first): served earlier in the test, with the same
+// text, fields and answer clock reads. A Raw served in an order not known
+// (WithServed, RawOf) stands in any other's place the offset rule reads.
+func (r Raw) ServedAs(n int) Raw {
+	r.served, r.nth = true, max(n, 0)
+	return r
+}
+
+// Nth is where F served r's mock in the test (ServedAs), 0 where it was not
+// served or that order is not known.
+func (r Raw) Nth() int { return r.nth }
 
 // Kind is what a drifted leaf is learned as.
 type Kind string

@@ -402,11 +402,12 @@ func getAnswer(name, url, body string, at time.Time) *models.Mock {
 }
 
 // A move is what F gave the application in place of what the recording gave
-// it, as an answer to the same call: answers both runs gave it (two users
-// read in each, two health checks a minute apart) are no move, nor is an
-// answer to another call F alone gave it beside one the recording alone did;
-// a read of the clock the lead moved stays noise beside them, at the minute
-// and at the second, as text and typed.
+// it, as an answer to the same call: answers both runs gave it in the order
+// the recording did (two users read in each, two health checks a minute
+// apart, F serving each first as recorded) are no move, nor is an answer to
+// another call F alone gave it beside one the recording alone did; a read of
+// the clock the lead moved stays noise beside them, at the minute and at the
+// second, as text and typed.
 func TestAnswersBothRunsGaveOrOfTwoCallsAreNoMove(t *testing.T) {
 	const p = "body.seen_at"
 	before := r1Insert.Add(-90 * time.Second)
@@ -422,8 +423,12 @@ func TestAnswersBothRunsGaveOrOfTwoCallsAreNoMove(t *testing.T) {
 		name string
 		raw  func(dc *DriftCache) []Raw
 	}{
-		{"two users both runs read", func(dc *DriftCache) []Raw { return []Raw{dc.RawOf(users1, true), dc.RawOf(users2, true)} }},
-		{"two health checks both runs read", func(dc *DriftCache) []Raw { return []Raw{dc.RawOf(health1, true), dc.RawOf(health2, true)} }},
+		{"two users both runs read", func(dc *DriftCache) []Raw {
+			return []Raw{dc.RawOf(users1, true).ServedAs(1), dc.RawOf(users2, true).ServedAs(2)}
+		}},
+		{"two health checks both runs read", func(dc *DriftCache) []Raw {
+			return []Raw{dc.RawOf(health2, true).ServedAs(4), dc.RawOf(health1, true).ServedAs(2)}
+		}},
 		{"a user the recording alone read, an order F alone placed", func(dc *DriftCache) []Raw { return []Raw{dc.RawOf(users1, false), dc.RawOf(order, true)} }},
 	} {
 		for _, row := range []struct {
@@ -439,6 +444,161 @@ func TestAnswersBothRunsGaveOrOfTwoCallsAreNoMove(t *testing.T) {
 			if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, set.raw(dc), nil, nil)[0]; ln.Kind != KindNoise {
 				t.Errorf("%s, %s: %s from %+v (%s); want noise", set.name, row.name, ln.Kind, ln.From, ln.Why)
 			}
+		}
+	}
+}
+
+// Two recordings both runs gave the application, which F gave in another
+// order than the recording did, are a move: a consumer that prefetches takes
+// two messages before it processes the first, and builds visible_after on
+// the first it got, its SentTimestamp and a minute, to the minute. Both
+// messages were sent before either receive, and both receives came before
+// the insert in both runs: the recording's insert is built on A, F's on B.
+// It is refused, naming both receives and the offset, as text, as a
+// DATETIME of no zone and typed at the minute, as text at the hour, through the
+// payloads F served and leaf by leaf, whatever the gap between the two
+// messages; so is one whose order F served them in keploy cannot tell. F
+// serving them in the recorded order leaves nothing in the other's place,
+// and the move is the lead's, as of the health checks above.
+func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
+	receive := func(name string, sent, at time.Time) *models.Mock {
+		m := r1Receive(`{"SentTimestamp": "` + strconv.FormatInt(sent.UnixMilli(), 10) + `"}`)
+		m.Name = name
+		// Answered on a clock no value here stands near.
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(200*time.Millisecond)
+		return m
+	}
+	const p = "body.visible_after"
+	type row struct {
+		name      string
+		rec, live Shape
+	}
+	minuteRows := func(sentA, sentB time.Time) []row {
+		at := func(t time.Time) time.Time { return t.Add(time.Minute) }
+		return []row{
+			{"text, the minute", strLeaf(p, at(sentA).Format("2006-01-02T15:04Z07:00")), strLeaf(p, at(sentB).Format("2006-01-02T15:04Z07:00"))},
+			{"a DATETIME of no zone, the minute", strLeaf(p, at(sentA).Format("2006-01-02 15:04")), strLeaf(p, at(sentB).Format("2006-01-02 15:04"))},
+			{"typed, the minute", typedLeaf(p, at(sentA), time.Minute), typedLeaf(p, at(sentB), time.Minute)},
+		}
+	}
+	// At the hour (ISO 8601's reduced precision), the value two hours after
+	// a message sent an hour after the other.
+	hourRows := func(sentA, sentB time.Time) []row {
+		at := func(t time.Time) string {
+			return t.Add(2 * time.Hour).Truncate(time.Hour).Format("2006-01-02T15Z07:00")
+		}
+		return []row{{"text, the hour", strLeaf(p, at(sentA)), strLeaf(p, at(sentB))}}
+	}
+	for _, sent := range []struct {
+		a    time.Time
+		gap  time.Duration
+		rows func(sentA, sentB time.Time) []row
+	}{
+		{time.Date(2026, 10, 22, 11, 10, 16, 473e6, time.UTC), 2*time.Minute + 311*time.Millisecond, minuteRows},
+		{time.Date(2026, 10, 22, 11, 10, 16, 473e6, time.UTC), time.Minute + 5*time.Second, minuteRows},
+		{time.Date(2026, 10, 22, 8, 40, 16, 473e6, time.UTC), time.Hour + 3*time.Second, hourRows},
+	} {
+		sentA, gap := sent.a, sent.gap
+		sentB := sentA.Add(gap)
+		a := receive("mock-4", sentA, time.Date(2026, 10, 22, 11, 14, 13, 778e6, time.UTC))
+		b := receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 14, 15, 101e6, time.UTC))
+		for _, row := range sent.rows(sentA, sentB) {
+			for _, served := range []struct {
+				name    string
+				refused bool
+				of      func(dc *DriftCache) ([]Raw, []Earlier)
+			}{
+				{"payloads F served in the other order", true, func(dc *DriftCache) ([]Raw, []Earlier) {
+					return []Raw{dc.RawOf(a, true).ServedAs(2), dc.RawOf(b, true).ServedAs(1)}, nil
+				}},
+				{"payloads F served in an order keploy cannot tell", true, func(dc *DriftCache) ([]Raw, []Earlier) {
+					return []Raw{dc.RawOf(a, true), dc.RawOf(b, true)}, nil
+				}},
+				{"leaf by leaf in the other order", true, func(*DriftCache) ([]Raw, []Earlier) {
+					return nil, []Earlier{
+						{Mock: b.Name, At: b.Spec.ReqTimestampMock, Own: true, Payload: RawOf(b, true).ServedAs(1)},
+						{Mock: a.Name, At: a.Spec.ReqTimestampMock, Own: true, Payload: RawOf(a, true).ServedAs(2)},
+					}
+				}},
+				{"one leaf by leaf, one payload, in the other order", true, func(dc *DriftCache) ([]Raw, []Earlier) {
+					return []Raw{dc.RawOf(a, true).ServedAs(3)}, []Earlier{{Mock: b.Name, At: b.Spec.ReqTimestampMock, Own: true, Payload: RawOf(b, true).ServedAs(1)}}
+				}},
+				{"payloads F served in the recorded order", false, func(dc *DriftCache) ([]Raw, []Earlier) {
+					return []Raw{dc.RawOf(a, true).ServedAs(1), dc.RawOf(b, true).ServedAs(2)}, nil
+				}},
+				{"in the recorded order, A read twice, F's order on its exchange", false, func(dc *DriftCache) ([]Raw, []Earlier) {
+					return []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(2)}, []Earlier{{Mock: a.Name, At: a.Spec.ReqTimestampMock, Own: true, Payload: RawOf(a, true).ServedAs(1)}}
+				}},
+			} {
+				dc := NewDriftCache()
+				raw, earlier := served.of(dc)
+				ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, earlier, raw, nil, nil)[0]
+				if row.name == "text, the hour" {
+					// Read to the hour, the instant is a pick from what
+					// the application was given (the echo, before any
+					// offset), compared at replay in any order, or built on
+					// it by an offset: never noise.
+					// Leaf by leaf, the echo reads the exchanges' leaves,
+					// and the offset refuses it.
+					bound := ln.Kind == KindVariable && ln.From.Echo && (ln.From.Mock == b.Name || ln.From.Mock == a.Name)
+					refused := ln.Kind == KindUnaccounted && strings.Contains(ln.Why, "to the hour, stands 2h0m0s after the moment mock-4 at spec.resp.body holds as the recording gave it")
+					if !bound && !refused {
+						t.Errorf("gap %v, %s, %s: %s from %+v (%s); want a variable of a receive, or refused, built on the receives by two hours", gap, row.name, served.name, ln.Kind, ln.From, ln.Why)
+					}
+					continue
+				}
+				if !served.refused {
+					if ln.Kind != KindNoise {
+						t.Errorf("gap %v, %s, %s: %s (%s); want noise, the lead's move", gap, row.name, served.name, ln.Kind, ln.Why)
+					}
+					continue
+				}
+				if ln.Kind != KindUnaccounted || ln.From.Mock != "" ||
+					!strings.Contains(ln.Why, "the moment mock-4 at spec.resp.body holds as the recording gave it") ||
+					!strings.Contains(ln.Why, "the moment mock-11 at spec.resp.body holds, which record's full round gave the application in its place") {
+					t.Errorf("gap %v, %s, %s: %s from %+v (%s); want it refused, built on mock-4 and mock-11 by an offset", gap, row.name, served.name, ln.Kind, ln.From, ln.Why)
+				}
+			}
+		}
+	}
+	// One receive, B, served and recorded after the call: F alone gave it,
+	// and the value is refused as built on it.
+	sentA := time.Date(2026, 10, 22, 11, 10, 16, 473e6, time.UTC)
+	sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
+	a := receive("mock-4", sentA, time.Date(2026, 10, 22, 11, 14, 13, 778e6, time.UTC))
+	b := receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 16, 20, 0, time.UTC))
+	dc := NewDriftCache()
+	if ln := ClassifyIn(dc, []string{p}, strLeaf(p, sentB.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, sentA.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), r1Insert, nil, []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(1)}, nil, nil)[0]; ln.Kind != KindUnaccounted {
+		t.Errorf("B alone served, after the call: %s (%s); want it refused", ln.Kind, ln.Why)
+	}
+}
+
+// inRecordedOrder: one recording is in its own order; two are in the
+// recording's order only where F's order of them is known and the same.
+func TestInRecordedOrder(t *testing.T) {
+	t0 := time.Date(2026, 10, 22, 11, 0, 0, 0, time.UTC)
+	at := func(mock string, d time.Duration, nth int) offsetPlace {
+		return offsetPlace{mock: mock, at: t0.Add(d), nth: nth}
+	}
+	for _, c := range []struct {
+		name string
+		a, b offsetPlace
+		want bool
+	}{
+		{"one recording", at("mock-1", 0, 0), at("mock-1", 0, 0), true},
+		{"as recorded", at("mock-1", 0, 1), at("mock-2", time.Second, 2), true},
+		{"as recorded, b first", at("mock-2", time.Second, 5), at("mock-1", 0, 3), true},
+		{"the other order", at("mock-1", 0, 2), at("mock-2", time.Second, 1), false},
+		{"the other order, b first", at("mock-2", time.Second, 1), at("mock-1", 0, 2), false},
+		{"a's order unknown", at("mock-1", 0, 0), at("mock-2", time.Second, 2), false},
+		{"b's order unknown", at("mock-1", 0, 1), at("mock-2", time.Second, 0), false},
+		{"recorded at one instant", at("mock-1", 0, 1), at("mock-2", 0, 2), false},
+		{"recorded at one instant, served the other way", at("mock-1", 0, 2), at("mock-2", 0, 1), false},
+		{"served as one", at("mock-1", 0, 1), at("mock-2", time.Second, 1), false},
+	} {
+		if got := inRecordedOrder(c.a, c.b); got != c.want {
+			t.Errorf("%s: %v; want %v", c.name, got, c.want)
 		}
 	}
 }

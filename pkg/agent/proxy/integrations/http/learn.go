@@ -794,8 +794,11 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // a kept-alive app never makes again in F is one). Each is read once. The
 // paired mock is not one, and neither is an exchange the learn step served
 // (earlier): its leaves and fixed parts, with what F saw at each, are read
-// instead (earlierOf). dc keeps each mock's text for the test, read with its
-// answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
+// instead (earlierOf). A mock served earlier in the test is read as the n-th
+// F served (learn.Raw.ServedAs), in served's order: the order every parser's
+// claim tells the tracker of (learn.Tracker.ServedMock), in which F gave the
+// application its recordings. dc keeps each mock's text for the test, read
+// with its answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
 // disk and that cannot be read back, and why; no mock is then returned, since
 // what it held cannot be told.
 func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
@@ -813,25 +816,28 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 		read[id] = true
 		return true
 	}
-	add := func(m *models.Mock, served bool) error {
-		r, err := dc.ReadRaw(m, served)
+	add := func(m *models.Mock, nth int) error {
+		r, err := dc.ReadRaw(m, nth > 0)
 		if err != nil {
 			return fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+		}
+		if nth > 0 {
+			r = r.ServedAs(nth)
 		}
 		out = append(out, r)
 		return nil
 	}
-	for _, m := range served {
+	for i, m := range served {
 		prev.See(m)
 		if m != nil && !leafed[m.Name] && once(m) {
-			if err := add(m, true); err != nil {
+			if err := add(m, i+1); err != nil {
 				return nil, err
 			}
 		}
 	}
 	for _, m := range visible {
 		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) && once(m) {
-			if err := add(m, false); err != nil {
+			if err := add(m, 0); err != nil {
 				return nil, err
 			}
 		}
@@ -861,6 +867,35 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 		return nil, readErr
 	}
 	return out, nil
+}
+
+// inServeOrder is earlier with the payload of each exchange the learn step
+// served leaf by leaf read as the n-th mock F served in the test
+// (learn.Raw.ServedAs), where served (the test's served mocks, in F's order,
+// as earlierRaw reads them) holds its recording; one it does not hold keeps
+// an order keploy cannot tell, which the offset rule fails closed on. A copy:
+// earlier is the round's.
+func inServeOrder(earlier []learn.Earlier, served []*models.Mock) []learn.Earlier {
+	nth := make(map[string]int, len(served))
+	for i, m := range served {
+		if m == nil {
+			continue
+		}
+		id := m.Name + "\x00" + m.Spec.ReqTimestampMock.String()
+		if _, ok := nth[id]; !ok {
+			nth[id] = i + 1
+		}
+	}
+	out := append([]learn.Earlier(nil), earlier...)
+	for i, e := range out {
+		if !e.Payload.Read() {
+			continue
+		}
+		if n := nth[e.Payload.Mock()+"\x00"+e.Payload.At().String()]; n > 0 {
+			out[i].Payload = e.Payload.ServedAs(n)
+		}
+	}
+	return out
 }
 
 // orderMiss is the order rule's reading, under the proven switch outside
@@ -1038,6 +1073,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
+			// The exchanges served leaf by leaf, each as the n-th mock F
+			// served, as the payloads among raw are.
+			earlier = inServeOrder(earlier, served)
 			// A pool mock's call need not run on the clock F set for a
 			// test (at the start-up and between tests none is set, and a
 			// call made in a test was recorded in none): its clock reads
