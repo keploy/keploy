@@ -386,7 +386,7 @@ const (
 	whyMoved      = "a word of it that changed stands elsewhere in it on the other side: its words moved, which is no fresh value"
 	whyCase       = "only the case of a word of it changed"
 	whyEscape     = "a word of it that changed stands right after a '%' or '\\', an escape keploy does not read apart"
-	whyInstant    = "a word of it that changed is part of an instant that did not move as F's clock moves it, so it is no clock read keploy may learn"
+	whyInstant    = "a word of it that changed is part of an instant that did not move as F's clock moves it, and keploy would hold the rest of that instant as recorded, which a later run's clock changes"
 	whyZone       = "a word of it that changed is part of an instant written in another zone than when it was recorded, which F's clock does not account for"
 	whyGluedUUID  = "a time-ordered UUID in it that changed is glued to a letter or digit"
 	whyVariant    = "a time-ordered UUID in it has a variant keploy does not read (N18)"
@@ -526,13 +526,33 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 		{rec, func(c changedSpan) [2]int { return c.r }, spansOf(c.pairs, true)},
 		{live, func(c changedSpan) [2]int { return c.l }, spansOf(c.pairs, false)},
 	} {
-		overlaps := func(from, to int) bool {
+		// inSlot reports whether byte i of the side stands in a slot other
+		// than an instant's.
+		inSlot := func(i int) bool {
 			for _, sp := range spans {
 				if sp.kind == models.WordSlotInstant {
 					continue
 				}
-				x := side.spanOf(sp)
-				if x[0] < to && from < x[1] {
+				if x := side.spanOf(sp); x[0] <= i && i < x[1] {
+					return true
+				}
+			}
+			return false
+		}
+		overlaps := func(from, to int) bool {
+			for i := from; i < to; i++ {
+				if inSlot(i) {
+					return true
+				}
+			}
+			return false
+		}
+		// heldFixed reports whether a letter or digit of side.s[from:to]
+		// stands in no slot: read as words, that part of it is compared as
+		// recorded.
+		heldFixed := func(from, to int) bool {
+			for i := from; i < to; i++ {
+				if isWord(side.s[i]) && !inSlot(i) {
 					return true
 				}
 			}
@@ -544,9 +564,17 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 				taken[i] = true
 			}
 		}
+		// Read as words, such an instant whose changed words leave a letter
+		// or digit of it outside the slots holds that part as recorded (an
+		// ISO time whose seconds changed, its date and hour fixed), which a
+		// later run's clock moves: it is refused. One every letter and digit
+		// of which stands in the slots holds nothing of it fixed: it is a
+		// value that changed whole and only reads as an instant (an id of
+		// ten, thirteen, sixteen or nineteen digits), learned by its words
+		// as any other.
 		for _, lay := range clockLayouts {
 			for _, m := range clockMatches(lay, side.s, taken) {
-				if _, _, ok := lay.read(side.s[m[0]:m[1]]); ok && overlaps(m[0], m[1]) {
+				if _, _, ok := lay.read(side.s[m[0]:m[1]]); ok && overlaps(m[0], m[1]) && heldFixed(m[0], m[1]) {
 					return whyInstant
 				}
 			}

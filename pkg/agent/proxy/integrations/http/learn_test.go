@@ -345,8 +345,9 @@ func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
 		served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/events", `{"at":"`+c.live+`"}`, nil), db, n, opts)
 		if c.clock == nil {
 			// An instant that moved otherwise than F's clock moves it is no
-			// clock read, and its words are not learned (r9 §2): refused.
-			if served != nil || miss == nil || !strings.Contains(miss.res.Why, "no clock read keploy may learn") {
+			// clock read, and its words are not learned: its date would be
+			// held as recorded. Refused.
+			if served != nil || miss == nil || !strings.Contains(miss.res.Why, "did not move as F's clock moves it") {
 				t.Fatalf("%s: served %v miss %+v, want refused", c.name, served, miss)
 			}
 			continue

@@ -547,7 +547,9 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"beyond ASCII where the runs drifted, in F only", "id A7-x", "id 订单B8", whyScript, nil},
 		{"an instant whose zone changed", "at " + wAt.Format(time.RFC3339), "at " + later.In(plus1).Format(time.RFC3339), whyZone, nil},
 		{"an instant that did not move as F's clock does", "at " + wAt.Format(time.RFC3339), "at " + wAt.Add(3*time.Hour).Format(time.RFC3339), whyInstant, nil},
-		{"an epoch that moved otherwise", "ts " + strconv.FormatInt(wAt.Unix(), 10), "ts " + strconv.FormatInt(wAt.Unix()+3600, 10), whyInstant, nil},
+		// Read as words, the rest of such an instant would be held fixed.
+		{"an epoch's fraction that moved otherwise, its seconds fixed", "ts " + strconv.FormatInt(wAt.Unix(), 10) + ".123", "ts " + strconv.FormatInt(wAt.Unix(), 10) + ".456", whyInstant, nil},
+		{"a date whose day alone changed", "on 2026-10-21", "on 2026-10-25", whyInstant, nil},
 		{"a UUID recorded with a variant keploy does not read, F's one it does", "id " + uuid7Of(wAt, "abc123456789abcdef", 'c', false), "id " + uuid7Of(later, "def0123456789abcde", '8', false), whyVariant, nil},
 		{"a UUID in F of a variant keploy does not read, the recorded one it does", "id " + uuid7Of(wAt, "abc123456789abcdef", '8', false), "id " + uuid7Of(later, "def0123456789abcde", 'c', false), "a time-ordered UUID in it has a variant keploy does not read", nil},
 		{"an instant written otherwise", strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.UnixMilli(), 10), whySkeleton, nil},
@@ -840,7 +842,7 @@ func TestAGluedValueOfAnEarlierCallIsFound(t *testing.T) {
 // word that repeats is a tie, one glued inside another containment, and
 // every other reason no tie rule.
 func TestRefusalClass(t *testing.T) {
-	for why, want := range map[string]string{whyRepeat: models.RefusedTie, whyGlued: models.RefusedContainment, whyParts: "", whyGluedUUID: "", whyMoved: "", "": ""} {
+	for why, want := range map[string]string{whyRepeat: models.RefusedTie, whyGlued: models.RefusedContainment, whyParts: "", whyGluedUUID: "", whyMoved: "", whyInstant: "", "": ""} {
 		if got := RefusalClass(why); got != want {
 			t.Errorf("RefusalClass(%q) = %q, want %q", why, got, want)
 		}
@@ -1441,6 +1443,68 @@ func TestAUUIDInstantKeepsItsVersion(t *testing.T) {
 		}
 		if ok, why := WordsAdmit(tc.of(wAt), tc.other(other), e); ok || why != "an instant of it is written otherwise than when it was recorded" {
 			t.Errorf("%s: a UUID of the other version: admitted %v (%q)", tc.name, ok, why)
+		}
+	}
+}
+
+// A changed id is learned by its words whatever its length: an id of ten,
+// thirteen, sixteen or nineteen digits too, which reads as an epoch, since
+// every digit of it changed with it (one run, one slot) and nothing of the
+// instant it reads as is held fixed. Over seeded pairs of every length,
+// alone, between words and after a word and a '-', none is refused, and
+// each entry admits F and another id of its length.
+func TestAChangedIDOfEveryLengthIsLearned(t *testing.T) {
+	r := rand.New(rand.NewSource(10))
+	id := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte('0' + r.Intn(10))
+		}
+		if b[0] == '0' {
+			b[0] = '1'
+		}
+		return string(b)
+	}
+	for n := 1; n <= 24; n++ {
+		refused := 0
+		for i := 0; i < 60; i++ {
+			a, b := id(n), id(n)
+			if a == b {
+				continue
+			}
+			for _, form := range []string{"%s", "order %s paid", "ord-%s"} {
+				rec, live := fmt.Sprintf(form, a), fmt.Sprintf(form, b)
+				e, why := NewDriftCache().Words(rec, live, nil)
+				if why != "" {
+					if refused++; refused <= 3 {
+						t.Errorf("%d digits: %q -> %q refused: %s", n, rec, live, why)
+					}
+					continue
+				}
+				if ok, why := WordsAdmit(rec, live, e); !ok {
+					t.Errorf("%d digits: %q -> %q: F not admitted: %s", n, rec, live, why)
+				}
+				if next := fmt.Sprintf(form, id(n)); next != rec {
+					if ok, why := WordsAdmit(rec, next, e); !ok {
+						t.Errorf("%d digits: %q -> %q: another id %q not admitted: %s", n, rec, live, next, why)
+					}
+				}
+			}
+		}
+		if refused > 0 {
+			t.Errorf("%d digits: %d changed ids refused", n, refused)
+		}
+	}
+	for _, tc := range [][3]string{
+		{"1829384756123456789", "1829384761234567890", "s0r0"}, // a snowflake-like id, nineteen digits
+		{"1234567890123", "1234567990123", "s0r0"},             // thirteen digits, a few of them changed
+		{"id 1761042482", "id 1761046082", "s1r0"},             // an epoch second an hour off F's clock
+		// An instant every letter and digit of which changed holds nothing of
+		// it fixed: its words are learned, its separators kept.
+		{"on 2026-10-21", "on 2027-11-25", "s1r0 s1r1 s1r2"},
+	} {
+		if got := slotsOf(learnedWords(t, tc[0], tc[1])); got != tc[2] {
+			t.Errorf("%q -> %q: slots %s, want %s", tc[0], tc[1], got, tc[2])
 		}
 	}
 }

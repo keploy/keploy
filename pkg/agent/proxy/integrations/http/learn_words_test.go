@@ -585,6 +585,10 @@ func TestTheLearnPlansTies(t *testing.T) {
 		// Two values that were two when recorded and one in F are two
 		// values (neither carries the other): each is learned apart.
 		{name: "equal only in F", method: "POST", path: "/a", rec: `{"a":"a1x","b":"b2y"}`, f: `{"a":"z9q","b":"z9q"}`, words: []string{"body.a", "body.b"}},
+		// An id that reads as an epoch, every digit of it in its one word, is
+		// learned by its words: nothing of an instant is held fixed.
+		{name: "a snowflake id", method: "POST", path: "/a", rec: `{"id":"1829384756123456789"}`, f: `{"id":"1829384761234567890"}`, words: []string{"body.id"}},
+		{name: "a snowflake id as a number", method: "POST", path: "/a", rec: `{"id":1829384756123456789}`, f: `{"id":1829384761234567890}`, words: []string{"body.id"}},
 		{name: "seq beside a fresh hex", method: "POST", path: "/a", rec: `{"note":"seq=17","id":"3f2b8c1e9a4d70a1"}`, f: `{"note":"seq=18","id":"a7c4e2d10b3f4c2e"}`, words: []string{"body.id", "body.note"}},
 		// Twins are named by their first place, past the test case's keys
 		// (here "id", which the twins' value does not carry).
