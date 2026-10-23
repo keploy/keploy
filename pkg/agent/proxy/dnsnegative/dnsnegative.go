@@ -37,9 +37,15 @@
 // lines wait for the stop. An answer must be noted before any question the
 // app asked after it got that answer is told: a walk's next step told first
 // finds nothing held yet, and the lookup it ends is said, at the stop, as if
-// its search went unseen. A caller may note only while it records: a walk
+// its search went unseen. A Log's recording runs from Reset to Stop: a walk
 // under way when it starts has its earlier steps unseen, and its steps are
-// told as above.
+// told as above. After the Stop, until the next Reset, the app's lookups (as
+// it shuts down, or as it goes on running) are no recording's to explain:
+// their answers are only remembered, as evidence of a walk the next recording
+// may see the end of. The answer to a question the app asked while the
+// recording ran (by when the app asked it, AskAt: a capture may tell of it
+// late) is said if it would be said plainly, as nothing can wait for the rest
+// of a walk then, and given a DEBUG line if it would wait.
 // One Log is one recording at a time, across every scope it keeps apart: Stop
 // and Reset end and start them all, and they share its bounds.
 package dnsnegative
@@ -49,6 +55,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/miekg/dns"
@@ -119,6 +126,10 @@ const (
 	RoutineFound     = "the name as given, which the resolver then found in one of its search domains"
 	RoutineReverse   = "a reverse lookup (PTR), which is never a step of the app's own lookup"
 	RoutineGrpcProbe = "gRPC's service-config probe, which grpc-go makes on every target and whose failure it ignores"
+	// RoutineAfterStop is the name as given, asked before its search
+	// domains, whose answer came after the recording stopped: the rest of
+	// the walk, which would tell, is no recording's.
+	RoutineAfterStop = "the name as given, asked before the resolver's search domains, answered after the recording stopped: the rest of the walk, which would tell whether the lookup failed, is not recorded"
 )
 
 // The lines' messages. Relayed is keploy record's DNS relay, which passed the
@@ -202,11 +213,17 @@ type Ticket struct {
 	// scope is the scope it was asked in: its answer's, whatever the
 	// Answer says.
 	scope string
+	// beforeStop says the app asked it before the recording stopped, though
+	// the Log was told of it after (AskAt).
+	beforeStop bool
 }
 
 // Log is what a recording has said of the answers that did not resolve the
 // app's lookups, and the lines it holds back. Its zero value is ready; Reset
-// starts each recording afresh.
+// starts each recording afresh. A Log never Reset is a recording no question
+// told of late belongs to once it stopped (StoppedAfter): an agent that only
+// replays stops it at each test set's end (SetGracefulShutdown), and never
+// records.
 type Log struct {
 	mu sync.Mutex
 	// seq counts the questions the Log was told of (Ask).
@@ -218,8 +235,9 @@ type Log struct {
 	// flight no longer than its recording.
 	inflight map[string]int
 	gen      uint64
-	// stopped says the recording stopped (Stop): what comes after holds
-	// nothing, as no stop is left to say it.
+	// stopped says the recording stopped (Stop): until the next Reset an
+	// answer is remembered (seen), and said only when its question was asked
+	// before the stop (note).
 	stopped bool
 	// named holds the app's own lookups: the first LogMax logged at INFO,
 	// the rest at DEBUG.
@@ -239,10 +257,12 @@ type Log struct {
 	// stoppedAt is the place the recording's Stop took among the questions
 	// (it counts as one in seq): Reset forgets the answers remembered before
 	// it, which no walk under way at the next start can be a step after.
+	// stopTime is when it stopped, and startTime when it started (Reset;
+	// zero for a Log never Reset): a question told of after the stop, asked
+	// between the two (AskAt), is still the recording's.
 	stoppedAt uint64
-	// reportedRepeats, reportedDebug and reportedUntracked are the counts
-	// Stop last logged.
-	reportedRepeats, reportedDebug, reportedUntracked uint64
+	stopTime  time.Time
+	startTime time.Time
 }
 
 // seenAnswer is an answer remembered, with the recording (gen) and the
@@ -387,12 +407,24 @@ const inflightMax = TrackMax
 // the walk's candidate; n.S shows that the resolver searches n, held as asked
 // as given, so that its search, not the app asking again, decides its line.
 func (l *Log) Ask(logger *zap.Logger, cfg Config, scope string, q dns.Question) Ticket {
+	return l.AskAt(logger, cfg, scope, q, time.Now())
+}
+
+// AskAt is Ask for a question the app asked at, which a caller may tell of
+// later than it was asked (a capture behind the app): asked before the
+// recording stopped (and after it started), its answer is the recording's,
+// though both come after. at must be on time.Now()'s clock, with its
+// monotonic reading, as the stop's time is (time.Now(), less how long ago
+// the app asked): a wall time read another way moves with a step of the wall
+// clock, and lags it by a suspend.
+func (l *Log) AskAt(logger *zap.Logger, cfg Config, scope string, q dns.Question, at time.Time) Ticket {
 	name := strings.ToLower(dns.Fqdn(q.Name))
 	k := heldKey(scope, name)
 	var out lines
 	l.mu.Lock()
 	l.seq++
 	t := Ticket{seq: l.seq, gen: l.gen, scope: scope}
+	t.beforeStop = l.stoppedAfter(at)
 	switch n := l.inflight[k]; {
 	case n > 0:
 		l.inflight[k] = n + 1
@@ -507,6 +539,18 @@ func (l *Log) note(logger *zap.Logger, r *resolver, t Ticket, a Answer, out *lin
 		l.seen, _ = lru.New[string, seenAnswer](seenMax)
 	}
 	l.seen.Add(key(a.Scope, name, a.Question.Qtype), seenAnswer{Answer: a, gen: l.gen, seq: l.seq})
+	final := false
+	if l.stopped {
+		// The recording stopped, and released what it held. The answer to a
+		// question the app asked before the stop ends a lookup the recording
+		// saw begin (its answer came late: a slow upstream, a capture behind
+		// the app): it is said, but can wait for nothing (final). Any other
+		// is no recording's to explain.
+		if t.seq == 0 || t.gen != l.gen || (t.seq >= l.stoppedAt && !t.beforeStop) {
+			return
+		}
+		final = true
+	}
 	if byType := l.held[heldKey(a.Scope, name)]; byType != nil {
 		h := byType[a.Question.Qtype]
 		retry := t.quiet && h != nil && t.seq > latestNoted(byType) && !l.stepInFlight(r, a.Scope, name)
@@ -549,10 +593,10 @@ func (l *Log) note(logger *zap.Logger, r *resolver, t Ticket, a Answer, out *lin
 	if a.Synthetic || a.Rcode == dns.RcodeSuccess {
 		return
 	}
-	if a.Rcode == dns.RcodeNameError {
+	if a.Rcode == dns.RcodeNameError && !final {
 		l.learn(logger, r, a, name, out)
 	}
-	l.negative(logger, r, a, name, out)
+	l.negative(logger, r, a, name, final, out)
 }
 
 // key is the key of the answer to (name, qtype) in scope: name lower case.
@@ -823,7 +867,9 @@ func (l *Log) wasLearned(scope, name string) bool {
 }
 
 // negative logs the answer a, which did not resolve the lookup of name (lower
-// case): once per lookup, by the class its first answer gave it.
+// case): once per lookup, by the class its first answer gave it. A final
+// answer (one after the recording's stop) is held by nothing: what would wait
+// for the rest of a walk gets a DEBUG line instead.
 //
 // A lookup keeps that class, routine or the app's, for the recording: its
 // repeats come from a resolver's cache, or keploy's, and the answer that made
@@ -831,7 +877,7 @@ func (l *Log) wasLearned(scope, name string) bool {
 // steps of a later walk, which would turn a healthy run's candidate into an
 // INFO line. Only learning that the app asked the name as given (learn) moves
 // a lookup from routine to the app's.
-func (l *Log) negative(logger *zap.Logger, r *resolver, a Answer, name string, out *lines) {
+func (l *Log) negative(logger *zap.Logger, r *resolver, a Answer, name string, final bool, out *lines) {
 	q := a.Question
 	k := onceKey(a.Scope, name, q.Qtype, a.Rcode)
 	learned := l.wasLearned(a.Scope, name)
@@ -848,9 +894,11 @@ func (l *Log) negative(logger *zap.Logger, r *resolver, a Answer, name string, o
 	case reason != "" && !waits:
 		l.sayRoutine(logger, r, a, k, reason, true, out)
 	case reason != "":
-		if l.hold(r, a, name, k, unproven) == nil {
+		if final || l.hold(r, a, name, k, unproven) == nil {
 			l.sayRoutine(logger, r, a, k, reason, true, out)
 		}
+	case a.Rcode == dns.RcodeNameError && r.asksAsGivenFirst(name) && final:
+		l.sayRoutine(logger, r, a, k, RoutineAfterStop, true, out)
 	case a.Rcode == dns.RcodeNameError && r.asksAsGivenFirst(name):
 		if l.hold(r, a, name, k, asGiven) == nil {
 			l.sayNamed(logger, r, a, k, NextStepSearchUnseen, true, out)
@@ -861,14 +909,14 @@ func (l *Log) negative(logger *zap.Logger, r *resolver, a Answer, name string, o
 }
 
 // hold holds the lookup of name (lower case) answered a, whose line waits on
-// the rest of a walk, and returns it; nil when it cannot: no room is left, or
-// the recording has stopped (no stop is left to say what it holds).
+// the rest of a walk, and returns it; nil when no room is left. Nothing is
+// held once the recording stopped (an answer then is final, or unsaid).
 func (l *Log) hold(r *resolver, a Answer, name, k string, kind heldKind) *heldLookup {
 	hk := heldKey(a.Scope, name)
 	if h := l.held[hk][a.Question.Qtype]; h != nil {
 		return h
 	}
-	if l.nheld >= TrackMax || l.stopped {
+	if l.nheld >= TrackMax {
 		return nil
 	}
 	h := &heldLookup{kind: kind, a: a, key: k, noted: l.seq, tried: make([]bool, len(r.search)), r: r}
@@ -947,7 +995,8 @@ func (l *Log) sayNamed(logger *zap.Logger, r *resolver, a Answer, k, suffix stri
 	level := zapcore.InfoLevel
 	if held := len(l.named.seen); held > LogMax {
 		level = zapcore.DebugLevel
-		if held == LogMax+1 {
+		// The line promises a count at the stop: none comes after it.
+		if held == LogMax+1 && !l.stopped {
 			*out = append(*out, line{logger: logger, level: zapcore.InfoLevel, msg: MsgLimit,
 				fields: []zap.Field{zap.Int("limit", LogMax), zap.String("next_step", NextStepSeeDebug)}})
 		}
@@ -996,31 +1045,31 @@ func answerFields(r *resolver, a Answer) []zap.Field {
 // end of their search), and how many unresolved answers the app got without
 // an INFO line of their own: repeats of a lookup logged; the lookups past
 // LogMax, each logged at DEBUG; and the answers to lookups past TrackMax, only
-// counted. The count is at INFO, with how to see them, when lookups the user
-// has not seen at INFO came since it was last logged; at DEBUG when only
-// repeats or answers it does not track did; and not at all when nothing
-// moved.
+// counted. One count per recording: at INFO, with how to see them, when
+// lookups went to DEBUG; at DEBUG when only repeats did; none when nothing
+// did. A Stop of a stopped recording does nothing.
 func (l *Log) Stop(logger *zap.Logger) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	var out lines
 	l.mu.Lock()
+	if l.stopped {
+		l.mu.Unlock()
+		return
+	}
 	l.releaseAll(logger, &out)
 	// The stop takes a place of its own among the questions, so that an
 	// answer noted after it, before the next question, is placed after it.
 	l.seq++
-	l.stopped, l.stoppedAt = true, l.seq
+	l.stopped, l.stoppedAt, l.stopTime = true, l.seq, time.Now()
 	logged := min(len(l.named.seen), LogMax)
 	repeats := l.named.repeats
 	debug := uint64(len(l.named.seen) - logged)
 	untracked := l.named.pastMax
-	debugMoved := debug > l.reportedDebug
-	moved := debugMoved || repeats > l.reportedRepeats || untracked > l.reportedUntracked
-	l.reportedRepeats, l.reportedDebug, l.reportedUntracked = repeats, debug, untracked
 	l.mu.Unlock()
 	out.log()
-	if !moved {
+	if debug == 0 && repeats == 0 && untracked == 0 {
 		return
 	}
 	fields := []zap.Field{
@@ -1031,7 +1080,7 @@ func (l *Log) Stop(logger *zap.Logger) {
 		zap.Int("limit", LogMax),
 	}
 	level := zapcore.DebugLevel
-	if debugMoved {
+	if debug > 0 {
 		level = zapcore.InfoLevel
 		next := NextStepSeeDebug
 		if untracked > 0 {
@@ -1040,6 +1089,23 @@ func (l *Log) Stop(logger *zap.Logger) {
 		fields = append(fields, zap.String("next_step", next))
 	}
 	logger.Log(level, MsgCount, fields...)
+}
+
+// StoppedAfter says the Log's recording stopped after at, and started before
+// it: a question the app asked at, which a caller is told of only now (a
+// capture behind the app), was that recording's, though nothing may record
+// now (auto-replay's test session began): AskAt it. False while the recording
+// runs, once the next starts, and for a Log never Reset (no recording). at is
+// on time.Now()'s clock, as AskAt's is.
+func (l *Log) StoppedAfter(at time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stoppedAfter(at)
+}
+
+// stoppedAfter is StoppedAfter, under l.mu.
+func (l *Log) stoppedAfter(at time.Time) bool {
+	return l.stopped && !l.startTime.IsZero() && !at.Before(l.startTime) && at.Before(l.stopTime)
 }
 
 // releaseAll ends every held lookup, in the order they were noted: keploy saw
@@ -1079,7 +1145,6 @@ func (l *Log) releaseAll(logger *zap.Logger, out *lines) {
 func (l *Log) Reset() {
 	l.mu.Lock()
 	l.named, l.routine, l.learned = onceSet{}, onceSet{}, nil
-	l.reportedRepeats, l.reportedDebug, l.reportedUntracked = 0, 0, 0
 	for _, byType := range l.held {
 		for _, h := range byType {
 			h.repeats = 0 // the last recording's answers, not this one's
@@ -1093,7 +1158,8 @@ func (l *Log) Reset() {
 		}
 	}
 	l.gen++
-	l.inflight, l.stopped, l.stoppedAt = nil, false, 0
+	l.inflight, l.stopped, l.stoppedAt, l.stopTime = nil, false, 0, time.Time{}
+	l.startTime = time.Now()
 	l.mu.Unlock()
 }
 

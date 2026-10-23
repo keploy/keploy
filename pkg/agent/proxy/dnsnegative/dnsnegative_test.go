@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -472,19 +473,138 @@ func TestAFailedSearchCountsTheRepeatsHeld(t *testing.T) {
 	}
 }
 
-// After the recording's stop nothing is held, for no stop is left to say it:
-// what comes then (the app's lookups as it shuts down) is said at once.
-func TestAfterTheStopNothingIsHeld(t *testing.T) {
+// After the recording's stop nothing is said or held until the next starts:
+// the app's lookups as it shuts down, or as it goes on running (a compose
+// app, a sidecar's), are no recording's to explain. The next recording holds
+// again.
+func TestNothingIsSaidAfterTheStop(t *testing.T) {
 	h := newHarness(t, Config{Search: corp, Ndots: 1})
 	h.stop()
-	h.ask(nx("nope.example.invalid."))
-	if got := h.info(); len(got) != 1 || got[0] != infoLine("nope.example.invalid.", "A", "NXDOMAIN", NextStepNoSuchName+NextStepSearchUnseen) {
-		t.Fatalf("a lookup after the stop logged %q at INFO; want it said at once", got)
+	h.ask(nx("nope.example.invalid."), nx("mongoDb."), nx("nope.example.invalid."), nx("nope.example.invalid."))
+	if got := h.lines(zapcore.InfoLevel); len(got) != 0 {
+		t.Fatalf("lookups after the stop logged %+v at INFO; want nothing", got)
+	}
+	if got := h.debugQueries(); len(got) != 0 || h.l.nheld != 0 {
+		t.Fatalf("lookups after the stop logged %v at DEBUG and hold %d; want nothing", got, h.l.nheld)
+	}
+	h.stop()
+	if c := h.countLines(); len(c) != 0 {
+		t.Fatalf("a second stop counted %+v; want nothing, the answers after the first being no recording's", c)
 	}
 	h.l.Reset()
 	h.ask(nx("nope.example.invalid."))
 	if h.l.nheld != 1 {
 		t.Fatalf("the next recording holds %d lookups; want it holding again", h.l.nheld)
+	}
+}
+
+// A lookup the recording saw begin, whose answer comes after its stop (a slow
+// upstream, a capture behind the app), is said if it would be said plainly:
+// nothing can wait for the rest of a walk then, so a name that would wait
+// gets a DEBUG line, and nothing is held. A question asked after the stop is
+// no recording's.
+func TestALookupAskedBeforeTheStopIsSaidWhenItsAnswerComesAfter(t *testing.T) {
+	h := newHarness(t, Config{Search: corp, Ndots: 1})
+	dotless := h.question(nx("mongoDb."))                    // asked last: said plainly
+	asGiven := h.question(nx("db.prod."))                    // asked as given first: its search would tell
+	inDomain := h.question(nx("payments.corp.example.com.")) // no step seen before it: its walk would tell
+	h.stop()
+	h.answer(dotless, nx("mongoDb."))
+	h.answer(asGiven, nx("db.prod."))
+	h.answer(inDomain, nx("payments.corp.example.com."))
+	h.ask(nx("nope.example.invalid.")) // asked after the stop
+	want := []string{infoLine("mongoDb.", "A", "NXDOMAIN", NextStepDotlessNative)}
+	if got := h.info(); !equal(got, want) {
+		t.Fatalf("logged %q at INFO; want %q", got, want)
+	}
+	routine := map[string]string{}
+	for _, e := range h.lines(zapcore.DebugLevel) {
+		m := e.ContextMap()
+		routine[m["query"].(string)], _ = m["routine"].(string)
+	}
+	if routine["db.prod."] != RoutineAfterStop || routine["payments.corp.example.com."] != RoutineCandidate || len(routine) != 2 {
+		t.Fatalf("logged %v at DEBUG; want db.prod. as answered after the stop and payments.corp.example.com. as a candidate, nothing for the question asked after the stop", routine)
+	}
+	if h.l.nheld != 0 {
+		t.Fatalf("holds %d lookups after the stop; want none", h.l.nheld)
+	}
+	h.stop() // a stopped recording's stop does nothing
+	if c := h.countLines(); len(c) != 0 {
+		t.Fatalf("a second stop counted %+v; want nothing", c)
+	}
+
+	// A question asked before the stop that the Log is told of only after it
+	// (a capture behind the app), by when the app asked it, is the
+	// recording's; one asked after the stop is not.
+	// StoppedAfter tells a caller that no longer records (auto-replay's test
+	// session began) which of them to tell. A recording runs from its start
+	// (Reset) to its stop: a question asked before it started is not its own.
+	h = newHarness(t, Config{})
+	beforeTheStart := time.Now().Add(-time.Hour)
+	h.l.Reset()
+	beforeTheStop := time.Now()
+	for !time.Now().After(beforeTheStop) { // the stop comes strictly after
+		time.Sleep(time.Microsecond)
+	}
+	if h.l.StoppedAfter(beforeTheStop) {
+		t.Fatal("a recording under way says it stopped")
+	}
+	h.stop()
+	if !h.l.StoppedAfter(beforeTheStop) || h.l.StoppedAfter(time.Now()) || h.l.StoppedAfter(beforeTheStart) {
+		t.Fatal("a stopped recording does not say it stopped after a question asked while it ran, and only then")
+	}
+	late := h.l.AskAt(h.logger, h.cfg, "", nx("mongoDb.").answer().Question, beforeTheStop)
+	afterwards := h.l.AskAt(h.logger, h.cfg, "", nx("redis.").answer().Question, time.Now())
+	beforehand := h.l.AskAt(h.logger, h.cfg, "", nx("ldap.").answer().Question, beforeTheStart)
+	h.answer(late, nx("mongoDb."))
+	h.answer(afterwards, nx("redis."))
+	h.answer(beforehand, nx("ldap."))
+	want = []string{infoLine("mongoDb.", "A", "NXDOMAIN", NextStepDotlessNative)}
+	if got := h.info(); !equal(got, want) {
+		t.Fatalf("questions told of after the stop logged %q at INFO; want %q, the one asked while it ran", got, want)
+	}
+	h.l.Reset()
+	if h.l.StoppedAfter(beforeTheStop) {
+		t.Fatal("the next recording says it stopped")
+	}
+
+	// A Log never Reset records nothing a late question belongs to: an
+	// agent that only replays stops it at each test set's end.
+	h = newHarness(t, Config{})
+	beforeTheStop = time.Now().Add(-time.Second)
+	h.stop()
+	if h.l.StoppedAfter(beforeTheStop) {
+		t.Fatal("a Log never Reset says a recording of it stopped")
+	}
+	late = h.l.AskAt(h.logger, h.cfg, "", nx("mongoDb.").answer().Question, beforeTheStop)
+	h.answer(late, nx("mongoDb."))
+	if got := h.info(); len(got) != 0 {
+		t.Fatalf("a question told of late to a Log never Reset logged %q at INFO; want nothing", got)
+	}
+
+	// Past the INFO bound, a lookup said after the stop gets no line
+	// promising a count at the stop: none comes.
+	h = newHarness(t, Config{})
+	for i := 0; i < LogMax; i++ {
+		h.ask(nx("req-" + strconv.Itoa(i) + ".example."))
+	}
+	oneMore := h.question(nx("one-more.example."))
+	h.stop()
+	h.answer(oneMore, nx("one-more.example."))
+	if got := h.logs.FilterMessage(MsgLimit).All(); len(got) != 0 {
+		t.Fatalf("the bound reached after the stop logged %+v; want no line promising a count", got)
+	}
+
+	// A redundant expansion asked before the stop, answered after it, would
+	// teach keploy that the app asked its base as given, whose search the
+	// recording will not see: it starts no wait.
+	h = newHarness(t, Config{Search: twoCorps, Ndots: 1})
+	h.ask(nx("pay.a.example."), nx("pay.b.example.")) // a walk of pay: pay.b.example. routine
+	expansion := h.question(nx("pay.b.example.b.example."))
+	h.stop()
+	h.answer(expansion, nx("pay.b.example.b.example."))
+	if got := h.info(); len(got) != 0 || h.l.nheld != 0 {
+		t.Fatalf("an expansion answered after the stop logged %q at INFO and holds %d; want neither", got, h.l.nheld)
 	}
 }
 
@@ -504,9 +624,9 @@ func TestATicketNeverGivenBackLastsOnlyItsRecording(t *testing.T) {
 // resolving a fresh name per request must flood neither the log nor the
 // agent's memory for the life of the recording. Past the INFO bound one line
 // says the rest go to DEBUG, they do, and the count is logged when the
-// recording stops: at INFO with a next step when lookups the user has not
-// seen came since the last count, at DEBUG when only repeats did, and not at
-// all when nothing moved. Past the tracking bound, answers are only counted.
+// recording stops, once per recording: at INFO with a next step when lookups
+// went to DEBUG, at DEBUG when only repeats did, and not at all when nothing
+// did. Past the tracking bound, answers are only counted.
 func TestTheLinesAreBoundedAndTheRestCounted(t *testing.T) {
 	h := newHarness(t, Config{})
 	const past = 50
@@ -540,37 +660,41 @@ func TestTheLinesAreBoundedAndTheRestCounted(t *testing.T) {
 	if m := got[0].ContextMap(); m["repeats"] != uint64(repeats) || m["debug_lookups"] != uint64(past) || m["untracked_answers"] != uint64(0) || m["lookups_logged"] != int64(LogMax) {
 		t.Fatalf("the count says %+v; want repeats %d, debug_lookups %d, untracked_answers 0, lookups_logged %d", m, repeats, past, LogMax)
 	}
-	h.ask(name(1)) // only a repeat moves
+	h.ask(name(1)) // after the stop: no recording's, so nothing moves
 	h.stop()
-	if got := h.countLines(); len(got) != 2 || got[1].Level != zapcore.DebugLevel || got[1].ContextMap()["repeats"] != uint64(repeats+1) {
-		t.Fatalf("a count only repeats moved is logged again at DEBUG: want a second line, DEBUG, repeats %d; got %+v", repeats+1, got)
-	}
-	h.ask(name(LogMax + past)) // a lookup past the limit moves
-	h.stop()
-	if got := h.countLines(); len(got) != 3 || got[2].Level != zapcore.InfoLevel || got[2].ContextMap()["debug_lookups"] != uint64(past+1) {
-		t.Fatalf("a new lookup past the limit brings the count back to INFO: want a third line, INFO, debug_lookups %d; got %+v", past+1, got)
+	if got := h.countLines(); len(got) != 1 {
+		t.Fatalf("an answer after the stop moved the count: %+v", got)
 	}
 
-	// Past the tracking bound nothing more is held, and the answers are counted.
+	// The next recording: only a repeat moves the count, at DEBUG.
+	h.l.Reset()
+	h.ask(name(1), name(1))
+	h.stop()
+	if got := h.countLines(); len(got) != 2 || got[1].Level != zapcore.DebugLevel || got[1].ContextMap()["repeats"] != uint64(1) {
+		t.Fatalf("a recording whose count only a repeat moved: want a second line, DEBUG, repeats 1; got %+v", got)
+	}
+
+	// The next: past the tracking bound nothing more is held, and the answers
+	// are counted at INFO with what --debug does not show.
+	h.l.Reset()
+	debugBefore := len(h.lines(zapcore.DebugLevel))
 	for i := 0; i < TrackMax+past; i++ {
 		h.ask(name(i))
 	}
 	if got := len(h.l.named.seen); got != TrackMax {
 		t.Fatalf("the set of lookups logged holds %d after %d distinct names; want its bound, %d", got, TrackMax+past, TrackMax)
 	}
-	if got := len(h.lines(zapcore.DebugLevel)); got != TrackMax-LogMax {
+	if got := len(h.lines(zapcore.DebugLevel)) - debugBefore; got != TrackMax-LogMax {
 		t.Fatalf("%d DEBUG lines for lookups past the INFO bound; want one for each the set holds, %d", got, TrackMax-LogMax)
 	}
 	h.stop()
-	if m := h.countLines()[3].ContextMap(); m["debug_lookups"] != uint64(TrackMax-LogMax) || m["untracked_answers"] != uint64(past) {
-		t.Fatalf("the count says %+v; want debug_lookups %d and untracked_answers %d", m, TrackMax-LogMax, past)
+	got = h.countLines()
+	if len(got) != 3 {
+		t.Fatalf("three recordings logged %d counts; want 3: %+v", len(got), got)
 	}
-	for i := 0; i < repeats; i++ { // answers it does not track move the count at DEBUG
-		h.ask(name(TrackMax))
-	}
-	h.stop()
-	if got := h.countLines(); len(got) != 5 || got[4].Level != zapcore.DebugLevel || got[4].ContextMap()["untracked_answers"] != uint64(past+repeats) {
-		t.Fatalf("answers to an untracked lookup are counted at DEBUG: want a fifth line, DEBUG, untracked_answers %d; got %+v", past+repeats, got)
+	if m := got[2].ContextMap(); got[2].Level != zapcore.InfoLevel || m["debug_lookups"] != uint64(TrackMax-LogMax) || m["untracked_answers"] != uint64(past) ||
+		m["next_step"] != NextStepSeeDebug+NextStepUntracked {
+		t.Fatalf("the count says %+v; want INFO, debug_lookups %d, untracked_answers %d and what --debug does not show", got[len(got)-1], TrackMax-LogMax, past)
 	}
 }
 
