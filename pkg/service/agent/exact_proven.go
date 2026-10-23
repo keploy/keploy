@@ -600,8 +600,10 @@ func (a *Agent) settleBackground(ex *models.ExactServing) *testBackground {
 
 // backgroundOf is the background of a set whose worker scope is worker and
 // whose pool is pool, its recordings by name in byName (testBackground): a
-// worker-scope recording whose kind keys it (models.ExactKeyOf) and that no
-// other data-plane recording of the background shares the key of has no
+// worker-scope recording whose kind keys it (models.ExactSiblingKey: a key
+// as the registration that gave it, so two parsers' equal strings are two
+// keys) and that no other data-plane recording of the background shares the
+// key of has no
 // sibling; one byName lacks, or its kind cannot key, or two of its kind's
 // keys claim (models.ExactKeyErr, in keyErrs), has (it stays gated).
 func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*models.Mock) *testBackground {
@@ -614,7 +616,7 @@ func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*m
 		if mk == nil || mk.IsProtocolPhase() {
 			return "", false
 		}
-		k, ok := models.ExactKeyOf(mk)
+		k, ok := models.ExactSiblingKey(mk)
 		if !ok {
 			return "", false
 		}
@@ -640,7 +642,7 @@ func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*m
 			continue
 		}
 		seen[n] = true
-		for _, k := range models.ExactKeyClaims(mk) {
+		for _, k := range models.ExactSiblingClaims(mk) {
 			keys[string(mk.Kind)+"\x00"+k]++
 		}
 	}

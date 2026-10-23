@@ -782,6 +782,30 @@ func TestASpendInAClosedViewSpendsInTheViewThatReplacesIt(t *testing.T) {
 	}
 }
 
+// A spend that loaded a view a later serve replaced, and finds that closed
+// view stored back in force (no view replaces it), is refused, and spends
+// nothing: SpendByKind settles as exactConsume does (settleInForce), never
+// a wait that spins on a view that has no replacement.
+func TestASpendInAClosedViewBackInForceIsRefused(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	v := mm.exactView()
+	mm.ServeExactPool("k2", []string{"pool"})
+	if spent, wait := mm.spendByKindIn(v, ms["pool"]); spent || wait == nil {
+		t.Fatalf("a spend in a replaced view: spent %v, wait %v; want it to wait for the view in force", spent, wait)
+	}
+	mm.exact.view.Store(v)
+	if mm.SpendByKind(ms["pool"]) {
+		t.Fatal("a spend in a closed view back in force was spent")
+	}
+	unused, used := mm.KindBackground(models.HTTP)
+	if names := exactNames(unused); !slices.Contains(names, "pool") || len(used) != 0 {
+		t.Fatalf("the closed view's background changed: unused %v, spent %v", names, exactNames(used))
+	}
+}
+
 // A consume through a delete door that lands in the same gap waits too, and
 // is settled against the new view: a background recording a test's view shows
 // under S12's rules is spent for the staging, and the next test's call in

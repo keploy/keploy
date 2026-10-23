@@ -171,6 +171,35 @@ func TestAKindsExactKeysEachKeyTheirOwn(t *testing.T) {
 			t.Fatalf("once one of the two is removed, the recording is keyed %q, %v", got, ok)
 		}
 	})
+	// Two registrations that give equal strings give one key each, as each
+	// gave it, and two sibling keys: each named by its registration.
+	same := func(p string) func(*Mock) (string, bool) {
+		return func(m *Mock) (string, bool) {
+			if m.Spec.HTTPReq == nil || !strings.HasPrefix(m.Spec.HTTPReq.URL, p) {
+				return "", false
+			}
+			return "DeleteMessage", true
+		}
+	}
+	s1, s2 := RegisterExactKey(HTTP, same("/s1/")), RegisterExactKey(HTTP, same("/s2/"))
+	k1, ok1 := ExactKeyOf(httpOn("m", "/s1/x"))
+	k2, ok2 := ExactKeyOf(httpOn("m", "/s2/x"))
+	if !ok1 || !ok2 || k1 != "DeleteMessage" || k2 != "DeleteMessage" {
+		t.Fatalf("two registrations' equal strings are keys %q, %v and %q, %v; want each as its registration gave it", k1, ok1, k2, ok2)
+	}
+	s1k, sok1 := ExactSiblingKey(httpOn("m", "/s1/x"))
+	s2k, sok2 := ExactSiblingKey(httpOn("m", "/s2/x"))
+	if !sok1 || !sok2 || s1k == s2k {
+		t.Fatalf("two registrations' equal strings are sibling keys %q, %v and %q, %v; want two", s1k, sok1, s2k, sok2)
+	}
+	if same, ok := ExactSiblingKey(httpOn("n", "/s1/y")); !ok || same != s1k {
+		t.Fatalf("one registration's equal keys are sibling keys %q and %q; want one", s1k, same)
+	}
+	if c := ExactSiblingClaims(httpOn("m", "/s1/x")); len(c) != 1 || c[0] != s1k {
+		t.Fatalf("the sibling claims are %q; want [%q]", c, s1k)
+	}
+	s1()
+	s2()
 	other()
 	if got, ok := ExactKeyOf(httpOn("m", "/api/users")); ok {
 		t.Fatalf("an unregistered key still keys: %q", got)

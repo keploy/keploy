@@ -230,20 +230,9 @@ func (m *MockManager) KindBackground(kind models.Kind) (unused, spent []*models.
 // revisions moved, and spends against that one (closedWait), as exactConsume
 // does. While a view is in force, its close never refuses a spend.
 func (m *MockManager) SpendByKind(mk *models.Mock) bool {
-	var waited *exactView
-	for {
-		v := m.exactView()
-		if v != nil && v == waited {
-			// The view waited on is in force again: none replaces it.
-			return false
-		}
-		spent, wait := m.spendByKindIn(v, mk)
-		if wait == nil {
-			return spent
-		}
-		m.waitReplaced(wait)
-		waited = v
-	}
+	return settleInForce(m, false, func(v *exactView) (bool, <-chan struct{}) {
+		return m.spendByKindIn(v, mk)
+	})
 }
 
 // spendByKindIn is SpendByKind settled against v. wait, when not nil, says v

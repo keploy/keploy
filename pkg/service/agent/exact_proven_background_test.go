@@ -149,6 +149,38 @@ func TestBackgroundOfGatesARecordingTwoExactKeysClaim(t *testing.T) {
 	}
 }
 
+// Two parsers' exact keys are two namespaces: a recording one parser keys
+// and one another keys with an equal string are no siblings of each other,
+// so neither gates the other; two recordings one parser keys alike still
+// are.
+func TestBackgroundOfReadsEachExactKeyInItsOwnRegistration(t *testing.T) {
+	registerTestQueue(t)
+	t.Cleanup(models.RegisterExactKey(testQueue, func(m *models.Mock) (string, bool) {
+		k := m.Spec.Metadata["other"]
+		return k, k != ""
+	}))
+	other := func(name, key string) *models.Mock {
+		return &models.Mock{Name: name, Kind: testQueue, Spec: models.MockSpec{Metadata: map[string]string{"other": key}, ReqTimestampMock: time.Unix(1, 0)}}
+	}
+	byName := map[string]*models.Mock{
+		"queue":  queueMock("queue", "DeleteMessage rh-1", false),
+		"parser": other("parser", "DeleteMessage rh-1"),
+		"twin-a": other("twin-a", "ReceiveMessage q"),
+		"twin-b": other("twin-b", "ReceiveMessage q"),
+	}
+	worker := []models.MockEntry{{Name: "queue", Place: "post-url-1"}, {Name: "parser", Place: "post-url-1"}, {Name: "twin-a", Place: "post-url-1"}, {Name: "twin-b", Place: "post-url-1"}}
+	bg := backgroundOf(worker, nil, byName)
+	if !bg.noSibling["queue"] || !bg.noSibling["parser"] {
+		t.Fatalf("no sibling: queue %v, parser %v; want both reached, an equal key of another parser's being no sibling", bg.noSibling["queue"], bg.noSibling["parser"])
+	}
+	if bg.noSibling["twin-a"] || bg.noSibling["twin-b"] {
+		t.Fatalf("no sibling: twin-a %v, twin-b %v; want both gated, siblings under one parser's key", bg.noSibling["twin-a"], bg.noSibling["twin-b"])
+	}
+	if len(bg.keyErrs) != 0 {
+		t.Fatalf("the background says %q; want no error", bg.keyErrs)
+	}
+}
+
 // The background is settled by S12's rules only under the proven switch: a
 // staging that names them reaching an agent without it (one run with the
 // switch off, whatever its client sent) settles none, and every worker-scope

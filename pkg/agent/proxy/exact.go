@@ -1364,17 +1364,27 @@ const (
 // moved, and is settled against that one (closedWait), as one that came a
 // moment later would be.
 func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
+	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
+		return m.exactConsumeIn(v, mk, evicts)
+	})
+}
+
+// settleInForce settles a consume or a spend (settle) against the view in
+// force, and, while the view it finds is closed (settle's wait), again
+// against the view that replaces it, once that is installed and the
+// revisions moved. A view that was waited on and is in force again has no
+// replacement to wait for: what it says it settled is final, and the settle
+// is refused (refused), never a wait that spins.
+func settleInForce[T any](m *MockManager, refused T, settle func(v *exactView) (T, <-chan struct{})) T {
 	var waited *exactView
 	for {
 		v := m.exactView()
 		if v != nil && v == waited {
-			// The view waited on is in force again: none replaces it, and
-			// what it says it consumed is final.
-			return exactRefused
+			return refused
 		}
-		verdict, wait := m.exactConsumeIn(v, mk, evicts)
+		out, wait := settle(v)
 		if wait == nil {
-			return verdict
+			return out
 		}
 		m.waitReplaced(wait)
 		waited = v
