@@ -364,7 +364,10 @@ func blankSpans(s string, blank func(instant) bool) string {
 
 // driftedInstant is a keyed instant of a drifted value that changed: the
 // moment it was recorded, and the moment F saw in its place, the k-th of its
-// layout in the live value.
+// layout in the live value. Both sides are of one layout (driftedInstants),
+// or both an instant its protocol types (classifyInstant), so both are
+// dated instants or both times of day: a layout is one or the other
+// (clockLayout.wraps).
 type driftedInstant struct{ rec, live moment }
 
 // driftedInstants are the keyed instants of a drifted value's recorded and

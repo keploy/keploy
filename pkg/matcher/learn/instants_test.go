@@ -677,6 +677,38 @@ func TestInstantSpans(t *testing.T) {
 	}
 }
 
+// A drifted value's changed instant is dated on both sides or a time of day
+// on both: its sides are the k-th of one layout, and a layout reads one or
+// the other. A time of day whose value turns into an instant (or the other
+// way) is no changed instant, so an offset is never read between a date and
+// a time of day.
+func TestAChangedInstantIsDatedOnBothSidesOrATimeOfDayOnBoth(t *testing.T) {
+	for _, tc := range []struct {
+		recorded, live string
+		want           int
+		day            bool
+	}{
+		{"opens 11:15", "opens 11:16", 1, true},
+		{"opens 2026-10-22T11:15:00Z", "opens 2026-10-22T11:16:00Z", 1, false},
+		{"opens 11:15", "opens 2026-10-22T11:16:00Z", 0, false},
+		{"opens 2026-10-22T11:15:00Z", "opens 11:16", 0, false},
+		{"opens 11:15 on 2026-10-22T11:15:00Z", "opens 2026-10-22T11:16:00Z then 11:20", 2, false},
+	} {
+		got := driftedInstants(tc.recorded, tc.live)
+		if len(got) != tc.want {
+			t.Fatalf("%q -> %q: %d changed instants %+v, want %d", tc.recorded, tc.live, len(got), got, tc.want)
+		}
+		for _, p := range got {
+			if p.rec.key.day != p.live.key.day {
+				t.Fatalf("%q -> %q: %+v pairs a time of day with a dated instant", tc.recorded, tc.live, p)
+			}
+			if tc.want == 1 && p.rec.key.day != tc.day {
+				t.Fatalf("%q -> %q: %+v, want a time of day %v", tc.recorded, tc.live, p, tc.day)
+			}
+		}
+	}
+}
+
 // A word of a value is never found in a protocol-phase answer's own clock
 // read (rule 2): a batch number that drifted from 14 to 15 is no word of a
 // hook's config call's Date header, whose minute is 14. A data-plane

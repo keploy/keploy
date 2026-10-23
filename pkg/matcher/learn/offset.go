@@ -342,9 +342,6 @@ func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 		return a.label < b.label
 	})
 	for _, p := range pairs {
-		if p.rec.key.day != p.live.key.day {
-			continue
-		}
 		for _, g := range op.given {
 			if m, ok := offsetBetween(p, g[0], g[1]); ok {
 				return m, true
