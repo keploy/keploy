@@ -62,11 +62,8 @@ func structural(c byte) bool {
 // structuralSet is the structural characters, as the layout hash names them.
 const structuralSet = " \t\n\r\f\v\"'`{}[]():,;&<>|\\=/?#+"
 
-// The run classes that are no script's own name.
-const (
-	classLatin  = "Latin"
-	classCommon = "Common"
-)
+// classLatin is the class of ASCII letters and digits: the Latin script's.
+const classLatin = "Latin"
 
 // scriptNames are unicode's scripts by name, in order: a rune's class is the
 // one script that holds it, found the same way on every run.
@@ -95,12 +92,8 @@ func runeClass(r rune) (class string, word, joins bool) {
 	if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
 		return "", false, false
 	}
-	switch {
-	case unicode.Is(unicode.Latin, r):
-		return classLatin, true, false
-	case unicode.Is(unicode.Common, r):
-		return classCommon, true, false
-	}
+	// The scripts partition the runes they hold (Latin, Common and
+	// Inherited are three of them), and every letter and digit is in one.
 	for _, name := range scriptNames {
 		if unicode.Is(unicode.Scripts[name], r) {
 			return name, true, false

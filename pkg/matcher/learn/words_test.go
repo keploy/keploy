@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -113,7 +114,7 @@ func TestWhatEachSlotAdmits(t *testing.T) {
 			"k=v3": true, "k=a-b.c": true, "k=": false, "k=a b": false, "k=é": false, "j=v3": false,
 		}},
 		{"a run alone, separators around it fixed", "k=-v1-", "k=-v2-", "s1r0", map[string]bool{
-			"k=-x_y-": true, "k=v3": false, "k=-v3": false,
+			"k=-x_y-": true, "k=v3": false, "k=-v3": false, "k=--": false, "k=-": false, "k=-v3-x": false, "k=x-v3-": false,
 		}},
 		{"a segment whose runs drifted", "t V1StGXR8_Z5jdHi6B-myT", "t x9kLq-2mZp_Rt7YwXa3bN", "s1t", map[string]bool{
 			"t abc": true, "t a-b_c.d": true, "t a b": false, "t ab/c": false, "u abc": false, "t ü": false,
@@ -172,6 +173,12 @@ func TestAnAcceptedClockReadIsOneInstantSlot(t *testing.T) {
 		{"epoch milliseconds", "epoch", strconv.FormatInt(wAt.UnixMilli(), 10), strconv.FormatInt(later.UnixMilli()+500, 10), "s0i:epoch:d13",
 			[]string{strconv.FormatInt(other.UnixMilli(), 10)},
 			[]string{strconv.FormatInt(other.Unix(), 10)}},
+		// Two instants with nothing between them are two reads, in order.
+		{"two instants with nothing between them", "jsdate", wAt.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(wAt.Unix(), 10),
+			later.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(later.Unix(), 10),
+			"s0i:jsdate:W M d2 d4 d2:d2:d2 GMT+d4 (N) s1i:epoch:d10F",
+			[]string{other.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(other.Unix(), 10)},
+			[]string{other.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time) " + strconv.FormatInt(other.Unix(), 10)}},
 		{"a time of day beside text", "timeofday", "at " + wAt.Format("15:04:05") + " sharp", "at " + later.Format("15:04:05") + " sharp", "s1i:timeofday:d2:d2:d2F",
 			[]string{"at 23:59:59.999 sharp"},
 			[]string{"at 23:59 sharp", "at 23:59:59 late"}},
@@ -300,6 +307,31 @@ func TestAValueOfTooManyInstantsToPlaceIsRefusedSayingSo(t *testing.T) {
 	// A few are placed, and judged by the ways tried.
 	if ok, why := WordsAdmit(rec, strings.Join(many[:3], " "), e); ok || why == whyTooMany {
 		t.Fatalf("3 instants admitted %v (%s), want refused by a way tried", ok, why)
+	}
+}
+
+// The words format's guards are a format (models.WordsVersion 1): the
+// digest and the layout of a recorded value, and the grammar the layout is
+// read under (the structural characters, the declared zone names and the
+// clock layouts' names), stand in every mock file F wrote. A change to any
+// of them voids every entry already written, so each is pinned here: a
+// change that moves one is a new version of the format, never a quiet one.
+func TestTheWordsGuardsAreStable(t *testing.T) {
+	if got := hex.EncodeToString(wordsGrammar); got != "17773c72a7389b6a9858deddbbc13a39ff4793215bcb4bdc82a53fab16c81c1f" {
+		t.Errorf("the words grammar hashes to %s: a new words format, not version %d", got, models.WordsVersion)
+	}
+	later := wAt.Add(FullRoundLead)
+	for _, tc := range []struct {
+		rec, f, digest, layout, slots string
+	}{
+		{"ORD-1 paid 100 ref=3f2b8c1e9a4d", "ORD-1 paid 100 ref=a7c4e2d10b3f", "b4ee399075dabe99", "c3322fff20d9bf6e", "s4r0"},
+		{"ORD-1 paid 100 at " + wAt.Format(time.RFC3339), "ORD-1 paid 100 at " + later.Format(time.RFC3339), "f096738e7176bdce", "f01da47dec79058a", "s4i:iso8601:d4-d2-d2Td2:d2:d2FZ"},
+		{"订单A7K 已发货 x1", "订单A7K 已发货 x2", "e2a8763b0616aece", "e48fb7b0934866df", "s2r0"},
+	} {
+		e := learnedWords(t, tc.rec, tc.f)
+		if e.Digest != tc.digest || e.Layout != tc.layout || slotsOf(e) != tc.slots {
+			t.Errorf("%q: digest %s layout %s slots %s, want %s %s %s", tc.rec, e.Digest, e.Layout, slotsOf(e), tc.digest, tc.layout, tc.slots)
+		}
 	}
 }
 
@@ -731,6 +763,46 @@ func TestWordsAreDeterministic(t *testing.T) {
 	}
 }
 
+// Each rune's class, as the runs read it: ASCII letters and digits and the
+// Latin script's letters are Latin, every other script its own, Common's
+// letters and digits (a fullwidth digit, ー, µ) Common; a mark of any kind,
+// or a rune of the Inherited script (a joiner), joins the class before it;
+// any other rune (a symbol, a space, a control) is no word.
+func TestEachRunesClass(t *testing.T) {
+	for _, tc := range []struct {
+		r           rune
+		class       string
+		word, joins bool
+	}{
+		{'a', "Latin", true, false},
+		{'Z', "Latin", true, false},
+		{'5', "Latin", true, false},
+		{'é', "Latin", true, false},
+		{'Ж', "Cyrillic", true, false},
+		{'订', "Han", true, false},
+		{'ナ', "Katakana", true, false},
+		{'１', "Common", true, false},
+		{'ー', "Common", true, false},
+		{'µ', "Common", true, false},
+		{'́', "", false, true}, // a combining acute: Mn, Inherited
+		{'ั', "", false, true}, // a Thai vowel mark: Mn, the Thai script
+		{'ि', "", false, true}, // a Devanagari vowel sign: Mc
+		{'⃝', "", false, true}, // an enclosing circle: Me
+		{'‍', "", false, true}, // the zero-width joiner: Cf, Inherited
+		{'-', "", false, false},
+		{'€', "", false, false},
+		{'—', "", false, false},
+		{' ', "", false, false},
+		{'\u0080', "", false, false},
+		{'\u007f', "", false, false},
+	} {
+		class, word, joins := runeClass(tc.r)
+		if class != tc.class || word != tc.word || joins != tc.joins {
+			t.Errorf("runeClass(%U) = %q %v %v, want %q %v %v", tc.r, class, word, joins, tc.class, tc.word, tc.joins)
+		}
+	}
+}
+
 // The classes split runs as declared: a script change is a run boundary,
 // Common is its own class, and a mark joins its letter.
 func TestRunsSplitByClass(t *testing.T) {
@@ -744,6 +816,15 @@ func TestRunsSplitByClass(t *testing.T) {
 		{"µ5", []string{"µ:Common", "5:Latin"}},
 		{"caféx", []string{"caféx:Latin"}},
 		{"a.b@c~d!e*f$g^h%i", []string{"a:Latin", "b:Latin", "c:Latin", "d:Latin", "e:Latin", "f:Latin", "g:Latin", "h:Latin", "i:Latin"}},
+		// A mark joins the run before it, of whatever class; one that
+		// follows no run starts none.
+		{"caféx", []string{"caféx:Latin"}},
+		{"กัx", []string{"กั:Thai", "x:Latin"}},
+		{"a‍b", []string{"a‍b:Latin"}},
+		{"́ab", []string{"ab:Latin"}},
+		{"a-́b", []string{"a:Latin", "b:Latin"}},
+		{"a€b—c", []string{"a:Latin", "b:Latin", "c:Latin"}},
+		{"ab１２cd", []string{"ab:Latin", "１２:Common", "cd:Latin"}},
 	} {
 		var got []string
 		for _, r := range runsOf(tc.s, 0, len(tc.s)) {
