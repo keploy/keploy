@@ -353,12 +353,23 @@ func TestTheLearnedFilesAreWrittenIgnoredFirst(t *testing.T) {
 	if err := writeLearned(stage, models.LearnedLocalFile, []models.LearnedLeaf{staged, stale}); err != nil {
 		t.Fatal(err)
 	}
+	// The copy-back ensures the project's .gitignore, never the staging
+	// folder's (which goes when its verb ends).
+	stageIgnore, projectIgnore := filepath.Join(filepath.Dir(stage), ".gitignore"), filepath.Join(filepath.Dir(set), ".gitignore")
+	_ = os.Remove(stageIgnore)
+	_ = os.Remove(projectIgnore)
 	if err := MergeLocal(set, stage); err != nil {
 		t.Fatal(err)
 	}
 	merged, _ := readLearned(filepath.Join(set, models.LearnedLocalFile))
 	if len(merged) != 1 || merged[0].F != "ORD-1 ref=c3" {
 		t.Fatalf("merged %+v", merged)
+	}
+	if _, err := os.Stat(stageIgnore); !os.IsNotExist(err) {
+		t.Errorf("the copy-back wrote the staging folder's .gitignore (%v)", err)
+	}
+	if b, err := os.ReadFile(projectIgnore); err != nil || !strings.Contains(string(b), "/*/"+models.LearnedLocalFile) {
+		t.Errorf("the copy-back left the project's .gitignore without its lines: %q (%v)", b, err)
 	}
 
 	// The mocks learn nothing any more: both files go.
