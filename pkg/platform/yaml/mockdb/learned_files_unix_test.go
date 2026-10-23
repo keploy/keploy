@@ -39,7 +39,20 @@ func TestASetKeployMayNotReadIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(set, 0o755) })
-	if got, err := ReadSetMocks(context.Background(), zap.NewNop(), set); err == nil {
+	// The read's error is its own: it logs to the logger it is given, and
+	// prints nothing of its own.
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = out
+	got, rerr := ReadSetMocks(context.Background(), zap.NewNop(), set)
+	os.Stdout = stdout
+	if rerr == nil {
 		t.Errorf("a set folder it may not search: %v", got)
+	}
+	if b, _ := os.ReadFile(out.Name()); len(b) != 0 {
+		t.Errorf("the read printed %q", b)
 	}
 }
