@@ -444,41 +444,110 @@ func (sc scope) owner() func(*models.Mock) bool {
 // the pool, and in a view that scopes the pool to a test
 // (integrations.TestOwnership), only the mocks it says are the test's.
 func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (scope, error) {
-	var sc scope
 	perTest, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get per-test mocks")
-		return sc, errors.New("error while matching the request with the mocks")
+		return scope{}, errors.New("error while matching the request with the mocks")
 	}
 	session, err := mockDb.GetSessionMocks()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get session mocks")
-		return sc, errors.New("error while matching the request with the mocks")
+		return scope{}, errors.New("error while matching the request with the mocks")
 	}
-	sc.visible = append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)
-	httpPerTest, httpSession := inRecordedOrder(FilterHTTPMocks(perTest)), inRecordedOrder(FilterHTTPMocks(session))
-	sc.http = append(append(make([]*models.Mock, 0, len(httpPerTest)+len(httpSession)), httpPerTest...), httpSession...)
-
-	open := tracker.Open()
-	inScope := map[string]bool{}
-	owner, _ := mockDb.(integrations.TestOwnership)
+	r := scopeReads{perTest: perTest, session: session, open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
+	r.owner, _ = mockDb.(integrations.TestOwnership)
 	if integrations.ExactServing(mockDb) {
 		// Under exact serving the store alone says what the open test owns:
 		// what its per-test tier shows, as on the bare manager. A worker's
 		// view made before exact serving began passes straight through, and
 		// its allowlist is the scope it was made for, not the open test's.
-		owner = nil
+		r.owner = nil
 	}
-	windows, _ := mockDb.(integrations.TestWindows)
-	inFlight, _ := mockDb.(integrations.InFlightOwner)
-	pools, _ := mockDb.(integrations.PoolMembership)
+	r.windows, _ = mockDb.(integrations.TestWindows)
+	r.inFlight, _ = mockDb.(integrations.InFlightOwner)
+	r.pools, _ = mockDb.(integrations.PoolMembership)
 	// Under S12's background rules a test learns from its own recordings
 	// only (own exact, own learn, then background exact): with
 	// a test open the background (the worker scope and the pool the view
 	// shows in it) answers a call exactly or not at all, and no drift of the
 	// test's is learned onto a background recording. The pool is learned
 	// from between tests only.
-	exactBackground := open && integrations.S12Background(mockDb)
+	r.exactBackground = r.open && integrations.S12Background(mockDb)
+	return r.scope(live, liveShape, n, pool), nil
+}
+
+// learnScopeIn is learnScope read from one snapshot of the store's round
+// (integrations.RoundSnapshot): the view, whose each recording is, whether a
+// test is open, and what the test's own answered, all of one instant. A test
+// is open only where the store shows its view and the learn tracker has it
+// open (RoundInTest): at a boundary between the two no recording is a test's
+// own, and where the store shows a test's view the background answers
+// exactly or not at all (RoundSnapshot.ExactBackground). What the open
+// test's own answered is every account of it: what the tracker took for a
+// call (Answer), what the view says answered (a pool view's ahead answers
+// carried into the test among them), and the recordings the view holds (its
+// test's own, in flight, or shared) that the round answered as a call in
+// flight of a test that did not open next (voided): each answered a call of
+// the round, and answers none again.
+func (h *HTTP) learnScopeIn(snap integrations.RoundSnapshot, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) scope {
+	answered := map[string]*models.Mock{}
+	var order []*models.Mock
+	add := func(m *models.Mock) {
+		if m != nil && answered[m.Name] == nil {
+			answered[m.Name] = m
+			order = append(order, m)
+		}
+	}
+	for _, m := range snap.Learn.Answered {
+		add(m)
+	}
+	for _, m := range snap.TakenInView() {
+		add(m)
+	}
+	for _, m := range snap.Voided() {
+		// Whoever's the view holds it as: the test's own, in flight, or
+		// shared with the tests recorded beside it.
+		if snap.Open && snap.Owner(m) != integrations.OwnerNone {
+			add(m)
+		}
+	}
+	r := scopeReads{
+		perTest: snap.PerTest, session: snap.Session, open: snap.Open,
+		windows: snap, inFlight: snap, pools: snap,
+		exactBackground: snap.ExactBackground(),
+		answered:        func(name string) bool { return answered[name] != nil },
+		answeredMocks:   func() []*models.Mock { return order },
+	}
+	return r.scope(live, liveShape, n, pool)
+}
+
+// scopeReads is what a request's scope is built from (scopeReads.scope):
+// the store's per-test and session reads, whether a test is open, how the
+// store tells whose a recording is, and which of the test's own answered.
+type scopeReads struct {
+	perTest, session []*models.Mock
+	open             bool
+	owner            integrations.TestOwnership
+	windows          integrations.TestWindows
+	inFlight         integrations.InFlightOwner
+	pools            integrations.PoolMembership
+	exactBackground  bool
+	// answered reports whether one of the test's own answered a request of
+	// it; answeredMocks are those, as recorded, read after the scope's
+	// mocks.
+	answered      func(name string) bool
+	answeredMocks func() []*models.Mock
+}
+
+// scope is the scope r reads.
+func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, pool bool) scope {
+	var sc scope
+	perTest, session, open := r.perTest, r.session, r.open
+	sc.visible = append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)
+	httpPerTest, httpSession := inRecordedOrder(FilterHTTPMocks(perTest)), inRecordedOrder(FilterHTTPMocks(session))
+	sc.http = append(append(make([]*models.Mock, 0, len(httpPerTest)+len(httpSession)), httpPerTest...), httpSession...)
+
+	inScope := map[string]bool{}
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -494,7 +563,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight, pools)
+		own, poolsOwn := ownership(m, i < len(httpPerTest), r.owner, r.windows, r.inFlight, r.pools)
 		// A protocol-phase mock (a handshake, a token fetch) is never a
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
@@ -502,10 +571,10 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		c := learn.Candidate{
 			Shape:    n.shape(rp, d),
 			Known:    n.known(m),
-			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !exactBackground),
+			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
 		}
 		inScope[m.Name] = true
-		if own && tracker.Answered(m.Name) {
+		if own && r.answered(m.Name) {
 			// Each of the test's own mocks answers one request of it
 			// (design §5.2), whatever lifetime the store gives it: one
 			// that answered is spent. It still competes, as the recording
@@ -525,7 +594,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	// mock is deleted when consumed) is still spent, and still competes.
 	if open {
 		var gone []*models.Mock
-		for _, m := range tracker.AnsweredMocks() {
+		for _, m := range r.answeredMocks() {
 			if !inScope[m.Name] && m.Spec.HTTPReq != nil {
 				gone = append(gone, m)
 			}
@@ -544,7 +613,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	for range poolCands {
 		sc.own = append(sc.own, false)
 	}
-	return sc, nil
+	return sc
 }
 
 // ownership says whether a recorded mock is the open test's own and whether
@@ -834,11 +903,15 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 	// that pass read its scope, would fail the same way, and looking again
 	// would find it, and fail, forever (a session-lifetime mock in the
 	// per-test tier, whose claim updates the session tier): the call
-	// misses instead.
-	unclaimed := map[*models.Mock]uint64{}
-	stuck := func(m *models.Mock) bool {
+	// misses instead. Read from one snapshot of the round, the pass is also
+	// the round's staging, generation and take log's length: a claim the
+	// round moved under (another view, the tracker's next test), refused
+	// only once the round moved, is never stuck, and the call looks again
+	// at the round as it is now.
+	unclaimed := map[*models.Mock]learnPass{}
+	stuck := func(m *models.Mock, now learnPass) bool {
 		at, ok := unclaimed[m]
-		return ok && storeRevision(mockDb) == at
+		return ok && at == now
 	}
 	refused := func(m *models.Mock, res learn.Result, sc scope) (*models.Mock, *learnMiss, error) {
 		h.Logger.Warn("keploy's mock store would not hand out the recording the learn step chose for this call; learning nothing from it",
@@ -850,17 +923,12 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		rev := storeRevision(mockDb)
-		sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, opts.LearnPool)
+		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
 		}
-		// What the test served so far is read after the scope: a mock a
-		// concurrent call consumed before the scope was read is gone from
-		// the scope, and the mock manager told the tracker of it before it
-		// left (MockManager.observeServed), so it is in one of the two.
-		test, earlier, served, before := tracker.Test()
-		windows, _ := mockDb.(integrations.TestWindows)
+		sc, windows, claimDb := read.sc, read.windows, read.claimDb
+		test, earlier, served, before := read.test, read.earlier, read.served, read.before
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -885,7 +953,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				rp := recordedParts(picked)
 				rec = n.shape(rp, destOf(live, rp))
 			}
-			if stuck(picked) {
+			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
 			if own && !tracker.Answer(test, picked) {
@@ -895,7 +963,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			// matcher's does: a stated recording no open test owns is a
 			// reusable one, kept and served in turn (cursorPick), never
 			// used up.
-			out, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+			out, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, claimDb, nil, nil)
 			if err != nil || !claimed {
 				if own {
 					tracker.Unanswer(test, picked.Name)
@@ -903,7 +971,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				if err != nil {
 					return nil, nil, err
 				}
-				unclaimed[picked] = rev
+				unclaimed[picked] = read.at
 				continue
 			}
 			commit()
@@ -914,7 +982,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
-			if stuck(m) {
+			if stuck(m, read.at) {
 				return refused(m, res, sc)
 			}
 			if !own && m.Spec.ReqTimestampMock.IsZero() {
@@ -980,7 +1048,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if own && !tracker.Answer(test, m) {
 				continue
 			}
-			out, claimed, why, err := h.claimLearned(ctx, m, mockDb, plan, sc.owner())
+			out, claimed, why, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner())
 			if own && (err != nil || why != "" || !claimed) {
 				tracker.Unanswer(test, m.Name)
 			}
@@ -992,7 +1060,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
-				unclaimed[m] = rev
+				unclaimed[m] = read.at
 				continue
 			}
 			for _, l := range learned {
@@ -1010,6 +1078,63 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		}
 		return nil, miss, nil
 	}
+}
+
+// learnPass is the instant a pass of the learn step read the store at: the
+// store's revision, and, read from one snapshot of the round, the round's
+// staging, generation and take log's length.
+type learnPass struct {
+	rev   uint64
+	round integrations.RoundAt
+}
+
+// learnRead is what a pass of the learn step reads (readLearnPass): the
+// request's scope, the learn tracker's test (its number, its earlier places,
+// what was served in it and before it), where the store places a recording
+// among the recorded tests (windows), and the store a claim of this pass
+// takes from (claimDb): one checked against the snapshot the pass read.
+type learnRead struct {
+	sc             scope
+	test           uint64
+	earlier        []learn.Earlier
+	served, before []*models.Mock
+	windows        integrations.TestWindows
+	claimDb        integrations.MockMemDb
+	at             learnPass
+}
+
+// readLearnPass reads a pass of the learn step. From a store that reads its
+// round in one snapshot (integrations.RoundReader, under exact serving), it
+// is that one read: the scope, whose each recording is, the tracker's test
+// and what the test's own answered, of one instant, and a claim is taken
+// only while the round is still at it (integrations.WithinRound). From any
+// other store, the reads one after another: the scope first, then the
+// tracker, so a mock a concurrent call consumed before the scope was read is
+// gone from the scope, and in the tracker's account (the store tells it
+// first: MockManager.observeServed).
+func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
+	rev := storeRevision(mockDb)
+	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
+		r := learnRead{
+			sc:      h.learnScopeIn(snap, live, liveShape, n, pool),
+			test:    snap.Learn.Number,
+			earlier: snap.Learn.Earlier,
+			served:  snap.Learn.Served,
+			before:  snap.Learn.Before,
+			windows: snap,
+			claimDb: integrations.WithinRound(mockDb, snap.At),
+			at:      learnPass{rev: rev, round: snap.At},
+		}
+		return r, nil
+	}
+	sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, pool)
+	if err != nil {
+		return learnRead{}, err
+	}
+	r := learnRead{sc: sc, claimDb: mockDb, at: learnPass{rev: rev}}
+	r.test, r.earlier, r.served, r.before = tracker.Test()
+	r.windows, _ = mockDb.(integrations.TestWindows)
+	return r, nil
 }
 
 // storeRevision is the mock store's revision (MockManager.Revision: it moves

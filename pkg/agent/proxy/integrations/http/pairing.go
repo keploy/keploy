@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // pairExactly is record's full round's pairing of an HTTP call, the step
@@ -37,9 +38,65 @@ import (
 //
 // It returns the recording paired, and its answer read back (withResponse),
 // or nils.
+//
+// Read from one snapshot of the store's round (integrations.RoundReader), the
+// candidates, whose each is, and the background are of one instant, and a
+// claim takes a recording only while the round is still at it
+// (integrations.ClaimPairingIn): one the round moved under is looked at
+// again, in the round as it is now.
 func (h *HTTP) pairExactly(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) (answer, recording *models.Mock) {
-	cands := integrations.PairingCandidates(mockDb, models.HTTP)
-	if len(cands) == 0 || sqsPoll(input) {
+	if sqsPoll(input) {
+		return nil, nil
+	}
+	for ctx.Err() == nil {
+		snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Kind: models.HTTP, Pairing: true})
+		if !ok {
+			return h.pairExactlyIn(ctx, input, n, integrations.PairingCandidates(mockDb, models.HTTP),
+				func(m *models.Mock) bool { return !openTestsOwn(mockDb, m) },
+				func() []*models.Mock { b, _ := integrations.KindBackground(mockDb, models.HTTP); return b },
+				func(x *models.Mock) (bool, bool) { return integrations.ClaimPairing(mockDb, x), false })
+		}
+		cands, errs := snap.LoadCandidates(models.HTTP)
+		for _, e := range errs {
+			if e.Name == "" {
+				h.Logger.Warn("record's full round could not read the test set's recordings kept on disk, so no call pairs with those it did not read: a call that is one misses where it was made",
+					zap.String("kind", string(models.HTTP)), zap.Error(e.Err),
+					zap.String("next_step", "fix the error above and record the test set again"))
+				continue
+			}
+			h.Logger.Warn("record's full round could not read a recording kept on disk, so no call pairs with it: a call that is that recording misses where it was made",
+				zap.String("mock", e.Name), zap.Error(e.Err),
+				zap.String("next_step", "fix the error above and record the test set again"))
+		}
+		answer, recording, moved := h.pairExactlyInRound(ctx, input, n, mockDb, snap, cands)
+		if !moved {
+			return answer, recording
+		}
+	}
+	return nil, nil
+}
+
+// pairExactlyInRound is pairExactly of one snapshot of the round, cands its
+// candidates decoded: moved when a claim found the round moved since.
+func (h *HTTP) pairExactlyInRound(ctx context.Context, input *req, n strictNoise, mockDb integrations.MockMemDb, snap integrations.RoundSnapshot, cands []*models.Mock) (answer, recording *models.Mock, moved bool) {
+	answer, recording = h.pairExactlyIn(ctx, input, n, cands,
+		// None of the view's own: it is the view's, never another test's.
+		func(m *models.Mock) bool { return snap.Owner(m) == integrations.OwnerNone },
+		func() []*models.Mock { return snap.BackgroundUnused },
+		func(x *models.Mock) (bool, bool) {
+			claimed, m, _ := integrations.ClaimPairingIn(mockDb, x, snap.At)
+			moved = m
+			return claimed, m
+		})
+	return answer, recording, moved
+}
+
+// pairExactlyIn is pairExactly of cands: others says which are another
+// test's, background is the background's unused, read when one fits, and
+// claim claims one, stop saying the claim's round moved (nothing more is
+// tried).
+func (h *HTTP) pairExactlyIn(ctx context.Context, input *req, n strictNoise, cands []*models.Mock, others func(*models.Mock) bool, background func() []*models.Mock, claim func(*models.Mock) (claimed, stop bool)) (answer, recording *models.Mock) {
+	if len(cands) == 0 {
 		return nil, nil
 	}
 	live := liveDestination(ctx, input)
@@ -55,18 +112,17 @@ func (h *HTTP) pairExactly(ctx context.Context, input *req, mockDb integrations.
 		}
 		return out
 	}
-	var others []*models.Mock
+	var theirs []*models.Mock
 	for _, m := range cands {
-		if m != nil && !openTestsOwn(mockDb, m) {
-			others = append(others, m)
+		if m != nil && others(m) {
+			theirs = append(theirs, m)
 		}
 	}
-	exact := inRecordedOrder(fits(others))
+	exact := inRecordedOrder(fits(theirs))
 	if len(exact) == 0 {
 		return nil, nil
 	}
-	background, _ := integrations.KindBackground(mockDb, models.HTTP)
-	if !oneAnswer(append(append([]*models.Mock(nil), exact...), fits(background)...)) {
+	if !oneAnswer(append(append([]*models.Mock(nil), exact...), fits(background())...)) {
 		return nil, nil
 	}
 	for _, x := range exact {
@@ -78,8 +134,12 @@ func (h *HTTP) pairExactly(ctx context.Context, input *req, mockDb integrations.
 			// An answer keploy cannot read back pairs nothing.
 			return nil, nil
 		}
-		if integrations.ClaimPairing(mockDb, x) {
+		claimed, stop := claim(x)
+		if claimed {
 			return served, x
+		}
+		if stop {
+			return nil, nil
 		}
 	}
 	return nil, nil
