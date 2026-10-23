@@ -732,6 +732,10 @@ jobs:
   # Linux test jobs
   # -------------------------------------------------------------------
 
+  # The hooks' eBPF objects are one tested keploy/ebpf main commit's
+  # (ebpf-objects.yml). Needs no build: seconds, beside the builds.
+  run_ebpf_objects:
+    uses: ./.github/workflows/ebpf-objects.yml
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
@@ -1482,6 +1486,7 @@ jobs:
       - run_grpc_linux
       - run_schema_match_linux
       - run_sample_tls_pcap
+      - run_ebpf_objects
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1513,6 +1518,7 @@ jobs:
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
             "${{ needs.run_sample_tls_pcap.result }}" \
+            "${{ needs.run_ebpf_objects.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

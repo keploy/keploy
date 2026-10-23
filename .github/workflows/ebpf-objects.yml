@@ -1,0 +1,41 @@
+name: eBPF objects from keploy/ebpf
+
+# The eBPF objects the agent's hooks embed (pkg/agent/hooks/linux: bpf_* and
+# unixconn_*, with their bindings) are copied from keploy/ebpf, whose lanes are
+# what test them: they rebuild them from source, load them on 5.10 and 6.12,
+# and load them in VMs of 5.19 and 6.0, whose verifiers refuse what the test
+# lanes' kernels let through. Nothing here loads them on those kernels, so
+# this checks that the files are those of one keploy/ebpf main commit, byte
+# for byte, and one its kernel-loads lane has tested
+# (test_workflow_scripts/check-ebpf-objects.sh says why).
+#
+# Called by prepare_and_run.yml on every pull request and push to main, and
+# required by its gate, the one required check: a check that only warned
+# would let a conflict resolved back to the old objects merge green. It takes
+# seconds, so it runs whatever the change.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  from-ebpf-main:
+    # A blobless clone of keploy/ebpf's main (commits and trees, a few MB)
+    # and a `git ls-tree` per commit that changed the files: seconds. The
+    # clone's five attempts each give up once their transfer stalls, and an
+    # attempt whose connection never opens ends once curl, under git, gives
+    # up on it after its own 300 s: five such and the waits between them are
+    # 1600 s. The hour, as the gate's, bounds only a run that hangs some
+    # other way.
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The check's own cases, against a local keploy/ebpf
+        run: bash .github/workflows/test_workflow_scripts/check-ebpf-objects.tests.sh
+
+      - name: The hooks' eBPF files are one keploy/ebpf main commit's
+        run: bash .github/workflows/test_workflow_scripts/check-ebpf-objects.sh
