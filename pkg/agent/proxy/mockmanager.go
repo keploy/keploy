@@ -4133,12 +4133,22 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
 // same mock: the observer is told of a mock that was served either way.
+//
+// With an observer, the serve is then filed in the open test's view
+// (exactView.hear, ServedInOpenTest), the view read before the observer is
+// told: a view is installed after the learn tracker's Begin of its test and
+// replaced before the next one's, so a mock a test view holds is one the
+// tracker heard of in that test, and a reader that reads the view's account
+// before the tracker's never finds there a serve the tracker has not heard
+// of. Without one (the switch off) nothing is filed.
 func (m *MockManager) observeServed(mock *models.Mock) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
 	if f := m.servedObserver.Load(); f != nil {
+		v := m.exactView()
 		(*f)(mock)
+		v.hear(mock)
 	}
 }
 
@@ -4151,7 +4161,9 @@ func (m *MockManager) observeServedCopy(mock models.Mock) {
 	}
 	if f := m.servedObserver.Load(); f != nil {
 		c := mock
+		v := m.exactView()
 		(*f)(&c)
+		v.hear(&c)
 	}
 }
 

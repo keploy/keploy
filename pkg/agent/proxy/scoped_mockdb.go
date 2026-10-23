@@ -351,9 +351,21 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// ServedInOpenTest forwards the store's account of what its open test was
+// served (integrations.ExactServedReader), none when it keeps none, so a
+// learn step on a scoped view reads the store's account as it would the bare
+// manager's.
+func (s *scopedMockDb) ServedInOpenTest() []*models.Mock {
+	if er, ok := s.MockMemDb.(integrations.ExactServedReader); ok {
+		return er.ServedInOpenTest()
+	}
+	return nil
+}
+
 var (
 	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
+	_ integrations.ExactServedReader   = (*scopedMockDb)(nil)
 )
 
 // ClaimantOf and ExactTakenCandidates forward what the store's open test's view says of the recordings it shares

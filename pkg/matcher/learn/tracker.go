@@ -39,7 +39,7 @@ type Tracker struct {
 	// (mockID). They are the running set's: NewSet forgets them.
 	outside     []*models.Mock
 	outsideKept map[string]bool
-	// kept are the identities (mockID) in mocks: a mock served again is kept
+	// kept are the identities (MockID) in mocks: a mock served again is kept
 	// once.
 	kept map[string]bool
 	// answered are the test's own mocks that answered a request of the
@@ -111,9 +111,12 @@ func (t *Tracker) NewSet() {
 	t.mu.Unlock()
 }
 
-// mockID is a served mock's identity: its name, which is unique within one
-// set's recording only, with its kind and recorded times.
-func mockID(m *models.Mock) string {
+// MockID is a served mock's identity, as the tracker files it (each once): its
+// name, which is unique within one set's recording only, with its kind and
+// recorded times. The mock store files its open test's account by it too
+// (proxy MockManager.ServedInOpenTest), so the two accounts agree on which
+// serves are one.
+func MockID(m *models.Mock) string {
 	return m.Name + "\x00" + string(m.Kind) + "\x00" + strconv.FormatInt(m.Spec.ReqTimestampMock.UnixNano(), 10) +
 		"\x00" + strconv.FormatInt(m.Spec.ResTimestampMock.UnixNano(), 10)
 }
@@ -182,10 +185,10 @@ func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 	before := append(make([]*models.Mock, 0, len(t.before)+len(t.outside)), t.before...)
 	seen := make(map[string]bool, len(t.before))
 	for _, m := range t.before {
-		seen[mockID(m)] = true
+		seen[MockID(m)] = true
 	}
 	for _, m := range t.outside {
-		if !seen[mockID(m)] {
+		if !seen[MockID(m)] {
 			before = append(before, m)
 		}
 	}
@@ -211,7 +214,7 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 		copy(t.servedAt[i+1:], t.servedAt[i:])
 		t.servedAt[i] = at
 	}
-	id := mockID(m)
+	id := MockID(m)
 	// Kept between tests too: the next Begin moves it to before.
 	if !t.kept[id] {
 		if t.kept == nil {
@@ -482,12 +485,12 @@ func NewPreviousCall(paired *models.Mock) *PreviousCall {
 	if paired == nil {
 		return &PreviousCall{}
 	}
-	return &PreviousCall{id: mockID(paired), to: paired.Spec.ReqTimestampMock}
+	return &PreviousCall{id: MockID(paired), to: paired.Spec.ReqTimestampMock}
 }
 
 // See considers m as paired's previous call.
 func (p *PreviousCall) See(m *models.Mock) {
-	if p == nil || m == nil || p.to.IsZero() || m.IsProtocolPhase() || mockID(m) == p.id {
+	if p == nil || m == nil || p.to.IsZero() || m.IsProtocolPhase() || MockID(m) == p.id {
 		return
 	}
 	if at := m.Spec.ReqTimestampMock; !at.IsZero() && at.Before(p.to) && at.After(p.at) {
