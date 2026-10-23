@@ -2,6 +2,7 @@ package learn
 
 import (
 	"net/http"
+	"regexp"
 	"strconv"
 	"testing"
 	"time"
@@ -185,5 +186,83 @@ func TestClassifyInAClockWordInTheAnswerIsNoEcho(t *testing.T) {
 	}
 	if ln := ClassifyIn(nil, []string{"body.at"}, got, rec, recInsert, nil, nil, resp, nil)[0]; ln.Kind == KindNoise {
 		t.Fatal("by the lead alone: learned as noise")
+	}
+}
+
+// A zone alternation tries the longest name first, so a name is never read
+// as a shorter one it begins with; names of one length come in their order.
+func TestAnAlternationPutsTheLongestNameFirst(t *testing.T) {
+	if got := alternation([]string{"B", "ES", "EST", "A"}); got != "EST|ES|A|B" {
+		t.Fatalf("alternation %q", got)
+	}
+	if got := regexp.MustCompile(alternation([]string{"ES", "EST"})).FindString("at EST"); got != "EST" {
+		t.Fatalf("read %q of EST", got)
+	}
+}
+
+// Each layout reads an instant of the clock's range alone: [2000, 2100), in
+// UTC. One outside it, and a text that is no instant, is no read.
+func TestEachLayoutReadsOnlyTheClocksRange(t *testing.T) {
+	in := time.Date(2026, 10, 21, 10, 28, 2, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		read func(string) (time.Time, time.Duration, bool)
+		at   func(time.Time) string
+	}{
+		{"rfc1123", readRFC1123, func(t time.Time) string { return t.Format(time.RFC1123) }},
+		{"rfc1123 with an offset", readRFC1123, func(t time.Time) string { return t.Format(time.RFC1123Z) }},
+		{"unixdate", readUnixDate, func(t time.Time) string { return t.Format(time.UnixDate) }},
+		{"jsdate", readJSDate, func(t time.Time) string {
+			return t.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)"
+		}},
+		{"iso8601", readISO, func(t time.Time) string { return t.Format(time.RFC3339) }},
+		{"compact", readCompact, func(t time.Time) string { return t.Format("20060102T150405Z") }},
+	} {
+		if got, _, ok := tc.read(tc.at(in)); !ok || !got.Equal(in) {
+			t.Errorf("%s: %v %v of %q, want %v", tc.name, got, ok, tc.at(in), in)
+		}
+		for _, out := range []time.Time{in.AddDate(-30, 0, 0), in.AddDate(100, 0, 0), clockTo} {
+			if got, _, ok := tc.read(tc.at(out)); ok {
+				t.Errorf("%s: %q, outside the clock's range, reads as %v", tc.name, tc.at(out), got)
+			}
+		}
+		if _, _, ok := tc.read(tc.at(clockFrom)); !ok {
+			t.Errorf("%s: the range's first instant does not read", tc.name)
+		}
+		if got, _, ok := tc.read("not an instant"); ok {
+			t.Errorf("%s: a text that is no instant reads as %v", tc.name, got)
+		}
+	}
+}
+
+// An instant that did not change is no clock read, even inside both spans
+// of a window that holds it (the spans meet): no read is ever learned of a
+// value's unchanged instant.
+func TestAnUnchangedInstantIsNoClockRead(t *testing.T) {
+	at := time.Date(2026, 10, 21, 10, 28, 2, 0, time.UTC)
+	w := &Window{Rec: Span{From: at.Add(-time.Minute), To: at.Add(time.Minute)}, F: Span{From: at.Add(-time.Minute), To: at.Add(time.Minute)}}
+	s := "at " + at.Format(time.RFC3339)
+	if !w.holds(clockLayouts[layoutNamed("iso8601")], at.Format(time.RFC3339), at.Format(time.RFC3339)) {
+		t.Fatal("the window does not hold the instant on both sides")
+	}
+	if c := clockInBy(s, s+" x", w, true); len(c.pairs) != 0 {
+		t.Fatalf("pairs %+v, want none", c.pairs)
+	}
+}
+
+// The accepted reads are paired in the order they stand in the recorded
+// value, whatever their layouts' order: an ISO instant before an HTTP date
+// is learned as two instant slots, in their order.
+func TestReadsOfTwoLayoutsStandInTheirOrder(t *testing.T) {
+	at := time.Date(2026, 10, 21, 10, 28, 2, 0, time.UTC)
+	later := at.Add(FullRoundLead)
+	rec, live := "at "+at.Format(time.RFC3339)+" or "+at.Format(time.RFC1123), "at "+later.Format(time.RFC3339)+" or "+later.Format(time.RFC1123)
+	c := clockOf(rec, live)
+	if len(c.pairs) != 2 || c.pairs[0].r.from > c.pairs[1].r.from {
+		t.Fatalf("pairs %+v, want two in the recorded value's order", c.pairs)
+	}
+	e, why := NewDriftCache().Words(rec, live, nil)
+	if why != "" || len(e.Slots) != 2 || e.Slots[0].Layout != "iso8601" || e.Slots[1].Layout != "rfc1123" {
+		t.Fatalf("words %+v (%s), want an ISO slot then an HTTP date's", e, why)
 	}
 }

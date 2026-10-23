@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -745,6 +746,11 @@ func TestTieOf(t *testing.T) {
 		// separator, is no instant alone.
 		{"an instant beside a word F added", [2]string{"at " + wAt.Format(time.RFC3339), "at " + later.Format(time.RFC3339) + " now"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
 		{"an instant whose last separator changed", [2]string{wAt.Format(time.RFC3339) + " ", later.Format(time.RFC3339) + ";"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
+		// A value that gained, or lost, a part after its last structural character
+		// beside an instant holds another number of parts: it is no instant alone,
+		// even where the separators it shares stand alike.
+		{"an instant beside a part F added after the last separator", [2]string{"at " + wAt.Format(time.RFC3339) + ";", "at " + later.Format(time.RFC3339) + ";x"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
+		{"an instant beside a part F dropped after the last separator", [2]string{"at " + wAt.Format(time.RFC3339) + ";x", "at " + later.Format(time.RFC3339) + ";"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
 		// A UUID's random part is no clock's: a value that carries a part of it is
 		// glued inside it.
 		{"a word inside a UUID's random group", [2]string{v7, v7f}, [2]string{"x123", "x012"}, TiePartial, models.RefusedContainment},
@@ -903,6 +909,8 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		{"a digest guard in upper case", rec, with(func(c *models.WordsEntry) { c.Digest = strings.ToUpper(c.Digest) }), whyGuard},
 		{"a digest guard of sixteen letters past f", rec, with(func(c *models.WordsEntry) { c.Digest = "ghijklmnopqrstuv" }), whyGuard},
 		{"a digest guard of sixteen other bytes", rec, with(func(c *models.WordsEntry) { c.Digest = "----------------" }), whyGuard},
+		{"a digest guard whose first digit is no hex digit", rec, with(func(c *models.WordsEntry) { c.Digest = "g" + c.Digest[1:] }), whyGuard},
+		{"a layout guard whose last digit is no hex digit", rec, with(func(c *models.WordsEntry) { c.Layout = c.Layout[:15] + "g" }), whyGuard},
 		{"a layout guard of seventeen digits", rec, with(func(c *models.WordsEntry) { c.Layout = "01234567890123456" }), whyGuard},
 		{"a layout guard malformed", rec, with(func(c *models.WordsEntry) { c.Layout = "XYZ" }), whyGuard},
 		{"another layout", rec, with(func(c *models.WordsEntry) { c.Layout = "0000000000000000" }), whyLayoutGuard},
@@ -936,6 +944,29 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		if ok, _ := WordsAdmit(tc.rec, tc.rec, tc.e); ok && tc.rec == rec {
 			t.Errorf("%s: a void entry admits even the recording", tc.name)
 		}
+	}
+}
+
+// The recorded value itself is admitted by an entry that holds for it, as it
+// stands: no instant of it is read again (one here is of no month).
+func TestTheRecordingIsAdmittedAsItStands(t *testing.T) {
+	rec := "at 2026-13-45T10:28:02Z"
+	iso := layoutNamed("iso8601")
+	m := clockMatches(clockLayouts[iso], rec, make([]bool, len(rec)))
+	if len(m) != 1 {
+		t.Fatalf("matches %v, want the one instant", m)
+	}
+	if _, _, ok := clockLayouts[iso].read(rec[m[0][0]:m[0][1]]); ok {
+		t.Fatal("the instant reads")
+	}
+	tr := tokenize(rec, []collapsed{{from: m[0][0], to: m[0][1], lay: iso}})
+	e := models.WordsEntry{V: models.WordsVersion, Digest: wordsDigest(rec), Layout: layoutHash(tr),
+		Slots: []models.WordSlot{{Seg: 1, Kind: models.WordSlotInstant, Layout: "iso8601", Skeleton: clockLayouts[iso].skeleton(rec[m[0][0]:m[0][1]])}}}
+	if ok, why := WordsAdmit(rec, rec, e); !ok || why != "" {
+		t.Fatalf("the recording: admitted %v (%q), want admitted", ok, why)
+	}
+	if ok, _ := WordsAdmit(rec, "at 2026-13-46T10:28:02Z", e); ok {
+		t.Fatal("another value whose instant does not read is admitted")
 	}
 }
 
@@ -1108,6 +1139,10 @@ func TestWholeDriftByRuns(t *testing.T) {
 		{"a sign", "-5", "5", false},
 		{"no word", "--", "---", false},
 		{"unchanged", "a", "a", false},
+		// Two instants of two layouts that swapped places are each collapsed where
+		// it stands live, so the words beside them are read as words: "Oct" is
+		// no word of the live value, where it is inside an instant.
+		{"two instants that swapped places", "Oct " + wAt.Format(time.RFC3339) + " " + wAt.Format(time.RFC1123), "Nov " + later.Format(time.RFC1123) + " " + later.Format(time.RFC3339), true},
 	} {
 		whole, why := WholeDrift(tc.rec, tc.live, nil)
 		if whole != tc.whole || whole == (why != "") {
@@ -1175,6 +1210,57 @@ func TestEachRunesClass(t *testing.T) {
 		class, word, joins := runeClass(tc.r)
 		if class != tc.class || word != tc.word || joins != tc.joins {
 			t.Errorf("runeClass(%U) = %q %v %v, want %q %v %v", tc.r, class, word, joins, tc.class, tc.word, tc.joins)
+		}
+	}
+	// The scripts partition the runes they hold, and every letter and digit
+	// is in one: runeClass's first script found is the only one, and no
+	// letter or digit is of no script, in this toolchain's Unicode tables.
+	held := make([]uint8, unicode.MaxRune+1)
+	for _, tab := range unicode.Scripts {
+		for _, r := range tab.R16 {
+			for c := rune(r.Lo); c <= rune(r.Hi); c += rune(r.Stride) {
+				held[c]++
+			}
+		}
+		for _, r := range tab.R32 {
+			for c := rune(r.Lo); c <= rune(r.Hi); c += rune(r.Stride) {
+				held[c]++
+			}
+		}
+	}
+	for r := rune(utf8.RuneSelf); r <= unicode.MaxRune; r++ {
+		if held[r] > 1 {
+			t.Fatalf("%U is in %d scripts", r, held[r])
+		}
+		if (unicode.IsLetter(r) || unicode.IsDigit(r)) && held[r] != 1 {
+			t.Fatalf("the letter or digit %U is in no script", r)
+		}
+	}
+}
+
+// asciiAlnum is a run of ASCII letters and digits, not empty; asciiToken is
+// ASCII, not empty: each byte is checked, the first and the last too.
+func TestTheASCIIClasses(t *testing.T) {
+	for _, tc := range []struct {
+		s            string
+		alnum, token bool
+	}{
+		{"", false, false},
+		{"a", true, true},
+		{"aZ09", true, true},
+		{"-a", false, true},
+		{"a-", false, true},
+		{"a.b", false, true},
+		{"\xffa", false, false},
+		{"a\xff", false, false},
+		{"é", false, false},
+		{"\x7f", false, true},
+	} {
+		if got := asciiAlnum(tc.s); got != tc.alnum {
+			t.Errorf("asciiAlnum(%q) = %v, want %v", tc.s, got, tc.alnum)
+		}
+		if got := asciiToken(tc.s); got != tc.token {
+			t.Errorf("asciiToken(%q) = %v, want %v", tc.s, got, tc.token)
 		}
 	}
 }
