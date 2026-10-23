@@ -49,6 +49,12 @@ func TestRedactLearnedValue(t *testing.T) {
 	for _, tc := range []struct{ path, value, want string }{
 		{"body.note", "ORD-1 paid 100", "ORD-1 paid 100"},
 		{"header.authorization", "abc", redacted},
+		// A path's segments split at each of . [ ] { }: a credential's name
+		// between any of them is one.
+		{"body.user[pin]", "1234", redacted},
+		{"body[pin].user", "1234", redacted},
+		{"request{cookie}", "a=b", redacted},
+		{"body.x{otp}.y", "1", redacted},
 		{"body.user.db_password", "hunter2", redacted},
 		{"header.x-api-key", "k1", redacted},
 		{"body.note", "Bearer abc.def", redacted},
