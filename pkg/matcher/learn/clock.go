@@ -519,12 +519,12 @@ var (
 	plusTime   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\+\d{2}:\d{2}:\d{2}`)
 )
 
-// readUnixDate reads an instant of Unix date's layouts (unixDateLayouts),
-// to the second, in UTC when it names no zone, and a declared zone's name at
+// readUnixDate reads an instant of Unix date's layouts (unixDateLayouts), to
+// the second, in UTC when it names no zone, and a declared zone's name at
 // offset 0 (in UTC): the same instant on every host. A lead read compares a
-// difference of two, which offset 0 keeps; a read within the call's window
-// of a zone other than UTC or GMT reads its instant off by its offset, and
-// is no read (N5).
+// difference of two, which offset 0 keeps; a read within the call's window of
+// a zone other than UTC or GMT reads its instant off by its offset, and is no
+// read.
 func readUnixDate(s string) (time.Time, time.Duration, bool) {
 	for _, layout := range unixDateLayouts {
 		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil && inClockRange(t) {

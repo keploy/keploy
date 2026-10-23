@@ -386,13 +386,12 @@ const (
 	BasisEarlier LearnBasis = "earlier"
 	// BasisWhole: every run of the leaf changed, so the whole leaf is noise:
 	// how keploy learns a leaf of a kind it learns no words of yet (Mongo,
-	// Postgres; design r9 §5).
+	// Postgres).
 	BasisWhole LearnBasis = "whole"
 	// BasisBeforeWords: the leaf was learned whole (noise.req), or the
-	// variable bound whole (no words), before keploy learned words, of a
-	// kind it now learns words of: a re-record learns only the words that
-	// change ("re-record to tighten", design r9 N6). What changed of it then
-	// is not known.
+	// variable bound whole (no words), before keploy learned words, of a kind
+	// it now learns words of: a re-record learns only the words that change
+	// ("re-record to tighten"). What changed of it then is not known.
 	BasisBeforeWords LearnBasis = "before-words"
 )
 

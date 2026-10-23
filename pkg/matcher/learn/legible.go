@@ -72,14 +72,14 @@ func RegisterLeafReader(k models.Kind, f LeafReader) {
 
 // RegisterWordsKind says the learn step of mocks of kind k learns a drifted
 // leaf by its words (models.WordsEntry): of such a mock, a leaf learned whole
-// (noise.req) and a variable bound whole (no words) were learned before
-// keploy learned words, and a re-record learns them word by word ("re-record
-// to tighten", RetightenLines). Of a kind no adapter registers, keploy learns
-// a leaf only whole (design r9 §5: Mongo's and Postgres's learners, which
-// learn a leaf only when every word of it changed, learn.WholeDrift), so its
-// whole noise is what a record learns today, and a re-record does not
-// tighten it. The protocol adapter registers it, as it registers its leaf
-// reader: what it declares, never read off a mock.
+// (noise.req) and a variable bound whole (no words) were learned before keploy
+// learned words, and a re-record learns them word by word ("re-record to
+// tighten", RetightenLines). Of a kind no adapter registers, keploy learns a
+// leaf only whole (Mongo's and Postgres's learners, which learn a leaf only
+// when every word of it changed, learn.WholeDrift), so its whole noise is what
+// a record learns today, and a re-record does not tighten it. The protocol
+// adapter registers it, as it registers its leaf reader: what it declares,
+// never read off a mock.
 func RegisterWordsKind(k models.Kind) {
 	readersMu.Lock()
 	wordsKinds[k] = true
@@ -446,15 +446,15 @@ func legibleOf(set string, m *models.Mock, leaves map[string]Leaf, words bool) [
 	return out
 }
 
-// RetightenLines are the lines a status prints (N6) of a set's learned leaves
-// that were learned before keploy learned words (models.BasisBeforeWords: a
-// leaf of a kind keploy learns words of, learned whole into noise.req, or a
-// variable or echo of one bound whole, with no words), in the leaves' order:
-// "<mock> <path>: re-record to tighten (learned whole, before keploy learned
-// words)", or "(bound whole, ...)" of a variable or echo. None with the
-// proven switch off, or for a set whose latest report does not say proven
-// (proven false). A leaf of a kind keploy learns only whole (Mongo,
-// Postgres) has none: a re-record learns it whole again.
+// RetightenLines are the lines a status prints of a set's learned leaves that
+// were learned before keploy learned words (models.BasisBeforeWords: a leaf of
+// a kind keploy learns words of, learned whole into noise.req, or a variable
+// or echo of one bound whole, with no words), in the leaves' order: "<mock>
+// <path>: re-record to tighten (learned whole, before keploy learned words)",
+// or "(bound whole, ...)" of a variable or echo. None with the proven switch
+// off, or for a set whose latest report does not say proven (proven false). A
+// leaf of a kind keploy learns only whole (Mongo, Postgres) has none: a
+// re-record learns it whole again.
 func RetightenLines(leaves []models.LearnedLeaf, proven bool) []string {
 	if !provenswitch.On() || !proven {
 		return nil

@@ -388,8 +388,8 @@ func TestALearnStepReusedMockKeepsEveryEchoItWasServedWith(t *testing.T) {
 	p.ContinueTestErrorCapture()
 	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
 	for _, c := range []struct{ target, want string }{
-		// The id and the rid change apart: two values that both went from
-		// 1 to 2 would be one changed word at two places (r9 N8, refused).
+		// The id and the rid change apart: two values that both went from 1 to
+		// 2 would be one changed word at two places, which is refused.
 		{"/users/u-2?rid=r-7", `{"id":"u-2","rid":"r-7"}`},
 		{"/users/u-1?rid=r-3", `{"id":"u-1","rid":"r-3"}`},
 	} {

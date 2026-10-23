@@ -52,7 +52,7 @@ func slotsOf(e models.WordsEntry) string {
 	return strings.Join(out, " ")
 }
 
-// The founder's case: of "ORD-1 paid 100 ref=<hex>", only the ref changed in
+// The motivating case: of "ORD-1 paid 100 ref=<hex>", only the ref changed in
 // F, so only the ref may change; "paid 999" is a regression keploy catches,
 // and a fresh ref is no difference.
 func TestOnlyTheWordsThatChangedMayChange(t *testing.T) {
@@ -77,7 +77,7 @@ func TestOnlyTheWordsThatChangedMayChange(t *testing.T) {
 		{"\"ORD-1 paid 100 ref=0c9d8e7f6a5b", false},
 		{"ORD-1 paid 100 ref=0c9d8e7f6a5b#", false},
 		{"ORD-1 paid 100 ref=ünï", false},
-		{"ORD-1 paid 100 ref=a.b-c_d", true}, // the run alone in its segment: any ASCII token (N1)
+		{"ORD-1 paid 100 ref=a.b-c_d", true}, // the run alone in its segment: any ASCII token
 	} {
 		if ok, why := WordsAdmit(rec, tc.live, e); ok != tc.ok || ok == (why != "") {
 			t.Errorf("%q admitted %v (%s), want %v", tc.live, ok, why, tc.ok)
@@ -248,9 +248,9 @@ func uuid7Of(at time.Time, rand string, variant byte, upper bool) string {
 // mixes cases, which uuidSkeleton reads as none.
 func mixedCase(u string) string { return u[:24] + strings.ToUpper(u[24:]) }
 
-// A time-ordered UUID is an instant slot in its letters' case, its version
-// and a variant of 8, 9, a or b, either case (SF2); a recorded variant
-// outside them is refused (N18), and so is one glued to a word.
+// A time-ordered UUID is an instant slot in its letters' case, its version and
+// a variant of 8, 9, a or b, either case; a recorded variant outside them is
+// refused, and so is one glued to a word.
 func TestAUUIDInstantKeepsItsCaseVersionAndVariant(t *testing.T) {
 	later := wAt.Add(FullRoundLead)
 	other := wAt.Add(3 * time.Hour)
@@ -285,7 +285,7 @@ func TestAUUIDInstantKeepsItsCaseVersionAndVariant(t *testing.T) {
 	for _, v := range []byte{'c', 'C', '0', 'f'} {
 		rec, f := uuid7Of(wAt, "abc123456789abcdef", v, false), uuid7Of(later, "def0123456789abcde", v, false)
 		if _, why := NewDriftCache().Words(rec, f, nil); !strings.Contains(why, "variant") {
-			t.Errorf("recorded variant %c: learned (%q), want refused (N18)", v, why)
+			t.Errorf("recorded variant %c: learned (%q), want refused", v, why)
 		}
 	}
 	glued := "x" + uuid7Of(wAt, "abc123456789abcdef", 'a', false)
@@ -581,8 +581,8 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 	}
 }
 
-// Two clock reads other than UUIDs in one value may repeat (N2): they are no
-// tie, and each is its own instant slot.
+// Two clock reads other than UUIDs in one value may repeat: they are no tie,
+// and each is its own instant slot.
 func TestTwoInstantsOfOneValueAreNoRepeat(t *testing.T) {
 	later := wAt.Add(FullRoundLead)
 	rec := wAt.Format(time.RFC3339) + " / " + wAt.Format(time.RFC3339)
@@ -662,9 +662,9 @@ func TestAnEmptyOrLongerPieceIsInNothing(t *testing.T) {
 	}
 }
 
-// Glued containment (B1): either value's changed piece lies inside the
-// other's, starting and ending at a class boundary of the container, at one
-// offset recorded and live, from its start or its end.
+// Glued containment: either value's changed piece lies inside the other's,
+// starting and ending at a class boundary of the container, at one offset
+// recorded and live, from its start or its end.
 func TestGluedContainment(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -699,7 +699,7 @@ func TestGluedContainment(t *testing.T) {
 }
 
 // How two places of one call stand (TieOf): the instant check first, then
-// sources, which the glued test is part of; r9 §8's rows.
+// sources, which the glued test is part of.
 func TestTieOf(t *testing.T) {
 	later := wAt.Add(FullRoundLead)
 	v7, v7f := uuid7Of(wAt, "abc123456789abcdef", 'a', false), uuid7Of(later, "def0123456789abcde", 'b', false)
@@ -732,7 +732,7 @@ func TestTieOf(t *testing.T) {
 		// whose changed piece is "10442"; as it stands its changed piece is
 		// "10", inside no class boundary of "10442".
 		{"an over-encoded INV10442 and 10442", [2]string{"INV10%3442", "INV20%3442"}, [2]string{"10442", "20442"}, TiePartial, models.RefusedContainment},
-		{"ORD 12347 beside 1234 (N17)", [2]string{"ORD 12347", "ORD 56785"}, [2]string{"1234", "5678"}, TieNone, ""},
+		{"ORD 12347 beside 1234, no class boundary", [2]string{"ORD 12347", "ORD 56785"}, [2]string{"1234", "5678"}, TieNone, ""},
 		{"seq=17 beside a fresh hex", [2]string{"seq=17", "seq=18"}, [2]string{"3f2b8c1e9a4d70a1", "a7c4e2d10b3f4c2e"}, TieNone, ""},
 		{"createdAt and updatedAt", [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt, ""},
 		{"an instant beside text and the same instant", [2]string{"at " + wAt.Format(time.RFC3339), "at " + later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieExempt, ""},
@@ -1168,8 +1168,8 @@ func TestEachInstantOfAnEntryIsOneSlots(t *testing.T) {
 	}
 }
 
-// WholeDrift judges by runs: a leaf is whole when every run of it changed
-// and no changed run repeats (N14: a one-run value that changed anywhere).
+// WholeDrift judges by runs: a leaf is whole when every run of it changed and
+// no changed run repeats (so a one-run value that changed anywhere).
 func TestWholeDriftByRuns(t *testing.T) {
 	later := wAt.Add(FullRoundLead)
 	for _, tc := range []struct {
@@ -1178,7 +1178,7 @@ func TestWholeDriftByRuns(t *testing.T) {
 	}{
 		{"a fresh id", "3f2b8c1e9a4d", "a7c4e2d10b3f", true},
 		{"a fresh UUID v4", "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "6fa459ea-ee8a-4ca4-894e-db77e160355e", true},
-		{"one run glued (N14)", "ORD123paid100", "ORD124paid100", true},
+		{"one run glued", "ORD123paid100", "ORD124paid100", true},
 		{"a lone instant", wAt.Format(time.RFC3339), later.Format(time.RFC3339), true},
 		{"a timestamps: true field", wAt.Format("2006-01-02T15:04:05.000Z"), later.Format("2006-01-02T15:04:05.000Z"), true},
 		{"a partial note", "ORD-1 paid 100 ref=a1", "ORD-1 paid 100 ref=b2", false},

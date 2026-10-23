@@ -64,10 +64,10 @@ type varDecl struct {
 	// (models.MockVariable.Clock). It is read only where the call binds the
 	// variable.
 	clock []models.ClockRead
-	// words: what the learn step learned of the words of the variable's
-	// value at its bind (models.MockVariable.Words). The call binds it only
-	// to a value they admit (learn.WordsAdmit). nil for a variable learned
-	// before words, whose bind any value takes (N6).
+	// words: what the learn step learned of the words of the variable's value
+	// at its bind (models.MockVariable.Words). The call binds it only to a
+	// value they admit (learn.WordsAdmit). nil for a variable learned before
+	// words, whose bind any value takes.
 	words  *models.WordsEntry
 	bind   *varPlace
 	use    []varPlace
@@ -694,7 +694,7 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 // learn step learned at its bind admit (learn.WordsAdmit): only the words
 // record's full round saw change may change, and every other byte of the
 // recorded value must stand. A variable learned before words binds any value
-// (nil words, N6).
+// (nil words).
 func wordsHold(mock string, d varDecl, v held) *varProblem {
 	if d.words == nil {
 		return nil

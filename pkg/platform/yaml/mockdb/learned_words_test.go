@@ -159,10 +159,10 @@ func TestMergeVariableKeepsWordsWithTheBind(t *testing.T) {
 	}
 }
 
-// Backward compatibility (compat audit A6): a rewrite with the switch off (a
-// noise persist, a prune) reads and writes back every mock's words, a newer
-// keploy's entry included, so the next proven run reads what was learned; a
-// mock that carries none is written byte for byte as before. The gob format
+// Backward compatibility: a rewrite with the switch off (a noise persist, a
+// prune) reads and writes back every mock's words, a newer keploy's entry
+// included, so the next proven run reads what was learned; a mock that carries
+// none is written byte for byte as before. The gob format
 // (KEPLOY_MOCK_FORMAT=gob) carries them too; its bytes are the gob encoder's,
 // so only the YAML and JSON files are compared byte for byte.
 func TestWordsSurviveASwitchOffRewrite(t *testing.T) {

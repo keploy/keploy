@@ -15,9 +15,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// The learn step's legible files (word-level learn, design r9 §6): what the
-// set's mocks learned is derived from the mocks (learn.Legible), which this
-// store reads for it (ReadSetMocks), whatever the format they are in.
+// The learn step's legible files (word-level learn): what the set's mocks
+// learned is derived from the mocks (learn.Legible), which this store reads
+// for it (ReadSetMocks), whatever the format they are in.
 
 func init() {
 	learn.RegisterSetReader(func(setDir string) ([]*models.Mock, error) {

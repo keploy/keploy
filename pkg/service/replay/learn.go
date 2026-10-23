@@ -77,10 +77,10 @@ type learnedFilesWriter interface {
 }
 
 // writeLearnedFiles writes the set's learned files once what the learn step
-// learned is on its mocks (design r9 §6): they are derived from the mocks and
-// say, for a person or an LLM, what was learned and how to undo it. A store
-// that writes none writes none, and one that fails says so: the recording is
-// written all the same.
+// learned is on its mocks: they are derived from the mocks and say, for a
+// person or an LLM, what was learned and how to undo it. A store that writes
+// none writes none, and one that fails says so: the recording is written all
+// the same.
 func writeLearnedFiles(logger *zap.Logger, db interface{}, testSetID string, consumed map[string]models.MockState) {
 	w, ok := db.(learnedFilesWriter)
 	if !ok {

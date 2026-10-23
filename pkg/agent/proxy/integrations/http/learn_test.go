@@ -146,9 +146,9 @@ func learnOn(t *testing.T) (*HTTP, learnNoise, models.OutgoingOptions) {
 	return h, h.newLearnNoise(opts, nil, nil), opts
 }
 
-// wordPlaces are the places spec learned words at, as a noise map names
-// them; it fails t when spec learned a leaf whole: under the proven switch
-// the HTTP learn step learns only the words of a leaf that changed (r9 §1).
+// wordPlaces are the places spec learned words at, as a noise map names them;
+// it fails t when spec learned a leaf whole: under the proven switch the HTTP
+// learn step learns only the words of a leaf that changed.
 func wordPlaces(t *testing.T, spec models.MockSpec) map[string][]string {
 	t.Helper()
 	if len(spec.ReqBodyNoise) != 0 {
@@ -1554,8 +1554,8 @@ func TestLearnMatchAValueBeyondASCIIIsRefusedNotNoise(t *testing.T) {
 func TestLearnMatchARefNextToAFreshBase64SignatureIsRefused(t *testing.T) {
 	U1, U2 := "3f2b8c1e-9a4d-4e7b-8c21-5d6e7f8a9b0c", "a7c4e2d1-0b3f-4a8e-9d12-6f5e4d3c2b1a"
 	S1, S2 := "q3+/Zx9Lk2mN8pQ4rS7tU1vW5xY0zA6bC+dE/fG3hI8=", "Hj2Kl/9Mn4+Op6Qr8St0Uv/Wx1Yz3Ab5Cd7Ef+Gh9Ij="
-	// F's signatures keep the recorded ones' '+', '/' and '=' where they
-	// stand (a std base64 whose layout drifts is refused at once, N12).
+	// F's signatures keep the recorded ones' '+', '/' and '=' where they stand
+	// (a std base64 whose layout drifts is refused at once).
 	S3, S4 := "Zz+/Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0Pp+Oo/Nn9Mm1=", "Kk1Ll/9Mm3+Nn4Oo5Pp6Qq7Rr/Ss8Tt9Uu0+Vv1Ww2Xx="
 	cb := func(ref, sig string) string { return "https://app.example/cb?ref=" + ref + "&sig=" + sig }
 	h, n, opts := learnOn(t)
@@ -1969,9 +1969,9 @@ func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 }
 
 // A token minted for the call with the app's clock (jti random, iat now),
-// which b95 refused whole, is learned by its words (r9): only the runs of it
-// that F saw change may change, and every other byte of it is compared, its
-// header and the claims that did not change included.
+// which keploy refused whole before it learned words, is learned by its words:
+// only the runs of it that F saw change may change, and every other byte of it
+// is compared, its header and the claims that did not change included.
 func TestLearnMatchLearnsATokenThatIsMoreThanItsClockReadByItsWords(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
@@ -2738,7 +2738,7 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 		{"a 2 s longer boot", 2 * time.Second, true, false, true},
 		{"a 30 s longer boot", 30 * time.Second, true, false, true},
 		{"no app clock", 2 * time.Second, false, false, false},
-		// A test's own call is read in its window too (r9 §3).
+		// A test's own call is read in its window too.
 		{"a test's own call", 2 * time.Second, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -136,7 +136,7 @@ func TestLegibleSaysWhatEachMockLearned(t *testing.T) {
 		},
 	}}
 	// A Postgres mock: its kind's learn step learns a leaf only whole
-	// (r9 §5), and no reader of its leaves is registered here.
+	// (WholeDrift), and no reader of its leaves is registered here.
 	pg := &models.Mock{Name: "mock-2", Kind: models.PostgresV3, Spec: models.MockSpec{
 		ReqBodyNoise: map[string][]string{"bind.$1": {}},
 		Variables:    models.MockVariables{"id": {Recorded: "7", Bind: "bind.$2", Echo: true}},
@@ -207,11 +207,11 @@ func TestLegibleSaysWhatEachMockLearned(t *testing.T) {
 		"mock-1 body.at: re-record to tighten (learned whole, before keploy learned words)",
 	}
 	if !slices.Equal(lines, want) || RetightenLines(leaves, false) != nil {
-		t.Errorf("N6 lines %q, want %q", lines, want)
+		t.Errorf("re-record lines %q, want %q", lines, want)
 	}
 	t.Setenv(provenswitch.Env, "")
 	if RetightenLines(leaves, true) != nil {
-		t.Error("N6 printed with the switch off")
+		t.Error("re-record lines printed with the switch off")
 	}
 }
 

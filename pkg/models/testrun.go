@@ -66,7 +66,7 @@ type TestReport struct {
 	// proven switch, config.Test.Learn) in a keploy whose learners class a
 	// call they refuse by a word-level learn rule (UnmatchedCall.Refused):
 	// LearnWords. A reader that counts those refusals (enterprise's
-	// E-measure) reads a report that says so, and no other: a report
+	// tools/emeasure) reads a report that says so, and no other: a report
 	// without it is another round's, or one a keploy that classes no
 	// refusal wrote. Absent otherwise.
 	Learn string `json:"learn,omitempty" yaml:"learn,omitempty"`
@@ -499,11 +499,11 @@ type UnmatchedCall struct {
 	// (Mapping.Groups): with whom, and which of them its recording was
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
-	// Refused is, of a MissRequestChanged miss, the word-level learn rule
-	// that refused the call (design r9 §2, N8): RefusedTie or
-	// RefusedContainment. Empty for every other miss, and for a call refused
-	// for any other reason. It names a rule, never a value: what tells how
-	// many recordings those rules cost (E-measure).
+	// Refused is, of a MissRequestChanged miss, the word-level learn rule that
+	// refused the call: RefusedTie or RefusedContainment. Empty for every
+	// other miss, and for a call refused for any other reason. It names a
+	// rule, never a value: what tells how many recordings those rules cost
+	// (enterprise's tools/emeasure).
 	Refused string `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
@@ -645,8 +645,8 @@ const (
 	// value inside a place, two places of one value learned apart.
 	RefusedTie = "tie"
 	// RefusedContainment: a changed piece of a value lies inside another
-	// changed value's, at a class boundary of it (glued containment, B1), and
-	// no other rule ties the two.
+	// changed value's, at a class boundary of it (glued containment), and no
+	// other rule ties the two.
 	RefusedContainment = "containment"
 )
 

@@ -10,13 +10,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// The release gate of word-level learn (design r9 §7), in process: record's
-// full round learns the words of "ORD-1 paid 100 ref=<hex>" that changed
-// (learnMatch), the consumed mock's state is written onto the recording
-// (mockdb's PersistLearned) and read back from disk, and a later replay
-// answers a fresh ref and refuses "paid 999", in production's order under
-// the switch: the learn step's own pass first (learnedMatch), then the
-// matcher's strict serve; each alone gives the same answer.
+// The release gate of word-level learn, in process: record's full round learns
+// the words of "ORD-1 paid 100 ref=<hex>" that changed (learnMatch), the
+// consumed mock's state is written onto the recording (mockdb's
+// PersistLearned) and read back from disk, and a later replay answers a fresh
+// ref and refuses "paid 999", in production's order under the switch: the
+// learn step's own pass first (learnedMatch), then the matcher's strict serve;
+// each alone gives the same answer.
 func TestReleaseGateLearnPersistServe(t *testing.T) {
 	h, n, opts := learnOn(t)
 	const body, bodyF = `{"note":"ORD-1 paid 100 ref=3f2b8c1e9a4d","item":"book"}`, `{"note":"ORD-1 paid 100 ref=a7c4e2d10b3f","item":"book"}`
@@ -85,9 +85,9 @@ func TestReleaseGateLearnPersistServe(t *testing.T) {
 	}
 }
 
-// Backward compatibility (compat audit A6, r9 §7): with the switch off, a
-// recording's learned words change nothing: every call is served or refused
-// as the same recording with no words is, by the matcher main has.
+// Backward compatibility: with the switch off, a recording's learned words
+// change nothing: every call is served or refused as the same recording with
+// no words is, by the matcher main has.
 func TestTheSwitchOffServesAWordsCarryingRecordingAsMainDoes(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "")
 	const body = `{"note":"ORD-1 paid 100 ref=3f2b8c1e9a4d","item":"book"}`

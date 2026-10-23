@@ -40,9 +40,9 @@ import (
 //     separators between) learns each run that changed as a slot of its own
 //     (models.WordSlotRun): a later replay lets only a run of ASCII letters
 //     and digits stand there, its neighbouring separators fixed, or, of a
-//     run alone in its segment, any ASCII token (N1);
+//     run alone in its segment, any ASCII token;
 //   - a segment whose runs drifted, ASCII on both sides, is one token slot
-//     (models.WordSlotToken): any ASCII token may stand there (N1);
+//     (models.WordSlotToken): any ASCII token may stand there;
 //   - an accepted clock read is one instant slot (models.WordSlotInstant),
 //     by its segment, its layout and its skeleton;
 //   - anything else is refused.
@@ -687,7 +687,7 @@ func uuidVariant(u string) bool {
 	return strings.IndexByte("89abAB", u[19]) >= 0
 }
 
-// --- the changed piece, and glued containment (B1) ---
+// --- the changed piece, and glued containment ---
 
 // byteClass is a byte's class within a changed piece: a letter, a digit, or
 // another byte.
@@ -844,10 +844,10 @@ func wordPieces(rec, live string, c clockSet) []wpiece {
 	return out
 }
 
-// instantOnly reports whether every word of a drifted value that changed
-// lies inside an accepted clock read other than a UUID's (c, as it stands):
-// a value two places of one call may share without one carrying the other
-// (createdAt = updatedAt). Such twins are never held equal (N2).
+// instantOnly reports whether every word of a drifted value that changed lies
+// inside an accepted clock read other than a UUID's (c, as it stands): a value
+// two places of one call may share without one carrying the other (createdAt =
+// updatedAt). Such twins are never held equal.
 func instantOnly(rec, live string, c clockSet) bool {
 	// (With no read, a value that changed has a part or a separator that
 	// changed, which the loops below find.)
@@ -1015,9 +1015,9 @@ type Tie int
 const (
 	// TieNone: neither carries the other.
 	TieNone Tie = iota
-	// TieExempt: every word of both that changed lies inside an accepted
-	// clock read other than a UUID's (createdAt = updatedAt): neither
-	// carries the other, and they are never held equal (N2).
+	// TieExempt: every word of both that changed lies inside an accepted clock
+	// read other than a UUID's (createdAt = updatedAt): neither carries the
+	// other, and they are never held equal.
 	TieExempt
 	// TieWhole: one value whole, recorded, at both places: they may be one
 	// value of the call.
@@ -1051,9 +1051,9 @@ func (dc *DriftCache) TieOf(a, b [2]string, w *Window) Tie {
 // TieClass names the word-level rule that ties drifted values a and b of one
 // call, as TieOf reads them, for the report of a call refused by the tie
 // (models.UnmatchedCall.Refused): models.RefusedContainment when the glued
-// test (B1) alone ties them, models.RefusedTie for any other tie, "" when
-// TieOf finds none or exempts them. It names a rule and decides nothing:
-// TieOf decides.
+// test alone ties them, models.RefusedTie for any other tie, "" when TieOf
+// finds none or exempts them. It names a rule and decides nothing: TieOf
+// decides.
 func (dc *DriftCache) TieClass(a, b [2]string, w *Window) string {
 	if dc == nil {
 		dc = NewDriftCache()
@@ -1090,8 +1090,8 @@ func (dc *DriftCache) TieChance(a, b [2]string, w *Window) bool {
 // whole (why), for the report of the call it refuses
 // (models.UnmatchedCall.Refused): models.RefusedTie for a changed word that
 // repeats in the leaf, models.RefusedContainment for one glued inside another
-// (B1); "" for every other reason. A protocol learner names the rule by it,
-// never by matching the reason's text.
+// (the glued test); "" for every other reason. A protocol learner names the
+// rule by it, never by matching the reason's text.
 func RefusalClass(why string) string {
 	switch why {
 	case whyRepeat:
@@ -1383,7 +1383,7 @@ func admitWords(tr, tl wtoks, bySeg map[int][]models.WordSlot) string {
 		}
 		if len(rs.runs) == 1 {
 			// The run alone in its segment: any ASCII token, the separators
-			// around it fixed (N1).
+			// around it fixed.
 			lead, trail := tr.gap(g, 0), tr.gap(g, 1)
 			if !strings.HasPrefix(lt, lead) || !strings.HasSuffix(lt, trail) || len(lt) < len(lead)+len(trail) {
 				return "a separator beside a word of it learned to change is not the one recorded"

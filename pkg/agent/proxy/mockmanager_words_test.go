@@ -10,13 +10,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// Word-level learn's persistence through the mock manager (design r9, plan
-// K5): the learn step leaves the words it learned of a consumed mock's
-// leaves on the copy it hands a consume door (MockSpec.LearnedWords), with
-// record's full round's values there (MockSpec.LearnedF). The door's state
-// is all that reaches the mock file and learned.local.yaml, so a door that
-// dropped them would leave every word-learned leaf of its mocks compared
-// whole at replay: a loud false red.
+// Word-level learn's persistence through the mock manager: the learn step
+// leaves the words it learned of a consumed mock's leaves on the copy it hands
+// a consume door (MockSpec.LearnedWords), with record's full round's values
+// there (MockSpec.LearnedF). The door's state is all that reaches the mock
+// file and learned.local.yaml, so a door that dropped them would leave every
+// word-learned leaf of its mocks compared whole at replay: a loud false red.
 
 // wordsEntry is a readable words entry (its guards and slots are never read
 // here).

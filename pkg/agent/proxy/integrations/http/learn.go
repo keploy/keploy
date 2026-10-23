@@ -980,15 +980,14 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			// A pool mock's call need not run on the clock F set for a
-			// test (at the start-up and between tests none is set, and a
-			// call made in a test was recorded in none): its clock reads
-			// are read in its own window (learn.Tracker.CallWindowFrom),
-			// as well as by the lead. Its previous recorded call is found
-			// among every recording of the set, those on disk too, as the
-			// earlier places streamed them.
-			// A call's clock reads are read in its own window too, a test's
-			// own call included (r9 §3).
+			// A pool mock's call need not run on the clock F set for a test
+			// (at the start-up and between tests none is set, and a call made
+			// in a test was recorded in none): its clock reads are read in its
+			// own window (learn.Tracker.CallWindowFrom), as well as by the
+			// lead. Its previous recorded call is found among every recording
+			// of the set, those on disk too, as the earlier places streamed
+			// them. A call's clock reads are read in its own window too, a
+			// test's own call included.
 			w := tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb), w)
@@ -1046,13 +1045,13 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 
 // pairing is what the learn step learned on a paired mock: the words it
 // learned of the leaves that drifted as noise (by exact place; never a leaf
-// whole, design r9 §1), its variables (an echo and a call-local variable
-// included, each with its words), the variables of the test bound at an
-// earlier mock that it uses (binds, by that mock), each variable's value in
-// this call, for its answer, and record's full round's value at each place
-// whose words it learned (f, by mock, then place: learned.local.yaml). Of a
-// request it refuses, refused names the word-level rule that refused it, if
-// one did (models.RefusedTie, RefusedContainment): the miss's report says it
+// whole), its variables (an echo and a call-local variable included, each with
+// its words), the variables of the test bound at an earlier mock that it uses
+// (binds, by that mock), each variable's value in this call, for its answer,
+// and record's full round's value at each place whose words it learned (f, by
+// mock, then place: learned.local.yaml). Of a request it refuses, refused
+// names the word-level rule that refused it, if one did (models.RefusedTie,
+// RefusedContainment): the miss's report says it
 // (models.UnmatchedCall.Refused).
 type pairing struct {
 	words   map[string]models.WordsEntry
@@ -1064,10 +1063,10 @@ type pairing struct {
 }
 
 // learnedAs is what the plan learned the drifted leaf l as, as the learn
-// step's log says it: "noise" when its words are noise, "echo" or
-// "variable" when it is a variable's place (a leaf Classify found noise
-// becomes one when another place of the call holds its value whole, r9 §2),
-// and else what Classify found it (l.Kind).
+// step's log says it: "noise" when its words are noise, "echo" or "variable"
+// when it is a variable's place (a leaf Classify found noise becomes one when
+// another place of the call holds its value whole), and else what Classify
+// found it (l.Kind).
 func (p pairing) learnedAs(l learn.Learned) string {
 	// (A place whose words are noise is one Classify found noise: l.Kind.)
 	path := l.Recorded.Path
@@ -1324,11 +1323,10 @@ func chanceOf(dc *learn.DriftCache, a, b [2]string, w *learn.Window) string {
 
 // tiePlaces reads the ties between the places learnPlan learned words at
 // (slots: noise, echoes, variables used here), and between each and the test
-// case's values (given), design r9 §2, the instant check first
-// (learn.DriftCache.TieOf):
+// case's values (given), the instant check first (learn.DriftCache.TieOf):
 //
 //   - two places whose every changed word lies inside an accepted clock read
-//     other than a UUID's are exempt, and never held equal (N2);
+//     other than a UUID's are exempt, and never held equal;
 //   - two places of noise that hold one recorded value whole, and one live
 //     value (twins), are one variable of this call alone (echo: true, no
 //     answer), bound at the first place in sorted order and used at the
@@ -1336,7 +1334,7 @@ func chanceOf(dc *learn.DriftCache, a, b [2]string, w *learn.Window) string {
 //     that F saw hold two values are two values that were equal when
 //     recorded, each learned apart, as a value recorded equal to a test
 //     case's is not its;
-//   - anything else that ties two places is refused (N8): a partial tie, a
+//   - anything else that ties two places is refused: a partial tie, a
 //     value glued inside another, a test case's value inside a place.
 //
 // It changes p for a call-local variable: the places' noise words go, and

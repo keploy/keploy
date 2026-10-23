@@ -44,7 +44,7 @@ func TestLearnedByTest(t *testing.T) {
 // A set's report says it ran record's full round's learn step, in a keploy
 // whose learners class each call they refuse (TestReport.Learn), when it
 // did, and only then: under the proven switch, with the learn step on. A
-// reader counting those refusals (enterprise's E-measure) reads no other
+// reader counting those refusals (enterprise's tools/emeasure) reads no other
 // report. Every report the replay writes for the set says it, whichever way
 // the set ends: the first, RUNNING one and the last of a set it runs, and
 // the one report of a set with no test to run, a set it ignores whole, and

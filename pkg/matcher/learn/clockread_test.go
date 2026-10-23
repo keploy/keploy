@@ -29,10 +29,10 @@ func classifyNote(t *testing.T, rec, live string) Learned {
 	return got[0]
 }
 
-// A drift that holds nothing new is refused (b95's (A), kept): only the order
-// of its words, a sign or separator, or how many times it holds a word
-// changed, in any reading, read decoded where it has escapes. The refusal
-// names the part, never a value.
+// A drift that holds nothing new is refused (as before keploy learned words):
+// only the order of its words, a sign or separator, or how many times it holds
+// a word changed, in any reading, read decoded where it has escapes. The
+// refusal names the part, never a value.
 func TestADriftThatHoldsNothingNewIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name, rec, live, why string
@@ -102,10 +102,11 @@ func TestAnInstantOnlyTheDecodedFormShowsIsAClockRead(t *testing.T) {
 	}
 }
 
-// What b95 refused whole beside a clock read (its (B) gate, gone) is learned
-// by its words now: the clock read is one instant slot, a word beside it that
-// changed is a slot of its own, and every other byte is still compared. The
-// leaf is noise to Classify; what it learns is its words (learnWords).
+// What keploy refused whole beside a clock read before it learned words is
+// learned by its words now: the clock read is one instant slot, a word beside
+// it that changed is a slot of its own, and every other byte is still
+// compared. The leaf is noise to Classify; what it learns is its words
+// (learnWords).
 func TestTextBesideAClockReadLearnsOnlyItsWords(t *testing.T) {
 	later := recAt.Add(FullRoundLead)
 	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }

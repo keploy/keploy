@@ -22,10 +22,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// Word-level learn at the HTTP parser (design r9): what the learn step
-// learns of a leaf is the words of it that changed in F, and every serve
-// site reads them through learn.WordsAdmit, so every other byte of the leaf
-// is still compared.
+// Word-level learn at the HTTP parser: what the learn step learns of a leaf is
+// the words of it that changed in F, and every serve site reads them through
+// learn.WordsAdmit, so every other byte of the leaf is still compared.
 
 // withWords is m with the words F learns of a leaf at place, recorded rec
 // and seen f in record's full round.
@@ -48,12 +47,12 @@ func multipartNote(boundary string, notes ...string) (string, string) {
 	return "multipart/form-data; boundary=" + boundary, b.String()
 }
 
-// Every strict serve site reads a leaf's words (r9 §1, SF1): the path, a
-// query value, a header, a form field, a multipart field and a JSON body
-// field each let only the learned words change. The founder's case at each:
-// a fresh ref is no difference, "paid 999" is. Words admit one value: where
-// a call can send the field twice, the fresh ref with one more value beside
-// it is refused, as with no words.
+// Every strict serve site reads a leaf's words: the path, a query value, a
+// header, a form field, a multipart field and a JSON body field each let only
+// the learned words change. The motivating case at each: a fresh ref is no
+// difference, "paid 999" is. Words admit one value: where a call can send the
+// field twice, the fresh ref with one more value beside it is refused, as with
+// no words.
 func TestEachStrictSiteReadsTheWords(t *testing.T) {
 	const rec, f, fresh, regressed = "ORD-1 paid 100 ref=a1b2c3", "ORD-1 paid 100 ref=d4e5f6", "ORD-1 paid 100 ref=0f9e8d", "ORD-1 paid 999 ref=0f9e8d"
 	seg := func(s string) string { return strings.NewReplacer(" ", "-", "=", "-").Replace(s) }
@@ -461,8 +460,8 @@ func TestExcusedNeverSeesAWordsPlace(t *testing.T) {
 }
 
 // A mock that learned the words of a path segment (or of the target) is keyed
-// by its other parts in the not-owned index (r9 §1): a call of another path
-// asks by the learned key, which the recording is under.
+// by its other parts in the not-owned index: a call of another path asks by
+// the learned key, which the recording is under.
 func TestAPathWordMockIsKeyedByItsOtherParts(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	m := recorded("m", "/v1/orders/ORD-1-a1", nil, "")
@@ -486,9 +485,9 @@ func TestAPathWordMockIsKeyedByItsOtherParts(t *testing.T) {
 	}
 }
 
-// The variable pass admits a bind only through the words learned there (r9
-// §4), in both of holdVariables' branches: an echo's, and a variable bound
-// here first. A variable learned before words binds any value (N6).
+// The variable pass admits a bind only through the words learned there, in
+// both of holdVariables' branches: an echo's, and a variable bound here first.
+// A variable learned before words binds any value.
 func TestAVariableBindsOnlyAValueItsWordsAdmit(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rec, f := "ord-1-a1b2", "ord-1-c3d4"
@@ -511,7 +510,7 @@ func TestAVariableBindsOnlyAValueItsWordsAdmit(t *testing.T) {
 			{"ord-1-e5f6", true, true},
 			{"ord-2-e5f6", true, false},
 			{"xyz", true, false},
-			{"ord-2-e5f6", false, true}, // learned before words: any value binds (N6)
+			{"ord-2-e5f6", false, true}, // learned before words: any value binds
 		} {
 			db := &varDb{perTest: []*models.Mock{mock(tc.words)}}
 			ok, stub, diag := matchVar(t, newHTTP(), db, call(tc.live))
@@ -534,10 +533,10 @@ func TestAVariableBindsOnlyAValueItsWordsAdmit(t *testing.T) {
 // formCT is a form body's content type.
 var formCT = map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 
-// The learn step's ties between the places it learned words at (r9 §2, §8):
-// twins are one call-local variable, instants are exempt, two values equal
-// only when recorded are two values, and a partial tie, a glued piece, an
-// in-leaf repeat and a test case's value inside a place are refused (N8).
+// The learn step's ties between the places it learned words at: twins are one
+// call-local variable, instants are exempt, two values equal only when
+// recorded are two values, and a partial tie, a glued piece, an in-leaf repeat
+// and a test case's value inside a place are refused.
 func TestTheLearnPlansTies(t *testing.T) {
 	later := learnAt.Add(learn.FullRoundLead)
 	v7 := func(at time.Time, r string) string {
@@ -630,7 +629,8 @@ func TestTheLearnPlansTies(t *testing.T) {
 					t.Fatalf("refused saying %q, want chance said %v", miss.res.Why, strings.Contains(tc.refused, learn.UUIDChance))
 				}
 				// The rule that refused it, on the miss's report
-				// (models.UnmatchedCall.Refused): what E-measure counts.
+				// (models.UnmatchedCall.Refused): what enterprise's tools/emeasure
+				// counts.
 				var report models.MockMismatchReport
 				miss.explain(&report)
 				if miss.res.Refused != tc.class || report.Refused != tc.class {
