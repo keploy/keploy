@@ -609,6 +609,15 @@ const (
 	ClientTestsRead       = "read"
 )
 
+// AgentVersionHeader is the response header in which an agent names its own
+// keploy version, on every answer of its routes, where it was built with one.
+// Where the CLI keeps nothing of what the agent learned, because the agent
+// did not say it reads what this keploy sends it (TestRequestReadHeader,
+// ClientTestsReadHeader), its reasons name the agent by it. An agent that
+// does not send it, every agent released before it among them, is named as
+// one that did not say its version.
+const AgentVersionHeader = "X-Keploy-Agent-Version"
+
 // UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
 // agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
 // why. The body is still the list that was read, so a client that does not know

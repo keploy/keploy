@@ -63,6 +63,10 @@ type clientTestsReader interface {
 // failure with "HTTP 200 {\"isSuccess\":false}", defeating any status check a
 // client might make.
 func respondAgent(w http.ResponseWriter, r *http.Request, status int, err error) {
+	// The agent names its version on every answer (models.AgentVersionHeader).
+	if utils.Version != "" {
+		w.Header().Set(models.AgentVersionHeader, utils.Version)
+	}
 	resp := models.AgentResp{IsSuccess: err == nil}
 	if err != nil {
 		resp.ErrorMsg = err.Error()

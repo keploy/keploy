@@ -306,6 +306,15 @@ type FailureInfo struct {
 	// was (false-pass row 0). Set with the proven switch off, the only place
 	// a wrong answer is demoted.
 	MappingStale string `json:"mapping_stale,omitempty" yaml:"mapping_stale,omitempty"`
+	// LearningNotKept says, under KEPLOY_PROVEN=1 in record's full round, why
+	// keploy did not keep what its agent learned on the mocks this test
+	// consumed, and what it did not keep: the agent did not say it read the
+	// test case's request (an agent older than keploy), so a value the
+	// application took from the request may have been learned as noise, or
+	// as a variable that takes any value. A test that passed may have passed
+	// on it alone, so the test has no verdict, and its test set is not
+	// judged.
+	LearningNotKept string `json:"learning_not_kept,omitempty" yaml:"learning_not_kept,omitempty"`
 }
 
 // MappingStaleRemedy is what to do about a test whose recorded mapping
@@ -314,8 +323,9 @@ const MappingStaleRemedy = "re-record the test-set, or run keploy test with --di
 
 // NotJudged is why the test has no verdict, whatever its status says: what
 // keploy could not read or check of it (UnmatchedCallsUnread,
-// TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
-// capture at all (CannotCapture, decision 20), one reason each.
+// TestMocksUnread, VariablesUnchecked, CaptureUnread, LearningNotKept), or
+// what it cannot capture at all (CannotCapture, decision 20), one reason
+// each.
 // Empty for a judged test. Each is set only under the proven switch, so a
 // result written without it is never unjudged, but for MappingStale, which is
 // set with it off, the only place a wrong answer is demoted to OBSOLETE.
@@ -344,6 +354,9 @@ func (fi FailureInfo) NotJudged() []string {
 	}
 	if fi.MappingStale != "" {
 		why = append(why, fi.MappingStale)
+	}
+	if fi.LearningNotKept != "" {
+		why = append(why, fi.LearningNotKept)
 	}
 	return why
 }

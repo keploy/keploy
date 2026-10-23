@@ -514,6 +514,8 @@ type prRun struct {
 	cases    []*models.TestCase
 	// cancel stops the run from outside, as a SIGINT does; set by run.
 	cancel context.CancelFunc
+	// set is the test set the next run replays: test-set-0 where empty.
+	set string
 }
 
 func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
@@ -593,7 +595,11 @@ func (p *prRun) runTestSet(t *testing.T, serveTest bool) models.TestSetStatus {
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	p.cancel = cancel
-	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", serveTest)
+	set := p.set
+	if set == "" {
+		set = "test-set-0"
+	}
+	status, err := p.replayer.RunTestSet(ctx, set, "test-run-0", serveTest)
 	if err != nil {
 		t.Fatalf("RunTestSet returned an error, which is a different path from the one under test: %v", err)
 	}

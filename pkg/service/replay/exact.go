@@ -685,12 +685,11 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 		TestRequest: open.request,
 		Exact:       ex,
 	}
-	err := r.instrumentation.UpdateMockParams(ctx, params)
+	err := r.sendFilter(ctx, params)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))
 		return err
 	}
-	r.noteOpening(params)
 	return nil
 }
 

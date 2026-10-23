@@ -113,15 +113,14 @@ type AgentClient struct {
 	// last staging call said it serves the set by
 	// (models.BackgroundRulesHeader): "" until one says S12's.
 	stagedBackground atomic.Pointer[string]
-	// testRequestRead holds whether the agent's answer to the last
-	// /updatemockparams said its learn step took the test case's request
-	// the filter carried (models.TestRequestReadHeader). Every call clears
-	// it first.
-	testRequestRead atomic.Bool
 	// clientTestsRead holds whether the agent's answer to the last /mock
 	// said its learn step reads the session's tests as keploy mock's client
 	// tests (models.ClientTestsReadHeader). Every call clears it first.
 	clientTestsRead atomic.Bool
+	// agentVersion holds the keploy version the agent's last successful
+	// answer to /mock or /updatemockparams named (models.AgentVersionHeader):
+	// "" where it named none, and until one is answered.
+	agentVersion atomic.Pointer[string]
 
 	// concurrentServing holds what the agent's last /storemocks answer said
 	// of serving a test the recordings it shares with the tests that ran
@@ -292,12 +291,35 @@ func (a *AgentClient) AgentReadsClientTests() bool {
 	return a.clientTestsRead.Load()
 }
 
-// AgentReadTestRequest reports whether the agent's answer to the last
-// /updatemockparams said its learn step took the test case's request the
-// filter carried (models.TestRequestReadHeader). False until an answer says
-// so, and from the start of every call.
-func (a *AgentClient) AgentReadTestRequest() bool {
-	return a.testRequestRead.Load()
+// AgentVersion is the keploy version the agent's last successful answer to
+// /mock or /updatemockparams named (models.AgentVersionHeader;
+// pkg.AgentVersionReader): "" where it named none, as an agent older than
+// this keploy does not, and until one is answered.
+func (a *AgentClient) AgentVersion() string {
+	if v := a.agentVersion.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// noteAgentVersion keeps the version a successful answer's header names
+// (AgentVersion), "" where it names none.
+func (a *AgentClient) noteAgentVersion(h http.Header) {
+	v := h.Get(models.AgentVersionHeader)
+	a.agentVersion.Store(&v)
+}
+
+// SendTestCaseFilter sends params, a filter that opens a test case and
+// carries its request, as UpdateMockParams does, and reports whether the
+// agent's answer to this call said its learn step took the request
+// (models.TestRequestReadHeader; pkg.TestCaseFilterSender): false for an
+// answer that says nothing, and for a call that fails.
+func (a *AgentClient) SendTestCaseFilter(ctx context.Context, params models.MockFilterParams) (bool, error) {
+	header, err := a.updateMockParams(ctx, params)
+	if err != nil {
+		return false, err
+	}
+	return header.Get(models.TestRequestReadHeader) == models.TestRequestRead, nil
 }
 
 // AgentServesBackground is the background rules the agent's answer to the
@@ -969,6 +991,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		return err
 	}
 	a.clientTestsRead.Store(res.Header.Get(models.ClientTestsReadHeader) == models.ClientTestsRead)
+	a.noteAgentVersion(res.Header)
 	return nil
 }
 
@@ -1534,7 +1557,14 @@ func decodeStoreMocksResp(res *http.Response) error {
 	return nil
 }
 
-func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) (retErr error) {
+func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	_, err := a.updateMockParams(ctx, params)
+	return err
+}
+
+// updateMockParams is UpdateMockParams, with the headers of the agent's
+// answer to this call (nil for a call that fails).
+func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFilterParams) (_ http.Header, retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
@@ -1544,7 +1574,6 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
-	a.testRequestRead.Store(false)
 	// Nor does it believe a staging's background rules (stagedBackground)
 	// until the agent's answer to it says them.
 	if ex := params.Exact; ex != nil && ex.Stage {
@@ -1558,19 +1587,19 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for updatemockparams")
-		return fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
+		return nil, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
-		return fmt.Errorf("error creating request for update mock params: %s", err.Error())
+		return nil, fmt.Errorf("error creating request for update mock params: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
+		return nil, fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
 	defer func() {
 		io.Copy(io.Discard, res.Body)
@@ -1581,19 +1610,19 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 
 	rawBody, readErr := readAgentBody(res)
 	if readErr != nil {
-		return fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
+		return nil, fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
 	if err := agentRespErr("update mock params", res, rawBody); err != nil {
-		return err
+		return nil, err
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
-	a.testRequestRead.Store(res.Header.Get(models.TestRequestReadHeader) == models.TestRequestRead)
+	a.noteAgentVersion(res.Header)
 	if ex := params.Exact; ex != nil && ex.Stage {
 		rules := res.Header.Get(models.BackgroundRulesHeader)
 		a.stagedBackground.Store(&rules)
 	}
-	return nil
+	return res.Header, nil
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {

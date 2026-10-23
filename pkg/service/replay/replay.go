@@ -212,8 +212,9 @@ type runShape struct {
 	unclaimedWhy string
 	// staleWhy names the tests of a set with a verdict of its own (FAILED,
 	// a partial run's APP_FAULT) that are not judged for a stale mapping
-	// (FailureInfo.MappingStale). Empty otherwise: a set not judged says it
-	// in notJudged.
+	// (FailureInfo.MappingStale), or for learning keploy did not keep
+	// (FailureInfo.LearningNotKept). Empty otherwise: a set not judged says
+	// it in notJudged.
 	staleWhy string
 }
 
@@ -5751,6 +5752,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// calls reached a real dependency (captureIncomplete, just above). Placed
 	// after those, so none is replaced by a remedy that re-records over it.
 	staleMapping := testsWithStaleMapping(testCaseResults)
+	// What record's full round learned, read before any test's verdict is
+	// taken: a test whose learning keploy does not keep (its agent did not
+	// say it read the test case's request) may have passed on that learning
+	// alone, so it has no verdict (FailureInfo.LearningNotKept), said on its
+	// row. A round a hook says could not read all its tests read keeps
+	// nothing (below), and marks no test for it: its set is not judged
+	// already, or keeps a status that says more.
+	learnKeeps := r.learning() && r.instrument && unchecked == ""
+	var learnedKept map[string]models.MockState
+	var learningNotKeptBy map[string][]string
+	var learningNotKeptTests []string
+	if learnKeeps {
+		learnedKept, learningNotKeptBy = r.readLearning(testSetID, r.exact.stripUnresolved(allConsumedAcrossCycles), consumers)
+		learningNotKeptTests = markLearningNotKept(testCaseResults, learningNotKeptBy, r.requestsUnread.agentVersion())
+	}
 	// What of the set has no verdict, whatever the set's status: Start's
 	// exit code reads it for a set its user's stop took to USER_ABORT, where
 	// none of the rules here and below leaves it not judged (OBS-ctrlc).
@@ -5776,6 +5792,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("status", string(testSetStatus)),
 				zap.Strings("tests", staleMapping),
 				zap.String("next_step", models.MappingStaleRemedy))
+		}
+	}
+	// A test whose learning keploy did not keep has no verdict (above). A
+	// set that would read PASSED for it has none either: its tests may have
+	// passed on what was not kept. One with a verdict of its own keeps it (a
+	// FAILED test failed whatever was learned beside it), and its reason
+	// names the tests not judged, as for a stale mapping.
+	if len(learningNotKeptTests) > 0 {
+		if testSetStatus == models.TestSetStatusPassed || notJudged != "" {
+			notJudged = alsoNotJudged(notJudged, learningNotKeptReason(learningNotKeptTests, r.requestsUnread.agentVersion()))
+			r.logger.Error("test-set is not judged: keploy did not keep what its agent learned for some of its tests, which may have passed on it alone; the run goes on to the next test-set",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", learningNotKeptTests),
+				zap.String("next_step", learningNotKeptRemedy()))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		} else {
+			staleWhy = joinNotes(staleWhy, learningNotKeptNote(learningNotKeptTests, r.requestsUnread.agentVersion()))
+			r.logger.Error("some tests of the test-set are not judged: keploy did not keep what its agent learned for them, and they may have passed on it alone; the set keeps its own status",
+				zap.String("test-set", testSetID),
+				zap.String("status", string(testSetStatus)),
+				zap.Strings("tests", learningNotKeptTests),
+				zap.String("next_step", learningNotKeptRemedy()))
 		}
 	}
 	// Under the proven switch the set is judged only if one agent process
@@ -5833,11 +5872,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// learned on what it served unread: nothing of it is kept, and the
 	// recording stays as recorded for a round that can.
 	if r.learning() && r.instrument {
-		if unchecked != "" {
+		if !learnKeeps {
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
-		} else if err := r.persistLearned(runTestSetCtx, testSetID, r.readLearning(testSetID, r.exact.stripUnresolved(allConsumedAcrossCycles), consumers), actualTestMockMappings, r.exact.consumerOf()); err != nil {
+		} else if err := r.persistLearned(runTestSetCtx, testSetID, learnedKept, actualTestMockMappings, r.exact.consumerOf()); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
 		}
@@ -6732,12 +6771,11 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	}
 
 	// Send parameters to agent for filtering and mock updates
-	err := r.instrumentation.UpdateMockParams(ctx, params)
+	err := r.sendFilter(ctx, params)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 		return err
 	}
-	r.noteOpening(params)
 	if ex := params.Exact; ex != nil && ex.Stage && ex.Background != "" {
 		r.confirmBackground(ex.Background)
 	}

@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -27,22 +30,87 @@ func (m *mockService) learningPool() bool {
 
 // keepLearned writes what record's full round learned onto the set's mocks
 // (persistLearned), where the agent said its learn step reads the session's
-// tests as client tests (clientTestsRead). Otherwise it keeps none of it, and
-// says so: an agent older than this keploy learns a value the test harness
-// gave the application as noise where it changed, and the recording keeps
-// comparing every field. consumedErr is why the agent's consumed mocks could
-// not be read: then what was learned cannot be read either.
+// tests as client tests (clientTestsRead). Otherwise it keeps none of it: an
+// agent older than this keploy learns a value the test harness gave the
+// application as noise where it changed. A round whose agent learned
+// anything it would have kept then did not complete, and its error says what
+// was not kept and why: the round's tests ran on what was learned, and the
+// recording, kept without it, compares every field. One that learned nothing
+// lost nothing. consumedErr is why the agent's consumed mocks could not be
+// read: then what was learned cannot be read either.
 func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
 	if consumedErr != nil {
 		return nil, nil, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
 	}
 	if !m.clientTestsRead() {
-		m.logger.Warn("keploy kept nothing its agent learned in record's full round: the agent did not say it reads keploy mock's tests as a test harness's client tests, as an agent older than this keploy does not, so a value the harness gave the application may have been learned as noise; the recording keeps comparing every field",
+		notKept := m.learnedOnto(consumed, expected)
+		if len(notKept) == 0 {
+			return nil, nil, nil
+		}
+		// The agent by the version its answer named, or as one that named
+		// none (models.AgentVersionHeader).
+		didNotSay := pkg.AgentDidNotSay(pkg.AgentVersionOf(m.instrumentation), "it reads keploy mock's tests as a test harness's client tests")
+		m.logger.Warn("keploy kept nothing its agent learned in record's full round, and the round did not complete: the agent did not say it reads keploy mock's tests as a test harness's client tests, so a value the harness gave the application may have been learned as noise; the recording keeps comparing every field",
 			zap.String("mock-set", set),
-			zap.String("next_step", "run the keploy agent of this keploy version"))
-		return nil, nil, nil
+			zap.Strings("notKept", notKept),
+			zap.String("agent", didNotSay),
+			zap.String("next_step", clientTestsRemedy()))
+		return nil, nil, fmt.Errorf("keploy kept nothing its agent learned in record's full round (%s): %s, so a value the harness gave the application may have been learned as noise, and the round's tests ran on it; %s", firstFields(notKept, 10), didNotSay, clientTestsRemedy())
 	}
 	return m.persistLearned(ctx, set, consumed, flows, expected)
+}
+
+// clientTestsRemedy is what to do about a round whose agent did not say it
+// reads keploy mock's tests as client tests: run it with an agent of this
+// keploy's own version, which does.
+func clientTestsRemedy() string {
+	if utils.Version != "" {
+		return "run keploy mock record with the keploy agent of its own version (" + utils.Version + ")"
+	}
+	return "run keploy mock record with the keploy agent of its own version"
+}
+
+// learnedOnto is what the learn step learned on consumed that persistLearned
+// would keep (learnsOnto, by each mock's test in expected), each as "<mock>
+// <field or variable> (<kind>)", sorted: nil when it learned nothing there.
+func (m *mockService) learnedOnto(consumed []models.MockState, expected map[string][]models.MockEntry) []string {
+	owner := map[string]string{}
+	for test, entries := range expected {
+		for _, e := range entries {
+			owner[e.Name] = test
+		}
+	}
+	var out []string
+	for _, st := range consumed {
+		if !m.learnsOnto(owner[st.Name]) {
+			continue
+		}
+		for field := range st.ReqBodyNoise {
+			out = append(out, st.Name+" "+field+" (noise)")
+		}
+		for v, mv := range st.Variables {
+			kind := "variable"
+			if mv.Echo {
+				kind = "echo"
+			}
+			out = append(out, st.Name+" "+v+" ("+kind+")")
+		}
+		for at, vars := range st.Binds {
+			for v := range vars {
+				out = append(out, st.Name+" "+v+" (bound at "+at+")")
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// firstFields joins up to n fields, and says how many more there are.
+func firstFields(fields []string, n int) string {
+	if len(fields) <= n {
+		return strings.Join(fields, ", ")
+	}
+	return strings.Join(fields[:n], ", ") + " and " + strconv.Itoa(len(fields)-n) + " more"
 }
 
 // clientTestsRead reports whether the agent said, answering the session's
