@@ -114,10 +114,10 @@ func TestWhatEachSlotAdmits(t *testing.T) {
 			"k=v3": true, "k=a-b.c": true, "k=": false, "k=a b": false, "k=é": false, "j=v3": false,
 		}},
 		{"a run alone, separators around it fixed", "k=-v1-", "k=-v2-", "s1r0", map[string]bool{
-			"k=-x_y-": true, "k=v3": false, "k=-v3": false, "k=--": false, "k=-": false, "k=-v3-x": false, "k=x-v3-": false,
+			"k=-x_y-": true, "k=v3": false, "k=-v3": false, "k=--": false, "k=-": false, "k=-v3-x": false, "k=x-v3-": false, "k=-\xff-": false, "k=-\xffa-": false,
 		}},
 		{"a segment whose runs drifted", "t V1StGXR8_Z5jdHi6B-myT", "t x9kLq-2mZp_Rt7YwXa3bN", "s1t", map[string]bool{
-			"t abc": true, "t a-b_c.d": true, "t a b": false, "t ab/c": false, "u abc": false, "t ü": false,
+			"t abc": true, "t a-b_c.d": true, "t a b": false, "t ab/c": false, "u abc": false, "t ü": false, "t \xffbc": false, "t \xff": false,
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,6 +173,11 @@ func TestAnAcceptedClockReadIsOneInstantSlot(t *testing.T) {
 		{"epoch milliseconds", "epoch", strconv.FormatInt(wAt.UnixMilli(), 10), strconv.FormatInt(later.UnixMilli()+500, 10), "s0i:epoch:d13",
 			[]string{strconv.FormatInt(other.UnixMilli(), 10)},
 			[]string{strconv.FormatInt(other.Unix(), 10)}},
+		// An instant after a separator that is no structural one ('-') is one
+		// segment of its own: the text before it ends where it begins.
+		{"an instant after a '-'", "iso8601", "ref x-" + wAt.Format(time.RFC3339), "ref x-" + later.Format(time.RFC3339), "s2i:iso8601:d4-d2-d2Td2:d2:d2FZ",
+			[]string{"ref x-" + other.Format(time.RFC3339)},
+			[]string{"ref y-" + other.Format(time.RFC3339), "ref x_" + other.Format(time.RFC3339)}},
 		// Two instants with nothing between them are two reads, in order.
 		{"two instants with nothing between them", "jsdate", wAt.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(wAt.Unix(), 10),
 			later.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(later.Unix(), 10),
@@ -406,6 +411,9 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"an instant written otherwise", strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.UnixMilli(), 10), whySkeleton, nil},
 		{"a changed word that repeats", "id=x1 ref=x1", "id=y2 ref=y2", whyRepeat, nil},
 		{"a changed word that repeats recorded only", "id=x1 ref=x1", "id=y2 ref=z3", whyRepeat, nil},
+		{"a time-ordered UUID that repeats", "a " + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " b " + uuid7Of(wAt, "abc123456789abcdef", 'a', false), "a " + uuid7Of(later, "def0123456789abcde", 'b', false) + " b " + uuid7Of(later, "def0123456789abcde", 'b', false), whyRepeat, nil},
+		{"a separator before its first part changed", "a b", " a c", whySeparators, nil},
+		{"a separator after its last part changed", "a b", "a c ", whySeparators, nil},
 		{"a changed word that repeats in F only", "id=x1 ref=y2", "id=z3 ref=z3", whyRepeat, nil},
 		// As many parts, one of them an instant on one side and plain text on
 		// the other: its clock read stands elsewhere.

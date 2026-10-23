@@ -248,14 +248,15 @@ func asciiAlnum(s string) bool {
 	return true
 }
 
-// asciiToken reports whether s is an ASCII token: not empty, all ASCII, and
-// no structural character.
+// asciiToken reports whether s, a segment's text or a part of it (which
+// holds no structural character), is an ASCII token: not empty, and all
+// ASCII.
 func asciiToken(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if s[i] >= utf8.RuneSelf || structural(s[i]) {
+		if s[i] >= utf8.RuneSelf {
 			return false
 		}
 	}
