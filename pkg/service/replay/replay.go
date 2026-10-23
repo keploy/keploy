@@ -3275,6 +3275,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// being pushed (a Pulsar MESSAGE), and a call the app makes at once
 			// in reaction is this test's. Opened after, that miss landed with
 			// no window open and was discarded.
+			// Exact serving: a test case begins only over the pool, never
+			// over the last test case's own view (poolBeforeBegin). When the
+			// agent takes no pool call the set stops here, failing closed.
+			if beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, testCase.Name); beginErr != nil {
+				utils.LogError(r.logger, beginErr, "failed to serve the test set's pool before a test case begins")
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), beginErr); ok {
+					testSetStatus = resolvedStatus
+				} else {
+					testSetStatus = models.TestSetStatusInternalErr
+				}
+				exitLoop = true
+				break
+			}
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, requestVariables(tmplRun, testCase)...)
@@ -4387,6 +4400,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// outgoing mock calls keep happening while CompareHTTPStream consumes
 			// the stream body below. Every exit path therefore calls
 			// attachMockErrors only AFTER stream consumption has finished.
+			// Exact serving: a test case begins only over the pool, never
+			// over the last test case's own view (poolBeforeBegin). When the
+			// agent takes no pool call the set stops here, failing closed.
+			if beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, tc.Name); beginErr != nil {
+				utils.LogError(r.logger, beginErr, "failed to serve the test set's pool before a test case begins")
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), beginErr); ok {
+					testSetStatus = resolvedStatus
+				} else {
+					testSetStatus = models.TestSetStatusInternalErr
+				}
+				exitLoop = true
+				break
+			}
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, requestVariables(tmplRun, tc)...)
@@ -4397,6 +4423,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
 				break
+			}
+			// endStream ends the streamed test case under exact serving: the
+			// agent serves the pool from then on, on every exit, before the
+			// test case's consumption and misses are read (as the main loop
+			// serves it once its test case has its answer), so the next test
+			// case never begins over this one's view. A failed pool call is
+			// returned once, and served again at the next one's loop head
+			// (poolBeforeBegin).
+			poolServed := false
+			endStream := func() error {
+				if poolServed {
+					return nil
+				}
+				poolServed = true
+				rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
+				for _, s := range streamingTests[i+1:] {
+					rest = append(rest, s.testCase)
+				}
+				return r.serveExactPool(runTestSetCtx, r.exact, nextExactTest(rest, nil, nil, refusedTests))
 			}
 			// Exact serving: as the main loop reads what the gap answered.
 			answeredInGap, gapReadErr := r.drainAnsweredInGap(runTestSetCtx, r.exact, tc.Name)
@@ -4447,6 +4492,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if simErr != nil {
 				sayNoAnswer(r.logger, tc.Name, simErr, "failed to simulate streaming request")
 				noteNoAnswer(tc.Name, simErr)
+				endStreamOnFailure(r.logger, tc.Name, endStream())
 				drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
@@ -4578,6 +4624,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						if testCaseResult, differs := r.startFailedRow(tmplRun, &sent, expectedStream, start, testSetID, started); differs {
 							sayStartJudged(r.logger, tc.Name, streamErr)
 							noteNoAnswer(tc.Name, streamErr)
+							endStreamOnFailure(r.logger, tc.Name, endStream())
 							drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 							failure++
 							testSetStatus = models.TestSetStatusFailed
@@ -4616,6 +4663,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
 						}
 						noteNoAnswer(tc.Name, streamErr)
+						endStreamOnFailure(r.logger, tc.Name, endStream())
 						drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
@@ -4670,6 +4718,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					failure++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New(errMsg))
+					endStreamOnFailure(r.logger, tc.Name, endStream())
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -4684,11 +4733,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under exact serving the agent serves the pool from now, so the
 			// drain below reads all of the test case's consumption, and a
 			// call the application makes from here is the pool's.
-			rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
-			for _, s := range streamingTests[i+1:] {
-				rest = append(rest, s.testCase)
-			}
-			if err := r.serveExactPool(runTestSetCtx, r.exact, nextExactTest(rest, nil, nil, refusedTests)); err != nil && streamConsumedErr == nil {
+			if err := endStream(); err != nil && streamConsumedErr == nil {
 				streamConsumedErr = err
 			}
 
