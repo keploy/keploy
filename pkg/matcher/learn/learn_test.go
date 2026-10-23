@@ -326,10 +326,16 @@ func TestClassify(t *testing.T) {
 	if f := from["body.file"]; f.Whole || f.Path != "body.doc" {
 		t.Fatalf("body.file from %+v: a part of a longer value, found where it drifted together", f)
 	}
-	if from["body.sess"] != (Place{Mock: "redis-2"}) || from["body.seq"] != (Place{Mock: "pg-3"}) {
+	// A raw mock's place has no leaf: it names the mock, and what was found
+	// in which field of its payload.
+	leafless := func(p Place) Place { p.Field, p.Held = "", ""; return p }
+	if leafless(from["body.sess"]) != (Place{Mock: "redis-2"}) || leafless(from["body.seq"]) != (Place{Mock: "pg-3"}) {
 		t.Fatalf("body.sess from %+v, body.seq from %+v", from["body.sess"], from["body.seq"])
 	}
-	if from["body.db"] != (Place{Mock: "pg-3"}) {
+	if f := from["body.sess"]; f.Field != "spec.genericrequests[0].message[0].data" || f.Held != "71a" {
+		t.Fatalf("body.sess from %+v: want its word 71a found in spec.genericrequests[0].message[0].data", f)
+	}
+	if leafless(from["body.db"]) != (Place{Mock: "pg-3"}) {
 		t.Fatalf("body.db from %+v: a raw mock's place has no leaf", from["body.db"])
 	}
 }

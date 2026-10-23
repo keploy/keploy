@@ -388,6 +388,25 @@ func respLeaves(r *models.HTTPResp) []learn.Leaf {
 	return out
 }
 
+// classifiedAnswer is m's recorded answer as the classifier reads it for
+// the drift of m's own call (learn.ClassifyIn's resp): its leaves
+// (respLeaves), without its Date header where that is the answer's own clock
+// stamp (learn.AnswerStamp: within the span the exchange was recorded in).
+// The server read its clock as it answered the call, so no word of the
+// call's request came back there: a word of a drifted value that the Date
+// holds by coincidence is no echo.
+func classifiedAnswer(m *models.Mock) []learn.Leaf {
+	leaves := respLeaves(m.Spec.HTTPResp)
+	out := leaves[:0:0]
+	for _, l := range leaves {
+		if l.Path == "header.date" && learn.AnswerStamp(l.Value, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // learnMiss is a request the learn step left unanswered.
 type learnMiss struct {
 	res     learn.Result
@@ -950,7 +969,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if !own {
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
-			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
+			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w)
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
@@ -1076,11 +1095,23 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			from := l.From
 			switch {
 			case from.Side == "":
-				return p, r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
+				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case from.Side != learn.Request:
-				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
+				why := r.Path + " carries a value " + from.Mock + " answered earlier in the test at " + from.Path + ", which keploy cannot follow from an answer"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case !from.Whole || from.Var == "":
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case !own || !from.Own:
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 			}
@@ -1365,7 +1396,11 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own b
 	for _, r := range respLeaves(m.Spec.HTTPResp) {
 		// respLeaves names body scalars only of a JSON answer.
 		place, _ := learn.VarPlace(r, true)
-		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path], Place: place})
+		// Its Date header, within the span the exchange was recorded in and
+		// served as recorded, is its server's clock read as it answered: no
+		// value came from it (learn.AnswerStamp).
+		stamp := r.Path == "header.date" && sent[r.Path] == r.Value && learn.AnswerStamp(r.Value, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path], Place: place, Stamp: stamp})
 	}
 	sort.Slice(e.Seen, func(i, j int) bool {
 		if e.Seen[i].Side != e.Seen[j].Side {

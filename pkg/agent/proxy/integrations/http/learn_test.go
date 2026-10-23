@@ -2512,7 +2512,7 @@ func TestLearnMatchRefusesAWordTheSetsStartUpHeld(t *testing.T) {
 	tr.Begin()
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", 2*time.Second, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{}`)}}
 	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"k-3"}`, nil), db, n, opts)
-	const why = "a word of it appears in the test set's start-up, in pool-1 at body.node"
+	const why = "appears in the test set's start-up, in pool-1 at body.node"
 	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, why) {
 		t.Fatalf("served %v miss %+v err %v; want the call refused: %s", served, miss, err, why)
 	}
@@ -2978,5 +2978,129 @@ func TestLearnMatchAViewSwappedWhileTheScopeWasReadIsLookedAtAgain(t *testing.T)
 	served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/orders", `{"id":"o-2"}`, nil), db, n, opts)
 	if err != nil || served == nil || !db.lost {
 		t.Fatalf("served %v miss %+v err %v lost %v; want answered on the second look", served, miss, err, db.lost)
+	}
+}
+
+// A departure the app picks from a timetable the learn step served, by its
+// clock, stays checked end to end: the timetable is an exchange the test was
+// served leaf by leaf (an Earlier, no Raw), and the moment F's booking names
+// is one of its departures, so the booking is refused as a value an answer
+// gave, never served with its departure learned as noise. So it is with a
+// zoned booking from a timetable of local times of day. A booking the
+// timetable did not list at record is refused too.
+func TestLearnMatchKeepsAPickFromAServedTimetableChecked(t *testing.T) {
+	for _, tc := range []struct {
+		name, table, rec, live, why string
+	}{
+		{"a time of day", `{"date":"2026-10-14","departures":["10:00","10:01","10:02","10:03"]}`, `{"departure":"2026-10-14 10:01"}`, `{"departure":"2026-10-14 10:02"}`, "answered earlier in the test"},
+		{"an instant", `{"departures":["2026-10-14T10:00:00Z","2026-10-14T10:01:00Z","2026-10-14T10:02:00Z"]}`, `{"departure":"2026-10-14T10:01:00Z"}`, `{"departure":"2026-10-14T10:02:00Z"}`, "answered earlier in the test"},
+		{"a zoned instant", `{"date":"2026-10-14","departures":["15:30","15:31","15:32","15:33"]}`, `{"departure":"2026-10-14T15:31+05:30"}`, `{"departure":"2026-10-14T15:32+05:30"}`, "answered earlier in the test"},
+		{"one unlisted at record", `{"date":"2026-10-14","departures":["10:00","10:02","10:03"]}`, `{"departure":"2026-10-14 10:01"}`, `{"departure":"2026-10-14 10:02"}`, "in mock-0 at body.departures[1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			db := &learnDb{perTest: []*models.Mock{
+				learnRecorded("mock-0", 0, "GET", "/v1/timetable", "", nil, tc.table),
+				learnRecorded("mock-1", time.Second, "POST", "/v1/book", tc.rec, nil, `{"ok":true}`),
+			}, observe: tr.ServedMock}
+			if served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/timetable", "", nil), db, n, opts); served == nil {
+				t.Fatalf("the timetable: %+v", miss)
+			}
+			served, miss, err := h.learnMatch(ctx, live("POST", "/v1/book", tc.live, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if served != nil {
+				t.Fatalf("FALSE GREEN: the pick from the served timetable was served, learned %v", db.consumed[len(db.consumed)-1].Spec.ReqBodyNoise)
+			}
+			if miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "body.departure") || !strings.Contains(miss.res.Why, tc.why) {
+				t.Fatalf("refused as %s: %q; want request_changed naming body.departure and %q", miss.res.Reason, miss.res.Why, tc.why)
+			}
+		})
+	}
+}
+
+// An exchange's Date header, within the span the exchange was recorded in,
+// is its server's clock read as it answered: a later value whose changed
+// word it holds by coincidence is no value it gave, and is learned as noise
+// end to end. A Date header outside that span (the server's clock ahead) is
+// searched as any leaf is, and refuses it.
+func TestLearnMatchReadsAServedDateHeaderAsItsAnswersStamp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		answered time.Duration
+		served   bool
+	}{
+		{"within its span", 300 * time.Millisecond, true},
+		{"after its answer", -time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			status := learnRecorded("mock-0", 0, "GET", "/v1/status", "", nil, `{"ok":true}`)
+			status.Spec.HTTPResp.Header["Date"] = learnAt.Format(http.TimeFormat)
+			status.Spec.ReqTimestampMock = learnAt.Add(-200 * time.Millisecond)
+			status.Spec.ResTimestampMock = learnAt.Add(tc.answered)
+			db := &learnDb{perTest: []*models.Mock{
+				status,
+				learnRecorded("mock-1", time.Second, "POST", "/v1/log", `{"batch":"batch-00"}`, nil, `{"ok":true}`),
+			}, observe: tr.ServedMock}
+			if served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/status", "", nil), db, n, opts); served == nil {
+				t.Fatalf("the status: %+v", miss)
+			}
+			served, miss, err := h.learnMatch(ctx, live("POST", "/v1/log", `{"batch":"batch-07"}`, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.served && (served == nil || !reflect.DeepEqual(db.consumed[len(db.consumed)-1].Spec.ReqBodyNoise, map[string][]string{"body.batch": {}})) {
+				t.Fatalf("served %v, miss %+v; want body.batch learned as noise", served != nil, miss)
+			}
+			if !tc.served && (served != nil || !strings.Contains(miss.res.Why, "mock-0 at header.date")) {
+				t.Fatalf("served %v, miss %+v; want it refused, naming mock-0's header.date", served, miss)
+			}
+		})
+	}
+}
+
+// The call's own answer's Date header, within the span the exchange was
+// recorded in, is its server's clock read as it answered the call: a word
+// of the call's drifted value that it holds by coincidence (the second of a
+// sent_at that no lead or window shows a clock read) is no echo, and the
+// value is learned as noise. A Date header outside that span is read as any
+// leaf of the answer, and refuses it.
+func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		answered time.Duration
+		served   bool
+	}{
+		{"within its span", 1500 * time.Millisecond, true},
+		{"before its Date", 900 * time.Millisecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			send := learnRecorded("mock-0", time.Second, "POST", "/v1/send", `{"sent_at":"2026-10-14T10:00:01Z"}`, nil, `{"ok":true}`)
+			send.Spec.HTTPResp.Header["Date"] = "Wed, 14 Oct 2026 10:00:01 GMT"
+			send.Spec.ResTimestampMock = learnAt.Add(tc.answered)
+			db := &learnDb{perTest: []*models.Mock{send}, observe: tr.ServedMock}
+			served, miss, err := h.learnMatch(ctx, live("POST", "/v1/send", `{"sent_at":"2026-10-14T10:01:04Z"}`, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.served && (served == nil || !reflect.DeepEqual(db.consumed[len(db.consumed)-1].Spec.ReqBodyNoise, map[string][]string{"body.sent_at": {}})) {
+				t.Fatalf("served %v, miss %+v; want body.sent_at learned as noise", served != nil, miss)
+			}
+			if !tc.served && (served != nil || !strings.Contains(miss.res.Why, "comes back in the answer at header.date")) {
+				t.Fatalf("served %v, miss %+v; want it refused, the answer's header.date holding a word of it", served != nil, miss)
+			}
+		})
 	}
 }

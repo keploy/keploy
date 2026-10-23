@@ -38,6 +38,10 @@ type clockLayout struct {
 	wraps bool
 }
 
+// Every layout reads its text in UTC where the text names no offset, and an
+// abbreviated zone ("GMT", "UTC") at its own offset, never at the host's
+// (time.ParseInLocation in UTC): what an instant is, and the time of day its
+// text writes (instant.wall), are the text's, whatever zone keploy runs in.
 var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})`), read: readRFC1123},
 	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?)?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
@@ -90,10 +94,12 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // instant an answer the replay serves from its recording carries, so
 // neither falls in both. An app may still pick another of a served answer's
 // instants by its clock (a timetable's next departure), which can fall in
-// both: the payloads then hold the pick both ways, and the classifier follows
-// it as a variable (echoedInstants) before any window or lead excuses it. A
-// read made before the previous call falls in neither. It is no tolerance:
-// the spans are what each run's calls show.
+// both: an earlier place then holds the moment F saw (a payload, or a leaf of
+// an exchange the learn step served, as recorded or as F saw it), and the
+// classifier follows the value as a variable of the place holding its
+// recorded moment, or refuses it, before any window or lead excuses it
+// (instants.go, echoedIn). A read made before the previous call falls in
+// neither. It is no tolerance: the spans are what each run's calls show.
 type Window struct{ Rec, F Span }
 
 // Span is one run's part of a Window: From, when its previous data-plane
@@ -293,7 +299,7 @@ func inClockRange(t time.Time) bool { return !t.Before(clockFrom) && t.Before(cl
 
 func readRFC1123(s string) (time.Time, time.Duration, bool) {
 	for _, layout := range []string{time.RFC1123, time.RFC1123Z, "Mon, 02 Jan 2006 15:04:05 UTC"} {
-		if t, err := time.Parse(layout, s); err == nil && inClockRange(t) {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil && inClockRange(t) {
 			return t, time.Second, true
 		}
 	}
@@ -320,7 +326,7 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 	}
 	for _, layout := range []string{"2006-01-02T15:04:05Z07:00", "2006-01-02T15:04:05Z0700", "2006-01-02T15:04:05Z07", "2006-01-02T15:04:05",
 		"2006-01-02T15:04Z07:00", "2006-01-02T15:04Z0700", "2006-01-02T15:04", "2006-01-02"} {
-		if t, err := time.Parse(layout, n); err == nil && inClockRange(t) {
+		if t, err := time.ParseInLocation(layout, n, time.UTC); err == nil && inClockRange(t) {
 			return t, res, true
 		}
 	}
@@ -329,7 +335,7 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 
 func readCompact(s string) (time.Time, time.Duration, bool) {
 	for _, layout := range []string{"20060102T150405Z", "20060102T150405"} {
-		if t, err := time.Parse(layout, s); err == nil && inClockRange(t) {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil && inClockRange(t) {
 			return t, time.Second, true
 		}
 	}
@@ -339,13 +345,13 @@ func readCompact(s string) (time.Time, time.Duration, bool) {
 // readTimeOfDay reads a time of day, to the second or the minute, or to its
 // fraction of a second ("10:00:41.250").
 func readTimeOfDay(s string) (time.Time, time.Duration, bool) {
-	if t, err := time.Parse("15:04:05", s); err == nil {
+	if t, err := time.ParseInLocation("15:04:05", s, time.UTC); err == nil {
 		if f := strings.IndexByte(s, '.'); f >= 0 {
 			return t, fractionRes(len(s) - f - 1), true
 		}
 		return t, time.Second, true
 	}
-	if t, err := time.Parse("15:04", s); err == nil {
+	if t, err := time.ParseInLocation("15:04", s, time.UTC); err == nil {
 		return t, time.Minute, true
 	}
 	return time.Time{}, 0, false

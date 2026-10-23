@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -45,6 +46,11 @@ type Seen struct {
 	// Name is the variable the learn step put at Place (bound or used
 	// there), "" for none (Named).
 	Name string
+	// Stamp: the leaf is its answer's own clock stamp by its protocol (an
+	// HTTP answer's Date header within the span keploy stamped the exchange
+	// in: AnswerStamp, instants.go rule 3), which no value came from. Its
+	// words are searched for nothing; the echo reads it as it stands.
+	Stamp bool
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -81,6 +87,25 @@ type Raw struct {
 	// text is Text; answerClock is AnswerClock.
 	text        string
 	answerClock []time.Time
+	// fields are where each scalar and key of text stands in it, and the
+	// field of the mock's spec it is (rawField): what a reason names where a
+	// value is found.
+	fields []rawField
+	// stamps are the fields of text that are its answer's own clock stamp
+	// by its protocol (instants.go, rule 3: an HTTP answer's Date header
+	// within the span keploy stamped the exchange in): no value came from
+	// one, and only the echo reads them.
+	stamps []rawField
+}
+
+// rawField is one scalar or key of a Raw's text: [start, end) of it in the
+// text, and its field of the mock's spec, by the spec's JSON names
+// ("Res.header.Date", "MongoResponses[0].Message.Sections[1]"); a key's is
+// its own (key: the field's name, not its value).
+type rawField struct {
+	start, end int
+	path       string
+	key        bool
 }
 
 // Text is r's recorded request and answer, the payload only, as one text.
@@ -96,8 +121,8 @@ func (r Raw) Text() string { return r.text }
 // come from. A copy; r keeps its own.
 func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answerClock...) }
 
-// WithServed is r as served, or not, earlier in the test: the same text and
-// answer clock reads.
+// WithServed is r as served, or not, earlier in the test: the same text,
+// fields and answer clock reads.
 func (r Raw) WithServed(served bool) Raw {
 	r.Served = served
 	return r
@@ -140,6 +165,16 @@ type Place struct {
 	Run bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
+	// Field, of a place found in a raw mock's payload, is the field of its
+	// spec that holds what was found, as the mock file names it
+	// (rawField.describe; "" when it stands across two); Held is what was
+	// found there: the value whole, or a part of it. Echo: what was found is
+	// an instant of the value's, in another layout or at another resolution,
+	// that the earlier places hold both ways (echoedInstants). They are the
+	// evidence a reason names (evidence), which names Held by where it
+	// stands in the value, never by its text.
+	Field, Held string
+	Echo        bool
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -151,8 +186,11 @@ type Learned struct {
 	From Place
 	// Echo are an echo's places in the paired mock's recorded answer.
 	Echo []Leaf
-	// Why, of an unaccounted drift, is why it cannot be noise. It never
-	// holds a value.
+	// Why, of an unaccounted drift, is why it cannot be noise; of a variable
+	// found in a raw mock's payload (From.Side "") or by the echo
+	// (From.Echo), the evidence: what was found, where, that nothing showed
+	// the value is a clock read, and how to correct it (evidence). It never
+	// holds a value: it names a part of one by where it stands.
 	Why string
 }
 
@@ -201,6 +239,9 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
+				if from.Side == "" || from.Echo {
+					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w), from)
+				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
 			}
@@ -1056,23 +1097,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			if !ok {
 				continue
 			}
-			r := 6
-			if s.Side == Request {
-				switch {
-				case e.Own:
-					r = 0
-				case e.Run:
-					r = 1
-				default:
-					r = 2
-				}
-				if !whole {
-					r += 3
-				}
-			}
-			if r < rank {
-				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}, r
+			if r := placeRank(e, s, whole); r < rank {
+				best, rank = seenPlace(e, s, whole), r
 			}
 			if rank == 0 {
 				return best, true
@@ -1081,6 +1107,29 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	}
 	if rank < 7 {
 		return best, true
+	}
+	// The echo (instants.go): where an earlier place holds the moment F saw
+	// in v (a pick from served data, by its clock), a place that holds the
+	// moment v was recorded with is where it came from, before any lead or
+	// window excuses a word of it. An exchange F served leaf by leaf first,
+	// then a raw mock (below).
+	echoed := recordedOf(dc.echoedIn(v, at, served, raw))
+	if len(echoed) > 0 {
+		for _, e := range served {
+			for _, s := range e.Seen {
+				if !dc.holdsInstant(s.Leaf.Value, echoed) && !dc.holdsInstant(dc.rawExtra(s.Leaf.Value), echoed) {
+					continue
+				}
+				whole := s.Leaf.Value == recorded
+				if r := placeRank(e, s, whole); r < rank {
+					best, rank = seenPlace(e, s, whole), r
+					best.Echo = true
+				}
+			}
+		}
+		if rank < 7 {
+			return best, true
+		}
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
 	// the recorded value, or what of it drifted (a changed word, a piece),
@@ -1112,35 +1161,183 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			searched = append(searched, p.rec)
 		}
 	}
-	var payloads []string
-	for _, x := range raw {
-		if x.Served || x.At.Before(at) {
-			payloads = append(payloads, x.text, dc.rawExtra(x.text))
-		}
-	}
-	echoed := dc.echoedInstants(v, payloads)
+	keep := dc.stampsEchoed(v, served, raw)
 	for _, x := range raw {
 		if !x.Served && !x.At.Before(at) {
 			continue
 		}
-		if dc.holdsInstant(x.text, echoed) || dc.holdsInstant(dc.rawExtra(x.text), echoed) {
-			return Place{Mock: x.Mock}, true
+		if len(echoed) > 0 {
+			for _, f := range x.fields {
+				if !f.key && dc.holdsInstant(x.text[f.start:f.end], echoed) {
+					return Place{Mock: x.Mock, Field: f.describe(), Echo: true}, true
+				}
+			}
+			if dc.holdsInstant(x.text, echoed) || dc.holdsInstant(dc.rawExtra(x.text), echoed) {
+				return Place{Mock: x.Mock, Echo: true}, true
+			}
 		}
-		texts := dc.searched(x)
+		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
-				if containsWholeClock(text, recorded) || v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.Mock}, true
+				if containsWholeClock(text, recorded) {
+					return Place{Mock: x.Mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded}, true
+				}
+				if v.decoded && containsWholeClock(text, v.decRec) {
+					return Place{Mock: x.Mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				return Place{Mock: x.Mock}, true
+				return Place{Mock: x.Mock, Field: dc.fieldOf(x, texts, w), Held: w}, true
 			}
 		}
 	}
 	return Place{}, false
+}
+
+// heldAt names the earliest place that holds one of moments (an exchange F
+// served leaf by leaf, as recorded or as F served it, then a raw mock served
+// earlier or recorded before at): "in <mock> at <field>", "" when none does.
+func (dc *DriftCache) heldAt(moments []moment, at time.Time, served []Earlier, raw []Raw) string {
+	holds := func(text string) bool {
+		return dc.holdsInstant(text, moments) || dc.holdsInstant(dc.rawExtra(text), moments)
+	}
+	for _, e := range served {
+		for _, s := range e.Seen {
+			// As echoedIn reads it: what F served, not what the application
+			// itself sent where it drifted.
+			if holds(s.Leaf.Value) || (s.Side == Response || s.Live == s.Leaf.Value) && holds(s.Live) {
+				return "in " + e.Mock + " at " + s.Leaf.Path
+			}
+		}
+	}
+	for _, x := range raw {
+		if !x.Served && !x.At.Before(at) {
+			continue
+		}
+		for _, f := range x.fields {
+			if !f.key && holds(x.text[f.start:f.end]) {
+				return "in " + x.Mock + " at " + f.describe()
+			}
+		}
+		if holds(x.text) {
+			return "in " + x.Mock + "'s payload"
+		}
+	}
+	return ""
+}
+
+// evidence is why the drifted value v is a variable of from (appearedIn), a
+// place in a raw mock's payload or one the echo found, as a reason names it:
+// what was found there and in which field, why no clock read of the
+// application's accounts for it, and how to correct it. It names a part of
+// the value by where it stands in it, never by its text: a value may be a
+// credential.
+func evidence(v *valueDrift, from Place) string {
+	at := from.Mock + "'s payload"
+	switch {
+	case from.Path != "":
+		at = from.Mock + " at " + from.Path
+	case from.Field != "":
+		at = from.Mock + " at " + from.Field
+	}
+	var found, provenance string
+	switch {
+	case from.Echo:
+		found = "the moment it was recorded with stands in " + at + ", and the moment record's full round saw in it stands earlier in the test too"
+		provenance = "a pick from what the application was given, by its clock, moves as a read of the clock does, so its move shows no read of the clock"
+	case from.Held == v.rec || from.Held == v.decRec:
+		found = "its recorded value stands whole in " + at
+	default:
+		found = "a part of its recorded value (" + partOf(v.rec, from.Held) + ") stands in " + at
+	}
+	if provenance == "" {
+		provenance = notClock(v)
+	}
+	return found + "; " + provenance + ", so keploy follows it as a value from there. " + correction(from.Mock)
+}
+
+// notClock says why no read of the application's clock accounts for v.
+func notClock(v *valueDrift) string {
+	if len(v.clock.reads) > 0 {
+		return "a part of it is a read of the application's clock, but that part is not"
+	}
+	return "nothing shows the value is a read of the application's clock (it did not move by the lead that record's full round runs ahead of the recording, and no window of its call shows a read)"
+}
+
+// correction is how to correct a refusal of a value found in mock.
+func correction(mock string) string {
+	return "If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it flowed from " + mock + ", where keploy cannot follow it yet"
+}
+
+// partOf names where part stands in value, by its characters' places,
+// never by its text: "its characters 15 to 26", or "a part of it in another
+// form" (decoded, case-folded) where value holds it in none of its own.
+func partOf(value, part string) string {
+	i := strings.Index(value, part)
+	if part == "" || i < 0 {
+		return "a part of it in another form"
+	}
+	a := utf8.RuneCountInString(value[:i]) + 1
+	return "its characters " + strconv.Itoa(a) + " to " + strconv.Itoa(a+utf8.RuneCountInString(part)-1)
+}
+
+// placeRank orders the places a value may have come from (appearedIn): the
+// request that sent it whole first, the test's own call before the run's,
+// the run's before another's; then the same inside a longer value; then an
+// answer.
+func placeRank(e Earlier, s Seen, whole bool) int {
+	if s.Side != Request {
+		return 6
+	}
+	r := 2
+	switch {
+	case e.Own:
+		r = 0
+	case e.Run:
+		r = 1
+	}
+	if !whole {
+		r += 3
+	}
+	return r
+}
+
+// seenPlace is the place s of e is.
+func seenPlace(e Earlier, s Seen, whole bool) Place {
+	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}
+}
+
+// echoedIn are v's changed instants whose live moment an earlier place
+// holds (echoedInstants): a payload served earlier in the test or recorded
+// before at (raw), in every form, and every value of an exchange F served
+// earlier (served), on either side, as recorded and as F served it (an
+// answer's), in every form. nil when none.
+func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, raw []Raw) []driftedInstant {
+	if len(v.instants) == 0 {
+		return nil
+	}
+	var held heldMoments
+	for _, x := range raw {
+		if x.Served || x.At.Before(at) {
+			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
+		}
+	}
+	for _, e := range served {
+		for _, s := range e.Seen {
+			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
+			// What F served (an answer's value, or a request's that did not
+			// drift). What the application itself sent in F, where it
+			// drifted, is its own output, whose co-drift with v sources
+			// reads: two reads of the clock in one moment drift alike.
+			if s.Side == Response || s.Live == s.Leaf.Value {
+				dc.heldIn(&held, s.Live, dc.rawExtra(s.Live))
+			}
+		}
+	}
+	return echoedInstants(v, &held)
 }
 
 // Echoes are the answer leaves that hold r's recorded value: a scalar equal
@@ -1215,12 +1412,11 @@ func RawOf(m *models.Mock, served bool) Raw {
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.
 	payload := dropKeys(v, 0)
-	var sb strings.Builder
-	textOf(payload, &sb)
-	r.text = sb.String()
+	r.text, r.fields = textFields(payload)
 	if m.IsProtocolPhase() {
 		r.answerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	}
+	r.stamps = answerStamps(r.text, r.fields, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	return r
 }
 
@@ -1272,6 +1468,107 @@ func textOf(v interface{}, sb *strings.Builder) {
 		sb.WriteString(strconv.FormatBool(t))
 		sb.WriteByte('\n')
 	}
+}
+
+// textFields is v's text as textOf writes it, with where each of its
+// scalars and keys stands in it (rawField).
+func textFields(v interface{}) (string, []rawField) {
+	var sb strings.Builder
+	var fields []rawField
+	var walk func(v interface{}, path string)
+	scalar := func(s, path string, key bool) {
+		start := sb.Len()
+		sb.WriteString(s)
+		fields = append(fields, rawField{start: start, end: sb.Len(), path: path, key: key})
+		sb.WriteByte('\n')
+	}
+	walk = func(v interface{}, path string) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				p := k
+				if path != "" {
+					p = path + "." + k
+				}
+				scalar(k, p, true)
+				walk(t[k], p)
+			}
+		case []interface{}:
+			for i, child := range t {
+				walk(child, path+"["+strconv.Itoa(i)+"]")
+			}
+		case string:
+			scalar(t, path, false)
+		case json.Number:
+			scalar(t.String(), path, false)
+		case bool:
+			scalar(strconv.FormatBool(t), path, false)
+		}
+	}
+	walk(v, "")
+	return sb.String(), fields
+}
+
+// fieldOf is the field of x's text, as searched (texts: its text and its
+// other forms, a stamp and an answer clock read blanked), that holds word w
+// as a token, in its own text or in a declared form of it; "" when none
+// does (w stands across two fields).
+func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) string {
+	for _, f := range x.fields {
+		if f.end > len(texts[0]) {
+			break
+		}
+		own := texts[0][f.start:f.end]
+		if ContainsToken(own, w) {
+			return f.describe()
+		}
+	}
+	for _, f := range x.fields {
+		if f.end > len(texts[0]) {
+			break
+		}
+		for _, form := range textForms(texts[0][f.start:f.end])[1:] {
+			if ContainsToken(form, w) {
+				return f.describe()
+			}
+		}
+	}
+	return ""
+}
+
+// specNames are the names a mock file gives the spec's fields whose JSON
+// names differ (an HTTP mock's req and resp, a Mongo mock's requests and
+// responses, a generic mock's buffers).
+var specNames = map[string]string{
+	"Req": "req", "Res": "resp", "http2Req": "req", "http2Resp": "resp",
+	"MongoRequests": "requests", "MongoResponses": "responses",
+	"RequestBin": "genericrequests", "ResponseBin": "genericresponses", "Message": "message", "Origin": "origin",
+}
+
+// describe is f as a reason names it: by the names the mock file gives it
+// ("spec.resp.header.Date").
+func (f rawField) describe() string {
+	var b strings.Builder
+	b.WriteString("spec")
+	for _, seg := range strings.Split(f.path, ".") {
+		name, index := seg, ""
+		if i := strings.IndexByte(seg, '['); i >= 0 {
+			name, index = seg[:i], seg[i:]
+		}
+		if n, ok := specNames[name]; ok {
+			name = n
+		}
+		b.WriteString("." + name + index)
+	}
+	if f.key {
+		return "the name of " + b.String()
+	}
+	return b.String()
 }
 
 // dropKeys is v without what payloadKeys names of the spec itself (depth

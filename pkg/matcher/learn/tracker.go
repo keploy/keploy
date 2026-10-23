@@ -458,9 +458,13 @@ func (t *Tracker) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 // had answered before it read, so a call pending across paired's send is
 // another of the app's flows' (a handler's write, blocked, sent between the
 // consumer's read and its insert), and bounds nothing of paired's read.
-// What decides is the recording's own stamps, never a margin. It keeps only
-// that instant, so a caller can feed it every recording of the set as a
-// store streams them, holding none.
+// What decides is the recording's own stamps, never a margin. A span the
+// skip widens can hold a pick the application made from served data by its
+// clock, as a read of the clock would fall there: the classifier's echo
+// reads every earlier place for the moment F saw before any window excuses
+// it (echoedIn), so such a pick is followed, never noise. It keeps only that
+// instant, so a caller can feed it every recording of the set as a store
+// streams them, holding none.
 type PreviousCall struct {
 	id     string
 	to, at time.Time

@@ -769,9 +769,31 @@ func nonASCIIRuns(s string) []string {
 // changed too; a word at its own place on both sides is not. keploy cannot
 // tell whether such a word came from there, and refuses rather than learn
 // it as noise.
+//
+// And an instant of what changed whose moment F saw is one an earlier place
+// holds (echoedIn: a pick from served data, by the clock), while no earlier
+// place holds the moment it was recorded with (else it is a variable of that
+// place, appearedIn), is refused before any lead or window excuses its words:
+// what F saw came from what F served, whatever moved it.
 func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) string {
 	if v.unparsed != "" {
 		return v.unparsed
+	}
+	if echoed := dc.echoedIn(v, at, served, raw); len(echoed) > 0 {
+		where := dc.heldAt(liveOf(echoed), at, served, raw)
+		if where == "" {
+			where = "earlier in the test"
+		}
+		return "the moment record's full round saw in it stands " + where + ", while no earlier place holds the moment it was recorded with: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
+	keep := dc.stampsEchoed(v, served, raw)
+	// word names t, a word of v's recorded value or of what F saw, by where
+	// it stands, never by its text.
+	word := func(t string, recorded bool) string {
+		if recorded {
+			return "a word of its recorded value (" + partOf(v.rec, t) + ")"
+		}
+		return "a word of what record's full round saw in it (" + partOf(v.live, t) + ")"
 	}
 	check := func(i int, t string, recorded, moved bool) string {
 		// A word of a run counts unless it is a clock word itself; a word
@@ -788,9 +810,15 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				where = "in the test set's start-up"
 			}
 			for _, s := range e.Seen {
+				// An answer's own clock stamp is no place a value came
+				// from (Seen.Stamp), unless a stamp F served holds a word
+				// the value took in F (stampsEchoed).
+				if stamped(s) && !keep {
+					continue
+				}
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
-					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
+					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
 				}
 			}
 		}
@@ -800,8 +828,12 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
-			if dc.searchedTokens(x)[i][t] {
-				return "a word of it appears earlier in the test, in " + x.Mock + "'s payload: keploy cannot tell whether it came from there"
+			if dc.searchedTokens(x, keep)[i][t] {
+				at := x.Mock + "'s payload"
+				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
+					at = x.Mock + " at " + f
+				}
+				return word(t, recorded) + " appears earlier in the test, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.Mock)
 			}
 		}
 		return ""
