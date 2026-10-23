@@ -148,6 +148,21 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 			if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{{Name: "mock-1"}}, nil, flows, expected); err != nil {
 				t.Fatalf("nothing learned: %v", err)
 			}
+			// Each kind of learning, alone, is learning not kept: a variable,
+			// an echo, and a variable bound at an earlier mock of the test
+			// each fail the round, which names it.
+			for _, only := range []struct {
+				learned models.MockState
+				said    string
+			}{
+				{models.MockState{Name: "mock-1", Variables: models.MockVariables{"id": {Recorded: "1", Answer: []string{"body.id"}}}}, "mock-1 id (variable)"},
+				{models.MockState{Name: "mock-1", Variables: models.MockVariables{"rid": {Recorded: "r-1", Echo: true}}}, "mock-1 rid (echo)"},
+				{models.MockState{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-0": {"id": {Recorded: "1", Bind: "body.id"}}}}, "mock-1 id (bound at mock-0)"},
+			} {
+				if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{only.learned}, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round ("+only.said+"): ") {
+					t.Fatalf("only %s learned: err %v; want the round failed, naming it", only.said, err)
+				}
+			}
 		})
 	}
 	m := &mockService{config: &config.Config{}, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
