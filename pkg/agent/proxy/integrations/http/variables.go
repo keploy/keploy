@@ -551,53 +551,13 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		}
 	}
 
-	// What it learned of the words of a leaf (noise.words) lets that leaf
-	// change only where its slots are: the recorded value is put back there
-	// when the live one is admitted (learn.WordsAdmit), its presence and JSON
-	// type still required. The values are read as the learn step read them:
-	// a path segment or a query value with keploy.yml's url noise masked.
-	if len(m.Spec.LearnedWords) > 0 {
-		urlMask := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).url
-		places := make([]string, 0, len(m.Spec.LearnedWords))
-		for k := range m.Spec.LearnedWords {
-			places = append(places, k)
-		}
-		sort.Strings(places)
-		for _, k := range places {
-			raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
-			if !ok {
-				continue // a form or multipart field: the strict comparison reads it
-			}
-			place, err := variables.Parse(raw)
-			if err != nil {
-				continue
-			}
-			if _, isVar := liveAt[place.String()]; isVar {
-				continue
-			}
-			r, ok := rec.read(place)
-			if !ok {
-				continue
-			}
-			l, ok := live.read(place)
-			if !ok || l.body && l.kind != r.kind {
-				return nil, nil
-			}
-			rv, lv := r.value, l.value
-			if place.Part == variables.PartPath || place.Part == variables.PartQuery {
-				rv, lv = maskURLNoise(rv, urlMask), maskURLNoise(lv, urlMask)
-			}
-			if admitted, _ := learn.WordsAdmit(rv, lv, m.Spec.LearnedWords[k]); !admitted {
-				// Left as the call sent it: the strict comparison decides
-				// it, by its words (strictKnown.admits) or, of an AWS SigV4
-				// Authorization, by its parts (founder decision 25).
-				continue
-			}
-			if asRecorded, ok = asRecorded.putBack(place, r); !ok {
-				return nil, nil
-			}
-		}
-	}
+	// What it learned of the words of a leaf (noise.words) is read where the
+	// call is compared with its recording (fitsRecording: strictDiff, whose
+	// every site admits a live value by those words, keploy.yml's url noise
+	// masked as the learn step masked it). Nothing is put back for it here:
+	// a value put back would be compared as recorded, so the only effect of
+	// putting one back by another reading (a segment masked alone) could be
+	// to admit what the strict comparison refuses.
 
 	// 1. The call, with the recorded values put back, is the recording.
 	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise) {
