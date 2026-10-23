@@ -1043,7 +1043,10 @@ func TestABinaryRequestBodyIsReadForItsText(t *testing.T) {
 // protobuf's tags and lengths, a NUL, no UTF-8) is a request keploy could not
 // read, the reason naming it: every value that changed is refused. Each side
 // is read by what it declares: a sent body declared no text beside a recorded
-// one declared JSON leaves the request unread, naming the sent side's type.
+// one declared JSON leaves the request unread, naming the sent side's type,
+// and a recorded one declared no text beside a sent one declared JSON leaves
+// it unread, naming the recorded side's; a side whose bytes are no text
+// leaves it unread whichever side it is.
 func TestARequestBodyOfNoDeclaredTypeIsReadWhereItsBytesAreText(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
 	const p = "body.slot"
@@ -1095,9 +1098,14 @@ func TestARequestBodyOfNoDeclaredTypeIsReadWhereItsBytesAreText(t *testing.T) {
 		{"a DEL in its text", request(both("body", "slots s17\x7fs18")), undeclaredUnread},
 		{"no UTF-8", request(both("body", "slots s17 \xffs18")), undeclaredUnread},
 		{"recorded as text, sent as bytes", request(models.TestRequestPart{Name: "body", Recorded: "slots s17 s18", Sent: "slots s17\x01s18"}), undeclaredUnread},
+		{"recorded as bytes, sent as text", request(models.TestRequestPart{Name: "body", Recorded: "slots s17\x01s18", Sent: "slots s17 s18"}), undeclaredUnread},
 		{"recorded declared JSON, sent declared a protobuf",
 			request(models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/x-protobuf"},
 				models.TestRequestPart{Name: "body", Recorded: `{"slots":["s17","s18"]}`, Sent: "BAs17 s18"}),
+			mediaUnread("application/x-protobuf")},
+		{"recorded declared a protobuf, sent declared JSON",
+			request(models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/x-protobuf", Sent: "application/json"},
+				models.TestRequestPart{Name: "body", Recorded: "BAs17 s18", Sent: `{"slots":["s17","s18"]}`}),
 			mediaUnread("application/x-protobuf")},
 	} {
 		if e := row.req[0]; e.Unread != row.why {
