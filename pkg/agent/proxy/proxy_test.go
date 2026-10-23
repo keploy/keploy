@@ -303,10 +303,10 @@ func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
 		t.Fatalf("precondition: the previous set's consumption was not recorded")
 	}
 
-	// The test-set boundary. The error is ignored on purpose: Mock can fail
-	// later, at the nsswitch setup, and that failure is AFTER the reset — the
-	// property under test is the reset, not the call's overall success.
-	_ = p.Mock(context.Background(), models.OutgoingOptions{})
+	// The test-set boundary.
+	if err := p.Mock(context.Background(), models.OutgoingOptions{}); err != nil {
+		t.Fatalf("Mock: %v", err)
+	}
 
 	if got := p.GetPersistentConsumed(); len(got) != 0 {
 		t.Fatalf("Mock did not clear the previous test set's consumption: %#v — the replayer treats a "+
@@ -621,10 +621,10 @@ func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
 				}
 				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
 			} else {
-				// Mock can fail last, at its nsswitch setup (root's), with
-				// the session already set up.
 				opts.Mocking = true
-				_ = p.Mock(context.Background(), opts)
+				if err := p.Mock(context.Background(), opts); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			app, src := acceptedConn(t)
@@ -709,9 +709,11 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 				"Record": func() {
 					_ = p.Record(ctx, make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true})
 				},
-				// Mock can fail later, at its nsswitch setup: after the
-				// container keys' start, which is what is checked here.
-				"Mock": func() { _ = p.Mock(ctx, models.OutgoingOptions{}) },
+				"Mock": func() {
+					if err := p.Mock(ctx, models.OutgoingOptions{}); err != nil {
+						t.Fatal(err)
+					}
+				},
 			}
 			use := func(connID, dst string) containerkey.State {
 				containerkey.Default.Name(nil, connID, dst)

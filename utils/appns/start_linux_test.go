@@ -1,0 +1,443 @@
+//go:build linux
+
+package appns
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/internal/nsswitchtest"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	fedora     = "passwd:     files systemd\nhosts:      files myhostname resolve [!UNAVAIL=return] dns\n"
+	fedoraView = "passwd:     files systemd\nhosts:      files myhostname dns\n"
+)
+
+// hostFile makes confPath a file of the test's own holding conf.
+func hostFile(t *testing.T, conf string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "nsswitch.conf")
+	if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saved := confPath
+	confPath = path
+	t.Cleanup(func() { confPath = saved })
+	return path
+}
+
+// startAndRead starts sh -c script through Start and returns its output.
+func startAndRead(t *testing.T, logger *zap.Logger, script string) string {
+	t.Helper()
+	var out strings.Builder
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	// Killed with the thread that started it, which Start keeps until done:
+	// should the test die first, so does the command, and should Start let
+	// the thread go before done, the command is killed and the test fails.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	done, err := Start(logger, cmd)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err = cmd.Wait()
+	done()
+	if err != nil {
+		t.Fatalf("the command failed (%v):\n%s", err, out.String())
+	}
+	return out.String()
+}
+
+// A host whose hosts line keploy sees needs no view: the command starts as
+// cmd.Start starts it, in keploy's own mount namespace, and nothing is said.
+func TestStartWithNoViewToMakeStartsTheCommandAsItIs(t *testing.T) {
+	path := hostFile(t, "hosts:          files dns\n")
+	core, logs := observer.New(zap.DebugLevel)
+	out := startAndRead(t, zap.New(core), "cat "+path+"; readlink /proc/self/ns/mnt")
+	self, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "hosts:          files dns\n" + self + "\n"; out != want {
+		t.Errorf("the command saw %q, want the host's file in keploy's mount namespace: %q", out, want)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("Start logged %v for a host that needs no view", logs.All())
+	}
+}
+
+// authselectHost makes confPath, authselectConf, authselectSelected and
+// authselectVendor files of the test's own, laid out as authselect lays them
+// out: confPath a link to authselectConf, which holds conf, authselectSelected
+// naming profile ("" for none), and a vendor profile of each name in vendor.
+// With linked false, confPath is a file of its own holding conf instead (an
+// opted-out host's). It returns confPath.
+func authselectHost(t *testing.T, conf, profile string, linked bool, vendor ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "authselect"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	generated := filepath.Join(dir, "authselect", "nsswitch.conf")
+	selected := filepath.Join(dir, "authselect", "authselect.conf")
+	path := filepath.Join(dir, "nsswitch.conf")
+	if err := os.WriteFile(generated, []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if profile != "" {
+		if err := os.WriteFile(selected, []byte(profile), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if linked {
+		if err := os.Symlink(generated, path); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vendorDir := filepath.Join(dir, "vendor")
+	for _, name := range vendor {
+		if err := os.MkdirAll(filepath.Join(vendorDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	savedConf, savedGenerated, savedSelected, savedVendor := confPath, authselectConf, authselectSelected, authselectVendor
+	confPath, authselectConf, authselectSelected, authselectVendor = path, generated, selected, vendorDir
+	t.Cleanup(func() {
+		confPath, authselectConf, authselectSelected, authselectVendor = savedConf, savedGenerated, savedSelected, savedVendor
+	})
+	return path
+}
+
+// A host whose /etc/nsswitch.conf authselect manages, from a default profile
+// it ships, with the hosts line earlier keploy versions wrote and a killed run
+// left behind, needs no view: the command starts as it is, the host's file
+// is left as it is, and keploy says once at INFO, however many times it
+// starts the application, what that line has meant for the host and how
+// authselect puts its own back. Nothing is said where authselect does not
+// manage the file (an opted-out host's file of its own), where a custom or a
+// vendor profile (its author's line) or no profile is selected, for a file
+// authselect did not generate, or for a line like it.
+func TestStartSaysOnceWhereAnEarlierKeployLeftItsHostsLine(t *testing.T) {
+	const header = "# Generated by authselect\n# Do not modify this file manually, use authselect instead. Any user changes will be overwritten.\n"
+	left := header + "passwd:     files systemd\nhosts: files dns\n"
+	for _, tc := range []struct {
+		name, conf, profile string
+		linked, said        bool
+		vendor              []string
+	}{
+		{name: "authselect's file, rewritten", conf: left, profile: "local\nwith-silent-lastlog\n", linked: true, said: true},
+		{name: "an opted-out host's file of its own", conf: left, profile: "local\n"},
+		{name: "a custom profile", conf: left, profile: "custom/mine\n", linked: true},
+		{name: "a vendor profile of a default one's name", conf: left, profile: "local\n", linked: true, vendor: []string{"local"}},
+		{name: "a vendor profile of another name", conf: left, profile: "local\n", linked: true, vendor: []string{"corp"}, said: true},
+		{name: "no profile selected", conf: left, linked: true},
+		{name: "the line in a file authselect did not generate", conf: "passwd:     files systemd\nhosts: files dns\n", profile: "local\n", linked: true},
+		{name: "authselect's file, a line like it", conf: header + "hosts:      files dns\n", profile: "local\n", linked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leftoverSaid = sync.Once{}
+			t.Cleanup(func() { leftoverSaid = sync.Once{} })
+			path := authselectHost(t, tc.conf, tc.profile, tc.linked, tc.vendor...)
+			core, logs := observer.New(zap.InfoLevel)
+			for range 2 {
+				if out := startAndRead(t, zap.New(core), "cat "+path); out != tc.conf {
+					t.Errorf("the command saw %q, want the host's file as it is: %q", out, tc.conf)
+				}
+			}
+			if got := nsswitchOf(t, path); got != tc.conf {
+				t.Errorf("the host's file is %q, want it as it was: %q", got, tc.conf)
+			}
+			if got := nsswitchOf(t, authselectConf); got != tc.conf {
+				t.Errorf("authselect's file is %q, want it as it was: %q", got, tc.conf)
+			}
+			entries := logs.All()
+			if !tc.said {
+				if len(entries) != 0 {
+					t.Errorf("Start said %v, want nothing", entries)
+				}
+				return
+			}
+			if len(entries) != 1 {
+				t.Fatalf("Start said %d things at INFO over two starts, want the leftover line once: %v", len(entries), entries)
+			}
+			msg := entries[0].Message
+			for _, want := range []string{"which authselect manages", `"hosts: files dns"`, "no default profile authselect ships writes it",
+				"earlier keploy versions wrote it while keploy test ran", "killed or crashed, or when two runs overlapped",
+				"through /etc/hosts and DNS alone", "any mDNS, libvirt or NIS module the profile adds", "DNS still reaches systemd-resolved", "lookups bypass it",
+				"keploy no longer writes this file", "sudo authselect apply-changes -b", "PAM's included", "authselect check does not notice"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the leftover line does not say %q: %s", want, msg)
+				}
+			}
+			if strings.Contains(msg, "split DNS") {
+				t.Errorf("the leftover line says the host lost split DNS, which a stub resolv.conf keeps: %s", msg)
+			}
+			if got := entries[0].ContextMap()["file"]; got != path {
+				t.Errorf("the leftover line names the file %v, want %s", got, path)
+			}
+		})
+	}
+}
+
+// Where keploy cannot make the namespace (it has no CAP_SYS_ADMIN: keploy run
+// as a user, the usual way), the command starts as it is, the host's file is
+// left as it is, and keploy says so once at INFO, with what it means in record
+// and in test and the remedy, however many times it starts the application:
+// for a keploy run as a user, the file capability on this very binary that
+// keeps the application unprivileged, and what that capability gives every
+// user who can run the binary, before root, which runs the application as
+// root. What it means includes that a name that does not resolve at replay
+// time then fails, which keploy test answers for a lookup it sees.
+func TestStartWithoutPrivilegeStartsTheCommandAsItIsAndSaysSoOnce(t *testing.T) {
+	if nsswitchtest.CanMakeMountNamespaces() == nil {
+		t.Skip("this process can make the namespace")
+	}
+	fallbackSaid = sync.Once{}
+	t.Cleanup(func() { fallbackSaid = sync.Once{} })
+	// keploy's binary, as the fallback names it: one anyone may run, whatever
+	// this test binary's own mode (a umask of 077 makes it 0700).
+	fixture := filepath.Join(t.TempDir(), "keploy")
+	if err := os.WriteFile(fixture, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(fixture, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	was := executable
+	t.Cleanup(func() { executable = was })
+	executable = func() (string, error) { return fixture, nil }
+	path := hostFile(t, fedora)
+	core, logs := observer.New(zap.InfoLevel)
+	for range 2 {
+		if out := startAndRead(t, zap.New(core), "cat "+path); out != fedora {
+			t.Errorf("the command saw %q, want the host's file as it is: %q", out, fedora)
+		}
+	}
+	if got := nsswitchOf(t, path); got != fedora {
+		t.Errorf("the host's file is %q, want it as it was: %q", got, fedora)
+	}
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("Start said %d things at INFO over two starts, want the fallback once: %v", len(entries), entries)
+	}
+	msg := entries[0].Message
+	remedies := []string{"give keploy CAP_SYS_ADMIN"}
+	if os.Geteuid() != 0 {
+		bin := shellQuote(fixture)
+		capability, root := "sudo chown root "+bin+" && sudo chmod go-w "+bin+" && sudo setcap cap_sys_admin+p "+bin+" ", "sudo -E keploy"
+		remedies = []string{capability, root, "still run the application as you, with no capability", "a change through a shared writable mapping keeps it",
+			"runs the application as root", "every user who can run that binary then holds CAP_SYS_ADMIN, which is close to root", "let only a group you trust run it",
+			"again after each update of keploy, which replaces the binary with one anyone may run: restrict it again first",
+			"to you alone: chmod go-rx, then setfacl -m u:" + strconv.Itoa(os.Getuid()) + ":rx, as a chmod go-rx after it empties the ACL's mask, which chmod go-w does not"}
+		if i, j := strings.Index(msg, capability), strings.Index(msg, root); i < 0 || j < 0 || i > j {
+			t.Errorf("the fallback's line does not name the file capability, then running keploy as root: %s", msg)
+		}
+	}
+	for _, want := range append(remedies, "systemd-resolved", "out of keploy's sight", "in keploy record they are not recorded as mocks",
+		"in keploy test they resolve live", "a name that does not resolve at replay time fails the lookup", "left as it is") {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the fallback's line does not say %q: %s", want, msg)
+		}
+	}
+	if got := entries[0].ContextMap()["hosts"]; got != "hosts: files myhostname resolve [!UNAVAIL=return] dns" {
+		t.Errorf("the fallback's line names the hosts line %q", got)
+	}
+}
+
+// As root, the command sees the view, in a mount namespace of its own, while
+// keploy (and every other process) sees the host's file as it was; the view
+// is read-only, to root too; and the directory the file is in, over which the
+// view's tmpfs was mounted for a moment, is the command's own again: its other
+// files are there.
+func TestStartGivesTheCommandItsView(t *testing.T) {
+	if err := nsswitchtest.CanMakeMountNamespaces(); err != nil {
+		t.Skipf("the view is a mount namespace of its own, which this process cannot make: %v", err)
+	}
+	path := hostFile(t, fedora)
+	sibling := filepath.Join(filepath.Dir(path), "hosts")
+	if err := os.WriteFile(sibling, []byte("here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	out := startAndRead(t, zap.NewNop(), "cat "+path+"; echo ---; readlink /proc/self/ns/mnt; echo ---; cat "+sibling+"; echo; echo ---; stat -c '%a %u %g' "+path+
+		"; echo ---; if echo x 2>&1 >> "+path+"; then echo written; fi; cat "+path)
+	parts := strings.Split(out, "---\n")
+	if len(parts) != 5 {
+		t.Fatalf("the command said %q", out)
+	}
+	if !strings.Contains(parts[4], "Read-only file system") || strings.Contains(parts[4], "written") || !strings.HasSuffix(parts[4], fedoraView) {
+		t.Errorf("a write to the view, as root, said %q: want it refused (read-only), and the view as it was", parts[4])
+	}
+	if parts[0] != fedoraView {
+		t.Errorf("the command saw\n%q\nwant the view\n%q", parts[0], fedoraView)
+	}
+	if ns := strings.TrimSpace(parts[1]); ns == self {
+		t.Errorf("the command ran in keploy's mount namespace (%s)", ns)
+	}
+	if parts[2] != "here\n" {
+		t.Errorf("the command did not see the other files of the view's directory (%q)", parts[2])
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%o %d %d", st.Mode&0o777, st.Uid, st.Gid); strings.TrimSpace(parts[3]) != want {
+		t.Errorf("the view's mode, owner and group are %q, want the host's file's: %q", strings.TrimSpace(parts[3]), want)
+	}
+	if got := nsswitchOf(t, path); got != fedora {
+		t.Errorf("the host's file is %q, want it as it was: %q", got, fedora)
+	}
+}
+
+func nsswitchOf(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// No thread of keploy's is left in an application's mount namespace, nor
+// enters one but the thread that starts the application: keploy's main
+// thread (the one /proc/self reads) stays in keploy's while the application
+// runs, and once it is done the threads that started it are gone. The
+// runtime parks the main thread, rather than ending it, when a goroutine
+// locked to it exits; one GOMAXPROCS makes the goroutine that starts the
+// application likely to be scheduled on it.
+func TestNoThreadOfKeploysStaysInAnApplicationsNamespace(t *testing.T) {
+	if err := nsswitchtest.CanMakeMountNamespaces(); err != nil {
+		t.Skipf("the view is a mount namespace of its own, which this process cannot make: %v", err)
+	}
+	path := hostFile(t, fedora)
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	own, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/mnt", os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 20 {
+		var out strings.Builder
+		cmd := exec.Command("sh", "-c", "cat "+path+"; read x || true")
+		cmd.Stdout = &out
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL} // as in startAndRead
+		done, err := Start(zap.NewNop(), cmd)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if ns, _ := os.Readlink(fmt.Sprintf("/proc/%d/ns/mnt", os.Getpid())); ns != own {
+			t.Errorf("start %d: keploy's main thread is in the application's mount namespace (%s, keploy's %s)", i, ns, own)
+		}
+		in.Close()
+		err = cmd.Wait()
+		done()
+		if err != nil || out.String() != fedoraView {
+			t.Fatalf("start %d: the command saw %q (%v)", i, out.String(), err)
+		}
+	}
+	deadline := time.Now().Add(time.Minute)
+	for {
+		var foreign []string
+		tasks, err := os.ReadDir("/proc/self/task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range tasks {
+			if ns, err := os.Readlink("/proc/self/task/" + task.Name() + "/ns/mnt"); err == nil && ns != own {
+				foreign = append(foreign, task.Name()+":"+ns)
+			}
+		}
+		if len(foreign) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a minute after the last application was done, threads of keploy's are still in another mount namespace: %v (keploy's %s)", foreign, own)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The binary's path in the fallback's command is one word of a shell's
+// command line, whatever it holds.
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/usr/local/bin/keploy":        "/usr/local/bin/keploy",
+		"/home/ann/My Tools/keploy":    "'/home/ann/My Tools/keploy'",
+		"/opt/it's/keploy":             `'/opt/it'\''s/keploy'`,
+		"/tmp/$(id)/keploy":            "'/tmp/$(id)/keploy'",
+		"":                             "''",
+		"/srv/keploy-3.2_amd64/keploy": "/srv/keploy-3.2_amd64/keploy",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+// The fallback's remedy names keploy's binary as one shell word: a path with a
+// blank or a quote, pasted, still names that file alone.
+func TestTheFallbacksRemedyQuotesTheBinarysPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root, the fallback names no file capability")
+	}
+	was := executable
+	t.Cleanup(func() { executable = was })
+	executable = func() (string, error) { return "/home/ann/My Tools/it's keploy", nil }
+	core, logs := observer.New(zap.InfoLevel)
+	sayFallback(zap.New(core), View{}, unix.EPERM)
+	const q = `'/home/ann/My Tools/it'\''s keploy'`
+	want := "sudo chown root " + q + " && sudo chmod go-w " + q + " && sudo setcap cap_sys_admin+p " + q + " "
+	if entries := logs.All(); len(entries) != 1 || !strings.Contains(entries[0].Message, want) {
+		t.Errorf("the fallback's line, for a binary at a path with a blank and a quote, is %v; want it to say %s", entries, want)
+	}
+}
+
+// A binary only its owner may run is one its user could not run once root
+// owns it: the fallback's command lets that user, and no one else, run it (an
+// ACL entry by uid, not the binary's group, which others may be in).
+func TestTheFallbacksRemedyKeepsAnOwnerOnlyBinaryRunnable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root, the fallback names no file capability")
+	}
+	bin := filepath.Join(t.TempDir(), "keploy")
+	if err := os.WriteFile(bin, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	was := executable
+	t.Cleanup(func() { executable = was })
+	executable = func() (string, error) { return bin, nil }
+	core, logs := observer.New(zap.InfoLevel)
+	sayFallback(zap.New(core), View{}, unix.EPERM)
+	q := shellQuote(bin)
+	want := "sudo setfacl -m u:" + strconv.Itoa(os.Getuid()) + ":rx " + q + " && sudo chown root " + q + " && sudo chmod go-w " + q + " && sudo setcap cap_sys_admin+p " + q + " "
+	if entries := logs.All(); len(entries) != 1 || !strings.Contains(entries[0].Message, want) {
+		t.Errorf("the fallback's line, for a binary only its owner may run, is %v; want it to say %s", entries, want)
+	}
+}

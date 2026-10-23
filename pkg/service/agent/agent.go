@@ -276,8 +276,8 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	// Setup returns only once what it started is torn down, however it
-	// returns: Hook's teardown (the proxy's, which restores nsswitch.conf and
-	// removes the CA from the trust store, then the hooks' unload) runs on
+	// returns: Hook's teardown (the proxy's, which removes the CA from the
+	// trust store, then the hooks' unload) runs on
 	// the group, and the process exits as soon as Setup returns (main). A
 	// stop that came before the port handoff, or while Hook was loading,
 	// returned at once and so cut that teardown short. stop ends the run

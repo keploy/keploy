@@ -18,9 +18,6 @@ import (
 func TestALearnStepForgetsThePreviousSetAtMock(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := New(zap.NewNop(), fakeDestInfo{}, config.New())
-	// Preseeded so Mock() leaves the host's /etc/nsswitch.conf alone (see
-	// testProxy).
-	p.nsswitchData = []byte("preseeded-by-test")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	p.learnTracker.ServedMock(&models.Mock{Name: "mock-0", Spec: models.MockSpec{ReqTimestampMock: time.Now().Add(-time.Hour)}}) // set 1's start-up

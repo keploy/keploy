@@ -166,7 +166,7 @@ func TestStartSkipListenerDrainsLateMockOnShutdown(t *testing.T) {
 	ch := seedLateOwnedMock(t, "late-start")
 
 	p := &Proxy{logger: zap.NewNop()}
-	p.skipListener = true // no TCP listener; empty nsswitchData skips the reset.
+	p.skipListener = true // no TCP listener
 
 	ctx, cancel := context.WithCancel(context.Background())
 	readyChan := make(chan error, 1)

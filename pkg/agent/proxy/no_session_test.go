@@ -514,7 +514,6 @@ func passedThroughWithoutASession(t *testing.T, global bool) (*Proxy, *sessionAt
 	cfg.Agent.Mode = models.MODE_RECORD
 	cfg.Agent.GlobalPassthrough = global
 	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
-	p.nsswitchData = []byte("preseeded-by-test")
 	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
 	app, src := acceptedConn(t)
 	w := &sessionAtClose{Conn: src, p: p, at: make(chan *agent.Session, 1)}
@@ -656,9 +655,6 @@ func TestAReplaySessionResetsWhatARecordingAgentPassedThrough(t *testing.T) {
 	cfg := config.New()
 	cfg.Agent.Mode = models.MODE_RECORD
 	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
-	// Preseeded so Mock() leaves the host's /etc/nsswitch.conf alone (see
-	// testProxy).
-	p.nsswitchData = []byte("preseeded-by-test")
 
 	app, src := acceptedConn(t)
 	dst := predialedTo(t, p, src, upstream)
@@ -787,7 +783,6 @@ func TestAGlobalPassthroughOutlivesOnlyASessionThatPassesThroughToo(t *testing.T
 		cfg.Agent.Mode = mode
 		cfg.Agent.GlobalPassthrough = true
 		p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
-		p.nsswitchData = []byte("preseeded-by-test") // see testProxy
 		app, src := acceptedConn(t)
 		dst := predialedTo(t, p, src, upstream)
 		done := make(chan error, 1)

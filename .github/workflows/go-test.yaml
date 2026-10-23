@@ -148,6 +148,32 @@ jobs:
             grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
           done
 
+      # The native application's own view of /etc/nsswitch.conf (utils/appns)
+      # is a mount namespace, which only root (or a keploy binary given
+      # CAP_SYS_ADMIN, which one test does as nobody) can make, and its tests
+      # and the agent's judge the host's file on a host of their own, a mount
+      # namespace too (internal/nsswitchtest): the run above skips them. Built
+      # as the runner user, run as root, and each PASS line grepped, so a test
+      # that skips or vanishes fails the step.
+      - name: nsswitch view tests as root
+        shell: bash
+        run: |
+          go test -c -o /tmp/appns.test ./utils/appns/
+          go test -c -o /tmp/utils.test ./utils/
+          go test -c -o /tmp/proxy.test ./pkg/agent/proxy/
+          go test -c -o /tmp/app.test ./pkg/client/app/
+          (cd utils/appns && sudo /tmp/appns.test -test.timeout=10m -test.count=1 -test.v -test.run '^(TestStartGivesTheCommandItsView|TestNoThreadOfKeploysStaysInAnApplicationsNamespace)$') | tee /tmp/nsswitch-root.out
+          (cd utils && sudo /tmp/utils.test -test.timeout=10m -test.count=1 -test.v -test.run '^(TestANativeAppSeesItsOwnNsswitchConfAndTheHostsStaysAsItWas|TestOnlyANativeAppGetsAViewOfNsswitchConf|TestAKeployGivenOnlyCapSysAdminGivesTheAppItsViewAndNothingMore)$') | tee -a /tmp/nsswitch-root.out
+          (cd pkg/agent/proxy && sudo /tmp/proxy.test -test.timeout=10m -test.count=1 -test.v -test.run '^TestMockLeavesTheHostsNsswitchConfAsItIs$') | tee -a /tmp/nsswitch-root.out
+          (cd pkg/client/app && sudo /tmp/app.test -test.timeout=10m -test.count=1 -test.v -test.run '^TestANativeAppSeesItsViewOfNsswitchConfInRecordAndInTest$') | tee -a /tmp/nsswitch-root.out
+          for t in TestStartGivesTheCommandItsView TestNoThreadOfKeploysStaysInAnApplicationsNamespace \
+            TestANativeAppSeesItsOwnNsswitchConfAndTheHostsStaysAsItWas/{kill_keploy_first,kill_app_first} \
+            TestOnlyANativeAppGetsAViewOfNsswitchConf TestAKeployGivenOnlyCapSysAdminGivesTheAppItsViewAndNothingMore \
+            TestMockLeavesTheHostsNsswitchConfAsItIs \
+            TestANativeAppSeesItsViewOfNsswitchConfInRecordAndInTest; do
+            grep -q -- "^\s*--- PASS: $t " /tmp/nsswitch-root.out || { echo "$t did not pass as root"; exit 1; }
+          done
+
       # The compose library is behind the `composelib` build tag, so the plain
       # run above exercises the SHELL-OUT path and never the library. Its own
       # tests — and the App call sites that choose between the two — would go

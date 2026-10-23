@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1127,52 +1126,4 @@ func (p *Proxy) stopDNSServers() error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-const (
-	nsSwitchConfig = "/etc/nsswitch.conf"
-	nsSwitchPerm   = 0644
-)
-
-// setting up the dns routing for the linux system
-func (p *Proxy) setupNsswitchConfig() error {
-	if _, err := os.Stat(nsSwitchConfig); err == nil {
-		data, err := os.ReadFile(nsSwitchConfig)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to read the nsswitch.conf file from system")
-			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
-		}
-
-		p.nsswitchData = data
-
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			if strings.HasPrefix(line, "hosts:") {
-				lines[i] = "hosts: files dns"
-			}
-		}
-
-		data = []byte(strings.Join(lines, "\n"))
-
-		err = writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
-		if err != nil {
-			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
-		}
-
-		p.logger.Debug("Successfully written to nsswitch config of linux")
-	}
-	return nil
-}
-
-// resetNsSwitchConfig resets the hosts config of nsswitch of the system
-func (p *Proxy) resetNsSwitchConfig() error {
-	data := p.nsswitchData
-
-	err := writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
-	if err != nil {
-		return errors.New("failed to reset the nsswitch.conf back to the original state")
-	}
-
-	p.logger.Debug("Successfully reset the nsswitch config of linux")
-	return nil
 }

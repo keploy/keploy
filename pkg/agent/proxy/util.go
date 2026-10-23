@@ -5,24 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
-
-// writeNsswitchConfig writes the content to nsswitch.conf file
-func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte, perm os.FileMode) error {
-
-	err := os.WriteFile(nsSwitchConfig, data, perm)
-	if err != nil {
-		logger.Error("failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy", zap.Error(err))
-		return err
-	}
-	return nil
-}
 
 func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) error {
 

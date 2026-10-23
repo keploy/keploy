@@ -81,9 +81,10 @@ func TestTheProxysShutdownRecordsItsSteps(t *testing.T) {
 	case <-time.After(time.Minute): // only turns a hang into a failure
 		t.Fatal("start() did not return after its context was cancelled")
 	}
-	// Two stages, then the detach and the CA's removal: begun, between, ended.
-	if steps := utils.TeardownSteps() - before; steps < 5 {
-		t.Fatalf("the proxy's shutdown recorded %d teardown steps, want at least 5", steps)
+	// The flush's end, then the detach and the CA's removal: begun, between,
+	// ended.
+	if steps := utils.TeardownSteps() - before; steps < 4 {
+		t.Fatalf("the proxy's shutdown recorded %d teardown steps, want at least 4", steps)
 	}
 	if utils.TeardownBusy() {
 		t.Fatal("the proxy's shutdown left teardown work in progress")

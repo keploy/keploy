@@ -294,7 +294,6 @@ func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) 
 	t.Setenv(provenswitch.Env, "1")
 	core, logs := observer.New(zap.WarnLevel)
 	p := New(zap.New(core), fakeDestInfo{}, config.New())
-	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })

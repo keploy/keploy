@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"go.keploy.io/server/v3/utils/appns"
 	"go.uber.org/zap"
 	"golang.org/x/term"
 )
@@ -49,10 +50,9 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 
 	// extraEnv is added to what the command inherits from keploy, for this
 	// command alone — a secret that one child needs is not exported to every
-	// other process keploy starts.
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	// other process keploy starts. What it inherits is keploy's environment
+	// as keploy was started with it (commandEnviron).
+	cmd.Env = append(commandEnviron(logger), extraEnv...)
 
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = waitDelay
@@ -106,10 +106,20 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
-	err = cmd.Start()
+	// The application keploy runs natively (kind Native: App.Run's) sees an
+	// /etc/nsswitch.conf of its own where the host's would hide its DNS from
+	// keploy (appns.Start); a command with no kind (a script the replay runs)
+	// starts as it always did.
+	done := func() {}
+	if kind == Native {
+		done, err = appns.Start(logger, cmd)
+	} else {
+		err = cmd.Start()
+	}
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
+	defer done()
 
 	err = cmd.Wait()
 	if err != nil {

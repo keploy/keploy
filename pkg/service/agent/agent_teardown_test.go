@@ -106,7 +106,7 @@ func (s *heldStage) start(ctx context.Context) {
 }
 
 // heldStartProxy starts a held stage as its start (the proxy's start(), whose
-// teardown restores nsswitch.conf and removes the CA), and then fails when
+// teardown removes the CA), and then fails when
 // told to, as StartProxy does when an auxiliary hook fails (AfterStart) with
 // start() running and the CA installed. started is closed once it has.
 type heldStartProxy struct {
@@ -189,8 +189,8 @@ func setupParked() bool {
 
 // Setup returns only once what it started has been torn down, however it
 // returns: the agent process exits as soon as it does (main), and an exit
-// cuts short the proxy's teardown -- the CA's removal from the trust store,
-// nsswitch.conf's restore -- and the hooks' unload. A stop that came before
+// cuts short the proxy's teardown -- the CA's removal from the trust store --
+// and the hooks' unload. A stop that came before
 // the port handoff, or while the hooks loaded or the proxy started, returned
 // at once; so did a proxy that failed after it had started. And Hook's
 // teardown waited on the proxy's and the hooks' groups before Hook had added

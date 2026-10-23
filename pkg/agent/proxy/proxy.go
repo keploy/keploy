@@ -396,9 +396,6 @@ type Proxy struct {
 	// stops them.
 	tcpDNS, udpDNS *dnsServer
 
-	//to store the nsswitch.conf file data
-	nsSwitchMutex             sync.Mutex
-	nsswitchData              []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	GlobalPassthrough         bool
 	OpportunisticTLSIntercept bool
 	// DisableHandshakeHold mirrors config.Agent.DisableHandshakeHold: accept
@@ -2187,14 +2184,6 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// instead; the Go runtime garbage-collects MC once all
 		// references drop.
 		utils.TeardownStep()
-		p.nsSwitchMutex.Lock()
-		if string(p.nsswitchData) != "" {
-			if err := p.resetNsSwitchConfig(); err != nil {
-				utils.LogError(p.logger, err, "failed to reset the nsswitch config, please retry shutdown or restore the resolver configuration manually from /etc/nsswitch.conf")
-			}
-		}
-		p.nsSwitchMutex.Unlock()
-		utils.TeardownStep()
 		// Remove TLS uprobes (and any other hook-owned kernel state) BEFORE
 		// forking update-ca-certificates: a uprobe teardown that races that
 		// fork can inherit the last link reference into the child and then be
@@ -2329,16 +2318,6 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 			p.sessionMu.RUnlock()
 		}
-
-		p.nsSwitchMutex.Lock()
-		if string(p.nsswitchData) != "" {
-			// reset the hosts config in nsswitch.conf of the system (in test mode)
-			err = p.resetNsSwitchConfig()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
-			}
-		}
-		p.nsSwitchMutex.Unlock()
 		utils.TeardownStep()
 		// Remove TLS uprobes (and any other hook-owned kernel state) before
 		// forking update-ca-certificates — see the skipListener path.
@@ -4194,17 +4173,6 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
-	}
-
-	p.nsSwitchMutex.Lock()
-	defer p.nsSwitchMutex.Unlock()
-	if string(p.nsswitchData) == "" {
-		// setup the nsswitch config to redirect the DNS queries to the proxy
-		err := p.setupNsswitchConfig()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to setup nsswitch config")
-			return errors.New("failed to mock the outgoing message")
-		}
 	}
 	return nil
 }

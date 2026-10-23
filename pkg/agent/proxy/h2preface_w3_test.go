@@ -310,7 +310,6 @@ func replayH2Through(t *testing.T, proven bool) []byte {
 	cfg := config.New()
 	cfg.Agent.Mode = models.MODE_TEST
 	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, "127.0.0.1:50051")}, cfg)
-	p.nsswitchData = []byte("preseeded-by-test")
 	probe := h2Probe{saw: make(chan []byte, 1)}
 	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP2: probe}
 	p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP2}}

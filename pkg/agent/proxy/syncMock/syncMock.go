@@ -1035,7 +1035,7 @@ const outChanStall = 30 * time.Second
 // stop's teardown takes no step while it waits, and the CLI that stops the
 // agent kills a teardown that takes none for utils.TeardownStallChecks of the
 // agent's beats (about as many seconds of its time), cutting short what comes
-// after the close: the nsswitch reset, the hooks' detach, the CA's removal.
+// after the close: the hooks' detach, the CA's removal.
 // The consumer is often gone by then (a recording's client ends its streams
 // before it stops the agent); one still reading takes a mock far more often
 // than this.

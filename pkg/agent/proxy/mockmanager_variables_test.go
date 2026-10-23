@@ -152,9 +152,6 @@ func TestMockBeginsTheSetsVariablesUnderTheSwitch(t *testing.T) {
 			t.Setenv(provenswitch.Env, "")
 		}
 		p := New(zap.NewNop(), fakeDestInfo{}, config.New())
-		// Preseeded so Mock() leaves the host's /etc/nsswitch.conf alone (see
-		// testProxy).
-		p.nsswitchData = []byte("preseeded-by-test")
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		if err := p.Mock(ctx, models.OutgoingOptions{Mocking: true}); err != nil {
@@ -189,9 +186,6 @@ func TestMockBeginsTheSetsVariablesUnderTheSwitch(t *testing.T) {
 func TestKeployTestsStartUpBindsForEveryTestOfItsSet(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := New(zap.NewNop(), fakeDestInfo{}, config.New())
-	// Preseeded so Mock() leaves the host's /etc/nsswitch.conf alone (see
-	// testProxy).
-	p.nsswitchData = []byte("preseeded-by-test")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	filter := func(params models.MockFilterParams) {
@@ -578,9 +572,6 @@ func TestGoingExactAfterAStartUpServedEveryTestsRecordingsKeepsNoRuns(t *testing
 func TestTheProxyOpensATestWithItsVariables(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := New(zap.NewNop(), fakeDestInfo{}, config.New())
-	// Preseeded so Mock() leaves the host's /etc/nsswitch.conf alone (see
-	// testProxy).
-	p.nsswitchData = []byte("preseeded-by-test")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	given := []models.VariableBinding{{Name: "id", Value: "u1", Recorded: "u0", Mock: "test case test-1", Place: "request"}}

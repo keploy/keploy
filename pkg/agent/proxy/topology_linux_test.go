@@ -839,7 +839,6 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			// listener is outside it.
 			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
 			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
-			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
 			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
 			p.SetTopologySink(sink)
 			if tc.mode == models.MODE_RECORD {
@@ -925,7 +924,6 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 			cfg.Agent.MockMode = true
 			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
 			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
-			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
 			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
 			p.SetTopologySink(sink)
 			if err := p.SetRealDeps(context.Background(), []string{entry}); err != nil {

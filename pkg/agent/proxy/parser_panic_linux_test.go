@@ -76,7 +76,6 @@ func throughHandler(t *testing.T, mode models.Mode, parser integrations.Integrat
 	cfg := config.New()
 	cfg.Agent.Mode = mode
 	p := New(logger, fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
-	p.nsswitchData = []byte("preseeded-by-test") // see testProxy
 	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: parser}
 	p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
 	if mode == models.MODE_RECORD {

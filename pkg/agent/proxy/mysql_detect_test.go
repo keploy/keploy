@@ -47,13 +47,6 @@ func testProxy(t *testing.T) *Proxy {
 		// Built the way proxy.New does, so tests can drive SetMocksWithWindow —
 		// the call a stock agent actually makes to publish a test set's mocks.
 		dnsCache: newDNSCache(),
-		// Preseeded so Mock() skips setupNsswitchConfig, which rewrites
-		// /etc/nsswitch.conf and only restores it on proxy shutdown — a unit
-		// test never shuts the proxy down, so as root this would permanently
-		// replace the host's DNS configuration, and as non-root it would fail
-		// the write and abort Mock() early. Either way the test's verdict would
-		// depend on privileges rather than on the code under test.
-		nsswitchData: []byte("preseeded-by-test"),
 		Integrations: map[integrations.IntegrationType]integrations.Integrations{
 			integrations.MYSQL: mysql.New(zap.NewNop()),
 		},

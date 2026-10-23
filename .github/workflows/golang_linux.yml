@@ -612,3 +612,44 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/lifetime_tags/golang-linux.sh"
+
+  # A native application's DNS on a host whose /etc/nsswitch.conf has glibc
+  # ask systemd-resolved (Fedora's "hosts: files myhostname resolve
+  # [!UNAVAIL=return] dns"): resolved queries from its own process, which keploy
+  # does not see, so nothing of the application's DNS was recorded, while
+  # keploy test rewrote the host's file for every process on it (and a killed
+  # run left it rewritten). keploy now starts the application in a mount
+  # namespace of its own, whose /etc/nsswitch.conf is a copy keploy can see:
+  # a cgo application's lookup must be recorded as a DNS mock, answered from
+  # it with the name's server gone, and the lane's /etc/nsswitch.conf must stay
+  # byte for byte as it was, after a run killed with SIGKILL too. The lane runs
+  # its own systemd-resolved, in namespaces of its own
+  # (test_workflow_scripts/golang/nsswitch_resolved). Build only: a released
+  # keploy is the behaviour it replaces.
+  nsswitch_resolved:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: nsswitch with systemd-resolved (record_build_replay_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Record, replay, kill
+        env:
+          RECORD_BIN: ${{ steps.build.outputs.path }}
+          REPLAY_BIN: ${{ steps.build.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/nsswitch_resolved/golang-linux.sh"
