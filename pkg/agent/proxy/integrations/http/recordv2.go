@@ -158,7 +158,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 					// response the application read: a half-closed client
 					// that reset before its acknowledgement went out
 					// (relay/client_took.go).
-					logger.Debug("V2 HTTP record: the client closed the connection before it took any of the response; "+
+					logger.Debug("V2 HTTP record: the client closed the connection before its stack acknowledged any of the response; "+
 						"nothing is recorded for the call", zap.Error(err))
 					return nil
 				}

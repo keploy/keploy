@@ -116,8 +116,8 @@ func TestRecordV2_ThroughTheRelayALateAnswerToACallTheClientGaveUpOnIsNotRecorde
 	// Said apart at Debug, as the one silent end that can hide a response an
 	// application read (a half-closed client that reset before its stack
 	// acknowledged it).
-	if n := c.logs.FilterMessageSnippet("the client closed the connection before it took any of the response").Len(); n != 1 {
-		t.Fatalf("%d Debug lines say the client closed before it took any of the response, want one", n)
+	if n := c.logs.FilterMessageSnippet("the client closed the connection before its stack acknowledged any of the response").Len(); n != 1 {
+		t.Fatalf("%d Debug lines say the client closed before its stack acknowledged any of the response, want one", n)
 	}
 }
 
@@ -252,6 +252,63 @@ func TestRecordV2_ThroughTheRelayAResponseTheClientClosedPartwayIsLeftOutAndSays
 				}
 			}
 		})
+	}
+}
+
+// Through the relay, as the proxy records: a client closes partway through a
+// response, and the relay ends the destination's stream where the client
+// stopped. But before the relay has ended the stream, the session closes the
+// parser's stream (its abort, whose fallthrough leaves out the rest of the
+// connection under its own reason): the parser's read fails, as a read of a
+// closed stream does (ErrClosed), not at the stream's end (io.EOF). Only a
+// stream that ran out ended where the client stopped, so the exchange is not
+// reported as one the client closed partway: that would name the wrong cause.
+func TestRecordV2_ThroughTheRelayAStreamTheSessionClosedIsNotTheClientsClosePartway(t *testing.T) {
+	c := newRelayedConn(t)
+	// The relay must still be capturing when the session closes the stream:
+	// a grace this long keeps it from ending on an idle destination first.
+	c.grace = time.Hour
+	c.start(t)
+	write(t, c.app, c.src, jdkRequest(7))
+	relayed(t, c.dest, jdkRequest(7))
+	body := strings.Repeat("0123456789", 200)
+	read := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2000\r\n\r\n" + body[:500]
+	if _, err := c.dest.Write([]byte(read)); err != nil {
+		t.Fatal(err)
+	}
+	relayed(t, c.app, read)
+	if err := c.app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	awaitFIN(t, c.dest)
+	if _, err := c.dest.Write([]byte(body[500:])); err != nil {
+		t.Fatal(err)
+	}
+	for limit := time.Now().Add(10 * time.Second); !c.sess.EndedWhereClientStopped(); {
+		if time.Now().After(limit) {
+			t.Fatal("the relay did not end the stream where the client stopped")
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	select {
+	case <-c.relayDone:
+		t.Fatal("the relay ended before the session closed the stream")
+	default:
+	}
+	_ = c.sess.DestStream.Close()
+	_ = c.sess.ClientStream.Close()
+	// What recordV2 returns, and reports, for a stream the session closed
+	// under it is the abort's matter, not this row's.
+	select {
+	case <-c.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recordV2 did not return once the session closed its streams")
+	}
+	if l := c.leftOut(supervisor.LeftOutClientClosedPartway); len(l) != 0 {
+		t.Fatalf("%d left-out lines say the client closed partway, want none: the session closed the stream", len(l))
+	}
+	if n := c.logs.FilterMessageSnippet("the client closed the connection partway").Len(); n != 0 {
+		t.Fatalf("%d lines say the client closed partway, want none", n)
 	}
 }
 
