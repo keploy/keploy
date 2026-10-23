@@ -548,6 +548,8 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"an instant whose zone changed", "at " + wAt.Format(time.RFC3339), "at " + later.In(plus1).Format(time.RFC3339), whyZone, nil},
 		{"an instant that did not move as F's clock does", "at " + wAt.Format(time.RFC3339), "at " + wAt.Add(3*time.Hour).Format(time.RFC3339), whyInstant, nil},
 		{"an epoch that moved otherwise", "ts " + strconv.FormatInt(wAt.Unix(), 10), "ts " + strconv.FormatInt(wAt.Unix()+3600, 10), whyInstant, nil},
+		{"a UUID recorded with a variant keploy does not read, F's one it does", "id " + uuid7Of(wAt, "abc123456789abcdef", 'c', false), "id " + uuid7Of(later, "def0123456789abcde", '8', false), whyVariant, nil},
+		{"a UUID in F of a variant keploy does not read, the recorded one it does", "id " + uuid7Of(wAt, "abc123456789abcdef", '8', false), "id " + uuid7Of(later, "def0123456789abcde", 'c', false), "a time-ordered UUID in it has a variant keploy does not read", nil},
 		{"an instant written otherwise", strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.UnixMilli(), 10), whySkeleton, nil},
 		{"a changed word that repeats", "id=x1 ref=x1", "id=y2 ref=y2", whyRepeat, nil},
 		{"a changed word that repeats recorded only", "id=x1 ref=x1", "id=y2 ref=z3", whyRepeat, nil},
@@ -1405,6 +1407,40 @@ func TestAnEntryThisBuildCannotReadAdmitsNothing(t *testing.T) {
 	} {
 		if ok, why := WordsAdmit("ORD-1 ref=a1", "ORD-1 ref=b2", e); ok || why == "" || why != e.Unreadable() {
 			t.Errorf("WordsAdmit(%+v) = %v, %q: want a refusal saying %q", e, ok, why, e.Unreadable())
+		}
+	}
+}
+
+// uuid1Of is a version 1 UUID of instant at, with the given node.
+func uuid1Of(at time.Time, node string) string {
+	ts := uint64(at.UnixNano()/100) + 0x01B21DD213814000
+	return fmt.Sprintf("%08x-%04x-1%03x-8%03x-%s", ts&0xffffffff, (ts>>32)&0xffff, (ts>>48)&0x0fff, 0x123, node)
+}
+
+// A UUID's instant slot holds the version it was recorded with: an entry
+// learned of a version 1 UUID admits a later version 1 one and no version 7
+// one, and the reverse.
+func TestAUUIDInstantKeepsItsVersion(t *testing.T) {
+	later, other := wAt.Add(FullRoundLead), wAt.Add(5*time.Hour)
+	v1 := func(at time.Time) string { return "id " + uuid1Of(at, "0123456789ab") }
+	v7 := func(at time.Time) string { return "id " + uuid7Of(at, "abc123456789abcdef", '8', false) }
+	for _, tc := range []struct {
+		name      string
+		of, other func(time.Time) string
+		slots     string
+	}{
+		{"learned of version 1", v1, v7, "s1i:uuid:x8-x4-1x3-vx3-x12"},
+		{"learned of version 7", v7, v1, "s1i:uuid:x8-x4-7x3-vx3-x12"},
+	} {
+		e := learnedWords(t, tc.of(wAt), tc.of(later))
+		if got := slotsOf(e); got != tc.slots {
+			t.Fatalf("%s: slots %s, want %s", tc.name, got, tc.slots)
+		}
+		if ok, why := WordsAdmit(tc.of(wAt), tc.of(other), e); !ok {
+			t.Errorf("%s: a later UUID of its version is not admitted: %s", tc.name, why)
+		}
+		if ok, why := WordsAdmit(tc.of(wAt), tc.other(other), e); ok || why != "an instant of it is written otherwise than when it was recorded" {
+			t.Errorf("%s: a UUID of the other version: admitted %v (%q)", tc.name, ok, why)
 		}
 	}
 }
