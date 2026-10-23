@@ -578,6 +578,17 @@ func TestEachSlotIsMarkedWhereItStands(t *testing.T) {
 	if got := renderSlots(rec, e); got != "⟨changes⟩⟨changes⟩" {
 		t.Errorf("two slots that touch rendered %q", got)
 	}
+	// What stands after the last slot is written too, and the slots are
+	// marked in the value's order whatever order the entry lists them in.
+	rec = "id ab-12-cd tail"
+	e = learnedWords(t, rec, "id ab-34-ce tail")
+	if got := renderSlots(rec, e); got != "id ab-⟨changes⟩-⟨changes⟩ tail" {
+		t.Errorf("rendered %q", got)
+	}
+	e.Slots[0], e.Slots[1] = e.Slots[1], e.Slots[0]
+	if got := renderSlots(rec, e); got != "id ab-⟨changes⟩-⟨changes⟩ tail" {
+		t.Errorf("slots listed out of order rendered %q", got)
+	}
 }
 
 // What a learned file says of a leaf: unread, redacted (by its place, or by
@@ -675,6 +686,106 @@ func TestLegibleListsInOrderAndRedacts(t *testing.T) {
 		if l.Variable == "" && l.Recorded != notALeaf {
 			t.Errorf("%s: %q, want %q", l.Path, l.Recorded, notALeaf)
 		}
+	}
+}
+
+// Legible lists the mocks by name, whatever order the store reads them in;
+// says so when no store is registered; and says of each leaf what it is: an
+// entry this build cannot read and a void one compared whole, an echo of
+// this call alone, a variable's words where it binds, its ID of its words'
+// digest, and every recorded value the obfuscator matches redacted.
+func TestLegibleSaysWhatEachLeafIs(t *testing.T) {
+	note := learnedWords(t, "ORD-1 ref=a1", "ORD-1 ref=b2")
+	newer := note.Clone()
+	newer.V = models.WordsVersion + 1
+	vw := learnedWords(t, "o-1111", "o-9999")
+	m2 := &models.Mock{Name: "mock-2", Kind: models.HTTP, Noise: []string{"^s3cr3t-"}, Spec: models.MockSpec{
+		Metadata:     map[string]string{"body.note": "ORD-1 ref=a1", "body.id": "o-1111", "header.x-ref": "ORD-1 ref=a1"},
+		LearnedWords: map[string]models.WordsEntry{"body.note": newer, "header.x-ref": models.VoidWords(note.Digest)},
+		Variables: models.MockVariables{
+			"echo": {Recorded: "o-1111", Bind: "body.id", Echo: true},
+			"word": {Recorded: "o-1111", Bind: "body.w", Words: &vw},
+			"sec":  {Recorded: "s3cr3t-3", Bind: "body.s"},
+		},
+	}}
+	m1 := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqBodyNoise: map[string][]string{"body.at": nil}}}
+	withSet(t, []*models.Mock{m2, m1})
+	set := filepath.Join(t.TempDir(), "test-set-0")
+	leaves, err := Legible(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaves) == 0 || leaves[0].Mock != "mock-1" {
+		t.Fatalf("leaves %+v, want mock-1's first", leaves)
+	}
+	by := map[string]models.LearnedLeaf{}
+	for _, l := range leaves {
+		by[l.Path] = l
+	}
+	if l := by["body.note"]; len(l.Slots) != 0 || !strings.Contains(l.Why, "is compared whole: its learned words entry is "+models.WordsWrittenByNewer) {
+		t.Errorf("an entry of a newer keploy: %+v", l)
+	}
+	if l := by["header.x-ref"]; !strings.Contains(l.Why, "in two ways, so its learned words are void") {
+		t.Errorf("a void entry: %+v", l)
+	}
+	if l := by["body.id"]; !strings.Contains(l.Why, "of this call alone") {
+		t.Errorf("an echo: %+v", l)
+	}
+	if l := by["body.w"]; l.ID != learnedID("test-set-0", "mock-2", "body.w", vw.Digest) || !strings.Contains(l.Why, "only its marked words may change where it binds") {
+		t.Errorf("a variable's words: %+v", l)
+	}
+	if l := by["body.s"]; l.Recorded != redacted || l.Rendered != "body.s = "+redacted {
+		t.Errorf("a variable's recorded value the obfuscator matches: %+v", l)
+	}
+	RegisterSetReader(nil)
+	if _, err := Legible(set); err == nil || !strings.Contains(err.Error(), "no mock store is registered") {
+		t.Errorf("no store: %v", err)
+	}
+}
+
+// A learned file keploy cannot read (here a folder) is an error, never one
+// with no leaves; a local file's leaf this run has no value for keeps the
+// value the file holds; and with no local value and no learned file the
+// copy-back reads nothing, the staging mocks included.
+func TestWhatTheLocalFileKeepsAndWhatItCannotRead(t *testing.T) {
+	_, set := localSet(t, "ORD-1 ref=a1", "ORD-1 ref=b2", nil)
+	two := learnedWords(t, "ORD-2 ref=a1", "ORD-2 ref=b2")
+	one := learnedWords(t, "ORD-1 ref=a1", "ORD-1 ref=b2")
+	RegisterSetReader(func(string) ([]*models.Mock, error) {
+		return []*models.Mock{{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:     map[string]string{"body.note": "ORD-1 ref=a1", "body.id": "ORD-2 ref=a1"},
+			LearnedWords: map[string]models.WordsEntry{"body.note": one, "body.id": two}}}}, nil
+	})
+	if err := WriteLearned(set, []LocalValue{{Mock: "mock-1", Path: "body.note", F: "ORD-1 ref=b2"}, {Mock: "mock-1", Path: "body.id", F: "ORD-2 ref=b2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteLearned(set, []LocalValue{{Mock: "mock-1", Path: "body.note", F: "ORD-1 ref=c3"}}); err != nil {
+		t.Fatal(err)
+	}
+	local, err := readLearned(filepath.Join(set, models.LearnedLocalFile))
+	if err != nil || len(local) != 2 {
+		t.Fatalf("local %+v (%v)", local, err)
+	}
+	for _, l := range local {
+		if want := map[string]string{"body.note": "ORD-1 ref=c3", "body.id": "ORD-2 ref=b2"}[l.Path]; l.F != want {
+			t.Errorf("%s: F %q, want %q", l.Path, l.F, want)
+		}
+	}
+	stage := filepath.Join(t.TempDir(), "stage", "test-set-0")
+	if err := os.MkdirAll(filepath.Join(stage, models.LearnedLocalFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeLocal(set, stage); err == nil {
+		t.Error("a staging local file that is a folder merged")
+	}
+	fresh := filepath.Join(t.TempDir(), "keploy", "test-set-0")
+	empty := filepath.Join(t.TempDir(), "stage", "test-set-0")
+	if err := os.MkdirAll(fresh, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failingReader(t)
+	if err := MergeLocal(fresh, empty); err != nil {
+		t.Errorf("nothing to merge and nothing to prune read the staging mocks: %v", err)
 	}
 }
 

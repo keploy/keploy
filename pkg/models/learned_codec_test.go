@@ -451,7 +451,7 @@ func TestAMocksWordsTravelByGob(t *testing.T) {
 func TestTheJSONNumberGrammar(t *testing.T) {
 	for s, want := range map[string]bool{
 		"0": true, "-0": true, "7": true, "9": true, "19": true, "90": true, "-12": true,
-		"1.5": true, "1.9": true, "0.25": true, "1e5": true, "1E5": true, "1e+5": true, "1e-5": true, "1.5e3": true, "-1.5E-3": true, "1e59": true,
+		"1.5": true, "1.9": true, "1e0": true, "1e10": true, "0.25": true, "1e5": true, "1E5": true, "1e+5": true, "1e-5": true, "1.5e3": true, "-1.5E-3": true, "1e59": true,
 		"": false, "-": false, "01": false, "+1": false, "1.": false, ".5": false, "-.5": false, "e5": false, "E5": false,
 		"1e": false, "1e+": false, "1E-": false, "1x": false, "0x1F": false, "1.2.3": false, "--1": false, "1e5.0": false,
 		"a": false, ":": false, "1_000": false, "1.5a": false, "1.5-": false, "1.a": false, "1e5a": false, "1e5-": false, "1ee5": false,
