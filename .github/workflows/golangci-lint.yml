@@ -103,7 +103,12 @@ jobs:
           #   v2.14.0  -> first release that reads go1.27.2+ export data; 0
           #               issues on go1.27.3 (go.mod's go line, the eMudhra
           #               crypto/x509 fix). Same version keploy-ci-golint ships.
-          version: v2.14.0
+          #   v2.15.0  -> errcheck 1.20.0 -> 1.30.0, which also reports a
+          #               receive whose error value is dropped (`<-errCh`,
+          #               `case <-done:` on a chan error); staticcheck 0.8.2.
+          #               Its release binary is built with go1.27.0 and
+          #               reads go1.27.3 export data.
+          version: v2.15.0
           only-new-issues: true
           args: --timeout=5m
 
