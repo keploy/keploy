@@ -154,3 +154,74 @@ func TestStartWhoseAgentCannotStartExitsWithItsCode(t *testing.T) {
 		t.Fatalf("exit code %d, want %d", utils.ErrCode, utils.ExitPrivilegeRequired)
 	}
 }
+
+// GetTestRunID names the run this Start made, and none for a Start that
+// stopped before it named one: a replayer an earlier Start named test-run-1
+// whose next Start fails before its first test set (its agent does not come
+// up) said test-run-1 was that run, and a caller reading that run's reports
+// read the earlier run's green as this one's.
+func TestAStartThatNamesNoRunDoesNotNameTheOneBefore(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	cause := errors.New("the keploy agent could not start")
+	sets := func(context.Context) ([]string, error) { return []string{"test-set-0"}, nil }
+	r := NewReplayer(zap.NewNop(), startTestDB{list: sets}, nil, startReportDB{}, nil, nil, startTelemetry{}, setupFailsInstrumentation{err: cause}, nil, &config.Config{Command: "true"}).(*Replayer)
+	// What an earlier Start of this replayer named.
+	r.testRunID, r.testRunTestSets = "test-run-1", []string{"test-set-0"}
+	if err := r.Start(context.Background()); err == nil || !strings.Contains(err.Error(), cause.Error()) {
+		t.Fatalf("Start returned %v; want it to name the agent's failure (%v)", err, cause)
+	}
+	if got := r.GetTestRunID(); got != "" {
+		t.Fatalf("GetTestRunID = %q after a Start that named no run; want \"\"", got)
+	}
+	if r.testRunTestSets != nil {
+		t.Fatalf("the earlier run's test sets are still this run's: %v", r.testRunTestSets)
+	}
+}
+
+// A Start that its user stops before its first test set is the run of none
+// of an earlier Start's tests: it exits 0, as an interrupted run that failed
+// nothing does, and its totals, reports, failures and the test sets whose
+// misses it could not attribute are its own -- none.
+// They were reset only once the test sets were listed, so the exit code read
+// an earlier Start's failed tests and exited 1, and the getters returned
+// that run's.
+func TestAStartStoppedBeforeItsFirstSetCarriesNoEarlierRun(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := func(ctx context.Context) ([]string, error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	r := NewReplayer(zap.NewNop(), startTestDB{list: stop}, nil, nil, nil, nil, startTelemetry{}, startInstrumentation{}, nil, &config.Config{}).(*Replayer)
+	// What an earlier Start of this replayer ran: two tests, one failed.
+	r.totalTests, r.totalTestPassed, r.totalTestFailed = 2, 1, 1
+	r.completeTestReport = map[string]TestReportVerdict{"test-set-0": {}}
+	r.mockMismatchFailures.AddFailure("test-set-0", "test-1", []string{"mock-1"}, nil)
+	r.noteUnattributed("test-set-0")
+	if err := r.Start(ctx); err == nil {
+		t.Fatal("Start returned nil for a run stopped before its first test set")
+	}
+	if utils.ErrCode != 0 {
+		t.Fatalf("exit code %d for a run its user stopped before it ran a test; want 0", utils.ErrCode)
+	}
+	if total, passed, failed := r.GetTestRunTotals(); total != 0 || passed != 0 || failed != 0 {
+		t.Fatalf("totals %d/%d/%d are an earlier run's", total, passed, failed)
+	}
+	if got := r.GetCompleteTestRunReport(); len(got) != 0 {
+		t.Fatalf("the complete report is an earlier run's: %v", got)
+	}
+	if got := r.GetMockMismatchFailures(); len(got) != 0 {
+		t.Fatalf("the mock mismatch failures are an earlier run's: %v", got)
+	}
+	r.unattributedMu.Lock()
+	unattributed := len(r.unattributedSets)
+	r.unattributedMu.Unlock()
+	if unattributed != 0 {
+		t.Fatalf("the test sets an earlier run could not attribute misses of are this run's: %v", r.unattributedSets)
+	}
+}
