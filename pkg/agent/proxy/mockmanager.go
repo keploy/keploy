@@ -4173,7 +4173,12 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 // ---------- bookkeeping ----------
 
 // SetServedObserver makes f told of every mock a parser is served, from now
-// on (nil: none).
+// on (nil: none). Under exact serving f runs in the step that settles the
+// consume, holding the round lock (exact_round.go), so a snapshot of the
+// round reads the consume and f's account of it together: f must not call
+// back into the manager (a consume door, a snapshot, a claim or a spend,
+// LearnBoundary), or it waits on the lock it runs under. The learn
+// tracker's ServedMock takes only its own lock.
 func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	if f == nil {
 		m.servedObserver.Store(nil)

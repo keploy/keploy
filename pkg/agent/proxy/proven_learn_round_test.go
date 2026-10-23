@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -378,6 +379,62 @@ func TestALearnStepReadsTheRoundOnceMoreAfterAnInstall(t *testing.T) {
 	}
 	if code != http.StatusOK || got != `{"order":1}` {
 		t.Fatalf("the call in flight got %d %s; want test-2's mock-a", code, got)
+	}
+}
+
+// A take refused because the learn tracker began or ended a test between a
+// pass's read and its take is read again: the boundary moves the round's
+// generation, not the store's revision, and the next pass, of the round as
+// it is now, serves the call. Told by the store's revision alone, the
+// refusal read as a recording the store would not hand out, and a call its
+// recording answers exactly missed: a false red. Two schedules the replay
+// makes: keploy mock's scope flow opens a test's view before the tracker
+// begins it, and the replay ends a test on the store (its pool view) before
+// the tracker.
+func TestALearnStepReadsAgainATakeALearnBoundaryRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		at       func(p *Proxy, mm *MockManager)
+		boundary func(p *Proxy)
+		request  string
+		want     string
+	}{
+		{"the tracker begins the test the store shows",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			},
+			func(p *Proxy) { p.ContinueTestErrorCapture() },
+			"GET /status HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n", `{"up":1}`},
+		{"the tracker ends the test the store ended",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			},
+			func(p *Proxy) { p.EndTestErrorCapture() },
+			roundPost(`{"item":"apple"}`), `{"order":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mm := s12Orders(t)
+			tc.at(p, mm)
+			before, _ := mm.RoundSnapshot(integrations.RoundQuery{})
+			// The boundary lands as the call's take is about to take the
+			// round lock: after its read, before its check.
+			var moved atomic.Bool
+			mm.exact.round.onWait = func() {
+				if moved.CompareAndSwap(false, true) {
+					tc.boundary(p)
+				}
+			}
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, tc.request)
+			after, _ := mm.RoundSnapshot(integrations.RoundQuery{})
+			if !moved.Load() || after.At.Gen == before.At.Gen {
+				t.Fatalf("precondition: no boundary landed under the call's take (round %+v -> %+v)", before.At, after.At)
+			}
+			if code != http.StatusOK || got != tc.want {
+				t.Fatalf("a call whose take a learn boundary refused got %d %s; want %s, read again", code, got, tc.want)
+			}
+		})
 	}
 }
 

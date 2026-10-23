@@ -84,10 +84,16 @@ type roundLog struct {
 	epoch uint64
 	takes []integrations.Take
 	// ahead is, by name, the entry of each ahead answer no view has
-	// carried or voided yet; taken, the names of the recordings consumed,
-	// spent or claimed in the staging.
+	// carried or voided yet; taken, the names of the recordings consumed or
+	// spent in the staging and not given back since. A pairing's claims
+	// are the staging's claimed set's (exactClaimed).
 	ahead map[string]int
 	taken map[string]bool
+	// byTest is, by test, the entries of what its views answered in the
+	// staging that a view of it installed again gives back (reopenLocked):
+	// its own and the shared recordings it consumed, and the ahead answers
+	// carried into it (their TakeConsumed entries).
+	byTest map[string][]int
 }
 
 // lockRound takes the round lock for a change (onWait first).
@@ -128,28 +134,65 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	if t.Mock == nil {
 		return i
 	}
+	byTest := func(test string, at int) {
+		if l.byTest == nil {
+			l.byTest = map[string][]int{}
+		}
+		l.byTest[test] = append(l.byTest[test], at)
+	}
 	switch t.How {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
-	case integrations.TakeConsumed, integrations.TakeSpent, integrations.TakeClaimed:
+	case integrations.TakeCarried:
+		if t.Of >= 0 {
+			byTest(t.Test, t.Of)
+		}
+	case integrations.TakeConsumed, integrations.TakeSpent:
 		if l.taken == nil {
 			l.taken = map[string]bool{}
 		}
 		l.taken[t.Mock.Name] = true
-		if t.Ahead {
+		switch {
+		case t.Ahead:
 			if l.ahead == nil {
 				l.ahead = map[string]int{}
 			}
 			l.ahead[t.Mock.Name] = i
+		case t.How == integrations.TakeConsumed && t.Test != "":
+			byTest(t.Test, i)
 		}
 	}
 	return i
 }
 
-// takenInStagingLocked reports whether name was consumed, spent or claimed
-// in the current staging (the take log), holding the round lock.
+// takenInStagingLocked reports whether name was consumed or spent in the
+// current staging (the take log), and not given back since, holding the
+// round lock.
 func (m *MockManager) takenInStagingLocked(name string) bool {
 	return m.logLocked().taken[name]
+}
+
+// reopenLocked writes, holding the round lock as v, a test's view, is
+// installed, that what an earlier view of the same test answered in the
+// staging answers again: a test opened again (a retry) starts its own, the
+// shared recordings it answered with (exactClaims.release) and the ahead
+// answers carried into it afresh, as v shows them unconsumed. One
+// TakeRestored entry per answer of a recording v holds (Of: its
+// TakeConsumed entry), each given back once.
+func (m *MockManager) reopenLocked(v *exactView) {
+	l := m.logLocked()
+	given := l.byTest[v.test]
+	if len(given) == 0 {
+		return
+	}
+	delete(l.byTest, v.test)
+	for _, i := range given {
+		mk := l.takes[i].Mock
+		if _, held := v.index[mk.Name]; !held {
+			continue
+		}
+		m.takeLocked(integrations.Take{Mock: mk, How: integrations.TakeRestored, Gen: v.round, Test: v.test, Of: i})
+	}
 }
 
 // settleAheadLocked writes, holding the round lock as into is installed,
@@ -198,7 +241,9 @@ func (m *MockManager) restoreLocked(names []string) {
 		case t.How == integrations.TakeSpent && !t.ForView:
 			last[t.Mock.Name] = i
 		case t.How == integrations.TakeRestored:
-			delete(last, t.Mock.Name)
+			if at, ok := last[t.Mock.Name]; ok && at == t.Of {
+				delete(last, t.Mock.Name)
+			}
 		}
 	}
 	r.bump("a test process claimed its key again: what it spent answers again")
@@ -478,6 +523,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	parts := integrations.RoundParts{
 		Owners: owners, Claimants: claimants, Worker: v.worker, Pool: v.pool,
 		Windows: m.testWindows.Load(), PoolNames: m.exact.poolNames.Load(),
+		ViewGen: v.round,
 	}
 	if v.bg != nil {
 		parts.BackgroundPool = v.bg.pool

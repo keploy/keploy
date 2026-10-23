@@ -573,6 +573,47 @@ func TestARestartedKeyGivesItsSpendsBackInOneStepOfTheRound(t *testing.T) {
 	}
 }
 
+// A restarted key gives back each spend once: a second restart with nothing
+// spent since writes nothing. A give-back is of the entry it names: a
+// retried test giving back its consume of a recording leaves the staging's
+// spend of the same recording for the key's restart to give back.
+func TestARestartedKeyGivesBackEachSpendOnce(t *testing.T) {
+	t.Run("twice", func(t *testing.T) {
+		s := newRoundStore(t)
+		s.poolSpent()
+		s.mm.RestartExactKey(models.PoolKeyNone, []string{"pool"})
+		once := s.snapshot(t)
+		s.mm.RestartExactKey(models.PoolKeyNone, []string{"pool"})
+		if twice := s.snapshot(t); len(twice.Taken) != len(once.Taken) {
+			t.Fatalf("a second restart wrote %d entries for a spend given back already: %+v", len(twice.Taken)-len(once.Taken), twice.Taken[len(once.Taken):])
+		}
+	})
+	t.Run("the entry it names", func(t *testing.T) {
+		s := newRoundStore(t)
+		s.poolSpent()
+		spend := len(s.snapshot(t).Taken) - 1
+		open := func() {
+			s.begin()
+			s.mm.ServeExactTest("T1", []*models.Mock{s.ms["pool"]})
+		}
+		open()
+		if !s.mm.DeleteFilteredMock(*shown(s.snapshot(t), "pool")) {
+			t.Fatal("precondition: T1's own was refused")
+		}
+		s.mm.ServeExactPool(models.PoolKeyNone, nil)
+		s.end()
+		open()
+		reopened := s.snapshot(t)
+		if gave := lastTake(t, reopened); gave.How != integrations.TakeRestored || gave.Of == spend {
+			t.Fatalf("precondition: T1's retry wrote %+v", gave)
+		}
+		s.mm.RestartExactKey(models.PoolKeyNone, []string{"pool"})
+		if gave := lastTake(t, s.snapshot(t)); gave.How != integrations.TakeRestored || gave.Of != spend {
+			t.Fatalf("the restart wrote %+v; want the staging's spend at %d given back", gave, spend)
+		}
+	})
+}
+
 // A test's view is bound to the learn tracker's open test only when no other
 // view is bound to it. After a test whose end never reached the tracker (its
 // misses' read did not complete), the next test's view, installed before the
@@ -693,6 +734,240 @@ func TestTheTakeLogCarriesAndVoidsAheadAnswers(t *testing.T) {
 			t.Fatalf("the next staging starts at %+v, candidates %v", snap.At, exactNames(snap.Candidates))
 		}
 	})
+}
+
+// roundClass is where name is at snap: shown unconsumed, a pairing
+// candidate, the background's unused, answered (AnsweredInRound) or
+// claimed (ClaimedInRound), joined with "+" when in several, "none" when in
+// none.
+func roundClass(snap integrations.RoundSnapshot, name string) string {
+	var in []string
+	for _, c := range []struct {
+		is   bool
+		name string
+	}{
+		{shown(snap, name) != nil, "shown"},
+		{hasName(snap.Candidates, name), "candidate"},
+		{hasName(snap.BackgroundUnused, name), "unused"},
+		{snap.AnsweredInRound(name), "answered"},
+		{snap.ClaimedInRound(name), "claimed"},
+	} {
+		if c.is {
+			in = append(in, c.name)
+		}
+	}
+	if len(in) == 0 {
+		return "none"
+	}
+	return strings.Join(in, "+")
+}
+
+// roundClasses checks, at snap, where each of want's recordings is
+// (roundClass), and that no data-plane recording of the store is both
+// answered and still free to answer (shown unconsumed, a candidate, the
+// background's unused), but a voided ahead answer a view shows, or both
+// claimed and a candidate.
+func roundClasses(t *testing.T, when string, s *roundStore, snap integrations.RoundSnapshot, want map[string]string) {
+	t.Helper()
+	for name, w := range want {
+		if got := roundClass(snap, name); got != w {
+			t.Errorf("%s: %s is %s, want %s\n%s", when, name, got, w, roundSummary(snap))
+		}
+	}
+	for name, mk := range s.ms {
+		if mk.IsProtocolPhase() {
+			continue
+		}
+		c := roundClass(snap, name)
+		free := strings.Contains(c, "shown") || strings.Contains(c, "candidate") || strings.Contains(c, "unused")
+		voided := hasName(snap.Voided(), name)
+		if free && strings.Contains(c, "answered") && !voided || strings.Contains(c, "claimed") && strings.Contains(c, "candidate") {
+			t.Errorf("%s: %s is %s", when, name, c)
+		}
+	}
+}
+
+// lastTake is snap's take log's last entry.
+func lastTake(t *testing.T, snap integrations.RoundSnapshot) integrations.Take {
+	t.Helper()
+	if len(snap.Taken) == 0 {
+		t.Fatal("the take log is empty")
+	}
+	return snap.Taken[len(snap.Taken)-1]
+}
+
+// A test opened again in the staging (a retry) starts afresh what its
+// earlier view answered: its own, the shared recordings it answered with,
+// and the ahead answers carried into it. The view shows them unconsumed,
+// and the take log gives each back in the install's step (TakeRestored, Of
+// its consume), once, and only for a recording the new view holds. Read
+// from the log without it, a retried test's own read as answered while its
+// view showed it and served it again: a learn step that counts the log's
+// answers as spent would refuse the retry's own calls.
+func TestATestOpenedAgainAnswersAfreshInTheTakeLog(t *testing.T) {
+	retry := func(s *roundStore, open func()) {
+		s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		s.end()
+		s.begin()
+		open()
+	}
+	t.Run("its own", func(t *testing.T) {
+		s := newRoundStore(t)
+		open := func() { s.mm.ServeExactTest("T1", []*models.Mock{s.ms["own"], s.ms["own2"]}) }
+		s.begin()
+		open()
+		for attempt := 1; attempt <= 3; attempt++ {
+			before := s.snapshot(t)
+			roundClasses(t, fmt.Sprintf("attempt %d opened", attempt), s, before, map[string]string{"own": "shown", "own2": "shown"})
+			if !s.mm.WithinRound(before.At).DeleteFilteredMock(*shown(before, "own")) {
+				t.Fatalf("attempt %d: T1's own was refused", attempt)
+			}
+			answered := s.snapshot(t)
+			consume := len(answered.Taken) - 1
+			roundClasses(t, fmt.Sprintf("attempt %d answered own", attempt), s, answered, map[string]string{"own": "answered", "own2": "shown"})
+			retry(s, open)
+			again := s.snapshot(t)
+			gave := lastTake(t, again)
+			if gave.How != integrations.TakeRestored || gave.Mock.Name != "own" || gave.Of != consume || gave.Test != "T1" || again.At.Gen == answered.At.Gen {
+				t.Fatalf("attempt %d: the retry wrote %+v; want own's consume at %d given back", attempt, gave, consume)
+			}
+			if n := len(again.Taken) - len(answered.Taken); n != 1 {
+				t.Fatalf("attempt %d: the retry wrote %d entries; want one, an answer given back once", attempt, n)
+			}
+		}
+	})
+	t.Run("a shared recording", func(t *testing.T) {
+		s := newRoundStore(t)
+		open := func() {
+			s.mm.ServeExactTestConcurrent("T1", []*models.Mock{s.ms["own"]}, []*models.Mock{s.ms["next2"]})
+		}
+		s.begin()
+		open()
+		snap := s.snapshot(t)
+		if snap.Owner(s.ms["next2"]) != integrations.OwnerShared || !s.mm.DeleteFilteredMock(*shown(snap, "next2")) {
+			t.Fatalf("precondition: T1 did not answer with the shared next2 (owner %d)", snap.Owner(s.ms["next2"]))
+		}
+		answered := s.snapshot(t)
+		roundClasses(t, "T1 answered with next2", s, answered, map[string]string{"next2": "answered"})
+		retry(s, open)
+		again := s.snapshot(t)
+		roundClasses(t, "T1 opened again", s, again, map[string]string{"next2": "shown"})
+		if gave := lastTake(t, again); gave.How != integrations.TakeRestored || gave.Of != len(answered.Taken)-1 || again.Owner(s.ms["next2"]) != integrations.OwnerShared {
+			t.Fatalf("the retry wrote %+v; next2 is %d", gave, again.Owner(s.ms["next2"]))
+		}
+	})
+	t.Run("an ahead answer carried into it", func(t *testing.T) {
+		s := newRoundStore(t)
+		s.betweenWithAhead()
+		if !s.mm.DeleteFilteredMock(*shown(s.snapshot(t), "next")) {
+			t.Fatal("precondition: the ahead answer was refused")
+		}
+		ahead := len(s.snapshot(t).Taken) - 1
+		open := func() { s.mm.ServeExactTest("T2", []*models.Mock{s.ms["next"], s.ms["next2"]}) }
+		s.begin()
+		open()
+		carried := s.snapshot(t)
+		roundClasses(t, "T2 opened with next carried", s, carried, map[string]string{"next": "answered", "next2": "shown"})
+		if got := exactNames(carried.TakenInView()); strings.Join(got, ",") != "next" {
+			t.Fatalf("precondition: T2 answered %v", got)
+		}
+		retry(s, open)
+		again := s.snapshot(t)
+		roundClasses(t, "T2 opened again", s, again, map[string]string{"next": "shown", "next2": "shown"})
+		if gave := lastTake(t, again); gave.How != integrations.TakeRestored || gave.Mock.Name != "next" || gave.Of != ahead || len(again.TakenInView()) != 0 {
+			t.Fatalf("the retry wrote %+v (want the ahead consume at %d given back); its view answered %v", gave, ahead, exactNames(again.TakenInView()))
+		}
+	})
+	t.Run("a voided ahead answer stays answered", func(t *testing.T) {
+		// next answered T2's call in flight; T2 did not open next (voided),
+		// opened later, answered next again, and is opened again: the retry
+		// gives back T2's own answer alone, never the voided one.
+		s := newRoundStore(t)
+		s.betweenWithAhead()
+		if !s.mm.DeleteFilteredMock(*shown(s.snapshot(t), "next")) {
+			t.Fatal("precondition: the ahead answer was refused")
+		}
+		s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		open := func() { s.mm.ServeExactTest("T2", []*models.Mock{s.ms["next"], s.ms["next2"]}) }
+		s.begin()
+		open()
+		later := s.snapshot(t)
+		roundClasses(t, "T2 opened after its ahead answer was voided", s, later, map[string]string{"next": "shown+answered"})
+		if !s.mm.DeleteFilteredMock(*shown(later, "next")) {
+			t.Fatal("precondition: T2 did not answer next")
+		}
+		retry(s, open)
+		again := s.snapshot(t)
+		roundClasses(t, "T2 opened again", s, again, map[string]string{"next": "shown+answered"})
+		if gave := lastTake(t, again); gave.How != integrations.TakeRestored || again.Taken[gave.Of].Ahead {
+			t.Fatalf("the retry wrote %+v; want T2's own answer given back", gave)
+		}
+	})
+	t.Run("only what the view opened again holds", func(t *testing.T) {
+		s := newRoundStore(t)
+		s.inTest()
+		snap := s.snapshot(t)
+		for _, n := range []string{"own", "own2"} {
+			if !s.mm.DeleteFilteredMock(*shown(snap, n)) {
+				t.Fatalf("precondition: %s was refused", n)
+			}
+		}
+		answered := s.snapshot(t)
+		retry(s, func() { s.mm.ServeExactTest("T1", []*models.Mock{s.ms["own"]}) })
+		again := s.snapshot(t)
+		roundClasses(t, "T1 opened again with own alone", s, again, map[string]string{"own": "shown", "own2": "answered"})
+		if n := len(again.Taken) - len(answered.Taken); n != 1 || lastTake(t, again).Mock.Name != "own" {
+			t.Fatalf("the retry wrote %d entries, the last %+v; want own's alone", n, lastTake(t, again))
+		}
+	})
+}
+
+// A pairing's claim is no answer of the recording's own: the recording stays
+// its owner's, and no pairing takes it again. Until its owner opens, it is
+// claimed and in no other class; its owner's view shows it, unconsumed and
+// unanswered, and the owner's call takes it, which answers it. Counted as
+// answered from the claim on, a learn step reading the log would refuse the
+// owner's own call that the store serves.
+func TestAPairingsClaimIsNoAnswerOfTheRecordingsOwn(t *testing.T) {
+	s := newRoundStore(t)
+	s.inTest()
+	roundClasses(t, "T1 open", s, s.snapshot(t), map[string]string{"other": "candidate"})
+	if !s.mm.ClaimPairing(s.ms["other"]) {
+		t.Fatal("precondition: T1's call could not claim T3's other")
+	}
+	roundClasses(t, "other claimed", s, s.snapshot(t), map[string]string{"other": "claimed"})
+	s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+	s.end()
+	s.begin()
+	s.mm.ServeExactTest("T3", []*models.Mock{s.ms["other"]})
+	open := s.snapshot(t)
+	roundClasses(t, "T3 open", s, open, map[string]string{"other": "shown+claimed"})
+	if !s.mm.WithinRound(open.At).DeleteFilteredMock(*shown(open, "other")) {
+		t.Fatal("T3's own call could not take the recording a pairing claimed")
+	}
+	roundClasses(t, "T3 answered other", s, s.snapshot(t), map[string]string{"other": "answered+claimed"})
+	if s.mm.ClaimPairing(s.ms["other"]) {
+		t.Fatal("a pairing claimed other a second time")
+	}
+}
+
+// A spend for the view alone (a protocol-phase recording a delete door
+// evicted in a test) answers no call again while that view is in force, and
+// answers again in the next view, which shows it.
+func TestAViewsEvictionIsAnsweredWhileThatViewIsInForce(t *testing.T) {
+	s := newRoundStore(t)
+	s.inTest()
+	if !s.mm.DeleteFilteredMock(*shown(s.snapshot(t), "hs")) {
+		t.Fatal("precondition: the handshake was not evicted")
+	}
+	evicted := s.snapshot(t)
+	if tk := lastTake(t, evicted); !tk.ForView || shown(evicted, "hs") != nil || !evicted.AnsweredInRound("hs") {
+		t.Fatalf("in the view that evicted it: %+v, shown %v, answered %v", tk, shown(evicted, "hs") != nil, evicted.AnsweredInRound("hs"))
+	}
+	s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+	if next := s.snapshot(t); shown(next, "hs") == nil || next.AnsweredInRound("hs") {
+		t.Fatalf("in the next view: shown %v, answered %v", shown(next, "hs") != nil, next.AnsweredInRound("hs"))
+	}
 }
 
 // Where nothing moves, a snapshot's reads are the accessors': the view's

@@ -98,8 +98,10 @@ const (
 	// pool in a test), or, ForView, a protocol-phase one until the view
 	// changes.
 	TakeSpent
-	// TakeClaimed: a pairing claimed another test's recording (no
-	// consumption: it stays its owner's).
+	// TakeClaimed: a pairing claimed another test's recording. A claim is
+	// no consumption: the recording stays its owner's, whose view shows it
+	// unconsumed until the owner's own call takes it; no pairing takes it
+	// again in the staging.
 	TakeClaimed
 	// TakeCarried: a test view's install carried a pool view's ahead answer
 	// into the test (Of: that answer's entry).
@@ -108,10 +110,13 @@ const (
 	// test: the test it was answered for did not open next (Of: that
 	// answer's entry). It answered a call of the round all the same.
 	TakeVoided
-	// TakeRestored: a recording spent for the staging answers again (Of:
-	// the TakeSpent entry it gives back): a test process claimed its pool
-	// slice's key again (MockManager.RestartExactKey), a new scope, as a
-	// test begun again is.
+	// TakeRestored: a take given back, its recording answering again (Of:
+	// the entry it gives back): a spend for the staging, when a test
+	// process claimed its pool slice's key again
+	// (MockManager.RestartExactKey), a new scope; or what a test's earlier
+	// view answered (its own, a shared recording, an ahead answer carried
+	// into it), when a view of the same test is installed again in the
+	// staging (a retry), which starts them afresh.
 	TakeRestored
 )
 
@@ -130,12 +135,13 @@ type Take struct {
 	Test string
 	// Ahead: a TakeConsumed of a pool view's ahead.
 	Ahead bool
-	// ForView: a TakeSpent that holds until the view changes, not for the
-	// staging (a protocol-phase recording a delete door evicted in a test).
+	// ForView: a TakeSpent that holds while the view it was made in (Gen)
+	// is in force, not for the staging (a protocol-phase recording a
+	// delete door evicted in a test): the next view shows it again.
 	ForView bool
 	// Of is, for TakeCarried and TakeVoided, the index of the ahead's
-	// TakeConsumed entry, for TakeRestored the index of the TakeSpent
-	// entry it gives back; -1 otherwise.
+	// TakeConsumed entry, for TakeRestored the index of the TakeSpent or
+	// TakeConsumed entry it gives back; -1 otherwise.
 	Of int
 }
 
@@ -223,6 +229,7 @@ type RoundSnapshot struct {
 	poolNames *map[string]struct{}
 	winStart  time.Time
 	winEnd    time.Time
+	viewGen   uint64
 }
 
 // RoundParts is what a store fills a RoundSnapshot's unexported answers
@@ -239,6 +246,9 @@ type RoundParts struct {
 	Windows                *models.WindowSchedule
 	PoolNames              *map[string]struct{}
 	WindowStart, WindowEnd time.Time
+	// ViewGen is the generation the view in force was installed at (the
+	// Gen of the takes made in it).
+	ViewGen uint64
 }
 
 // WithParts is s answering from p (a store's, read with s).
@@ -247,6 +257,7 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	s.worker, s.pool, s.bgPool = p.Worker, p.Pool, p.BackgroundPool
 	s.windows, s.poolNames = p.Windows, p.PoolNames
 	s.winStart, s.winEnd = p.WindowStart, p.WindowEnd
+	s.viewGen = p.ViewGen
 	return s
 }
 
@@ -373,23 +384,52 @@ func (s RoundSnapshot) Voided() []*models.Mock {
 }
 
 // AnsweredInRound reports whether name answered a call of the round in the
-// staging and answers none again: consumed (an ahead answer included,
-// carried or voided), spent or claimed, and not restored since
-// (TakeRestored).
+// staging and answers none again: by a consume (an ahead answer included,
+// carried or voided) or a spend that no TakeRestored gave back (a retried
+// test's, a restarted key's: each gives back the one entry it names). A
+// spend for the view alone (ForView) counts while that view is in force. A
+// pairing's claim is no answer of the recording's own (ClaimedInRound).
+//
+// With it, every data-plane recording of the staging is, at one snapshot,
+// in at most one of: shown unconsumed (PerTest, Session, ...), the
+// pairing's candidates (Candidates, OnDisk), the background's unused
+// (BackgroundUnused), or answered. Two kinds are in none: a claimed
+// recording its owner's view does not show, and a retried test's own its
+// retry did not answer again (the replay's account of its first answer
+// keeps it from the candidates). One is in two, by design: a voided ahead
+// answer (Voided) a later view of the test it named shows, which the store
+// serves again as before, and a learn step counts as spent.
 func (s RoundSnapshot) AnsweredInRound(name string) bool {
-	answered := false
-	for _, t := range s.Taken {
+	// The entries of name that answered, and are not given back.
+	live := map[int]bool{}
+	for i, t := range s.Taken {
 		if t.Mock == nil || t.Mock.Name != name {
 			continue
 		}
 		switch t.How {
-		case TakeConsumed, TakeSpent, TakeClaimed:
-			answered = true
+		case TakeConsumed:
+			live[i] = true
+		case TakeSpent:
+			if !t.ForView || t.Gen == s.viewGen {
+				live[i] = true
+			}
 		case TakeRestored:
-			answered = false
+			delete(live, t.Of)
 		}
 	}
-	return answered
+	return len(live) > 0
+}
+
+// ClaimedInRound reports whether a pairing claimed name in the staging
+// (TakeClaimed): no pairing takes it again. The claim is no consumption: a
+// view of its owner shows it unconsumed, until the owner's call takes it.
+func (s RoundSnapshot) ClaimedInRound(name string) bool {
+	for _, t := range s.Taken {
+		if t.How == TakeClaimed && t.Mock != nil && t.Mock.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // CandidateError is a pairing candidate the store keeps on disk that could

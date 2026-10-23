@@ -483,7 +483,7 @@ func (m *MockManager) claimPairingLocked(mk *models.Mock) (claimed bool, why str
 	case mk == nil || mk.IsProtocolPhase() || mk.IsAsync():
 		return false, "it is no recording a pairing may take"
 	case !m.ownedElsewhere(v, mk.Name) || m.takenInStagingLocked(mk.Name):
-		return false, "it is no other test's recording the set left unused: the background's, the view's own, or consumed, spent or claimed in the staging"
+		return false, "it is no other test's recording the set left unused: the background's, the view's own, or consumed or spent in the staging"
 	}
 	// The claim is the one guard against a second: one step, so two calls
 	// that race for a recording never both take it.

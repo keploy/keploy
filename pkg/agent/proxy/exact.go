@@ -786,11 +786,13 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	install := func() {
 		// One step with the swap, holding the round lock: no snapshot sees
-		// the claims of a retried test released, its mocks begun, or its
-		// carried answers, before the view that holds them.
+		// the claims of a retried test released, what its earlier view
+		// answered given back, its mocks begun, or its carried answers,
+		// before the view that holds them.
 		m.installExactWith(v, func(r *roundState) {
 			epoch := m.stagingEpoch.Load()
 			m.exact.claims.release(epoch, test)
+			m.reopenLocked(v)
 			m.exact.begun.add(epoch, owned)
 			m.exact.fired.Store(true)
 			m.exact.last.Store(v)
