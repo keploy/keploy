@@ -13,62 +13,57 @@ import (
 
 // WHERE A DRIFTED INSTANT CAME FROM.
 //
-// The classifier reads a drifted value word by word, at every earlier place
-// (02df41407's reading). Three rules read instants (clockLayouts: RFC 1123,
-// ISO 8601, compact, an epoch, a time of day, a time-ordered UUID's time),
-// and none of them learns a value as noise because of what it looks like
-// where F saw what became of it:
+// The classifier reads a drifted value word by word, at every earlier place,
+// in a payload and in the call's own answer, whatever the value looks like:
+// the words of an instant's date and time are words like any other. A value
+// is excused as a clock read by its provenance alone, never by its shape
+// (units, HH:MM, digits, lengths):
 //
-//  1. At an earlier leaf F saw drift, a unit (rule 3) that is no clock read
-//     the lead moved or read in its call's window drifted with that leaf
-//     also where the leaf held the unit's moment both ways, in any declared
-//     layout (holdsMomentOf: "1792667656470" and "2026-10-22T11:14:16.47Z"
-//     are one moment), or its text whole, recorded and live. This only finds
-//     more: the leaf's words co-drift with the unit's as any value's do.
+//   - the app's own clock read: an instant that moved by F's lead, or that
+//     lies, in both runs, within its call's window (Window: from the call's
+//     previous call to the call, by the stamps keploy took of both, and the
+//     clock F set; PreviousCall). Its words are then no words of a value
+//     (clockIn), and only the same read whole elsewhere is followed;
+//   - a dependency's own clock read: rule 2 below.
+//
+// A value whose provenance shows neither stays checked: where an earlier
+// place holds one of its words, it is refused (a variable that cannot be
+// followed, or unaccounted), even when the word is a minute that a Date
+// header holds by coincidence. That false red fails closed, naming the value
+// and the recording, never noise.
+//
+// Two rules read instants (clockLayouts: RFC 1123, ISO 8601, compact, an
+// epoch, a time of day, a time-ordered UUID's time) to compare moments across
+// layouts; neither learns a value as noise because of what it looks like:
+//
+//  1. At an earlier leaf F saw drift, a value that is no clock read drifted
+//     with that leaf also where the leaf held a moment of the value's that
+//     changed both ways, in any declared layout (holdsMomentOf:
+//     "1792667656470" and "2026-10-22T11:14:16.47Z" are one moment), or its
+//     text whole, recorded and live. This only finds more: the leaf's words
+//     co-drift with the value's as any value's do.
 //
 //  2. A protocol-phase recording's answer's own clock read is no place a
-//     value came from (Raw.AnswerClock). A protocol-phase exchange (a
-//     driver's handshake, heartbeat or auth, IsProtocolPhase) is the
-//     driver's, its answer consumed by the driver: an instant that answer
-//     holds, between the recording's request and its answer at its own
+//     value came from (Raw.AnswerClock). Its provenance is the recording's:
+//     a protocol-phase exchange (a driver's handshake, heartbeat or auth,
+//     IsProtocolPhase) is the driver's, its answer consumed by the driver,
+//     and an instant that answer holds within the span keploy stamped from
+//     the recording's request to its answer, at the instant's own
 //     resolution, that its request does not hold, is the dependency's read
-//     of its clock as it answered (a Mongo isMaster's localTime). Every
-//     search of a payload (appearedIn, unaccounted) reads it with those
-//     instants blanked; the echo (echoedInstants: the payloads hold the
-//     instant F saw too) reads it as it stands. Two clocks that read one
-//     moment are no copy of each other (S12 E3, leg (b): the consumer's
-//     processed_at was read in the millisecond in which the handshake on the
-//     connection the driver opened for its insert was answered, and that
-//     reply's localTime was that millisecond, in 7 runs of 10). A data-plane
-//     answer's instants are searched as any text is: an answer can read
-//     back a value the application stored in that second. A dependency whose
-//     clock is off by more than the call's span holds no clock read of its
-//     answer: its instants are followed, a false red, never a false green.
-//
-//  3. A value that is one instant whole, of more than one word (an ISO 8601
-//     or RFC 1123 stamp, a time of day, an epoch with its fraction), is one
-//     unit (valueDrift.unit). In a payload, which F holds no live view of,
-//     its words and pieces are never searched on their own, and never left
-//     unaccounted for there: the value is searched whole, as it is written
-//     (and echoed, echoedInstants). Its words are the date and time of one
-//     moment: two stamps of one minute share their minute, and a second's
-//     word is every small number a payload holds (a request id, a count),
-//     so whether they met would turn on when each was read (S12 E2, leg
-//     (b): the typed reading of the insert's processed_at, read 2 ms before
-//     a concurrent handler's call and so outside its call's window, met a
-//     receive's Date header in its minute "14"). At an earlier leaf F saw,
-//     where both runs' values are known, a unit is read word by word as any
-//     value is (rule 1 adds to that). Nothing else is a unit: a value of one
-//     word (an epoch, a compact stamp, an id whose digits read as a date),
-//     and a value an instant only stands inside of ("user-1298498081", a
-//     time-ordered UUID), are read word by word everywhere.
-//
-// echoedPart, which asks whether the call's own answer holds a word of what
-// changed, reads a unit's words not at all (rule 3: they are no words of
-// their own, and the answer is a recorded payload) and every other value's
-// as before. An answer that echoes a request's instant is served with the
-// recorded one; an application that checks it goes red at replay, a false
-// red, never a false green.
+//     of its clock as it answered (a Mongo isMaster's localTime). F serves
+//     that answer from its recording: a value that differs between the
+//     recording and F was not copied from it. Every search of a payload
+//     (appearedIn, unaccounted) reads it with those instants blanked; the
+//     echo (echoedInstants: the payloads hold the instant F saw too) reads
+//     it as it stands. Two clocks that read one moment are no copy of each
+//     other (S12 E3, leg (b): the consumer's processed_at was read in the
+//     millisecond in which the handshake on the connection the driver opened
+//     for its insert was answered, and that reply's localTime was that
+//     millisecond, in 7 runs of 10). A data-plane answer's instants are
+//     searched as any text is: an answer can read back a value the
+//     application stored in that second. A dependency whose clock is off by
+//     more than the call's span holds no clock read of its answer: its
+//     instants are followed, a false red, never a false green.
 //
 // The word-level learning build (train/feat/word-level-learn) rewrites
 // ClassifyIn with instant slots: it keeps these rules.
@@ -246,13 +241,6 @@ func blankSpans(s string, blank func(instant) bool) string {
 	return string(b)
 }
 
-// wholeInstant reports whether s is one keyed instant whole, of more than one
-// word (rule 3's unit).
-func wholeInstant(s string) bool {
-	spans := instantSpans(s)
-	return len(spans) == 1 && spans[0].keyed && spans[0].start == 0 && spans[0].end == len(s) && len(wordsBy(s, isWord)) > 1
-}
-
 // driftedInstant is a keyed instant of a drifted value that changed: the
 // moment it was recorded, and the moment F saw in its place, the k-th of its
 // layout in the live value.
@@ -289,10 +277,8 @@ func driftedInstants(recorded, live string) []driftedInstant {
 }
 
 // readInstants fills d's reading of its instants once its forms are read:
-// the instants of its forms that changed (instants), the moments its forms
-// hold, recorded and live (recKeys, liveKeys), and whether it is one unit
-// (rule 3: the value, raw or decoded, recorded and live, is one instant
-// whole of more than one word).
+// the instants of its forms that changed (instants), and the moments its
+// forms hold, recorded and live (recKeys, liveKeys).
 func (d *valueDrift) readInstants() {
 	d.recKeys, d.liveKeys = map[instantKey]bool{}, map[instantKey]bool{}
 	seen := map[driftedInstant]bool{}
@@ -314,11 +300,10 @@ func (d *valueDrift) readInstants() {
 			}
 		}
 	}
-	d.unit = wholeInstant(d.rec) && wholeInstant(d.live) || d.decoded && wholeInstant(d.decRec) && wholeInstant(d.decLive)
 }
 
 // holdsMomentOf reports whether e, what F saw drift at an earlier place, held
-// a moment a changed instant of the unit v names both ways (rule 1): v's
+// a moment a changed instant of v names both ways (rule 1): v's
 // recorded moment in e's recorded value and the moment F saw in v in e's
 // live value, neither on e's other side.
 func (e *valueDrift) holdsMomentOf(v *valueDrift) bool {
@@ -333,22 +318,23 @@ func (e *valueDrift) holdsMomentOf(v *valueDrift) bool {
 // echoedInstants are the recorded instants of v's that changed whose live
 // instant, too, an earlier payload holds (texts: the payloads appearedIn
 // searches, in every form, as they stand): what an application that stores
-// an instant it was sent sends (rule 2). nil when none.
+// an instant it was sent sends, or that picks one from what it was served (a
+// departure from a timetable, by its clock). nil when none. A payload holds
+// an instant where it names that moment (holdsKey): an instant of the same
+// moment in any layout, or a time of day that is the instant's own, to the
+// nanosecond, on its UTC day (a timetable's "11:15" holds "2026-10-22
+// 11:15"), and the other way round.
 func (dc *DriftCache) echoedInstants(v *valueDrift, texts []string) map[instantKey]bool {
 	if len(v.instants) == 0 {
 		return nil
 	}
-	held := map[instantKey]bool{}
+	var held heldMoments
 	for _, text := range texts {
-		for _, sp := range dc.spansOf(text) {
-			if sp.keyed {
-				held[sp.key] = true
-			}
-		}
+		held.add(dc.spansOf(text))
 	}
 	var out map[instantKey]bool
 	for _, p := range v.instants {
-		if held[p.live] {
+		if held.holds(p.live) {
 			if out == nil {
 				out = map[instantKey]bool{}
 			}
@@ -358,17 +344,69 @@ func (dc *DriftCache) echoedInstants(v *valueDrift, texts []string) map[instantK
 	return out
 }
 
-// holdsInstant reports whether text holds, whole, one of instants.
+// holdsInstant reports whether text holds, whole, one of instants, as
+// echoedInstants reads a payload (heldMoments).
 func (dc *DriftCache) holdsInstant(text string, instants map[instantKey]bool) bool {
 	if len(instants) == 0 || text == "" {
 		return false
 	}
-	for _, sp := range dc.spansOf(text) {
-		if sp.keyed && instants[sp.key] {
+	var held heldMoments
+	held.add(dc.spansOf(text))
+	for k := range instants {
+		if held.holds(k) {
 			return true
 		}
 	}
 	return false
+}
+
+// heldMoments are the moments a payload's instants name: each keyed instant
+// as it is (keys), and, by their time of day on their UTC day in
+// nanoseconds, its times of day (days) and its other instants (onDays).
+type heldMoments struct {
+	keys         map[instantKey]bool
+	days, onDays map[int64]bool
+}
+
+// add files spans' keyed instants.
+func (h *heldMoments) add(spans []instant) {
+	for _, sp := range spans {
+		if !sp.keyed {
+			continue
+		}
+		if h.keys == nil {
+			h.keys, h.days, h.onDays = map[instantKey]bool{}, map[int64]bool{}, map[int64]bool{}
+		}
+		h.keys[sp.key] = true
+		if sp.key.day {
+			h.days[sp.key.at] = true
+		} else {
+			h.onDays[timeOfDay(sp.key.at)] = true
+		}
+	}
+}
+
+// holds reports whether the payload names k's moment: an instant of it, or,
+// for an instant, a time of day that is its own, and, for a time of day, an
+// instant whose own it is.
+func (h *heldMoments) holds(k instantKey) bool {
+	if h.keys == nil {
+		return false
+	}
+	if h.keys[k] {
+		return true
+	}
+	if k.day {
+		return h.onDays[k.at]
+	}
+	return h.days[timeOfDay(k.at)]
+}
+
+// timeOfDay is at's (UnixNano) time of day on its UTC day, in nanoseconds:
+// what a time of day's instantKey holds.
+func timeOfDay(at int64) int64 {
+	const day = int64(24 * time.Hour)
+	return (at%day + day) % day
 }
 
 // spansOf is instantSpans(text), read once per test (a nil cache reads it
@@ -502,11 +540,11 @@ func answerClock(payload interface{}, asked, answered time.Time) []time.Time {
 
 // clockKeys are x's answer's clock reads (Raw.AnswerClock) as moments.
 func clockKeys(x Raw) map[instantKey]bool {
-	if len(x.AnswerClock) == 0 {
+	if len(x.answerClock) == 0 {
 		return nil
 	}
-	out := make(map[instantKey]bool, len(x.AnswerClock))
-	for _, t := range x.AnswerClock {
+	out := make(map[instantKey]bool, len(x.answerClock))
+	for _, t := range x.answerClock {
 		out[instantKey{at: t.UnixNano()}] = true
 	}
 	return out
@@ -514,12 +552,12 @@ func clockKeys(x Raw) map[instantKey]bool {
 
 // rawKey is a payload's text with its answer's clock reads, as a cache key.
 func rawKey(x Raw) string {
-	if len(x.AnswerClock) == 0 {
-		return x.Text
+	if len(x.answerClock) == 0 {
+		return x.text
 	}
 	var sb strings.Builder
-	sb.WriteString(x.Text)
-	for _, t := range x.AnswerClock {
+	sb.WriteString(x.text)
+	for _, t := range x.answerClock {
 		sb.WriteByte(0)
 		sb.WriteString(strconv.FormatInt(t.UnixNano(), 10))
 	}
@@ -531,7 +569,7 @@ func rawKey(x Raw) string {
 func (dc *DriftCache) searched(x Raw) [2]string {
 	keys := clockKeys(x)
 	if len(keys) == 0 {
-		return [2]string{x.Text, dc.rawExtra(x.Text)}
+		return [2]string{x.text, dc.rawExtra(x.text)}
 	}
 	k := rawKey(x)
 	dc.mu.Lock()
@@ -541,7 +579,7 @@ func (dc *DriftCache) searched(x Raw) [2]string {
 		return s
 	}
 	blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
-	s = [2]string{blankSpans(x.Text, blank), blankSpans(dc.rawExtra(x.Text), blank)}
+	s = [2]string{blankSpans(x.text, blank), blankSpans(dc.rawExtra(x.text), blank)}
 	dc.mu.Lock()
 	if dc.blanked == nil {
 		dc.blanked = map[string][2]string{}
@@ -556,7 +594,7 @@ func (dc *DriftCache) searched(x Raw) [2]string {
 func (dc *DriftCache) searchedTokens(x Raw) []map[string]bool {
 	keys := clockKeys(x)
 	if len(keys) == 0 {
-		return dc.rawTokens(x.Text)
+		return dc.rawTokens(x.text)
 	}
 	k := rawKey(x)
 	dc.mu.Lock()
@@ -565,7 +603,7 @@ func (dc *DriftCache) searchedTokens(x Raw) []map[string]bool {
 	if ok {
 		return t
 	}
-	forms := textForms(x.Text)
+	forms := textForms(x.text)
 	for i := range forms {
 		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
 	}

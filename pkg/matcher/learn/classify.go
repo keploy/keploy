@@ -64,22 +64,43 @@ type Earlier struct {
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
 // in the test (Served), or recorded before the request L classifies (At).
-// Text is its recorded request and answer, the payload only, as one text: a
-// value found there flowed from that mock, at a place no leaf names.
+// Its text (Text) is its recorded request and answer, the payload only, as
+// one text: a value found there flowed from that mock, at a place no leaf
+// names.
+//
+// A Raw with a text comes only from its mock (RawOf, ReadRaw, and their
+// DriftCache forms), or from another Raw (WithServed): its text and its
+// answer's clock reads (AnswerClock) are read together from the mock and
+// travel together, so no copy keeps the one and drops the other. A cache of
+// Raws keeps the Raw whole; a literal of the exported fields alone has no
+// text, and is searched for nothing.
 type Raw struct {
 	Mock   string
 	At     time.Time
 	Served bool
-	Text   string
-	// AnswerClock are, of a protocol-phase mock (a driver's handshake,
-	// heartbeat or auth), the moments of its answer's own clock reads
-	// (RawOf, answerClock): the instants its answer holds, between its
-	// request and its answer, that its request does not, which the
-	// dependency read from its clock while it answered. No value came from
-	// one of them (instants.go, rule 2). nil for a data-plane mock, or one
-	// whose answer or span is not known: then every instant of it is a place
-	// a value may have come from.
-	AnswerClock []time.Time
+	// text is Text; answerClock is AnswerClock.
+	text        string
+	answerClock []time.Time
+}
+
+// Text is r's recorded request and answer, the payload only, as one text.
+func (r Raw) Text() string { return r.text }
+
+// AnswerClock are, of a protocol-phase mock (a driver's handshake, heartbeat
+// or auth), the moments of its answer's own clock reads (RawOf, answerClock):
+// the instants its answer holds, between its request and its answer as
+// keploy stamped them, that its request does not, which the dependency read
+// from its clock while it answered. No value came from one of them
+// (instants.go, rule 2). nil for a data-plane mock, or one whose answer or
+// span is not known: then every instant of it is a place a value may have
+// come from. A copy; r keeps its own.
+func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answerClock...) }
+
+// WithServed is r as served, or not, earlier in the test: the same text and
+// answer clock reads.
+func (r Raw) WithServed(served bool) Raw {
+	r.Served = served
+	return r
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -208,17 +229,11 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 // echoedPart says where the call's recorded answer (resp) holds a word of
 // what drifted value v changed (a word it lost, or one outside the longest
 // common subsequences, recorded side; no part of a clock read the lead
-// moved), in any declared form of the answer, in its case or folded; "" when
-// nowhere.
-//
-// A unit's words are no words of their own (instants.go, rule 3), and are
-// not searched here. A stale echo of an instant is served, and an
-// application that checks it goes red at replay: a false red, never a false
-// green.
+// moved, or read in its call's window), in any declared form of the answer,
+// in its case or folded; "" when nowhere. Every value is read so, whatever it
+// looks like: the words of an instant's date and time are words like any
+// other.
 func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
-	if v.unit {
-		return ""
-	}
 	for i := range readings {
 		words := map[string]bool{}
 		for t := range v.lost[i] {
@@ -570,11 +585,9 @@ type valueDrift struct {
 	wholes map[string]bool
 	// The value's instants (instants.go, readInstants): instants are those
 	// of its forms that changed; recKeys and liveKeys the moments its forms
-	// hold, recorded and live; unit whether it is one instant whole of more
-	// than one word (rule 3).
+	// hold, recorded and live.
 	instants          []driftedInstant
 	recKeys, liveKeys map[instantKey]bool
-	unit              bool
 }
 
 // DriftCache keeps each value's drift for one test of the learn step: the
@@ -969,13 +982,13 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	drifted := func(p run, rec, live string) bool {
 		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
 	}
-	// A unit (instants.go, rules 1 and 3) drifted with e also where e held
-	// its moment both ways, in any layout, or its text, recorded and live;
-	// its words co-drift below as any value's do. A clock read the lead
-	// moved, or read in its call's window, in either is no part, as its
-	// words are none below: two clock reads of one moment drift alike
-	// whatever made them.
-	if v.unit && !v.clock.whole && !e.clock.whole {
+	// v drifted with e also where e held a moment of v's that changed both
+	// ways, in any layout (instants.go, rule 1), or v's text whole, recorded
+	// and live; its words co-drift below as any value's do. This only finds
+	// more. A clock read the lead moved, or read in its call's window, in
+	// either is no part, as its words are none below: two clock reads of one
+	// moment drift alike whatever made them.
+	if !v.clock.whole && !e.clock.whole {
 		whole := run{v.rec, v.live}
 		if e.holdsMomentOf(v) || drifted(whole, e.rec, e.live) || v.decoded && drifted(run{v.decRec, v.decLive}, e.rec, e.live) || e.decoded && drifted(whole, e.decRec, e.decLive) {
 			return true, false
@@ -1080,30 +1093,29 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	//
 	// Instants (instants.go): a payload is searched with a protocol-phase
 	// answer's own clock reads blanked (rule 2), but where the payloads hold
-	// the instant F saw too (echoedInstants); a unit is searched whole, never
-	// by a word or a piece of it (rule 3).
+	// the instant F saw too (echoedInstants). Every value is searched whole
+	// and by its words and pieces, whatever it looks like: only a clock read
+	// its call's window or the lead shows (clockIn), a provenance, is none.
 	var searched []string
 	if !v.clock.whole {
 		searched = append(searched, recorded)
 	}
-	if !v.unit {
-		for i := range readings {
-			for t := range v.lost[i] {
-				if t != recorded && !clockWord(t, true, v, v.clock) {
-					searched = append(searched, t)
-				}
+	for i := range readings {
+		for t := range v.lost[i] {
+			if t != recorded && !clockWord(t, true, v, v.clock) {
+				searched = append(searched, t)
 			}
 		}
-		for _, p := range v.pieces {
-			if p.rec != recorded && !isClock(p, v.clock) {
-				searched = append(searched, p.rec)
-			}
+	}
+	for _, p := range v.pieces {
+		if p.rec != recorded && !isClock(p, v.clock) {
+			searched = append(searched, p.rec)
 		}
 	}
 	var payloads []string
 	for _, x := range raw {
 		if x.Served || x.At.Before(at) {
-			payloads = append(payloads, x.Text, dc.rawExtra(x.Text))
+			payloads = append(payloads, x.text, dc.rawExtra(x.text))
 		}
 	}
 	echoed := dc.echoedInstants(v, payloads)
@@ -1111,7 +1123,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		if !x.Served && !x.At.Before(at) {
 			continue
 		}
-		if dc.holdsInstant(x.Text, echoed) || dc.holdsInstant(dc.rawExtra(x.Text), echoed) {
+		if dc.holdsInstant(x.text, echoed) || dc.holdsInstant(dc.rawExtra(x.text), echoed) {
 			return Place{Mock: x.Mock}, true
 		}
 		texts := dc.searched(x)
@@ -1205,9 +1217,9 @@ func RawOf(m *models.Mock, served bool) Raw {
 	payload := dropKeys(v, 0)
 	var sb strings.Builder
 	textOf(payload, &sb)
-	r.Text = sb.String()
+	r.text = sb.String()
 	if m.IsProtocolPhase() {
-		r.AnswerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		r.answerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	}
 	return r
 }

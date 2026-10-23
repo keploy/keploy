@@ -274,10 +274,10 @@ func TestClassify(t *testing.T) {
 	}
 	raw := []Raw{
 		// A database row the test inserted before: the id came from there.
-		{Mock: "pg-3", At: at.Add(-2 * time.Second), Text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
+		{Mock: "pg-3", At: at.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
 		// Recorded after the paired call, and not served before it: not
 		// earlier.
-		{Mock: "pg-9", At: at.Add(time.Second), Text: `{"params":["t-5"]}`},
+		{Mock: "pg-9", At: at.Add(time.Second), text: `{"params":["t-5"]}`},
 		// A run of a drifted value that drifted counts in a payload as a
 		// token there: "71a" of "sess s-71a" is one, a row's minutes are
 		// not body.at's run.
@@ -342,8 +342,8 @@ func TestRawOfLeavesOutWhereAndWhen(t *testing.T) {
 		ReqTimestampMock: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 	}}
 	r := RawOf(m, true)
-	if !ContainsToken(r.Text, "4242") || ContainsToken(r.Text, "77777") || strings.Contains(r.Text, "2026") {
-		t.Fatalf("raw text %s: it holds the payload only", r.Text)
+	if !ContainsToken(r.Text(), "4242") || ContainsToken(r.Text(), "77777") || strings.Contains(r.Text(), "2026") {
+		t.Fatalf("raw text %s: it holds the payload only", r.Text())
 	}
 	if !r.Served || r.Mock != "m" {
 		t.Fatalf("%+v", r)
@@ -364,8 +364,8 @@ func TestRawOfLeavesOutAPostgresInvocationsWhereAndWhen(t *testing.T) {
 		},
 	}}}
 	r := RawOf(m, false)
-	if strings.Contains(r.Text, "2026") || strings.Contains(r.Text, "71318920f30e") || !strings.Contains(r.Text, "CREATE TABLE IF NOT EXISTS twins") {
-		t.Fatalf("raw text %q: it holds the payload only", r.Text)
+	if strings.Contains(r.Text(), "2026") || strings.Contains(r.Text(), "71318920f30e") || !strings.Contains(r.Text(), "CREATE TABLE IF NOT EXISTS twins") {
+		t.Fatalf("raw text %q: it holds the payload only", r.Text())
 	}
 	if m.Spec.PostgresV3.Query.InvocationID != inv {
 		t.Fatalf("RawOf changed the recording's invocation id to %q", m.Spec.PostgresV3.Query.InvocationID)
@@ -661,6 +661,10 @@ func TestSources(t *testing.T) {
 		{"one instant moved by another amount, whole", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, true},
 		{"one instant moved by another amount, inside a longer value", "at " + at.Format(time.RFC3339) + " ok", "at " + at.Add(5*time.Minute).Format(time.RFC3339) + " ok", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, false},
 		{"one instant moved by another amount, its milliseconds", strconv.FormatInt(at.UnixMilli(), 10), strconv.FormatInt(at.Add(5*time.Minute).UnixMilli(), 10), at.Format("2006-01-02T15:04:05.000Z"), at.Add(5 * time.Minute).Format("2006-01-02T15:04:05.000Z"), true, false},
+		// The same moment both ways in another layout, the instant inside
+		// a longer value: rule 1 reads every value, not only one that is an
+		// instant whole.
+		{"one instant moved by another amount, its milliseconds, inside a longer value", strconv.FormatInt(at.UnixMilli(), 10), strconv.FormatInt(at.Add(5*time.Minute).UnixMilli(), 10), "booked at " + at.Format("2006-01-02T15:04:05.000Z") + " by w-1", "booked at " + at.Add(5*time.Minute).Format("2006-01-02T15:04:05.000Z") + " by w-1", true, false},
 		{"the moment held one way only", at.Format(time.RFC1123), at.Add(9 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), false, false},
 		{"one instant, its second against its millisecond", strconv.FormatInt(at.Unix(), 10), strconv.FormatInt(at.Add(5*time.Minute).Unix(), 10), at.Add(473 * time.Millisecond).Format("2006-01-02T15:04:05.000Z"), at.Add(5*time.Minute + 473*time.Millisecond).Format("2006-01-02T15:04:05.000Z"), false, false},
 		// What only stands inside a longer value is no unit: read word by
@@ -853,7 +857,7 @@ func TestPairSpent(t *testing.T) {
 func TestAppearedInRawPayloads(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
 	raw := func(text string) []Raw {
-		return []Raw{{Mock: "mock-db", At: at.Add(-time.Second), Served: true, Text: text}}
+		return []Raw{{Mock: "mock-db", At: at.Add(-time.Second), Served: true, text: text}}
 	}
 	for _, tc := range []struct {
 		name, text, recorded, now string
@@ -916,7 +920,7 @@ func TestUnaccounted(t *testing.T) {
 	earlier := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.kind", Type: String, Value: "batch-7"}, Live: "batch-7"},
 	}}}
-	raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO jobs (shard) VALUES ('s3')"}}
+	raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, text: "INSERT INTO jobs (shard) VALUES ('s3')"}}
 	for _, tc := range []struct {
 		name, recorded, now string
 		refused             bool
@@ -976,7 +980,7 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 			live:    "Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436103}`) + "." + b64u("\x07\x08\x09\xfa\xfb"),
 			earlier: earlier("1760436042", "1760436103")},
 		{name: "an id after a backslash, from a payload", rec: `{"path":"C:\\b3f2b8c1e9a4d"}`, live: `{"path":"C:\\f1e2d3c4b5a69"}`,
-			raw: []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO jobs (id) VALUES ('b3f2b8c1e9a4d')"}}},
+			raw: []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, text: "INSERT INTO jobs (id) VALUES ('b3f2b8c1e9a4d')"}}},
 		{name: "an echoed id picked from an earlier answer", rec: "ord-7Q2K", live: "ord-9MX4",
 			earlier: []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 				{Side: Response, Leaf: Leaf{Path: "body.items[0].id", Type: String, Value: "ord-7Q2K"}, Live: "ord-7Q2K"},
@@ -1038,7 +1042,7 @@ func TestClassifyAccountsForWhatFlowedInEveryForm(t *testing.T) {
 	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	b64s := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	payload := func(text string) []Raw {
-		return []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: text}}
+		return []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, text: text}}
 	}
 	sent := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.user", Noise: "body.user", Type: String, Value: "A7K29QXM"}, Live: "Zq81Lm0X", Place: "body.user"},
@@ -1151,7 +1155,7 @@ func TestClassifyAWholeClockValueAnEarlierCallHeldInsideALongerOne(t *testing.T)
 	if got := classifyOne(rec, live, at, e, nil, nil); got.Kind != KindNoise {
 		t.Errorf("beside an HTTP leaf: %s (%s)", got.Kind, got.Why)
 	}
-	raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
+	raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, text: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
 	if got := classifyOne(rec, live, at, nil, raw, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 		t.Errorf("beside a payload: %s", got.Kind)
 	}
@@ -1265,7 +1269,7 @@ func TestClassifyReadsWrappedGluedAndPaddedEncodings(t *testing.T) {
 			if got := classifyOne(tc.enc(pad, a), tc.enc(pad, b), at, sent, nil, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 				t.Fatalf("%s (pad %d): an id that flowed into it learned as %s", tc.name, pad, got.Kind)
 			}
-			raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO s (blob) VALUES ('" + tc.enc(pad, a) + "')"}}
+			raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, text: "INSERT INTO s (blob) VALUES ('" + tc.enc(pad, a) + "')"}}
 			if got := classifyOne(a, b, at, nil, raw, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 				t.Fatalf("%s (pad %d), in a payload: an id that flowed from it learned as %s", tc.name, pad, got.Kind)
 			}
@@ -1578,14 +1582,14 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 		reads++
 		return &models.HTTPResp{StatusCode: 200, Body: `{"token":"tok-7f3a9c"}`}, nil, nil
 	})
-	if r := RawOf(m, true); strings.Contains(r.Text, "tok-7f3a9c") {
+	if r := RawOf(m, true); strings.Contains(r.Text(), "tok-7f3a9c") {
 		t.Fatal("RawOf read the parked answer: the test's premise moved")
 	}
 	dc := NewDriftCache()
 	for i := 0; i < 2; i++ {
 		r, err := dc.ReadRaw(m, true)
-		if err != nil || !strings.Contains(r.Text, "tok-7f3a9c") {
-			t.Fatalf("read %d: err %v, text %q", i, err, r.Text)
+		if err != nil || !strings.Contains(r.Text(), "tok-7f3a9c") {
+			t.Fatalf("read %d: err %v, text %q", i, err, r.Text())
 		}
 	}
 	if reads != 1 {
@@ -1595,8 +1599,8 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 		t.Fatal("the pooled mock was written")
 	}
 	var nilCache *DriftCache
-	if r, err := nilCache.ReadRaw(m, false); err != nil || !strings.Contains(r.Text, "tok-7f3a9c") {
-		t.Fatalf("a nil cache: err %v, text %q", err, r.Text)
+	if r, err := nilCache.ReadRaw(m, false); err != nil || !strings.Contains(r.Text(), "tok-7f3a9c") {
+		t.Fatalf("a nil cache: err %v, text %q", err, r.Text())
 	}
 	broken := &models.Mock{Name: "mock-1", Kind: models.HTTP}
 	broken.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {

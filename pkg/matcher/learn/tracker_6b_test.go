@@ -211,3 +211,79 @@ func TestTrackerCallWindowIsOneRunOfTheAppsClock(t *testing.T) {
 		t.Fatalf("a previous call at the paired one's own time gave %+v", w)
 	}
 }
+
+// A call still unanswered when paired was sent is no previous call of
+// paired's: S12 E3 leg (b), run r2's recordings (keploy 6db6cd0f3). The
+// consumer read processed_at (13.458) after its duplicate read (mock-6, sent
+// 13.112, answered 13.458619) and sent its insert at 13.459990; post-url-1's
+// handler sent its upsert (mock-8) at 13.459791 between the two, which the
+// lane's hold kept unanswered until 14.421. The upsert is another flow's: the
+// window runs from the duplicate read, and holds the read, in both readings.
+// Answered before the insert was sent, it would be the previous call, and
+// the read falls before it; with no answer time it still counts.
+func TestAPendingCallIsNoPreviousCall(t *testing.T) {
+	ts := func(sec, nsec int) time.Time { return time.Date(2026, 10, 22, 18, 38, sec, nsec, time.UTC) }
+	const read = 1792694293458
+	receive := r1Receive("")
+	receive.Spec.ReqTimestampMock, receive.Spec.ResTimestampMock = ts(12, 106755139), ts(13, 111622044)
+	receive.Spec.HTTPReq.Header["X-Amz-Date"] = "20261022T183812Z"
+	receive.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 18:38:13 GMT"
+	hello5 := r2Hello("mock-5", 8, ts(13, 205118312), ts(13, 458911204), read)
+	hello7 := r2Hello("mock-7", 10, ts(13, 301455028), ts(13, 459120377), read)
+	count := r2Mongo("mock-6", ts(13, 112600041), ts(13, 458619421),
+		[]string{`{ SectionSingle msg: {"aggregate":"events","pipeline":[{"$match":{"event":"S12 message"}}],"cursor":{},"$db":"keploy"} }`},
+		`{ SectionSingle msg: {"cursor":{"firstBatch":[],"id":{"$numberLong":"0"},"ns":"keploy.events"},"ok":{"$numberDouble":"1.0"}} }`)
+	upsert := func(answered time.Time) *models.Mock {
+		return r2Mongo("mock-8", ts(13, 459791587), answered,
+			[]string{`{ SectionSingle msg: {"update":"url-shortener","ordered":true,"$db":"keploy"} }`,
+				`{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":"Lhr4BWAi"},"u":{"$set":{"_id":"Lhr4BWAi","created":{"$date":{"$numberLong":"1792694293219"}},"url":"https://google.com"}},"upsert":true} ] }`},
+			`{ SectionSingle msg: {"n":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}} }`)
+	}
+	insert := &models.Mock{Name: "mock-9", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: ts(13, 459990012)}}
+	prevOf := func(recorded ...*models.Mock) time.Time {
+		p := NewPreviousCall(insert)
+		for _, m := range recorded {
+			p.See(m)
+		}
+		return p.At()
+	}
+	pending := upsert(ts(14, 421828601))
+	if got := prevOf(receive, hello5, count, hello7, pending); !got.Equal(count.Spec.ReqTimestampMock) {
+		t.Fatalf("the previous call is at %s; want the duplicate read's %s: the upsert was unanswered when the insert was sent", got.Format(time.RFC3339Nano), count.Spec.ReqTimestampMock.Format(time.RFC3339Nano))
+	}
+	answered := upsert(ts(13, 459900000))
+	if got := prevOf(receive, hello5, count, hello7, answered); !got.Equal(answered.Spec.ReqTimestampMock) {
+		t.Fatalf("an upsert answered before the insert was sent is no previous call: %s", got.Format(time.RFC3339Nano))
+	}
+	unknown := upsert(time.Time{})
+	if got := prevOf(receive, count, unknown); !got.Equal(unknown.Spec.ReqTimestampMock) {
+		t.Fatalf("an upsert of no answer time is no previous call: %s", got.Format(time.RFC3339Nano))
+	}
+
+	// F at boot: the duplicate read served, then the insert, on the app's
+	// clock F set past the recording.
+	rec := time.UnixMilli(read).UTC()
+	offset := FullRoundLead + 4*time.Second + 217*time.Millisecond
+	real0 := time.Date(2026, 10, 22, 19, 2, 0, 0, time.UTC)
+	tr := NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r.Add(rec.Sub(real0) + offset), true })
+	tr.ServedMockAt(count, real0.Add(-2*time.Millisecond))
+	arrival := real0.Add(time.Millisecond)
+	live, _ := tr.appClock(real0)
+	w := tr.CallWindowFrom(prevOf(receive, hello5, count, hello7, pending), insert, arrival)
+	if w == nil || !w.Rec.holds(rec, time.Millisecond) || !w.F.holds(live, time.Millisecond) {
+		t.Fatalf("the insert's window %+v does not hold its read (recorded %s, live %s)", w, rec.Format(time.RFC3339Nano), live.Format(time.RFC3339Nano))
+	}
+	for _, typed := range []bool{false, true} {
+		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); ln.Kind != KindNoise {
+			t.Errorf("typed %v: %s (from %q, %s); want noise, a read in its call's window", typed, ln.Kind, ln.From.Mock, ln.Why)
+		}
+	}
+	// With the upsert as the previous call (answered before the insert was
+	// sent), the read falls before the window: the typed reading's words are
+	// then searched, and the receive's Date header holds its second.
+	w = tr.CallWindowFrom(prevOf(receive, hello5, count, hello7, answered), insert, arrival)
+	if ln := classifyProcessedAt(rec, live, true, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, answered); ln.Kind == KindNoise {
+		t.Error("a read before its call's previous call, typed: noise; want it checked, and refused by the receive")
+	}
+}

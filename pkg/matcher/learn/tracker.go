@@ -452,7 +452,13 @@ func (t *Tracker) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 // previous data-plane call before paired: the latest by request time, not
 // paired itself. A protocol-phase call (a handshake, a driver's heartbeat)
 // is no previous call: a driver makes one whenever it opens a connection,
-// after the app read its clock for the call it opens it for. It keeps only
+// after the app read its clock for the call it opens it for. Nor is a call
+// still unanswered when paired was sent (its recorded answer came after
+// paired's request): the call before a clock read is one the app made and
+// had answered before it read, so a call pending across paired's send is
+// another of the app's flows' (a handler's write, blocked, sent between the
+// consumer's read and its insert), and bounds nothing of paired's read.
+// What decides is the recording's own stamps, never a margin. It keeps only
 // that instant, so a caller can feed it every recording of the set as a
 // store streams them, holding none.
 type PreviousCall struct {
@@ -471,6 +477,12 @@ func NewPreviousCall(paired *models.Mock) *PreviousCall {
 // See considers m as paired's previous call.
 func (p *PreviousCall) See(m *models.Mock) {
 	if p == nil || m == nil || p.to.IsZero() || m.IsProtocolPhase() || mockID(m) == p.id {
+		return
+	}
+	// Answered after paired was sent: another flow's call, pending across
+	// its send. One whose answer time is not known still counts: it may be
+	// the previous call, and the later bound only narrows the window.
+	if res := m.Spec.ResTimestampMock; !res.IsZero() && res.After(p.to) {
 		return
 	}
 	if at := m.Spec.ReqTimestampMock; !at.IsZero() && at.Before(p.to) && at.After(p.at) {

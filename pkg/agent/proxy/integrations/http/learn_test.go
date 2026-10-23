@@ -1598,7 +1598,7 @@ func TestLearnMatchATokenStoredInRedisIsRefused(t *testing.T) {
 			served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/me", "", map[string]string{"Authorization": "Bearer Zq81Lm0Xw2"}), db, n, opts)
 			if served != nil {
 				t.Fatalf("a bearer token the app stored in Redis earlier in the test was learned: noise %v (raw text %s)",
-					db.consumed[0].Spec.ReqBodyNoise, learn.RawOf(&models.Mock{Kind: models.GENERIC, Spec: models.MockSpec{GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "string", Data: resp}}}}}}, true).Text)
+					db.consumed[0].Spec.ReqBodyNoise, learn.RawOf(&models.Mock{Kind: models.GENERIC, Spec: models.MockSpec{GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "string", Data: resp}}}}}}, true).Text())
 			}
 			if miss == nil || miss.res.Reason != models.MissRequestChanged {
 				t.Fatalf("miss %+v", miss)
@@ -2647,26 +2647,23 @@ func TestLearnMatchAnOwnCallInFlightReadsEveryEarlierRecording(t *testing.T) {
 // At start-up F's clock runs the lead past the earliest recording from when
 // keploy froze it, before the app booted: a start-up call's clock read moved
 // by the lead and the boot's difference, which the lead alone does not read.
-// Where the read stands inside a longer value ("at <instant>"), its words are
-// read one by one, and the window decides: read in the call's window (the
-// receive served before it, its arrival, on the app's clock) it is a clock
-// read, learned as noise, whether the boot took 2 s or 30 s longer; read by
-// the lead alone (no app clock, or a test's own call, which is read so: F
-// sets each test's clock), the minute and second that changed are words of
-// the receive's Date header, a value that flowed from the receive, refused.
-// Where the read is the value whole, one instant (learn's instants.go, rule
-// 3), it is compared as the one moment it names, which the receive does not
-// hold: noise, however it is read.
+// Its words are read one by one, the value whole or inside a longer one
+// ("at <instant>") alike, and the window, its provenance, decides: read in
+// the call's window (the receive served before it, its arrival, on the app's
+// clock) it is a clock read, learned as noise, whether the boot took 2 s or
+// 30 s longer; read by the lead alone (no app clock, or a test's own call,
+// which is read so: F sets each test's clock), nothing shows it is one, and
+// the minute and second that changed are words of the receive's Date header,
+// a value that may have flowed from the receive: refused, naming it.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
 	for _, form := range []struct {
 		name string
 		of   func(time.Time) string
-		unit bool
 	}{
-		{"inside a longer value", func(t time.Time) string { return "at " + iso(t) }, false},
-		{"one instant whole", iso, true},
+		{"inside a longer value", func(t time.Time) string { return "at " + iso(t) }},
+		{"one instant whole", iso},
 	} {
 		for _, tc := range []struct {
 			name  string
@@ -2711,7 +2708,7 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				if tc.own && read != 0 {
 					t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
 				}
-				if !tc.noise && !form.unit {
+				if !tc.noise {
 					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
 						t.Fatalf("served %v miss %+v; want refused, a value from mock-0 as the lead reads it", got, miss)
 					}
@@ -2783,16 +2780,14 @@ func TestLearnMatchAWindowIsOneRunOfTheAppsClock(t *testing.T) {
 // the set: those the store stages, those it keeps on disk, and those the
 // replay served (a per-test recording a serve took out of the store): a read
 // made before that previous call, though after the latest one found
-// elsewhere, is no clock read of the call, and is refused where it stands
-// inside a longer value (its words, read one by one, are words of the
-// receive's Date header). Where it is the value whole, one instant (learn's
-// instants.go, rule 3), it is compared as the moment it names, which the
-// receive does not hold: noise, wherever the previous call is.
+// elsewhere, is no clock read of the call, and is refused, the value whole or
+// inside a longer one alike: its words, read one by one, are words of the
+// receive's Date header.
 func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
-	for _, unit := range []bool{false, true} {
+	for _, whole := range []bool{false, true} {
 		form := func(t time.Time) string { return "at " + iso(t) }
-		if unit {
+		if whole {
 			form = iso
 		}
 		for _, tc := range []struct {
@@ -2805,7 +2800,7 @@ func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 			{"a later previous call staged", false, true, false, false},
 			{"the previous call served, no longer staged", false, false, true, true},
 		} {
-			t.Run(fmt.Sprintf("%s, one instant whole %v", tc.name, unit), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s, one instant whole %v", tc.name, whole), func(t *testing.T) {
 				h, n, opts := learnOn(t)
 				opts.LearnPool = true
 				receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
@@ -2836,8 +2831,8 @@ func TestLearnMatchTheWindowsPreviousCallMayBeOnDisk(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if learned := got != nil && len(db.pooled) == 1; learned != (tc.noise || unit) {
-					t.Fatalf("learned %v (miss %+v); want %v", learned, miss, tc.noise || unit)
+				if learned := got != nil && len(db.pooled) == 1; learned != tc.noise {
+					t.Fatalf("learned %v (miss %+v); want %v", learned, miss, tc.noise)
 				}
 			})
 		}

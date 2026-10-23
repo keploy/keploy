@@ -77,7 +77,9 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // Window is when one call's clock reads can have been made, in each run
 // (Tracker.CallWindow): in the recording (Rec) and in record's full round
 // (F), each on that run's app clock, after the run's previous data-plane call
-// reached keploy and no later than this call did. A value is in a request
+// reached keploy and no later than this call did (in the recording, the
+// previous call is one answered before this call was sent: PreviousCall).
+// A value is in a request
 // only once the app read it, so a read of the clock is no later than the
 // call that carries it; one made after the previous call is no earlier than
 // that. An instant that falls in its run's span in both runs moved with the
@@ -86,8 +88,12 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // from the read to the call, each at least nothing), however far F's clock
 // ran ahead while the app booted: a constant does not move, nor does an
 // instant an answer the replay serves from its recording carries, so
-// neither falls in both. A read made before the previous call falls in
-// neither. It is no tolerance: the spans are what each run's calls show.
+// neither falls in both. An app may still pick another of a served answer's
+// instants by its clock (a timetable's next departure), which can fall in
+// both: the payloads then hold the pick both ways, and the classifier follows
+// it as a variable (echoedInstants) before any window or lead excuses it. A
+// read made before the previous call falls in neither. It is no tolerance:
+// the spans are what each run's calls show.
 type Window struct{ Rec, F Span }
 
 // Span is one run's part of a Window: From, when its previous data-plane

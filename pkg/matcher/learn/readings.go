@@ -794,12 +794,6 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 			}
 		}
-		// A unit's words are the date and time of its one moment, no
-		// words of their own in a payload, of which F holds no live view
-		// (instants.go, rule 3): appearedIn searched it there whole.
-		if v.unit {
-			return ""
-		}
 		for _, x := range raw {
 			if !x.Served && !x.At.Before(at) {
 				continue
