@@ -429,6 +429,42 @@ type MockFilterParams struct {
 	// serves each test case exactly its own mocks. nil for every other
 	// caller, and always without the switch.
 	Exact *ExactServing `json:"exact,omitempty"`
+
+	// TestRequest is, on the filter that opens a test case in record's full
+	// round (the learn step's round, under the proven switch), the test
+	// case's own request: what the application was given before any call
+	// of the test. The agent's learn step reads it as the test's earliest
+	// place, for its echo alone: a value the application picks from it by
+	// its clock (the next of the slots it lists) is followed from there, or
+	// refused, never learned as noise. nil for every other caller. An agent
+	// that predates it ignores it; one that has it reads a filter that opens
+	// a test case without it (a keploy older than its agent) as a request it
+	// could not read, and refuses what only that request could account for.
+	TestRequest *TestRequest `json:"testRequest,omitempty"`
+}
+
+// TestRequest is a keploy test case's own request, as the filter that opens
+// it in record's full round carries it to the agent (MockFilterParams): each
+// part as recorded and as keploy test sends it in this run (with its
+// template values), or why keploy could not read it.
+type TestRequest struct {
+	// Test is the test case's name.
+	Test string `json:"test"`
+	// Parts are the request's parts, in a stable order: "url", each header
+	// as "header.<name>", "body", each form field as "form.<key>".
+	Parts []TestRequestPart `json:"parts,omitempty"`
+	// Unread says why keploy could not read the request (a test case of a
+	// kind it reads no request of, a body kept apart from the test case),
+	// "" when it could. A request keploy could not read has no parts.
+	Unread string `json:"unread,omitempty"`
+}
+
+// TestRequestPart is one part of a test case's request, as recorded and as
+// sent in this run.
+type TestRequestPart struct {
+	Name     string `json:"name"`
+	Recorded string `json:"recorded"`
+	Sent     string `json:"sent"`
 }
 
 // ExactServing is what a keploy test filter asks of exact serving, under the
