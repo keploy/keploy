@@ -1,19 +1,52 @@
 // Command store is the streaming app's backing store for the
 // mock-mismatch-streaming lane: an HTTP service holding a list of messages
-// in memory. The app reaches it over HTTP, a dependency every keploy records
-// and mocks (the lane used Redis before; Redis is recorded and mocked only
+// in memory, and a line-protocol cache (a memcached text-protocol subset)
+// holding the SSE stream's banner. The app reaches the first over HTTP and
+// the second over plain TCP, which keploy records and mocks through its
+// Generic parser, the parser of every protocol keploy has no parser for (the
+// lane used Redis before, through Generic; Redis is recorded and mocked only
 // by Keploy Enterprise now). The lane starts it outside keploy, as a
 // dependency the app calls; at replay it is down and keploy answers for it.
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 )
+
+// lines is what the line-protocol cache holds.
+var lines = map[string]string{"banner": "keploy streams"}
+
+// serveLines answers a connection's "get <key>" requests as memcached does,
+// "VALUE <key> 0 <len>", the value and "END", or "END" alone for a key it does
+// not hold, until the connection ends.
+func serveLines(c net.Conn) {
+	defer func() { _ = c.Close() }()
+	r := bufio.NewReader(c)
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		key, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), "get ")
+		if !ok {
+			_, _ = c.Write([]byte("ERROR\r\n"))
+			continue
+		}
+		if v, held := lines[key]; held {
+			_, _ = fmt.Fprintf(c, "VALUE %s 0 %d\r\n%s\r\nEND\r\n", key, len(v), v)
+			continue
+		}
+		_, _ = c.Write([]byte("END\r\n"))
+	}
+}
 
 type message struct {
 	ID       string `json:"id"`
@@ -72,6 +105,23 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	})
-	log.Printf("store listening on %s", addr)
+	linesAddr := os.Getenv("LINES_ADDR")
+	if linesAddr == "" {
+		linesAddr = "127.0.0.1:9098"
+	}
+	ln, err := net.Listen("tcp", linesAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveLines(c)
+		}
+	}()
+	log.Printf("store listening on %s (lines on %s)", addr, linesAddr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

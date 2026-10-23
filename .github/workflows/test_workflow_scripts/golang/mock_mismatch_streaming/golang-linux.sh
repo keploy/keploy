@@ -3,20 +3,26 @@
 #
 # The app (./app) serves streaming responses (SSE, NDJSON, multipart, plain
 # text), each built from one read of its store (./store), an HTTP service it
-# calls. SSE, NDJSON and multipart are streams by their Content-Type; the
-# text/plain one is a stream only when its recording kept its body as frames
-# (a keploy recorder older than that rule), and is otherwise replayed whole in
-# the main loop. We record it, then MUTATE the recorded read the streaming
-# GETs depend on (GET /store/messages/list) to a path no request makes (the
-# writes are left intact, so the mismatch is isolated to the streaming
-# reads). On replay the streaming (Phase-2) path must SURFACE the unmatched
-# outgoing call on each streaming test case (SSE, NDJSON, multipart), the
-# plain-text one must report it too, every test but those four must pass, and
-# keploy test must exit 1: this is the behaviour added by
-# finalizing the per-test capture window AFTER stream consumption; before it,
-# the streaming path opened no window and carried no unmatched_calls. Success
-# here is INVERTED: we assert the streaming mismatch is reported, not that
-# every test passes. Then the same replay under the proven switch
+# calls; the SSE stream also carries a banner the app reads from the store's
+# line-protocol cache over plain TCP (a memcached text get), which keploy
+# records and mocks through its Generic parser, keploy's parser of every
+# protocol it has no parser for. SSE, NDJSON and multipart are streams by
+# their Content-Type; the text/plain one is a stream only when its recording
+# kept its body as frames (a keploy recorder older than that rule), and is
+# otherwise replayed whole in the main loop. We record it, then MUTATE the
+# recorded read the streaming GETs depend on (GET /store/messages/list) to a
+# path no request makes (the writes are left intact, so the mismatch is
+# isolated to the streaming reads). On replay the streaming (Phase-2) path
+# must SURFACE the unmatched outgoing call on each streaming test case (SSE,
+# NDJSON, multipart), the plain-text one must report it too, every test but
+# those four must pass, and keploy test must exit 1: this is the behaviour
+# added by finalizing the per-test capture window AFTER stream consumption;
+# before it, the streaming path opened no window and carried no
+# unmatched_calls. Success here is INVERTED: we assert the streaming mismatch
+# is reported, not that every test passes. The recorded banner get is
+# rewritten too, to a request the app never sends, and the SSE test must
+# report that Generic miss as well: a Generic miss on a streaming test is
+# reported like an HTTP one. Then the same replay under the proven switch
 # (KEPLOY_PROVEN=1).
 #
 # The lane ran on the samples-go sse-redis sample until Redis became a Keploy
@@ -24,8 +30,9 @@
 # it); the store keeps the feature, which is OSS code, covered without Redis.
 #
 # Readiness is event-driven: the store's and the app's ports, the test files
-# keploy writes. Ports: 8097 (app), 9097 (store). Env: RECORD_BIN (either
-# keploy), REPLAY_BIN (this build: a release replayer predates the feature).
+# keploy writes. Ports: 8097 (app), 9097 (store), 9098 (the store's
+# line-protocol cache). Env: RECORD_BIN (either keploy), REPLAY_BIN (this
+# build: a release replayer predates the feature).
 set -uo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +42,7 @@ source "$SRC/../../test-iid.sh" || true
 : "${REPLAY_BIN:?REPLAY_BIN: the keploy that replays (this build)}"
 APP=8097
 STORE=9097
+LINES=9098
 echo "record: $RECORD_BIN"
 echo "replay: $REPLAY_BIN"
 case "$REPLAY_BIN" in
@@ -101,7 +109,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for p in "$APP" "$STORE"; do
+for p in "$APP" "$STORE" "$LINES"; do
     if listening "$p"; then echo "::error::port $p is in use"; exit 1; fi
 done
 
@@ -109,6 +117,7 @@ done
 ./store >store.log 2>&1 &
 STORE_PID=$!
 wait_listen "$STORE" "$STORE_PID" || { echo "::error::the store did not start"; cat store.log; exit 1; }
+wait_listen "$LINES" "$STORE_PID" || { echo "::error::the store's line-protocol cache did not start"; cat store.log; exit 1; }
 
 sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "./stream-app" \
     --generateGithubActions=false --disable-tele >record_logs.txt 2>&1 </dev/null &
@@ -151,6 +160,7 @@ for name in sse ndjson multipart plain; do
     done
 done
 [ "$(grep -c . body-ndjson.txt)" -eq 3 ] || { echo "::error::the NDJSON stream recorded has $(grep -c . body-ndjson.txt) lines, want 3"; exit 1; }
+grep -qF '"banner":"keploy streams"' body-sse.txt || { echo "::error::the SSE stream recorded lacks the banner the app reads from the cache"; cat body-sse.txt; exit 1; }
 # The wait ends when keploy has written every test case, or when keploy
 # ends: a recorder that drops one while it keeps running leaves the wait to
 # the job's timeout, no event telling a test case it will never write from
@@ -188,6 +198,16 @@ yq -i "($LIST_READ | .spec.req.url) |= sub(\"/store/messages/list$\"; \"/store/m
 [ "$(count "$LIST_READ")" -eq 0 ] || { echo "::error::a list read survived the rewrite"; exit 1; }
 [ "$(count 'select(.kind == "Http" and ((.spec.req.url // "") | test("/store/messages/MISS$")))')" -eq 4 ] || { echo "::error::the rewrite did not leave four MISS reads"; exit 1; }
 [ "$(count "$WRITES")" -eq 4 ] || { echo "::error::the rewrite touched the store's writes"; exit 1; }
+# The banner get, recorded by the Generic parser, is rewritten to a request
+# the app never sends (another command, another key), so the replay's get
+# matches no recorded exchange, nor comes close to one: Generic matches a
+# session exchange at a Jaccard similarity of 0.4.
+BANNER_GET='select(.kind == "Generic" and ((.spec.genericrequests[0].message[0].data // "") | test("^get banner")))'
+banners=$(count "$BANNER_GET")
+[ "$banners" -eq 1 ] || { echo "::error::recorded $banners Generic mock(s) of the banner get, want 1"; yq -N 'select(.kind == "Generic") | .name + " " + .spec.genericrequests[0].message[0].data' "$MOCKS"; exit 1; }
+TOUCH=$'touch zzzzzzzzzzzzzzzz 0\r\n' yq -i "($BANNER_GET | .spec.genericrequests[0].message[0].data) = strenv(TOUCH)" "$MOCKS"
+[ "$(count "$BANNER_GET")" -eq 0 ] || { echo "::error::the banner get survived the rewrite"; exit 1; }
+[ "$(count 'select(.kind == "Generic" and ((.spec.genericrequests[0].message[0].data // "") | test("^touch zzzz")))')" -eq 1 ] || { echo "::error::the rewrite did not leave one touch request"; exit 1; }
 
 # --- Replay -----------------------------------------------------------------
 # The store is down: keploy answers for it, and the mutated reads match no
@@ -231,9 +251,20 @@ report_has_streaming_miss() {
     [ -n "$hits" ] || return 1
     echo "the forced miss was reported on: $(tr '\n' ' ' <<<"$hits")"
 }
+# report_has_generic_miss <report>: the SSE test carries an unmatched call
+# the Generic parser reported (the rewritten banner get).
+report_has_generic_miss() {
+    local hits
+    hits=$(yq -N '.tests[] | select(.test_case_id | test("events-sse")) |
+        select([.failure_info.unmatched_calls[] | select(.protocol == "Generic")] | length > 0) |
+        .test_case_id' "$1")
+    [ -n "$hits" ] || return 1
+    echo "the forced Generic miss was reported on: $(tr '\n' ' ' <<<"$hits")"
+}
 # require_replay <log> <exit code> <report>...: the replay's verdict on the
 # forced misses. Each streaming test (SSE, NDJSON and multipart, each read
-# through its own framing) reports the miss of its read of the store; every
+# through its own framing) reports the miss of its read of the store, and
+# the SSE test the Generic miss of its banner get; every
 # other test (the writes, which the rewrite left alone, and the health check)
 # passes, so the miss stayed where it was forced; and keploy test exits 1,
 # its code for failed tests, not a crash's or a signal's.
@@ -257,6 +288,19 @@ require_replay() {
             exit 1
         fi
     done
+    ok=false
+    for rf in "$@"; do
+        if report_has_generic_miss "$rf"; then
+            ok=true
+            break
+        fi
+    done
+    if [ "$ok" != true ]; then
+        echo "::error::replay did NOT report the forced Generic miss (the banner get) on the SSE streaming test ($log)"
+        grep -n -B2 -A12 'protocol: Generic' "$@" | head -40
+        grep -iE "generic|banner" "$log" | head -20
+        exit 1
+    fi
     local others
     others=$(yq -N '.tests[] | select((.test_case_id | test("events-")) | not) | select(.status != "PASSED") | .test_case_id + " " + .status' "$@")
     if [ -n "$others" ]; then

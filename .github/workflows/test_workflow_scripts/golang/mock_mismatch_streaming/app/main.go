@@ -1,16 +1,20 @@
 // Command app serves the streaming responses of the mock-mismatch-streaming
 // lane (SSE, NDJSON, multipart and plain text), each built from what it reads
-// from the store (../store) over HTTP. It is the samples-go sse-redis sample
-// with its Redis replaced by that store.
+// from the store (../store) over HTTP; the SSE stream also carries a banner
+// it reads from the store's line-protocol cache over plain TCP, which keploy
+// records and mocks through its Generic parser. It is the samples-go
+// sse-redis sample with its Redis replaced by that store.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,7 +28,43 @@ const (
 	boundary   = "keploy-stream-boundary"
 )
 
-var store = envOr("STORE_URL", "http://127.0.0.1:9097")
+var (
+	store = envOr("STORE_URL", "http://127.0.0.1:9097")
+	cache = envOr("LINES_ADDR", "127.0.0.1:9098")
+)
+
+// readBanner reads the SSE stream's banner from the store's line-protocol
+// cache: "get banner", answered "VALUE banner 0 <len>", the value and "END",
+// on a connection of its own. A connection that ends before the answer (a
+// replay whose recorded get matches nothing: keploy closes it) is an error.
+func readBanner() (string, error) {
+	c, err := net.Dial("tcp", cache)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Write([]byte("get banner\r\n")); err != nil {
+		return "", err
+	}
+	r := bufio.NewReader(c)
+	head, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	var key string
+	var flags, n int
+	if _, err := fmt.Sscanf(head, "VALUE %s %d %d", &key, &flags, &n); err != nil {
+		return "", fmt.Errorf("the cache answered %q: %w", head, err)
+	}
+	v := make([]byte, n+2)
+	if _, err := io.ReadFull(r, v); err != nil {
+		return "", err
+	}
+	if end, err := r.ReadString('\n'); err != nil || strings.TrimRight(end, "\r\n") != "END" {
+		return "", fmt.Errorf("the cache did not end its answer: %q, %v", end, err)
+	}
+	return string(v[:n]), nil
+}
 
 type message struct {
 	ID       string `json:"id"`
@@ -153,6 +193,13 @@ func streamStart(w http.ResponseWriter, r *http.Request) ([]message, http.Flushe
 }
 
 func handleSSE(w http.ResponseWriter, r *http.Request) {
+	// The banner first, then the messages: a banner the cache does not
+	// answer is said in the stream, and the messages are read all the same.
+	banner, err := readBanner()
+	if err != nil {
+		log.Printf("banner read failed: %v", err)
+		banner = "unavailable"
+	}
 	ms, flusher, ok := streamStart(w, r)
 	if !ok {
 		return
@@ -160,7 +207,8 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	_, _ = fmt.Fprint(w, "event:TICKER\ndata:[{\"message_type\":\"TICKER\"}]\n\n")
+	ticker, _ := json.Marshal([]map[string]string{{"message_type": "TICKER", "banner": banner}})
+	_, _ = fmt.Fprintf(w, "event:TICKER\ndata:%s\n\n", ticker)
 	flusher.Flush()
 	for _, m := range ms {
 		data, _ := json.Marshal([]map[string]any{{"message_id": m.ID, "message_type": "SYSTEM", "title": m.Text, "category": m.Category}})

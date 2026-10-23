@@ -42,13 +42,43 @@
 #          Redis mocks held to a test or to the set's end;
 #        - with --remove-unused-mocks, which must keep every Redis mock (the
 #          Generic recorder writes them as config mocks, which it keeps).
+#      Each replay's copy of the fixture has one Redis mock answer wrong on
+#      purpose (fresh_fixture): GET kv:a's (mock-25) answers "omega", where
+#      the Redis held "alpha" when the set was recorded and holds it again
+#      once the replay's PUT /kv/a has run. A replay that serves Redis from
+#      the fixture's mocks (a keploy without the skip: every one before it)
+#      then fails GET /kv/a on its verdict, not only on the logs. An agent
+#      that keeps the Redis mocks in its pool while the skip relays Redis is
+#      caught by the pool listing (pooled) and, under the proven switch, by
+#      the calls "not made" the replay holds its tests to.
+#   4b. The fixture with the mappings.yaml keploy v3.6.159's own replay of it
+#      wrote (./fixture/mappings-v3.6.159.yaml), as a user's older test set
+#      holds one: each test listed with the Generic Redis mocks it consumed.
+#      It was made by replaying a copy of ./fixture/test-set-0 with the
+#      v3.6.159 release binary, every dependency down (that release mocks
+#      Redis through Generic), all nine tests passing, and keeping the
+#      mappings.yaml it wrote. Replayed by default and under the proven
+#      switch, whose ownership is then that mapping's: still no test is held
+#      to a Redis mock.
+#   4c. The same set as Keploy Enterprise records it: its Redis mocks in
+#      Enterprise's kind (kind: Redis, the exchange under RequestBin and
+#      ResponseBin), which this build cannot read, the mapping naming them
+#      so. Replayed by default and under the proven switch: the read of the
+#      set says once, at WARN, how many Redis mocks it does not read, no
+#      ERROR is logged for them, and the set passes, Redis relayed.
 #   5. No ERROR in a log this build wrote, and no data race in any log.
+#
+# RECORD_PROVEN=1 records under the proven switch (the
+# record_build_proven_replay_build cell): keploy record then writes the set's
+# mappings.yaml from its test windows and accounts for every call it could not
+# capture; a Redis it relays is no capture loss. Its recording is replayed by
+# default and under the proven switch, besides the replays above.
 #
 # Not record_build_replay_latest: a release that predates the skip mocks
 # Redis from Generic mocks at replay, and this build records none.
 #
 # Not covered here: a Redis mock a set's mappings.yaml names in a concurrency
-# group or marks unresolved (keploy record's full round, KEPLOY_PROVEN), which
+# group or marks unresolved (Keploy Enterprise's record, KEPLOY_PROVEN), which
 # the replay leaves out of the set's concurrency as of its mappings
 # (withoutLeftOutConcurrency, unit-tested in pkg/service/replay). The lane
 # sends its requests one at a time, and no release that records Redis through
@@ -56,11 +86,12 @@
 #
 # The dependencies run in docker compose (./docker-compose.yml). Readiness is
 # event-driven: the containers answering, the app's port, the test files
-# keploy writes. Ports: 8098 (app), 6379 and 6380 (Redis),
-# 11211 (memcached), 7379 (echo). Env: RECORD_BIN, REPLAY_BIN; REDIS_IMAGE (default
+# keploy writes. Ports: 8098 (app), 6379 and 6380 (Redis), 11211 (memcached),
+# 7379 (echo). Env: RECORD_BIN, REPLAY_BIN; REDIS_IMAGE (default
 # redis:7.4-alpine), MEMCACHED_IMAGE (default memcached:1.6-alpine);
 # FIXTURE_OUT, when set, gets the latest release's recording of the test set
-# as ./fixture holds it (FIXTURE_OUT/test-set-0: how ./fixture was made).
+# as ./fixture holds it (FIXTURE_OUT/test-set-0: how ./fixture was made; the
+# wrong answer of 4 is made on each replay's copy, never in ./fixture).
 set -uo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,6 +113,9 @@ URL="https://keploy.io/docs/keploy-cloud/cloud-installation/"
 NOTICE="Redis calls are skipped"
 SKIP_LINE="relaying a Redis connection to the real server"
 LEFT_OUT="keploy leaves this test set's Redis mocks out of its replay"
+# UNREAD: what the read of a set says of the Redis mocks (Keploy
+# Enterprise's) this build cannot read.
+UNREAD="Redis mocks? this keploy does not read"
 # ERRORS_ALLOWED: an extended regex of ERROR lines this build may log here;
 # none so far.
 ERRORS_ALLOWED='^$'
@@ -113,7 +147,7 @@ echo "work dir: $WORK"
 (cd "$SRC" && go_retry mod download && go build -o "$WORK/redis-app" ./app && go build -o "$WORK/echo-server" ./echo) || { echo "::error::build failed"; exit 1; }
 cd "$WORK" || exit 1
 # A runner may reuse WORK: nothing of an earlier run is read as this one's.
-sudo rm -rf keploy keploy.yml fixture-*
+sudo rm -rf keploy keploy.yml fixture-* own-*
 rm -f ./*.log
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -268,14 +302,15 @@ served() { plain "$1" | grep -E 'mock found for generic request' | grep -oE '"Mo
 # lists them (--debug) at each request it is asked to answer.
 pooled() { plain "$1" | grep -E '(Filtered|Unfiltered) Mocks' | grep -oE '"Mock\[[0-9]+\]": ?"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' | sort -u; }
 
-# check_clean_cut <step> <mocks.yaml> <log>: the replay served none of the
-# recording's Redis mocks, nor held one in the Generic parser's pool; it held
-# and served its memcached and echo mocks (the reading works); every Redis
-# connection was relayed; and the agent said once that it left every Redis
-# mock out. RELAYED_WANT is the connections the Redis servers counted
-# (replay).
+# check_clean_cut <step> <mocks.yaml> <log> [unsent]: the replay served none
+# of the recording's Redis mocks, nor held one in the Generic parser's pool;
+# it held and served its memcached and echo mocks (the reading works); every
+# Redis connection was relayed; and the agent said once that it left every
+# Redis mock out, or, with unsent (a set whose Redis mocks keploy test could
+# not read, and so never sent the agent), said nothing of leaving any out.
+# RELAYED_WANT is the connections the Redis servers counted (replay).
 check_clean_cut() {
-    local step=$1 mocks=$2 log=$3 servedNames pooledNames redisNames n
+    local step=$1 mocks=$2 log=$3 unsent=${4:-} servedNames pooledNames redisNames n
     servedNames=$(served "$log")
     pooledNames=$(pooled "$log")
     redisNames=$(names_of "$mocks" redis)
@@ -308,6 +343,7 @@ check_clean_cut() {
     # says nothing of a recording that has none.
     local want lines left
     want=$(wc -w <<<"$redisNames")
+    [ -n "$unsent" ] && want=0
     lines=$(plain "$log" | grep -cF "$LEFT_OUT")
     left=$(plain "$log" | grep -F "$LEFT_OUT" | grep -oE '"mocks": ?[0-9]+' | grep -oE '[0-9]+$' | head -n1)
     if [ "$want" -gt 0 ]; then
@@ -316,7 +352,7 @@ check_clean_cut() {
     elif [ "$lines" -ne 0 ]; then
         fail "$step: the agent said it left out Redis mocks of a recording that has none"
     fi
-    echo "$step: $want Redis mock(s) in the recording, ${left:-none} left out of the pool, none pooled or served; $relayed Redis connection(s) relayed of $RELAYED_WANT counted"
+    echo "$step: $(wc -w <<<"$redisNames") Redis mock(s) in the recording, none pooled or served, ${left:-none} left out by the agent; $relayed Redis connection(s) relayed of $RELAYED_WANT counted"
 }
 
 # replay <name> <dir> [keploy test flags...]: keploy test of the recording in
@@ -367,7 +403,53 @@ replay() {
 # fresh_fixture <dir>: dir holds, as keploy reads a recording, a copy of the
 # committed fixture's test set and nothing else.
 fresh_fixture() {
-    sudo rm -rf "$1" && mkdir -p "$1/keploy" && cp -r "$SRC/fixture/test-set-0" "$1/keploy/"
+    sudo rm -rf "$1" && mkdir -p "$1/keploy" && cp -r "$SRC/fixture/test-set-0" "$1/keploy/" || return 1
+    # The wrong answer of 4: GET kv:a's mock answers omega (the set holds
+    # one GET kv:a, so it is found by its request, whatever its name).
+    local m="$1/keploy/test-set-0/mocks.yaml"
+    GETA=$'*2\r\n$3\r\nget\r\n$4\r\nkv:a\r\n' OMEGA=$'$5\r\nomega\r\n' yq -i \
+        '(select(.kind == "Generic" and .spec.genericrequests[0].message[0].data == strenv(GETA)) | .spec.genericresponses[0].message[0].data) = strenv(OMEGA)' "$m" || return 1
+    if [ "$(GETA=$'*2\r\n$3\r\nget\r\n$4\r\nkv:a\r\n' OMEGA=$'$5\r\nomega\r\n' yq -N 'select(.kind == "Generic" and .spec.genericrequests[0].message[0].data == strenv(GETA) and .spec.genericresponses[0].message[0].data == strenv(OMEGA)) | .name' "$m" | grep -c .)" -ne 1 ]; then
+        echo "::error::the fixture's copy in $1 does not hold one GET kv:a mock answering omega: the fixture changed, and its replays would no longer fail on a served Redis mock"
+        return 1
+    fi
+}
+# fresh_fixture_mapped <dir>: the fixture with the mappings.yaml keploy
+# v3.6.159's replay of it wrote (4b).
+fresh_fixture_mapped() {
+    fresh_fixture "$1" && cp "$SRC/fixture/mappings-v3.6.159.yaml" "$1/keploy/test-set-0/mappings.yaml"
+}
+# fresh_fixture_enterprise <dir>: the mapped fixture as Keploy Enterprise
+# records it (4c): each Generic Redis mock in Enterprise's kind and shape
+# (kind: Redis; RequestBin, ResponseBin, reqTimestampMock, resTimestampMock),
+# its mapping entries of that kind. ENTERPRISE_REDIS is then how many.
+fresh_fixture_enterprise() {
+    local names
+    fresh_fixture_mapped "$1" || return 1
+    names=$(names_of "$1/keploy/test-set-0/mocks.yaml" redis | paste -sd'|')
+    [ -n "$names" ] || return 1
+    ENTERPRISE_REDIS=$(names_of "$1/keploy/test-set-0/mocks.yaml" redis | wc -l)
+    NAMES="^($names)\$" yq -i '(select(.kind == "Generic" and (.name | test(strenv(NAMES))))) |=
+        (.kind = "Redis" | .spec.RequestBin = .spec.genericrequests | .spec.ResponseBin = .spec.genericresponses |
+         .spec.reqTimestampMock = .spec.reqtimestampmock | .spec.resTimestampMock = .spec.restimestampmock |
+         del(.spec.genericrequests) | del(.spec.genericresponses) | del(.spec.reqtimestampmock) | del(.spec.restimestampmock))' \
+        "$1/keploy/test-set-0/mocks.yaml" || return 1
+    NAMES="^($names)\$" yq -i '((.tests[].mock_entries[], .startup[]) | select(.name | test(strenv(NAMES))) | .kind) = "Redis"' \
+        "$1/keploy/test-set-0/mappings.yaml" || return 1
+    [ "$(yq -N 'select(.kind == "Redis") | .name' "$1/keploy/test-set-0/mocks.yaml" | grep -c .)" -eq "$ENTERPRISE_REDIS" ]
+}
+# check_unread <step> <log> <n>: the read of the set said once, at WARN,
+# that it holds n Redis mocks this build does not read, with the URL (that
+# the agent, never sent them, said nothing of leaving any out is
+# check_clean_cut's, unsent).
+check_unread() {
+    local said
+    said=$(plain "$2" | grep -E "$UNREAD")
+    [ "$(grep -c . <<<"$said")" -eq 1 ] || fail "$1: the read of the set said $(grep -c . <<<"$said") times that it does not read Redis mocks, want once"
+    grep -qE "holds $3 Redis mocks? this keploy does not read" <<<"$said" || fail "$1: the read of the set did not say it holds the $3 Redis mocks it does not read: $said"
+    grep -qwF WARN <<<"$said" || fail "$1: what the read of the set said of its Redis mocks is not at WARN"
+    grep -qF "$URL" <<<"$said" || fail "$1: what the read of the set said of its Redis mocks does not carry $URL"
+    echo "$1: the read of the set said once that it does not read its $3 Redis mocks"
 }
 
 # --- 1, 2. Record -----------------------------------------------------------
@@ -389,7 +471,9 @@ TESTS=9
 before_a=$(conns redis-a)
 before_b=$(conns redis-b)
 sudo rm -rf keploy keploy.yml
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$WORK/redis-app" \
+record_proven=(-u KEPLOY_PROVEN)
+[ "${RECORD_PROVEN:-}" = 1 ] && record_proven=(KEPLOY_PROVEN=1)
+sudo -E env "${record_proven[@]}" PATH="$PATH" "$RECORD_BIN" record -c "$WORK/redis-app" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -40 record.log; exit 1; }
@@ -425,6 +509,31 @@ if is_build "$RECORD_BIN"; then
     [ "$redis_mocks" -eq 0 ] || fail "this build recorded $redis_mocks Redis mock(s): $(names_of "$MOCKS" redis | tr '\n' ' ')"
     check_notices "record" record.log
     no_errors "record" record.log
+    if [ "${RECORD_PROVEN:-}" = 1 ]; then
+        # Under the proven switch keploy record wrote the set's mappings.yaml
+        # from its test windows, owning the memcached and echo mocks, and
+        # said no call went uncaptured: a Redis it relays is no loss.
+        MAP=keploy/test-set-0/mappings.yaml
+        if [ ! -s "$MAP" ]; then
+            fail "proven record: keploy record wrote no mappings.yaml"
+        else
+            mapped=0
+            owned=$(yq -N '.tests[].mock_entries[].name' "$MAP")
+            for n in $(names_of "$MOCKS" memcached) $(names_of "$MOCKS" lookalike); do
+                grep -qxF "$n" <<<"$owned" && mapped=$((mapped + 1))
+            done
+            [ "$mapped" -ge 3 ] || fail "proven record: mappings.yaml names $mapped of the memcached and echo mocks, want the three its tests made"
+        fi
+        # What keploy record says of calls it could not capture (a loss that
+        # fails the recording, test cases recorded without a verdict, or
+        # calls it passed through as a server-first protocol): a Redis the
+        # skip relays must be none of them. Not the kernel's skipped capture
+        # runs, evidence that fails nothing and is no Redis matter.
+        if plain record.log | grep -E "the recording is (incomplete|not verified)|these test cases' calls may be missing from the mocks|connections keploy passes through"; then
+            fail "proven record: keploy record said a call went uncaptured: a Redis the skip relays is reached for real at replay too, and is no capture loss"
+        fi
+        echo "proven record: mappings.yaml written, no capture loss said"
+    fi
 elif [ "$(plain record.log | grep -cF "$NOTICE")" -gt 0 ]; then
     # The latest release has the skip already: its recording has no Redis
     # mocks to ignore, and the committed fixture alone checks the clean cut.
@@ -449,9 +558,21 @@ fi
 docker compose stop memcached >/dev/null 2>&1 || fail "cannot stop memcached for the replay"
 stop_echo
 listening "$ECHO_PORT" && fail "the echo server still listens: the replay could reach it for real"
-replay replay "$WORK"
+# The own recording's replays read a copy of it: a replay writes the set's
+# mappings.yaml when it has none, and the next would read that instead.
+own_copy() { sudo rm -rf "$1" && mkdir -p "$1" && cp -r "$WORK/keploy" "$1/"; }
+own_copy "$WORK/own-default" || fail "cannot copy the recording"
+replay replay "$WORK/own-default"
 check_notices "replay" replay.log
 check_clean_cut "replay" "$MOCKS" replay.log
+if [ "${RECORD_PROVEN:-}" = 1 ]; then
+    # The proven record's set, its mappings.yaml its test windows', under
+    # the proven switch: each test owns what that mapping says it does.
+    own_copy "$WORK/own-proven" || fail "cannot copy the recording"
+    REPLAY_PROVEN=1 replay replay-proven "$WORK/own-proven"
+    check_notices "proven replay" replay-proven.log
+    check_clean_cut "proven replay" "$MOCKS" replay-proven.log
+fi
 
 # 4. The committed fixture, a test set a release that mocked Redis through
 # Generic recorded. A run that makes the fixture (FIXTURE_OUT) has none to
@@ -473,7 +594,7 @@ if [ -z "${FIXTURE_OUT:-}" ]; then
     check_notices "replay of the fixture" replay-fixture.log
     check_clean_cut "replay of the fixture" "$FIX_MOCKS" replay-fixture.log
 
-    # 4b. Under the proven switch (KEPLOY_PROVEN=1), whose exact serving
+    # Under the proven switch (KEPLOY_PROVEN=1), whose exact serving
     # holds each test to the calls it recorded, and the set's end to its
     # worker scope (the calls the application made outside every test, its
     # boot's). The Redis mocks are no test's and no worker scope's (the call
@@ -487,17 +608,52 @@ if [ -z "${FIXTURE_OUT:-}" ]; then
     check_notices "proven replay of the fixture" replay-fixture-proven.log
     check_clean_cut "proven replay of the fixture" "$FIX_MOCKS" replay-fixture-proven.log
 
-    # 4c. --remove-unused-mocks deletes what no test consumed, and keeps the
-    # Redis mocks, which went unconsumed because their calls were made for
-    # real: the Generic recorder writes every mock as a config one, which the
-    # prune keeps, and a keploy with a Redis parser replays them (the docs
-    # say so: docs/explanation/mock-lifetimes.md).
+    # With --remove-unused-mocks, which deletes what no test consumed, and
+    # keeps the Redis mocks, which went unconsumed because their calls were
+    # made for real: the Generic recorder writes every mock as a config one,
+    # which the prune keeps, and a keploy with a Redis parser replays them
+    # (the docs say so: docs/explanation/mock-lifetimes.md).
     fresh_fixture "$WORK/fixture-prune" || fail "cannot copy the fixture"
     replay replay-fixture-prune "$WORK/fixture-prune" --remove-unused-mocks
     plain replay-fixture-prune.log | grep -qF "pruned mocks successfully" || fail "replay with --remove-unused-mocks: keploy did not prune the set (no 'pruned mocks successfully'), so the check below proves nothing"
     kept_redis=$(count_kind "$WORK/fixture-prune/keploy/test-set-0/mocks.yaml" redis)
     [ "$kept_redis" -eq "$fixture_redis" ] || fail "replay with --remove-unused-mocks kept $kept_redis of the fixture's $fixture_redis Redis mocks: it deleted recordings this build only left out"
     echo "--remove-unused-mocks kept $kept_redis of $fixture_redis Redis mocks"
+
+    # 4b. With the mappings.yaml keploy v3.6.159's replay of it wrote: each
+    # test listed with the Redis mocks it consumed then.
+    fixture_owned=$(yq -N '.tests[].mock_entries[].name' "$SRC/fixture/mappings-v3.6.159.yaml")
+    mapped_redis=$(for n in $(names_of "$FIX_MOCKS" redis); do grep -cxF "$n" <<<"$fixture_owned"; done | awk '{ s += $1 } END { print s + 0 }')
+    [ "$mapped_redis" -gt 0 ] || fail "the fixture's v3.6.159 mappings.yaml names no Redis mock: replaying it proves nothing the plain fixture does not"
+    echo "the fixture's v3.6.159 mappings.yaml names Redis mocks $mapped_redis time(s)"
+    fresh_fixture_mapped "$WORK/fixture-mapped" || fail "cannot copy the mapped fixture"
+    replay replay-fixture-mapped "$WORK/fixture-mapped"
+    check_notices "replay of the mapped fixture" replay-fixture-mapped.log
+    check_clean_cut "replay of the mapped fixture" "$FIX_MOCKS" replay-fixture-mapped.log
+    fresh_fixture_mapped "$WORK/fixture-mapped-proven" || fail "cannot copy the mapped fixture"
+    REPLAY_PROVEN=1 replay replay-fixture-mapped-proven "$WORK/fixture-mapped-proven"
+    check_notices "proven replay of the mapped fixture" replay-fixture-mapped-proven.log
+    check_clean_cut "proven replay of the mapped fixture" "$FIX_MOCKS" replay-fixture-mapped-proven.log
+
+    # 4c. As Keploy Enterprise records it: Redis mocks this build cannot read.
+    for mode in default proven; do
+        dir="$WORK/fixture-enterprise-$mode"
+        if ! fresh_fixture_enterprise "$dir"; then
+            fail "cannot make the Enterprise-shaped fixture"
+            continue
+        fi
+        name=replay-fixture-enterprise-$mode
+        if [ "$mode" = proven ]; then
+            REPLAY_PROVEN=1 replay "$name" "$dir"
+        else
+            replay "$name" "$dir"
+        fi
+        check_notices "$mode replay of the Enterprise fixture" "$name.log"
+        check_unread "$mode replay of the Enterprise fixture" "$name.log" "$ENTERPRISE_REDIS"
+        # The Generic Redis mocks the set was made from are checked as
+        # never pooled or served; the agent, never sent one, says nothing.
+        check_clean_cut "$mode replay of the Enterprise fixture" "$FIX_MOCKS" "$name.log" unsent
+    done
 fi
 
 # --- 5. --------------------------------------------------------------------

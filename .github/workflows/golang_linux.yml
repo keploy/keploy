@@ -467,8 +467,11 @@ jobs:
   # default and under KEPLOY_PROVEN=1. The app and the HTTP store it streams
   # from are in this repo (test_workflow_scripts/golang/mock_mismatch_streaming);
   # the recorded read of the store is rewritten so the replay's read matches
-  # no mock. The lane ran on samples-go sse-redis until Redis became a Keploy
-  # Enterprise dependency (OSS keploy passes Redis through; redis_skip below).
+  # no mock, and so is the SSE stream's banner get of the store's
+  # line-protocol cache, which the Generic parser records: the SSE test
+  # reports that Generic miss too. The lane ran on samples-go sse-redis
+  # until Redis became a Keploy Enterprise dependency (OSS keploy passes
+  # Redis through; redis_skip below).
   # Not record_build_replay_latest: a release replayer predates the feature.
   mock_mismatch_streaming:
     timeout-minutes: 30
@@ -550,10 +553,13 @@ jobs:
   # notice is said once per Redis destination and never for the others, and
   # keploy test passes with Redis live. CLEAN CUT: a test set the latest
   # release recorded (Generic Redis mocks; the record_latest cell's own, and
-  # the committed fixture in every cell) replays with this build, Redis live,
-  # and passes, by default, under KEPLOY_PROVEN=1 and with
-  # --remove-unused-mocks (which keeps its Redis mocks), and its debug log
-  # proves the Generic parser neither held nor served one of its Redis mocks.
+  # the committed fixture in every cell, with and without the mappings.yaml
+  # an older replay wrote, and in Keploy Enterprise's Redis kind) replays
+  # with this build, Redis live, and passes, by default and under
+  # KEPLOY_PROVEN=1 (the plain fixture also with --remove-unused-mocks,
+  # which keeps its Redis mocks), and its debug log proves the Generic
+  # parser neither held nor served one of its Redis mocks. The
+  # record_build_proven_replay_build cell records under KEPLOY_PROVEN=1.
   # Not record_build_replay_latest: a release that predates the skip mocks
   # Redis at replay, and this build records none.
   redis_skip:
@@ -570,6 +576,12 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
+          # keploy record under KEPLOY_PROVEN=1: its mappings.yaml from the
+          # test windows, its capture-loss accounting, with Redis relayed.
+          - job: record_build_proven_replay_build
+            record_src: build
+            replay_src: build
+            record_proven: "1"
     name: redis-skip (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -610,6 +622,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          RECORD_PROVEN: ${{ matrix.config.record_proven || '' }}
           WORK: ${{ runner.temp }}/redis_skip
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/redis_skip/golang-linux.sh"
@@ -621,6 +634,7 @@ jobs:
           name: redis-skip-${{ matrix.config.job }}
           path: |
             ${{ runner.temp }}/redis_skip/keploy/
+            ${{ runner.temp }}/redis_skip/own-*/keploy/reports/
             ${{ runner.temp }}/redis_skip/fixture-*/keploy/reports/
             ${{ runner.temp }}/redis_skip/fixture-*/keploy/test-set-0/mocks.yaml
             ${{ runner.temp }}/redis_skip/*.log
