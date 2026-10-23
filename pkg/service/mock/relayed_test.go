@@ -123,20 +123,39 @@ func TestAnAgentThatCannotSayWhatItRelayedLeavesIsolationUnknown(t *testing.T) {
 	}
 }
 
-// The next step for what the agent relayed goes with that reason only: a run
-// not isolated for another reason first (here its test command failed) is
-// not told to use Keploy Enterprise for it.
-func TestTheRelayedNextStepGoesWithItsReasonOnly(t *testing.T) {
+// What the agent relayed live is named on the terminal whatever reason
+// decided the run is not isolated: a run whose test command failed, and
+// whose Redis was relayed to the live server, is told both, with Keploy
+// Enterprise as the next step for its Redis. That the agent could not say
+// what it relayed is not named (nor its next step) when an earlier reason
+// decided: it is the weakest reason, said only when it is the one.
+func TestTheRelayedCallsAreNamedWhateverReasonDecided(t *testing.T) {
+	failed := models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 2}
 	_, _, logs := replayIn(t, replayCase{
-		runExit:      models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 2},
+		runExit:      failed,
 		relayedAfter: models.RelayedLives{{Reason: models.RelayedRedisEnterpriseOnly, Destination: "10.0.0.5:6379", Connections: 1}},
 	})
 	out := logged(logs)
 	if !strings.Contains(out, "this replay did not prove the tests run with the dependencies off") || !strings.Contains(out, "the test command failed") {
 		t.Fatalf("the terminal does not say the run is not isolated because its test command failed:\n%s", out)
 	}
-	if strings.Contains(out, "use Keploy Enterprise: "+models.RedisEnterpriseURL) {
-		t.Fatalf("a run not isolated because its test command failed is told to use Keploy Enterprise:\n%s", out)
+	if !strings.Contains(out, "Redis relayed to the live server at 10.0.0.5:6379 (1 connection(s)): open-source keploy does not mock Redis") {
+		t.Fatalf("the terminal does not name the Redis relayed live of a run whose test command failed:\n%s", out)
+	}
+	if !strings.Contains(out, "use Keploy Enterprise: "+models.RedisEnterpriseURL) {
+		t.Fatalf("the terminal does not give the Redis relayed live its next step:\n%s", out)
+	}
+
+	_, _, logs = replayIn(t, replayCase{
+		runExit:    failed,
+		relayedErr: fmt.Errorf("%w: agent returned 404", models.ErrRelayedLiveUnsupported),
+	})
+	out = logged(logs)
+	if !strings.Contains(out, "the test command failed") {
+		t.Fatalf("the terminal does not say the test command failed:\n%s", out)
+	}
+	if strings.Contains(out, "does not say which calls it relayed") || strings.Contains(out, "run keploy's agent at this keploy's version") {
+		t.Fatalf("a run not isolated because its test command failed is told about an agent that cannot say what it relayed:\n%s", out)
 	}
 }
 

@@ -1211,6 +1211,7 @@ func (p *Proxy) recordMySQLOutgoing(
 	clientConnID, destConnID int64,
 	outgoingOpts models.OutgoingOptions,
 	tlsUpgrader models.TLSUpgrader,
+	mocked *mockedNote,
 ) error {
 	// The record-mode parsing kill switch. The matched-parser path has its own
 	// gate far below in handleConnection, but the MySQL PROBE branch returns
@@ -1247,7 +1248,7 @@ func (p *Proxy) recordMySQLOutgoing(
 	if shouldRecordViaSupervisor(mysqlParser) {
 		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, mysqlParser,
 			integrations.MYSQL, mocks, parserErrGrp, mysqlLogger,
-			clientConnID, destConnID, outgoingOpts); err != nil {
+			clientConnID, destConnID, outgoingOpts, mocked); err != nil {
 			if isNetworkClosedErr(err) {
 				mysqlLogger.Debug("V2 record path: connection closed", zap.Error(err))
 			} else {
@@ -1269,7 +1270,7 @@ func (p *Proxy) recordMySQLOutgoing(
 		// caller's deferred close drop the connection.
 		declined := fmt.Errorf("no MySQL parser is registered: %w", integrations.ErrParserDeclined)
 		return p.relayDeclinedConn(parserCtx, declined, mysqlLogger, integrations.MYSQL,
-			mysqlSessionForRelay(srcConn, dstConn, mysqlLogger))
+			mysqlSessionForRelay(srcConn, dstConn, mysqlLogger), mocked)
 	}
 
 	mysqlSession := &integrations.RecordSession{
@@ -1289,7 +1290,7 @@ func (p *Proxy) recordMySQLOutgoing(
 		// A decline is not a failure: relay rather than letting the caller's
 		// deferred close drop a connection keploy merely chose not to parse.
 		if errors.Is(err, integrations.ErrParserDeclined) {
-			return p.relayDeclinedConn(parserCtx, err, mysqlLogger, integrations.MYSQL, mysqlSession)
+			return p.relayDeclinedConn(parserCtx, err, mysqlLogger, integrations.MYSQL, mysqlSession, mocked)
 		}
 		utils.LogError(p.logger, err, "failed to record the outgoing message")
 		return err
@@ -1412,7 +1413,12 @@ func mysqlSessionForRelay(srcConn, dstConn net.Conn, logger *zap.Logger) *integr
 // which is not the better failure. The honest signal is the Warn below,
 // one per connection, which is also what the other two pass-through paths
 // (the record-mode kill switch and GlobalPassthrough) do.
-func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Logger, parserType integrations.IntegrationType, session *integrations.RecordSession) error {
+//
+// Under the proven switch, keploy mock's topology lists the connection live
+// from here (mocked.declined): it was listed mocked when its parser took it,
+// and nothing of it is recorded, so a replay answers none of it from the
+// recording. mocked is nil outside the switch.
+func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Logger, parserType integrations.IntegrationType, session *integrations.RecordSession, mocked *mockedNote) error {
 	if session == nil || !relayableConn(session.Ingress) || !relayableConn(session.Egress) {
 		utils.LogError(logger, err, "parser declined but the session carried no conns to relay",
 			zap.String("parser", string(parserType)))
@@ -1435,7 +1441,7 @@ func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Lo
 		)
 	}
 
-	util.RelayRawPassthrough(session.Ingress, session.Egress)
+	util.RelayRawPassthrough(mocked.declined(session.Ingress), session.Egress)
 	return nil
 }
 
@@ -2962,7 +2968,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// not to copies. See recordMySQLOutgoing's doc comment.
 			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
-				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
+				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader, mocked)
 		}
 
 		m := p.getMockManager()
@@ -3612,10 +3618,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Any other connection is handed to a parser from here, which records
 	// it or answers it from mocks: listed mocked. A record's parser that
 	// declines the connection after reading from it relays the rest of it
-	// raw (relayDeclinedConn), and is listed mocked all the same: a mocked
-	// row for a connection nothing was recorded of, left for a follow-up. (A
-	// supervisor that retires a parser mid-connection has recorded its mocks
-	// so far; the test cases after it are left out.)
+	// raw (relayDeclinedConn), which takes the mocked row back and lists the
+	// connection live: nothing of it is recorded. So does a supervisor that
+	// retires the parser before it recorded anything of the connection
+	// (recordViaSupervisor, mockedNote.retired). One that retires it after it
+	// recorded some keeps it listed mocked; the test cases from then on are
+	// left out of the recording.
 	mocked.note()
 
 	if !generic {
@@ -3629,7 +3637,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// on failure. The legacy path below is preserved for parsers
 			// that have not yet migrated.
 			if shouldRecordViaSupervisor(matchedParser) {
-				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, matchedParser, parserType, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
+				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, matchedParser, parserType, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, mocked); err != nil {
 					if isNetworkClosedErr(err) {
 						logger.Debug("V2 record path: connection closed", zap.Error(err))
 					} else {
@@ -3662,7 +3670,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := matchedParser.RecordOutgoing(parserCtx, session)
 			p.countParserPanic(err, parserType, dstAddr)
 			if errors.Is(err, integrations.ErrParserDeclined) {
-				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session)
+				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session, mocked)
 			}
 			if err != nil {
 				if isNetworkClosedErr(err) {
@@ -3701,7 +3709,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			return p.recordGenericOutgoing(parserCtx, srcConn, dstConn, rule.MC,
-				parserErrGrp, logger, clientConnID, destConnID, outgoingOpts)
+				parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, mocked)
 		}
 		return p.mockGenericOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts, logger)
 	}
@@ -3724,6 +3732,7 @@ func (p *Proxy) recordGenericOutgoing(
 	logger *zap.Logger,
 	clientConnID, destConnID int64,
 	outgoingOpts models.OutgoingOptions,
+	mocked *mockedNote,
 ) error {
 	genericParser := p.Integrations[integrations.GENERIC]
 	// Route through the supervisor exactly like the matched-parser path. This
@@ -3733,7 +3742,7 @@ func (p *Proxy) recordGenericOutgoing(
 	// declared IsV2() == true all along; nothing consulted it here, so the
 	// migration silently skipped the widest code path in the proxy.
 	if shouldRecordViaSupervisor(genericParser) {
-		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, genericParser, integrations.GENERIC, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
+		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, genericParser, integrations.GENERIC, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, mocked); err != nil {
 			if isNetworkClosedErr(err) {
 				logger.Debug("V2 generic record path: connection closed", zap.Error(err))
 			} else {
@@ -3759,14 +3768,14 @@ func (p *Proxy) recordGenericOutgoing(
 	if genericParser == nil {
 		declined := fmt.Errorf("no generic parser is registered: %w", integrations.ErrParserDeclined)
 		return p.relayDeclinedConn(parserCtx, declined, logger, integrations.GENERIC,
-			p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil))
+			p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil), mocked)
 	}
 
 	genericSession := p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
 	err := genericParser.RecordOutgoing(parserCtx, genericSession)
 	p.countParserPanic(err, integrations.GENERIC, dstConn.RemoteAddr())
 	if errors.Is(err, integrations.ErrParserDeclined) {
-		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
+		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession, mocked)
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 		utils.LogError(logger, err, "failed to record the outgoing message")

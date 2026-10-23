@@ -103,8 +103,9 @@ type Receipt struct {
 	// Relayed is the calls keploy's agent relayed to a live server during the
 	// run instead of answering them from the recording, per destination and
 	// why (a Redis the open-source keploy does not mock, the agent's
-	// pass-through, mock.real), with how many connections: a run with any is
-	// not isolated.
+	// pass-through, mock.real), with how many connections, and the DNS
+	// lookups no recorded answer matched that the live resolver answered,
+	// per resolver and query: a run with any is not isolated.
 	// Absent when none was, and when the agent could not say (IsolationNote
 	// then says the run's isolation is unknown).
 	Relayed models.RelayedLives `yaml:"relayed,omitempty" json:"relayed,omitempty"`
@@ -279,14 +280,15 @@ type TestReceipt struct {
 // isolation decides whether a finished run proved isolation: the runner
 // passed, a call the recording lacks could not reach a real service, the
 // agent relayed no call to a live server (relayed: a Redis the open-source
-// keploy does not mock, the agent's pass-through, mock.real's) and said
-// so, the agent's miss list was read and was empty, and the agent served at
-// least one recorded call -- the only evidence the test command's traffic
-// went through keploy at all. A run keploy never intercepted also passes with
-// nothing missed; on macOS that is what `npm test` does, because the shell
-// npm runs scripts through drops the interception. An agent that cannot say
-// what it relayed (an older one) proves nothing: the run's isolation is
-// unknown, said last, as the weakest reason.
+// keploy does not mock, the agent's pass-through, mock.real's, a DNS lookup
+// the live resolver answered) and said so, the agent's miss list was read
+// and was empty, and the agent served at least one recorded call -- the only
+// evidence the test command's traffic went through keploy at all. A run
+// keploy never intercepted also passes with nothing missed; on macOS that is
+// what `npm test` does, because the shell npm runs scripts through drops the
+// interception. An agent that cannot say what it relayed (an older one)
+// proves nothing: the run's isolation is unknown, said last, as the weakest
+// reason.
 func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, bypass []string, relayed relayedCheck) (bool, string) {
 	switch {
 	case runnerExit != 0:

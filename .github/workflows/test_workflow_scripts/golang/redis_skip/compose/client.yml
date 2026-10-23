@@ -1,0 +1,19 @@
+# The compose cell's keploy mock test command (../golang-compose-linux.sh):
+# the lane's client (../client) in a container, on the lane's network, which
+# SETs and GETs on Redis A and gets from memcached by their compose service
+# names (deps.yml). CLIENT_LOOKUP, when keploy mock replay runs it, names a
+# name it looks up first, which its recording never looked up.
+services:
+  client:
+    image: redisskip-client:lane
+    container_name: redisskip-client
+    environment:
+      REDIS_ADDR: redis-a:6379
+      CACHE_ADDR: memcached:11211
+      LOOKUP: ${CLIENT_LOOKUP:-}
+    networks:
+      - lane
+networks:
+  lane:
+    name: redisskip-lane
+    external: true

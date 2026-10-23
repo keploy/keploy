@@ -33,8 +33,11 @@ type LiveRow struct {
 	// Relayed is, for a dependency outside the run's tree keploy relays to
 	// instead of recording or mocking it, what relayed it:
 	// "redis_enterprise_only" (a Redis this keploy neither records nor
-	// mocks), "parsing_disabled" (a record's parsing kill switch). Empty for
-	// a listener of the run's tree.
+	// mocks), "parsing_disabled" (a record's parsing kill switch),
+	// "parser_declined" (a record's parser that took the connection and then
+	// declined it), "parser_retired" (a record's connection whose parser the
+	// supervisor retired before it recorded anything of it). Empty for a
+	// listener of the run's tree.
 	Relayed string `json:"relayed,omitempty" yaml:"relayed,omitempty"`
 }
 

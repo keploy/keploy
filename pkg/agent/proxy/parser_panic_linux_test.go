@@ -135,9 +135,9 @@ func TestEveryParserDispatchCountsAParserPanic(t *testing.T) {
 			errGrp, gctx := errgroup.WithContext(ctx)
 			gctx = context.WithValue(gctx, models.ErrGroupKey, errGrp)
 			if typ == integrations.MYSQL {
-				_ = p.recordMySQLOutgoing(gctx, srcRaw, destRaw, make(chan *models.Mock, 8), errGrp, zap.NewNop(), 1, 2, models.OutgoingOptions{}, nil)
+				_ = p.recordMySQLOutgoing(gctx, srcRaw, destRaw, make(chan *models.Mock, 8), errGrp, zap.NewNop(), 1, 2, models.OutgoingOptions{}, nil, nil)
 			} else {
-				_ = p.recordGenericOutgoing(gctx, srcRaw, destRaw, make(chan *models.Mock, 8), errGrp, zap.NewNop(), 1, 2, models.OutgoingOptions{})
+				_ = p.recordGenericOutgoing(gctx, srcRaw, destRaw, make(chan *models.Mock, 8), errGrp, zap.NewNop(), 1, 2, models.OutgoingOptions{}, nil)
 			}
 			panicLoss(t, p, "the "+string(typ)+" parser, on a connection to "+destRaw.RemoteAddr().String())
 		})

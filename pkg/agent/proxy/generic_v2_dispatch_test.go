@@ -230,7 +230,7 @@ func TestRecordGenericOutgoing_UnregisteredParserDeclinesInsteadOfPanicking(t *t
 	}()
 
 	err := p.recordGenericOutgoing(gctx, srcRaw, destRaw, make(chan *models.Mock, 8), errGrp,
-		zap.NewNop(), 1, 2, models.OutgoingOptions{})
+		zap.NewNop(), 1, 2, models.OutgoingOptions{}, nil)
 	if err != nil {
 		t.Fatalf("recordGenericOutgoing returned %v, want nil — an unregistered parser is a "+
 			"decline to be relayed, not a connection failure", err)

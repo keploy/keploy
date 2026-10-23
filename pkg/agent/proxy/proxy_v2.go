@@ -58,6 +58,7 @@ func (p *Proxy) recordViaSupervisor(
 	logger *zap.Logger,
 	clientConnID, destConnID int64,
 	opts models.OutgoingOptions,
+	mocked *mockedNote,
 ) error {
 	sv := supervisor.New(supervisor.Config{
 		Logger: logger,
@@ -140,6 +141,19 @@ func (p *Proxy) recordViaSupervisor(
 	// each parser stays free to add the method independently and we
 	// don't have to touch every IntegrationsV2 implementation in this
 	// change.
+
+	// Whether the parser recorded any mock of the connection. One the
+	// supervisor retires before it did leaves a connection nothing of which is
+	// recorded, which the relay forwards raw from then on: under the proven
+	// switch its topology lists it live from there (mockedNote.retired,
+	// parserReads.listLive), not mocked. Set as the parser emits a mock, before
+	// the session can still refuse it (its context done) or the memory guard
+	// drop it: a connection whose only mocks were refused or dropped stays
+	// listed mocked. The memory guard counts what it drops as capture loss;
+	// a mock refused once the context is done is the loss parserReads' doc
+	// names as its own fix.
+	var recordedAny atomic.Bool
+	svSess.AddPostRecordHook(func(*models.Mock) { recordedAny.Store(true) })
 
 	// Opt-in gap resync. See [parserCanResyncAfterGap].
 	canResyncAfterGap := parserCanResyncAfterGap(parser)
@@ -433,6 +447,18 @@ func (p *Proxy) recordViaSupervisor(
 		// it still carries the error, and the span is open all the same
 		// (OnStop).
 		reported := result.Status == supervisor.StatusError && errors.Is(result.Err, supervisor.ErrReported)
+
+		// A parser retired while the recording runs, before it recorded
+		// anything of the connection: nothing of it is recorded, and the relay
+		// forwards the rest raw, so under the proven switch it is listed live
+		// from here on, now and at each read of the caller's bytes, its mocked
+		// row taken back (mockedNote.retired). One that recorded some of it
+		// stays listed mocked: its test cases from here on are left out of the
+		// recording (the WARN below). One retired as the recording stops is
+		// left as it is.
+		if !shuttingDown && !recordedAny.Load() {
+			reads.listLive(mocked.retired())
+		}
 
 		if !shuttingDown && !reported {
 			// Warn, not Debug. This is permanent, silent capture loss for

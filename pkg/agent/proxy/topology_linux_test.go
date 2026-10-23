@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +35,8 @@ type rowSink struct {
 	mu     sync.Mutex
 	live   []models.LiveRow
 	mocked []models.MockedRow
+	// takenBackFor is the LIVE rows mocked rows were taken back for.
+	takenBackFor []models.LiveRow
 }
 
 func (s *rowSink) NoteLive(r models.LiveRow) {
@@ -40,10 +45,27 @@ func (s *rowSink) NoteLive(r models.LiveRow) {
 	s.mu.Unlock()
 }
 
-func (s *rowSink) NoteMocked(r models.MockedRow) {
+// NoteMocked keeps r; taking it back removes it, as the agent's wire does
+// for the last listing of a row, and keeps the LIVE row it is taken back for
+// (in takenBackFor too).
+func (s *rowSink) NoteMocked(r models.MockedRow) func(models.LiveRow) {
 	s.mu.Lock()
 	s.mocked = append(s.mocked, r)
 	s.mu.Unlock()
+	return func(asLive models.LiveRow) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if asLive != (models.LiveRow{}) {
+			s.live = append(s.live, asLive)
+			s.takenBackFor = append(s.takenBackFor, asLive)
+		}
+		for i, m := range s.mocked {
+			if m == r {
+				s.mocked = append(s.mocked[:i:i], s.mocked[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
 func (s *rowSink) rows() ([]models.LiveRow, []models.MockedRow) {
@@ -793,11 +815,12 @@ func TestOffTheSwitchNoRowIsTold(t *testing.T) {
 type chanSink struct{ mocked chan models.MockedRow }
 
 func (chanSink) NoteLive(models.LiveRow) {}
-func (s chanSink) NoteMocked(r models.MockedRow) {
+func (s chanSink) NoteMocked(r models.MockedRow) func(models.LiveRow) {
 	select {
 	case s.mocked <- r:
 	default:
 	}
+	return func(models.LiveRow) {}
 }
 
 // handleConnection lists a local destination as mocked only when the call
@@ -1072,4 +1095,279 @@ func TestUnderTheSwitchARelayedRedisIsListedLiveNotMocked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readThenDecline takes every connection that opens with "get " and, as a
+// parser deciding by what it reads may, reads that much of it, puts it back
+// for the relay and declines it (integrations.ErrParserDeclined).
+type readThenDecline struct{}
+
+func (readThenDecline) MatchType(_ context.Context, buf []byte) bool {
+	return len(buf) >= 4 && string(buf[:4]) == "get "
+}
+
+func (readThenDecline) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(s.Ingress, head); err != nil {
+		return err
+	}
+	s.Ingress = util.NewSafeConnWithReader(s.Ingress, util.NewPrefixReader(head, s.Ingress), zap.NewNop())
+	return fmt.Errorf("a test parser that reads, then declines: %w", integrations.ErrParserDeclined)
+}
+
+func (readThenDecline) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
+	return nil
+}
+
+// Under the switch, in keploy mock's record, a connection whose parser takes
+// it and then declines it, after reading from it, is relayed raw and nothing
+// of it is recorded: the mocked row listed as the parser took it is taken
+// back, and the destination is listed live, relayed because its parser
+// declined it, each time it carries the client's bytes. The relay carries
+// the bytes the parser read too.
+func TestUnderTheSwitchAConnectionItsParserDeclinesIsListedLiveNotMocked(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded.reset()
+	t.Cleanup(recorded.reset)
+	t.Setenv("KEPLOY_PROVEN", "1")
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(containerAt{})
+	up := newFakeRedis(t, nil)
+	dest := ipv4Dest(t, up.addr)
+	dest.KernelPid = uint32(os.Getpid())
+	p, mocks := recordProxy(t, zap.NewNop(), up.addr)
+	p.DestInfo = fakeDestInfo{dest: dest}
+	p.Integrations["decliner"] = readThenDecline{}
+	p.integrationsPriority = append([]ParserPriority{{Priority: 1 << 20, ParserType: "decliner"}}, p.integrationsPriority...)
+	// keploy mock's run, whose tree is another process: this test process,
+	// which owns the listener, is outside it.
+	p.mockMode, p.appPID = true, uint32(hold(t).Process.Pid)
+	s := &rowSink{}
+	p.SetTopologySink(s)
+
+	_ = serveConn(t, p, false, "get k\r\n", "get k\r\n")
+	if got := up.received(); got != "get k\r\nget k\r\n" {
+		t.Fatalf("the real server received %q, want both requests whole", got)
+	}
+	live, mocked := s.rows()
+	want := models.LiveRow{Exe: exe, Port: uint16(dest.Port), Relayed: relayedParserDeclined}
+	if len(mocked) != 0 || len(live) < 2 {
+		t.Fatalf("the declined connection is listed live=%+v mocked=%+v, want a live row for each of its two requests and no mocked one", live, mocked)
+	}
+	for _, r := range live {
+		if r != want {
+			t.Fatalf("the declined connection is listed live %+v, want %+v", r, want)
+		}
+	}
+	select {
+	case m := <-mocks:
+		t.Fatalf("a mock was recorded of a connection its parser declined: %+v", m)
+	default:
+	}
+}
+
+// retiringParser is a supervised parser (IntegrationsV2) that takes every
+// connection that opens with "get ", reads its first request, records one
+// mock of it when emit is set, and then panics, as a parser bug would: the
+// supervisor retires it, and the relay forwards the rest of the connection
+// raw.
+type retiringParser struct{ emit bool }
+
+func (retiringParser) MatchType(_ context.Context, buf []byte) bool {
+	return len(buf) >= 4 && string(buf[:4]) == "get "
+}
+
+func (retiringParser) IsV2() bool { return true }
+
+func (p retiringParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	req := make([]byte, len("get k\r\n"))
+	if _, err := io.ReadFull(s.V2.ClientStream, req); err != nil {
+		return err
+	}
+	if p.emit {
+		now := time.Now()
+		if err := s.V2.EmitMock(&models.Mock{Kind: models.GENERIC, Name: "retiring", Spec: models.MockSpec{ReqTimestampMock: now, ResTimestampMock: now}}); err != nil {
+			return err
+		}
+	}
+	panic("a test parser that dies on the connection's first request")
+}
+
+func (retiringParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
+	return nil
+}
+
+// liveSignalSink is a rowSink that also says, on noted, each LIVE row it is
+// told of.
+type liveSignalSink struct {
+	rowSink
+	noted chan models.LiveRow
+}
+
+func (s *liveSignalSink) NoteLive(r models.LiveRow) {
+	s.rowSink.NoteLive(r)
+	s.noted <- r
+}
+
+// Under the switch, in keploy mock's record, a connection whose supervised
+// parser is retired (here, it panics) before it recorded anything of it is
+// relayed raw from then on and nothing of it is recorded: the mocked row
+// listed as the parser took it is taken back, and the destination is listed
+// live, retired-parser relayed, as the parser is retired and at each later
+// read of the client's bytes, so every test that uses the connection from
+// then on is listed. One whose parser recorded a mock of it before it was
+// retired stays listed mocked, and is not listed live.
+func TestUnderTheSwitchAConnectionItsParserIsRetiredFromBeforeRecordingIsListedLive(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded.reset()
+	t.Cleanup(recorded.reset)
+	t.Setenv("KEPLOY_PROVEN", "1")
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(containerAt{})
+
+	setupAt := func(t *testing.T, parser retiringParser, addr string) (*Proxy, *liveSignalSink, *agent.NetworkAddress) {
+		dest := ipv4Dest(t, addr)
+		dest.KernelPid = uint32(os.Getpid())
+		p, _ := recordProxy(t, zap.NewNop(), addr)
+		p.DestInfo = fakeDestInfo{dest: dest}
+		p.Integrations["retiring"] = parser
+		p.integrationsPriority = append([]ParserPriority{{Priority: 1 << 20, ParserType: "retiring"}}, p.integrationsPriority...)
+		// keploy mock's run, whose tree is another process: this test
+		// process, which owns the listener, is outside it.
+		p.mockMode, p.appPID = true, uint32(hold(t).Process.Pid)
+		s := &liveSignalSink{noted: make(chan models.LiveRow, 16)}
+		p.SetTopologySink(s)
+		return p, s, dest
+	}
+
+	t.Run("retired before it recorded anything", func(t *testing.T) {
+		// The server answers only "get r": the client's other requests are
+		// carried with no reply, so each LIVE listing after the retirement
+		// is a client chunk's.
+		up := newQuietServer(t, "get r\r\n")
+		p, s, dest := setupAt(t, retiringParser{}, up.addr)
+		app, src := acceptedConn(t)
+		done := make(chan error, 1)
+		go func() { done <- p.handleConnection(context.Background(), src) }()
+		want := models.LiveRow{Exe: exe, Port: uint16(dest.Port), Relayed: relayedParserRetired}
+		write := func(req string) {
+			if _, err := app.Write([]byte(req)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write("get k\r\n")
+		if r := awaitEvent(t, s.noted, "the connection listed live as its parser is retired"); r != want {
+			t.Fatalf("listed live %+v, want %+v", r, want)
+		}
+		write("get k\r\n")
+		if r := awaitEvent(t, s.noted, "the connection listed live at the read of the client's next request"); r != want {
+			t.Fatalf("listed live %+v, want %+v", r, want)
+		}
+		br := bufio.NewReader(app)
+		if got := roundTrip(t, app, br, "get r\r\n"); got != "END\r\n" {
+			t.Fatalf("the answered request got %q, want the real server's END", got)
+		}
+		if r := awaitEvent(t, s.noted, "the connection listed live at the read of the answered request"); r != want {
+			t.Fatalf("listed live %+v, want %+v", r, want)
+		}
+		_ = app.Close()
+		awaitEvent(t, done, "handleConnection returning")
+		// Every chunk the relay carried has been told of: the server's
+		// answer listed nothing, only the client's three requests did.
+		if n := len(s.noted); n != 0 {
+			t.Fatalf("%d more LIVE listing(s) after the client's requests (%+v): a chunk from the server was listed", n, <-s.noted)
+		}
+		if got := up.received(); got != "get k\r\nget k\r\nget r\r\n" {
+			t.Fatalf("the real server received %q, want every request whole", got)
+		}
+		live, mocked := s.rows()
+		if len(mocked) != 0 {
+			t.Fatalf("the connection is still listed mocked %+v, though nothing of it was recorded", mocked)
+		}
+		s.mu.Lock()
+		takenBackFor := append([]models.LiveRow(nil), s.takenBackFor...)
+		s.mu.Unlock()
+		if !reflect.DeepEqual(takenBackFor, []models.LiveRow{want}) {
+			t.Fatalf("the mocked row was taken back for %+v, want once for %+v: its test keeps a LIVE row", takenBackFor, want)
+		}
+		for _, r := range live {
+			if r != want {
+				t.Fatalf("listed live %+v, want %+v", r, want)
+			}
+		}
+	})
+
+	t.Run("retired after it recorded a mock", func(t *testing.T) {
+		up := newFakeRedis(t, nil)
+		p, s, dest := setupAt(t, retiringParser{emit: true}, up.addr)
+		if err := serveConn(t, p, false, "get k\r\n", "get k\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		live, mocked := s.rows()
+		if len(live) != 0 {
+			t.Fatalf("a connection its parser recorded a mock of is listed live %+v", live)
+		}
+		if len(mocked) != 1 || mocked[0].Port != uint16(dest.Port) || mocked[0].Exe != exe {
+			t.Fatalf("listed mocked %+v, want one row of the listener %s :%d", mocked, exe, dest.Port)
+		}
+	})
+}
+
+// quietServer is a server that keeps what it receives and answers "END\r\n"
+// only to a read that holds answered; any other read gets no reply.
+type quietServer struct {
+	addr string
+	mu   sync.Mutex
+	got  []string
+}
+
+func newQuietServer(t *testing.T, answered string) *quietServer {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	q := &quietServer{addr: ln.Addr().String()}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				for {
+					n, err := c.Read(buf)
+					if n > 0 {
+						q.mu.Lock()
+						q.got = append(q.got, string(buf[:n]))
+						q.mu.Unlock()
+						if strings.Contains(string(buf[:n]), answered) {
+							_, _ = c.Write([]byte("END\r\n"))
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return q
+}
+
+func (q *quietServer) received() string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return strings.Join(q.got, "")
 }

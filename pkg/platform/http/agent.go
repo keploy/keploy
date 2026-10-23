@@ -1763,7 +1763,8 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 
 // GetRelayedLive fetches GET /agent/relayed: the connections the agent
 // relayed live to a dependency instead of answering them from a recording,
-// per reason and destination, each counted since it started
+// per reason and destination (and a replay's DNS lookups the live resolver
+// answered, per query too), each counted since it started
 // (models.RelayedLives). An agent older than the route (404) or one that
 // cannot count them (501) gives models.ErrRelayedLiveUnsupported, which is
 // "unknown", not "none".

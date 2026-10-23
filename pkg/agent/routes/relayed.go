@@ -18,7 +18,8 @@ type relayedLiveReader interface {
 
 // HandleRelayedLive answers GET /agent/relayed: the connections the agent
 // relayed live to a dependency instead of answering them from a recording,
-// per reason and destination, each counted since it started (an empty list
+// per reason and destination (and a replay's DNS lookups the live resolver
+// answered, per query too), each counted since it started (an empty list
 // when it relayed none). Safe to poll; it takes nothing away. An agent that
 // cannot count them answers 501, never 200 with nothing: `keploy mock
 // replay` claims a run isolated only on an answer that says none were

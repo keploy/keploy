@@ -1,6 +1,9 @@
 # The compose cell's Redis servers (../golang-compose-linux.sh): Redis A and
 # Redis B on the lane's network, each at the address the lane gives it
-# (REDIS_A_IP, REDIS_B_IP), so recreating one with another address moves it.
+# (REDIS_A_IP, REDIS_B_IP), so recreating one with another address moves it;
+# and a memcached (MEMCACHED_IP), which keploy mock's test command
+# (client.yml) calls besides Redis A, and which the lane stops before keploy
+# mock replay, so its calls are answered from the recording.
 # They are a project of their own, not services of the app's file (app.yml):
 # keploy brings the app's project up and takes it down with each keploy
 # record and keploy test, and these outlive both, so the lane recreates them
@@ -16,6 +19,11 @@ services:
     networks:
       lane:
         ipv4_address: ${REDIS_B_IP:?the address of Redis B}
+  memcached:
+    image: ${MEMCACHED_IMAGE:-memcached:1.6-alpine}
+    networks:
+      lane:
+        ipv4_address: ${MEMCACHED_IP:?the address of memcached}
 networks:
   lane:
     name: redisskip-lane

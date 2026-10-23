@@ -17,23 +17,63 @@ import (
 // mock.real's. A connection the run's own process tree serves (a self-call)
 // is no dependency, and is not counted: serveTreeListener answers it before
 // any of those is reached.
+// It counts a replay's DNS lookups its DNS answered with the live resolver's
+// answer too, per resolver and query (noteLookup): one no recorded answer
+// matched (models.RelayedDNS), and one of a name mock.real lists.
 // `keploy mock replay` reads the counts (Proxy.RelayedLive) before and after
 // its test command, and claims the run isolated only when it relayed none.
 type relayedLive struct {
 	mu sync.Mutex
 	n  map[relayedKey]int
+	// names is how many DNS rows count a name of their own: past
+	// maxRelayedNames, a lookup of a name no row holds yet is counted on its
+	// reason and resolver's row of other names (models.RelayedOtherNames),
+	// so an agent asked for ever-new names for its whole life (a name per
+	// request) keeps a bounded number of rows.
+	names int
 }
 
-type relayedKey struct{ reason, dest string }
+// maxRelayedNames is how many DNS rows an agent counts a name of its own on.
+const maxRelayedNames = 256
+
+// relayedKey is a row: a connection's reason and destination, or a DNS
+// lookup's reason, resolver (dest) and query.
+type relayedKey struct{ reason, dest, query string }
 
 // note counts one connection relayed live to dest, for reason.
 func (r *relayedLive) note(reason, dest string) {
+	r.add(relayedKey{reason: reason, dest: dest})
+}
+
+// noteLookup counts one DNS lookup of query (its name and type, dnsQuery)
+// that keploy's DNS answered with the answer of the live resolver at
+// resolver, for reason.
+func (r *relayedLive) noteLookup(reason, resolver, query string) {
+	k := relayedKey{reason: reason, dest: resolver, query: query}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, counted := r.n[k]; !counted {
+		if r.names >= maxRelayedNames {
+			k.query = models.RelayedOtherNames
+		} else {
+			r.names++
+		}
+	}
+	r.addLocked(k)
+}
+
+func (r *relayedLive) add(k relayedKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addLocked(k)
+}
+
+// addLocked is add, r.mu held.
+func (r *relayedLive) addLocked(k relayedKey) {
 	if r.n == nil {
 		r.n = map[relayedKey]int{}
 	}
-	r.n[relayedKey{reason, dest}]++
+	r.n[k]++
 }
 
 // rename moves one connection counted for reason at from to dest to: the
@@ -45,7 +85,7 @@ func (r *relayedLive) rename(reason, from, to string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	k := relayedKey{reason, from}
+	k := relayedKey{reason: reason, dest: from}
 	if r.n[k] == 0 {
 		return
 	}
@@ -53,7 +93,7 @@ func (r *relayedLive) rename(reason, from, to string) {
 	if r.n[k] == 0 {
 		delete(r.n, k)
 	}
-	r.n[relayedKey{reason, to}]++
+	r.n[relayedKey{reason: reason, dest: to}]++
 }
 
 // rows is every count, sorted (models.RelayedLives.Sorted); empty, never
@@ -63,7 +103,7 @@ func (r *relayedLive) rows() models.RelayedLives {
 	r.mu.Lock()
 	out := make(models.RelayedLives, 0, len(r.n))
 	for k, n := range r.n {
-		out = append(out, models.RelayedLive{Reason: k.reason, Destination: k.dest, Connections: n})
+		out = append(out, models.RelayedLive{Reason: k.reason, Destination: k.dest, Query: k.query, Connections: n})
 	}
 	r.mu.Unlock()
 	if sorted := out.Sorted(); len(sorted) > 0 {
@@ -73,8 +113,10 @@ func (r *relayedLive) rows() models.RelayedLives {
 }
 
 // RelayedLive is every connection p relayed live to a dependency since it
-// started, per reason and destination (relayedLive): the agent's answer to
-// GET /agent/relayed (agent.RelayedLiveReporter).
+// started, per reason and destination, and every DNS lookup a replay's DNS
+// answered with the live resolver's answer, per reason, resolver and query
+// (relayedLive): the agent's answer to GET /agent/relayed
+// (agent.RelayedLiveReporter).
 func (p *Proxy) RelayedLive() models.RelayedLives {
 	return p.relayed.rows()
 }

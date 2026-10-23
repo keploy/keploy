@@ -813,14 +813,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
 	} else {
-		fields := []zap.Field{zap.String("mock-set", name), zap.String("reason", isolationNote)}
-		if next := relayed.nextStep(); next != "" && isolationNote == relayed.note() {
-			// The reason is what the agent relayed live, or that it cannot
-			// say: how to have those calls answered from a recording (for
-			// Redis, Keploy Enterprise), or the agent say what it relays.
-			fields = append(fields, zap.String("next_step", next))
-		}
-		m.logger.Info("this replay did not prove the tests run with the dependencies off", fields...)
+		m.logger.Info("this replay did not prove the tests run with the dependencies off", notIsolatedFields(name, isolationNote, relayed)...)
 	}
 
 	//     Leave the verdict where the editor, an agent and a status command
@@ -2135,6 +2128,26 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			// would otherwise read it as "when this happened".
 			zap.String("recordedReqTimestamp", state.ReqTimestampMock))
 	}
+}
+
+// notIsolatedFields are the fields of the line that says a replay did not
+// prove isolation: the set, the reason (isolation's), and what the agent
+// relayed live with the next step for it. The calls it relayed are named
+// whatever reason decided, also when an earlier one did (the test command
+// failed, --on-miss passthrough, bypass rules): a run whose Redis answered
+// live says so, with Keploy Enterprise as the next step, though its test
+// command also failed. That the agent cannot say what it relayed is named,
+// with its next step, only when it is the reason.
+func notIsolatedFields(set, reason string, relayed relayedCheck) []zap.Field {
+	fields := []zap.Field{zap.String("mock-set", set), zap.String("reason", reason)}
+	note := relayed.note()
+	if relayed.known && note != "" && note != reason {
+		fields = append(fields, zap.String("relayed", note))
+	}
+	if next := relayed.nextStep(); next != "" && (relayed.known || note == reason) {
+		fields = append(fields, zap.String("next_step", next))
+	}
+	return fields
 }
 
 // servedPool counts the mocks of filtered and unfiltered, those a replay

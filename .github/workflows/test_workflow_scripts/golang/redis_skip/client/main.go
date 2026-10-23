@@ -2,7 +2,9 @@
 // calls a test suite would, a SET and a GET on Redis (REDIS_ADDR) and a get
 // on memcached (CACHE_ADDR), and exits 0 when each is answered as expected:
 // the GET with the value the SET wrote, the memcached get with a reply that
-// ends in END.
+// ends in END. With LOOKUP set, it first looks that name up, as a suite
+// whose replay asks for a name its recording never looked up, and fails if
+// the name has no address.
 package main
 
 import (
@@ -26,6 +28,13 @@ func main() {
 
 func run() error {
 	ctx := context.Background()
+	if name := os.Getenv("LOOKUP"); name != "" {
+		addrs, err := net.DefaultResolver.LookupHost(ctx, name)
+		if err != nil {
+			return fmt.Errorf("lookup %s: %w", name, err)
+		}
+		fmt.Printf("client: %s has %s\n", name, strings.Join(addrs, ", "))
+	}
 	rdb := redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR")})
 	defer func() { _ = rdb.Close() }()
 	if err := rdb.Set(ctx, "mock:k", "mocked", 0).Err(); err != nil {

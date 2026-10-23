@@ -108,7 +108,7 @@ func TestRelayDeclinedConn_RelaysTheWholeStreamIncludingConsumedBytes(t *testing
 		integrations.ErrParserDeclined)
 
 	go func() {
-		_ = p0().relayDeclinedConn(ctx, declined, zap.NewNop(), integrations.GRPC, session)
+		_ = p0().relayDeclinedConn(ctx, declined, zap.NewNop(), integrations.GRPC, session, nil)
 	}()
 
 	select {
@@ -307,7 +307,7 @@ func TestRecordMySQLOutgoing_DeclineRelaysRatherThanDropping(t *testing.T) {
 
 	go func() {
 		_ = p.recordMySQLOutgoing(ctx, proxySide, dstConn, make(chan *models.Mock, 8), errGrp,
-			zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader)
+			zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader, nil)
 	}()
 
 	// If the decline relayed, the echo comes back. If the dispatcher treated
@@ -456,7 +456,7 @@ func TestRelayDeclinedConn_ForwardsTheHalfClose(t *testing.T) {
 
 	declined := fmt.Errorf("port not in allowlist: %w", integrations.ErrParserDeclined)
 	go func() {
-		_ = p0().relayDeclinedConn(ctx, declined, zap.NewNop(), integrations.GRPC, session)
+		_ = p0().relayDeclinedConn(ctx, declined, zap.NewNop(), integrations.GRPC, session, nil)
 	}()
 
 	if _, err := appSide.Write([]byte("request")); err != nil {

@@ -155,8 +155,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		// The connections the agent relayed live to a dependency instead of
 		// answering them from a recording (the Redis skip, the agent's
-		// pass-through, mock.real), for keploy mock replay's isolation
-		// verdict. See
+		// pass-through, mock.real, a DNS lookup the live resolver answered),
+		// for keploy mock replay's isolation verdict. See
 		// pkg/agent/routes/relayed.go.
 		r.Get("/relayed", a.HandleRelayedLive)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)

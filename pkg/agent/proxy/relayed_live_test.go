@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -19,7 +20,9 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Every Redis connection a replay relays to the real Redis is counted as a
@@ -283,5 +286,108 @@ func TestARedisConnectionIsCountedBeforeItsDialReturns(t *testing.T) {
 	}
 	if got := p.RelayedLive(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("a record's connection was counted %+v, want %+v", got, want)
+	}
+}
+
+// A replay's DNS lookup that no recorded answer matches, which keploy's DNS
+// forwards to the live resolver and answers the application with, reached a
+// live dependency: it is counted, per resolver and query, each lookup the
+// answer is handed out for, from the cache too, and so is one the resolver
+// answers with no record of the type (NODATA). A lookup a recorded answer
+// matches is not, nor one keploy answers itself (the synthesized steer of a
+// name the resolver says does not exist), nor a record's lookups. With
+// mocking off, the resolver's answer is handed out whatever it is, and
+// counted. A name mock.real lists is resolved live by mock.real.
+func TestADNSLookupTheLiveResolverAnsweredIsCountedLive(t *testing.T) {
+	p := liveProxy(t,
+		map[string][]string{"kept.test.": {"10.0.0.5"}},
+		map[string][]string{"kept.test.": {"10.0.0.5"}, "new.test.": {"10.0.0.8"}, "listed.test.": {"10.0.0.9"}, "empty.test.": {}})
+	resolver := net.JoinHostPort(p.dnsUpstreamServers[0], p.dnsUpstreamPort)
+
+	if got := lookup(t, p, "kept.test.", false); !reflect.DeepEqual(got, []string{"10.0.0.5"}) {
+		t.Fatalf("kept.test answered %v, want its recorded answer", got)
+	}
+	if got := lookup(t, p, "nx.test.", false); !reflect.DeepEqual(got, []string{"127.0.0.1"}) {
+		t.Fatalf("nx.test answered %v, want keploy's own steer", got)
+	}
+	if rows := p.RelayedLive(); len(rows) != 0 {
+		t.Fatalf("lookups answered from the recording or by keploy were counted relayed: %+v", rows)
+	}
+
+	for i := 0; i < 2; i++ {
+		if got := lookup(t, p, "new.test.", false); !reflect.DeepEqual(got, []string{"10.0.0.8"}) {
+			t.Fatalf("new.test answered %v, want the live resolver's answer", got)
+		}
+	}
+	want := models.RelayedLives{{Reason: models.RelayedDNS, Destination: resolver, Query: "new.test A", Connections: 2}}
+	if got := p.RelayedLive(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("relayed %+v, want %+v", got, want)
+	}
+
+	// NODATA: the name exists and has no record of the type.
+	if got := lookup(t, p, "empty.test.", false); len(got) != 0 {
+		t.Fatalf("empty.test answered %v, want the live resolver's empty answer", got)
+	}
+	want = append(models.RelayedLives{{Reason: models.RelayedDNS, Destination: resolver, Query: "empty.test A", Connections: 1}}, want...).Sorted()
+	if got := p.RelayedLive(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("relayed %+v, want %+v", got, want)
+	}
+
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: false}})
+	if got := lookup(t, p, "gone.test.", false); len(got) != 0 {
+		t.Fatalf("gone.test answered %v with mocking off, want the live resolver's NXDOMAIN", got)
+	}
+	want = append(models.RelayedLives{{Reason: models.RelayedDNS, Destination: resolver, Query: "gone.test A", Connections: 1}}, want...).Sorted()
+	if got := p.RelayedLive(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("relayed %+v, want %+v", got, want)
+	}
+
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
+	lookup(t, p, "recorded.test.", false)
+	if got := p.RelayedLive(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("a record's lookup was counted relayed: %+v, want %+v", got, want)
+	}
+
+	t.Setenv(provenswitch.Env, "1")
+	list, err := realdeps.Parse([]string{"listed.test:443"})
+	require.NoError(t, err)
+	p.real.Store(&realState{list: list, book: &realdeps.Book{}})
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
+	if got := lookup(t, p, "listed.test.", false); !reflect.DeepEqual(got, []string{"10.0.0.9"}) {
+		t.Fatalf("listed.test answered %v, want the live resolver's answer", got)
+	}
+	want = append(want, models.RelayedLive{Reason: models.RelayedReal, Destination: resolver, Query: "listed.test A", Connections: 1}).Sorted()
+	if got := p.RelayedLive(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("relayed %+v, want %+v", got, want)
+	}
+}
+
+// An agent counts a name of its own on at most maxRelayedNames DNS rows: a
+// lookup of a name no row holds yet, past them, is counted on its reason and
+// resolver's row of other names, so an agent asked for ever-new names keeps a
+// bounded count. A name a row already holds is still counted on its own row.
+func TestTheDNSRowsAnAgentKeepsAreBounded(t *testing.T) {
+	var r relayedLive
+	const resolver = "127.0.0.11:53"
+	for i := 0; i < maxRelayedNames+5; i++ {
+		r.noteLookup(models.RelayedDNS, resolver, fmt.Sprintf("n%d.test A", i))
+	}
+	r.noteLookup(models.RelayedDNS, resolver, "n0.test A")
+	rows := r.rows()
+	if len(rows) != maxRelayedNames+1 {
+		t.Fatalf("the agent keeps %d rows, want %d: %d named and one of other names", len(rows), maxRelayedNames+1, maxRelayedNames)
+	}
+	byQuery := map[string]int{}
+	for _, row := range rows {
+		byQuery[row.Query] = row.Connections
+	}
+	if got := byQuery[models.RelayedOtherNames]; got != 5 {
+		t.Fatalf("the row of other names counts %d lookups, want the 5 past the bound", got)
+	}
+	if got := byQuery["n0.test A"]; got != 2 {
+		t.Fatalf("a name a row already holds was counted %d times on it, want 2", got)
+	}
+	if _, kept := byQuery[fmt.Sprintf("n%d.test A", maxRelayedNames)]; kept {
+		t.Fatal("a name past the bound has a row of its own")
 	}
 }

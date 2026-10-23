@@ -102,6 +102,80 @@ func TestRowsResetWithTheSession(t *testing.T) {
 	require.Empty(t, mocked)
 }
 
+// A mocked-local row is taken back (a record's connection whose parser then
+// declined it, or was retired before it recorded anything, listed live
+// instead) only when every connection that listed it has taken its listing
+// back: then its window goes too. Each take-back lists the connection's LIVE
+// row for the test the mocked row named, even when another test is open by
+// then. Taking one back twice counts once; one of an earlier session, or one
+// taken back after the run's windows were read, changes nothing; a zero LIVE
+// row lists nothing.
+func TestAMockedRowIsTakenBackWithItsLastListing(t *testing.T) {
+	db := models.MockedRow{Addr: "127.0.0.1:5432", Port: 5432}
+	cache := models.MockedRow{Addr: "127.0.0.1:11211", Port: 11211}
+	dbLive := models.LiveRow{Exe: "/usr/bin/postgres", Port: 5432, Relayed: "parser_retired"}
+
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	first, second := a.NoteMocked(db), a.NoteMocked(db)
+	a.NoteMocked(cache)
+	first(models.LiveRow{})
+	first(dbLive)
+	live, mocked := topologyOf(t, a)
+	require.Equal(t, []models.MockedRow{db, cache}, mocked, "another connection still lists the row")
+	require.Empty(t, live, "a take-back with no LIVE row lists none, and a second take-back counts nothing")
+
+	a, _ = wireAgent(t, models.MODE_RECORD)
+	first, second = a.NoteMocked(db), a.NoteMocked(db)
+	a.NoteMocked(cache)
+	first(dbLive)
+	second(dbLive)
+	live, mocked = topologyOf(t, a)
+	require.Equal(t, []models.MockedRow{cache}, mocked, "every listing of the row was taken back")
+	require.Equal(t, []models.LiveRow{dbLive}, live, "the take-backs list the LIVE row, once for the test")
+
+	// The LIVE row goes to the test the mocked row named, not to the test
+	// open when it is taken back.
+	a, _ = wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	inA := a.NoteMocked(db)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	inA(dbLive)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	live, mocked = topologyOf(t, a)
+	require.Empty(t, mocked)
+	want := dbLive
+	want.Test = "o::TestA"
+	require.Equal(t, []models.LiveRow{want}, live, "the LIVE row names the test the mocked row named")
+
+	// A listing made before the run's windows were read and taken back after
+	// it: the agent's later read says what the first said.
+	a, _ = wireAgent(t, models.MODE_RECORD)
+	late := a.NoteMocked(db)
+	_, mocked = topologyOf(t, a)
+	require.Equal(t, []models.MockedRow{db}, mocked)
+	late(dbLive)
+	live, mocked = topologyOf(t, a)
+	require.Equal(t, []models.MockedRow{db}, mocked, "a listing taken back once the windows were read changed what they say")
+	require.Empty(t, live)
+
+	a, _ = wireAgent(t, models.MODE_RECORD)
+	stale := a.NoteMocked(db)
+	require.NoError(t, a.resetSession(context.Background()))
+	a.NoteMocked(db)
+	stale(dbLive)
+	live, mocked = topologyOf(t, a)
+	require.Equal(t, []models.MockedRow{db}, mocked, "a listing of the session before is not this session's")
+	require.Empty(t, live)
+	_ = second
+}
+
 // sinkProxy is a proxy that takes a topology sink.
 type sinkProxy struct {
 	coreAgent.Proxy

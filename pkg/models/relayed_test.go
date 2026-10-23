@@ -67,3 +67,46 @@ func TestRelayedLiveTextNamesWhatAndWhy(t *testing.T) {
 		t.Fatalf("Text = %q, want every row, sorted", got)
 	}
 }
+
+// A DNS lookup the live resolver answered is a row of its own per resolver
+// and query: its words name the lookup, the resolver and why, its next step
+// is to record again, and two reads of the agent's counts tell the run's
+// lookups apart from earlier ones by query too.
+func TestARelayedDNSLookupIsARowOfItsOwn(t *testing.T) {
+	a := RelayedLive{Reason: RelayedDNS, Destination: "127.0.0.11:53", Query: "redis-b A", Connections: 2}
+	if got, want := a.Text(), "DNS lookup of redis-b A answered by the live resolver at 127.0.0.11:53 (2 lookup(s)): the recording has no DNS answer for it, so keploy's DNS asked the live resolver"; got != want {
+		t.Fatalf("Text = %q, want %q", got, want)
+	}
+	if got := (RelayedLives{a}).NextStep(); !strings.Contains(got, "record the set again") {
+		t.Fatalf("NextStep = %q, want it to say to record again", got)
+	}
+	real := RelayedLive{Reason: RelayedReal, Destination: "127.0.0.11:53", Query: "api.test A", Connections: 1}
+	if got := real.Text(); !strings.HasPrefix(got, "DNS lookup of api.test A answered by the live resolver") || !strings.Contains(got, "mock.real lists the name") {
+		t.Fatalf("Text = %q", got)
+	}
+	aaaa := RelayedLive{Reason: RelayedDNS, Destination: "127.0.0.11:53", Query: "redis-b AAAA", Connections: 1}
+	base := RelayedLives{{Reason: RelayedDNS, Destination: "127.0.0.11:53", Query: "redis-b A", Connections: 1}}
+	now := RelayedLives{aaaa, a}
+	want := RelayedLives{{Reason: RelayedDNS, Destination: "127.0.0.11:53", Query: "redis-b A", Connections: 1}, aaaa}
+	if got := now.Since(base); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Since = %+v, want %+v", got, want)
+	}
+	if got := (RelayedLives{a, a}).Sorted(); !reflect.DeepEqual(got, RelayedLives{{Reason: RelayedDNS, Destination: "127.0.0.11:53", Query: "redis-b A", Connections: 4}}) {
+		t.Fatalf("Sorted = %+v, want one row adding both", got)
+	}
+
+	// mock.real's DNS row and its connection row each get their own step.
+	realConn := RelayedLive{Reason: RelayedReal, Destination: "10.0.0.9:443", Connections: 1}
+	steps := (RelayedLives{real, realConn}).NextStep()
+	if !strings.Contains(steps, "take the name out of mock.real") || !strings.Contains(steps, "take the destination out of mock.real") {
+		t.Fatalf("NextStep = %q, want a step for the name and one for the destination", steps)
+	}
+	other := RelayedLive{Reason: RelayedDNS, Destination: "127.0.0.11:53", Query: RelayedOtherNames, Connections: 3}
+	if got, want := other.Text(), "DNS lookups of other names answered by the live resolver at 127.0.0.11:53 (3 lookup(s)): the recording has no DNS answer for them, so keploy's DNS asked the live resolver"; got != want {
+		t.Fatalf("Text = %q, want %q", got, want)
+	}
+	otherReal := RelayedLive{Reason: RelayedReal, Destination: "127.0.0.11:53", Query: RelayedOtherNames, Connections: 2}
+	if got, want := otherReal.Text(), "DNS lookups of other names answered by the live resolver at 127.0.0.11:53 (2 lookup(s)): mock.real lists the names, which every run resolves for real"; got != want {
+		t.Fatalf("Text = %q, want %q", got, want)
+	}
+}

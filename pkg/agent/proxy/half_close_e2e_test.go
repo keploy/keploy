@@ -88,7 +88,7 @@ func TestRecordViaSupervisor_HalfCloseReachesTheUpstream(t *testing.T) {
 	go func() {
 		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), probe, "test",
 			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
-			models.OutgoingOptions{})
+			models.OutgoingOptions{}, nil)
 	}()
 
 	request := []byte("matrix-generic\n")
@@ -198,7 +198,7 @@ func TestRecordViaSupervisor_ServerHalfCloseReachesTheClient(t *testing.T) {
 	go func() {
 		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), probe, "test",
 			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
-			models.OutgoingOptions{})
+			models.OutgoingOptions{}, nil)
 	}()
 
 	reply := []byte("response-body-with-no-length-prefix")

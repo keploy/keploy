@@ -12,7 +12,8 @@ import (
 // RelayedLiveReader is an optional Instrumentation extension: the connections
 // the agent relayed live to a dependency since it started, instead of
 // answering them from a recording (models.RelayedLives): a Redis the
-// open-source keploy does not mock, the agent's pass-through, mock.real's.
+// open-source keploy does not mock, the agent's pass-through, mock.real's,
+// and the DNS lookups its DNS answered with the live resolver's answer.
 // *pkg/platform/http.AgentClient implements it.
 //
 // A replay whose agent relayed one did not answer every dependency from the
