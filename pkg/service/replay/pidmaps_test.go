@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -845,6 +846,37 @@ func TestUnderTheSwitchARetryCycleDoesNotRunATaintedSetAgain(t *testing.T) {
 	}
 }
 
+// Nor does it run a set again across an agent started again while it ran:
+// each test counted across the restart is not judged
+// (models.CaptureLossAgentStartedAgain), and so would be every test the cycle
+// ran again, a test that ran before the restart too, that row then being its
+// verdict.
+func TestUnderTheSwitchARetryCycleDoesNotRunASetAcrossAnAgentStartedAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.config.RetryPassing = true
+	// A wrong answer, which on its own starts a retry cycle.
+	h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-3": true}}
+	// Reads: the run's mark, the set's look at which agent answers, then one
+	// as each test ends: b2 answers from test-2's on.
+	h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}}, agent: "a1", restartAt: 4, next: "b2"}
+	h.replayer.markPIDMaps(context.Background())
+	h.replayer.appStartsAnew()
+	if s := h.run(t); s != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %s; want INTERNAL_ERR, not judged", s)
+	}
+	for _, r := range h.report.report.Tests {
+		restarted := false
+		for _, c := range r.FailureInfo.CannotCapture {
+			restarted = restarted || c.Kind == models.CaptureLossAgentStartedAgain
+		}
+		if want := r.TestCaseID != "test-1"; restarted != want {
+			t.Fatalf("%s charged the agent started again: %v, want %v: test-1 ran before the restart, and is not run again", r.TestCaseID, restarted, want)
+		}
+	}
+}
+
 // A kernel's count of skipped runs (5.12+) is evidence, never a verdict: a
 // --retry-passing-test cycle runs as it does on a kernel without the count
 // (5.10), the same reads and the same results, and no test is charged it.
@@ -1146,7 +1178,10 @@ func (c *composeLossInstr) GetCaptureLosses(ctx context.Context) (models.Capture
 // next set's start of it was a docker start of a running container; or a
 // daemon of it the stop left running). One that predates the recording,
 // which keploy could not exclude, outlives the application too: every later
-// set is charged it.
+// set is charged it. A set whose tests are charged such a loss from before it
+// began says so in its reason, and why the application ran on into it, and
+// keploy says it at ERROR; a set charged only what it lost itself says no
+// such thing. What a set's stop left running keploy says at ERROR as well.
 func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	stall := models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}
@@ -1214,6 +1249,8 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 		} {
 			t.Run(string(lost.kind)+"/"+tc.name, func(t *testing.T) {
 				h := tc.harness(t)
+				core, logs := observer.New(zapcore.InfoLevel)
+				h.replayer.logger = zap.New(core)
 				h.replayer.config.Test.Mocking = true
 				h.replayer.instrument = !tc.noApp
 				if !tc.noApp {
@@ -1236,6 +1273,18 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				if p, s := charged(h); p != 1 || s != 1 {
 					t.Fatalf("the first set: %d tests charged the process, %d the stall; want one each", p, s)
 				}
+				// Its loss is its own: nothing was carried into it.
+				if reason := h.report.report.FailureReason; strings.Contains(reason, "before this test-set began") {
+					t.Fatalf("the first set's reason %q says a loss was carried into it; it lost the process itself", reason)
+				}
+				if n := errorsSaying(logs, "before this test-set began runs on in it"); n != 0 {
+					t.Fatalf("the first set: %d ERRORs say a loss was carried into it; want none", n)
+				}
+				leftSaid := errorsSaying(logs, "the stop of the application at the test-set's end left part of it running")
+				if wantLeft := tc.why != "" && strings.HasPrefix(tc.why, "the stop of the application"); (leftSaid == 1) != wantLeft {
+					t.Fatalf("the first set: %d ERRORs say its stop left part of the application running; want one only where it did (%v)", leftSaid, wantLeft)
+				}
+				logs.TakeAll()
 				// The next set has results of its own, as another test set's
 				// would (the harness runs one set's id); its own stop works.
 				h.report.mu.Lock()
@@ -1257,15 +1306,29 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				// before it, and why the application ran on into it.
 				reason := h.report.report.FailureReason
 				carried := strings.Contains(reason, "before this test-set began")
+				said := errorsSaying(logs, "before this test-set began runs on in it")
 				switch {
 				case tc.kept && lost.appLife && (!carried || !strings.Contains(reason, tc.why)):
 					t.Fatalf("the next set's reason %q; want it to say what was charged from before it, and why: %q", reason, tc.why)
-				case (!tc.kept || !lost.appLife) && carried:
-					t.Fatalf("the next set's reason %q says a loss was carried into it", reason)
+				case tc.kept && lost.appLife && said != 1:
+					t.Fatalf("the next set: %d ERRORs say a loss was carried into it; want one", said)
+				case (!tc.kept || !lost.appLife) && (carried || said != 0):
+					t.Fatalf("the next set's reason %q (and %d ERRORs) say a loss was carried into it", reason, said)
 				}
 			})
 		}
 	}
+}
+
+// errorsSaying is how many of logs' entries at ERROR say what.
+func errorsSaying(logs *observer.ObservedLogs, what string) int {
+	n := 0
+	for _, e := range logs.All() {
+		if e.Level == zapcore.ErrorLevel && strings.Contains(e.Message, what) {
+			n++
+		}
+	}
+	return n
 }
 
 // composeStartsInstr is a compose stack whose counts are now, and whose
@@ -1365,6 +1428,44 @@ func TestUnderTheSwitchAComposeAppIsChargedFromItsFirstMark(t *testing.T) {
 			h.replayer.config.Test.Mocking = true
 			if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusPassed || n != 0 {
 				t.Fatalf("%s, %d tests charged %s; want PASSED, none: it was lost before the set's mark", s, n, kind)
+			}
+		})
+	}
+}
+
+// Under the proven switch, a run's first application, which keploy starts
+// once Start has marked the agent's counts, is counted from that mark: what
+// the agent counted before (a process of an earlier run's application it
+// could not place) is no loss of this run's, and charges none of its tests.
+// Here one application, kept alive across sets, serves the run, so Start's
+// mark is the only base its losses are counted from.
+func TestUnderTheSwitchTheRunsApplicationIsCountedFromStartsMark(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppSubtreeUntracked, models.CaptureLossPIDMap} {
+		t.Run(string(kind), func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Mocking = true
+			before := models.CaptureLosses{{Kind: kind, Count: 1, What: "the latest: pid 41 (worker)"}}
+			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before}}
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.KeepAppAlive = true
+			// What config/default.go sets, which the harness's bare config
+			// does not: Start runs each test set this many times at most.
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			saved := utils.ErrCode
+			t.Cleanup(func() { utils.ErrCode = saved })
+			utils.ErrCode = 0
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+			if err := h.replayer.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if rep := h.report.report; rep == nil || rep.Status != string(models.TestSetStatusPassed) {
+				t.Fatalf("report %+v; want PASSED: %s was lost before the run's application started", rep, kind)
+			}
+			if n := chargedWith(h, kind); n != 0 {
+				t.Fatalf("%d tests charged %s; want none: it was lost before Start's mark", n, kind)
 			}
 		})
 	}
@@ -1586,7 +1687,10 @@ func TestUnderTheSwitchAnAgentStartedAgainForgetsWhatTheRunningAppLost(t *testin
 // that kind before the run's application started: under an application kept
 // alive (whose set is not judged for what the agent before took with it, and
 // fails on what this one lost), and under one keploy starts anew for the next
-// set, for a process of the application's and for one that predates it.
+// set, for a process of the application's, for one that predates it, and for
+// a call keploy cannot capture at all (counted, for the whole run, from the
+// run's first mark: under the new agent, from the mark its first application
+// starts after), which leaves the tests without a verdict.
 func TestUnderTheSwitchAnAgentStartedAgainIsChargedItsOwnLossesFromItsStart(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
@@ -1597,6 +1701,7 @@ func TestUnderTheSwitchAnAgentStartedAgainIsChargedItsOwnLossesFromItsStart(t *t
 		{"kept alive, a process of the application's", models.CaptureLossPIDMap, true},
 		{"started anew, a process of the application's", models.CaptureLossPIDMap, false},
 		{"started anew, a process that predates it", models.CaptureLossPIDMapExcluded, false},
+		{"started anew, a call keploy cannot capture at all", models.CaptureLossUnixSocket, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 2, 0)
@@ -1618,10 +1723,116 @@ func TestUnderTheSwitchAnAgentStartedAgainIsChargedItsOwnLossesFromItsStart(t *t
 			h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{{{Kind: tc.kind, Count: 1, What: "pid 41"}}}}, agent: "b2"}
 			resetResults(h)
 			s := run(t)
-			if n := chargedWith(h, tc.kind); n != 2 {
+			n := chargedWith(h, tc.kind)
+			if tc.kind.NotJudged() {
+				n = notJudgedFor(h, tc.kind)
+			}
+			if n != 2 {
 				t.Fatalf("set 2: %s, %d of 2 tests charged b2's %s; want both, counted from b2's start", s, n, tc.kind)
 			}
 		})
+	}
+}
+
+// notJudgedFor is how many of the last set's tests were left without a
+// verdict for kind.
+func notJudgedFor(h *prRun, kind models.CaptureLossKind) int {
+	n := 0
+	for _, r := range h.report.report.Tests {
+		for _, c := range r.FailureInfo.CannotCapture {
+			if c.Kind == kind {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// Under the proven switch, a set whose agent was started again while it ran
+// has no verdict, and its reason claims nothing carried into it from before
+// it began: the counts of two agent processes cannot be compared, though the
+// new one counts more of a process of the application's than the old one's
+// mark held.
+func TestUnderTheSwitchAnAgentStartedAgainMidSetClaimsNoLossCarriedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	kind := models.CaptureLossPIDMap
+	h := newPartialRunHarness(t, 2, 0)
+	core, logs := observer.New(zapcore.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	h.replayer.config.Test.Mocking = true
+	// a1's reads: the run's mark, the set's look at which agent answers, one
+	// as each test ends (the second sees the lost process), the set's end.
+	h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, nil, {{Kind: kind, Count: 1, What: "pid 41"}}}}, agent: "a1"}
+	h.replayer.markPIDMaps(context.Background())
+	h.replayer.appStartsAnew()
+	if s := h.runServing(t); s != models.TestSetStatusFailed {
+		t.Fatalf("set 1: %s, want FAILED on the lost process", s)
+	}
+	// Set 2: a1 answers its look at which agent answers; b2, which counts
+	// three of its own, every read after.
+	h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{{{Kind: kind, Count: 1, What: "pid 41"}}}},
+		agent: "a1", restartAt: 2, next: "b2", nextHolds: models.CaptureLosses{{Kind: kind, Count: 3, What: "pid 77"}}}
+	resetResults(h)
+	logs.TakeAll()
+	if s := h.runServing(t); s != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("set 2: %s; want INTERNAL_ERR, not judged: its agent was started again", s)
+	}
+	if reason := h.report.report.FailureReason; strings.Contains(reason, "before this test-set began") {
+		t.Fatalf("set 2's reason %q says a loss was carried into it, from counts of two agent processes", reason)
+	}
+	if n := errorsSaying(logs, "before this test-set began runs on in it"); n != 0 {
+		t.Fatalf("set 2: %d ERRORs say a loss was carried into it; want none", n)
+	}
+}
+
+// Under the proven switch, a set whose stop of its application is not waited
+// out (the set's run ended first: here a result keploy could not store) does
+// not know that its application ended, nor that what it lost did: the next
+// set's start is no start anew, and its tests are charged what was lost. A
+// set can follow such a one: one that is also not judged lets the run go on
+// (abortAfterTestSet).
+func TestUnderTheSwitchASetEndStopNotWaitedOutKeepsTheBase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	prev := testSetDrainStall
+	testSetDrainStall = 50 * time.Millisecond
+	t.Cleanup(func() { testSetDrainStall = prev })
+	kind := models.CaptureLossPIDMap
+	lost := models.CaptureLosses{{Kind: kind, Count: 1, What: "pid 41"}}
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Test.Mocking = true
+	// Reads: the run's mark, then the lost process from the first test on.
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, lost}}
+	// Set 1's application does not stop until the test releases it, so its
+	// stop is not over when the set's run ends.
+	release, stopped := make(chan struct{}), make(chan struct{})
+	h.instr.release, h.instr.stopped = release, stopped
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+			<-stopped
+		}
+	})
+	h.report.failInsertOf = map[string]error{"test-1": errors.New("the report store refused the write")}
+	h.replayer.markPIDMaps(context.Background())
+	h.replayer.appStartsAnew()
+	if s := h.run(t); s != models.TestSetStatusInternalErr {
+		t.Fatalf("set 1: %s, want INTERNAL_ERR (a result could not be stored)", s)
+	}
+	if !strings.Contains(h.replayer.lossAppRunsOnWhy, "was not waited out") {
+		t.Fatalf("premise: set 1's stop was waited out (%q)", h.replayer.lossAppRunsOnWhy)
+	}
+	close(release)
+	<-stopped
+	released = true
+	h.instr.release, h.instr.stopped = nil, nil
+	h.report.failInsertOf = nil
+	resetResults(h)
+	if s, n := h.run(t), chargedWith(h, kind); s != models.TestSetStatusFailed || n != 2 {
+		t.Fatalf("set 2: %s, %d of 2 tests charged %s; want FAILED, both: set 1's stop was not waited out, so its application, and what it lost, may run on", s, n, kind)
+	}
+	if reason := h.report.report.FailureReason; !strings.Contains(reason, "was not waited out") {
+		t.Fatalf("set 2's reason %q; want it to say set 1's stop was not waited out", reason)
 	}
 }
 
