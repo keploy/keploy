@@ -134,9 +134,12 @@ func (m *prMappingDB) insertCalls() int {
 // log line — is what the YAML, JUnit, --format json and the cloud UI render,
 // so the assertions read it.
 type prReportDB struct {
-	mu          sync.Mutex
-	results     []models.TestResult
-	report      *models.TestReport
+	mu      sync.Mutex
+	results []models.TestResult
+	report  *models.TestReport
+	// reports are every report the run wrote, in order (the set's first,
+	// RUNNING one, and its last at least).
+	reports     []*models.TestReport
 	failInserts bool
 	// failInsertOf fails only the named test's result insert, with that error.
 	failInsertOf map[string]error
@@ -199,6 +202,7 @@ func (f *prReportDB) InsertReport(_ context.Context, _ string, _ string, rep *mo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.report = rep
+	f.reports = append(f.reports, rep)
 	return nil
 }
 func (f *prReportDB) UpdateReport(context.Context, string, any) error { return nil }

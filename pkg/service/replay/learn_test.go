@@ -1,11 +1,13 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
@@ -38,32 +40,58 @@ func TestLearnedByTest(t *testing.T) {
 // whose learners class each call they refuse (TestReport.Learn), when it
 // did, and only then: under the proven switch, with the learn step on. A
 // reader counting those refusals (enterprise's E-measure) reads no other
-// report. A set with no test to run says so too.
+// report. Every report the replay writes for the set says it, whichever way
+// the set ends: the first, RUNNING one and the last of a set it runs, and
+// the one report of a set with no test to run, a set it ignores whole, and
+// a set an interrupted keploy templatize left half-written.
 func TestTheReportSaysTheLearnStepRan(t *testing.T) {
+	ignored := func(h *prRun) { h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {}} }
+	interrupted := func(h *prRun) { h.replayer.testDB = interruptedSet{h.replayer.testDB.(*prTestDB)} }
 	for _, tc := range []struct {
-		sw    string
-		learn bool
-		n     int
-		want  string
+		name    string
+		sw      string
+		learn   bool
+		n       int
+		setup   func(*prRun)
+		reports int
+		want    string
 	}{
-		{sw: "1", learn: true, n: 2, want: models.LearnWords},
-		{sw: "1", learn: true, n: 0, want: models.LearnWords},
-		{sw: "1", learn: false, n: 2},
-		{sw: "", learn: true, n: 2},
-		{sw: "", learn: false, n: 2},
+		{name: "a set it runs", sw: "1", learn: true, n: 2, reports: 2, want: models.LearnWords},
+		{name: "a set with no test", sw: "1", learn: true, n: 0, reports: 1, want: models.LearnWords},
+		{name: "a set it ignores whole", sw: "1", learn: true, n: 2, setup: ignored, reports: 1, want: models.LearnWords},
+		{name: "a set an interrupted templatize left", sw: "1", learn: true, n: 2, setup: interrupted, reports: 1, want: models.LearnWords},
+		{name: "no learn step", sw: "1", learn: false, n: 2, reports: 2},
+		{name: "no learn step, an ignored set", sw: "1", learn: false, n: 2, setup: ignored, reports: 1},
+		{name: "no learn step, an interrupted set", sw: "1", learn: false, n: 2, setup: interrupted, reports: 1},
+		{name: "switch off", sw: "", learn: true, n: 2, reports: 2},
+		{name: "switch off, no learn step", sw: "", learn: false, n: 2, reports: 2},
+		{name: "switch off, a set with no test", sw: "", learn: true, n: 0, reports: 1},
 	} {
-		t.Run(fmt.Sprintf("switch=%q learn=%v tests=%d", tc.sw, tc.learn, tc.n), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s (switch=%q learn=%v tests=%d)", tc.name, tc.sw, tc.learn, tc.n), func(t *testing.T) {
 			t.Setenv(provenswitch.Env, tc.sw)
 			h := newPartialRunHarness(t, tc.n, 0)
 			h.replayer.config.Test.Learn = tc.learn
 			h.replayer.mockDB = &learnedStore{prMockDB: h.mocks}
-			_ = h.run(t)
-			if h.report.report == nil {
-				t.Fatal("no report was written")
+			if tc.setup != nil {
+				tc.setup(h)
 			}
-			if got := h.report.report.Learn; got != tc.want {
-				t.Fatalf("the report's learn is %q; want %q", got, tc.want)
+			_ = h.run(t)
+			if len(h.report.reports) < tc.reports {
+				t.Fatalf("%d reports were written; want %d at least", len(h.report.reports), tc.reports)
+			}
+			for i, rep := range h.report.reports {
+				if rep.Learn != tc.want {
+					t.Errorf("report %d of %d (%s) says learn %q; want %q", i+1, len(h.report.reports), rep.Status, rep.Learn, tc.want)
+				}
 			}
 		})
 	}
+}
+
+// interruptedSet is a test store whose set an interrupted keploy templatize
+// left half-written (refuseInterruptedSet refuses it).
+type interruptedSet struct{ *prTestDB }
+
+func (interruptedSet) Interrupted(context.Context, string) error {
+	return fmt.Errorf("%w: test-set-0 holds test-1.yaml.tmp: finish or undo the keploy templatize that wrote it", setfile.ErrReplaceInterrupted)
 }
