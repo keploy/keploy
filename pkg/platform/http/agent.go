@@ -1711,14 +1711,24 @@ func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefus
 // than the route (404) or one that cannot count (501) gives
 // models.ErrCaptureLossesUnsupported, which is "unknown", not "none".
 func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	losses, _, err := a.GetCaptureLossesAndAgent(ctx)
+	return losses, err
+}
+
+// GetCaptureLossesAndAgent is GetCaptureLosses, and the agent process that
+// answered (models.AgentInstanceHeader): its counts are that process's, from
+// its start, and an agent started again in its place counts afresh. "" where
+// the answer names none (an agent with the switch off, or older than the
+// header).
+func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
 	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
 	}
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
+		return nil, "", fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
 	}
 	defer func() {
 		if err := res.Body.Close(); err != nil {
@@ -1726,17 +1736,17 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 		}
 	}()
 	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
-		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+		return nil, "", fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
 	}
 	if res.StatusCode != http.StatusOK {
 		rawBody, _ := readAgentBody(res)
-		return nil, agentRespErr("get capture losses", res, rawBody)
+		return nil, "", agentRespErr("get capture losses", res, rawBody)
 	}
 	var losses models.CaptureLosses
 	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
-		return nil, fmt.Errorf("failed to decode the capture losses: %w", err)
+		return nil, "", fmt.Errorf("failed to decode the capture losses: %w", err)
 	}
-	return losses, nil
+	return losses, res.Header.Get(models.AgentInstanceHeader), nil
 }
 
 // GetUnchargedCaptureLosses asks the agent what it could not capture since

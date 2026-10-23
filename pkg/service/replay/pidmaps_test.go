@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1198,25 +1199,29 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
 			harness func(t *testing.T) *prRun
-			serving bool // the sets are served by one agent (serveTest)
-			noApp   bool // keploy starts no application (no -c)
-			kept    bool // the next set's application is this set's
+			serving bool   // the sets are served by one agent (serveTest)
+			noApp   bool   // keploy starts no application (no -c)
+			kept    bool   // the next set's application is this set's
+			why     string // what the next set's reason says of why
 		}{
-			{"kept alive across sets", plain, true, false, true},
-			{"one keploy does not start", plain, false, true, true},
-			{"a compose stack's app started again for the next set", compose(nil), true, false, false},
+			{"kept alive across sets", plain, true, false, true, "kept alive across test-sets (--keep-app-alive)"},
+			{"one keploy does not start", plain, false, true, true, "keploy does not start the application (no command)"},
+			{"a compose stack's app started again for the next set", compose(nil), true, false, false, ""},
 			// The stop's failure leaves the first set unjudged too.
-			{"a compose stack's app whose stop failed", compose(errors.New("keploy could not interrupt the application's container: context deadline exceeded")), true, false, true},
-			{"started anew for each set", plain, false, false, false},
-			{"started anew, but its stop left a daemon running", leftADaemon, false, false, true},
+			{"a compose stack's app whose stop failed", compose(errors.New("keploy could not interrupt the application's container: context deadline exceeded")), true, false, true, "keploy found the application's container still running when it started it for this test-set"},
+			{"started anew for each set", plain, false, false, false, ""},
+			{"started anew, but its stop left a daemon running", leftADaemon, false, false, true, "the stop of the application at test-set test-set-0's end left running daemons keploy cannot see (pids [41])"},
 		} {
 			t.Run(string(lost.kind)+"/"+tc.name, func(t *testing.T) {
 				h := tc.harness(t)
 				h.replayer.config.Test.Mocking = true
 				h.replayer.instrument = !tc.noApp
-				// As Start marks the run before its first application.
-				h.replayer.markPIDMaps(context.Background())
-				h.replayer.appStartsAnew()
+				if !tc.noApp {
+					// As Start marks the run before its first application;
+					// a run with no command marks in its first set.
+					h.replayer.markPIDMaps(context.Background())
+					h.replayer.appStartsAnew()
+				}
 				run := h.run
 				if tc.serving {
 					run = h.runServing
@@ -1247,6 +1252,16 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				if p, s := charged(h); status != wantStatus || p != want || s != 0 {
 					t.Fatalf("the next set: status %s, %d tests charged the process, %d the stall; want %s, %d and none",
 						status, p, s, wantStatus, want)
+				}
+				// The set's reason says its tests are charged what was lost
+				// before it, and why the application ran on into it.
+				reason := h.report.report.FailureReason
+				carried := strings.Contains(reason, "before this test-set began")
+				switch {
+				case tc.kept && lost.appLife && (!carried || !strings.Contains(reason, tc.why)):
+					t.Fatalf("the next set's reason %q; want it to say what was charged from before it, and why: %q", reason, tc.why)
+				case (!tc.kept || !lost.appLife) && carried:
+					t.Fatalf("the next set's reason %q says a loss was carried into it", reason)
 				}
 			})
 		}
@@ -1350,6 +1365,261 @@ func TestUnderTheSwitchAComposeAppIsChargedFromItsFirstMark(t *testing.T) {
 			h.replayer.config.Test.Mocking = true
 			if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusPassed || n != 0 {
 				t.Fatalf("%s, %d tests charged %s; want PASSED, none: it was lost before the set's mark", s, n, kind)
+			}
+		})
+	}
+}
+
+// Under the proven switch, a compose app whose stop failed runs on into the
+// next set; that set's start of it is told failed (the set halts), so the
+// app keploy finds at the set after is still the one that ran before: no
+// start anew, and the base stays where it was, the set after charged what
+// the app lost in the first set. A failed start is no start anew: the daemon
+// may have carried it out, or the container ran all along.
+func TestUnderTheSwitchAFailedStartAfterAFailedStopKeepsTheBase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	kind := models.CaptureLossPIDMap
+	c := &composeInstr{stopErr: errors.New("keploy could not interrupt the application's container: context deadline exceeded")}
+	h := composeHarness(t, c)
+	li := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, {{Kind: kind, Count: 1, What: "pid 41"}}}}
+	h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: li}
+	h.replayer.config.Test.Mocking = true
+	if s := h.runServing(t); s != models.TestSetStatusInternalErr {
+		t.Fatalf("set 1: %s, want INTERNAL_ERR (its stop failed)", s)
+	}
+	c.stopErr = nil
+	c.startErr = errors.New(`keploy could not start the application's container "app" again: context deadline exceeded`)
+	resetResults(h)
+	if s, _ := h.replayer.RunTestSet(context.Background(), "test-set-0", "test-run-0", true); s != models.TestSetStatusAppHalted {
+		t.Fatalf("set 2: %s, want APP_HALTED (its start was told failed)", s)
+	}
+	c.startErr = nil
+	resetResults(h)
+	if s, n := h.runServing(t), chargedWith(h, kind); s != models.TestSetStatusFailed || n != 2 {
+		t.Fatalf("set 3: %s, %d of 2 tests charged; want FAILED, both: the app ran on from set 1, its stop having failed", s, n)
+	}
+}
+
+// namedLossInstr is prLossInstr whose reads name the agent process that
+// answered them, as the keploy agent client's do (models.AgentInstanceHeader).
+// From the read numbered restartAt on (from 1; 0: never) another process,
+// next, answers, its counts its own: nextHolds.
+type namedLossInstr struct {
+	*prLossInstr
+	agent     string
+	restartAt int
+	next      string
+	nextHolds models.CaptureLosses
+}
+
+func (f *namedLossInstr) GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
+	l, err := f.GetCaptureLosses(ctx)
+	f.lmu.Lock()
+	read := f.reads
+	f.lmu.Unlock()
+	if f.restartAt > 0 && read >= f.restartAt {
+		return f.nextHolds, f.next, err
+	}
+	return l, f.agent, err
+}
+
+// Under the proven switch, an agent started again while a set runs is told
+// by the capture-loss reads themselves, where nothing else watches which
+// agent process answers: the test whose read the new one answers, or the
+// set's end read, cannot be told to have lost nothing, and the set is not
+// judged, rather than passed on the new agent's empty counts.
+func TestUnderTheSwitchAnAgentStartedAgainMidSetIsToldByItsCounts(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	// Reads: the run's mark, the set's look at which agent answers, one as
+	// each test ends, and the set's end.
+	for _, tc := range []struct {
+		name      string
+		restartAt int
+	}{
+		{"before the second test's read", 4},
+		{"after the last test, before the set's end read", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Mocking = true
+			h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}}, agent: "a1", restartAt: tc.restartAt, next: "b2"}
+			h.replayer.markPIDMaps(context.Background())
+			h.replayer.appStartsAnew()
+			if s := h.run(t); s != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+				t.Fatalf("%s; want INTERNAL_ERR, not judged: the agent before may have counted a loss that went with it", s)
+			}
+			if reason := h.report.report.FailureReason; !strings.Contains(reason, "agent process a1, then b2") {
+				t.Fatalf("reason %q; want both agent processes named", reason)
+			}
+		})
+	}
+	// What the new agent lost itself is the test's, from its start, though
+	// the agent before had counted as many before the set: a loss of the
+	// set's, and one of the test's own.
+	t.Run("the new agent's own losses", func(t *testing.T) {
+		before := models.CaptureLosses{ // by kind, as a charge is
+			{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"},
+			{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to a:443"},
+		}
+		h := newPartialRunHarness(t, 2, 0)
+		h.replayer.config.Test.Mocking = true
+		h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before}}, agent: "a1", restartAt: 4, next: "b2", nextHolds: before}
+		h.replayer.markPIDMaps(context.Background())
+		h.replayer.appStartsAnew()
+		h.run(t)
+		var second models.TestResult
+		for _, r := range h.report.report.Tests {
+			if r.TestCaseID == "test-2" {
+				second = r
+			}
+		}
+		if !reflect.DeepEqual(second.FailureInfo.CaptureIncomplete, before) {
+			t.Fatalf("test-2 charged %+v; want b2's own %+v, from its start", second.FailureInfo.CaptureIncomplete, before)
+		}
+	})
+	// So for the set's end read: what the new agent lost after the last
+	// test is the set's, from its start, a loss of the set's failing it and
+	// a call keploy cannot capture at all said in why it is not judged.
+	for _, tc := range []struct {
+		name   string
+		lost   models.CaptureLoss
+		status models.TestSetStatus
+		says   string
+	}{
+		{"the new agent's own loss after the last test", models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}, models.TestSetStatusFailed, "parser stopped taking what keploy captured"},
+		{"the new agent's own call keploy cannot capture after the last test", models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/run/app.sock"}, models.TestSetStatusInternalErr, "called a Unix socket keploy cannot capture"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := models.CaptureLosses{tc.lost}
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Mocking = true
+			h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before}}, agent: "a1", restartAt: 5, next: "b2", nextHolds: before}
+			h.replayer.markPIDMaps(context.Background())
+			h.replayer.appStartsAnew()
+			if s := h.run(t); s != tc.status || !strings.Contains(h.report.report.FailureReason, tc.says) {
+				t.Fatalf("%s, reason %q; want %s, saying %q: b2's own, from its start", s, h.report.report.FailureReason, tc.status, tc.says)
+			}
+		})
+	}
+}
+
+// Under the proven switch, keploy's agent started again between two test
+// sets (kubelet restarting a crashed sidecar, docker a container) forgets
+// what the agent before counted: a process of the running application's that
+// it could not place runs on, its calls reaching a real dependency the new
+// agent never sees. So the tests after are not judged until keploy starts the
+// application anew under the new agent: where one application serves the
+// sets (kept alive across them, or one keploy does not start), the next set is
+// not judged, and says both agent processes; where keploy starts the
+// application anew for each set, the next set is judged on the new agent's
+// counts, from its start.
+func TestUnderTheSwitchAnAgentStartedAgainForgetsWhatTheRunningAppLost(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppSubtreeUntracked, models.CaptureLossPIDMap} {
+		for _, tc := range []struct {
+			name    string
+			serving bool // the sets are served by one agent (serveTest)
+			noApp   bool // keploy starts no application (no -c)
+			judged  bool // the next set is judged
+		}{
+			{"kept alive across sets", true, false, false},
+			{"one keploy does not start", false, true, false},
+			{"started anew for each set", false, false, true},
+		} {
+			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
+				lost := models.CaptureLosses{{Kind: kind, Count: 1, What: "the latest: pid 41 (worker)"}}
+				h := newPartialRunHarness(t, 2, 0)
+				h.replayer.config.Test.Mocking = true
+				h.replayer.instrument = !tc.noApp
+				// The agent's every read says a1 answered it; its second test
+				// sees the lost process. Reads: the run's mark, the set's
+				// look at which agent answers (none for a run whose first set
+				// takes the mark), and one as each test ends.
+				answers := []models.CaptureLosses{nil, nil, nil, lost}
+				if tc.noApp {
+					answers = answers[1:]
+				}
+				h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: answers}, agent: "a1"}
+				if !tc.noApp {
+					h.replayer.markPIDMaps(context.Background())
+					h.replayer.appStartsAnew()
+				}
+				run := h.run
+				if tc.serving {
+					run = h.runServing
+				}
+				if s, n := run(t), chargedWith(h, kind); s != models.TestSetStatusFailed || n == 0 {
+					t.Fatalf("set 1: %s, %d tests charged %s; want FAILED on it", s, n, kind)
+				}
+				// The agent is started again: b2's counts are its own, from
+				// nothing.
+				h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}}, agent: "b2"}
+				resetResults(h)
+				s := run(t)
+				unjudged := 0
+				for _, r := range h.report.report.Tests {
+					for _, c := range r.FailureInfo.CannotCapture {
+						if c.Kind == models.CaptureLossAgentStartedAgain && c.What == "agent process a1, then b2" {
+							unjudged++
+						}
+					}
+				}
+				if tc.judged {
+					if s != models.TestSetStatusPassed || unjudged != 0 {
+						t.Fatalf("set 2: %s, %d tests not judged for the agent started again; want PASSED: its application was started anew under the new agent", s, unjudged)
+					}
+					return
+				}
+				if s != models.TestSetStatusInternalErr || unjudged != 2 || !h.replayer.notJudged("test-set-0") {
+					t.Fatalf("set 2: %s, %d of 2 tests not judged for the agent started again; want INTERNAL_ERR, both: the application that lost a process ran on, and the agent that counted it is gone", s, unjudged)
+				}
+				if reason := h.report.report.FailureReason; !strings.Contains(reason, "keploy's agent was started again while the application ran on") || !strings.Contains(reason, "agent process a1, then b2") {
+					t.Fatalf("set 2's reason %q; want it to say the agent was started again, naming both processes", reason)
+				}
+			})
+		}
+	}
+}
+
+// Under the proven switch, what an agent started again loses itself is
+// charged from its own start, though the agent before had counted as many of
+// that kind before the run's application started: under an application kept
+// alive (whose set is not judged for what the agent before took with it, and
+// fails on what this one lost), and under one keploy starts anew for the next
+// set, for a process of the application's and for one that predates it.
+func TestUnderTheSwitchAnAgentStartedAgainIsChargedItsOwnLossesFromItsStart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name    string
+		kind    models.CaptureLossKind
+		serving bool
+	}{
+		{"kept alive, a process of the application's", models.CaptureLossPIDMap, true},
+		{"started anew, a process of the application's", models.CaptureLossPIDMap, false},
+		{"started anew, a process that predates it", models.CaptureLossPIDMapExcluded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Mocking = true
+			// a1 counted one before the run's application started, none
+			// after: no test of the first set is charged it.
+			before := models.CaptureLosses{{Kind: tc.kind, Count: 1, What: "pid 7"}}
+			h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before}}, agent: "a1"}
+			h.replayer.markPIDMaps(context.Background())
+			h.replayer.appStartsAnew()
+			run := h.run
+			if tc.serving {
+				run = h.runServing
+			}
+			if s := run(t); s != models.TestSetStatusPassed {
+				t.Fatalf("set 1: %s, want PASSED: the loss came before the application started", s)
+			}
+			// b2 counts one itself.
+			h.replayer.instrumentation = &namedLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{{{Kind: tc.kind, Count: 1, What: "pid 41"}}}}, agent: "b2"}
+			resetResults(h)
+			s := run(t)
+			if n := chargedWith(h, tc.kind); n != 2 {
+				t.Fatalf("set 2: %s, %d of 2 tests charged b2's %s; want both, counted from b2's start", s, n, tc.kind)
 			}
 		})
 	}

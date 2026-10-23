@@ -1128,6 +1128,35 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// inspectFailsDocker is a daemon whose inspect of one container (failID)
+// fails, as a wedged or starved daemon's does, while every other call works.
+type inspectFailsDocker struct {
+	*daemonModel
+	failID string
+}
+
+func (d *inspectFailsDocker) ContainerInspect(ctx context.Context, ref string) (container.InspectResponse, error) {
+	if ref == d.failID {
+		return container.InspectResponse{}, context.DeadlineExceeded
+	}
+	return d.daemonModel.ContainerInspect(ctx, ref)
+}
+
+// A start whose inspect of the app's container, before it, fails cannot tell
+// whether it starts one that was not running: it never says anew, though the
+// start itself works, as the container runs on (a stop that did not end it).
+// Said anew, the replay would count the app's losses from the start of an
+// app that ran before it.
+func TestAStartWhoseInspectFailsIsNoStartAnew(t *testing.T) {
+	stallBudget(t, 2*time.Second)
+	d, app := appStack()
+	a := stackApp(d, "app")
+	a.docker = &inspectFailsDocker{daemonModel: d, failID: app.id}
+	if anew, err := a.StartComposeApp(context.Background()); err == nil && anew {
+		t.Fatal("the inspect could not tell, the container runs on, and the start says anew")
+	}
+}
+
 // appStack is a daemon holding compose project "proj": keploy's agent
 // (keploy-v3-agent, its service keploy-agent) and the app's service "app",
 // its container as compose names it (proj-app-1, no container_name), which

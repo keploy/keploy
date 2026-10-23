@@ -387,7 +387,7 @@ func TestWhatADownstreamCaptureLostFailsTheTestsItTaints(t *testing.T) {
 	}{
 		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried", true, false},
 		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)", true, false},
-		{CaptureLossAppSubtreeUntracked, "keploy could not mark 2 process(es) forked in the application's subtree as the application's, its map of the subtree full, so their calls may have been neither recorded nor mocked while this test or one before it ran; report it to keploy with the agent's log, which names the process", false, true},
+		{CaptureLossAppSubtreeUntracked, "keploy could not mark 2 process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked while this test ran, or before it; report it to keploy with the agent's log, which names the process", false, true},
 	} {
 		if tc.k.NotJudged() || tc.k.Evidence() || tc.k.PerTest() != tc.perTest || tc.k.AppLife() != tc.appLife || tc.k.runScoped() {
 			t.Fatalf("%s: NotJudged %v, Evidence %v, PerTest %v, AppLife %v; want a judged loss, PerTest %v, AppLife %v",
@@ -500,5 +500,26 @@ func TestAKindThisBuildDoesNotKnowIsKeptAndJudged(t *testing.T) {
 	}
 	if got := at(5).Charged(LossBases{Set: at(1), App: at(1)}, at(3)); !reflect.DeepEqual(got, at(4)) {
 		t.Fatalf("Charged = %+v, want the 4 since the set's base", got)
+	}
+}
+
+// An agent started again while the application ran on (the replay's own
+// charge, never the agent's) leaves the tests it is charged to without a
+// verdict, and says why and what to do.
+func TestAnAgentStartedAgainLeavesTheTestsWithoutAVerdict(t *testing.T) {
+	k := CaptureLossAgentStartedAgain
+	if !k.NotJudged() || k.PerTest() || k.Evidence() || k.AppLife() {
+		t.Fatalf("%s: NotJudged %v, PerTest %v, Evidence %v, AppLife %v; want not judged only", k, k.NotJudged(), k.PerTest(), k.Evidence(), k.AppLife())
+	}
+	l := CaptureLosses{{Kind: k, Count: 1, What: "agent process a1, then b2"}}
+	judged, notJudged := l.Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %v, %v: not judged", judged, notJudged)
+	}
+	if text := l.NotJudgedText(); !strings.Contains(text, "keploy's agent was started again while the application ran on") || !strings.Contains(text, "(agent process a1, then b2)") {
+		t.Fatalf("NotJudgedText = %q", text)
+	}
+	if remedy := l.NotJudgedRemedy(); remedy != AgentStartedAgainRemedy {
+		t.Fatalf("NotJudgedRemedy = %q, want %q", remedy, AgentStartedAgainRemedy)
 	}
 }

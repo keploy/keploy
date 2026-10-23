@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -284,6 +285,55 @@ func TestEnsureAgentHoldsStoredMocks_ReRegistersReplacementAgent(t *testing.T) {
 	}
 	if stats != 2 {
 		t.Fatalf("expected the probe plus the confirmation read (2 stats calls), got %d", stats)
+	}
+}
+
+// rearmLossInstr is rearmInstr whose capture-loss reads name the agent
+// process that answered them (the keploy agent client's do): the replacement,
+// agent, holding losses.
+type rearmLossInstr struct {
+	*rearmInstr
+	agent  string
+	losses models.CaptureLosses
+}
+
+func (f *rearmLossInstr) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	l, _, err := f.GetCaptureLossesAndAgent(ctx)
+	return l, err
+}
+
+func (f *rearmLossInstr) GetCaptureLossesAndAgent(context.Context) (models.CaptureLosses, string, error) {
+	return f.losses, f.agent, nil
+}
+
+// Under the proven switch, the capture-loss counts of a replacement agent set
+// up again before the application ran against it (the compose bring-up's
+// retry) are all the set's: its tests are charged what it lost from its
+// start, the app's own startup included, and judged on it, though the set's
+// mark was read from the agent it replaced.
+func TestEnsureAgentHoldsStoredMocks_CountsTheReplacementsLossesFromItsStart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	// One counted from the set's mark, one from the application's start.
+	lost := models.CaptureLosses{
+		{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"},
+		{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"},
+	}
+	f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", losses: lost}
+	r := newRearmReplayer(f.rearmInstr)
+	r.instrumentation = f
+	// The set's mark, and the run's bases, read from the agent replaced.
+	r.lossMark, r.lossMarked = captureLossMark{known: true, agent: "a1"}, true
+	r.lossAgent, r.lossBasesAgent = "a1", "a1"
+	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+		t.Fatal(err)
+	}
+	charged, err := r.testCaptureLosses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(charged, lost) {
+		t.Fatalf("the first test is charged %+v; want the replacement's losses, %+v, from its start, and nothing that leaves it unjudged", charged, lost)
 	}
 }
 

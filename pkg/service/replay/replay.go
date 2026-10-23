@@ -580,11 +580,21 @@ type Replayer struct {
 	// lossMark is, under the proven switch, where the next test set's tests
 	// count the agent's capture losses from (pidmaps.go); lossMarked is
 	// whether this run has taken one yet; lossLast is the latest per-test
-	// read, which the set's end counts what is left from.
-	lossMark     captureLossMark
-	lossMarked   bool
-	lossLast     models.CaptureLosses
-	lossLastRead bool
+	// read, which the set's end counts what is left from, and lossLastAgent
+	// the agent process that answered it.
+	lossMark      captureLossMark
+	lossMarked    bool
+	lossLast      models.CaptureLosses
+	lossLastRead  bool
+	lossLastAgent string
+	// lossAgent is the agent process that answered the latest capture-loss
+	// read naming one; lossBasesAgent, the one the bases below that outlive
+	// a test set were read from (lossAppBase, lossRunStart, lossRunBase).
+	// Where they differ the agent was started again, and those bases count
+	// nothing of the new one's (lossBasesAt), until keploy starts the
+	// application anew under it (appStartsAnew).
+	lossAgent      string
+	lossBasesAgent string
 	// lossRunBase is the run's first capture-loss mark, from which what
 	// keploy cannot capture at all is counted for the whole run (decision
 	// 20: a Unix-socket connection outlives the test set it was opened in).
@@ -597,9 +607,14 @@ type Replayer struct {
 	// kept running across sets (--keep-app-alive) keeps it; nil (the hooks'
 	// load) for an application keploy did not start. lossAppRunsOn says the
 	// last set's stop did not end its application, which then runs on under
-	// the next set's start, with what it lost.
-	lossAppBase   models.CaptureLosses
-	lossAppRunsOn bool
+	// the next set's start, with what it lost, and lossAppRunsOnWhy why.
+	// lossAppKept says why the running application is older than the set
+	// RunTestSet runs ("" where it started for it): what a set's tests are
+	// charged from before the set began is said with it (appLossesCarriedIn).
+	lossAppBase      models.CaptureLosses
+	lossAppRunsOn    bool
+	lossAppRunsOnWhy string
+	lossAppKept      string
 	// lossRunStart is the run's first capture-loss mark, from which a process
 	// that outlives the application is counted (a refused exclusion);
 	// lossRunStartSet, whether it was taken.
@@ -937,8 +952,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// RunTestSet, which marks it there.
 	r.pidMarked, r.lossMarked = false, false
 	r.lossRunBase, r.lossRunBaseSet = nil, false
-	r.lossAppBase, r.lossAppRunsOn = nil, false
+	r.lossAppBase, r.lossAppRunsOn, r.lossAppRunsOnWhy, r.lossAppKept = nil, false, "", ""
 	r.lossRunStart, r.lossRunStartSet = nil, false
+	r.lossLastAgent, r.lossAgent, r.lossBasesAgent = "", "", ""
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
 		r.appStartsAnew() // the run's first application starts after it
@@ -1801,6 +1817,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if agentWatch != nil {
 		defer agentWatch.Stop()
 	}
+	// An agent started again since the last set's end counts afresh: this
+	// set counts from its start (markAgentChange).
+	r.markAgentChange(ctx, serveTest)
 
 	// The set's own teardown scope, part of its run's: what keploy sees the
 	// stop of the set's app (and the daemons it left) do moves it, and the
@@ -2458,8 +2477,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// failed that the daemon carried out) keeps its base, and what
 			// its processes lost.
 			if anew {
-				r.lossAppRunsOn = false
 				r.appStartsAnew()
+			} else {
+				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
 			}
 		}
 
@@ -2599,9 +2619,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							// Ended, but for what its stop left running,
 							// which runs on with what it lost.
 							r.lossAppRunsOn = appLeftRunning != ""
+							r.lossAppRunsOnWhy = ""
+							if r.lossAppRunsOn {
+								r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end left running %s", testSetID, appLeftRunning)
+								r.logger.Error("the stop of the application at the test-set's end left part of it running: what keploy could not capture of its processes runs on into the next test-set, whose tests are charged it ("+provenswitch.Env+"=1)",
+									zap.String("test-set", testSetID),
+									zap.String("leftRunning", appLeftRunning),
+									zap.String("next_step", "make the application's daemons end when it is stopped (stop them in its own shutdown), or start them before keploy, where they are outside dependencies"))
+							}
 							return appStopKilled
 						case <-runTestSetCtx.Done():
 							r.lossAppRunsOn = true // not known to have ended
+							r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end was not waited out (the test-set's run ended first)", testSetID)
 							return ""
 						}
 					}
@@ -2632,6 +2661,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErrChan <- appErr
 					return nil
 				})
+			} else {
+				// One application, started once in Start, serves every set:
+				// what its processes lost in an earlier one taints this one.
+				r.lossAppKept = "the application is kept alive across test-sets (--keep-app-alive): keploy started it once, before the first test-set, and it runs on into this one"
 			}
 
 			// Checking for errors in the mocking and application
@@ -2976,6 +3009,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.markCaptureLosses(runTestSetCtx)
 		// So is what its processes lost: keploy starts no application, so
 		// nothing moves lossAppBase from the hooks' load (nil).
+	}
+	if !r.instrument && !r.noAgent {
+		r.lossAppKept = "keploy does not start the application (no command): it was up before keploy's first read, and the one application serves every test-set"
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -5475,7 +5511,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if uncapturable, lost := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		what := lost.NotJudgedText()
 		notJudged = alsoNotJudged(notJudged, notCapturableReason(uncapturable, what))
-		r.logger.Error("test-set is not judged: the application called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached, while some of its tests ran ("+provenswitch.Env+"=1)",
+		r.logger.Error("test-set is not judged: while some of its tests ran, the application called what keploy cannot capture, a TLS client abandoned its handshake, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's agent had been started again under the running application ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", uncapturable),
 			zap.String("reason", what),
@@ -5677,11 +5713,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
 	// next test set's tests count from here, and so does an application the
 	// next set starts anew (appStartsAnew).
+	// What its tests were charged of the application's processes from before
+	// it began is said with why the application ran on into it: read before
+	// the set's end moves the mark.
+	var carriedIn string
+	if carried := r.appLossesCarriedIn(); len(carried) > 0 {
+		carriedIn = appLossesCarriedInReason(carried, r.lossAppKept)
+		r.logger.Error("test-set failed: a process of the application's that keploy could not capture before this test-set began runs on in it, and taints its tests ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.String("lost", carried.Text()),
+			zap.String("why", r.lossAppKept),
+			zap.String("next_step", "see the earlier test-set's report for where it was lost; each test charged with it says what to do"))
+	}
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
 	lateJudged, lateNotJudged := late.Split()
-	for _, t := range []string{lateJudged.Text(), realUncaptured} {
+	for _, t := range []string{carriedIn, lateJudged.Text(), realUncaptured} {
 		if t == "" {
 			continue
 		}
@@ -6888,6 +6936,8 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if agentWatch != nil {
 		agentWatch.Accept()
 	}
+	// So do the capture-loss counts: the replacement's are all this set's.
+	r.agentSetUpAgain(ctx)
 
 	confirmed, err := r.probeMockStats(ctx)
 	if err != nil {

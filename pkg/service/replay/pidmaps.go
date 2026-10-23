@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -64,12 +67,16 @@ type pidMapVerdict struct {
 }
 
 // markPIDMaps reads the agent's refusals as the point the next test set's
-// are counted from. It is called once the agent is up and before the
+// are counted from, and the capture-loss counts with them
+// (markCaptureLosses). It is called once the agent is up and before the
 // application it serves starts: in Start for an agent that serves the whole
-// run, and in RunTestSet for a compose agent that a test set starts afresh.
-// Each test set's end then moves the mark to its own end
-// (pidMapCaptureIncomplete), so that every refusal of the run falls in exactly
-// one test set.
+// run, and in RunTestSet for a compose agent that a test set starts afresh,
+// and for a reused compose stack whose app starts for the first time; there
+// the caller then moves the running application's base to it
+// (appStartsAnew), but for a reused stack's app started again, whose start
+// says whether it was anew. Each test set's end then moves the mark to its
+// own end (pidMapCaptureIncomplete), so that every refusal of the run falls
+// in exactly one test set.
 func (r *Replayer) markPIDMaps(ctx context.Context) {
 	r.markCaptureLosses(ctx)
 	r.pidMark = pidMapMark{}
@@ -203,14 +210,80 @@ type CaptureLossReader interface {
 	GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 }
 
+// captureLossAgentReader is an optional CaptureLossReader extension: a read
+// of the counts that also names the agent process that answered it
+// (models.AgentInstanceHeader), "" where the answer names none (the keploy
+// agent client).
+type captureLossAgentReader interface {
+	GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error)
+}
+
 // captureLossMark is, under the proven switch, the agent's capture-loss counts
 // a test set's tests are counted from. known is false when they could not be
 // read; err says why (models.ErrCaptureLossesUnsupported for an agent that
-// cannot count, which leaves the tests as they were).
+// cannot count, which leaves the tests as they were). agent is the agent
+// process that answered the read ("" where it named none): its counts are
+// its own, from its start.
 type captureLossMark struct {
 	at    models.CaptureLosses
 	known bool
 	err   error
+	agent string
+}
+
+// otherAgent reports whether two reads were answered by different agent
+// processes: both named one, and not the same. One that named none (an agent
+// with the switch off, or older than the header) says nothing either way.
+func otherAgent(a, b string) bool {
+	return a != "" && b != "" && a != b
+}
+
+// noteLossAgent notes the agent process that answered a capture-loss read
+// (agent; "" where it named none): the latest (lossAgent), and, where none
+// was known, the one the run's bases that outlive a test set were read from
+// (lossBasesAgent). A read another process answers than the one those bases
+// were read from is of an agent started again in its place, or of a compose
+// stack's own for the set: what the one before counted went with it, so
+// those bases count nothing of this one's (lossBasesAt), until keploy starts
+// the application anew under it (appStartsAnew; a compose set's start of its
+// stack does, at once).
+func (r *Replayer) noteLossAgent(agent string) {
+	if agent == "" {
+		return
+	}
+	r.lossAgent = agent
+	if r.lossBasesAgent == "" {
+		r.lossBasesAgent = agent
+	}
+}
+
+// markAgentChange reads, under the proven switch as a test set begins, which
+// agent process answers now. Where it is not the one the set's mark was read
+// from, that one was started again since (between the sets: the set's own
+// watch, which begins before this read, says whether it was during it), and
+// the mark counts nothing of this one's: the set counts from this one's start
+// (nil), all of what it holds being since the mark; what outlives a set
+// lossBasesAt takes. An agent that cannot name its process, and a read that
+// fails, leave the mark as it was (the set's own reads say the rest). Not for
+// a compose stack the set brings up afresh (serveTest false): its own agent
+// is not up yet, and the set marks its counts once it is (markPIDMaps).
+func (r *Replayer) markAgentChange(ctx context.Context, serveTest bool) {
+	if !provenswitch.On() || !r.lossMark.known || r.lossMark.agent == "" {
+		return
+	}
+	if utils.CmdType(r.config.CommandType) == utils.DockerCompose && !serveTest {
+		return
+	}
+	reader, ok := r.instrumentation.(captureLossAgentReader)
+	if !ok {
+		return
+	}
+	_, agent, err := reader.GetCaptureLossesAndAgent(ctx)
+	if err != nil || !otherAgent(r.lossMark.agent, agent) {
+		return
+	}
+	r.lossMark = captureLossMark{known: true, agent: agent}
+	r.noteLossAgent(agent)
 }
 
 // markCaptureLosses reads, under the proven switch, the counts the next test
@@ -232,12 +305,13 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 		r.lossMark.err = models.ErrCaptureLossesUnsupported
 		return
 	}
-	at, err := readCaptureLosses(ctx, reader)
+	at, agent, err := readCaptureLosses(ctx, reader)
 	if err != nil {
 		r.lossMark.err = err
 		return
 	}
-	r.lossMark = captureLossMark{at: at, known: true}
+	r.lossMark = captureLossMark{at: at, known: true, agent: agent}
+	r.noteLossAgent(agent)
 	if !r.lossRunBaseSet {
 		// The run's first mark, before its application starts: what keploy
 		// cannot capture at all is counted from here for the whole run.
@@ -255,18 +329,53 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 // of the application's keploy could not place is counted from that mark on
 // (lossAppBase; the hooks' load where the mark could not be read: more,
 // never less). Not where the last set's stop did not end its application
-// (lossAppRunsOn: a compose stop that failed, a daemon the stop left running,
-// a stop not waited out): that application runs on, with what it lost, and
-// its base stays.
+// (lossAppRunsOn: a daemon the stop left running, a stop not waited out):
+// that application runs on, with what it lost, and its base stays, said
+// why (lossAppKept). Where another agent process answers now than the one
+// the bases that outlive a test set were read from (keploy's agent was
+// started again), an application started anew under the new one is all the
+// new one counts: those bases are taken from it too, the run's from its start
+// (nil: every count it holds is this run's, its process having started
+// during it), and what keploy cannot capture at all from the mark, as at the
+// run's first application.
 func (r *Replayer) appStartsAnew() {
 	if r.lossAppRunsOn {
 		r.lossAppRunsOn = false
+		r.lossAppKept = r.lossAppRunsOnWhy
 		return
 	}
-	r.lossAppBase = nil
+	r.lossAppBase, r.lossAppKept = nil, ""
 	if r.lossMark.known {
 		r.lossAppBase = r.lossMark.at
 	}
+	if otherAgent(r.lossBasesAgent, r.lossAgent) {
+		r.lossRunStart = nil
+		r.lossRunBase = r.lossAppBase
+		r.lossBasesAgent = r.lossAgent
+	}
+}
+
+// agentSetUpAgain is told the agent process that answers now was set up
+// again in full before the application ran against it (the docker compose
+// bring-up's retry, ensureAgentHoldsStoredMocks): nothing of this set's was
+// on the process it replaced, so every count this one holds is the set's and
+// its application's, counted from its start (nil bases). A read of the counts
+// names it; one that fails leaves the set's tests unread, as a mark that
+// could not be read does.
+func (r *Replayer) agentSetUpAgain(ctx context.Context) {
+	reader, ok := r.instrumentation.(CaptureLossReader)
+	if !ok || !r.lossMarked || errors.Is(r.lossMark.err, models.ErrCaptureLossesUnsupported) {
+		return
+	}
+	_, agent, err := readCaptureLosses(ctx, reader)
+	if err != nil {
+		r.lossMark = captureLossMark{err: err}
+		return
+	}
+	r.lossMark = captureLossMark{known: true, agent: agent}
+	r.lossLast, r.lossLastRead, r.lossLastAgent = nil, false, ""
+	r.lossAppBase, r.lossAppKept, r.lossRunStart, r.lossRunBase = nil, "", nil, nil
+	r.lossAgent, r.lossBasesAgent = agent, agent
 }
 
 // lossBases are the bases this run's losses are counted from
@@ -276,10 +385,43 @@ func (r *Replayer) lossBases() models.LossBases {
 	return models.LossBases{Set: r.lossMark.at, App: r.lossAppBase, Run: r.lossRunStart, Capture: r.lossRunBase}
 }
 
+// lossBasesAt are the bases a read the agent process agent answered is
+// counted from (lossBases), each read from another process left out: that
+// one's counts went with it, and this one, started after it, counts from
+// nothing (nil, its start). restarted then names the two processes, and the
+// losses the one before counted after its last read here cannot be told: a
+// test so counted is charged models.CaptureLossAgentStartedAgain, which
+// leaves it without a verdict. The set's mark is never older than the bases
+// that outlive the set, so a mark of another process comes with bases of
+// another process, which restarted names.
+func (r *Replayer) lossBasesAt(agent string) (models.LossBases, *models.AgentReplacement) {
+	b := r.lossBases()
+	if otherAgent(r.lossMark.agent, agent) {
+		b.Set = nil
+	}
+	if !otherAgent(r.lossBasesAgent, agent) {
+		return b, nil
+	}
+	b.App, b.Run, b.Capture = nil, nil, nil
+	return b, &models.AgentReplacement{First: r.lossBasesAgent, Next: agent}
+}
+
+// agentStartedAgain is the loss a test counted across an agent started again
+// is charged (models.CaptureLossAgentStartedAgain), naming both processes.
+func agentStartedAgain(rep models.AgentReplacement) models.CaptureLoss {
+	return models.CaptureLoss{Kind: models.CaptureLossAgentStartedAgain, Count: 1,
+		What: fmt.Sprintf("agent process %s, then %s", rep.First, rep.Next)}
+}
+
 // readCaptureLosses reads the agent's counts with no deadline of its own (the
-// proven switch's reads: the answer, the connection's close or ctx ends it).
-func readCaptureLosses(ctx context.Context, reader CaptureLossReader) (models.CaptureLosses, error) {
-	return reader.GetCaptureLosses(ctx)
+// proven switch's reads: the answer, the connection's close or ctx ends it),
+// and the agent process that answered, where the reader names it.
+func readCaptureLosses(ctx context.Context, reader CaptureLossReader) (models.CaptureLosses, string, error) {
+	if r, ok := reader.(captureLossAgentReader); ok {
+		return r.GetCaptureLossesAndAgent(ctx)
+	}
+	losses, err := reader.GetCaptureLosses(ctx)
+	return losses, "", err
 }
 
 // testCaptureLosses is, under the proven switch, what the agent could not
@@ -308,16 +450,31 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 		}
 		return nil, fmt.Errorf("at the start of the test set: %w", r.lossMark.err)
 	}
-	now, err := readCaptureLosses(ctx, reader)
+	now, agent, err := readCaptureLosses(ctx, reader)
 	if err != nil {
 		return nil, err
 	}
-	from := r.lossMark.at
+	r.noteLossAgent(agent)
+	from, fromAgent := r.lossMark.at, r.lossMark.agent
 	if r.lossLastRead {
-		from = r.lossLast
+		from, fromAgent = r.lossLast, r.lossLastAgent
 	}
-	r.lossLast, r.lossLastRead = now, true
-	return now.Charged(r.lossBases(), from), nil
+	bases, restarted := r.lossBasesAt(agent)
+	if otherAgent(fromAgent, agent) {
+		// What this agent counted is all since the previous read: it
+		// started after it.
+		from = nil
+		if restarted == nil {
+			restarted = &models.AgentReplacement{First: fromAgent, Next: agent}
+		}
+	}
+	r.lossLast, r.lossLastRead, r.lossLastAgent = now, true, agent
+	charged := now.Charged(bases, from)
+	if restarted != nil {
+		charged = append(charged, agentStartedAgain(*restarted))
+		sort.Slice(charged, func(i, j int) bool { return charged[i].Kind < charged[j].Kind })
+	}
+	return charged, nil
 }
 
 // captureTaintsTheSet reports whether, under the proven switch, the agent's
@@ -333,12 +490,55 @@ func (r *Replayer) captureTaintsTheSet() bool {
 	if !provenswitch.On() || !r.lossMark.known || !r.lossLastRead {
 		return false
 	}
-	for _, c := range r.lossLast.SinceWithin(r.lossBases()) {
+	bases, restarted := r.lossBasesAt(r.lossLastAgent)
+	if restarted != nil {
+		return true // its tests are not judged (CaptureLossAgentStartedAgain)
+	}
+	for _, c := range r.lossLast.SinceWithin(bases) {
 		if !c.Kind.PerTest() && !c.Kind.Evidence() {
 			return true
 		}
 	}
 	return false
+}
+
+// appLossesCarriedIn is, under the proven switch, what this set's tests were
+// charged, as its last test ended, of a process of the application's keploy
+// could not place (models.CaptureLossKind.AppLife) that was lost before the
+// set's mark: in an earlier set the application served, or as it started.
+// The application ran on into this set (lossAppKept says why), and such a
+// process with it. nil where there was none, and where the reads cannot be
+// compared (an agent started again: its tests are not judged).
+func (r *Replayer) appLossesCarriedIn() models.CaptureLosses {
+	if !provenswitch.On() || !r.lossMark.known || !r.lossLastRead {
+		return nil
+	}
+	if _, restarted := r.lossBasesAt(r.lossLastAgent); restarted != nil {
+		return nil
+	}
+	sinceSet := map[models.CaptureLossKind]uint64{}
+	for _, c := range r.lossLast.Since(r.lossMark.at) {
+		sinceSet[c.Kind] = c.Count
+	}
+	var out models.CaptureLosses
+	for _, c := range r.lossLast.Since(r.lossAppBase) {
+		if c.Kind.AppLife() && c.Count > sinceSet[c.Kind] {
+			out = append(out, models.CaptureLoss{Kind: c.Kind, Count: c.Count - sinceSet[c.Kind], What: c.What})
+		}
+	}
+	return out
+}
+
+// appLossesCarriedInReason is a set's reason for the losses its tests were
+// charged from before it began (appLossesCarriedIn): what they were, and why
+// the application they belong to ran on into the set (kept).
+func appLossesCarriedInReason(carried models.CaptureLosses, kept string) string {
+	if kept == "" {
+		kept = "the application ran on from before this test-set"
+	}
+	return "capture incomplete: its tests are charged what keploy could not capture of the application's processes before this test-set began, as such a process runs on with the application, and " + kept + ": " +
+		strings.TrimPrefix(carried.Text(), "capture incomplete: ") +
+		"; the earlier test-set's report says where it was lost, and each test charged with it says what to do"
 }
 
 // endCaptureLosses reads, at a test set's end under the proven switch, what
@@ -350,25 +550,26 @@ func (r *Replayer) captureTaintsTheSet() bool {
 // the next set's tests cannot be counted.
 func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	reader, ok := r.instrumentation.(CaptureLossReader)
-	mark, last, lastRead := r.lossMark, r.lossLast, r.lossLastRead
-	r.lossLast, r.lossLastRead = nil, false
+	mark, last, lastRead, lastAgent := r.lossMark, r.lossLast, r.lossLastRead, r.lossLastAgent
+	r.lossLast, r.lossLastRead, r.lossLastAgent = nil, false, ""
 	if !provenswitch.On() || !ok || !r.mocksDependencies() || r.noAgent || errors.Is(mark.err, models.ErrCaptureLossesUnsupported) {
 		r.markCaptureLosses(ctx)
 		return nil, nil
 	}
-	now, err := readCaptureLosses(ctx, reader)
+	now, agent, err := readCaptureLosses(ctx, reader)
 	r.lossMarked = true
 	if err != nil {
 		r.lossMark = captureLossMark{err: err}
 		return nil, err
 	}
-	r.lossMark = captureLossMark{at: now, known: true}
+	r.lossMark = captureLossMark{at: now, known: true, agent: agent}
+	r.noteLossAgent(agent)
 	if !mark.known {
 		return nil, nil // the set's tests were unjudged for it already
 	}
-	from := mark.at
+	from, fromAgent := mark.at, mark.agent
 	if lastRead {
-		from = last
+		from, fromAgent = last, lastAgent
 	}
 	// What keploy cannot capture at all over a connection that outlives
 	// tests: only what is new since the set's last read (its tests already
@@ -376,9 +577,19 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	// standing unix_unseen is always new (no mark takes it away): such a set
 	// is not judged. Every other kind, an abandoned TLS handshake too, from
 	// the set's last read or its mark (SinceWithin).
-	notFrom := r.lossRunBase
+	notFrom, notFromAgent := r.lossRunBase, r.lossBasesAgent
 	if lastRead {
-		notFrom = last
+		notFrom, notFromAgent = last, lastAgent
+	}
+	// A base another agent process answered counts nothing of this one's,
+	// which started after it: all this one counted is since (nil), and what
+	// the one before counted after its last read cannot be told.
+	var restarted *models.AgentReplacement
+	if otherAgent(fromAgent, agent) {
+		from, restarted = nil, &models.AgentReplacement{First: fromAgent, Next: agent}
+	}
+	if otherAgent(notFromAgent, agent) {
+		notFrom, restarted = nil, &models.AgentReplacement{First: notFromAgent, Next: agent}
 	}
 	// Not the PID-map refusals: the set's PID-map check
 	// (pidMapCaptureIncomplete) reports those, once.
@@ -387,6 +598,10 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 		if l.Kind != models.CaptureLossPIDMap && l.Kind != models.CaptureLossPIDMapExcluded {
 			out = append(out, l)
 		}
+	}
+	if restarted != nil {
+		out = append(out, agentStartedAgain(*restarted))
+		sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
 	}
 	return out, nil
 }
