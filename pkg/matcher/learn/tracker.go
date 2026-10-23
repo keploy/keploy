@@ -232,6 +232,23 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 	t.mu.Unlock()
 }
 
+// Epoch is the running test's number, the one Test returns, read without
+// copying anything the tracker keeps: Begin and NewSet move it, and nothing
+// else does (End keeps it, as does every serve and answer). A learn step that
+// reads it as a call is matched and again as it decides is of one test of one
+// set exactly when the two are equal: a test's end and the next one's begin,
+// or a new set, landing between the reads move it. It is the tracker's own
+// statement of the test's identity, for a reader that held the drift cache's
+// address for it (Drifts), which moves with it today but says nothing of it.
+func (t *Tracker) Epoch() uint64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.epoch
+}
+
 // Drifts is what each value drifted, kept for the running test (Classify),
 // and before the set's first test for its start-up, so that the start-up's
 // calls read each earlier recording's text once.
