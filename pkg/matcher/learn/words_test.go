@@ -351,6 +351,8 @@ func TestWhatStandsBesideAClockReadIsLearned(t *testing.T) {
 	plus1 := time.FixedZone("", 3600)
 	for _, tc := range []struct{ name, rec, f, slots string }{
 		{"a time of day across an instant's edge", wAt.In(plus1).Format(time.RFC3339) + ":30", later.In(plus1).Format(time.RFC3339) + ":45", "s0i:iso8601:d4-d2-d2Td2:d2:d2F+d2:d2 s1r0"},
+		{"a time of day across an instant's edge, the words before it of another length", "a " + wAt.In(plus1).Format(time.RFC3339) + ":30", "abcdefghijklmnopqrstuvwxyzabcdefgh " + later.In(plus1).Format(time.RFC3339) + ":45", "s0r0 s1i:iso8601:d4-d2-d2Td2:d2:d2F+d2:d2 s2r0"},
+		{"a token that kept one of its words", "x ab-cd", "x cd", "s1t"},
 		{"an instant after a backslash", `x\` + wAt.Format(time.RFC3339), `x\` + later.Format(time.RFC3339), "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ"},
 		{"a UUID that reads as no instant", "id 00000000-0000-7000-8000-00000000000a x", "id 00000000-0000-7000-8000-00000000000b x", "s1r4"},
 		{"a UUID glued to a word that did not change", "idX" + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref=a1", "idX" + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref=b2", "s2r0"},
@@ -438,6 +440,13 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"two clock reads swapped places", wAt.Format(time.RFC3339) + " " + strconv.FormatInt(wAt.Unix(), 10), strconv.FormatInt(later.Unix(), 10) + " " + later.Format(time.RFC3339), whyReadOrder, nil},
 		{"swapped ids", "A7K B8L x1", "B8L A7K x2", whyMoved, []string{"A7K", "B8L"}},
 		{"words that moved within their part", "ab-cd x1", "cd-ef x2", whyMoved, nil},
+		{"a token that moved to another part", "t1 p-q_r", "p-q_r t2", whyMoved, nil},
+		{"an instant's text that moved to another part", "1761042482 a-b_1", strconv.FormatInt(1761042482+int64(FullRoundLead/time.Second), 10) + " 1761042482", whyMoved, nil},
+		{"after a backslash escape", `q=a\ref1`, `q=a\ref2`, whyEscape, nil},
+		{"a UUID glued to a word at its end", uuid7Of(wAt, "abc123456789abcdef", 'a', false) + "x", uuid7Of(later, "def0123456789abcde", 'b', false) + "x", whyGluedUUID, nil},
+		// A UUID's random part is no clock's: a word that carries a group of it
+		// is glued inside it.
+		{"a word glued inside a UUID's random part", "id " + uuid7Of(wAt, "abc123456789abcdef", 'a', false) + " ref a123", "id " + uuid7Of(later, "def0123456789abcde", 'b', false) + " ref b012", whyGlued, nil},
 		{"only the case", "ref=ab12", "ref=AB12", whyCase, nil},
 		{"beyond ASCII in a run", "id café1", "id café2", whyNotASCII, nil},
 		{"beyond ASCII in a run, recorded only", "id café1", "id cafe2", whyNotASCII, nil},
@@ -504,6 +513,11 @@ func TestTheChangedPiece(t *testing.T) {
 		{"INV1042", "INV1042A", "1042", "1042A"},
 		{"a", "b", "a", "b"},
 		{"seq17", "seq18", "17", "18"},
+		{"ab-cd", "ab-ef", "cd", "ef"},
+		{"ab-cd", "cd", "ab-cd", "cd"},
+		{"cd", "ab-cd", "cd", "ab-cd"},
+		{"x.1", "x_1", ".", "_"},
+		{"AZaz09", "AZbz09", "AZaz", "AZbz"},
 	} {
 		p, ok := changedPiece(tc.r, tc.f)
 		if !ok || p.rec != tc.wr || p.live != tc.wf {
@@ -512,6 +526,48 @@ func TestTheChangedPiece(t *testing.T) {
 	}
 	if _, ok := changedPiece("a", "a"); ok {
 		t.Error("a word that did not change has a piece")
+	}
+}
+
+// A word that did not change on one side is empty there has no piece.
+func TestAnEmptySideHasNoPiece(t *testing.T) {
+	for _, tc := range [][2]string{{"a", ""}, {"", "a"}} {
+		if _, ok := changedPiece(tc[0], tc[1]); ok {
+			t.Errorf("%q -> %q has a piece", tc[0], tc[1])
+		}
+	}
+}
+
+// A byte's class within a changed piece: a digit, a letter (ASCII, either
+// case), or any other byte, the bytes beside each range included.
+func TestEachBytesClassInAPiece(t *testing.T) {
+	for i := 0; i < 256; i++ {
+		c := byte(i)
+		want := 0
+		switch {
+		case c >= '0' && c <= '9':
+			want = 2
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			want = 1
+		}
+		if got := byteClass(c); got != want {
+			t.Errorf("byteClass(%q) = %d, want %d", c, got, want)
+		}
+	}
+	for _, s := range []string{"/09:", "@AZ[", "`az{"} {
+		if got := subRuns(s); len(got) != 3 || got[0] != s[:1] || got[2] != s[3:] {
+			t.Errorf("subRuns(%q) = %q: the bytes beside a range are of another class", s, got)
+		}
+	}
+}
+
+// pieceIn reads no empty piece, and none longer than its container.
+func TestAnEmptyOrLongerPieceIsInNothing(t *testing.T) {
+	c := run{"ab12", "cd34"}
+	for _, p := range []run{{"", "34"}, {"12", ""}, {"", ""}, {"ab123", "cd34"}, {"ab12", "cd345"}} {
+		if pieceIn(c, p) {
+			t.Errorf("%q lies inside %q", p, c)
+		}
 	}
 }
 
@@ -534,6 +590,12 @@ func TestGluedContainment(t *testing.T) {
 		{"no class boundary (N17)", [2]string{"12347", "56785"}, [2]string{"1234", "5678"}, false},
 		{"another offset live", [2]string{"x1042y", "xy5678"}, [2]string{"1042", "5678"}, false},
 		{"unrelated", [2]string{"3f2b8c1e9a4d", "a7c4e2d10b3f"}, [2]string{"17", "18"}, false},
+		// At one offset from the start, the recorded container ending there; at
+		// one from the end, the recorded one beginning there.
+		{"start-aligned at the recorded end", [2]string{"P1042", "Q5678zz"}, [2]string{"1042", "5678"}, true},
+		{"end-aligned at the recorded start", [2]string{"1042P", "zz5678Q"}, [2]string{"1042", "5678"}, true},
+		{"no glue, the container longer live", [2]string{"1042P", "zz5678Q"}, [2]string{"1043", "5679"}, false},
+		{"no glue, the container longer recorded", [2]string{"zz5678Q", "1042P"}, [2]string{"5679", "1043"}, false},
 	} {
 		pa, _ := changedPiece(tc.a[0], tc.a[1])
 		pb, _ := changedPiece(tc.b[0], tc.b[1])
@@ -583,6 +645,16 @@ func TestTieOf(t *testing.T) {
 		{"a UUID v7 in a path and a body", [2]string{v7, v7f}, [2]string{v7, v7f}, TieWhole, models.RefusedTie},
 		{"one id at two places", [2]string{"o-1111", "o-9999"}, [2]string{"o-1111", "o-9999"}, TieWhole, models.RefusedTie},
 		{"two fresh ids", [2]string{"r-3f2b8c", "r-a7c4e2"}, [2]string{"n-91d0e3", "n-5be7aa"}, TieNone, ""},
+		// Instants in F written with a fraction they lacked recorded are still
+		// instants alone.
+		{"createdAt and updatedAt, F's with a fraction", [2]string{"at " + wAt.Format(time.RFC3339) + " x", "at " + later.Format("2006-01-02T15:04:05.000Z") + " x"}, [2]string{wAt.Format(time.RFC3339), later.Format("2006-01-02T15:04:05.000Z")}, TieExempt, ""},
+		// A value beside an instant that gained a word, or changed its last
+		// separator, is no instant alone.
+		{"an instant beside a word F added", [2]string{"at " + wAt.Format(time.RFC3339), "at " + later.Format(time.RFC3339) + " now"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
+		{"an instant whose last separator changed", [2]string{wAt.Format(time.RFC3339) + " ", later.Format(time.RFC3339) + ";"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
+		// A UUID's random part is no clock's: a value that carries a part of it is
+		// glued inside it.
+		{"a word inside a UUID's random group", [2]string{v7, v7f}, [2]string{"x123", "x012"}, TiePartial, models.RefusedContainment},
 	} {
 		if got := NewDriftCache().TieOf(tc.a, tc.b, nil); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)

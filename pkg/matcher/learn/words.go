@@ -539,7 +539,8 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 	// Between the slots of the value: a changed word that repeats (the same
 	// word recorded, or live, at two of its slots), and one whose changed
 	// piece is glued inside another's. Two instants other than UUIDs are
-	// clock reads, which may repeat (N2); a UUID repeats as any word does.
+	// clock reads, which may repeat (N2) and carry no piece; a UUID repeats,
+	// and holds a piece, as any word does.
 	for i := range spans {
 		for j := i + 1; j < len(spans); j++ {
 			a, b := spans[i], spans[j]
@@ -549,9 +550,8 @@ func checkSlots(rec, live string, tr, tf wtoks, spans []changedSpan, c clockSet)
 			if a.recText(rec) == b.recText(rec) || a.liveText(live) == b.liveText(live) {
 				return whyRepeat
 			}
-			if a.kind == models.WordSlotInstant || b.kind == models.WordSlotInstant {
-				continue
-			}
+			// A UUID's random part is no clock's: a word glued inside it
+			// carries it (a short id cut from the UUID).
 			pa, oka := changedPiece(a.recText(rec), a.liveText(live))
 			pb, okb := changedPiece(b.recText(rec), b.liveText(live))
 			if oka && okb && gluedPieces(pa, pb) {
@@ -575,14 +575,11 @@ type wordAt struct {
 	whole    bool
 }
 
-// wordsAt are the words of t by their text: every run of a plain segment,
-// and every plain segment whole.
+// wordsAt are the words of t by their text: every segment whole (an
+// instant's too), and every run of a plain one.
 func wordsAt(t wtoks) map[string][]wordAt {
 	out := map[string][]wordAt{}
 	for g, sg := range t.segs {
-		if sg.inst >= 0 {
-			continue
-		}
 		out[t.text(g)] = append(out[t.text(g)], wordAt{seg: g, whole: true})
 		for j := range sg.runs {
 			out[t.runText(g, j)] = append(out[t.runText(g, j)], wordAt{seg: g, run: j})
@@ -612,9 +609,10 @@ func afterEscape(s string, i int) bool {
 }
 
 // uuidVariant reports whether a time-ordered UUID's variant nibble is one
-// keploy reads: 8, 9, a or b, in either case.
+// keploy reads: 8, 9, a or b, in either case. u is a match of the UUID
+// layout: 36 bytes, its variant at 19.
 func uuidVariant(u string) bool {
-	return len(u) > 19 && strings.IndexByte("89abAB", u[19]) >= 0
+	return strings.IndexByte("89abAB", u[19]) >= 0
 }
 
 // --- the changed piece, and glued containment (B1) ---
@@ -650,7 +648,7 @@ func subRuns(s string) []string {
 // from either end, at least one left on each side ("INV1042" -> "INV2077" is
 // "1042" -> "2077"; "1042A" -> "2077A" is "1042" -> "2077"). A fresh hex
 // changes from end to end: its piece is the whole word. ok is false when the
-// two do not differ.
+// two do not differ, or either is empty.
 func changedPiece(r, f string) (run, bool) {
 	if r == f || r == "" || f == "" {
 		return run{}, false
@@ -682,8 +680,10 @@ func pieceBoundary(s string, i int) bool {
 // starting and ending at a class boundary of c, at one offset in both,
 // counted from c's start or from its end.
 func pieceIn(c, p run) bool {
+	// (An empty piece would lie anywhere; a longer one than c nowhere, which
+	// the loops' bounds already say.)
 	lr, lf := len(p.rec), len(p.live)
-	if lr == 0 || lf == 0 || lr > len(c.rec) || lf > len(c.live) {
+	if lr == 0 || lf == 0 {
 		return false
 	}
 	at := func(rs, fs int) bool {
@@ -711,13 +711,12 @@ func gluedPieces(a, b run) bool { return pieceIn(a, b) || pieceIn(b, a) }
 
 // wordPieces are the changed pieces of a drifted value (rec, live; c, its
 // clock reads as it stands): of each run that changed in a segment whose
-// runs stand alike, and of each other segment that changed whole; of the
-// whole value when its segments do not stand alike. A collapsed clock read
-// is no piece: what drifted with F's clock is no value that flowed.
+// runs stand alike, of each other segment that changed whole, and of each
+// time-ordered UUID; of the whole value when its segments do not stand
+// alike. Any other collapsed clock read is no piece: what drifted with F's
+// clock is no value that flowed. A UUID's random part is no clock's, so a
+// value glued inside it (a short id cut from it) carries it.
 func wordPieces(rec, live string, c clockSet) []run {
-	if rec == live {
-		return nil
-	}
 	tr, tf := tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
 	aligned := len(tr.segs) == len(tf.segs)
 	for i := 0; aligned && i < len(tr.segs); i++ {
@@ -734,7 +733,13 @@ func wordPieces(rec, live string, c clockSet) []run {
 		return out
 	}
 	for g, rs := range tr.segs {
-		if rs.inst >= 0 || tr.text(g) == tf.text(g) {
+		if rs.inst >= 0 {
+			if rs.lay == uuidLayout {
+				add(tr.text(g), tf.text(g))
+			}
+			continue
+		}
+		if tr.text(g) == tf.text(g) {
 			continue
 		}
 		if !sameRunLayout(tr, tf, g) {
@@ -753,7 +758,9 @@ func wordPieces(rec, live string, c clockSet) []run {
 // a value two places of one call may share without one carrying the other
 // (createdAt = updatedAt). Such twins are never held equal (N2).
 func instantOnly(rec, live string, c clockSet) bool {
-	if rec == live || len(c.pairs) == 0 {
+	// (With no read, a value that changed has a part or a separator that
+	// changed, which the loops below find.)
+	if rec == live {
 		return false
 	}
 	tr, tf := tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
