@@ -160,9 +160,9 @@ const (
 	AppContainer
 )
 
-// Config is how the app resolves the lookups noted with it: resolv.conf's
-// search list and ndots as keploy read them, where keploy sees the lookups
-// from, and what the lines say of keploy's part.
+// Config is how the app resolves the lookups noted with it: its resolver's
+// search list (resolv.conf's, as ResolverSearch takes it) and ndots, where
+// keploy sees the lookups from, and what the lines say of keploy's part.
 type Config struct {
 	Search []string
 	Ndots  int
@@ -1399,6 +1399,36 @@ func RedundantExpansionBase(search []string, name string) (base string, ok bool)
 		return fqdn[:len(fqdn)-len(s)-1], true
 	}
 	return "", false
+}
+
+// ResolverSearch is the search list to judge the app's lookups by, given
+// the one its resolv.conf lists (miekg's ClientConfig.Search: the last search
+// or domain line's domains) and the name of the app's host (its UTS
+// namespace's), asked only when needed. With a domain listed, it is the
+// listed list. With none listed but "." (no search or domain line, or
+// systemd-resolved's "search ."), the app's resolver may search the domain of
+// the host's name, the part after its first dot: glibc's and Go's do with no
+// such line, Go's after "search ." too, musl's never. That domain is then
+// added. A domain the resolver does not search only holds a lookup's line
+// for a step that does not come, so the line comes later and says keploy saw
+// no search; one it searches and keploy left out makes the steps of its walk
+// through it read as names the app asked, each said plainly. The list given
+// is not written to.
+func ResolverSearch(listed []string, hostname func() string) []string {
+	for _, s := range listed {
+		if strings.Trim(s, ".") != "" {
+			return listed
+		}
+	}
+	if hostname == nil {
+		return listed
+	}
+	host := hostname()
+	i := strings.IndexByte(host, '.')
+	if i < 0 || i == len(host)-1 {
+		return listed
+	}
+	return append(append(make([]string, 0, len(listed)+1), listed...), host[i+1:])
 }
 
 // RcodeString is rcode's name (NXDOMAIN, SERVFAIL, ...), or its number when

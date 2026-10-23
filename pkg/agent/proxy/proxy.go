@@ -473,7 +473,11 @@ type Proxy struct {
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
-	// dnsSearch is the resolv.conf search list, kept so a query can be
+	// dnsSearch is the resolver's search list: resolv.conf's, plus, on
+	// Linux (hostDomainSearched), the domain of the host's name when it
+	// lists none, as glibc's and Go's resolvers search it
+	// (dnsnegative.ResolverSearch), so it can name a domain no resolv.conf
+	// line does. It is kept so a query can be
 	// recognised as a redundant search expansion without asking upstream.
 	// A resolver probes name.S for each search domain S — before the name
 	// absolutely when it carries fewer than ndots dots (5 in Kubernetes),

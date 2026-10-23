@@ -3,11 +3,13 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/agent/proxy/dnsnegative"
 	"go.uber.org/zap"
 )
 
@@ -21,6 +23,16 @@ const defaultResolvConfPath = "/etc/resolv.conf"
 // discover real upstream resolvers. A package-level var so tests can
 // swap in a temp file without hitting host DNS.
 var resolvConfPath = defaultResolvConfPath
+
+// osHostname is the host's name, whose domain the app's resolver may search
+// (dnsnegative.ResolverSearch). hostDomainSearched says the host's resolvers
+// do: Linux's glibc and Go ones, with no domain listed. macOS's takes its
+// search list from the system's configuration, never the host's name (often
+// Name.local), so there it is not taken. Variables for tests.
+var (
+	osHostname         = os.Hostname
+	hostDomainSearched = runtime.GOOS == "linux"
+)
 
 // captureDNSUpstream snapshots the cluster resolver list from
 // /etc/resolv.conf into p.dnsUpstreamServers / p.dnsUpstreamPort. Must
@@ -81,7 +93,16 @@ func (p *Proxy) captureDNSUpstream() {
 	// Keep the search list: it is what makes a redundant expansion
 	// recognisable without a round trip. Captured even when every
 	// nameserver is filtered out below, since the two are independent.
-	p.dnsSearch = append([]string(nil), config.Search...)
+	// It is the resolver's: with no domain listed, glibc's and Go's search
+	// the domain of the host's name.
+	var hostname func() string
+	if hostDomainSearched {
+		hostname = func() string {
+			name, _ := osHostname()
+			return name
+		}
+	}
+	p.dnsSearch = append([]string(nil), dnsnegative.ResolverSearch(config.Search, hostname)...)
 	p.dnsNdots = config.Ndots
 
 	// resolv.conf has no port syntax per RFC — config.Port is populated

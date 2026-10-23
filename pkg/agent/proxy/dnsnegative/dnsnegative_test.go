@@ -958,6 +958,53 @@ func TestRedundantExpansionBase(t *testing.T) {
 	}
 }
 
+// A resolv.conf that lists no search domain (no search or domain line, or
+// systemd-resolved's "search .") leaves the search list to the resolver:
+// glibc's and Go's search the domain of the host's name with no such line,
+// and Go's after "search ." too. Left out, the steps of their walk through it
+// read as names the app asked, each said plainly at INFO.
+func TestResolverSearchTakesTheHostsDomainWhenNoneIsListed(t *testing.T) {
+	for _, tc := range []struct {
+		listed   []string
+		hostname string
+		want     []string
+	}{
+		{nil, "app01.corp.example.com", []string{"corp.example.com"}},
+		{[]string{}, "app01.corp.example.com.", []string{"corp.example.com."}},
+		{[]string{"."}, "app01.corp.example.com", []string{".", "corp.example.com"}},
+		{nil, "localhost.localdomain", []string{"localdomain"}},
+		{nil, "app01", nil},
+		{nil, "app01.", nil},
+		{nil, "", nil},
+		{[]string{"."}, "app01", []string{"."}},
+		{[]string{"a.example"}, "app01.corp.example.com", []string{"a.example"}},
+		{[]string{".", "a.example"}, "app01.corp.example.com", []string{".", "a.example"}},
+	} {
+		asked := false
+		got := ResolverSearch(tc.listed, func() string { asked = true; return tc.hostname })
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") || len(got) != len(tc.want) {
+			t.Errorf("ResolverSearch(%q, %q) = %q; want %q", tc.listed, tc.hostname, got, tc.want)
+		}
+		// The host's name is asked only when no domain is listed: a
+		// capture asks it of the app's namespace for every question.
+		if lists := strings.Trim(strings.Join(tc.listed, ""), ".") != ""; asked == lists {
+			t.Errorf("ResolverSearch(%q, ...) asked the host's name: %v; want %v", tc.listed, asked, !lists)
+		}
+	}
+	if got := ResolverSearch([]string{"."}, nil); len(got) != 1 || got[0] != "." {
+		t.Errorf("ResolverSearch with no host name = %q; want the listed list", got)
+	}
+	// The list given is the caller's (a resolv.conf's, kept): it is not
+	// written to, spare room or not.
+	listed := make([]string, 1, 4)
+	listed[0] = "."
+	got := ResolverSearch(listed, func() string { return "app01.corp.example.com" })
+	got[0] = "x"
+	if listed[0] != "." || listed[:2][1] != "" {
+		t.Errorf("ResolverSearch wrote to the list it was given: %q", listed[:2])
+	}
+}
+
 // Another lookup of a name that starts while the first's walk is still in
 // flight is no sign that the resolver will not search it: a sibling question
 // (the AAAA beside the A) still unanswered, or the walk's next step already

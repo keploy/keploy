@@ -317,6 +317,87 @@ func TestCaptureDNSUpstreamReadsNdots(t *testing.T) {
 	}
 }
 
+// withResolvConf points captureDNSUpstream at a resolv.conf of text, on a
+// Linux host named hostname, for the test, whatever the OS it runs on.
+func withResolvConf(t *testing.T, text, hostname string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatalf("write temp resolv.conf: %v", err)
+	}
+	origPath, origHostname, origSearched := resolvConfPath, osHostname, hostDomainSearched
+	resolvConfPath, hostDomainSearched = path, true
+	osHostname = func() (string, error) { return hostname, nil }
+	t.Cleanup(func() { resolvConfPath, osHostname, hostDomainSearched = origPath, origHostname, origSearched })
+}
+
+// The search list keploy judges the app's lookups by is its resolver's: with
+// no search domain listed (no search or domain line, or systemd-resolved's
+// "search ."), glibc's and Go's resolvers search the domain of the host's
+// name (Go's after "search ." too), and keploy read none there.
+func TestCaptureDNSUpstreamTakesTheHostsDomainWhenResolvConfListsNone(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, hostname string
+		want                 []string
+	}{
+		{"no search line", "nameserver 192.0.2.53\n", "app01.corp.example.com", []string{"corp.example.com"}},
+		{"search .", "nameserver 192.0.2.53\nsearch .\n", "app01.corp.example.com", []string{".", "corp.example.com"}},
+		{"a host name with no dot", "nameserver 192.0.2.53\n", "app01", nil},
+		{"a search line", "nameserver 192.0.2.53\nsearch a.example\n", "app01.corp.example.com", []string{"a.example"}},
+		{"a domain line", "nameserver 192.0.2.53\ndomain d.example\n", "app01.corp.example.com", []string{"d.example"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withResolvConf(t, tc.text, tc.hostname)
+			p := &Proxy{logger: zap.NewNop(), DNSPort: 53}
+			p.captureDNSUpstream()
+			if strings.Join(p.dnsSearch, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("dnsSearch = %q; want %q", p.dnsSearch, tc.want)
+			}
+		})
+	}
+	// macOS's resolver never searches the host's name's domain (a Mac is
+	// often Name.local): there the list is resolv.conf's alone.
+	t.Run("a host whose resolver does not search its name's domain", func(t *testing.T) {
+		withResolvConf(t, "nameserver 192.0.2.53\n", "Mac-1.local")
+		hostDomainSearched = false
+		p := &Proxy{logger: zap.NewNop(), DNSPort: 53}
+		p.captureDNSUpstream()
+		if len(p.dnsSearch) != 0 {
+			t.Errorf("dnsSearch = %q; want none", p.dnsSearch)
+		}
+	})
+}
+
+// A host named app01.corp.example.com whose resolv.conf lists no search
+// domain (RHEL's, when DHCP gives no domain; CentOS's localhost.localdomain
+// the same way): glibc and Go walk the host's domain. keploy read no search
+// list there, so the steps of a walk that worked read as names the app asked:
+// orders.svc. (asked as given first, then found as
+// orders.svc.corp.example.com.) and mongoDb.corp.example.com. (the candidate
+// tried before mongoDb.) each got a plain INFO line. Only mongoDb., the app's
+// own name, did not resolve.
+func TestRecordJudgesAWalkThroughTheHostsDomainWhenResolvConfListsNone(t *testing.T) {
+	host, port, stop := splitUpstream(t, "orders.svc.corp.example.com.")
+	defer stop()
+	withResolvConf(t, "nameserver 192.0.2.53\n", "app01.corp.example.com")
+	p, logs := recordingDNSProxy(t, host, port)
+	p.captureDNSUpstream()
+	p.dnsUpstreamServers, p.dnsUpstreamPort = []string{host}, port
+	for _, n := range []string{"orders.svc.", "orders.svc.corp.example.com.", "mongoDb.corp.example.com.", "mongoDb."} {
+		askDNS(t, p, n, dns.TypeA)
+	}
+	_ = p.SetGracefulShutdown(context.Background())
+	got := negativeAnswerLinesAt(logs, zapcore.InfoLevel)
+	if len(got) != 1 || got[0].ContextMap()["query"] != "mongoDb." {
+		t.Fatalf("a walk through the host's domain logged %+v at INFO; want one line, for the app's own mongoDb.", got)
+	}
+	for _, n := range []string{"orders.svc.", "mongoDb.corp.example.com."} {
+		if d := negativeAnswerLines(logs, zapcore.DebugLevel, n); len(d) != 1 {
+			t.Errorf("the walk's step %s logged %+v at DEBUG; want one routine line", n, d)
+		}
+	}
+}
+
 // The same name in another case is the same lookup: DNS names are
 // case-insensitive, and keploy's DNS cache is not, so "mongodb." is answered
 // by the resolver again after "MongoDb.", and noted again.

@@ -33,8 +33,9 @@ func (p *Proxy) noteNegativeAnswer(question dns.Question, resp dnsCacheEntry, as
 }
 
 // negativeAnswerConfig is the resolver configuration the relay's lines are
-// judged by: resolv.conf's search list and ndots as keploy read them
-// (captureDNSUpstream), and where the relay runs.
+// judged by: the resolver's search list (resolv.conf's, plus, on Linux, the
+// domain of the host's name when it lists none) and resolv.conf's ndots, as
+// captureDNSUpstream read them, and where the relay runs.
 func (p *Proxy) negativeAnswerConfig() dnsnegative.Config {
 	where := dnsnegative.Host
 	if p.IsDocker {
