@@ -974,6 +974,44 @@ func TestTheRecordingIsAdmittedAsItStands(t *testing.T) {
 	}
 }
 
+// An instant right after a '%' is a clock read, never an escape's remnant:
+// it is learned as an instant slot, as anywhere else.
+func TestAnInstantRightAfterAPercentIsLearned(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	e := learnedWords(t, "x%"+wAt.Format(time.RFC1123), "x%"+later.Format(time.RFC1123))
+	if got := slotsOf(e); got != "s1i:rfc1123:W, d2 M d4 d2:d2:d2 N" {
+		t.Fatalf("slots %s", got)
+	}
+}
+
+// A value's recorded instant is placed by the first way that reads it: the
+// walk stops there, however many ways are left (here 300 static instants
+// after the one F's clock moved).
+func TestTheWalkStopsAtTheRecordedWay(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	var static []string
+	for i := 0; i < 300; i++ {
+		static = append(static, wAt.Add(-time.Duration(i+1)*time.Hour).Format(time.RFC3339))
+	}
+	rest := " / " + strings.Join(static, " / ")
+	e := learnedWords(t, wAt.Format(time.RFC3339)+rest, later.Format(time.RFC3339)+rest)
+	if got := slotsOf(e); got != "s0i:iso8601:d4-d2-d2Td2:d2:d2FZ" {
+		t.Fatalf("slots %s", got)
+	}
+}
+
+// Live, a plain part where an instant slot's instant was recorded is not
+// where it was recorded (the instant stands later, in the same layout).
+func TestAPlainPartWhereAnInstantWasIsRed(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	rec := "a " + wAt.Format(time.RFC1123) + " b"
+	e := learnedWords(t, rec, "a "+later.Format(time.RFC1123)+" b")
+	live := "a x " + later.Format(time.RFC1123)
+	if ok, why := WordsAdmit(rec, live, e); ok || why != "an instant of it is not where it was recorded, in its layout" {
+		t.Errorf("%q: admitted %v (%q)", live, ok, why)
+	}
+}
+
 // A value that is red says what of it did not hold: an instant where one
 // was recorded with none, and a run alone in its segment left empty between
 // its separators.
@@ -1143,6 +1181,9 @@ func TestWholeDriftByRuns(t *testing.T) {
 		{"a sign", "-5", "5", false},
 		{"no word", "--", "---", false},
 		{"unchanged", "a", "a", false},
+		// An accepted clock read always changed: the recorded instant standing
+		// live elsewhere, as a plain word, is no word that did not change.
+		{"an instant whose recorded text stands live as a plain word", strconv.FormatInt(wAt.Unix(), 10) + " x", strconv.FormatInt(later.Unix(), 10) + " " + strconv.FormatInt(wAt.Unix(), 10), true},
 		// Two instants of two layouts that swapped places are each collapsed where
 		// it stands live, so the words beside them are read as words: "Oct" is
 		// no word of the live value, where it is inside an instant.
@@ -1152,6 +1193,9 @@ func TestWholeDriftByRuns(t *testing.T) {
 		if whole != tc.whole || whole == (why != "") {
 			t.Errorf("%s: whole %v (%q), want %v", tc.name, whole, why, tc.whole)
 		}
+	}
+	if _, why := WholeDrift("a", "a", nil); why != whySame {
+		t.Errorf("an unchanged value: %q, want %q", why, whySame)
 	}
 	// Within the call's window, an instant the lead does not read is one.
 	boot := wAt.Add(4 * time.Minute)

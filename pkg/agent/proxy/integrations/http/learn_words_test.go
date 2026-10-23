@@ -582,6 +582,9 @@ func TestTheLearnPlansTies(t *testing.T) {
 			f:     `{"createdAt":"` + later.Format(time.RFC3339) + `","updatedAt":"` + later.Format(time.RFC3339) + `"}`,
 			words: []string{"body.createdAt", "body.updatedAt"}},
 		{name: "equal only when recorded", method: "POST", path: "/a", rec: `{"a":"x-1","b":"x-1"}`, f: `{"a":"x-2","b":"x-3"}`, words: []string{"body.a", "body.b"}},
+		// Two values that were two when recorded and one in F are two
+		// values (neither carries the other): each is learned apart.
+		{name: "equal only in F", method: "POST", path: "/a", rec: `{"a":"a1x","b":"b2y"}`, f: `{"a":"z9q","b":"z9q"}`, words: []string{"body.a", "body.b"}},
 		{name: "seq beside a fresh hex", method: "POST", path: "/a", rec: `{"note":"seq=17","id":"3f2b8c1e9a4d70a1"}`, f: `{"note":"seq=18","id":"a7c4e2d10b3f4c2e"}`, words: []string{"body.id", "body.note"}},
 		// Twins are named by their first place, past the test case's keys
 		// (here "id", which the twins' value does not carry).
@@ -667,6 +670,98 @@ func TestTheLearnPlansTies(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A value the recording's obfuscator redacted (Mock.Noise) is excused at
+// learn as at serve: no words are learned of it.
+func TestAnObfuscatedValueIsExcusedAtLearn(t *testing.T) {
+	h, n, opts := learnOn(t)
+	m := learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"token":"secret-a1","note":"ORD-1 ref=a1"}`, nil, `{"ok":true}`)
+	m.Noise = []string{"^secret-[a-z0-9]+$"}
+	db := &learnDb{perTest: []*models.Mock{m}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/charges", `{"token":"secret-b2","note":"ORD-1 ref=b2"}`, nil), db, n, opts)
+	if err != nil || served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	if got := db.consumed[0].Spec.LearnedWords; len(got) != 1 || got["body.note"].Digest == "" {
+		t.Fatalf("words at %v, want body.note's alone", got)
+	}
+}
+
+// Instants read within the call's window (its clock not moved by the lead)
+// are clock reads wherever the call's words are learned: two places that
+// hold one such instant are exempt (createdAt = updatedAt), each learned
+// apart, and an echoed value beside one learns the instant as an instant
+// slot.
+func TestTheCallsWindowReadsItsInstantsEverywhere(t *testing.T) {
+	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
+	h, n, opts := learnOn(t)
+	prev := learnRecorded("mock-p", 0, "GET", "/v1/health", "", nil, `{}`)
+	recRead := learnAt.Add(time.Millisecond)
+	twins := learnRecorded("mock-0", 2*time.Millisecond, "POST", "/v1/orders", `{"created":"`+iso(recRead)+`","updated":"`+iso(recRead)+`"}`, nil, `{}`)
+	echo := learnRecorded("mock-1", 2*time.Millisecond, "POST", "/v1/notes", `{"note":"ord-77 at `+iso(recRead)+`"}`, nil, `{"note":"ord-77 at `+iso(recRead)+`"}`)
+	for _, tc := range []struct {
+		name, path, body string
+		mock             *models.Mock
+	}{
+		{"twins", "/v1/orders", `{"created":"%s","updated":"%s"}`, twins},
+		{"an echo", "/v1/notes", `{"note":"ord-88 at %s"}`, echo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &learnDb{perTest: []*models.Mock{tc.mock}, staged: []*models.Mock{prev}}
+			tr := learn.NewTracker()
+			tr.Begin()
+			offset := learn.FullRoundLead + 2*time.Second - 40*time.Second // F's clock: not moved by the lead
+			tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+			servedPrev := learnAt.Add(40 * time.Second)
+			tr.ServedMockAt(prev, servedPrev)
+			fRead := iso(servedPrev.Add(offset + time.Millisecond))
+			body := strings.ReplaceAll(tc.body, "%s", fRead)
+			call := live("POST", tc.path, body, nil)
+			call.arrived = servedPrev.Add(2 * time.Millisecond)
+			served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts)
+			if err != nil || served == nil {
+				t.Fatalf("served %v miss %+v err %v", served, miss, err)
+			}
+			got := db.consumed[0].Spec
+			if tc.mock == twins {
+				if len(got.Learned()) != 0 || len(got.LearnedWords) != 2 {
+					t.Fatalf("words %v variables %+v, want each instant learned apart", got.LearnedWords, got.Learned())
+				}
+				return
+			}
+			var words *models.WordsEntry
+			for _, v := range got.Learned() {
+				words = v.Words
+			}
+			if words == nil || len(words.Slots) != 2 || words.Slots[1].Kind != models.WordSlotInstant {
+				t.Fatalf("the echo's words %+v, want a run and an instant slot", words)
+			}
+		})
+	}
+}
+
+// A value an earlier call sent whole, which a later call sends whole where
+// a variable can stand, is refused where keploy cannot learn its words
+// there, saying why and by which rule (a changed word that repeats: a tie).
+func TestAVariableWhoseWordsCannotBeLearnedIsRefused(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	inv := learnRecorded("mock-0", 0, "POST", "/v1/invoices", `{"id":"x1-x1"}`, nil, `{"ok":true}`)
+	inv.Spec.ReqBodyNoise = map[string][]string{"body.id": {}}
+	db := &learnDb{perTest: []*models.Mock{inv, learnRecorded("mock-1", time.Second, "POST", "/v1/orders", `{"ref":"x1-x1"}`, nil, `{}`)}}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/invoices", `{"id":"y2-y2"}`, nil), db, n, opts); served == nil {
+		t.Fatalf("precondition: %+v", miss)
+	}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"ref":"y2-y2"}`, nil), db, n, opts)
+	if served != nil || miss == nil || !strings.Contains(miss.res.Why, "keploy cannot tell which of its words changed alone there: "+"the same changed word repeats in it") {
+		t.Fatalf("served %v miss %+v, want refused as a variable whose words cannot be learned", served, miss)
+	}
+	if miss.res.Refused != models.RefusedTie {
+		t.Fatalf("refused as %q, want %q", miss.res.Refused, models.RefusedTie)
 	}
 }
 
@@ -860,6 +955,18 @@ func TestTiePlacesOwnContract(t *testing.T) {
 		return slotPlace{l: leaf("body.id", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise},
 			slotPlace{l: leaf("header.x-id", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise}
 	}
+	t.Run("three places of one value", func(t *testing.T) {
+		a := slotPlace{l: leaf("body.a", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise}
+		b := slotPlace{l: leaf("body.b", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise}
+		c := slotPlace{l: leaf("body.c", learn.String, "o-1111", "o-9999"), kind: learn.KindNoise}
+		p := plan(t, a, b, c)
+		if why := tiePlaces(learn.NewTracker(), 0, &models.Mock{Name: "mock-0"}, &p, []slotPlace{c, a, b}, nil, true, map[string]bool{}, nil); why != "" {
+			t.Fatalf("refused: %s", why)
+		}
+		if len(p.words) != 0 || len(p.vars) != 1 || p.vars["a"].Bind != "body.a" || !reflect.DeepEqual(p.vars["a"].Use, []string{"body.b", "body.c"}) {
+			t.Fatalf("words %v variables %+v, want one variable bound at body.a and used at body.b and body.c", p.words, p.vars)
+		}
+	})
 	t.Run("a name the test case's keys left free", func(t *testing.T) {
 		a, b := twins()
 		p := plan(t, a, b)
