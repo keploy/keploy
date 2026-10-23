@@ -11,11 +11,12 @@
 # a mix of two builds, with the pull request's files, with the merged branch's
 # first build, with a file main never had, and with no file at all. A token
 # the server refuses, whichever way it says so, ends the check after one
-# attempt; a server error or a rate limit (429) is tried again, at most five
-# attempts in all, waiting 10, 20, 30 and 40 s between them (a sleep in bin/
-# records each wait and returns at once). With no token, unset or empty as
-# GitHub gives a missing secret, a check that is not a fork's fails and
-# clones nothing, as does a PR_FROM_FORK that is neither true nor false.
+# attempt; a server error, a rate limit (429), a name that does not resolve
+# and a transfer cut off are tried again, at most five attempts in all,
+# waiting 10, 20, 30 and 40 s between them (a sleep in bin/ records each wait
+# and returns at once). With no token, unset or empty as GitHub gives a
+# missing secret, a check that is not a fork's fails and clones nothing, as
+# does a PR_FROM_FORK that is neither true nor false.
 #
 # A keploy/keploy of its own gives a fork's pull request its checkout: the
 # merge commit, two commits deep as actions/checkout fetches it. Each merge
@@ -26,21 +27,23 @@
 # token unset or empty, clones nothing. With a token a fork gets the whole
 # check.
 #
-# The check's git is a wrapper (bin/git) that, for each clone, records
-# whether git may prompt and what password git's credential helpers give for
-# github.com, with a decoy helper configured before them as a runner's could
-# be: the check's own must be the one that answers, with the token. After a
-# clone it tells the helpers to store the credentials, as git does after one
-# GitHub accepted. It records the token on any git command line, and in any
-# file of the check's temporary directory, home or working directory, or one
-# under /tmp or /dev/shm written since the case began (scan), just before or
-# just after each clone; a case fails on either, on the token in such a file
-# once the check has ended, and on the token in the check's output. The token
-# is looked for as it is and in base64, at each of the three byte alignments
-# (so also as an Authorization header gives it, x-access-token:TOKEN), in
-# both alphabets. The wrapper can also refuse a clone in each of the ways GitHub
-# and git refuse credentials, fail the first clone as a server error or a
-# rate limit does, or fail every clone as a server that is down does.
+# The check's git is a wrapper (bin/git) that, for each clone, records whether
+# git may prompt, whether git gives the clone up once its transfer stays below
+# 1000 B/s for 30 s (its stall bound), and what password git's credential
+# helpers give for github.com, with a decoy helper configured before them as a
+# runner's could be: the check's own must be the one that answers, with the
+# token. After a clone it tells the helpers to store the credentials, as git
+# does after one GitHub accepted. It records the token on any git command
+# line, and in any file of the check's temporary directory, home or working
+# directory, or one under /tmp or /dev/shm written since the case began
+# (scan), just before or just after each clone; a case fails on either, on the
+# token in such a file once the check has ended, and on the token in the
+# check's output. The token is looked for as it is and in base64, at each of
+# the three byte alignments (so also as an Authorization header gives it,
+# x-access-token:TOKEN), in both alphabets. The wrapper can also refuse a
+# clone in each of the ways GitHub and git refuse credentials, fail the first
+# clone as a server error, a rate limit, a name that does not resolve or a
+# transfer cut off does, or fail every clone as a server that is down does.
 #
 #   bash .github/workflows/test_workflow_scripts/check-ebpf-objects.tests.sh
 set -euo pipefail
@@ -159,16 +162,19 @@ chmod +x "$work/scan"
 
 # bin/git: the real git, but it records in $SHIM_LOG "argv-has-token" if one
 # of $SHIM_NEEDLES is in its arguments; and for a clone, "prompts" if git may
-# prompt for credentials, "helper:" with the password git's helpers give for
-# github.com under its -c options (or "none"), and "file-has-token" if scan
-# finds one in a file just before or just after it. A clone that succeeds
-# has the helpers store the credentials, as git does once GitHub accepts
-# them. With SHIM_REFUSE it refuses the clone instead, as GitHub refuses a
-# token that cannot read the repository (notfound), is not valid (auth) or
-# may not read it (forbidden: an organization's SSO), or as git does when no
-# helper gives a username (username) or a password (password); or fails the
-# first clone as a server error (blip) or a rate limit (ratelimit) does, and
-# runs the next; or fails every clone as a server that is down does (down).
+# prompt for credentials, "stall-bound:LIMIT/TIME" if its environment does not
+# give git the stall bound of 1000 B/s for 30 s, "helper:" with the password
+# git's helpers give for github.com under its -c options (or "none"), and
+# "file-has-token" if scan finds one in a file just before or just after it. A
+# clone that succeeds has the helpers store the credentials, as git does once
+# GitHub accepts them. With SHIM_REFUSE it refuses the clone instead, as
+# GitHub refuses a token that cannot read the repository (notfound), is not
+# valid (auth) or may not read it (forbidden: an organization's SSO), or as
+# git does when no helper gives a username (username) or a password
+# (password); or fails the first clone as a server error (blip), a rate limit
+# (ratelimit), a name that does not resolve (dns) or a transfer cut off (eof)
+# does, and runs the next; or fails every clone as a server that is down does
+# (down).
 real=$(command -v git)
 mkdir -p "$work/bin"
 cat > "$work/bin/git" <<EOF
@@ -188,6 +194,8 @@ done
 while [ "$i" -lt ${#args[@]} ] && [ "${args[$i]}" = -c ]; do cfg+=(-c "${args[$((i + 1))]}"); i=$((i + 2)); done
 [ "${args[$i]:-}" = clone ] || exec "$real" "$@"
 [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] || echo prompts >> "$SHIM_LOG"
+[ "${GIT_HTTP_LOW_SPEED_LIMIT:-}/${GIT_HTTP_LOW_SPEED_TIME:-}" = 1000/30 ] ||
+  echo "stall-bound:${GIT_HTTP_LOW_SPEED_LIMIT:-none}/${GIT_HTTP_LOW_SPEED_TIME:-none}" >> "$SHIM_LOG"
 cred=$(printf 'protocol=https\nhost=github.com\npath=keploy/ebpf.git\n\n' |
   GIT_TERMINAL_PROMPT=0 "$real" "${cfg[@]}" credential fill 2> /dev/null) || cred=""
 pw=""
@@ -240,6 +248,26 @@ case ${SHIM_REFUSE:-} in
       clone
     fi
     ;;
+  dns)
+    if [ "$(grep -c '^helper:' "$SHIM_LOG")" -le 1 ]; then
+      echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': Could not resolve host: github.com" >&2
+      rc=128
+    else
+      clone
+    fi
+    ;;
+  eof)
+    if [ "$(grep -c '^helper:' "$SHIM_LOG")" -le 1 ]; then
+      echo "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)" >&2
+      echo "error: 2771 bytes of body are still expected" >&2
+      echo "fetch-pack: unexpected disconnect while reading sideband packet" >&2
+      echo "fatal: early EOF" >&2
+      echo "fatal: fetch-pack: invalid index-pack output" >&2
+      rc=128
+    else
+      clone
+    fi
+    ;;
   blip)
     if [ "$(grep -c '^helper:' "$SHIM_LOG")" -le 1 ]; then
       echo "fatal: unable to access 'https://github.com/keploy/ebpf.git/': The requested URL returned error: 502" >&2
@@ -249,7 +277,7 @@ case ${SHIM_REFUSE:-} in
     fi
     ;;
   *)
-    echo "bin/git: SHIM_REFUSE is '$SHIM_REFUSE', none of notfound, auth, username, password, forbidden, down, ratelimit, blip" >&2
+    echo "bin/git: SHIM_REFUSE is '$SHIM_REFUSE', none of notfound, auth, username, password, forbidden, down, ratelimit, dns, eof, blip" >&2
     exit 2
     ;;
 esac
@@ -281,7 +309,8 @@ hooks() {
 # file under $run, or one under /tmp or /dev/shm written since the case
 # began (scan), just before or just after each clone or once it has ended,
 # holds the token in any of its forms (needles). Its clones and waits are
-# recorded in $work/shim.log.
+# recorded in $work/shim.log. The caller's GIT_TERMINAL_PROMPT and
+# GIT_HTTP_LOW_SPEED_* do not reach it: the check must set them itself.
 run="$work/run"
 export SHIM_NEEDLES="${needles[*]}" SHIM_SCAN="$run" SHIM_MARK="$work/mark"
 expect() {
@@ -292,6 +321,7 @@ expect() {
   # may still read the marker's when the check writes its first file.
   touch -d '1 second ago' "$work/mark"
   out=$(cd "$run/cwd" && env -u PRO_ACCESS_TOKEN -u PR_FROM_FORK -u SHIM_REFUSE -u GIT_TERMINAL_PROMPT \
+    -u GIT_HTTP_LOW_SPEED_LIMIT -u GIT_HTTP_LOW_SPEED_TIME \
     PATH="$work/bin:$PATH" TMPDIR="$run/tmp" HOME="$run/home" SHIM_LOG="$work/shim.log" SHIM_TOKEN="$token" \
     "${@:5}" bash "$check" "$url" "$4" 2>&1) || rc=$?
   leak=$({ "$work/scan"; grep -xE 'argv-has-token|file-has-token' "$work/shim.log"; } 2> /dev/null || true)
@@ -348,6 +378,14 @@ expect "a rate limit is tried again" 0 "returned error: 429
 clone of https://.* failed \(attempt 1 of 5\); retrying in 10s
 the 8 eBPF files of .* are keploy/ebpf main's at [0-9a-f]+ \(two\)" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=ratelimit
 clones "a rate limit is tried again: two clones" "helper:token sleep 10 helper:token"
+expect "a name that does not resolve is tried again" 0 "Could not resolve host: github.com
+clone of https://.* failed \(attempt 1 of 5\); retrying in 10s
+the 8 eBPF files of .* are keploy/ebpf main's at [0-9a-f]+ \(two\)" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=dns
+clones "a name that does not resolve is tried again: two clones" "helper:token sleep 10 helper:token"
+expect "a transfer cut off is tried again" 0 "fatal: early EOF
+.*clone of https://.* failed \(attempt 1 of 5\); retrying in 10s
+the 8 eBPF files of .* are keploy/ebpf main's at [0-9a-f]+ \(two\)" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=eof
+clones "a transfer cut off is tried again: two clones" "helper:token sleep 10 helper:token"
 expect "a server down five times" 1 "attempt 4 of 5\); retrying in 40s
 .*could not clone https://.*'s main \(5 attempts\)$" "$work/hooks-old" "${same[@]}" SHIM_REFUSE=down
 clones "a server down: five clones, waits growing" "helper:token sleep 10 helper:token sleep 20 helper:token sleep 30 helper:token sleep 40 helper:token"
