@@ -730,3 +730,143 @@ func TestBeginRealTestCase(t *testing.T) {
 	useHooks(t, &fileOnlyHooks{})
 	require.ErrorIs(t, BeginRealTestCase(ctx, "test-1"), ErrNoRealTestClock)
 }
+
+// outsideClockHooks is a build that can also keep the run's clock on real
+// time outside tests (RealOutsideClock).
+type outsideClockHooks struct{ realClockHooks }
+
+func (h *outsideClockHooks) OutsideTestClock(_ context.Context, real bool) error {
+	if real {
+		h.moves = append(h.moves, "outside real")
+	} else {
+		h.moves = append(h.moves, "outside start")
+	}
+	return h.err
+}
+
+// A test ID's path is the part before its last "::", without the project.
+func TestTestPathIsTheIDsPath(t *testing.T) {
+	for id, want := range map[string]string{
+		"pkg::TestA":                               "pkg",
+		"e2e/a.spec.ts::pays › with a card":        "e2e/a.spec.ts",
+		"web::e2e/a.spec.ts::pays":                 "e2e/a.spec.ts",
+		"e2e/a.spec.ts::ends with a colon:":        "e2e/a.spec.ts",
+		models.TestID("", "", "pkg", "Test/[::1]"): "pkg",
+		models.TestID("web", "f.ts", "k", ":a::b"): "f.ts",
+		"TestBare": "",
+	} {
+		require.Equal(t, want, testPath(id), id)
+	}
+}
+
+// A key is REAL when every test of the recording its ID carries lists a
+// mock.real destination: not when one runs at its recorded begin (one the
+// scope table alone lists included), nor when no recorded test carries it.
+func TestARealKeyIsOneWhoseRecordedTestsAllUseMockReal(t *testing.T) {
+	a := newClockAgent(t)
+	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
+	stripe := []string{"api.stripe.com:443"}
+	require.NoError(t, a.SetTestBegins(context.Background(),
+		map[string]time.Time{"a::x": at, "a::y": at, "b::x": at, "b::y": at, "d::x": at, "c::x": at},
+		map[string][]string{"a::x": stripe, "a::y": stripe, "b::x": stripe, "d::x": stripe}))
+	a.scopeTable = map[string][]string{"a::x": nil, "d::old": nil}
+	require.True(t, a.realKey("a"))
+	require.False(t, a.realKey("b"), "a key with a test that runs at its recorded begin")
+	require.False(t, a.realKey("c"), "a key with no REAL test")
+	require.False(t, a.realKey("d"), "a test the scope table alone lists runs at its recorded begin")
+	require.False(t, a.realKey("worker"), "a key no recorded test carries")
+}
+
+// A key may name one describe group of a test file (its path, then the group's
+// titles): the group's beforeAll runs on the clock of the file's tests, as it
+// did under the file's own key. A path that only starts like the file's is not
+// it.
+func TestAGroupsKeyIsRealAsItsFilesTests(t *testing.T) {
+	a := newClockAgent(t)
+	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
+	stripe := []string{"js.stripe.com:443"}
+	require.NoError(t, a.SetTestBegins(context.Background(),
+		map[string]time.Time{"e2e/a.spec.ts::G › x": at, "e2e/a.spec.ts::H › y": at, "e2e/b.spec.ts::G › x": at},
+		map[string][]string{"e2e/a.spec.ts::G › x": stripe, "e2e/a.spec.ts::H › y": stripe}))
+	require.True(t, a.realKey("e2e/a.spec.ts"))
+	require.True(t, a.realKey("e2e/a.spec.ts/G"))
+	require.True(t, a.realKey("e2e/a.spec.ts/G/Inner"))
+	require.False(t, a.realKey("e2e/b.spec.ts/G"), "a group of a file with a test that runs at its recorded begin")
+	require.False(t, a.realKey("e2e/a.spec.tsx/G"), "another file whose path starts like it")
+	require.False(t, keyCoversPath("e2e/a.spec.ts", ""), "a bare test name is no key's")
+}
+
+// Under the proven switch, a claim of a key whose recorded tests all use
+// mock.real keeps the run's clock on real time outside them: its tests run
+// on real time, and so did all it did outside them when they were recorded.
+// A claim of any other key puts it back at the start time. Only a change
+// moves the clock (a run with no REAL key never calls the build), the moves
+// in tests are as before, and a new session gives the start time back.
+func TestAClaimOfARealKeyKeepsTheClockOutsideItsTestsOnRealTime(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &outsideClockHooks{realClockHooks{clockHooks{file: "/tmp/kclk1/t"}}}
+	useHooks(t, h)
+	a := newClockAgent(t)
+	ctx := context.Background()
+	b := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
+	stripe := []string{"api.stripe.com:443"}
+	require.NoError(t, a.SetTestBegins(ctx,
+		map[string]time.Time{"e2e/a.spec.ts::pays": b, "e2e/b.spec.ts::pays": b, "e2e/b.spec.ts::lists": b},
+		map[string][]string{"e2e/a.spec.ts::pays": stripe, "e2e/b.spec.ts::pays": stripe}))
+	run := func(id string) {
+		t.Helper()
+		require.NoError(t, a.BeginScopeAt(ctx, id, 0, time.Now()))
+		require.NoError(t, a.EndScopeAt(ctx, id, 0, time.Now()))
+	}
+	require.NoError(t, a.claimTestClock(ctx, "chromium"), "a worker's own claim: no recorded test carries its key")
+	require.NoError(t, a.claimTestClock(ctx, "e2e/a.spec.ts"))
+	run("e2e/a.spec.ts::pays")
+	require.NoError(t, a.claimTestClock(ctx, "e2e/a.spec.ts"), "the same clock again moves nothing")
+	require.NoError(t, a.claimTestClock(ctx, "e2e/b.spec.ts"))
+	run("e2e/b.spec.ts::lists")
+	require.NoError(t, a.claimTestClock(ctx, "e2e/a.spec.ts"))
+	require.NoError(t, a.releaseTestClock(ctx))
+	require.False(t, a.clockOutsideReal)
+	require.Equal(t, []string{
+		"outside real",
+		"real e2e/a.spec.ts::pays", "end e2e/a.spec.ts::pays",
+		"outside start",
+		"begin e2e/b.spec.ts::lists 2026-10-06T09:01:00Z", "end e2e/b.spec.ts::lists",
+		"outside real",
+		"outside start",
+	}, h.moves)
+
+	// A build that cannot move the clock outside tests leaves it as it was,
+	// and the next claim tries again.
+	h.moves, h.err = nil, errors.New("disk full")
+	require.ErrorContains(t, a.claimTestClock(ctx, "e2e/a.spec.ts"), "disk full")
+	require.False(t, a.clockOutsideReal)
+	h.err = nil
+	require.NoError(t, a.claimTestClock(ctx, "e2e/a.spec.ts"))
+	require.Equal(t, []string{"outside real", "outside real"}, h.moves)
+
+	// Without the switch nothing moves.
+	t.Setenv(provenswitch.Env, "")
+	h.moves = nil
+	require.NoError(t, a.claimTestClock(ctx, "e2e/b.spec.ts"))
+	require.Empty(t, h.moves)
+}
+
+// A build that freezes the run's clock and puts REAL tests on real time but
+// cannot keep it there outside them refuses the claim of a REAL key, so what
+// the key does outside its tests never runs hours or days before them; a
+// build that freezes nothing has no clock to move.
+func TestAClaimOfARealKeyNeedsABuildThatKeepsRealTimeOutsideTests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ctx := context.Background()
+	begins := map[string]time.Time{"pkg::TestA": time.Now()}
+	real := map[string][]string{"pkg::TestA": {"api.stripe.com:443"}}
+	useHooks(t, &realClockHooks{clockHooks{file: "/tmp/kclk1/t"}})
+	a := newClockAgent(t)
+	require.NoError(t, a.SetTestBegins(ctx, begins, real))
+	require.NoError(t, a.claimTestClock(ctx, "other"))
+	require.ErrorIs(t, a.claimTestClock(ctx, "pkg"), ErrNoRealOutsideClock)
+
+	useHooks(t, &realClockHooks{})
+	require.NoError(t, a.claimTestClock(ctx, "pkg"))
+}

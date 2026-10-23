@@ -992,6 +992,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 				cur, ok := vars(m)[n]
 				if ok {
 					cur.Echo = cur.Echo && b.Echo
+					cur.Outside = cur.Outside || b.Outside
 					if cur.Bind == "" {
 						cur.Bind = b.Bind
 					}
@@ -1215,31 +1216,80 @@ func TestLearnMatchAnExcusedDateHeaderIsNoSourceOfAClockRead(t *testing.T) {
 // uploads the document under "<id>.json" (or a cache key "doc:<id>", or
 // "doc-<id>"). In F the id is minted again, so both drift together. The
 // later call's value flowed from the earlier call, inside a longer value:
-// refused (request_changed), never learned as noise.
-func TestLearnMatchAFlowedIdInsideALongerValueIsRefused(t *testing.T) {
-	for _, tc := range []struct{ name, recID, liveID, prefix, suffix string }{
-		{"dot", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "", ".json"},
-		{"colon", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "doc:", ""},
-		{"dash", "7c9e6679", "1b4e28ba", "doc-", ""},
+// never learned as noise. The id is the test's variable, bound where it was
+// sent whole and used inside the path segment as a token: the replays after
+// F answer the upload only when its segment is that text with the id the
+// test sent, exactly. An id too short to be told from a chance word
+// (minWithin) is refused (request_changed).
+func TestLearnMatchAFlowedIdInsideALongerValueIsFollowedAsAToken(t *testing.T) {
+	for _, tc := range []struct {
+		name, recID, liveID, ciID, prefix, suffix string
+		refused                                   bool
+	}{
+		{"dot", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "5d2f1a7e-9c0b-4c4e-8a51-3f0b2b7c9d10", "", ".json", false},
+		{"colon", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "5d2f1a7e-9c0b-4c4e-8a51-3f0b2b7c9d10", "doc:", "", false},
+		{"dash", "7c9e6679", "1b4e28ba", "5d2f1a7e", "doc-", "", false},
+		{"too short", "7c9e6", "1b4e2", "5d2f1", "doc-", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
 			tr := learn.NewTracker()
 			tr.Begin()
 			ctx := learn.WithTracker(context.Background(), tr)
-			db := &learnDb{perTest: []*models.Mock{
+			recs := []*models.Mock{
 				learnRecorded("mock-0", 0, "POST", "/v1/docs", `{"id":"`+tc.recID+`"}`, nil, `{"ok":true}`),
 				learnRecorded("mock-1", time.Second, "PUT", "/bucket/"+tc.prefix+tc.recID+tc.suffix, `{"v":1}`, nil, `{}`),
-			}}
+			}
+			var per []*models.Mock
+			for _, r := range recs {
+				cp := *r
+				per = append(per, &cp)
+			}
+			db := &learnDb{perTest: per, observe: tr.ServedMock}
 			if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/docs", `{"id":"`+tc.liveID+`"}`, nil), db, n, opts); served == nil {
 				t.Fatalf("precondition: %+v", miss)
 			}
 			served, miss, _ := h.learnMatch(ctx, live("PUT", "/bucket/"+tc.prefix+tc.liveID+tc.suffix, `{"v":1}`, nil), db, n, opts)
-			if served != nil {
-				t.Fatalf("the id that flowed from mock-0 was learned: noise %v variables %+v", db.consumed[1].Spec.ReqBodyNoise, db.consumed[1].Spec.Learned())
+			if tc.refused {
+				if served != nil {
+					t.Fatalf("a short id inside a longer value was learned: noise %v variables %+v", db.consumed[1].Spec.ReqBodyNoise, db.consumed[1].Spec.Learned())
+				}
+				if miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "inside a longer value") {
+					t.Fatalf("miss %+v", miss)
+				}
+				return
 			}
-			if miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "inside a longer value") {
-				t.Fatalf("miss %+v", miss)
+			if served == nil || miss != nil {
+				t.Fatalf("the upload was refused: %+v", miss)
+			}
+			put := db.consumed[1].Spec
+			if len(put.ReqBodyNoise) != 0 {
+				t.Fatalf("the id was learned as noise: %v", put.ReqBodyNoise)
+			}
+			if want := (models.MockVariables{"id": {Recorded: tc.recID, Use: []string{"url.path[1]"}}}); !reflect.DeepEqual(put.Learned(), want) {
+				t.Fatalf("the upload learned %+v, want %+v", put.Learned(), want)
+			}
+			if want := (map[string]models.MockVariables{"mock-0": {"id": {Recorded: tc.recID, Bind: "body.id"}}}); !reflect.DeepEqual(put.LearnedBinds(), want) {
+				t.Fatalf("the upload's binds %+v, want %+v", put.LearnedBinds(), want)
+			}
+
+			// The replays after F.
+			mocks := learnedOnto(recs, db.consumed)
+			ci := &varDb{perTest: append([]*models.Mock(nil), mocks...)}
+			if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/docs", `{"id":"`+tc.ciID+`"}`, nil)); !ok {
+				t.Fatalf("the create in CI: %+v", diag)
+			}
+			if ok, _, diag := matchVar(t, h, ci, live("PUT", "/bucket/"+tc.prefix+tc.ciID+tc.suffix, `{"v":1}`, nil)); !ok {
+				t.Fatalf("the upload in CI: %+v", diag)
+			}
+			// The upload under another id is no upload of this document.
+			ci = &varDb{perTest: append([]*models.Mock(nil), mocks...)}
+			if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/docs", `{"id":"`+tc.ciID+`"}`, nil)); !ok {
+				t.Fatalf("the create in CI: %+v", diag)
+			}
+			ok, _, diag := matchVar(t, h, ci, live("PUT", "/bucket/"+tc.prefix+tc.liveID+tc.suffix, `{"v":1}`, nil))
+			if p := wantProblem(t, ok, diag, "so this call sends"); p.expected != tc.prefix+tc.ciID+tc.suffix {
+				t.Fatalf("expected %q, want the recorded segment with this run's id", p.expected)
 			}
 		})
 	}

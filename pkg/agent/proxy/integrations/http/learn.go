@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -246,9 +247,12 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 }
 
 // multipartLeaves reads a multipart/form-data body by its own boundary: each
-// field part is a leaf (body.<name>), each file part a fixed part (its file
-// name and bytes), so a boundary minted per request is no difference. It
-// reports false for a body it cannot read.
+// field part is a leaf (body.<name>, Form: a variable's place form.<name>),
+// each text file part a leaf too (File: its content compared whole, never
+// learned as noise; a value keploy follows may stand inside it) with its file
+// name fixed, and a binary file part a fixed part (its file name and bytes),
+// so a boundary minted per request is no difference. It reports false for a
+// body it cannot read.
 func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string]string) bool {
 	_, params, err := mime.ParseMediaType(p.header["content-type"])
 	if err != nil || params["boundary"] == "" {
@@ -274,13 +278,25 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 			return false
 		}
 		seen[name] = true
+		path := "body." + name
 		if part.FileName() != "" {
-			fixed["body."+name] = "file " + part.FileName() + "\x00" + string(data)
+			if !textFile(data) {
+				fixed[path] = "file " + part.FileName() + "\x00" + string(data)
+				continue
+			}
+			fixed[path+"{file}"] = part.FileName()
+			leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]"), Form: true, File: true}
 			continue
 		}
-		path := "body." + name
-		leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]")}
+		leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]"), Form: true}
 	}
+}
+
+// textFile reports whether a file part's bytes are text keploy can read
+// words in: valid UTF-8 with no NUL byte. A binary file stays fixed, compared
+// as its bytes.
+func textFile(data []byte) bool {
+	return utf8.Valid(data) && bytes.IndexByte(data, 0) < 0
 }
 
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
@@ -835,6 +851,23 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		// left (MockManager.observeServed), so it is in one of the two.
 		test, earlier, served, before := tracker.Test()
 		windows, _ := mockDb.(integrations.TestWindows)
+		// Under a claim, in a full record (which re-makes the pool), what
+		// the claim key's calls made outside every test sent first (a
+		// Playwright beforeAll seeding a name) is the key's: an earlier
+		// place of the key's tests, followed as a variable of the key. A
+		// call outside every test reads only the key's earlier calls.
+		keyScope := opts.LearnPool && tracker.Keyed()
+		outsideCall := keyScope && !tracker.Open()
+		var outsideMinted []learn.Minted
+		if keyScope {
+			var outsideEarlier []learn.Earlier
+			outsideEarlier, outsideMinted = tracker.Outside()
+			if outsideCall {
+				earlier = outsideEarlier
+			} else {
+				earlier = append(append([]learn.Earlier(nil), earlier...), outsideEarlier...)
+			}
+		}
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -865,11 +898,33 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if own && !tracker.Answer(test, picked) {
 				continue
 			}
-			// The claim reads the scope's owners (ownedKey), as the
-			// matcher's does: a stated recording no open test owns is a
-			// reusable one, kept and served in turn (cursorPick), never
-			// used up.
-			out, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+			// A recorded answer of the test's own that holds a value the
+			// test made earlier is answered with this run's value, and what
+			// that is learned (mintedAnswers).
+			var minted pairing
+			switch {
+			case own:
+				minted = h.mintedAnswers(tracker, test, picked, pairing{}, reservedNames(givenBindings(mockDb)), append(tracker.Minted(test), outsideMinted...))
+			case outsideCall:
+				minted = h.mintedAnswers(tracker, test, picked, pairing{}, nil, outsideMinted)
+			}
+			var (
+				out     *models.Mock
+				claimed bool
+				why     string
+			)
+			if len(minted.vars) > 0 {
+				out, claimed, why, err = h.claimLearned(ctx, picked, mockDb, minted, sc.owner())
+			}
+			if len(minted.vars) == 0 || why != "" {
+				// The claim reads the scope's owners (ownedKey), as the
+				// matcher's does: a stated recording no open test owns is a
+				// reusable one, kept and served in turn (cursorPick), never
+				// used up.
+				out, claimed, err = h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+			} else if claimed {
+				h.logMintedAnswers(picked, minted.vars)
+			}
 			if err != nil || !claimed {
 				if own {
 					tracker.Unanswer(test, picked.Name)
@@ -883,6 +938,9 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			commit()
 			if e, ok := n.servedExchange(picked, nil, rec, recordedParts(picked), liveShape, live, out, own); ok {
 				tracker.Served(test, e)
+				if outsideCall {
+					tracker.ServedOutside(e)
+				}
 			}
 			return out, nil, nil
 
@@ -944,10 +1002,17 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
 			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			given := givenBindings(mockDb)
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, outsideCall, learned, earlier, given)
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
+			switch {
+			case own:
+				plan = h.mintedAnswers(tracker, test, m, plan, reservedNames(given), append(tracker.Minted(test), outsideMinted...))
+			case outsideCall:
+				plan = h.mintedAnswers(tracker, test, m, plan, nil, outsideMinted)
 			}
 			if own && !tracker.Answer(test, m) {
 				continue
@@ -971,8 +1036,22 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
+			h.logMintedAnswers(m, plan.vars)
+			// What this call's request carried first in the test, a later
+			// call's answer may hold (mintedAnswers).
+			for _, v := range plan.minted {
+				if outsideCall {
+					tracker.MintOutside(v)
+					continue
+				}
+				tracker.Mint(test, v)
+			}
 			if e, ok := n.servedExchange(m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
+				e = withinPlaces(e, plan.vars)
 				tracker.Served(test, e)
+				if outsideCall {
+					tracker.ServedOutside(e)
+				}
 			}
 			return out, nil, nil
 		}
@@ -997,12 +1076,15 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 // pairing is what the learn step learned on a paired mock: its noise, its
 // variables (an echo included), the variables of the test bound at an earlier
 // mock that it uses (binds, by that mock), and each variable's value in this
-// call, for its answer.
+// call, for its answer. minted are the values this call's request carried
+// first in the test (learned here as noise or as an echo), which the tracker
+// keeps once the call is answered (learn.Tracker.Mint).
 type pairing struct {
 	noise  map[string][]string
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
+	minted []learn.Minted
 }
 
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
@@ -1015,6 +1097,9 @@ type pairing struct {
 //   - A variable is bound at its earlier place, a request place of one of
 //     the test's own HTTP mocks F served, which held the value whole, and is
 //     used here: it holds when the live value here is the one F saw there.
+//     A value held here inside a longer one ("<name>-renamed") is used here
+//     too, bound where it was sent whole (withinSource): it holds when the
+//     live text here is the recorded one with that value in its place.
 //   - An echo is a variable of this call alone (echo: true), bound here and
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
@@ -1023,13 +1108,20 @@ type pairing struct {
 //     here under the key's name with no bind, whatever else Classify found:
 //     the test case is earlier than any call it makes. Its name is the key's
 //     alone in the test: no other variable takes it.
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
+//   - A value learned as noise or as an echo at a variable place of one of
+//     the test's own calls first appeared there: the test made it (minted).
+//     It stays what it was learned as until a later call of the test answers
+//     it whole (mintedAnswers): then it is the test's variable, bound here.
+//   - outside: m is a pool call of the claim key, made while no test is open,
+//     in a full record (learnMatch). What it sends first is the key's
+//     (minted, Outside): a later call of the key, outside every test or in
+//     one of its tests, that sends it again uses the key's variable, bound
+//     here, and one that answers it answers it. Its names are the key's
+//     (learn.Tracker.OutsideName).
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own, outside bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
-	reserved := make(map[string]bool, len(given))
-	for _, g := range given {
-		reserved[g.Name] = true
-	}
+	reserved := reservedNames(given)
 	answers := func(l learn.Learned, from []learn.Leaf) []string {
 		var out []string
 		for _, a := range from {
@@ -1043,19 +1135,61 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		return out
 	}
 	echoed := map[string]string{} // recorded value -> its echo variable
+	// A text file's content that holds a value this very call sends whole at
+	// another place (an upload's test-set id, in its form field and inside the
+	// file it uploads): the value first appears here, so the call binds it at
+	// that place and uses it inside the file, exactly (sameCallWithin).
+	fileUses := sameCallWithin(learned, jsonReq, respLeavesOf(m))
 	for _, l := range learned {
 		r := l.Recorded
+		if src, ok := fileUses[r.Path]; ok && own {
+			name, ok := tracker.Name(test, m.Name, src.place, reserved)
+			if !ok {
+				return p, "the test ended before " + r.Path + " was learned"
+			}
+			v := p.vars[name]
+			v.Recorded, v.Bind = src.recorded, src.place
+			if use, ok := learn.VarPlace(r, jsonReq); ok {
+				v.Use = appendNew(v.Use, use)
+			}
+			v.Answer = appendNew(v.Answer, src.answers...)
+			p.vars[name] = v
+			p.values[name] = variables.Binding{Name: name, Value: src.live, Recorded: src.recorded, Mock: m.Name, Place: src.place}
+			continue
+		}
+		if src, ok := fileBinds(fileUses, r.Path); ok && own {
+			// The place that binds what the file holds: a variable, not noise.
+			name, ok := tracker.Name(test, m.Name, src.place, reserved)
+			if !ok {
+				return p, "the test ended before " + r.Path + " was learned"
+			}
+			v := p.vars[name]
+			v.Recorded, v.Bind = src.recorded, src.place
+			v.Answer = appendNew(v.Answer, src.answers...)
+			p.vars[name] = v
+			p.values[name] = variables.Binding{Name: name, Value: src.live, Recorded: src.recorded, Mock: m.Name, Place: src.place}
+			p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: src.place, Recorded: src.recorded, Live: src.live, Type: r.Type})
+			continue
+		}
+		if r.File && (l.Kind == learn.KindNoise || l.Kind == learn.KindEcho) {
+			// A file's content is compared whole: what changed in it must be a
+			// value keploy follows, never noise.
+			return p, r.Path + " is a file's content, which keploy compares whole, and it changed by more than a value keploy follows"
+		}
 		if g, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
 			place, placeable := learn.VarPlace(r, jsonReq)
 			switch {
 			case !placeable:
 				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)"
-			case !own:
+			case !own && !(outside && g.Outside):
+				// A claim key's given value (its harness gave it outside every
+				// test: a group's beforeAll) is carried by the key's calls
+				// outside its tests too.
 				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables"
 			}
 			v := p.vars[g.Name]
-			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
+			v.Recorded, v.Use, v.Outside = g.Recorded, appendNew(v.Use, place), g.Outside
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
@@ -1064,33 +1198,66 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		switch l.Kind {
 		case learn.KindNoise:
 			p.noise[r.Path] = []string{}
+			if place, ok := learn.VarPlace(r, jsonReq); ok && (own || outside) {
+				p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: place, Recorded: r.Value, Live: l.Live.Value, Type: r.Type, Outside: outside})
+			}
 
 		case learn.KindVariable:
 			from := l.From
+			// word is the variable's recorded value: r's own, or the value an
+			// earlier call sent whole that r holds inside a longer one, or a
+			// word both hold inside longer values (inside: bound there inside
+			// the earlier call's value, sharedSource).
+			word, inside := r.Value, false
 			switch {
 			case from.Side == "":
 				return p, r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
 			case from.Side != learn.Request:
 				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
 			case !from.Whole || from.Var == "":
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
-			case !own || !from.Own:
+				src, w, ok := withinSource(r, l.Live, earlier)
+				if !ok {
+					src, w, ok = sharedSource(r, l.Live, earlier)
+					inside = ok
+				}
+				if !ok {
+					return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				}
+				from, word = src, w
+			}
+			if !(own || outside) || !from.Own && !from.Outside {
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 			}
 			use, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
-			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
+			// withinSource checked a value inside a longer one already: the
+			// live text is the recorded one with the live value in its place.
+			if word == r.Value && !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
+			if inside {
+				// A word of the earlier place's value: a variable of its own
+				// beside the one the place may hold whole.
+				name, ok = tracker.NameWithin(test, from.Mock, from.Var, word, reserved)
+			}
+			if from.Outside {
+				// The claim key's variable, bound at a call made outside
+				// every test.
+				name, ok = tracker.OutsideName(from.Mock, from.Var)
+			}
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			v := p.vars[name]
-			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
-			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			v.Recorded, v.Use, v.Outside = word, appendNew(v.Use, use), from.Outside
+			if word == r.Value {
+				v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			} else {
+				v.Answer = appendNew(v.Answer, withinAnswers(word, respLeavesOf(m))...)
+			}
 			p.vars[name] = v
 			b := p.binds[from.Mock]
 			if b == nil {
@@ -1098,15 +1265,15 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.binds[from.Mock] = b
 			}
 			bv := b[name]
-			bv.Recorded, bv.Bind = r.Value, from.Var
+			bv.Recorded, bv.Bind, bv.Outside = word, from.Var, from.Outside
 			// F's clock evidence, read where the variable is bound: a clock
 			// read that moved by the lead there may share its live value with
 			// another one read in the same second in a replay
 			// (models.MockVariable.Clock).
-			bv.Clock = learn.ClockReads(r.Value, from.Live)
-			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
+			bv.Clock = learn.ClockReads(word, from.Live)
+			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, learn.Leaf{Path: r.Path, Type: r.Type, Value: word})...)
 			b[name] = bv
-			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
+			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: word, Mock: from.Mock, Place: from.Var, Outside: from.Outside}
 
 		case learn.KindUnaccounted:
 			return p, r.Path + " changed, and " + l.Why
@@ -1137,15 +1304,428 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				continue
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
+			if outside {
+				// Named as the key's: a later call of the key that answers
+				// it makes it the key's variable (mintedAnswers).
+				name, ok = tracker.OutsideName(m.Name, place)
+			}
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			echoed[r.Value] = name
 			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
+			if own || outside {
+				p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: place, Recorded: r.Value, Live: l.Live.Value, Type: r.Type, Outside: outside})
+			}
 		}
 	}
 	return p, ""
+}
+
+// minWithin is the length below which a value is not followed inside a
+// longer one: a short word equal by chance to one the test sent ("1", "on")
+// is not that value. Such a call is refused, as before.
+const minWithin = 6
+
+// withinSource is the earlier place whose value the drifted leaf r (live:
+// what F saw there) carries inside a longer value: a request place that sent
+// a value w whole (at least minWithin long, a string or a number) that
+// stands in r's recorded value as a token (learn.ContainsToken), where F saw
+// it drift, and whose live value put in w's place in r's recorded value
+// (learn.ReplaceToken) is r's live value, exactly: "<name>-renamed" carries
+// the name a create sent whole, "doc:<id>" the id. Of the test's own calls
+// F served before, else the claim key's made outside every test, the
+// earliest. ok is false when no place is: the call is refused, as before.
+// The place holds w whole, so the variable is bound there.
+func withinSource(r, live learn.Leaf, earlier []learn.Earlier) (from learn.Place, w string, ok bool) {
+	if r.Type != learn.String || r.Value == "" {
+		return learn.Place{}, "", false
+	}
+	served := append([]learn.Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	for _, outside := range []bool{false, true} {
+		for _, e := range served {
+			if !outside && !e.Own || outside && (e.Own || !e.Outside) {
+				continue
+			}
+			for _, s := range e.Seen {
+				v := s.Leaf.Value
+				if s.Side != learn.Request || s.Place == "" || s.Leaf.Unnamed || s.Leaf.Type != learn.String && s.Leaf.Type != learn.Number ||
+					s.Live == "" || s.Live == v || len(v) < minWithin || v == r.Value || !learn.ContainsToken(r.Value, v) {
+					continue
+				}
+				if with, _ := learn.ReplaceToken(r.Value, v, s.Live); with != live.Value {
+					continue
+				}
+				return learn.Place{Mock: e.Mock, Side: learn.Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise, Var: s.Place, Live: s.Live,
+					Whole: true, Own: e.Own, Run: e.Run, Outside: e.Outside, Name: s.Name}, v, true
+			}
+		}
+	}
+	return learn.Place{}, "", false
+}
+
+// sharedSource is, for a drifted leaf r (live: what F saw there) that withinSource
+// finds no whole value inside, the test's own earlier request place whose value
+// holds, inside a longer value too, a word r's value holds: a token w (at
+// least minWithin long, as learn.ReplaceToken reads tokens) standing in both
+// recorded values, where F's live value of each is its recorded one with one
+// value w' in w's places, exactly (learn.TokenValue, learn.ReplaceToken): the
+// time two names a test made of one Date.now() ("e2e-role-<ts>", then
+// "e2e-case-<ts>"). w is the variable: bound inside the earlier place's value,
+// where it first stands, and used inside r's. Of the test's own calls F served,
+// the earliest; ok is false when none is, and the call is refused, as before.
+// The place's live value (Place.Live) is w', the variable's value.
+func sharedSource(r, live learn.Leaf, earlier []learn.Earlier) (from learn.Place, w string, ok bool) {
+	if r.Type != learn.String || r.Value == "" || live.Value == "" {
+		return learn.Place{}, "", false
+	}
+	served := append([]learn.Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	words := sortedWords(r.Value)
+	for _, e := range served {
+		if !e.Own {
+			continue
+		}
+		for _, s := range e.Seen {
+			v := s.Leaf.Value
+			if s.Side != learn.Request || s.Place == "" || s.Leaf.Unnamed || s.Leaf.Type != learn.String ||
+				s.Live == "" || s.Live == v || v == r.Value {
+				continue
+			}
+			for _, cand := range words {
+				if len(cand) < minWithin || cand == v || !learn.ContainsToken(v, cand) {
+					continue
+				}
+				wl, ok := learn.TokenValue(v, cand, s.Live)
+				if !ok {
+					continue
+				}
+				if with, _ := learn.ReplaceToken(r.Value, cand, wl); with != live.Value {
+					continue
+				}
+				return learn.Place{Mock: e.Mock, Side: learn.Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise, Var: s.Place, Live: wl,
+					Own: e.Own, Run: e.Run, Outside: e.Outside}, cand, true
+			}
+		}
+	}
+	return learn.Place{}, "", false
+}
+
+// sortedWords are the ASCII letter-and-digit words of s, longest first, each
+// once: the words a value may share with another, the most specific first.
+func sortedWords(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for i := 0; i < len(s); {
+		if !isASCIIWord(s[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && isASCIIWord(s[j]) {
+			j++
+		}
+		if w := s[i:j]; !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+		i = j
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
+func isASCIIWord(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// fileSource is the place of a call that sends, whole, a value a text file
+// of the same call holds inside it: the variable's bind place, and the value
+// recorded and in this run.
+type fileSource struct {
+	path, place    string
+	recorded, live string
+	// answers are the call's answer places that hold the value, whole or
+	// inside a longer text (withinAnswers): answered with this run's value.
+	answers []string
+}
+
+// sameCallWithin maps each text file leaf of a call (learned: what F saw drift
+// in it) whose change is exactly one value the same call sends whole at
+// another place, first appearing there (no earlier call sent it), to that
+// place: the file's recorded text with that place's live value in the
+// recorded value's places (learn.ReplaceToken) is the file's live text. The
+// value is at least minWithin long, a string, at a variable's place. Each
+// was learned as noise, as an echo, or refused only because a word of it
+// comes back in the call's answer (Learned.Echoed): when the answer holds it,
+// every answer place holding a word of what changed must hold the value
+// whole or as a token, so that the variable answers it with this run's value
+// (resp: the call's recorded answer).
+func sameCallWithin(learned []learn.Learned, jsonReq bool, resp []learn.Leaf) map[string]fileSource {
+	fresh := func(l learn.Learned) bool {
+		return l.Kind == learn.KindNoise || l.Kind == learn.KindEcho || l.Kind == learn.KindUnaccounted && l.Echoed
+	}
+	echoed := func(l learn.Learned) bool { return l.Kind == learn.KindEcho || l.Echoed }
+	out := map[string]fileSource{}
+	for _, f := range learned {
+		r := f.Recorded
+		if !r.File || r.Value == "" || !fresh(f) {
+			continue
+		}
+		for _, s := range learned {
+			v := s.Recorded
+			if v.Path == r.Path || v.File || !fresh(s) || v.Type != learn.String || len(v.Value) < minWithin ||
+				s.Live.Value == "" || s.Live.Value == v.Value || !learn.ContainsToken(r.Value, v.Value) {
+				continue
+			}
+			place, ok := learn.VarPlace(v, jsonReq)
+			if !ok {
+				continue
+			}
+			if with, _ := learn.ReplaceToken(r.Value, v.Value, s.Live.Value); with != f.Live.Value {
+				continue
+			}
+			if (echoed(f) || echoed(s)) && !answeredWhole(v.Value, s.Live.Value, resp) {
+				continue
+			}
+			out[r.Path] = fileSource{path: v.Path, place: place, recorded: v.Value, live: s.Live.Value, answers: withinAnswers(v.Value, resp)}
+			break
+		}
+	}
+	return out
+}
+
+// answeredWhole reports whether every answer leaf that holds a word the value
+// lost (recorded, not live) holds the value itself, whole or as a token, at a
+// place a variable can answer: so answering the value accounts for every word
+// of it the answer echoes.
+func answeredWhole(recorded, live string, resp []learn.Leaf) bool {
+	liveWords := map[string]bool{}
+	for _, w := range sortedWords(live) {
+		liveWords[w] = true
+	}
+	var lost []string
+	for _, w := range sortedWords(recorded) {
+		if !liveWords[w] {
+			lost = append(lost, w)
+		}
+	}
+	for _, a := range resp {
+		holds := false
+		for _, w := range lost {
+			if learn.ContainsToken(a.Value, w) {
+				holds = true
+				break
+			}
+		}
+		if !holds {
+			continue
+		}
+		if _, ok := learn.VarPlace(a, true); !ok || a.Unnamed || !learn.ContainsToken(a.Value, recorded) && !learn.WholeEcho(learn.Leaf{Value: recorded}, a) {
+			return false
+		}
+	}
+	return true
+}
+
+// fileBinds reports whether the leaf at path is the place that binds a value
+// a file of its call holds (sameCallWithin), and that place.
+func fileBinds(uses map[string]fileSource, path string) (fileSource, bool) {
+	for _, src := range uses {
+		if src.path == path {
+			return src, true
+		}
+	}
+	return fileSource{}, false
+}
+
+// withinAnswers are the places of an answer (leaves) that hold w, a value
+// the call carries inside a longer one: whole (learn.WholeEcho), or as a
+// token of a text (the recorded "<name>-renamed" the call sent, answered
+// back). Each is answered with the text holding this run's value in w's
+// place (renderAnswers).
+func withinAnswers(w string, leaves []learn.Leaf) []string {
+	var out []string
+	for _, a := range leaves {
+		if !learn.WholeEcho(learn.Leaf{Value: w}, a) && (a.Unnamed || a.Type != learn.String || !learn.ContainsToken(a.Value, w)) {
+			continue
+		}
+		if place, ok := learn.VarPlace(a, true); ok {
+			out = append(out, place)
+		}
+	}
+	return out
+}
+
+// withinPlaces is e, an exchange F served, with no variable place at a
+// request place where it holds a variable of vars inside a longer value (a
+// use withinSource followed): what it sent there is that variable's text, no
+// value of its own to bind. A later call that sends the text again follows
+// it to the variable's own place (withinSource), never binds another
+// variable at this one.
+func withinPlaces(e learn.Earlier, vars models.MockVariables) learn.Earlier {
+	recorded := map[string]string{} // a use place -> its variable's recorded value
+	for _, v := range vars {
+		for _, u := range v.Use {
+			recorded[u] = v.Recorded
+		}
+	}
+	if len(recorded) == 0 {
+		return e
+	}
+	e.Seen = append([]learn.Seen(nil), e.Seen...)
+	for i, s := range e.Seen {
+		if w, ok := recorded[s.Place]; ok && s.Side == learn.Request && !variables.SameValue(w, s.Leaf.Value, s.Leaf.Type == learn.Number) {
+			e.Seen[i].Place = ""
+		}
+	}
+	return e
+}
+
+// reservedNames are the names of the values the test case gave (its template
+// keys): no other variable of the test takes one.
+func reservedNames(given []variables.Binding) map[string]bool {
+	reserved := make(map[string]bool, len(given))
+	for _, g := range given {
+		reserved[g.Name] = true
+	}
+	return reserved
+}
+
+// mintedAnswers is p, what the learn step learned on the test's own mock m
+// in test number n (or on a pool call of the claim key made outside every
+// test), with the answer places of m's recorded answer that hold a value of
+// minted, made at an earlier call (learn.Minted: the test's, or the claim
+// key's): a scalar of the answer's JSON body that holds the value whole, of
+// the type the request carried it as (a string or a number), or a string of
+// it that holds a string value as a token of a longer text (mintedWithin:
+// "Test Suites/<name>"), answered with this run's value in its place; never
+// an object key or a header. Each makes the value a
+// variable (the test's, or the key's: Outside): answered here with this
+// run's value, and bound where it first appeared (the bind rides on m's
+// state onto that call, which turns what was learned there, noise or an
+// echo, into the variable's bind). An answer place a variable of p answers
+// already is left to it. When m's answer cannot hold them all, p is returned
+// as it was: the call is answered as it was before.
+func (h *HTTP) mintedAnswers(tracker *learn.Tracker, test uint64, m *models.Mock, p pairing, reserved map[string]bool, minted []learn.Minted) pairing {
+	if len(minted) == 0 {
+		return p
+	}
+	// A big answer the disk store keeps apart from its mock (strict mock
+	// windows: proxy.EligibleForResponseSpill) is read loaded, as it is
+	// served: m's own Spec holds no answer then.
+	loaded, err := withResponse(m)
+	if err != nil || loaded.Spec.HTTPResp == nil {
+		return p
+	}
+	taken := map[string]bool{}
+	for _, v := range p.vars {
+		for _, a := range v.Answer {
+			taken[a] = true
+		}
+	}
+	leaves := respLeaves(loaded.Spec.HTTPResp)
+	vars, binds := models.MockVariables{}, map[string]models.MockVariables{}
+	values := make(map[string]variables.Binding, len(p.values))
+	for k, v := range p.values {
+		values[k] = v
+	}
+	within := map[string]bool{} // answer places that hold minted values inside a longer text
+	for _, v := range minted {
+		if v.Mock == m.Name {
+			// Its own answer: an echo, learned with its request.
+			continue
+		}
+		var at []string
+		for _, a := range leaves {
+			if !strings.HasPrefix(a.Path, "body") || a.Unnamed {
+				continue
+			}
+			whole := a.Type == v.Type && variables.SameValue(v.Recorded, a.Value, v.Type == learn.Number)
+			if !whole && !mintedWithin(v, a) {
+				continue
+			}
+			place, ok := learn.VarPlace(a, true)
+			if !ok || taken[place] || whole && within[place] {
+				continue
+			}
+			if whole {
+				taken[place] = true
+			} else {
+				// One text may hold several values the test made, each
+				// answered in its place (renderAnswers).
+				within[place] = true
+			}
+			at = append(at, place)
+		}
+		if len(at) == 0 {
+			continue
+		}
+		var name string
+		var ok bool
+		if v.Outside {
+			name, ok = tracker.OutsideName(v.Mock, v.Place)
+		} else {
+			name, ok = tracker.Name(test, v.Mock, v.Place, reserved)
+		}
+		if !ok {
+			// The test ended: nothing more is learned in it.
+			return p
+		}
+		if have, ok := p.vars[name]; ok && (have.Recorded != v.Recorded || have.Outside != v.Outside) {
+			continue
+		}
+		vars[name] = models.MockVariable{Recorded: v.Recorded, Answer: at, Outside: v.Outside}
+		if binds[v.Mock] == nil {
+			binds[v.Mock] = models.MockVariables{}
+		}
+		binds[v.Mock][name] = models.MockVariable{Recorded: v.Recorded, Bind: v.Place, Outside: v.Outside}
+		if _, ok := values[name]; !ok {
+			values[name] = variables.Binding{Name: name, Value: v.Live, Recorded: v.Recorded, Mock: v.Mock, Place: v.Place, Outside: v.Outside}
+		}
+	}
+	if len(vars) == 0 {
+		return p
+	}
+	out := pairing{noise: p.noise, minted: p.minted, vars: mergeVariables(p.vars, vars), binds: mergeBinds(p.binds, binds), values: values}
+	// The answer must hold every variable with this run's value, as the
+	// variable pass answers it in the replays after F.
+	decls, problem := readDecls(&models.Mock{Name: m.Name, Spec: models.MockSpec{Variables: out.vars}})
+	if problem == "" {
+		if _, vp := h.renderAnswers(loaded, &varHit{mock: m, decls: decls, local: out.values}, &variables.Table{}); vp != nil {
+			problem = vp.why
+		}
+	}
+	if problem != "" {
+		h.Logger.Debug("the answer of a later call holds a value the test made, and cannot be answered with this run's value; it is served as recorded",
+			zap.String("mock", m.Name), zap.String("why", problem))
+		return p
+	}
+	return out
+}
+
+// mintedWithin reports whether answer leaf a holds the value the test made,
+// v, inside a longer text: as a token of a string (learn.ContainsToken), a
+// string v at least minWithin long ("Test Suites/<name>", "<name>-renamed").
+func mintedWithin(v learn.Minted, a learn.Leaf) bool {
+	return v.Type == learn.String && a.Type == learn.String && len(v.Recorded) >= minWithin && learn.ContainsToken(a.Value, v.Recorded)
+}
+
+// logMintedAnswers says, for a served mock, each answer place of a value the
+// test made that it learned (a variable m answers and whose request places
+// are another call's: mintedAnswers).
+func (h *HTTP) logMintedAnswers(m *models.Mock, vars models.MockVariables) {
+	for name, v := range vars {
+		if v.Bind != "" || len(v.Use) > 0 {
+			continue
+		}
+		for _, a := range v.Answer {
+			h.Logger.Info("learned an answer that holds a value the test made earlier; it is answered with this run's value",
+				zap.String("mock", m.Name), zap.String("field", a), zap.String("variable", name))
+		}
+	}
 }
 
 // givenBindings are the values the running test case's request gave
@@ -1157,7 +1737,9 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 		return nil
 	}
 	var out []variables.Binding
-	for _, b := range table.Snapshot() {
+	// The test's, then the claim key's (given by the harness while no test was
+	// open), which every test of the key and its calls outside them carry.
+	for _, b := range append(table.Snapshot(), table.OutsideSnapshot()...) {
 		if b.Given {
 			out = append(out, b)
 		}
@@ -1170,12 +1752,73 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 // not the key's (two counters both at 1 when recorded are two values).
 func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, bool) {
 	number := r.Type == learn.Number
+	var whole, within []variables.Binding
 	for _, g := range given {
 		if r.Value != "" && variables.SameValue(g.Recorded, r.Value, number) && variables.SameValue(g.Value, live.Value, number) {
-			return g, true
+			whole = append(whole, g)
 		}
 	}
+	if len(whole) > 0 {
+		return latestGiven(whole), true
+	}
+	// A given value inside a longer one (a session token the test installs,
+	// in the Cookie header with the run's other cookies): the recorded text
+	// holds its recorded value as a token, and the live text is that text
+	// with this run's value in its place, exactly (the variable pass then
+	// asserts it so in every replay: usedWithin).
+	if r.Type != learn.String {
+		return variables.Binding{}, false
+	}
+	for _, g := range given {
+		if len(g.Recorded) < minWithin || g.Recorded == r.Value || !learn.ContainsToken(r.Value, g.Recorded) {
+			continue
+		}
+		if with, _ := learn.ReplaceToken(r.Value, g.Recorded, g.Value); with == live.Value {
+			within = append(within, g)
+		}
+	}
+	if len(within) > 0 {
+		return latestGiven(within), true
+	}
 	return variables.Binding{}, false
+}
+
+// latestGiven is, of the given values a call carries, the one it carries: of
+// one name, the latest install. A harness names each value it gives by what
+// it is and the order the test installed it ("cookie-jwt-3"), and gives it as
+// it is installed, before any call carries it: a value a helper signs for
+// each call (a per-request header) is given right before that call, and a
+// cookie stays the latest one installed. Two installs a run made in one
+// second hold one value, recorded and live alike, and carry it to different
+// calls: the call's own is the latest installed so far, which a replay that
+// made them in two seconds tells apart. Of two names (a session's jwt and
+// refresh cookies, set to one token), the first by name: the call holds
+// both. given is in name order (variables.Table.Snapshot).
+func latestGiven(gs []variables.Binding) variables.Binding {
+	best := gs[0]
+	bestBase, bestN := installOrder(best.Name)
+	for _, g := range gs[1:] {
+		base, n := installOrder(g.Name)
+		if base == bestBase && n > bestN {
+			best, bestN = g, n
+		}
+	}
+	return best
+}
+
+// installOrder splits a given value's name into what it is and the order of
+// its install ("cookie-jwt", 3 of "cookie-jwt-3"); a name with no order is
+// its own, with order 0.
+func installOrder(name string) (string, int) {
+	i := strings.LastIndexByte(name, '-')
+	if i < 0 || i == len(name)-1 {
+		return name, 0
+	}
+	n, err := strconv.Atoi(name[i+1:])
+	if err != nil || n < 0 {
+		return name, 0
+	}
+	return name[:i], n
 }
 
 // respLeavesOf are the leaves of m's recorded answer.

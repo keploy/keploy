@@ -1295,6 +1295,19 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 	if err := pusher.PushTestBegins(ctx, begins, real); err != nil {
 		return err
 	}
+	if given, keys := testGiven(mapping), testKeyGiven(mapping); len(given)+len(keys) > 0 {
+		// A recording whose tests' harness gave values needs an agent that
+		// binds them: without, every call carrying one misses, a failure that
+		// is keploy's, not the application's.
+		gp, ok := m.instrumentation.(TestGivenPusher)
+		if !ok {
+			return errors.New("this keploy's agent client cannot hand the agent the values the recording's tests made (given)")
+		}
+		if err := gp.PushTestGiven(ctx, given, keys); err != nil {
+			return err
+		}
+		m.logger.Info("sent the agent the values each test's harness gave in its recording", zap.Int("tests", len(given)), zap.Int("claim_keys", len(keys)), zap.String("mock-set", name))
+	}
 	m.realListed = real
 	for _, id := range slices.Sorted(maps.Keys(real)) {
 		// F3: the test runs on the real clock, so what its recording built
@@ -1321,6 +1334,40 @@ func testReal(mapping *models.Mapping) map[string][]string {
 			out = map[string][]string{}
 		}
 		out[tc.ID] = mergeSorted(out[tc.ID], tc.Real)
+	}
+	return out
+}
+
+// testGiven is, by test ID, what each test's harness gave when the test was
+// recorded (models.MappedTestCase.Given); nil when no test lists any.
+func testGiven(mapping *models.Mapping) map[string][]models.GivenValue {
+	if mapping == nil {
+		return nil
+	}
+	var out map[string][]models.GivenValue
+	for _, tc := range mapping.TestCases {
+		if len(tc.Given) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string][]models.GivenValue{}
+		}
+		out[tc.ID] = append([]models.GivenValue(nil), tc.Given...)
+	}
+	return out
+}
+
+// testKeyGiven is, by claim key, what each key's harness gave while no test
+// was open in the recording (models.Mapping.KeyGiven); nil when none.
+func testKeyGiven(mapping *models.Mapping) map[string][]models.GivenValue {
+	if mapping == nil || len(mapping.KeyGiven) == 0 {
+		return nil
+	}
+	out := make(map[string][]models.GivenValue, len(mapping.KeyGiven))
+	for _, k := range mapping.KeyGiven {
+		if k.Key != "" && len(k.Given) > 0 {
+			out[k.Key] = append([]models.GivenValue(nil), k.Given...)
+		}
 	}
 	return out
 }

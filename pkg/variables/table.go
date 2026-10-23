@@ -31,6 +31,15 @@ type Binding = models.VariableBinding
 // run's are bound beside its scope's (Beside), as its are beside the run's,
 // so the first test, which carries both in, holds no two variables recorded
 // with two values at one live value, whichever bound first.
+//
+// Beside the test's scope it holds the claim key's (models.MockVariable
+// Outside): the variables a call made outside every test bound under a claim
+// (a Playwright beforeAll, whenever it runs), which every test of the key
+// reads. A test's begin (Reset, Start) keeps them; a new claim drops them
+// (StartOutside). A claimed run binds none in the run's: its calls outside
+// its tests are its keys'. A test's variable is looked up in the test's
+// scope and the run's (Lookup), the key's in the key's (LookupOutside), and
+// a binding goes to the scope its Outside names (BindAll).
 type Table struct {
 	mu   sync.Mutex
 	vals map[string]Binding
@@ -52,6 +61,8 @@ type Table struct {
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
+	// outside are the claim key's bindings.
+	outside map[string]Binding
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -300,14 +311,24 @@ func (t *Table) put(b Binding) {
 	t.vals[b.Name] = b
 }
 
+// LookupOutside returns the claim key's binding of name in force, if any.
+func (t *Table) LookupOutside(name string) (Binding, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	b, ok := t.outside[name]
+	return b, ok
+}
+
 // BindAll binds bs together, all or none, under one lock, for a call checked
 // in scope gen (Gen): each name holds one value (a name already bound, the
 // run's included, must be bound to the same value), and two variables
 // recorded with two values do not share a live value, unless both are clock
-// reads the learn step marked, made in one second (TwoValues). It returns the
-// first binding that does not hold and the binding it collides with; stale is
-// true when a new scope began since gen (nothing is bound); ok is true when
-// every binding of bs is in force afterwards.
+// reads the learn step marked, made in one second (TwoValues). A binding
+// whose Outside is set is the claim key's, and is checked against the key's
+// alone; a test's is checked against the test's, the run's and the key's. It
+// returns the first binding that does not hold and the binding it collides
+// with; stale is true when a new scope began since gen (nothing is bound); ok
+// is true when every binding of bs is in force afterwards.
 func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok bool) {
 	from := t.lock()
 	defer t.unlock(from)
@@ -316,19 +337,74 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	}
 	inForce, beside := t.all(from), t.readersScopes()
 	for i, b := range bs {
+		if b.Outside {
+			// The claim key's: checked against the key's bindings alone.
+			if have, bound := t.outside[b.Name]; bound && have.Value != b.Value {
+				return b, have, false, false
+			}
+			if with, bad := collides(t.outside, nil, b, bs[:i]); bad {
+				return b, with, false, false
+			}
+			continue
+		}
 		if have, bound := inForce[b.Name]; bound && have.Value != b.Value {
 			return b, have, false, false
 		}
-		if with, bad := collides(inForce, beside, b, bs[:i]); bad {
+		// A test's: against the test's and the run's, the scopes that read
+		// the run's, and the claim key's.
+		if with, bad := collides(inForce, append(bindingsOf(t.outside), beside...), b, bs[:i]); bad {
 			return b, with, false, false
 		}
 	}
 	for _, b := range bs {
+		if b.Outside {
+			if t.outside == nil {
+				t.outside = make(map[string]Binding, len(bs))
+			}
+			if _, bound := t.outside[b.Name]; !bound {
+				t.outside[b.Name] = b
+			}
+			continue
+		}
 		if _, bound := t.lookup(from, b.Name); !bound {
 			t.put(b)
 		}
 	}
 	return Binding{}, Binding{}, false, true
+}
+
+// StartOutside begins a new claim's scope outside its tests: the claim key's
+// bindings are dropped (a test process run again runs its beforeAll again,
+// and mints its values anew), and so are the last test's, which belong to
+// the previous claim.
+func (t *Table) StartOutside() {
+	t.mu.Lock()
+	t.outside = nil
+	t.vals = nil
+	t.gen++
+	t.mu.Unlock()
+}
+
+// OutsideSnapshot returns the claim key's bindings in force, by name.
+func (t *Table) OutsideSnapshot() []Binding {
+	t.mu.Lock()
+	out := make([]Binding, 0, len(t.outside))
+	for _, b := range t.outside {
+		out = append(out, b)
+	}
+	t.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// bindingsOf returns the bindings of m, by name.
+func bindingsOf(m map[string]Binding) []Binding {
+	out := make([]Binding, 0, len(m))
+	for _, b := range m {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // collides is the binding b cannot be bound beside, of those in force, beside
@@ -370,7 +446,7 @@ func TwoValues(held, b Binding) bool {
 
 // Start begins a new scope (as Reset) with the values its test case gave
 // bound, under one lock: no call of the scope binds before them. A name given
-// twice keeps its first value.
+// twice keeps its first value. The claim key's bindings stay.
 func (t *Table) Start(given []Binding) {
 	t.StartCarrying(given, nil)
 }
@@ -429,8 +505,8 @@ func (t *Table) start(given, carried []Binding) {
 	}
 }
 
-// Reset forgets every binding of the scope: a new scope begins. The run's
-// stay.
+// Reset forgets every binding of the test's scope: a new scope begins. The
+// run's stay, and so do the claim key's (StartOutside drops them).
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.vals = nil
@@ -462,11 +538,18 @@ func (t *Table) Clone() *Table {
 			c.vals[k] = v
 		}
 	}
+	if t.outside != nil {
+		c.outside = make(map[string]Binding, len(t.outside))
+		for k, v := range t.outside {
+			c.outside[k] = v
+		}
+	}
 	c.run = t.runInForce(from)
 	return c
 }
 
-// Snapshot returns the bindings in force, the run's included, by name.
+// Snapshot returns the bindings in force, the run's included, by name (the
+// claim key's: OutsideSnapshot).
 func (t *Table) Snapshot() []Binding {
 	from := t.lock()
 	defer t.unlock(from)

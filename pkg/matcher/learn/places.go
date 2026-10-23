@@ -10,13 +10,16 @@ import (
 
 // VarPlace is the leaf's place in the grammar a mock's variables are written
 // in (variables.Parse): body.<json path>, url.path[<n>], url.query.<name>,
-// header.<name>. ok is false for a leaf no variable place can name: a field
-// of a form or multipart body, a JSON key no path names alone (Unnamed), a
-// whole body that is not JSON. jsonBody says whether the leaf's request (or
-// answer) has a JSON body.
+// header.<name>, form.<part> (a part of a multipart body, Leaf.Form). ok is
+// false for a leaf no variable place can name: a field of a urlencoded form,
+// a JSON key no path names alone (Unnamed), a whole body that is not JSON.
+// jsonBody says whether the leaf's request (or answer) has a JSON body.
 func VarPlace(l Leaf, jsonBody bool) (string, bool) {
 	if l.Unnamed {
 		return "", false
+	}
+	if l.Form {
+		return variables.Place{Part: variables.PartForm, Name: strings.TrimPrefix(l.Path, "body.")}.String(), true
 	}
 	switch {
 	case strings.HasPrefix(l.Path, "url.path."):
@@ -54,6 +57,8 @@ func LeafPath(place string) (string, bool) {
 		return "url.query." + p.Name, true
 	case variables.PartHeader:
 		return "header." + strings.ToLower(p.Name), true
+	case variables.PartForm:
+		return "body." + p.Name, true
 	case variables.PartBody:
 		var b strings.Builder
 		b.WriteString("body")
@@ -113,7 +118,7 @@ func varName(place string) string {
 		switch p.Part {
 		case variables.PartPath:
 			base = "path" + strconv.Itoa(p.Index)
-		case variables.PartQuery, variables.PartHeader:
+		case variables.PartQuery, variables.PartHeader, variables.PartForm:
 			base = p.Name
 		case variables.PartBody:
 			for i := len(p.Path) - 1; i >= 0 && base == ""; i-- {

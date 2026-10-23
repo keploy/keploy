@@ -2347,6 +2347,30 @@ func (m *MockManager) OpenTestWithWindow(filtered, unfiltered []*models.Mock, st
 	m.aheadVars.Reset()
 }
 
+// BindGiven binds b in the open test's scope as a given variable (Given): a
+// value the test made itself, which its harness gave while the test is open
+// (a session token the test signs and installs). One marked Outside is the
+// claim key's, given while no test was open (a group's beforeAll), and is
+// bound in the key's scope, which every test of the key reads
+// (variables.Table.BindAll). It returns the binding in force of b's name
+// afterwards and whether it is b: a name bound already keeps its value.
+func (m *MockManager) BindGiven(b models.VariableBinding) (models.VariableBinding, bool) {
+	b.Given = true
+	if !b.Outside {
+		return m.vars.Bind(b)
+	}
+	for range 2 { // a scope that began between Gen and BindAll: once more
+		_, with, stale, ok := m.vars.BindAll(m.vars.Gen(), []models.VariableBinding{b})
+		switch {
+		case ok:
+			return b, true
+		case !stale:
+			return with, false
+		}
+	}
+	return models.VariableBinding{}, false
+}
+
 // BoundVariables is the test variables the current test (or the one that just
 // ended, between tests) has bound: never what the next test's calls in flight
 // bound in the gap.

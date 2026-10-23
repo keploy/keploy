@@ -124,6 +124,15 @@ type TestBeginsPusher interface {
 	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
 }
 
+// TestGivenPusher is an optional Instrumentation extension: under the proven
+// switch Replay hands the agent, by test, the values each test's harness gave
+// when it was recorded (models.MappedTestCase.Given), so the agent binds the
+// value the harness gives in the replay as the given variable recorded with
+// the recording's.
+type TestGivenPusher interface {
+	PushTestGiven(ctx context.Context, given, keys map[string][]models.GivenValue) error
+}
+
 type SetPusher interface {
 	PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error
 }
@@ -178,6 +187,12 @@ type CaseMapper interface {
 
 type BootMapper interface {
 	UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error
+}
+
+// KeyGivenMapper keeps, by claim key, what the key's harness gave while no
+// test was open (models.Mapping.KeyGiven).
+type KeyGivenMapper interface {
+	UpsertKeyGiven(ctx context.Context, testSetID string, keys []models.KeyGiven) error
 }
 
 // IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.

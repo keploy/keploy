@@ -129,6 +129,11 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Any method: with the proven switch off the handler answers the
 		// 404 this path had before it existed.
 		r.HandleFunc("/replay/clock", a.HandleTestBegins)
+		// A value the open test made itself, from its harness, and what each
+		// test's harness gave in its recording, for a replay (given.go). Any
+		// method: with the switch off each answers 404.
+		r.HandleFunc("/given", a.HandleGiven)
+		r.HandleFunc("/replay/given", a.HandleTestGiven)
 		// The keploy CLI's container list, for a docker-mode agent that cannot
 		// read Docker itself (containerkey); only under the proven switch.
 		if provenswitch.On() {

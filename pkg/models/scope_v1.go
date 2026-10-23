@@ -33,6 +33,12 @@ type InstanceReq struct {
 	// run (a Go package's directory). Kept on each test's window, so the
 	// recording's mapping names the folder each test runs in.
 	Dir string `json:"dir,omitempty"`
+	// Browser says the test process drives a browser page (a Playwright
+	// worker): the page makes its reads on its own, a poll on a timer, a
+	// refetch as it draws again, as often as timing allows. Its tests' ends
+	// judge those reads count-free (RegisterReadCall); every write, and every
+	// call of a test process that does not say so, is judged as before.
+	Browser bool `json:"browser,omitempty"`
 }
 
 // InstanceResp answers POST /agent/instance. With one test process per run
@@ -144,6 +150,10 @@ type ScopeEvidence struct {
 	// did while this test or one before it ran (decision 20: a call over a
 	// Unix socket): the test has no verdict. Never a failure.
 	CannotCapture CaptureLosses `json:"cannotCapture,omitempty" yaml:"cannotCapture,omitempty"`
+	// CountFree names the reads the test made more or fewer times than
+	// recorded that its end did not count (count-free reads, RegisterReadCall):
+	// said, never a failure. Not part of Empty.
+	CountFree []string `json:"countFree,omitempty" yaml:"countFree,omitempty"`
 	// Reason is the text the test was failed with at its end.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Unread: keploy could not read everything the test did (its misses,

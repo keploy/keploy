@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -233,9 +234,13 @@ type Session struct {
 
 	// exchanges is NextRequest's state.
 	exchanges exchanges
-	// endedWithConnection, per fakeconn.Direction: that stream ended because
-	// its connection did (MarkEndedWithConnection).
-	endedWithConnection [2]atomic.Bool
+	// ends, per fakeconn.Direction, is how that stream ended, as it is told
+	// before it ends: endedWithConnection, its connection ended it
+	// (MarkEndedWithConnection); and above that bit, 1 + the bytes its
+	// receiver never took, once the peer its bytes are relayed to went away
+	// (MarkReceiverGone), 0 while it has not. One word per direction keeps a
+	// Session in its size class.
+	ends [2]atomic.Int32
 	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
 	// hole, and why (MarkEndedAtHole). nil while it has not.
 	endedAtHole      [2]atomic.Pointer[string]
@@ -339,19 +344,78 @@ func (s *Session) MarkMockIncomplete(reason string) {
 // known to be the client's (the rest may have been lost, or never captured),
 // and such a message is not recorded. Nil-safe.
 func (s *Session) MarkEndedWithConnection(dir fakeconn.Direction) {
-	if s == nil || int(dir) >= len(s.endedWithConnection) {
+	if s == nil || int(dir) >= len(s.ends) {
 		return
 	}
-	s.endedWithConnection[dir].Store(true)
+	s.ends[dir].Or(endedWithConnection)
 }
 
 // EndedWithConnection reports whether dir's stream ended because its
 // connection did (MarkEndedWithConnection). Nil-safe.
 func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
-	if s == nil || int(dir) >= len(s.endedWithConnection) {
+	if s == nil || int(dir) >= len(s.ends) {
 		return false
 	}
-	return s.endedWithConnection[dir].Load()
+	return s.ends[dir].Load()&endedWithConnection != 0
+}
+
+// endedWithConnection is the bit of Session.ends that MarkEndedWithConnection
+// sets; the bits above it are MarkReceiverGone's.
+const endedWithConnection int32 = 1
+
+// maxUndelivered caps what MarkReceiverGone keeps of a count of undelivered
+// bytes, which is at most one forwarded chunk's (relay.Config.ForwardBuf).
+const maxUndelivered = math.MaxInt32>>1 - 1
+
+// MarkReceiverGone says dir's stream ended because the peer its bytes are
+// relayed to went away: keploy's write of the stream's last chunk failed, and
+// the last undelivered bytes of that chunk never reached the peer, or (with
+// undelivered 0) for fakeconn.FromDest, the client reset the connection and
+// the relay stopped reading the destination. The relay calls it
+// (relay.Config.OnReceiverGone) before it ends the stream, so a parser that
+// reaches the end of the stream sees it.
+//
+// For fakeconn.FromDest the peer is the client: an HTTP response the stream
+// ends in the middle of is one the client left before its end, and is
+// recorded as keploy relayed it to the client (FinalHTTP.ClientLeft). It is
+// what tells that apart, where keploy relays the connection, from a server
+// that cut its response (the stream ends because the server closed) and from
+// a capture that lost the rest (a hole, or the recording stopping): neither
+// marks it. An observe-only capture (OutgoingOptions.SkipTLSMITM) relays
+// nothing, and says where a stream ended with MarkEndedWithConnection instead.
+//
+// A call with undelivered bytes is the failed write of the stream's last
+// chunk, and is kept over one without (a reset seen first); one without is
+// kept only when none came before it. Nil-safe.
+func (s *Session) MarkReceiverGone(dir fakeconn.Direction, undelivered int) {
+	if s == nil || int(dir) >= len(s.ends) {
+		return
+	}
+	undelivered = min(max(undelivered, 0), maxUndelivered)
+	gone := int32(undelivered+1) << 1
+	for {
+		v := s.ends[dir].Load()
+		if v>>1 != 0 && undelivered == 0 {
+			return // a failed write's count, or a reset, came first
+		}
+		if s.ends[dir].CompareAndSwap(v, v&endedWithConnection|gone) {
+			return
+		}
+	}
+}
+
+// ReceiverGone reports whether dir's stream ended because the peer its bytes
+// are relayed to went away (MarkReceiverGone), and how many bytes at the end of
+// the stream never reached it. Nil-safe.
+func (s *Session) ReceiverGone(dir fakeconn.Direction) (undelivered int, ok bool) {
+	if s == nil || int(dir) >= len(s.ends) {
+		return 0, false
+	}
+	v := s.ends[dir].Load() >> 1
+	if v == 0 {
+		return 0, false
+	}
+	return int(v - 1), true
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was

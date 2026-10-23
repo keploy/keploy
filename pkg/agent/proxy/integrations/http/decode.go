@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -248,6 +249,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				diag  *matchDiag
 				lmiss *learnMiss
 			)
+			// DIAG (local build only): how long the match took, for KPSLOW.
+			diagStart := time.Now()
 			switch {
 			case provenswitch.On() && opts.Learn:
 				// Record's full round: the learn step decides every request
@@ -281,6 +284,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+			if d := time.Since(diagStart); d > time.Second {
+				served := ""
+				if stub != nil {
+					served = stub.Name
+				}
+				h.Logger.Info("KPSLOW a call took over 1s to match", zap.Duration("took", d), zap.Bool("matched", ok), zap.String("served", served), zap.String("call", diagCall(input)))
+			}
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
@@ -308,6 +318,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+					// Whether the extra call is a read, by HTTP's terms
+					// (read_call.go): the test's end counts no read alone.
+					report.Read = readCall(input.method, input.header.Get("Content-Type"), input.body)
 				}
 				// A call that is a recording made elsewhere (another test's,
 				// or a worker-scope one not reached yet) is named as that
@@ -321,6 +334,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report)
+				}
+				// DIAG (local build only): the reason keploy's own WARN hides (nextStepOf).
+				if report != nil {
+					why := ""
+					if lmiss != nil {
+						why = lmiss.res.Why
+					}
+					h.Logger.Info("KPWHY no answer for a call", zap.String("call", diagCall(input)), zap.String("closest", report.ClosestMock),
+						zap.String("phase", report.MatchPhase), zap.Int("extra_of_recorded", n), zap.String("learn_why", why),
+						zap.String("diff", report.Diff), zap.String("next_step", report.NextSteps))
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
@@ -508,14 +531,35 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	// server's. Those it did not match are sent as recorded.
 	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
 	noBody := responseHasNoBody(method, stub.Spec.HTTPResp.StatusCode)
+	// A response its client left before the end (metaClientLeft) is served
+	// as the client had it: its recorded part, and no end. It is framed so
+	// that it stays open (chunked, with no last chunk; an HTTP/1.0 one by
+	// the connection, which the serving loop keeps open), and the serving
+	// loop then waits on the client, which goes away as it did when it was
+	// recorded.
+	unfinished := stub.Spec.Metadata[metaClientLeft] == "true"
+	http10 := protoMajor == 1 && protoMinor == 0
 	var headers string
 	for key, values := range header {
+		if unfinished && (strings.EqualFold(key, "Content-Length") || strings.EqualFold(key, "Transfer-Encoding")) {
+			continue
+		}
 		if key == "Content-Length" && !noBody {
 			values = []string{strconv.Itoa(len(respBody))}
 		}
 		for _, value := range values {
 			headers += fmt.Sprintf("%s: %s\r\n", key, value)
 		}
+	}
+	if unfinished {
+		if http10 {
+			return []byte(statusLine + headers + "\r\n" + respBody), nil
+		}
+		out := statusLine + headers + "Transfer-Encoding: chunked\r\n\r\n"
+		if respBody != "" {
+			out += fmt.Sprintf("%x\r\n%s\r\n", len(respBody), respBody)
+		}
+		return []byte(out), nil
 	}
 	return []byte(statusLine + headers + "\r\n" + respBody), nil
 }
@@ -624,4 +668,21 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 		}
 	}
 	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}
+}
+
+// diagCall names a call for the DIAG lines: method, path and, for GraphQL, its operation (local build only).
+var diagOp = regexp.MustCompile(`"operationName"\s*:\s*"([^"]+)"`)
+
+func diagCall(in *req) string {
+	out := in.method + " " + in.url.Path
+	if m := diagOp.FindSubmatch(in.body); m != nil {
+		out += " " + string(m[1])
+	} else if len(in.body) > 0 && in.url.Path == "/query" {
+		b := in.body
+		if len(b) > 60 {
+			b = b[:60]
+		}
+		out += " " + string(b)
+	}
+	return out
 }

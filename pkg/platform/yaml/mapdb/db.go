@@ -47,6 +47,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	var existingStartup, existingWorker, existingShared []models.MockEntry
 	var existingGroups []models.ConcurrencyGroup
 	var existingSource string
+	var existingKeyGiven []models.KeyGiven
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -78,6 +79,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingWorker = existingConfig.Worker
 		existingGroups, existingShared = existingConfig.Groups, existingConfig.Shared
 		existingSource = existingConfig.Source
+		existingKeyGiven = existingConfig.KeyGiven
 	}
 
 	for _, t := range mapping.TestCases {
@@ -122,6 +124,14 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Worker = mapping.Worker
 	case len(existingWorker) > 0:
 		newMapping.Worker = existingWorker
+	}
+	// What claim keys' harnesses gave outside every test, replace-or-keep as
+	// the startup section: the set's, which CreateMappingStructure cannot see.
+	switch {
+	case len(mapping.KeyGiven) > 0:
+		newMapping.KeyGiven = mapping.KeyGiven
+	case len(existingKeyGiven) > 0:
+		newMapping.KeyGiven = existingKeyGiven
 	}
 	// The concurrency groups and shared calls (models.Mapping.Groups,
 	// Shared), replace-or-keep as the worker scope: the entries carry the
@@ -471,6 +481,54 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
 
+// UpsertKeyGiven writes, by claim key, what each key's harness gave while no
+// test was open in this record (models.Mapping.KeyGiven): it replaces what an
+// earlier record wrote for that key, and keeps the other keys'.
+func (db *MappingDb) UpsertKeyGiven(ctx context.Context, testSetID string, keys []models.KeyGiven) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	at := make(map[string]int, len(mapping.KeyGiven))
+	for i, k := range mapping.KeyGiven {
+		at[k.Key] = i
+	}
+	for _, k := range keys {
+		if i, ok := at[k.Key]; ok {
+			mapping.KeyGiven[i] = k
+			continue
+		}
+		at[k.Key] = len(mapping.KeyGiven)
+		mapping.KeyGiven = append(mapping.KeyGiven, k)
+	}
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
 func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
@@ -528,6 +586,11 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {
 			tc.Real = in.Real
+		}
+		// What the test's harness gave in this record's run of the test
+		// (proven switch only): it replaces what an earlier record wrote.
+		if len(in.Given) > 0 {
+			tc.Given = in.Given
 		}
 	}
 	if len(suites) > 0 {

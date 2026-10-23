@@ -252,7 +252,13 @@ func (p *Proxy) recordViaSupervisor(
 		OnCarried:            reads.carried,
 		OnMarkMockIncomplete: p.teeDropped(svSess.MarkMockIncomplete, func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
 		OnClientChunkTeed:    sv.MarkPendingWork,
-		RealCertHook:         realCertHook,
+		// Where a stream ends because the peer its bytes go to went away
+		// (the client, for the server's stream: it closed or reset the
+		// connection before the end of a response), the session is told
+		// before the stream ends, so a parser can record what keploy
+		// relayed to the client as the client had it.
+		OnReceiverGone: svSess.MarkReceiverGone,
+		RealCertHook:   realCertHook,
 		// A hole in this connection's capture: every test case recorded while
 		// it carries traffic from here on is left out rather than shipped
 		// mock-less (replay would report match_phase=no_mocks). A parser that

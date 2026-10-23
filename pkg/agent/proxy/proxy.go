@@ -4416,6 +4416,18 @@ func (p *Proxy) ResetVariables() {
 	}
 }
 
+// BeginClaimVariables begins a claim's scope outside its tests: the
+// variables the previous claim's calls outside every test bound are dropped
+// (variables.Table.StartOutside), and the learn step's record of the key's
+// calls outside its tests starts afresh (learn.Tracker.NewKey). Satisfies the
+// agent's optional ClaimVariables extension interface.
+func (p *Proxy) BeginClaimVariables(key string) {
+	if m := p.getMockManager(); m != nil {
+		m.Variables().StartOutside()
+	}
+	p.learnTracker.NewKey(key)
+}
+
 // StartVariables begins a test's variables with the values its test case's
 // request gave bound (variables.Table.Start). false when the proxy keeps no
 // mock manager to hold them. Satisfies the agent's optional VariableBinder
@@ -4427,6 +4439,19 @@ func (p *Proxy) StartVariables(given []models.VariableBinding) bool {
 	}
 	m.StartVariables(given)
 	return true
+}
+
+// BindGiven binds b, a value the open test's harness gave, as the test's given
+// variable (MockManager.BindGiven). It returns the binding in force of b's
+// name and whether it is b; ok is false when the proxy keeps no mock manager.
+// Satisfies the agent's optional GivenBinder extension interface.
+func (p *Proxy) BindGiven(b models.VariableBinding) (in models.VariableBinding, bound, ok bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return models.VariableBinding{}, false, false
+	}
+	in, bound = m.BindGiven(b)
+	return in, bound, true
 }
 
 // BoundVariables returns the test variables bound so far in the test, and
@@ -5133,6 +5158,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
+					Read:             parserErr.MismatchReport.Read,
 					Differs:          parserErr.MismatchReport.Differs,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
