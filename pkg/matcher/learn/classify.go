@@ -514,10 +514,17 @@ func clockSide(w string, recorded bool, cs []clockSet) bool {
 // tokensBy are the words of s as word reads it.
 func tokensBy(s string, word func(byte) bool) map[string]bool {
 	out := map[string]bool{}
-	for _, seg := range segmentsBy(s, word) {
-		if seg.word {
-			out[seg.text] = true
+	for i := 0; i < len(s); {
+		if !word(s[i]) {
+			i++
+			continue
 		}
+		j := i + 1
+		for j < len(s) && word(s[j]) {
+			j++
+		}
+		out[s[i:j]] = true
+		i = j
 	}
 	return out
 }
@@ -610,31 +617,41 @@ func newTextCache() *textCache {
 	return &textCache{extra: map[string]string{}, tokens: map[string][]map[string]bool{}}
 }
 
-// read is the text's other forms, one per line, and its words in every
-// form by reading, each read once (textForms) for both.
-func (c *textCache) read(text string) (string, []map[string]bool) {
+// extraOf is the text's other forms (textForms), one per line, read once.
+func (c *textCache) extraOf(text string) string {
 	c.mu.Lock()
 	extra, ok := c.extra[text]
-	toks := c.tokens[text]
 	c.mu.Unlock()
 	if ok {
-		return extra, toks
+		return extra
 	}
-	forms := textForms(text)
-	extra = strings.Join(forms[1:], "\n")
+	extra = strings.Join(textForms(text)[1:], "\n")
+	c.mu.Lock()
+	c.extra[text] = extra
+	c.mu.Unlock()
+	return extra
+}
+
+// tokensOf is the text's words in every form, by reading, read once. They
+// are read only when asked: a search for a value inside a payload's forms
+// (rawExtra) needs none of them. A line break is a word byte of no reading,
+// so the words of the text and its other forms joined line by line are the
+// words of each form.
+func (c *textCache) tokensOf(text string) []map[string]bool {
+	c.mu.Lock()
+	toks, ok := c.tokens[text]
+	c.mu.Unlock()
+	if ok {
+		return toks
+	}
+	all := text + "\n" + c.extraOf(text)
 	for _, word := range readings {
-		set := map[string]bool{}
-		for _, f := range forms {
-			for w := range tokensBy(f, word) {
-				set[w] = true
-			}
-		}
-		toks = append(toks, set)
+		toks = append(toks, tokensBy(all, word))
 	}
 	c.mu.Lock()
-	c.extra[text], c.tokens[text] = extra, toks
+	c.tokens[text] = toks
 	c.mu.Unlock()
-	return extra, toks
+	return toks
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -705,16 +722,14 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 // rawTokens are every word of a payload's text in every declared form, by
 // reading.
 func (dc *DriftCache) rawTokens(text string) []map[string]bool {
-	_, toks := dc.texts.read(text)
-	return toks
+	return dc.texts.tokensOf(text)
 }
 
 // rawExtra is what a payload's text is searched in besides itself: its
 // other declared forms (textForms: decoded, case-folded, and the text its
 // encoded runs decode to), one per line.
 func (dc *DriftCache) rawExtra(text string) string {
-	extra, _ := dc.texts.read(text)
-	return extra
+	return dc.texts.extraOf(text)
 }
 
 // driftKey is a drifted value, with the window of the call it is read in
@@ -888,36 +903,43 @@ func clockWord(t string, recorded bool, d *valueDrift, cs ...clockSet) bool {
 func unescaped(s string) string {
 	// Each escape on its own (a stray '%' leaves the others to decode), and
 	// again while that changes anything, a few times at most (a value
-	// encoded inside a value encoded again: "%252F", "\\\\n").
+	// encoded inside a value encoded again: "%252F", "\\\\n"). Each escape
+	// needs its lead byte, so a pass over a text without it is skipped: a
+	// percent escape a '%', the others a '\\' (looked for after the percent
+	// escapes are read: "%5C" is one).
 	for i := 0; i < 4; i++ {
-		d := percentEscape.ReplaceAllStringFunc(s, func(m string) string {
-			b, err := hex.DecodeString(m[1:])
-			if err != nil {
-				return m
-			}
-			return string(b)
-		})
-		d = escapedSurrogates.ReplaceAllStringFunc(d, func(m string) string {
-			// Four hex digits each (escapedSurrogates): 16 bits.
-			hi, _ := strconv.ParseUint(m[2:6], 16, 16)
-			lo, _ := strconv.ParseUint(m[8:12], 16, 16)
-			return string(utf16.DecodeRune(rune(hi), rune(lo)))
-		})
-		d = backslashEscape.ReplaceAllStringFunc(d, func(m string) string {
-			switch {
-			case m == `\\`:
-				return `\`
-			case m[1] == 'u':
-				// The character it names (a JSON writer's escape of what
-				// is beyond ASCII).
-				// Four hex digits (backslashEscape): 16 bits.
-				if r, err := strconv.ParseUint(m[2:], 16, 16); err == nil {
-					return string(rune(r))
+		d := s
+		if strings.IndexByte(d, '%') >= 0 {
+			d = percentEscape.ReplaceAllStringFunc(d, func(m string) string {
+				b, err := hex.DecodeString(m[1:])
+				if err != nil {
+					return m
 				}
-			}
-			return " "
-		})
-
+				return string(b)
+			})
+		}
+		if strings.IndexByte(d, '\\') >= 0 {
+			d = escapedSurrogates.ReplaceAllStringFunc(d, func(m string) string {
+				// Four hex digits each (escapedSurrogates): 16 bits.
+				hi, _ := strconv.ParseUint(m[2:6], 16, 16)
+				lo, _ := strconv.ParseUint(m[8:12], 16, 16)
+				return string(utf16.DecodeRune(rune(hi), rune(lo)))
+			})
+			d = backslashEscape.ReplaceAllStringFunc(d, func(m string) string {
+				switch {
+				case m == `\\`:
+					return `\`
+				case m[1] == 'u':
+					// The character it names (a JSON writer's escape of what
+					// is beyond ASCII).
+					// Four hex digits (backslashEscape): 16 bits.
+					if r, err := strconv.ParseUint(m[2:], 16, 16); err == nil {
+						return string(rune(r))
+					}
+				}
+				return " "
+			})
+		}
 		if d == s {
 			break
 		}
