@@ -495,8 +495,11 @@ type UnmatchedCall struct {
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty
-	// everywhere else, and for a call of that round keploy could not judge
-	// because its own store could not read a recorded answer back.
+	// everywhere else, and for a call of that round no reason of judging's
+	// names: one keploy could not judge because its own store could not read
+	// a recorded answer back, one a parser's pairing found tied between
+	// recordings whose replies differ, or one call more than the test
+	// recorded (Kind and Recorded say so).
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Concurrent is, under the proven switch, what keploy knows of the call
 	// when the test was recorded while other tests' requests were open
