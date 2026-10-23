@@ -299,10 +299,18 @@ func holderOf(record string) string {
 	return "pid " + pid
 }
 
-// storeCommandBeat is how often the holder of the trust-store lock looks at a
-// command it runs under it (noteCommandProgress): the CLI's beat. A variable
-// so tests can shorten it.
-var storeCommandBeat = utils.TeardownBeat
+// storeCommandBeats returns the beats at which the holder of the trust-store
+// lock looks at a command it runs under it (noteCommandProgress), the CLI's
+// (utils.TeardownBeat), and the function that stops them. A variable so that
+// tests can give the beats themselves.
+var storeCommandBeats = func() (<-chan time.Time, func()) {
+	t := time.NewTicker(utils.TeardownBeat)
+	return t.C, t.Stop
+}
+
+// storeCommandLooked is called, in tests, after each look noteCommandProgress
+// takes at a command: it lets a test know the holder has looked.
+var storeCommandLooked = func() {}
 
 // noteCommandProgress marks, at each beat while cmd (started, under the lock)
 // runs, a step of the change for the processes queued behind it, if cmd or a
@@ -320,19 +328,21 @@ func noteCommandProgress(cmd *exec.Cmd) (stop func()) {
 		return func() {}
 	}
 	moved := utils.ProcessProgress(cmd.Process.Pid)
+	beats, stopBeats := storeCommandBeats()
+	looked := storeCommandLooked
 	done, ended := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(ended)
-		beat := time.NewTicker(storeCommandBeat)
-		defer beat.Stop()
+		defer stopBeats()
 		for {
 			select {
 			case <-done:
 				return
-			case <-beat.C:
+			case <-beats:
 				if moved() {
 					writeHolderRecord(lock)
 				}
+				looked()
 			}
 		}
 	}()

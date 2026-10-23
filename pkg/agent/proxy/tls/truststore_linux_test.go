@@ -246,24 +246,47 @@ func TestAnAbandonedWaitGivesTheLockBack(t *testing.T) {
 // (trustStoreWaitObserved), and each step of the queue it has seen
 // (trustStoreQueueMoved). The test drives it beat by beat, and never waits
 // for one thing without watching for the wait to have ended instead.
+//
+// The wait ends with its test, however the test ends: its cleanup stops it
+// (its context) and waits for it before the variables it reads are put back,
+// so a test that fails part way leaves no wait reading them into the next
+// test. (A wait stopped before its turn leaves lockTrustStore's give-back of
+// the lock to come when the holder lets go; that touches only its lock file
+// and abandonedWaitReturned.)
 type beatenWait struct {
 	t       *testing.T
 	beats   chan time.Time
 	counted chan int
 	moved   chan struct{}
 	got     chan error
+	stop    chan struct{} // closed at the test's end: no hook of the wait blocks after it
 }
 
 // startBeatenWait starts a wait for the lock, which another process holds,
 // and returns once it is queued (msgTrustStoreBusy).
 func startBeatenWait(t *testing.T) *beatenWait {
 	t.Helper()
-	w := &beatenWait{t: t, beats: make(chan time.Time), counted: make(chan int, 1), moved: make(chan struct{}, 64), got: make(chan error, 1)}
+	w := &beatenWait{t: t, beats: make(chan time.Time), counted: make(chan int, 1), moved: make(chan struct{}, 64), got: make(chan error, 1), stop: make(chan struct{})}
 	oldBeats, oldObserved, oldMoved := trustStoreWaitBeats, trustStoreWaitObserved, trustStoreQueueMoved
 	trustStoreWaitBeats = func() (<-chan time.Time, func()) { return w.beats, func() {} }
-	trustStoreWaitObserved = func(quiet int) { w.counted <- quiet }
-	trustStoreQueueMoved = func() { w.moved <- struct{}{} }
+	trustStoreWaitObserved = func(quiet int) {
+		select {
+		case w.counted <- quiet:
+		case <-w.stop:
+		}
+	}
+	trustStoreQueueMoved = func() {
+		select {
+		case w.moved <- struct{}{}:
+		case <-w.stop:
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan struct{})
 	t.Cleanup(func() {
+		close(w.stop)
+		cancel()
+		<-ended
 		trustStoreWaitBeats, trustStoreWaitObserved, trustStoreQueueMoved = oldBeats, oldObserved, oldMoved
 		stalledHolderRecord.Store(nil)
 	})
@@ -277,7 +300,8 @@ func startBeatenWait(t *testing.T) *beatenWait {
 		return nil
 	}))
 	go func() {
-		_, unlock, err := lockTrustStore(context.Background(), logger)
+		defer close(ended)
+		_, unlock, err := lockTrustStore(ctx, logger)
 		if err == nil {
 			unlock()
 		}
@@ -406,13 +430,19 @@ func TestAWaitGivesUpWhenTheQueueStopsMoving(t *testing.T) {
 // record when the command was scheduled (noteCommandProgress). Marked only at
 // the command's end, a queued agent's start or stop took no step for as long
 // as the command ran, and the CLI gave it up as stalled. Here the command is a
-// fake rebuild that copies the test's lines back one at a time, and the
-// waiter must see a step before the command ends.
+// fake rebuild that copies the test's lines back one at a time, and the test
+// gives both their beats, the holder's and then the waiter's: each beat of
+// the waiter after a look of the holder at a command that copied a line sees a
+// step. (With the holder's beats on a clock, a waiter beaten faster than the
+// holder's clock ran out its count between two of the holder's looks, on a
+// loaded host, and gave up.)
 func TestAWaiterSeesALongStoreCommandMakeProgress(t *testing.T) {
 	update := nativeTrustStoreForTest(t)
-	oldBeat := storeCommandBeat
-	storeCommandBeat = time.Millisecond
-	t.Cleanup(func() { storeCommandBeat = oldBeat })
+	holderBeats, looked := make(chan time.Time), make(chan struct{}, 1)
+	oldBeats, oldLooked := storeCommandBeats, storeCommandLooked
+	storeCommandBeats = func() (<-chan time.Time, func()) { return holderBeats, func() {} }
+	storeCommandLooked = func() { looked <- struct{}{} }
+	t.Cleanup(func() { storeCommandBeats, storeCommandLooked = oldBeats, oldLooked })
 
 	fifos := newKeytoolHold(t, "", "", false) // its two FIFOs: the command's acks, and the test's lines
 	script := `#!/bin/sh
@@ -428,18 +458,48 @@ done
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", update+string(os.PathListSeparator)+os.Getenv("PATH"))
-	rebuilt := make(chan error, 1)
-	go func() { rebuilt <- updateCaStore(context.Background(), zap.NewNop()) }()
+	rebuilt, rebuildEnded := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(rebuildEnded)
+		rebuilt <- updateCaStore(context.Background(), zap.NewNop())
+	}()
+	// However the test ends, the rebuild is let go to its end (the end of
+	// its lines: the test is the release FIFO's only writer) and waited for,
+	// before the variables it reads are put back.
+	t.Cleanup(func() {
+		_ = fifos.releaseF.Close()
+		<-rebuildEnded
+	})
 	fifos.waitReached(t, rebuilt)
 
+	// holderLook gives the holder a beat, and returns once it has looked at
+	// the command. The bound only turns a holder that never looks (no look
+	// at the command at all, the bug this test is for) into a failure, not a
+	// hang of the package.
+	holderLook := func() {
+		t.Helper()
+		select {
+		case holderBeats <- time.Now():
+		case err := <-rebuilt:
+			t.Fatalf("the rebuild ended (err %v) before the holder looked at it", err)
+		case <-time.After(time.Minute):
+			t.Fatal("the holder took no beat in a minute: nothing looks at the command it runs under the lock")
+		}
+		select {
+		case <-looked:
+		case <-time.After(time.Minute):
+			t.Fatal("the holder took a beat but did not look at the command in a minute")
+		}
+	}
+	holderLook() // its first look, which counts as progress whatever the command did: before the waiter queues
 	w := startBeatenWait(t)
-	// Wake the command, line by line, and beat the waiter after each, until
-	// it has seen the command get on.
-	seen := false
-	for i := 0; i < 10000 && !seen; i++ {
-		fifos.letGo(t)
+	for line := 1; line <= 3; line++ {
+		fifos.letGo(t) // the command wakes, copies the line back, and waits for the next
 		fifos.waitReached(t, rebuilt)
-		_, seen = w.beat()
+		holderLook()
+		if quiet, seen := w.beat(); !seen || quiet != 0 {
+			t.Fatalf("line %d: the waiter's beat after the holder looked at the command that copied it counted %d beats without a step, step seen %v; want a step: to the CLI it waited without progress", line, quiet, seen)
+		}
 	}
 	if _, err := fifos.releaseF.WriteString("done\n"); err != nil {
 		t.Fatal(err)
@@ -449,9 +509,6 @@ done
 	}
 	if err := <-w.got; err != nil {
 		t.Fatal(err)
-	}
-	if !seen {
-		t.Fatal("the waiter saw no step of a store command that made progress for 10000 lines: to the CLI it waited without progress")
 	}
 }
 
