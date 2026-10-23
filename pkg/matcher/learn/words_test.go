@@ -919,6 +919,7 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		{"a run slot twice", rec, with(func(c *models.WordsEntry) { c.Slots = append(c.Slots, c.Slots[0]) }), whyRange},
 		{"a negative segment", rec, with(func(c *models.WordsEntry) { c.Slots[0].Seg = -1 }), whyRange},
 		{"a segment one past the last", rec, with(func(c *models.WordsEntry) { c.Slots[0].Seg = 7 }), whyRange},
+		{"a run one past the last", rec, with(func(c *models.WordsEntry) { c.Slots[0].Run = 1 }), whyRange},
 		{"a negative run", rec, with(func(c *models.WordsEntry) { c.Slots[0].Run = -1 }), whyRange},
 		{"an instant slot of a negative segment", rec, with(func(c *models.WordsEntry) { c.Slots[1].Seg = -1 }), whyRange},
 		{"an instant slot naming a run", rec, with(func(c *models.WordsEntry) { c.Slots[1].Run = 1 }), whyGuard},
