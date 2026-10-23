@@ -47,6 +47,8 @@ type relayedConn struct {
 	// relay has ended.
 	sess      *supervisor.Session
 	relayDone chan struct{}
+	// grace is the relay's HalfCloseGrace (0: its default).
+	grace time.Duration
 }
 
 // loopback returns the two ends of a loopback TCP connection.
@@ -106,7 +108,7 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	if c.wrapSrc != nil {
 		src = c.wrapSrc(src)
 	}
-	r := relay.New(relay.Config{Logger: zap.NewNop(), ClientStopped: c.sess.MarkEndedWhereClientStopped}, src, connseq.NewUpstream(c.dst))
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped}, src, connseq.NewUpstream(c.dst))
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.relayDone = make(chan struct{})
