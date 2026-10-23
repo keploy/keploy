@@ -12,6 +12,10 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // viewInstr is the partial-run harness's agent under exact serving, telling
@@ -22,11 +26,14 @@ import (
 // tracker ends it). failPool fails the pool calls it answers true for, by
 // their number (1 for the set's first). failOpen fails the capture windows
 // it answers true for ("begin-failed", "continue-failed"), by their number
-// (1 for the set's first test).
+// (1 for the set's first test), with openErr when it is set. loaded is the
+// mocks it says it holds (GetMockStats).
 type viewInstr struct {
 	*prInstr
 	failPool func(n int) bool
 	failOpen func(n int) bool
+	openErr  error
+	loaded   int
 
 	mu     sync.Mutex
 	pools  int
@@ -55,10 +62,17 @@ func (v *viewInstr) open(what string) error {
 	v.mu.Unlock()
 	if v.failOpen != nil && v.failOpen(n) {
 		v.note(what + "-failed")
+		if v.openErr != nil {
+			return v.openErr
+		}
 		return errors.New("the agent did not open the capture window")
 	}
 	v.note(what)
 	return nil
+}
+
+func (v *viewInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	return models.MockStats{Loaded: v.loaded}, nil
 }
 
 func (v *viewInstr) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
@@ -258,6 +272,7 @@ func TestASetWhosePoolTheAgentNeverTakesStopsBeforeTheNextTestBegins(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, vi := exactViewRun(t, func(int) bool { return true }, tc.streamed...)
+			logs := observeLog(h)
 			status := h.run(t)
 			events := vi.trace()
 			if status != models.TestSetStatusInternalErr {
@@ -272,6 +287,8 @@ func TestASetWhosePoolTheAgentNeverTakesStopsBeforeTheNextTestBegins(t *testing.
 			if h.report.report == nil || !strings.Contains(h.report.report.FailureReason, "not judged: keploy could not serve the test set's pool after test case test-1") {
 				t.Errorf("the report does not say the set is not judged because test-1's pool was not served: %+v", h.report.report)
 			}
+			stoppedSaid(t, logs, "keploy could not serve the test set's pool after test case test-1", events)
+			notBegunSaid(t, logs, "keploy could not serve the test set's pool after test case test-1", events)
 			if !h.replayer.notJudged("test-set-0") {
 				t.Errorf("the set is not marked not judged, so the run would stop after it: %v", events)
 			}
@@ -351,11 +368,82 @@ func (b beginOnly) UpdateMockParams(ctx context.Context, params models.MockFilte
 	return b.v.UpdateMockParams(ctx, params)
 }
 
-// notBegunReported fails t unless the set's report says it is not judged
-// because test was not begun, and the run marks the set not judged (so the
-// run goes on to its next set).
-func notBegunReported(t *testing.T, h *prRun, test string, events []string) {
+// observeLog gives h's replayer a logger whose every entry logs holds.
+func observeLog(h *prRun) *observer.ObservedLogs {
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	return logs
+}
+
+// notBegunMsg starts the line that says a set is not judged because keploy
+// did not begin one of its test cases on its agent.
+const notBegunMsg = "test-set is not judged: keploy did not begin one of its test cases on its agent"
+
+// notBegunLogs is the entries of logs that say a set is not judged because a
+// test case was not begun.
+func notBegunLogs(logs *observer.ObservedLogs) []observer.LoggedEntry {
+	return logs.FilterMessageSnippet(notBegunMsg).All()
+}
+
+// stoppedMsg starts the line that says, where it happens, that keploy
+// stopped a set because it did not begin a test case on its agent.
+const stoppedMsg = "keploy did not begin a test case on its agent, so it stopped the test-set before that test case"
+
+// stoppedSaid fails t unless the log says once, at the warn level, that
+// keploy stopped test-set-0 before a test case it did not begin, with a
+// reason that holds why.
+func stoppedSaid(t *testing.T, logs *observer.ObservedLogs, why string, events []string) {
 	t.Helper()
+	said := logs.FilterMessageSnippet(stoppedMsg).All()
+	if len(said) != 1 {
+		t.Errorf("the log said keploy stopped the set before a test case it did not begin %d times; want once: %v", len(said), events)
+		return
+	}
+	e, f := said[0], said[0].ContextMap()
+	if e.Level != zapcore.WarnLevel {
+		t.Errorf("the stop line is at %s; want warn", e.Level)
+	}
+	if f["test-set"] != "test-set-0" {
+		t.Errorf("the stop line names test-set %v; want test-set-0", f["test-set"])
+	}
+	if r, _ := f["reason"].(string); !strings.Contains(r, why) {
+		t.Errorf("the stop line's reason %q does not say %q", r, why)
+	}
+}
+
+// notBegunSaid fails t unless the log says once, at the error level, that
+// test-set-0 is not judged because a test case was not begun, with a reason
+// that holds why and a next step.
+func notBegunSaid(t *testing.T, logs *observer.ObservedLogs, why string, events []string) {
+	t.Helper()
+	said := notBegunLogs(logs)
+	if len(said) != 1 {
+		t.Errorf("the log said the set is not judged for a test case not begun %d times; want once: %v", len(said), events)
+		return
+	}
+	e, f := said[0], said[0].ContextMap()
+	if e.Level != zapcore.ErrorLevel {
+		t.Errorf("the not-begun line is at %s; want error", e.Level)
+	}
+	if f["test-set"] != "test-set-0" {
+		t.Errorf("the not-begun line names test-set %v; want test-set-0", f["test-set"])
+	}
+	if r, _ := f["reason"].(string); !strings.Contains(r, why) {
+		t.Errorf("the not-begun line's reason %q does not say %q", r, why)
+	}
+	if n, _ := f["next_step"].(string); !strings.Contains(n, "check the agent's log") {
+		t.Errorf("the not-begun line's next_step %q does not say to check the agent's log", n)
+	}
+}
+
+// notBegunReported fails t unless the set's report says it is not judged
+// because test was not begun, the run marks the set not judged (so the run
+// goes on to its next set), and the log says so where the set stopped
+// (stoppedSaid) and at its end (notBegunSaid).
+func notBegunReported(t *testing.T, h *prRun, logs *observer.ObservedLogs, test string, events []string) {
+	t.Helper()
+	stoppedSaid(t, logs, "keploy's agent did not begin test case "+test, events)
+	notBegunSaid(t, logs, "keploy's agent did not begin test case "+test, events)
 	if h.report.report == nil {
 		t.Fatalf("no report was persisted: %v", events)
 	}
@@ -394,6 +482,7 @@ func TestATestCaseTheAgentCannotBeginStopsTheSetBeforeItsViewIsServed(t *testing
 		} {
 			t.Run(loop.name+"/"+tc.name, func(t *testing.T) {
 				h, vi := exactViewRun(t, nil, loop.streamed...)
+				logs := observeLog(h)
 				vi.failOpen = func(n int) bool { return n == tc.n }
 				if tc.beginOnly {
 					h.replayer.instrumentation = beginOnly{prInstr: h.instr, v: vi}
@@ -411,7 +500,7 @@ func TestATestCaseTheAgentCannotBeginStopsTheSetBeforeItsViewIsServed(t *testing
 						t.Errorf("%s was asked of the agent after %s's capture window failed to open: %v", e, tc.test, events)
 					}
 				}
-				notBegunReported(t, h, tc.test, events)
+				notBegunReported(t, h, logs, tc.test, events)
 			})
 		}
 	}
@@ -437,6 +526,52 @@ func TestATestCaseTheMainLoopDidNotBeginStopsTheStreamingPass(t *testing.T) {
 	}
 }
 
+// A capture call that fails because the application's docker compose stack
+// went down under it (keploy's agent among it) is the app's halt: the set is
+// APP_HALTED, as any other call the stack's halt fails, never a set keploy
+// did not judge. The log says where keploy stopped the set and why, and
+// nothing of a set not judged.
+func TestACaptureCallTheComposeStacksHaltFailsIsTheAppsHalt(t *testing.T) {
+	for _, loop := range []struct {
+		name     string
+		streamed []string
+	}{
+		{name: "the main loop"},
+		{name: "the streaming pass", streamed: []string{"test-1", "test-2", "test-3"}},
+	} {
+		t.Run(loop.name, func(t *testing.T) {
+			h, vi := exactViewRun(t, nil, loop.streamed...)
+			h.replayer.config.CommandType = string(utils.DockerCompose)
+			// The stack's agent holds the set's mocks, as compose's bring-up
+			// left them: the set's tests fire.
+			vi.loaded = len(h.mocks.filtered)
+			logs := observeLog(h)
+			vi.failOpen = func(n int) bool { return n == 2 }
+			vi.openErr = errors.New("dial tcp 172.18.0.3:8086: connect: connection refused")
+			// A compose stack is kept across sets: the set is served
+			// (runServing), as keploy runs a compose app's sets.
+			status := h.runServing(t)
+			events := vi.trace()
+			if !hasEvent(events, "continue-failed") {
+				t.Fatalf("precondition: test-2's capture window did not fail to open: %v", events)
+			}
+			if status != models.TestSetStatusAppHalted {
+				t.Errorf("the set reported %q; want %q: %v", status, models.TestSetStatusAppHalted, events)
+			}
+			if hasEvent(events, "test:test-2") || hasEvent(events, "test:test-3") {
+				t.Errorf("a test case was asked of the agent after test-2's capture window failed to open: %v", events)
+			}
+			if h.replayer.notJudged("test-set-0") {
+				t.Errorf("the set is marked not judged; want the app's halt: %v", events)
+			}
+			stoppedSaid(t, logs, "connection refused", events)
+			if said := notBegunLogs(logs); len(said) != 0 {
+				t.Errorf("the log said the set is not judged for a test case not begun: %v", said[0].ContextMap())
+			}
+		})
+	}
+}
+
 // A capture call cut short by the run's user stopping it is the user's stop,
 // not keploy's failure: the set is USER_ABORT, never INTERNAL_ERR.
 func TestACaptureCallTheUsersStopCutsShortIsTheStop(t *testing.T) {
@@ -449,6 +584,7 @@ func TestACaptureCallTheUsersStopCutsShortIsTheStop(t *testing.T) {
 	} {
 		t.Run(loop.name, func(t *testing.T) {
 			h, vi := exactViewRun(t, nil, loop.streamed...)
+			logs := observeLog(h)
 			vi.failOpen = func(n int) bool {
 				if n != 2 {
 					return false
@@ -466,6 +602,9 @@ func TestACaptureCallTheUsersStopCutsShortIsTheStop(t *testing.T) {
 			}
 			if hasEvent(events, "test:test-2") {
 				t.Errorf("test-2 was asked of the agent after its capture window failed to open: %v", events)
+			}
+			if n := len(logs.FilterMessageSnippet(stoppedMsg).All()) + len(notBegunLogs(logs)); n != 0 {
+				t.Errorf("the log said %d times that keploy did not begin a test case; want the user's stop alone: %v", n, events)
 			}
 		})
 	}

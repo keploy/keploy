@@ -1846,8 +1846,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	notReady := ""
 	// notBegun is why keploy did not begin a test case on its agent, under
 	// exact serving (poolBeforeBegin, openTestErrorCapture): the set stopped
-	// before that test case and is not judged.
-	notBegun := ""
+	// before that test case. The set's end marks the set not judged, and
+	// says so, only when the set's status is keploy's own failure
+	// (INTERNAL_ERR). A call that failed because the app's docker compose
+	// stack went down leaves the set the app's status (APP_HALTED).
+	var notBegun error
 
 	// exitLoopChan is never closed. The test loops below are its only readers,
 	// and they have finished by the time the deferred drain runs; its writers
@@ -3284,8 +3287,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// capture window opens next, where the agent's learn tracker
 			// begins it (openTestErrorCapture). When the agent takes no
 			// pool call, or opens no window, the set stops here, before the
-			// test case's view is asked for: not judged, saying why
-			// (notBegun), never a pass.
+			// test case's view is asked for, never a pass, and keploy says
+			// so at once (logStoppedBeforeTest). The set's end gives the
+			// set its verdict (notBegun): not judged when the status is
+			// keploy's own failure, else the status of what failed the call.
 			beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, testCase.Name)
 			if beginErr == nil {
 				beginErr = r.openTestErrorCapture(runTestSetCtx, r.exact, &captureOpened, testCase.Name)
@@ -3298,8 +3303,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if runTestSetCtx.Err() != nil {
 					break
 				}
-				r.logNotBegun(beginErr)
-				notBegun = beginErr.Error()
+				r.logStoppedBeforeTest(testSetID, beginErr)
+				notBegun = beginErr
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), beginErr); ok {
 					testSetStatus = resolvedStatus
 				} else {
@@ -4423,8 +4428,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// capture window opens next, where the agent's learn tracker
 			// begins it (openTestErrorCapture). When the agent takes no
 			// pool call, or opens no window, the set stops here, before the
-			// test case's view is asked for: not judged, saying why
-			// (notBegun), never a pass.
+			// test case's view is asked for, never a pass, and keploy says
+			// so at once (logStoppedBeforeTest). The set's end gives the
+			// set its verdict (notBegun): not judged when the status is
+			// keploy's own failure, else the status of what failed the call.
 			beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, tc.Name)
 			if beginErr == nil {
 				beginErr = r.openTestErrorCapture(runTestSetCtx, r.exact, &captureOpened, tc.Name)
@@ -4437,8 +4444,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if runTestSetCtx.Err() != nil {
 					break
 				}
-				r.logNotBegun(beginErr)
-				notBegun = beginErr.Error()
+				r.logStoppedBeforeTest(testSetID, beginErr)
+				notBegun = beginErr
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), beginErr); ok {
 					testSetStatus = resolvedStatus
 				} else {
@@ -5680,11 +5687,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.markNeverReady(testSetID)
 	}
 	// A test case keploy did not begin on its agent stopped the set before
-	// it: the set is not judged, saying why, and the run goes on to the next
-	// set, which stops the same way at its own first test if the agent is
-	// gone.
-	if notBegun != "" && testSetStatus == models.TestSetStatusInternalErr {
-		notJudged = alsoNotJudged(notJudged, "not judged: "+notBegun)
+	// it. When that left the set keploy's own failure (INTERNAL_ERR), the
+	// set is not judged, saying why, and the run goes on to the next set
+	// (abortAfterTestSet). A set the app's halt failed keeps the app's
+	// status.
+	if notBegun != nil && testSetStatus == models.TestSetStatusInternalErr {
+		r.logNotBegun(testSetID, notBegun)
+		notJudged = alsoNotJudged(notJudged, "not judged: "+notBegun.Error())
 		r.markNotJudged(testSetID)
 	}
 
