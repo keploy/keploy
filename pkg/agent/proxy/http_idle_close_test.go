@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
-	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -114,13 +113,13 @@ func TestRecordViaSupervisor_AnUpstreamIdleCloseLeavesNothingOut(t *testing.T) {
 
 	// The parser did read the second request and find the upstream's stream
 	// ended, or this test checks nothing. The relay's teardown closes the
-	// stream after it ends it, so a parser that got there late finds it
-	// closed (ErrClosed); either way it ended with no response.
+	// stream after it ends it; the end reads io.EOF all the same, however
+	// late the parser gets there, and it ended with no response.
 	ended := logs.FilterMessage("V2 HTTP record: dest stream ended before response").All()
 	if len(ended) != 1 {
 		t.Fatalf("the parser did not stop on the second request at the end of the upstream's stream: %d such lines", len(ended))
 	}
-	if e := ended[0].ContextMap()["error"]; e != io.EOF.Error() && e != fakeconn.ErrClosed.Error() {
+	if e := ended[0].ContextMap()["error"]; e != io.EOF.Error() {
 		t.Fatalf("the parser stopped on the second request with %v, want the end of the upstream's stream", e)
 	}
 	if _, _, added, _ := mgr.GetDropStats(); added != 1 {

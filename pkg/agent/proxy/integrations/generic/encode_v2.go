@@ -645,8 +645,9 @@ func order(x, y stamp) (first, known bool) {
 // readStream pumps Chunks from one FakeConn onto the shared events
 // channel. It returns on EOF / ErrClosed / deadline-exceeded; the
 // supervisor.Session's ctx is observed indirectly: when the ctx is
-// cancelled the relay closes the FakeConn streams, which surfaces
-// here as ErrClosed.
+// cancelled the relay ends the FakeConn streams and closes them, which
+// surfaces here as EOF (ErrClosed when the session's abort closes them
+// while the relay still captures).
 func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkEvent, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 	if fc == nil {

@@ -577,7 +577,11 @@ func (r *Relay) run(ctx context.Context) error {
 	r.teeC2D.waitDone()
 	r.teeD2C.waitDone()
 
-	// Close the FakeConns so any blocked parser Read returns ErrClosed.
+	// Close the FakeConns. Their streams have ended by now (each drain
+	// closed its channel as it returned), so a parser still reading takes
+	// what is left and then reads io.EOF, whether it gets there before this
+	// Close or after it: the Close changes nothing a reader sees. It closes
+	// FakeConn.Done, on which the tees, which have returned, selected.
 	_ = r.clientStream.Close()
 	_ = r.destStream.Close()
 
