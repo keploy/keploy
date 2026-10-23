@@ -468,6 +468,21 @@ func TestRefusalClass(t *testing.T) {
 			t.Errorf("RefusalClass(%q) = %q, want %q", why, got, want)
 		}
 	}
+	// WholeDrift's reasons are named by it too: a changed word that repeats
+	// in the leaf is a tie, every other reason a leaf is not whole is none.
+	for _, tc := range []struct {
+		rec, live, want string
+	}{
+		{"ab ab", "cd cd", models.RefusedTie},
+		{"ab cd", "ef ef", models.RefusedTie},
+		{"ORD-1 paid 100 ref=a1", "ORD-1 paid 100 ref=b2", ""},
+		{"--", "---", ""},
+		{"a", "a", ""},
+	} {
+		if _, why := WholeDrift(tc.rec, tc.live, nil); RefusalClass(why) != tc.want {
+			t.Errorf("WholeDrift(%q, %q) refuses for %q, which RefusalClass names %q, want %q", tc.rec, tc.live, why, RefusalClass(why), tc.want)
+		}
+	}
 }
 
 // The seeded rates of N16: a changed piece of one or two digits lands,

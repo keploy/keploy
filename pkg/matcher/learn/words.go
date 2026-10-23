@@ -795,7 +795,7 @@ var (
 // its groups' lengths in its letters' case, its version and its variant
 // (uuidSkeleton). "" for a UUID that mixes cases.
 func (lay clockLayout) skeleton(m string) string {
-	if lay.name == "uuid" {
+	if lay.name == UUIDClockLayout {
 		return uuidSkeleton(m)
 	}
 	na, nb := -1, -1
@@ -982,10 +982,12 @@ func (dc *DriftCache) TieClass(a, b [2]string, w *Window) string {
 }
 
 // RefusalClass names the word-level rule behind a reason Words gives for a
-// value's words it cannot learn (why), for the report of the call it refuses
+// value's words it cannot learn, or WholeDrift for a leaf it does not find
+// whole (why), for the report of the call it refuses
 // (models.UnmatchedCall.Refused): models.RefusedTie for a changed word that
 // repeats in the leaf, models.RefusedContainment for one glued inside another
-// (B1); "" for every other reason.
+// (B1); "" for every other reason. A protocol learner names the rule by it,
+// never by matching the reason's text.
 func RefusalClass(why string) string {
 	switch why {
 	case whyRepeat:
@@ -1356,7 +1358,7 @@ func WholeDrift(rec, live string, w *Window) (whole bool, why string) {
 		seen := map[string]bool{}
 		for _, r := range runs {
 			if seen[r.text] {
-				return false, "a word of it that changed repeats in it"
+				return false, whyRepeat
 			}
 			seen[r.text] = true
 		}

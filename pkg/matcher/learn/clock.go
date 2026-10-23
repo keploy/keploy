@@ -161,7 +161,7 @@ var clockLayouts = []clockLayout{
 	// in letters).
 	{name: "iso8601", re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|\+\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)( [+-](?:0\d|1[0-4]):?[0-5]\d(?: (` + abbrevAlt + `))?)?)?((?:Z|[+-]\d{2}(?::?\d{2})?)(?:\[(?:UTC|GMT|UCT|Etc/(?:UTC|UCT|GMT(?:[+-]?\d{1,2})?|Universal|Zulu|Greenwich)|(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)(?:/[A-Z][A-Za-z_-]+)+)\])?| ?(?:UTC|GMT))?`), read: readISO, zone: []int{1, 3}, nameGroup: 2, frac: true},
 	{name: "compact", re: regexp.MustCompile(`\d{8}T\d{6}(Z?)`), read: readCompact, zone: []int{1}},
-	{name: "uuid", re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
+	{name: UUIDClockLayout, re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{name: "epoch", re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch, frac: true},
 	{name: "timeofday", re: regexp.MustCompile(`\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?`), read: readTimeOfDay, wraps: true, frac: true},
 }
@@ -177,8 +177,13 @@ func layoutNamed(name string) int {
 	return -1
 }
 
+// UUIDClockLayout is the name of the clock layout of a time-ordered UUID (a
+// version 1 or 7), as the words format writes it (models.WordSlot.Layout):
+// what a protocol learner reads a learned UUID's clock read by.
+const UUIDClockLayout = "uuid"
+
 // uuidLayout is the index in clockLayouts of the time-ordered UUID's.
-var uuidLayout = layoutNamed("uuid")
+var uuidLayout = layoutNamed(UUIDClockLayout)
 
 // ClockOf reports whether a value drifted only with F's clock: every word
 // that changed between its recording (recorded) and record's full round
