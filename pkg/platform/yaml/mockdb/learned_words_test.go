@@ -328,4 +328,25 @@ func TestTheSetReaderSaysWhatItCannotRead(t *testing.T) {
 	if _, err := learn.Legible(write("cut", "mocks.yaml", cut)); err != nil {
 		t.Errorf("a set whose last mock was cut short: %v", err)
 	}
+	// A document that is no YAML, whole (its line ended), is a read error.
+	if _, err := ReadSetMocks(context.Background(), zap.NewNop(), write("syntax", "mocks.yaml", "version: [\n")); err == nil || !strings.Contains(err.Error(), "read the mocks of") {
+		t.Errorf("a mocks.yaml that is no YAML: %v", err)
+	}
+}
+
+// A state that learned nothing writes nothing and reads nothing: the set's
+// mocks file is not even opened (here it would not decode).
+func TestAStateThatLearnedNothingReadsNoMocks(t *testing.T) {
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "")
+	if err := os.MkdirAll(filepath.Join(dir, "test-set-0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test-set-0", "mocks.yaml"), []byte("version: x\nkind: Http\nname: mock-0\nspec: [1, 2]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	added, err := ys.PersistLearned(context.Background(), "test-set-0", map[string]models.MockState{"mock-0": {Name: "mock-0", LearnedWords: map[string]models.WordsEntry{}, Variables: models.MockVariables{}, ReqBodyNoise: map[string][]string{}}})
+	if err != nil || added != nil {
+		t.Fatalf("added %v err %v, want nothing read", added, err)
+	}
 }
