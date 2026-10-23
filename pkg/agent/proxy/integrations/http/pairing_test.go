@@ -231,6 +231,99 @@ func TestHTTPPairsExactlyWithAnotherTestsRecording(t *testing.T) {
 	})
 }
 
+// roundPairingDb is pairingDb read in one snapshot of the round
+// (integrations.RoundReader), as the agent's MockManager is under exact
+// serving: the store shows test-1's view and the tracker has it open, its
+// candidates and background are pairingDb's, owners says whose the view
+// holds each recording as, and a claim lands only while the round is still
+// at the snapshot (moved: that many claims find it moved first, each
+// followed by a fresh read).
+type roundPairingDb struct {
+	*pairingDb
+	owners map[string]integrations.RoundOwner
+	moved  int
+	reads  int
+}
+
+func (d *roundPairingDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	d.reads++
+	s := integrations.RoundSnapshot{
+		At:   integrations.RoundAt{Epoch: 1, Gen: uint64(d.reads)},
+		Test: "test-1", Phase: integrations.RoundInTest, Open: true, Background: true,
+		BackgroundUnused: d.bg,
+		Candidates:       d.PairingCandidates(q.Kind),
+	}
+	return s.WithParts(integrations.RoundParts{Owners: d.owners}), true
+}
+
+func (d *roundPairingDb) WithinRound(integrations.RoundAt) integrations.RoundScope { return nil }
+
+func (d *roundPairingDb) ClaimPairingIn(m *models.Mock, at integrations.RoundAt) (claimed, moved bool, why string) {
+	if d.moved > 0 {
+		d.moved--
+		return false, true, "a test's view was installed since the read"
+	}
+	return d.ClaimPairing(m), false, ""
+}
+
+func (d *roundPairingDb) SpendByKindIn(*models.Mock, integrations.RoundAt) (spent, moved bool, why string) {
+	return false, false, ""
+}
+
+func (d *roundPairingDb) TakenLog(uint64, int, int) []integrations.Take { return nil }
+
+var _ integrations.RoundReader = (*roundPairingDb)(nil)
+
+// Read from one snapshot of the round (the agent's production path), a
+// candidate the view holds as any of the open view's own (the open test's,
+// in flight into it, shared with the tests recorded beside it, taken by
+// another test, a pool view's ahead) never pairs, whatever the store
+// offers: only a recording no test the view knows of owns does, claimed
+// once. A claim the round moved under reads the round again and pairs in
+// the round as it is now.
+func TestHTTPPairsExactlyWithAnotherTestsRecordingInOneReadOfTheRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const host = "localhost:50001"
+	h := newHTTP()
+	n := h.newStrictNoise(nil, nil, nil)
+	ctx := context.Background()
+	call := getTo("/delete", host)
+	for _, tc := range []struct {
+		name  string
+		owner integrations.RoundOwner
+		pairs bool
+	}{
+		{"another test's", integrations.OwnerNone, true},
+		{"the open test's own", integrations.OwnerTest, false},
+		{"in flight into the open test", integrations.OwnerInFlight, false},
+		{"shared with the tests recorded beside it", integrations.OwnerShared, false},
+		{"shared, and taken by another test", integrations.OwnerSharedTaken, false},
+		{"a pool view's ahead", integrations.OwnerAhead, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := answered(onHost("mock-5", "/delete", host), time.Second, 200, `{"ok":true}`)
+			db := &roundPairingDb{pairingDb: &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{rec}}, owners: map[string]integrations.RoundOwner{"mock-5": tc.owner}}
+			answer, got := h.pairExactly(ctx, call, db, n)
+			if !tc.pairs {
+				if got != nil || answer != nil || len(db.claimed) != 0 {
+					t.Fatalf("a recording the view holds as %s paired (%v), claims %v", tc.name, got, db.claimed)
+				}
+				return
+			}
+			if got != rec || answer == nil || answer.Spec.HTTPResp.Body != `{"ok":true}` || !db.claimed["mock-5"] {
+				t.Fatalf("paired %v, claims %v; want mock-5, claimed", got, db.claimed)
+			}
+		})
+	}
+	t.Run("a claim the round moved under", func(t *testing.T) {
+		rec := answered(onHost("mock-5", "/delete", host), time.Second, 200, `{"ok":true}`)
+		db := &roundPairingDb{pairingDb: &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{rec}}, moved: 1}
+		if _, got := h.pairExactly(ctx, call, db, n); got != rec || db.reads != 2 || !db.claimed["mock-5"] {
+			t.Fatalf("paired %v after %d reads, claims %v; want mock-5, claimed in the second read", got, db.reads, db.claimed)
+		}
+	})
+}
+
 // In record's full round, under the proven switch, an HTTP call that is
 // exactly another test's recording is answered with that recording's
 // answer, and reported as an answer (models.AnswerProvisional, NotOwned,

@@ -164,3 +164,131 @@ func TestS12ATestLearnsOnlyFromItsOwn(t *testing.T) {
 		}
 	}
 }
+
+// roundLearnDb is s12LearnDb read in one snapshot of the round
+// (integrations.RoundReader), as the agent's MockManager is under exact
+// serving: the store shows test's view ("" the pool view), the tracker the
+// query names is read with it, and background says the set is served by
+// S12's background rules. The view holds its per-test tier as test's own;
+// its session tier is the pool's (the replay's scope table). A consume
+// through the round lands in s12LearnDb.
+type roundLearnDb struct {
+	*s12LearnDb
+	test       string
+	background bool
+}
+
+func (d *roundLearnDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	s := integrations.RoundSnapshot{Test: d.test, Background: d.background, PerTest: d.perTest, Session: d.mocks}
+	if t := q.Tracker; t != nil {
+		number, open, began := t.State()
+		s.Learn = integrations.LearnRead{Bound: true, Number: number, Open: open, Begun: began}
+		_, s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = t.Places()
+		s.Learn.Answered = t.AnsweredMocks()
+	}
+	switch {
+	case d.test != "" && s.Learn.Open:
+		s.Phase = integrations.RoundInTest
+	case d.test == "" && !s.Learn.Open:
+		s.Phase = integrations.RoundBetween
+	default:
+		s.Phase = integrations.RoundBoundary
+	}
+	s.Open = s.Phase == integrations.RoundInTest
+	owners := map[string]integrations.RoundOwner{}
+	if d.test != "" {
+		for _, m := range d.perTest {
+			owners[m.Name] = integrations.OwnerTest
+		}
+	}
+	pool := map[string]struct{}{}
+	for _, m := range d.mocks {
+		pool[m.Name] = struct{}{}
+	}
+	return s.WithParts(integrations.RoundParts{Owners: owners, PoolNames: &pool}), true
+}
+
+func (d *roundLearnDb) WithinRound(integrations.RoundAt) integrations.RoundScope {
+	return roundLearnScope{d.s12LearnDb}
+}
+
+func (d *roundLearnDb) ClaimPairingIn(*models.Mock, integrations.RoundAt) (claimed, moved bool, why string) {
+	return false, false, "no pairing in the learn step"
+}
+
+func (d *roundLearnDb) SpendByKindIn(*models.Mock, integrations.RoundAt) (spent, moved bool, why string) {
+	return false, false, "no background spend in the learn step"
+}
+
+func (d *roundLearnDb) TakenLog(uint64, int, int) []integrations.Take { return nil }
+
+// roundLearnScope is s12LearnDb as a RoundScope whose round never moves.
+type roundLearnScope struct{ *s12LearnDb }
+
+func (roundLearnScope) Moved() string { return "" }
+
+var _ integrations.RoundReader = (*roundLearnDb)(nil)
+
+// Read from one snapshot of the round (the agent's production path), S12's
+// background answers a call exactly or not at all, and nothing is learned
+// onto it, wherever the store shows a test's view: with the tracker's test
+// open in it (in a test), and with the tracker having none open (a boundary:
+// the view opened before the tracker began its test). Only where the store
+// shows the pool view and no test is open is the pool learned from. Under
+// today's rules the closer pool recording is paired in a test, as before.
+func TestS12ATestLearnsOnlyFromItsOwnInOneReadOfTheRound(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		test       string
+		begun      bool
+		background bool
+		learned    bool
+	}{
+		{"in a test", "test-1", true, true, false},
+		{"a test's view the tracker has not begun", "test-1", false, true, false},
+		{"between tests", "", false, true, true},
+		{"in a test, under today's rules", "test-1", true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			opts.LearnPool = true
+			own := learnRecorded("own", 0, "POST", "/a", `{"id":"x","n":1,"m":424242}`, nil, `{}`)
+			pool := learnRecorded("pool", -time.Hour, "POST", "/a", `{"id":"x","n":1,"m":2}`, nil, `{}`)
+			pool.TestModeInfo.Lifetime = models.LifetimeSession
+			ld := &learnDb{perTest: []*models.Mock{own}, mockMemDb: mockMemDb{mocks: []*models.Mock{pool}}}
+			db := &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}, test: tc.test, background: tc.background}
+			tr := learn.NewTracker()
+			if tc.begun {
+				tr.Begin()
+			}
+			ctx := learn.WithTracker(context.Background(), tr)
+			served, miss, err := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":9,"m":2}`, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.learned {
+				if served == nil || served.Name != "pool" || miss != nil || len(ld.pooled) != 1 {
+					t.Fatalf("served %v (miss %+v), %d learned onto the pool; want the pool recording learned from", served, miss, len(ld.pooled))
+				}
+				return
+			}
+			if served != nil || miss == nil || miss.closest != pool || miss.res.Reason != models.MissRequestChanged {
+				t.Fatalf("served %v (miss %+v); want a miss naming the pool recording", served, miss)
+			}
+			if len(ld.pooled) != 0 || len(ld.consumed) != 0 {
+				t.Fatalf("learned onto the pool %d times and consumed %d of the test's own", len(ld.pooled), len(ld.consumed))
+			}
+			// The pool recording still answers a call that is it exactly.
+			if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":1,"m":2}`, nil), db, n, opts); served == nil || served.Name != "pool" || miss != nil {
+				t.Fatalf("the pool recording did not answer its own call exactly: %v %+v", served, miss)
+			}
+			if !tc.begun {
+				return
+			}
+			// The test's own call learns from its own.
+			if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x","n":1,"m":31415}`, nil), db, n, opts); served == nil || served.Name != "own" || miss != nil || len(ld.consumed) != 1 {
+				t.Fatalf("the test's own call was not learned from its own: %v %+v", served, miss)
+			}
+		})
+	}
+}
