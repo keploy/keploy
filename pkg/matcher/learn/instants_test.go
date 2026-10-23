@@ -321,7 +321,9 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 			rec, live string
 			// copied: the value is the served instant cut to its own
 			// precision, both ways (a millisecond of a served
-			// microsecond): a variable of the receive, however it was read.
+			// microsecond): a variable of the receive, however it was
+			// read. A millisecond built on a served second is a read of
+			// the clock as much: a second is within F's lead.
 			copied bool
 		}{
 			{`{"SentTimestamp": "` + sec + `"}`, `{"SentTimestamp": "` + gsec + `"}`, false},
@@ -587,6 +589,21 @@ func TestEveryAnswerFieldIsAnAnswer(t *testing.T) {
 
 // The instants a text holds, in either case, and a time-ordered UUID's time
 // groups; and the moment each names.
+// A text that names its zone, ahead of UTC or behind it, is zoned; one of no
+// zone is not.
+func TestAnInstantNamesTheZoneItsTextNames(t *testing.T) {
+	for text, want := range map[string]bool{
+		"2026-10-22T20:00:00-10:00": true, "2026-10-22T20:00:00+05:30": true, "2026-10-22T20:00:00-0500": true,
+		"2026-10-22T20:00:00Z": true, "1792667656": true, "Thu, 22 Oct 2026 11:14:16 GMT": true, "20261022T111413Z": true,
+		"2026-10-22 20:00:00": false, "2026-10-22": false, "20261022T111413": false,
+	} {
+		sp := instantSpans(text)
+		if len(sp) != 1 || !sp[0].keyed || sp[0].zoned != want {
+			t.Errorf("%q: spans %+v; want one zoned %v", text, sp, want)
+		}
+	}
+}
+
 func TestInstantSpans(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 14, 16, 473e6, time.UTC)
 	for _, tc := range []struct {
@@ -1466,8 +1483,9 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 			t.Errorf("%s, mock-11 alone: %s (%s); want it refused, naming mock-11", tc.name, ln.Kind, ln.Why)
 		}
 	}
-	// A finer value is no copy of a coarser served instant: the receive's
-	// seconds hold no millisecond of them.
+	// A finer value is no copy of a coarser served instant of a unit within
+	// F's lead: the receive's second is the second of each run's value, as
+	// it is of a read of the clock in that second.
 	secAttrs := func(at time.Time) string { return `{"SentTimestamp": "` + strconv.FormatInt(at.Unix(), 10) + `"}` }
 	coarse, coarser := r1Receive(secAttrs(sent)), r1Receive(secAttrs(got))
 	coarser.Name = "mock-11"
@@ -1480,6 +1498,49 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 	dc := NewDriftCache()
 	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Errorf("milliseconds beside served seconds: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
+	}
+	// An exact copy a formatter wrote dropping its fraction's trailing
+	// zeros: the recorded message sent in a whole second, F's not
+	// ("…T11:14:16Z", then "…T11:14:16.784Z", F delivering a neighbour of
+	// the same second; a DATETIME of its own zone, F delivering a message
+	// two minutes later). Its text's resolution is no bound on the rule.
+	nano := func(at time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: at.Format(time.RFC3339Nano)}}}
+	}
+	loc := time.FixedZone("+05:30", 5*3600+1800)
+	local := func(at time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: at.In(loc).Format("2006-01-02 15:04:05.999")}}}
+	}
+	rec := sent.Truncate(time.Second)
+	for _, tc := range []struct {
+		name  string
+		got   time.Time
+		shape func(time.Time) Shape
+	}{
+		{"RFC 3339, a neighbour of the same second", rec.Add(784 * time.Millisecond), nano},
+		{"a DATETIME of its zone, two minutes later", got, local},
+	} {
+		whole, other := r1Receive(attrs(rec)), r1Receive(attrs(tc.got))
+		other.Name = "mock-11"
+		for m, at := range map[*models.Mock]time.Time{whole: rec, other: tc.got} {
+			m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+			// The message alone: no ReceiptHandle, whose epoch of its own
+			// names the recorded second too.
+			m.Spec.HTTPResp.Body = `{"Messages": [{"Body": "S12 message", "Attributes": ` + attrs(at) + `}]}`
+		}
+		dc = NewDriftCache()
+		if ln := ClassifyIn(dc, []string{p}, tc.shape(tc.got), tc.shape(rec), r1Insert, nil, []Raw{dc.RawOf(whole, true), dc.RawOf(other, true)}, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+			t.Errorf("an exact copy dropping trailing zeros, %s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, tc.shape(rec).Leaves[p].Value, tc.shape(tc.got).Leaves[p].Value, ln.Kind, ln.From, ln.Why)
+		}
+	}
+	// Typed, it is no copy that way: an instant its protocol types is
+	// matched at its own precision only, and is refused for its provenance.
+	typedMs := func(at time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
+	}
+	dc = NewDriftCache()
+	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
+		t.Errorf("typed milliseconds beside served seconds: %s from %+v (%s); want it refused for its provenance", ln.Kind, ln.From, ln.Why)
 	}
 }
 
@@ -1519,6 +1580,28 @@ func TestCovers(t *testing.T) {
 		{"11:14:16.473", "2026-10-22T11:14:16Z", true},
 		{"11:14", "2026-10-22T11:14:16Z", false},
 		{"11:14", "2026-10-22", false},
+		// A finer value built on a coarser held instant: the value cut to
+		// the held instant's unit, truncated only, where that unit is
+		// longer than F's lead (an hour, a day): within it (a second, a
+		// minute) a read of the clock is as finer.
+		{"2026-10-23", "2026-10-23T09:00:00Z", true},
+		{"2026-10-23", "2026-10-22T09:00:00Z", false},
+		// Rounded to the held unit it is no value built on it: a time past
+		// noon is not the next day's.
+		{"2026-10-23", "2026-10-22T18:00:00Z", false},
+		{"2026-10-22T10:00:00Z", "2026-10-22T09:44:16Z", false},
+		{"2026-10-22T09:00:00Z", "2026-10-22T09:14:16Z", true},
+		{"2026-10-22T09:00:00Z", "2026-10-22T10:14:16Z", false},
+		{"2026-10-22T11:14:16Z", "1792667656999", false},
+		{"11:14", "11:14:59", false},
+		{"09:00", "09:14:59", true},
+		{"2026-10-22", "2026-10-22T23:59:59+05:30", true},
+		{"2026-10-23T00:00+05:30", "2026-10-23T09:00+05:30", true},
+		// A date of no zone a zoned value's own day is built on, whose UTC
+		// day is the day before.
+		{"2026-10-23", "2026-10-23T02:00:00+05:30", true},
+		{"2026-10-22", "2026-10-23T02:00:00+05:30", true},
+		{"2026-10-24", "2026-10-23T02:00:00+05:30", false},
 		{"2026-10-22T11:14:16.473Z", "1792667656473", true},
 		{"2026-10-22T20:00:00Z", "2026-10-23T00:00+05:30", true},
 		{"2026-10-22T20:00:00Z", "2026-10-22T00:00+05:30", false},
@@ -1538,6 +1621,29 @@ func TestCovers(t *testing.T) {
 	} {
 		if got := covers(mo(tc.held), mo(tc.m)); got != tc.want {
 			t.Errorf("covers(%q, %q) = %v; want %v", tc.held, tc.m, got, tc.want)
+		}
+	}
+	// A typed moment is held only as a held instant cut to its own
+	// precision: never as a value built on a coarser one.
+	typed := func(s string, res time.Duration) moment {
+		at, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return instantMoment(at, res)
+	}
+	for _, tc := range []struct {
+		held string
+		m    moment
+		want bool
+	}{
+		{"2026-10-23", typed("2026-10-23T09:00:00Z", time.Second), false},
+		{"2026-10-22T11:14:16Z", typed("2026-10-22T11:14:16.473Z", time.Millisecond), false},
+		{"1792667656473", typed("2026-10-22T11:14:16Z", time.Second), true},
+		{"1792667656473", typed("2026-10-22T11:14:16.473Z", time.Millisecond), true},
+	} {
+		if got := covers(mo(tc.held), tc.m); got != tc.want {
+			t.Errorf("covers(%q, typed %v) = %v; want %v", tc.held, tc.m.key, got, tc.want)
 		}
 	}
 }
@@ -1673,6 +1779,11 @@ func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
 	shape := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
+	// Typed to the minute, the same read by the lead: noise by its
+	// provenance, the served instant no copy of it either.
+	typed := func(h, m int) Shape {
+		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(2026, 10, 22, h, m, 0, 0, time.UTC), time.Minute)}}
+	}
 	for _, created := range []string{"2026-10-22T11:14:40.120Z", "2026-10-22T11:14:20.000Z"} {
 		served := []Earlier{{Mock: "mock-3", At: at.Add(-5 * time.Second), Seen: []Seen{
 			{Side: Response, Leaf: Leaf{Path: "body.created_at", Noise: "body.created_at", Type: String, Value: created}, Live: created},
@@ -1680,6 +1791,191 @@ func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
 		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
 			t.Errorf("beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
 		}
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(11, 15), typed(11, 14), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
+			t.Errorf("typed, beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// A neighbour recording within one unit of the recorded one, which F
+// delivers (an SQS batch: messages sent milliseconds apart): the consumer
+// stores the delivered message's SentTimestamp rounded (MySQL's DATETIME(0)
+// rounds a fraction of a second; RFC 3339 rounded; to the minute; typed to
+// the minute). F's message names F's value rounded and the recorded one
+// truncated, the recorded message names the recorded value both ways: one
+// rule, rounding, names the recorded value in the recorded message and F's
+// in F's, so the value is a copy, a variable of the recorded receive (never
+// noise, whichever rule F's message names the recorded value by too). F's
+// message two minutes later is the control.
+func TestANeighbourRecordingWithinOneUnitIsTheEchos(t *testing.T) {
+	attrs := func(at time.Time) string {
+		return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}`
+	}
+	const p = "body.processed_at"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	at := func(m, s, ms int) time.Time { return time.Date(2026, 10, 22, 11, m, s, ms*1e6, time.UTC) }
+	for _, tc := range []struct {
+		name      string
+		sent, got time.Time
+		unit      time.Duration
+		layout    string
+	}{
+		{"a MySQL DATETIME rounded", at(14, 16, 473), at(14, 16, 784), time.Second, "2006-01-02 15:04:05"},
+		{"RFC 3339 rounded", at(14, 16, 473), at(14, 16, 784), time.Second, time.RFC3339},
+		{"rounded to the minute", at(14, 29, 900), at(14, 30, 211), time.Minute, "2006-01-02T15:04Z07:00"},
+		{"the control, two minutes later", at(14, 16, 473), at(16, 16, 784), time.Second, "2006-01-02 15:04:05"},
+	} {
+		receive, delivered := r1Receive(attrs(tc.sent)), r1Receive(attrs(tc.got))
+		delivered.Name = "mock-11"
+		for _, m := range []*models.Mock{receive, delivered} {
+			m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+		}
+		rec, live := tc.sent.Round(tc.unit), tc.got.Round(tc.unit)
+		for _, form := range []struct {
+			name      string
+			rec, live Shape
+		}{
+			{"as text", str(rec.Format(tc.layout)), str(live.Format(tc.layout))},
+			{"typed", Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, rec, tc.unit)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, live, tc.unit)}}},
+		} {
+			dc := NewDriftCache()
+			ln := ClassifyIn(dc, []string{p}, form.live, form.rec, r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+			if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+				t.Errorf("%s, %s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, form.name, form.rec.Leaves[p].Value, form.live.Leaves[p].Value, ln.Kind, ln.From, ln.Why)
+			}
+		}
+	}
+}
+
+// The echo's source is a place that names the recorded moment by the rule
+// the echo matched, apart from F's moment: where F's message names F's value
+// truncated only, a message that names the recorded value rounded only
+// (mock-2, 15.700 of a recorded 16) is no source, though it stands first;
+// the one that names it truncated (mock-4) is.
+func TestTheEchosSourceIsAPlaceItsRuleNames(t *testing.T) {
+	sent := func(name string, at time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "/queue/receive", Body: `{"MaxNumberOfMessages":10}`},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"Messages":[{"Attributes":{"SentTimestamp":"` + strconv.FormatInt(at.UnixMilli(), 10) + `"}}]}`},
+			ReqTimestampMock: time.Date(2026, 10, 22, 11, 14, 10, 0, time.UTC),
+		}}
+	}
+	at := func(m, s, ms int) time.Time { return time.Date(2026, 10, 22, 11, m, s, ms*1e6, time.UTC) }
+	dc := NewDriftCache()
+	raw := []Raw{dc.RawOf(sent("mock-2", at(14, 15, 700)), true), dc.RawOf(sent("mock-4", at(14, 16, 300)), true), dc.RawOf(sent("mock-11", at(15, 18, 700)), true)}
+	const p = "body.processed_at"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	ln := ClassifyIn(dc, []string{p}, str("2026-10-22T11:15:18Z"), str("2026-10-22T11:14:16Z"), at(14, 17, 0), nil, raw, nil, nil)[0]
+	if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+		t.Fatalf("%s from %+v (%s); want an echo's variable from mock-4", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// A value built on a date the application was given, with a time of day of
+// its own (the next opening of the dates its test case's request lists, or
+// that a served answer lists, picked by its clock): read from a text, its
+// date is held, both runs' (the value cut to the date's resolution), so it
+// is a copy: a variable of the date it was recorded with, which nothing
+// binds at, never noise. Where only F's date is held, it is refused, naming
+// it. Where its date held in both runs is one date, nothing of it changed
+// that a date accounts for: its time is the application's own. Typed, an
+// instant is matched at its own precision only, and is refused for its
+// provenance.
+func TestAValueBuiltOnAGivenDateIsTheEchos(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
+	const p = "body.opens"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	body := `{"dates":["2026-10-22","2026-10-23"]}`
+	request := func(body string) []Earlier {
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: body, Sent: body}}})}
+	}
+	served := func(body string) []Earlier {
+		v, _ := DecodeJSON([]byte(body))
+		leaves := map[string]Leaf{}
+		JSONLeaves("body", v, leaves)
+		e := Earlier{Mock: "mock-1", At: at.Add(-time.Second), Own: true}
+		for _, path := range []string{"body.dates[0]", "body.dates[1]"} {
+			if l, ok := leaves[path]; ok {
+				e.Seen = append(e.Seen, Seen{Side: Response, Leaf: l, Live: l.Value})
+			}
+		}
+		return []Earlier{e}
+	}
+	for _, c := range []struct {
+		name    string
+		earlier []Earlier
+		mock    string
+	}{{"the request's", request(body), "test case test-1"}, {"a served answer's", served(body), "mock-1"}} {
+		ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-23T09:00:00Z"), str("2026-10-22T09:00:00Z"), at, c.earlier, nil, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != c.mock || ln.From.Path != "body.dates[0]" || !ln.From.Echo {
+			t.Errorf("built on %s dates: %s from %+v (%s); want an echo's variable of %s at body.dates[0]", c.name, ln.Kind, ln.From, ln.Why, c.mock)
+		}
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22T10:00:00Z"), str("2026-10-22T09:00:00Z"), at, c.earlier, nil, nil, nil)[0]; ln.Kind != KindNoise {
+			t.Errorf("its time alone changed, beside %s dates: %s from %+v (%s); want noise", c.name, ln.Kind, ln.From, ln.Why)
+		}
+		typed := func(d int) Shape {
+			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(2026, 10, d, 9, 0, 0, 0, time.UTC), time.Second)}}
+		}
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(23), typed(22), at, c.earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
+			t.Errorf("typed, beside %s dates: %s from %+v (%s); want it refused for its provenance", c.name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+	// Only F's date held: refused, naming it.
+	only := `{"dates":["2026-10-23"]}`
+	for _, c := range []struct {
+		name, at string
+		earlier  []Earlier
+	}{{"the request's", "test case test-1 at body.dates[0]", request(only)}, {"a served answer's", "mock-1 at body.dates[0]", served(only)}} {
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-23T09:00:00Z"), str("2026-10-22T09:00:00Z"), at, c.earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "the moment record's full round saw in it stands in "+c.at+", while") {
+			t.Errorf("F's date alone in %s: %s (%s); want it refused, naming %s", c.name, ln.Kind, ln.Why, c.at)
+		}
+	}
+}
+
+// A value one side of which names its zone is read in that zone: no other
+// zone's wall clock is tried for it, so a recorded instant in UTC whose time
+// is a served instant's in another zone, beside a wall clock of no zone, is
+// no copy. And what the recordings hold is what they were recorded with: an
+// instant F served in a recorded place's stead (another value answered
+// there) is no place the recorded moment stands, so a wall clock of no zone
+// whose recorded moment only that served instant names, in some zone, is no
+// copy either.
+func TestTheZoneSearchReadsWallClocksOfNoZoneAgainstRecordings(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
+	const p = "body.at"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	leaf := func(mock, rec, live string) Earlier {
+		return Earlier{Mock: mock, At: at.Add(-time.Second), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.sentAt", Noise: "body.sentAt", Type: String, Value: rec}, Live: live},
+		}}
+	}
+	const t1, t2 = "1792667656473", "1792667776784" // 11:14:16.473Z, 11:16:16.784Z: 16:44:16 and 16:46:16 at +05:30
+	both := []Earlier{leaf("mock-4", t1, t1), leaf("mock-11", t2, t2)}
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:46:16"), str("2026-10-22T16:44:16Z"), at, both, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		t.Errorf("a zoned recorded instant beside a wall clock of no zone: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
+	}
+	// The control: both of no zone, one zone (+05:30) names both moments.
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:46:16"), str("2026-10-22 16:44:16"), at, both, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+		t.Errorf("both of no zone: %s from %+v (%s); want an echo's variable of mock-4", ln.Kind, ln.From, ln.Why)
+	}
+	// A wall clock of no zone built on a served zoned date: the next
+	// opening's local date (+05:30's midnights, in UTC), with a time of the
+	// application's own, written in its zone with none named.
+	dates := []Earlier{leaf("mock-4", "2026-10-21T18:30:00Z", "2026-10-21T18:30:00Z"), leaf("mock-11", "2026-10-22T18:30:00Z", "2026-10-22T18:30:00Z")}
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-23 09:07:13"), str("2026-10-22 09:07:13"), at, dates, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+		t.Errorf("a wall clock of no zone built on a served zoned date: %s from %+v (%s); want an echo's variable of mock-4", ln.Kind, ln.From, ln.Why)
+	}
+	swapped := []Earlier{leaf("mock-4", t1, t2)}
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:44:16"), str("2026-10-22 16:46:16"), at, swapped, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		t.Errorf("a recorded moment only what F served names: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 }
 

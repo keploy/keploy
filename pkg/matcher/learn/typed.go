@@ -23,15 +23,21 @@ import (
 //
 // Read whole, a drifted instant gets a value's checks, each of the instant:
 //
-//   - a variable where a leaf of an exchange F served drifted with it: one
-//     that was, as recorded, the instant it was recorded with (in any layout
-//     and form), or that held the moment it was recorded with and the moment
-//     F saw, both ways (rule 1), whatever its provenance;
+//   - a variable where a leaf of an exchange F served, or a part of the
+//     test case's own request keploy test sent with a template value,
+//     drifted with it: one that was, as recorded, the instant it was
+//     recorded with (in any layout and form), or that held the moment it was
+//     recorded with and the moment F saw, both ways (rule 1), whatever its
+//     provenance;
 //   - the echo, before any provenance excuses it (instants.go): where an
 //     earlier place holds the moment F saw (an instant of it in any layout,
-//     or its time of day), it may be a pick from what the application was
-//     given, by its clock; it is a variable of the place that holds the
-//     moment it was recorded with, or, held nowhere, refused;
+//     cut to the instant's own precision, or its time of day), by the rule
+//     an earlier recording holds the moment it was recorded with, or alone,
+//     it may be a pick from what the application was given, by its clock; it
+//     is a variable of the place that holds the moment it was recorded with,
+//     or, held nowhere, refused. An instant its protocol types is never read
+//     as a value built on a coarser instant (a date with a time of its own):
+//     matched at its own precision only;
 //   - a variable where a payload served or recorded earlier holds the moment
 //     it was recorded with, exactly, in any layout, a protocol-phase answer's
 //     own clock reads and an HTTP answer's stamp blanked (rules 2 and 3):
@@ -152,10 +158,13 @@ func instantFormOf(res time.Duration) struct {
 // (heldMoments): the instant, in UTC (an instant its protocol types names
 // its moment, as an epoch does), the time of day it writes there, and its
 // resolution, the precision a place's instant is cut to where it is matched
-// against it (covers).
+// against it (covers). It is typed: a place holds it only as an instant cut
+// to its own precision, never as a coarser instant it is finer than (the
+// founder's rule for an instant its protocol types: equal to an earlier
+// instant at its own precision).
 func instantMoment(t time.Time, res time.Duration) moment {
 	t = t.UTC()
-	return moment{key: instantKey{at: t.UnixNano()}, wall: clockOfDay(t), res: res, zoned: true}
+	return moment{key: instantKey{at: t.UnixNano()}, wall: clockOfDay(t), res: res, zoned: true, typed: true}
 }
 
 // The reasons a typed instant is refused for (Learned.Why), read after
@@ -200,12 +209,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		return ln
 	}
 	// The echo, before any provenance excuses the instant.
-	if dc.earlierMoments(at, served, raw).holdsApart(live, rec) {
-		if from, ok := dc.instantEchoFrom(r, rec, at, served, raw); ok {
+	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
+		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw); ok {
 			ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 			return ln
 		}
-		where := dc.heldAt([]moment{live}, at, served, raw)
+		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
 		}
@@ -219,8 +228,8 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// The test case's own request, as recorded, holding the moment it was
 	// recorded with, before any provenance excuses it: a pick from the
 	// request by the clock whose pick in F the request does not list.
-	if where := dc.requestHolds([]moment{rec}, []moment{live}, served); where != "" {
-		ln.Kind, ln.Why = KindUnaccounted, requestHoldsWhy(where)
+	if where, asRecorded := dc.requestHolds([]moment{rec}, []moment{live}, served); where != "" {
+		ln.Kind, ln.Why = KindUnaccounted, requestHoldsWhy(where, asRecorded)
 		return ln
 	}
 	if !instantClock(rt, lt, rres, lres, w) {
@@ -248,14 +257,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 // moment it was recorded with as recorded and the moment F saw as F saw it,
 // neither on its other side (it drifted with it, rule 1). Whole, of the
 // place, is its recorded text's being r's: where the value can be bound. The
-// test case's own request is the echo's alone (Earlier.Given).
+// test case's own request is such a place too, where keploy test sent a part
+// of it with template values (Earlier.Given): nothing binds there.
 func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
 	var best Place
 	rank := 7
 	for _, e := range served {
-		if e.Given {
-			continue
-		}
 		for _, s := range e.Seen {
 			if s.Live == s.Leaf.Value {
 				continue
@@ -311,18 +318,18 @@ func (dc *DriftCache) instantCoDrifted(rec, live string, rm, lm moment) bool {
 	return in(rec, rm) && in(live, lm) && !in(live, rm) && !in(rec, lm)
 }
 
-// instantEchoFrom is the earlier place holding rec, the moment the drifted
-// instant r was recorded with, as an instant or its time of day (as
-// appearedIn's echo reads the places): a leaf of an exchange F served
-// earlier, ranked by placeRank, then a payload served or recorded before at,
-// its field where one holds it.
-func (dc *DriftCache) instantEchoFrom(r Leaf, rec moment, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	rm := []moment{rec}
+// instantEchoFrom is the earlier place holding the moment the drifted
+// instant r was recorded with, as an instant or its time of day, by the rule
+// the echo found it a copy by (echoed, holdsRecorded, as appearedIn's echo
+// reads the places): a leaf of an exchange F served earlier, ranked by
+// placeRank, then a payload served or recorded before at, its field where
+// one holds it.
+func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	var best Place
 	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if !dc.holdsInstant(s.Leaf.Value, rm) && !dc.holdsInstant(dc.rawExtra(s.Leaf.Value), rm) {
+			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) {
 				continue
 			}
 			whole := s.Leaf.Value == r.Value
@@ -340,11 +347,11 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, rec moment, at time.Time, served [
 			continue
 		}
 		for _, f := range x.fields {
-			if !f.key && dc.holdsInstant(x.text[f.start:f.end], rm) {
+			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
 				return Place{Mock: x.mock, Field: f.describe(), Echo: true}, true
 			}
 		}
-		if dc.holdsInstant(x.text, rm) || dc.holdsInstant(dc.rawExtra(x.text), rm) {
+		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
 			return Place{Mock: x.mock, Echo: true}, true
 		}
 	}

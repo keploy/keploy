@@ -79,8 +79,9 @@ type Tracker struct {
 	// replay answered reached keploy. NewSet forgets them.
 	servedAt []time.Time
 	// given is the running test case's own request (Give), an earlier place
-	// only the echo reads (Earlier.Given); nil until it is given, and for a
-	// test no keploy test case opened (keploy mock's). Begin forgets it.
+	// the learn step reads as any other (Earlier.Given); nil until it is
+	// given, and for a test no keploy test case opened (keploy mock's).
+	// Begin forgets it.
 	given *Earlier
 }
 
@@ -143,9 +144,8 @@ func (t *Tracker) Begin() {
 // Await marks the running test as a keploy test case's, whose own request
 // the filter that opens it carries (Give): until it is given, the test's
 // earliest place is a request the learn step could not read (Earlier.Unread),
-// so a call the test makes before then, or every call of a test whose filter
-// never brought its request, is refused what only the request could account
-// for. The agent marks it as keploy test opens the test's capture window,
+// so every value that changed in a call the test makes before then, or in
+// every call of a test whose filter never brought its request, is refused. The agent marks it as keploy test opens the test's capture window,
 // after Begin. A test keploy test did not open (keploy mock's) is never
 // marked: it has no keploy test case.
 func (t *Tracker) Await() {
@@ -160,7 +160,7 @@ func (t *Tracker) Await() {
 }
 
 // Give makes e (GivenRequest: the running keploy test case's own request)
-// the running test's earliest place, which only the echo reads
+// the running test's earliest place, read as any earlier place
 // (Earlier.Given), until the next test begins. The agent gives it as the
 // test case opens (its mock filter), after Begin and before the replay sends
 // the request: a call the test's request led to finds it. One given while no

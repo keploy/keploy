@@ -39,9 +39,16 @@ import (
 // refused (unaccounted). A place holds a moment as an instant of it in any
 // layout, at the value's own precision (an instant the place holds finer, cut
 // to the value's resolution or to a coarser one the value is whole at,
-// truncated or rounded: a stored second of a served millisecond; covers), or
-// as its time of day as written in its own zone or in UTC (heldMoments).
-// The moments are compared, never their texts.
+// truncated or rounded: a stored second of a served millisecond), as the
+// start of a value read from a text that is finer than it (the value cut to
+// the place's instant's unit, an hour or a day, longer than F's lead: a
+// served date with the application's own time of day), or as its time of
+// day as written in its own zone or in UTC (cuts). An application writes a value by one rule, so the echo takes a
+// value for a copy where one rule names the moment F saw in what F served
+// and the moment it was recorded with in what the recordings hold (oneCut:
+// a neighbour recording F delivered within one unit of the recorded one is
+// one), or where what F served names F's moment alone (holdsApart). The
+// moments are compared, never their texts.
 //
 // A value whose provenance shows neither stays checked: where an earlier
 // place holds one of its words, it is refused (a variable that cannot be
@@ -166,6 +173,13 @@ type moment struct {
 	res   time.Duration
 	zone  int64
 	zoned bool
+	// typed: the moment of an instant its protocol types (instantMoment),
+	// which a place holds only as an instant cut to its own precision
+	// (covers). A moment read from a text is held the other way too: where
+	// it, cut to the unit of an instant the place holds (an hour, a day), is
+	// that instant (a value built on a served date and the application's
+	// own time of day).
+	typed bool
 }
 
 // clockOfDay is t's time of day as its text writes it, in its own location,
@@ -440,42 +454,66 @@ func (e *valueDrift) holdsMomentOf(v *valueDrift) bool {
 	return false
 }
 
-// echoedInstants are the changed instants of v whose live moment an earlier
-// place holds too (held: every payload appearedIn searches, in every form,
-// as it stands, and every value F saw or the recording holds at a leaf of an
-// exchange F served earlier, on either side): what an application that
+// echoMatch is a changed instant of a value that the echo took for a copy of
+// what the application was given (echoedPairs): the moment it was recorded
+// with (rec) and the moment F saw in it (live), and the rules (cutRule) one
+// of which names both, live by what F served and rec by what the recordings
+// hold; nil where an instant F served names F's moment alone, and any rule
+// may then name the recorded one.
+type echoMatch struct {
+	rec, live moment
+	rules     map[cutRule]bool
+}
+
+// echoedInstants are the changed instants of v that the echo takes for a
+// copy of what the application was given (echoedPairs): held, every payload
+// appearedIn searches, in every form, as it stands, and every value F saw or
+// the recording holds at a leaf of an exchange F served earlier, on either
+// side; recorded, what the recordings of those places hold. nil when none.
+func echoedInstants(v *valueDrift, held, recorded *heldMoments) []echoMatch {
+	return echoedPairs(v.instants, held, recorded)
+}
+
+// echoedPairs are the pairs (a changed instant as recorded and as F saw it)
+// whose live moment an earlier place holds too: what an application that
 // stores an instant it was sent sends, or that picks one from what it was
-// served (a departure from a timetable, by its clock). It is read before any
-// lead or window excuses a word of v: a pick from served data moves with the
-// clock as a read of it does. Each is returned as recorded; nil when none. A
-// place holds an instant where it names that moment (heldMoments.holds): an
-// instant of the same moment in any layout, or a time of day that is the
-// instant's own, as written in its own zone or in UTC (a timetable's "11:15"
-// holds "2026-10-22 11:15" and "2026-10-22T11:15+05:30"), and the other way
-// round, each at the drifted instant's own precision (covers: a second of a
-// served millisecond is held), by an instant that does not name the moment
-// it was recorded with too (holdsApart). A wall clock of no zone is also
-// read in each zone a zone may be in, where the zone makes both moments ones
-// the places hold (recorded: what the recordings hold).
-func echoedInstants(v *valueDrift, held, recorded *heldMoments) []driftedInstant {
-	var out []driftedInstant
-	for _, p := range v.instants {
+// served (a departure from a timetable, by its clock). The echo reads them
+// before any lead or window excuses a word of the value: a pick from served
+// data moves with the clock as a read of it does. A place holds an instant
+// where it names that moment (cuts): an instant of the same moment in any
+// layout, or a time of day that is the instant's own, as written in its own
+// zone or in UTC (a timetable's "11:15" holds "2026-10-22 11:15" and
+// "2026-10-22T11:15+05:30"), and the other way round, each at the drifted
+// instant's own precision (a second of a served millisecond is held), or, of
+// a value read from a text, the value at the unit of the place's instant,
+// an hour or a day (a served date the value is built on). A pair is a copy where one
+// rule names the moment F saw by what F served and the moment it was
+// recorded with by what the recordings hold (oneCut), or where an instant F
+// served names the moment F saw and not the one it was recorded with
+// (holdsApart: F's alone is held). A wall clock of no zone is also read in
+// each zone a zone may be in, where one rule names both moments as that
+// zone's (oneCut): one side alone fitting some zone is a coincidence a read
+// of the clock can meet.
+func echoedPairs(pairs []driftedInstant, held, recorded *heldMoments) []echoMatch {
+	var out []echoMatch
+	for _, p := range pairs {
+		if rules := oneCut(held, recorded, p.rec, p.live); rules != nil {
+			out = append(out, echoMatch{rec: p.rec, live: p.live, rules: rules})
+			continue
+		}
 		if held.holdsApart(p.live, p.rec) {
-			out = append(out, p)
+			out = append(out, echoMatch{rec: p.rec, live: p.live})
 			continue
 		}
 		// A wall clock of no zone, in a zone neither it nor the place names
-		// (a DATETIME an application writes in its own): read in each zone
-		// a zone may be in, it is an echo where one zone makes the moment F
-		// saw one an earlier place holds and the moment it was recorded with
-		// one a recorded place holds, as that zone's moments.
+		// (a DATETIME an application writes in its own).
 		if p.rec.zoned || p.live.zoned {
 			continue
 		}
 		for _, z := range held.zonesOf(p.live) {
 			r, l := p.rec.inZone(z), p.live.inZone(z)
-			if held.holdsApart(l, r) && recorded.holdsApart(r, l) {
-				out = append(out, driftedInstant{rec: r, live: l})
+			if rules := oneCut(held, recorded, r, l); rules != nil {
+				out = append(out, echoMatch{rec: r, live: l, rules: rules})
 				break
 			}
 		}
@@ -483,21 +521,52 @@ func echoedInstants(v *valueDrift, held, recorded *heldMoments) []driftedInstant
 	return out
 }
 
-// recorded are the moments of instants as recorded; live as F saw them.
-func recordedOf(instants []driftedInstant) []moment {
-	out := make([]moment, len(instants))
-	for i, p := range instants {
-		out[i] = p.rec
+// holdsRecorded reports whether text holds, as the echo's source, the
+// recorded moment of one of ms: by one of its rules (any, where it has none),
+// by which text does not name the moment F saw too (an instant both runs'
+// values are built on is no source of what changed).
+func (dc *DriftCache) holdsRecorded(text string, ms []echoMatch) bool {
+	for _, m := range ms {
+		if dc.namesApart(text, m.rec, m.live, m.rules) {
+			return true
+		}
 	}
-	return out
+	return false
 }
 
-func liveOf(instants []driftedInstant) []moment {
-	out := make([]moment, len(instants))
-	for i, p := range instants {
-		out[i] = p.live
+// holdsLive reports whether text holds the moment F saw of one of ms, by one
+// of its rules (any, where it has none), by which it does not name the
+// recorded moment too.
+func (dc *DriftCache) holdsLive(text string, ms []echoMatch) bool {
+	for _, m := range ms {
+		if dc.namesApart(text, m.live, m.rec, m.rules) {
+			return true
+		}
 	}
-	return out
+	return false
+}
+
+// namesApart reports whether an instant text holds names m by a rule of
+// rules (any, nil) by which it does not name other (cuts).
+func (dc *DriftCache) namesApart(text string, m, other moment, rules map[cutRule]bool) bool {
+	if text == "" {
+		return false
+	}
+	for _, sp := range dc.spansOf(text) {
+		if !sp.keyed {
+			continue
+		}
+		h := sp.moment()
+		if cuts(h, m, func(c cutRule) bool {
+			if rules != nil && !rules[c] {
+				return false
+			}
+			return !cuts(h, other, func(d cutRule) bool { return d == c })
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 // heldIn are the moments texts hold, each read once per test (spansOf).
@@ -507,22 +576,6 @@ func (dc *DriftCache) heldIn(held *heldMoments, texts ...string) {
 			held.add(dc.spansOf(text))
 		}
 	}
-}
-
-// holdsInstant reports whether text holds, whole, one of instants, as
-// echoedInstants reads a place (heldMoments).
-func (dc *DriftCache) holdsInstant(text string, instants []moment) bool {
-	if len(instants) == 0 || text == "" {
-		return false
-	}
-	var held heldMoments
-	held.add(dc.spansOf(text))
-	for _, k := range instants {
-		if held.holds(k) {
-			return true
-		}
-	}
-	return false
 }
 
 // heldMoments are the moments a place's instants name: each keyed instant
@@ -558,7 +611,8 @@ func (h *heldMoments) addMoment(m moment) {
 // holds reports whether the place names m's moment: an instant of it, or,
 // for an instant, a time of day that is its own (as it writes it in its
 // zone, or in UTC), and, for a time of day, an instant whose own it is; each
-// at m's own precision, the place's finer instants cut to it (covers).
+// at m's own precision, the place's finer instants cut to it, or m, read
+// from a text, at the resolution of a coarser instant of the place (covers).
 func (h *heldMoments) holds(m moment) bool {
 	for _, held := range h.list {
 		if covers(held, m) {
@@ -569,10 +623,10 @@ func (h *heldMoments) holds(m moment) bool {
 }
 
 // holdsApart reports whether the place names m's moment (holds) by an
-// instant that does not also name other's: one instant, cut to a value's
-// precision by one rule, is one value, so an instant that names both the
+// instant that does not also name other's: an instant that names both the
 // moment a value was recorded with and the one F saw (one by truncation, the
-// other by rounding) is a copy of neither.
+// other by rounding) is, alone, a copy of neither, since an application cuts
+// one instant by one rule (oneCut reads such an instant beside another).
 func (h *heldMoments) holdsApart(m, other moment) bool {
 	for _, held := range h.list {
 		if covers(held, m) && !covers(held, other) {
@@ -623,7 +677,10 @@ var zoneOffsets = func() []int64 {
 // wall clock, read in UTC, stands from each instant the place holds (of a
 // time of day, around the day). A unit m is whole at, or, read in a zone a
 // quarter hour off, the hour (of a wall clock whole at the minute) or the
-// day (whole at the quarter hour). Only these can make the place hold m
+// day (whole at the quarter hour); and, of a moment read from a text, the
+// coarsest unit a held instant may stand for, where that is coarser (a value
+// built on it: its resolution, a coarser one it is whole at, a day where it
+// is whole at a quarter hour). Only these can make the place hold m
 // (covers), and each is read once, in order.
 func (h *heldMoments) zonesOf(m moment) []int64 {
 	unit := int64(m.res)
@@ -653,9 +710,29 @@ func (h *heldMoments) zonesOf(m moment) []int64 {
 				ds = append(ds, w, w-nsPerDay, w+nsPerDay)
 			}
 		}
+		// A moment read from a text may be finer than the held instant it
+		// is built on (covers): within the coarsest unit the held instant
+		// may stand for of it too, its resolution or a coarser one it is
+		// whole at, a day where it is whole at a quarter hour (some zone's
+		// midnight).
+		u := unit
+		if !m.typed {
+			hu := int64(held.res)
+			for _, d := range precisionUnits {
+				if x := int64(d); x > hu && whole(held.key.at, 0, x) && (!held.key.day || x < nsPerDay) {
+					hu = x
+				}
+			}
+			if whole(held.key.at, 0, int64(15*time.Minute)) {
+				hu = nsPerDay
+			}
+			if hu > u {
+				u = hu
+			}
+		}
 		for _, d := range ds {
 			for _, z := range zoneOffsets {
-				if z >= d-unit && z <= d+unit {
+				if z >= d-u && z <= d+u {
 					near[z] = true
 				}
 			}
@@ -676,9 +753,9 @@ func (h *heldMoments) zonesOf(m moment) []int64 {
 func (m moment) inZone(z int64) moment {
 	if m.key.day {
 		at := ((m.key.at-z)%nsPerDay + nsPerDay) % nsPerDay
-		return moment{key: instantKey{at: at, day: true}, wall: m.wall, res: m.res}
+		return moment{key: instantKey{at: at, day: true}, wall: m.wall, res: m.res, typed: m.typed}
 	}
-	return moment{key: instantKey{at: m.key.at - z}, wall: m.wall, res: m.res, zone: z, zoned: true}
+	return moment{key: instantKey{at: m.key.at - z}, wall: m.wall, res: m.res, zone: z, zoned: true, typed: m.typed}
 }
 
 // cut is at, in nanoseconds, cut to a whole u as a clock z ahead of UTC
@@ -695,35 +772,122 @@ func cut(at, z, u int64) (trunc, round int64) {
 // whole reports whether at is a whole u as a clock z ahead of UTC writes it.
 func whole(at, z, u int64) bool { return ((at+z)%u+u)%u == 0 }
 
-// covers reports whether held, an instant a place holds, names m's moment at
-// m's own precision: held truncated, or rounded, to a precision m has (its
-// resolution, or a coarser one of precisionUnits it is whole at), is m (a
-// stored second of a served millisecond, "…T11:14:16Z" of "1792667656473";
-// the same second written as milliseconds, "1792667656000"; a minute or a
-// day of it). Two instants are cut as a clock in UTC, in held's zone or in
-// m's zone writes them (a day is a zone's own); and an m of no zone (read in
-// UTC) is also held's own wall clock, cut (a date of a zoned instant's own
-// day, a DATETIME of its local time). A wall clock of a zone neither names
-// is the echo's to read, both ways (echoedInstants). Of a time of day
-// only its time of day is cut, to less than a day, and an instant's time of
-// day is the one it writes in its zone or in UTC. The precision is m's: a
-// finer m is no copy of a coarser held. Nothing is read from either's text
-// but its moment.
+// covers reports whether held, an instant a place holds, names m's moment
+// (cuts): by one rule or another. Nothing is read from either's text but its
+// moment.
 func covers(held, m moment) bool {
-	if held.key == m.key {
-		return true
-	}
-	units := func(at, z int64, day bool, visit func(u int64) bool) bool {
+	return held.key == m.key || cuts(held, m, func(cutRule) bool { return true })
+}
+
+// cutRule is one rule by which an instant a place holds names a value's
+// moment (cuts): which of the two is cut (the place's instant to the value's
+// precision, a coarser copy of it; or, finer, the value to the resolution of
+// the place's instant, a value built on it), how (rounded, or truncated), to
+// which unit, as a clock zone ahead of UTC writes it, and which readings of
+// the two moments meet (read). An application writes a value by one rule:
+// the echo takes a value for a copy of what it was given only where one rule
+// names the moment it was recorded with in what the recordings hold and the
+// moment F saw in what F served (oneCut).
+type cutRule struct {
+	finer bool
+	round bool
+	unit  int64
+	zone  int64
+	read  cutRead
+}
+
+// cutRead is which readings of the two moments a rule compares.
+type cutRead uint8
+
+const (
+	// readInstants: both as instants, cut as a clock zone ahead of UTC
+	// writes them.
+	readInstants cutRead = iota
+	// readWall: the one of no zone as the other's own wall clock, in the
+	// other's zone (a date or a DATETIME of a zoned instant's local time).
+	readWall
+	// readDayUTC and readDayOwn: a time of day against an instant's time of
+	// day, in UTC, or as the instant writes it in its zone.
+	readDayUTC
+	readDayOwn
+	// readDays: two times of day.
+	readDays
+)
+
+// cuts visits each rule (cutRule) by which held, an instant a place holds,
+// names m, a value's moment, and reports whether visit accepted one:
+//
+//   - coarser: held truncated, or rounded, to a unit of precisionUnits m is
+//     whole at is m (a stored second of a served millisecond, "…T11:14:16Z"
+//     of "1792667656473"; the same second written as milliseconds,
+//     "1792667656000"; a minute or a day of it; the instant itself, at the
+//     finest unit). A finer m is no copy of a coarser held this way;
+//   - finer, of a moment read from a text only (moment.typed): m truncated to
+//     a unit held stands for (its resolution or coarser, whole at it) that
+//     is longer than F's lead, which m is finer than, is held (a served date
+//     with the application's own time of day: "2026-10-23T09:00:00Z" of
+//     "2026-10-23").
+//
+// Two instants are cut as a clock in UTC, in held's zone or in m's zone
+// writes them (a day is a zone's own); an m of no zone (read in UTC) is also
+// held's own wall clock, cut (a date of a zoned instant's own day, a
+// DATETIME of its local time), and a held of no zone m's. A wall clock of a
+// zone neither names is the echo's to read (echoedPairs). Of a time of day
+// only its time of day is cut, to less than a day, and an instant's time of
+// day is the one it writes in its zone or in UTC.
+func cuts(held, m moment, visit func(cutRule) bool) bool {
+	finer := !m.typed
+	// coarser visits each unit m may be cut to in zone z: every unit m is
+	// whole at (below a day of a time of day), finer than its text's
+	// resolution too. A formatter that drops a fraction's trailing zeros
+	// writes one value at the resolution its digits happen to need
+	// ("…T11:14:16Z", then "…T11:14:16.784Z"), so a text's resolution is no
+	// bound on the unit its value was cut to; and a held instant cut to a
+	// finer unit m is whole at names m only where it names m at m's own.
+	coarser := func(at, z int64, day bool, each func(u int64) bool) bool {
 		for _, d := range precisionUnits {
 			u := int64(d)
-			if d < m.res || day && u >= nsPerDay || !whole(at, z, u) {
+			if day && u >= nsPerDay || !whole(at, z, u) {
 				continue
 			}
-			if visit(u) {
+			if each(u) {
 				return true
 			}
 		}
 		return false
+	}
+	// finerUnits visits each unit held's instant hat may stand for in zone
+	// z that the value's mat is finer than: held's resolution or coarser,
+	// hat whole at it and mat not (below a day of a time of day), and longer
+	// than F's lead. A read of the clock moves by the lead between record
+	// and F, so at a unit within it (a second, a minute) every read lands in
+	// another unit in F, and a value finer than an instant of such a unit
+	// is built on it no more than a read of the clock falls in it; at a
+	// longer one (an hour, a day) a read stays in one unit in both runs but
+	// where it crosses the unit's edge.
+	finerUnits := func(hat, mat, z int64, day bool, each func(u int64) bool) bool {
+		if !finer {
+			return false
+		}
+		for _, d := range precisionUnits {
+			u := int64(d)
+			if d < held.res || d <= FullRoundLead || day && u >= nsPerDay || !whole(hat, z, u) || whole(mat, z, u) {
+				continue
+			}
+			if each(u) {
+				return true
+			}
+		}
+		return false
+	}
+	// try visits c truncated where trunc is want, and rounded where round
+	// is.
+	try := func(c cutRule, trunc, round, want int64) bool {
+		if trunc == want && visit(c) {
+			return true
+		}
+		c.round = true
+		return round == want && visit(c)
 	}
 	ofDay := func(v, u int64) (int64, int64) {
 		t, r := cut(v, 0, u)
@@ -732,50 +896,131 @@ func covers(held, m moment) bool {
 	switch {
 	case !held.key.day && !m.key.day:
 		hz, mz := held.offset(), m.offset()
-		for _, z := range []int64{0, hz, mz} {
-			if units(m.key.at, z, false, func(u int64) bool {
+		// UTC, held's zone and m's, each once.
+		zones := []int64{0}
+		for _, z := range []int64{hz, mz} {
+			if z != 0 && (len(zones) == 1 || z != zones[1]) {
+				zones = append(zones, z)
+			}
+		}
+		for _, z := range zones {
+			if coarser(m.key.at, z, false, func(u int64) bool {
 				t, r := cut(held.key.at, z, u)
-				return t == m.key.at || r == m.key.at
+				return try(cutRule{unit: u, zone: z}, t, r, m.key.at)
+			}) {
+				return true
+			}
+			if finerUnits(held.key.at, m.key.at, z, false, func(u int64) bool {
+				t, _ := cut(m.key.at, z, u)
+				return t == held.key.at && visit(cutRule{finer: true, unit: u, zone: z})
 			}) {
 				return true
 			}
 		}
 		// m of no zone (read in UTC) may be held's own wall clock, cut: the
 		// date or time of day a zoned instant writes.
-		if !m.zoned && hz != 0 && units(m.key.at, 0, false, func(u int64) bool {
+		if !m.zoned && hz != 0 && coarser(m.key.at, 0, false, func(u int64) bool {
 			t, r := cut(held.key.at, hz, u)
-			return t+hz == m.key.at || r+hz == m.key.at
+			return try(cutRule{unit: u, zone: hz, read: readWall}, t+hz, r+hz, m.key.at)
+		}) {
+			return true
+		}
+		// And held of no zone m's: a date of no zone a zoned value's own day
+		// is built on.
+		if !held.zoned && mz != 0 && finerUnits(held.key.at, m.key.at+mz, 0, false, func(u int64) bool {
+			t, _ := cut(m.key.at, mz, u)
+			return t+mz == held.key.at && visit(cutRule{finer: true, unit: u, zone: mz, read: readWall})
 		}) {
 			return true
 		}
 	case held.key.day && m.key.day:
-		return units(m.key.at, 0, true, func(u int64) bool {
+		if coarser(m.key.at, 0, true, func(u int64) bool {
 			t, r := ofDay(held.key.at, u)
-			return t == m.key.at || r == m.key.at
+			return try(cutRule{unit: u, read: readDays}, t, r, m.key.at)
+		}) {
+			return true
+		}
+		return finerUnits(held.key.at, m.key.at, 0, true, func(u int64) bool {
+			t, _ := ofDay(m.key.at, u)
+			return t == held.key.at && visit(cutRule{finer: true, unit: u, read: readDays})
 		})
 	case held.key.day:
 		// A time of day held, an instant drifted: the instant's own time
 		// of day, as it writes it or in UTC.
-		for _, mt := range []int64{timeOfDay(m.key.at), m.wall} {
-			if units(mt, 0, true, func(u int64) bool {
+		for i, mt := range []int64{timeOfDay(m.key.at), m.wall} {
+			rd := []cutRead{readDayUTC, readDayOwn}[i]
+			if coarser(mt, 0, true, func(u int64) bool {
 				t, r := ofDay(held.key.at, u)
-				return t == mt || r == mt
+				return try(cutRule{unit: u, read: rd}, t, r, mt)
+			}) {
+				return true
+			}
+			if finerUnits(held.key.at, mt, 0, true, func(u int64) bool {
+				t, _ := ofDay(mt, u)
+				return t == held.key.at && visit(cutRule{finer: true, unit: u, read: rd})
 			}) {
 				return true
 			}
 		}
 	default:
 		// An instant held, a time of day drifted.
-		for _, ht := range []int64{timeOfDay(held.key.at), held.wall} {
-			if units(m.key.at, 0, true, func(u int64) bool {
+		for i, ht := range []int64{timeOfDay(held.key.at), held.wall} {
+			rd := []cutRead{readDayUTC, readDayOwn}[i]
+			if coarser(m.key.at, 0, true, func(u int64) bool {
 				t, r := ofDay(ht, u)
-				return t == m.key.at || r == m.key.at
+				return try(cutRule{unit: u, read: rd}, t, r, m.key.at)
+			}) {
+				return true
+			}
+			if finerUnits(ht, m.key.at, 0, true, func(u int64) bool {
+				t, _ := ofDay(m.key.at, u)
+				return t == ht && visit(cutRule{finer: true, unit: u, read: rd})
 			}) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// oneCut are the rules (cutRule) each of which names live, the moment F saw
+// in a value, by an instant of fside (what F served) and rec, the moment the
+// value was recorded with, by an instant of rside (what the recordings
+// hold); nil when none does: an application writes a value by one rule, so a copy of what it was
+// given was cut so in both runs. An instant may name both moments by two
+// rules (truncated and rounded), and is then a copy of neither alone; but
+// where another instant names the recorded moment by the rule it names F's
+// by, the value is a copy all the same (a neighbour recording F delivered,
+// within one unit of the recorded one). Of a finer value (one built on a
+// coarser instant) the two instants differ: one instant both runs' values
+// are built on is no change the value copied.
+func oneCut(fside, rside *heldMoments, rec, live moment) map[cutRule]bool {
+	byRule := map[cutRule][]instantKey{}
+	for _, hr := range rside.list {
+		cuts(hr, rec, func(c cutRule) bool {
+			byRule[c] = append(byRule[c], hr.key)
+			return false
+		})
+	}
+	if len(byRule) == 0 {
+		return nil
+	}
+	var rules map[cutRule]bool
+	for _, hf := range fside.list {
+		cuts(hf, live, func(c cutRule) bool {
+			for _, k := range byRule[c] {
+				if !c.finer || k != hf.key {
+					if rules == nil {
+						rules = map[cutRule]bool{}
+					}
+					rules[c] = true
+					break
+				}
+			}
+			return false
+		})
+	}
+	return rules
 }
 
 // timeOfDay is at's (UnixNano) time of day on its UTC day, in nanoseconds:

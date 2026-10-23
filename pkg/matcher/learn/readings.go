@@ -761,9 +761,10 @@ func nonASCIIRuns(s string) []string {
 // (v) cannot be learned as noise either, "" when it can: what its readings
 // cannot read (unparsed), or a word of what changed, in a declared form and
 // reading, that is no part of a clock read the lead moved and that appears
-// earlier in the test (at an earlier place: in its recorded value for a word
-// v held when recorded, its live value for one v holds now; in any payload
-// served or recorded earlier, either way). The words of what changed are
+// earlier in the test (at an earlier place, the test case's own request
+// among them: in its recorded value for a word v held when recorded, its
+// live value for one v holds now; in any payload served or recorded earlier,
+// either way). The words of what changed are
 // those v lost and gained, and every word of its runs (runsBy) in that
 // reading: ids it holds in another order, or once more, are words of what
 // changed too; a word at its own place on both sides is not. keploy cannot
@@ -780,7 +781,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		return v.unparsed
 	}
 	if echoed := dc.echoedIn(v, at, served, raw); len(echoed) > 0 {
-		where := dc.heldAt(liveOf(echoed), at, served, raw)
+		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
 		}
@@ -803,16 +804,15 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			return ""
 		}
 		for _, e := range served {
-			// The test case's own request is the echo's alone
-			// (Earlier.Given).
-			if e.Given {
-				continue
-			}
 			// The run's exchange (Earlier.Run) is an earlier place of every
-			// test of the set: the set's start-up's.
+			// test of the set: the set's start-up's. The test case's own
+			// request (Earlier.Given) is the test's earliest place.
 			where := "earlier in the test"
-			if e.Run {
+			switch {
+			case e.Run:
 				where = "in the test set's start-up"
+			case e.Given:
+				where = "in what the test case gave the application"
 			}
 			for _, s := range e.Seen {
 				// An answer's own clock stamp is no place a value came
