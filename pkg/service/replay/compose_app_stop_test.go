@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -50,12 +52,19 @@ func (c *composeInstr) MakeAgentReadyForDockerCompose(ctx context.Context) error
 	return c.prInstr.MakeAgentReadyForDockerCompose(ctx)
 }
 
-// composeHarness is the harness for a set of a docker compose stack kept
-// across sets, with c as its instrumentation.
+// composeHarness is the harness for a set of a docker compose stack, with c as
+// its instrumentation: a stack kept across sets (runServing), or one the set
+// brings up afresh (run).
 func composeHarness(t *testing.T, c *composeInstr) *prRun {
 	t.Helper()
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.config.CommandType = string(utils.DockerCompose)
+	// A set that brings its stack up afresh (run: serveTest false) waits for
+	// the agent in it to answer /health before anything else; with nothing
+	// there the wait lasts until prTimeout ends the run.
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(agent.Close)
+	h.replayer.config.Agent.AgentURI = agent.URL
 	c.prInstr = h.instr
 	h.replayer.instrumentation = c
 	return h

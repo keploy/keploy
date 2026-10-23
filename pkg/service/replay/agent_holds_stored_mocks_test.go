@@ -1217,6 +1217,21 @@ func chargedStartedAgain(h *prRun) int {
 	return n
 }
 
+// composeStacks are the two ways a compose set gets its stack, each a run of
+// the set: the stack kept across sets (serveTest), whose first bring-up these
+// sets are, as keploy test runs every compose set that mocks (composeReuse);
+// and one the set brings up afresh (serveTest false), which RunTestSet marks
+// and rebases on its own path (keploy test takes it for compose today only
+// with mocking off, which reads no losses). The bases and the agent's
+// replacement must come out the same on both.
+var composeStacks = []struct {
+	name string
+	run  func(*prRun, *testing.T) models.TestSetStatus
+}{
+	{"the stack kept across sets", (*prRun).runServing},
+	{"a stack the set brings up afresh", (*prRun).run},
+}
+
 // Under the proven switch, compose's bring-up retry on its normal path: the
 // retry starts the agent again while the app's container is only created
 // (never started), and the client sets the replacement up again, mocks and
@@ -1225,23 +1240,52 @@ func chargedStartedAgain(h *prRun) int {
 // never ran against a1, and nothing was lost: the set is judged, and passes.
 func TestUnderTheSwitchTheRetrysAgentSetUpAgainLeavesTheSetJudged(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	for _, stack := range composeStacks {
+		t.Run(stack.name, func(t *testing.T) {
+			h, f := retryHarness(t)
+			core, logs := observer.New(zapcore.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			f.retryAtReady = true
+			s := stack.run(h, t)
+			if !f.replaced {
+				t.Fatal("premise: the retry did not start the agent again at MakeAgentReady")
+			}
+			if n := chargedStartedAgain(h); s != models.TestSetStatusPassed || n != 0 {
+				t.Fatalf("%s, %d of 2 tests charged the agent started again (reason %q); want PASSED, judged: the app never ran against a1",
+					s, n, h.report.report.FailureReason)
+			}
+			// The log says so, naming both agent processes.
+			said := logs.FilterMessageSnippet("bring-up retry before the application ever ran").
+				FilterField(zap.String("agent replaced", "a1")).FilterField(zap.String("agent", "b2"))
+			if said.Len() != 1 {
+				t.Fatalf("%d logs say the retry's agent counts from its start, naming a1 and b2; want 1", said.Len())
+			}
+		})
+	}
+}
+
+// Under the proven switch, each set bringing its compose stack up afresh: the
+// second set's stack is another, with an agent process of its own (b2), and
+// keploy starts the app anew under it. a1 counted a process of set 1's app it
+// could not place; that app and a1 went with set 1's stack, so set 2 counts
+// from b2's start and is judged on it: it passes, no test charged a1's loss
+// or the agent started again. Set 1 is charged its own loss.
+func TestUnderTheSwitchASetsOwnComposeStackCountsFromItsAgentsStart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	h, f := retryHarness(t)
-	core, logs := observer.New(zapcore.InfoLevel)
-	h.replayer.logger = zap.New(core)
-	f.retryAtReady = true
-	s := h.runServing(t)
-	if !f.replaced {
-		t.Fatal("premise: the retry did not start the agent again at MakeAgentReady")
+	f.lost, f.lossAfterReady = models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}, true
+	if s, n := h.run(t), chargedWith(h, models.CaptureLossPIDMap); s != models.TestSetStatusFailed || n != 2 {
+		t.Fatalf("set 1: %s, %d of 2 tests charged pid_map_refused; want FAILED, both: its app lost a process under a1", s, n)
 	}
-	if n := chargedStartedAgain(h); s != models.TestSetStatusPassed || n != 0 {
-		t.Fatalf("%s, %d of 2 tests charged the agent started again (reason %q); want PASSED, judged: the app never ran against a1",
-			s, n, h.report.report.FailureReason)
-	}
-	// The log says so, naming both agent processes.
-	said := logs.FilterMessageSnippet("bring-up retry before the application ever ran").
-		FilterField(zap.String("agent replaced", "a1")).FilterField(zap.String("agent", "b2"))
-	if said.Len() != 1 {
-		t.Fatalf("%d logs say the retry's agent counts from its start, naming a1 and b2; want 1", said.Len())
+	// Set 1's stack is down; set 2's comes up with an agent of its own.
+	f.mu.Lock()
+	f.agent, f.counts, f.lossAfterReady = "b2", nil, false
+	f.mu.Unlock()
+	resetResults(h)
+	s := h.run(t)
+	if lost, again := chargedWith(h, models.CaptureLossPIDMap), chargedStartedAgain(h); s != models.TestSetStatusPassed || lost != 0 || again != 0 || h.replayer.notJudged("test-set-0") {
+		t.Fatalf("set 2: %s, %d tests charged pid_map_refused, %d the agent started again (reason %q); want PASSED, judged on b2's counts from its start",
+			s, lost, again, h.report.report.FailureReason)
 	}
 }
 
@@ -1262,26 +1306,28 @@ func TestUnderTheSwitchAnAgentReplacedAfterTheAppStartedDoesNotForgetItsStartupL
 		if replaced {
 			name = "replaced during the readiness wait"
 		}
-		t.Run(name, func(t *testing.T) {
-			h, f := retryHarness(t)
-			f.lost, f.lossAfterReady, f.replaceAtCheck = lost, true, replaced
-			s := h.runServing(t)
-			if replaced != f.replaced {
-				t.Fatalf("premise: replaced %v, want %v", f.replaced, replaced)
-			}
-			charged, n := chargedWith(h, models.CaptureLossPIDMap), chargedStartedAgain(h)
-			if !replaced {
-				if s != models.TestSetStatusFailed || charged != 2 {
-					t.Fatalf("%s, %d of 2 tests charged pid_map_refused; want FAILED, both", s, charged)
+		for _, stack := range composeStacks {
+			t.Run(name+", "+stack.name, func(t *testing.T) {
+				h, f := retryHarness(t)
+				f.lost, f.lossAfterReady, f.replaceAtCheck = lost, true, replaced
+				s := stack.run(h, t)
+				if replaced != f.replaced {
+					t.Fatalf("premise: replaced %v, want %v", f.replaced, replaced)
 				}
-				return
-			}
-			if s != models.TestSetStatusInternalErr || n != 2 || !h.replayer.notJudged("test-set-0") {
-				t.Fatalf("%s, %d of 2 tests charged the agent started again; want INTERNAL_ERR, not judged, both: the app started under a1, which is gone with what it counted", s, n)
-			}
-			if reason := h.report.report.FailureReason; !strings.Contains(reason, "agent process a1, then b2") {
-				t.Fatalf("reason %q; want it to name both agent processes", reason)
-			}
-		})
+				charged, n := chargedWith(h, models.CaptureLossPIDMap), chargedStartedAgain(h)
+				if !replaced {
+					if s != models.TestSetStatusFailed || charged != 2 {
+						t.Fatalf("%s, %d of 2 tests charged pid_map_refused; want FAILED, both", s, charged)
+					}
+					return
+				}
+				if s != models.TestSetStatusInternalErr || n != 2 || !h.replayer.notJudged("test-set-0") {
+					t.Fatalf("%s, %d of 2 tests charged the agent started again; want INTERNAL_ERR, not judged, both: the app started under a1, which is gone with what it counted", s, n)
+				}
+				if reason := h.report.report.FailureReason; !strings.Contains(reason, "agent process a1, then b2") {
+					t.Fatalf("reason %q; want it to name both agent processes", reason)
+				}
+			})
+		}
 	}
 }
