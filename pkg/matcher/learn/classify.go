@@ -835,21 +835,16 @@ func (dc *DriftCache) ofInBy(rec, live string, w *Window, lead bool) *valueDrift
 	// read's colon). What the reads are, as the value stands, is d.clock's
 	// pairs (clockInBy of the raw value, before the merges): what its words
 	// collapse (words.go).
-	read := d.clock.read
 	dclock := d.clock
 	if d.decoded {
 		dclock = clockInBy(d.decRec, d.decLive, w, lead)
 		merge(dclock)
-		read = read || dclock.read
 	}
 	forms, _, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
 	for _, f := range forms[1:] {
-		c := clockInBy(f[0], f[1], w, lead)
-		merge(c)
-		read = read || c.read
+		merge(clockInBy(f[0], f[1], w, lead))
 	}
-	d.clock.read = read
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
 		d.clock.whole = d.clock.whole || dclock.whole

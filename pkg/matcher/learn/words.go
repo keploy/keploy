@@ -1396,8 +1396,8 @@ func runTexts(t wtoks) []wordRun {
 	for g, sg := range t.segs {
 		if sg.inst >= 0 {
 			out = append(out, wordRun{text: t.text(g), instant: true})
-			continue
 		}
+		// (An instant's segment holds no runs.)
 		for j := range sg.runs {
 			out = append(out, wordRun{text: t.runText(g, j)})
 		}

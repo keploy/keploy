@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
@@ -104,6 +105,7 @@ func TestWhatEachSlotAdmits(t *testing.T) {
 		{"a run among others", "id ab-12-cd", "id ab-34-cd", "s1r1", map[string]bool{
 			"id ab-99-cd": true, "id ab-x9Y-cd": true, "id ab-9.9-cd": false, "id ab-9-9-cd": false, "id ab--cd": false, "id ab-99-ce": false, "id ab_99-cd": false,
 			"id ab-99-cd.": false, "id ab-99-cd-": false, "id .ab-99-cd": false,
+			"id ab-é9-cd": false, "id ab-9é-cd": false,
 		}},
 		// The segment's runs are counted: a run added after the slot, or
 		// before it, is a word that was not there, never compared.
@@ -188,6 +190,11 @@ func TestAnAcceptedClockReadIsOneInstantSlot(t *testing.T) {
 		{"an instant after a '-'", "iso8601", "ref x-" + wAt.Format(time.RFC3339), "ref x-" + later.Format(time.RFC3339), "s2i:iso8601:d4-d2-d2Td2:d2:d2FZ",
 			[]string{"ref x-" + other.Format(time.RFC3339)},
 			[]string{"ref y-" + other.Format(time.RFC3339), "ref x_" + other.Format(time.RFC3339)}},
+		// An instant is read at its own segment alone: one that moved to the next
+		// segment is red.
+		{"an instant between words", "iso8601", "at " + wAt.Format(time.RFC3339) + " x", "at " + later.Format(time.RFC3339) + " x", "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ",
+			[]string{"at " + other.Format(time.RFC3339) + " x"},
+			[]string{"at x " + other.Format(time.RFC3339), "x " + other.Format(time.RFC3339) + " at"}},
 		// Two instants with nothing between them are two reads, in order.
 		{"two instants with nothing between them", "jsdate", wAt.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(wAt.Unix(), 10),
 			later.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)" + strconv.FormatInt(later.Unix(), 10),
@@ -684,6 +691,7 @@ func TestGluedContainment(t *testing.T) {
 func TestTieOf(t *testing.T) {
 	later := wAt.Add(FullRoundLead)
 	v7, v7f := uuid7Of(wAt, "abc123456789abcdef", 'a', false), uuid7Of(later, "def0123456789abcde", 'b', false)
+	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	for _, tc := range []struct {
 		name  string
 		a, b  [2]string
@@ -729,6 +737,11 @@ func TestTieOf(t *testing.T) {
 		// A UUID's random part is no clock's: a value that carries a part of it is
 		// glued inside it.
 		{"a word inside a UUID's random group", [2]string{v7, v7f}, [2]string{"x123", "x012"}, TiePartial, models.RefusedContainment},
+		// A whole epoch second standing whole in another's base64 text (a JWT's
+		// iat) is a whole value repeated, which no glued piece finds: a tie.
+		{"a JWT whose iat is an epoch second at another place", [2]string{"1760436042", "1760436103"},
+			[2]string{"Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436042}`) + "." + b64u("\x01\x02\x03\xfe\xff"), "Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436103}`) + "." + b64u("\x07\x08\x09\xfa\xfb")},
+			TiePartial, models.RefusedTie},
 	} {
 		if got := NewDriftCache().TieOf(tc.a, tc.b, nil); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
@@ -902,6 +915,48 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 	}
 }
 
+// A value that is red says what of it did not hold: an instant where one
+// was recorded with none, and a run alone in its segment left empty between
+// its separators.
+func TestWhyAValueIsRed(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	other := wAt.Add(5 * time.Hour)
+	ep := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	for _, tc := range []struct{ rec, f, live, why string }{
+		{"t ab-1 at " + ep(wAt), "t ab_c-2 at " + ep(later), "t " + ep(other) + " at q", "it holds an instant where it was recorded with none"},
+		{"k=-v1-", "k=-v2-", "k=--", "a word of it learned to change holds more than an ASCII token"},
+		{"k=-v1-", "k=-v2-", "k=-x", "a separator beside a word of it learned to change is not the one recorded"},
+		{"id ab-12-cd", "id ab-34-cd", "id ab-é9-cd", "a word of it learned to change holds more than ASCII letters and digits"},
+		{"id ab-12-cd", "id ab-34-cd", "id ab-99-ce", "a word of it that is not learned to change changed"},
+		{"id ab-12-cd", "id ab-34-cd", "id ab-99_cd", "a separator beside a word of it is not the one recorded"},
+		{"id ab-12-cd.", "id ab-34-cd.", "id ab-99-cd!", "a separator beside a word of it is not the one recorded"},
+	} {
+		e := learnedWords(t, tc.rec, tc.f)
+		if ok, why := WordsAdmit(tc.rec, tc.live, e); ok || why != tc.why {
+			t.Errorf("%q (recorded %q): admitted %v (%q), want %q", tc.live, tc.rec, ok, why, tc.why)
+		}
+	}
+}
+
+// The ways WordsAdmit tries to place a value's instants count only the
+// matches a later layout's earlier choices left free: sixteen instants with
+// a time of day inside each, and one more time of day, place an instant and
+// a time of day in 16 x 16 = 256 ways, the last of them the recorded one's.
+func TestTheWaysToPlaceInstantsSkipWhatAnEarlierLayoutTook(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	var static []string
+	for i := 0; i < 15; i++ {
+		static = append(static, wAt.Add(-time.Duration(i+1)*time.Hour).Format(time.DateTime))
+	}
+	pre := strings.Join(static, " / ") + " / "
+	rec := pre + wAt.Format(time.DateTime) + " / at " + wAt.Format(time.TimeOnly)
+	f := pre + later.Format(time.DateTime) + " / at " + later.Format(time.TimeOnly)
+	e := learnedWords(t, rec, f)
+	if got := slotsOf(e); got != "s60i:iso8601:d4-d2-d2 d2:d2:d2F s62i:timeofday:d2:d2:d2F" {
+		t.Fatalf("slots %s", got)
+	}
+}
+
 // An instant slot names the layout its segment collapses by: one moved to a
 // plain segment, even of the first layout's name, and two whose layouts
 // swapped, are void.
@@ -927,6 +982,13 @@ func TestAnInstantSlotNamesItsSegmentsLayout(t *testing.T) {
 	swapped.Slots[0].Skeleton, swapped.Slots[1].Skeleton = swapped.Slots[1].Skeleton, swapped.Slots[0].Skeleton
 	if ok, why := WordsAdmit(rec2, f2, swapped); ok || why != whyRange {
 		t.Errorf("two instant slots whose layouts swapped: admitted %v (%q), want void %q", ok, why, whyRange)
+	}
+	// Live, an instant of another layout at a slot's segment is not where
+	// the slot's was recorded.
+	other := wAt.Add(5 * time.Hour)
+	live := "from " + strconv.FormatInt(other.Unix(), 10) + " ts " + other.Format(time.RFC3339)
+	if ok, why := WordsAdmit(rec2, live, e2); ok || why != "an instant of it is not where it was recorded, in its layout" {
+		t.Errorf("two instants of two layouts swapped: admitted %v (%q)", ok, why)
 	}
 }
 

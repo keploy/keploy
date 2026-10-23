@@ -23,10 +23,7 @@ const FullRoundLead = 61500 * time.Millisecond
 type clockSet struct {
 	rec, live map[string]bool
 	whole     bool
-	// read: a clock read moved in the value (merged, DriftCache.ofIn: in
-	// any of its declared forms).
-	read  bool
-	reads []models.ClockRead
+	reads     []models.ClockRead
 	// pairs are the accepted reads of the value as it stands (not merged:
 	// clockInBy of these two texts), where each stands recorded and live,
 	// in the order they stand in the recorded value: what the value's words
@@ -381,7 +378,6 @@ func clockInBy(recorded, live string, w *Window, lead bool) clockSet {
 		}
 	}
 	c.whole = c.whole && changed
-	c.read = len(c.reads) > 0
 	return c
 }
 
