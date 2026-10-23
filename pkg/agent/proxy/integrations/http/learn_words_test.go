@@ -478,6 +478,9 @@ func TestAVariableBindsOnlyAValueItsWordsAdmit(t *testing.T) {
 	}
 }
 
+// formCT is a form body's content type.
+var formCT = map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+
 // The learn step's ties between the places it learned words at (r9 §2, §8):
 // twins are one call-local variable, instants are exempt, two values equal
 // only when recorded are two values, and a partial tie, a glued piece, an
@@ -496,6 +499,7 @@ func TestTheLearnPlansTies(t *testing.T) {
 		rec, f   string
 		fpath    string
 		given    []variables.Binding
+		ct       map[string]string
 		refused  string
 		class    string
 		words    []string
@@ -511,6 +515,12 @@ func TestTheLearnPlansTies(t *testing.T) {
 			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "(N8)", class: models.RefusedContainment},
 		{name: "a test case's value as a word of a place", method: "POST", path: "/a", rec: `{"note":"note INV1042 paid"}`, f: `{"note":"note INV2077 paid"}`,
 			given: []variables.Binding{{Name: "inv", Recorded: "INV1042", Value: "INV2077", Given: true}}, refused: "(N8)", class: models.RefusedTie},
+		// Twins are one variable of the call, which binds only at a place a
+		// variable can stand: two form fields that held one value are
+		// refused, never learned apart (each place's own words would let
+		// the two take two values).
+		{name: "twins in a form", method: "POST", path: "/a", rec: "a=k1x9q2&b=k1x9q2", f: "a=z7m3w8&b=z7m3w8", ct: formCT, refused: "a form or multipart field", class: models.RefusedTie},
+		{name: "twins, a JSON field and one of an empty key", method: "POST", path: "/a", rec: `{"a":"o-1111","b":{"":"o-1111"}}`, f: `{"a":"o-9999","b":{"":"o-9999"}}`, refused: "cannot follow a variable to", class: models.RefusedTie},
 		{name: "no tie rule: a separator changed", method: "POST", path: "/a", rec: `{"note":"a, b"}`, f: `{"note":"a ,b"}`, refused: "no word in it is new", class: ""},
 		{name: "createdAt = updatedAt", method: "POST", path: "/a",
 			rec:   `{"createdAt":"` + learnAt.Format(time.RFC3339) + `","updatedAt":"` + learnAt.Format(time.RFC3339) + `"}`,
@@ -523,7 +533,7 @@ func TestTheLearnPlansTies(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
-			m := learnRecorded("mock-0", 0, tc.method, tc.path, tc.rec, nil, `{"ok":true}`)
+			m := learnRecorded("mock-0", 0, tc.method, tc.path, tc.rec, tc.ct, `{"ok":true}`)
 			fpath := tc.fpath
 			if fpath == "" {
 				fpath = tc.path
@@ -532,7 +542,7 @@ func TestTheLearnPlansTies(t *testing.T) {
 			if tc.given != nil {
 				db.table.Start(tc.given)
 			}
-			served, miss, err := h.learnMatch(context.Background(), live(tc.method, fpath, tc.f, nil), db, n, opts)
+			served, miss, err := h.learnMatch(context.Background(), live(tc.method, fpath, tc.f, tc.ct), db, n, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
