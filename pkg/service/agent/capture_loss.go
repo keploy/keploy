@@ -172,9 +172,17 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 // cannot capture at all is counted from the hooks' load, not the session's
 // start -- the application may open its Unix-socket connection before its
 // first test claims the session, and every test after that rides on it
-// (decision 20) -- and every other kind from the run's mark.
+// (decision 20) -- and every other kind from the run's mark, a process that
+// outlives the application (a refused exclusion) among them: one an earlier
+// session of this agent counted is not this run's.
 func sinceRun(now models.CaptureLosses, mark captureLossMark) models.CaptureLosses {
-	return now.SinceWithin(mark.at, mark.at, nil)
+	return now.SinceWithin(runBases(mark))
+}
+
+// runBases are the bases of a session's losses (models.LossBases): its mark
+// for each kind, but the hooks' load for what keploy cannot capture at all.
+func runBases(mark captureLossMark) models.LossBases {
+	return models.LossBases{Set: mark.at, App: mark.at, Run: mark.at}
 }
 
 // captureLossesSince is what a test is charged as it ends (models.Charged):
@@ -213,5 +221,5 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, te
 	if test == nil {
 		test = mark.at
 	}
-	return now.Charged(mark.at, mark.at, nil, test), now, nil
+	return now.Charged(runBases(mark), test), now, nil
 }

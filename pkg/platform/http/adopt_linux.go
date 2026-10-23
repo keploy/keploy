@@ -411,17 +411,25 @@ type member struct {
 //
 // It returns why it had to kill a daemon that made no progress on its way
 // out, "" when it did not, or when the kill was the user's (Ctrl+C): a
-// shutdown that kill cut is not known. Each step the daemons take on their
+// shutdown that kill cut is not known; and what of the daemons it left
+// running (leftRunning), "" when none. Each step the daemons take on their
 // way out is a movement of moved, the teardown scope of the run whose app
 // left them (nil: none).
-func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) string {
+func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) (why, left string) {
 	if !adopting.Load() {
-		return ""
+		return "", ""
 	}
-	daemons := adoptedRunning(logger)
-	if len(daemons) == 0 {
-		return ""
+	daemons, unseen := adoptedRunning(logger)
+	var held []int
+	if len(daemons) > 0 {
+		why, held = stopAll(logger, daemons, reached, moved)
 	}
+	return why, leftRunning(unseen, held)
+}
+
+// stopAll stops daemons as stopAdopted does: why it had to kill one, and the
+// ones the kernel holds after their kill.
+func stopAll(logger *zap.Logger, daemons []int, reached []utils.Reached, moved *utils.TeardownScope) (string, []int) {
 	end := utils.BeginDaemonStop()
 	defer end()
 	ms := members(daemons)
@@ -431,6 +439,20 @@ func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.Teard
 		}
 	}()
 	return stopMembers(logger, ms, actingOn(reached), moved)
+}
+
+// leftRunning says what of the application's daemons a stop left running:
+// those keploy cannot see (unseen), which it does not stop, and those the
+// kernel holds after their kill (held). "" where none was.
+func leftRunning(unseen, held []int) string {
+	var parts []string
+	if len(unseen) > 0 {
+		parts = append(parts, fmt.Sprintf("daemons keploy cannot see (pids %v)", unseen))
+	}
+	if len(held) > 0 {
+		parts = append(parts, fmt.Sprintf("daemons the kernel holds after their kill (pids %v)", held))
+	}
+	return strings.Join(parts, " and ")
 }
 
 // actingOn is whether a member is acting on keploy's interrupt: reached by
@@ -448,17 +470,16 @@ func actingOn(reached []utils.Reached) func(member) bool {
 // adoptedRunning is this process's children that it adopted (no pidfd of its
 // own names them) and that run, but keploy itself (an agent whose sudo is
 // gone), what an earlier stop left to the kernel, and what this user may not
-// see, which it says.
-func adoptedRunning(logger *zap.Logger) []int {
+// see, which it says, and returns apart (unseen): it leaves those running.
+func adoptedRunning(logger *zap.Logger) (pids, unseen []int) {
 	children := childPids()
 	held, err := heldPidfds()
 	if err != nil {
 		failedClosed(logger, err)
-		return nil // which are its own cannot be told: stop none
+		return nil, nil // which are its own cannot be told: stop none
 	}
 	self, selfErr := os.Stat("/proc/self/exe")
 	me := os.Getpid()
-	var pids []int
 	for _, pid := range children {
 		st, ok := utils.ReadProcStat(pid)
 		if !ok || st.PPID != me || st.State == 'Z' || held[pid] {
@@ -471,6 +492,7 @@ func adoptedRunning(logger *zap.Logger) []int {
 		if err != nil {
 			logger.Info("keploy cannot see what a daemon the application left running is (it is not dumpable, or another user's), and leaves it running",
 				zap.Int("pid", pid), zap.Error(err))
+			unseen = append(unseen, pid)
 			continue
 		}
 		if selfErr == nil && os.SameFile(exe, self) {
@@ -478,7 +500,7 @@ func adoptedRunning(logger *zap.Logger) []int {
 		}
 		pids = append(pids, pid)
 	}
-	return pids
+	return pids, unseen
 }
 
 // members is each daemon of pids and every process it runs, now, each named
@@ -523,7 +545,7 @@ func members(pids []int) []member {
 // press of Ctrl+C the stop offers), and waits until each has exited, or is
 // held by the kernel without progress for as long. stallKill says why it
 // killed for want of progress; "" when it did not.
-func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string) {
+func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string, held []int) {
 	pids := make([]int, 0, len(ms))
 	var stopping []int
 	for _, m := range ms {
@@ -597,6 +619,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 					leftToKernel.Store([2]uint64{uint64(m.pid), m.start}, true)
 				}
 			}
+			held = left
 			return
 		}
 		// A kill cuts the way out of a process that was on one: one acting

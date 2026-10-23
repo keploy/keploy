@@ -77,11 +77,17 @@ func TestACaptureLossBetweenTestsChargesTheNext(t *testing.T) {
 
 // What was lost before the run's session began is not the run's.
 func TestACaptureLossBeforeTheSessionIsNotTheRuns(t *testing.T) {
-	a, _ := wireAgent(t, models.MODE_TEST)
-	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 9}}
-	require.NoError(t, a.resetSession(context.Background()))
-	claimSelf(t, a)
-	require.Empty(t, endPassed(t, a, "TestA").Action)
+	// A refusal of either map: an excluded one's process outlives the
+	// application, but one an earlier session of this agent counted is not
+	// this run's either.
+	for _, refusals := range []models.PIDMapRefusals{{Target: 9}, {Excluded: 9}} {
+		a, _ := wireAgent(t, models.MODE_TEST)
+		a.Hooks = countingHooks{refusals: refusals}
+		require.NoError(t, a.resetSession(context.Background()))
+		claimSelf(t, a)
+		e := endPassed(t, a, "TestA")
+		require.Empty(t, e.Action, "%+v before the session failed its first test: %s", refusals, e.Reason)
+	}
 }
 
 // A record never fails a test: the loss goes on the window, for judging, and
@@ -248,11 +254,11 @@ func TestTwoSourcesOfOneKindAreOneCount(t *testing.T) {
 		{Kind: models.CaptureLossKernelSkip, Count: 7, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"},
 	}, got)
 	// Nothing grew: nothing is charged.
-	require.Empty(t, got.Charged(got, got, got, got))
+	require.Empty(t, got.Charged(models.SameBases(got), got))
 	own[0].Count++
 	again, err := a.CaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 1, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"}}, again.Charged(got, got, got, got))
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 1, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"}}, again.Charged(models.SameBases(got), got))
 
 	// With hooks and a proxy that count nothing, the reporter's count is
 	// the agent's: never "unsupported".

@@ -591,14 +591,20 @@ type Replayer struct {
 	lossRunBase    models.CaptureLosses
 	lossRunBaseSet bool
 	// lossAppBase is the capture-loss mark the running application started
-	// after, from which a process lost for as long as its application runs
-	// (models.CaptureLossKind.AppLife) is counted: the set's mark where the
-	// set starts its application, an earlier set's where the application
-	// was kept running (--keep-app-alive); nil (the hooks' load) for an
-	// application keploy did not start. lossAppKept says the set that just
-	// ended left its application running for the next.
-	lossAppBase models.CaptureLosses
-	lossAppKept bool
+	// after, from which a process of the application's keploy could not
+	// place (models.CaptureLossKind.AppLife) is counted: moved only where
+	// keploy starts an application anew (appStartsAnew), so an application
+	// kept running across sets (--keep-app-alive) keeps it; nil (the hooks'
+	// load) for an application keploy did not start. lossAppRunsOn says the
+	// last set's stop did not end its application, which then runs on under
+	// the next set's start, with what it lost.
+	lossAppBase   models.CaptureLosses
+	lossAppRunsOn bool
+	// lossRunStart is the run's first capture-loss mark, from which a process
+	// that outlives the application is counted (a refused exclusion);
+	// lossRunStartSet, whether it was taken.
+	lossRunStart    models.CaptureLosses
+	lossRunStartSet bool
 	// setEnd is how the final report of the test set RunTestSet is running
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd); setEndCalls, the calls it charged to the set
@@ -931,7 +937,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// RunTestSet, which marks it there.
 	r.pidMarked, r.lossMarked = false, false
 	r.lossRunBase, r.lossRunBaseSet = nil, false
-	r.lossAppBase, r.lossAppKept = nil, false
+	r.lossAppBase, r.lossAppRunsOn = nil, false
+	r.lossRunStart, r.lossRunStartSet = nil, false
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
 	}
@@ -2023,8 +2030,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// not read.
 	composeHalted := false
 	// appStopKilled is that why, as the app's run returned it; read once the
-	// run has returned.
-	var appStopKilled string
+	// run has returned. appLeftRunning is what of the app its stop left
+	// running (models.AppError.LeftRunning), read then too.
+	var appStopKilled, appLeftRunning string
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -2242,6 +2250,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			stopAppBeforeSetEnd = func() string {
 				killed, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
 				r.composeAppStopped = true
+				// A stop that did not end the app (an error but its own
+				// exit) leaves it running, with what it lost, under the next
+				// set's start of it (a docker start of a running container).
+				r.lossAppRunsOn = serveTest && err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn)
 				switch {
 				case errors.Is(err, models.ErrAppExitedOnItsOwn):
 					// The app exited on its own before the set's end:
@@ -2571,15 +2583,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						stopApp(models.ErrAppStoppedForSetEnd)
 						select {
 						case <-appExited:
+							// Ended, but for what its stop left running,
+							// which runs on with what it lost.
+							r.lossAppRunsOn = appLeftRunning != ""
 							return appStopKilled
 						case <-runTestSetCtx.Done():
+							r.lossAppRunsOn = true // not known to have ended
 							return ""
 						}
 					}
 				}
 				// Under the proven switch: the listens the agent saw before
-				// this set's application starts are not this one's.
+				// this set's application starts are not this one's, nor what
+				// an earlier application's processes lost.
 				r.markReadiness(runTestSetCtx)
+				r.appStartsAnew()
 				runTestSetErrGrp.Go(func() error {
 					if appExited != nil {
 						defer close(appExited)
@@ -2588,7 +2606,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErr = r.RunApplication(appCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
-					appStopKilled = appErr.StopKilled
+					appStopKilled, appLeftRunning = appErr.StopKilled, appErr.LeftRunning
 					if appErr != (models.AppError{}) {
 						setLastAppErr(appErr)
 					}
@@ -2943,8 +2961,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.lossRunBase, r.lossRunBaseSet = nil, true
 		}
 		r.markCaptureLosses(runTestSetCtx)
-		// Nor what its processes lost: from the hooks' load, too.
-		r.lossAppBase = nil
+		// So is what its processes lost: keploy starts no application, so
+		// nothing moves lossAppBase from the hooks' load (nil).
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -5644,12 +5662,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Under the proven switch, what the agent lost after this set's last
 	// per-test read is the set's own, charged to none of its tests: the set
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
-	// next test set's tests count from here. The set's application runs on
-	// into the next set where keploy did not start it for this set: one kept
-	// alive across sets (serveTest), or one keploy does not start. (A compose
-	// stack's app keploy stops at the set's end is started again after a mark
-	// of its own, which the next set's processes count from.)
-	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx), serveTest || !r.instrument)
+	// next test set's tests count from here, and so does an application the
+	// next set starts anew (appStartsAnew).
+	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
 	lateJudged, lateNotJudged := late.Split()

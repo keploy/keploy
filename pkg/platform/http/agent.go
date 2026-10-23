@@ -1797,9 +1797,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 	appErrCh := make(chan models.AppError, 1)
 	// stopKilled is why the stop at a test set's end, or at a recording's
-	// end, had to kill the app (models.AppError.StopKilled), known once the
-	// app's run has returned.
-	var stopKilled string
+	// end, had to kill the app (models.AppError.StopKilled), and leftRunning
+	// what of its daemons the stop left running (models.AppError.LeftRunning),
+	// known once the app's run has returned.
+	var stopKilled, leftRunning string
 	defer func() {
 		err := runAppErrGrp.Wait()
 		if err != nil {
@@ -1807,6 +1808,11 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		}
 		if ret.AppErrorType == models.ErrCtxCanceled && stopKilled != "" {
 			ret.StopKilled = stopKilled
+		}
+		// On a run that ended with a type (a stop's, an exit's): a clean
+		// return carries no error to read it from.
+		if ret.AppErrorType != "" {
+			ret.LeftRunning = leftRunning
 		}
 	}()
 
@@ -1821,7 +1827,9 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		// stopping, and is not asked again when it acts on the interrupt.
 		// When the stop at a set's end had to kill one that made no
 		// progress on its way out, the run says so, as for the app.
-		if why := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx)); why != "" && stopKilled == "" {
+		why, left := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx))
+		leftRunning = left
+		if why != "" && stopKilled == "" {
 			switch {
 			case errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd):
 				stopKilled = "keploy interrupted the application at the set's end, and " + why

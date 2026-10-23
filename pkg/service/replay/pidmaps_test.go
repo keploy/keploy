@@ -1114,7 +1114,7 @@ func TestTheSetsTailLeavesPIDMapRefusalsToThePIDMapCheck(t *testing.T) {
 		{Kind: models.CaptureLossPIDMap, Count: 2}, {Kind: models.CaptureLossParserStall, Count: 1},
 	}}}
 	h.replayer.lossMark, h.replayer.lossMarked = captureLossMark{known: true}, true
-	late, err := h.replayer.endCaptureLosses(context.Background(), false)
+	late, err := h.replayer.endCaptureLosses(context.Background())
 	if err != nil || len(late) != 1 || late[0].Kind != models.CaptureLossParserStall {
 		t.Fatalf("the tail's losses %+v (%v), want the parser stall only", late, err)
 	}
@@ -1140,8 +1140,12 @@ func (c *composeLossInstr) GetCaptureLosses(ctx context.Context) (models.Capture
 // of the set's own (a parser's stall) stays with its set; where the next
 // set's application is started anew (keploy's per-set start, or a compose
 // stack's app keploy stops at each set's end and starts again), that set is
-// not charged it. One that predates the recording, which keploy could not
-// exclude, outlives the application too: every later set is charged it.
+// not charged it. A start that cannot be told to be anew keeps the base: the
+// set's stop did not end the application (a compose stop that failed, so the
+// next set's start of it was a docker start of a running container; or a
+// daemon of it the stop left running). One that predates the recording,
+// which keploy could not exclude, outlives the application too: every later
+// set is charged it.
 func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	stall := models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}
@@ -1176,6 +1180,21 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: answers}
 			return h
 		}
+		// compose is a compose stack's harness whose first set's stop of its
+		// app fails with stopErr (nil: it does not).
+		compose := func(stopErr error) func(t *testing.T) *prRun {
+			return func(t *testing.T) *prRun {
+				c := &composeInstr{stopErr: stopErr}
+				h := composeHarness(t, c)
+				h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: answers}}
+				return h
+			}
+		}
+		leftADaemon := func(t *testing.T) *prRun {
+			h := plain(t)
+			h.instr.leftRunning = "daemons keploy cannot see (pids [41])"
+			return h
+		}
 		for _, tc := range []struct {
 			name    string
 			harness func(t *testing.T) *prRun
@@ -1185,13 +1204,11 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 		}{
 			{"kept alive across sets", plain, true, false, true},
 			{"one keploy does not start", plain, false, true, true},
-			{"a compose stack's app started again for the next set", func(t *testing.T) *prRun {
-				c := &composeInstr{}
-				h := composeHarness(t, c)
-				h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: answers}}
-				return h
-			}, true, false, false},
+			{"a compose stack's app started again for the next set", compose(nil), true, false, false},
+			// The stop's failure leaves the first set unjudged too.
+			{"a compose stack's app whose stop failed", compose(errors.New("keploy could not interrupt the application's container: context deadline exceeded")), true, false, true},
 			{"started anew for each set", plain, false, false, false},
+			{"started anew, but its stop left a daemon running", leftADaemon, false, false, true},
 		} {
 			t.Run(string(lost.kind)+"/"+tc.name, func(t *testing.T) {
 				h := tc.harness(t)
@@ -1202,17 +1219,24 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				if tc.serving {
 					run = h.runServing
 				}
-				if status := run(t); status != models.TestSetStatusFailed {
-					t.Fatalf("the first set: status %s, want FAILED (its second test is tainted)", status)
+				wantFirst := models.TestSetStatusFailed // its second test is tainted
+				if c, ok := h.replayer.instrumentation.(*composeLossInstr); ok && c.stopErr != nil {
+					wantFirst = models.TestSetStatusInternalErr
+				}
+				if status := run(t); status != wantFirst {
+					t.Fatalf("the first set: status %s, want %s", status, wantFirst)
 				}
 				if p, s := charged(h); p != 1 || s != 1 {
 					t.Fatalf("the first set: %d tests charged the process, %d the stall; want one each", p, s)
 				}
 				// The next set has results of its own, as another test set's
-				// would (the harness runs one set's id).
+				// would (the harness runs one set's id); its own stop works.
 				h.report.mu.Lock()
 				h.report.results = nil
 				h.report.mu.Unlock()
+				if c, ok := h.replayer.instrumentation.(*composeLossInstr); ok {
+					c.stopErr = nil
+				}
 				want, wantStatus := 0, models.TestSetStatusPassed
 				if tc.kept || !lost.appLife {
 					want, wantStatus = 2, models.TestSetStatusFailed
@@ -1224,6 +1248,36 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Under the proven switch, an application keploy does not start (no -c), as
+// RunTestSet's first mark of such a run has it: the application was up before
+// keploy's first read, so a process of it keploy could not place is counted
+// from the hooks' load, and charged to every test, though it was lost before
+// that read.
+func TestUnderTheSwitchAnAppKeployDoesNotStartIsChargedFromTheHooksLoad(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppSubtreeUntracked, models.CaptureLossPIDMap} {
+		t.Run(string(kind), func(t *testing.T) {
+			losses := models.CaptureLosses{{Kind: kind, Count: 1, What: "the latest: pid 41 (worker)"}}
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{losses}}
+			h.replayer.config.Test.Mocking = true
+			h.replayer.instrument = false
+			status := h.run(t)
+			n := 0
+			for _, r := range h.report.report.Tests {
+				for _, c := range r.FailureInfo.CaptureIncomplete {
+					if c.Kind == kind {
+						n++
+					}
+				}
+			}
+			if status != models.TestSetStatusFailed || n != 2 {
+				t.Fatalf("status %s, %d of 2 tests charged %s; want FAILED, both: the process was lost before keploy's first read", status, n, kind)
+			}
+		})
 	}
 }
 

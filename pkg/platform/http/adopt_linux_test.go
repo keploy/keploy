@@ -589,7 +589,7 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	// The run's teardown scope: the slow daemon's steps on its way out move
 	// it, which the run's drains wait on.
 	scope := &utils.TeardownScope{}
-	why := stopAdopted(zap.New(core), nil, scope)
+	why, _ := stopAdopted(zap.New(core), nil, scope)
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("polite %d, deaf %d, busy %d, churn %d, slow %d", polite, deaf, busy, churn, slow)
@@ -661,7 +661,7 @@ func TestAPressKillsTheDaemonsAStopWaitsFor(t *testing.T) {
 		late, lateErr = startDaemon("exec sleep 120")
 		utils.MarkInterruptedAgain()
 	}()
-	why := stopAdopted(zap.New(core), nil, nil)
+	why, _ := stopAdopted(zap.New(core), nil, nil)
 	if lateErr != nil {
 		t.Fatal(lateErr)
 	}

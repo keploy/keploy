@@ -39,18 +39,18 @@ func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
 	prev := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 3, What: "to a:443"}}
 	now := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 3, What: "to a:443"}}
 	want := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}}
-	if got := now.Charged(run, run, run, prev); !reflect.DeepEqual(got, want) {
+	if got := now.Charged(SameBases(run), prev); !reflect.DeepEqual(got, want) {
 		t.Fatalf("no rejection since the previous test: Charged = %+v, want %+v (the PID map's taint only)", got, want)
 	}
 	now = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 5, What: "to b:443"}}
 	want = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}, {Kind: CaptureLossTLSAbort, Count: 2, What: "to b:443"}}
-	if got := now.Charged(run, run, run, prev); !reflect.DeepEqual(got, want) {
+	if got := now.Charged(SameBases(run), prev); !reflect.DeepEqual(got, want) {
 		t.Fatalf("two rejections since the previous test: Charged = %+v, want %+v", got, want)
 	}
 	// What keploy cannot capture at all (decision 20) is counted from the
 	// run's base, however far back it was made, as SinceWithin counts it.
 	unix := CaptureLosses{{Kind: CaptureLossUnixSocket, Count: 1}}
-	if got := unix.Charged(unix, unix, nil, unix); !reflect.DeepEqual(got, unix) {
+	if got := unix.Charged(LossBases{Set: unix, App: unix}, unix); !reflect.DeepEqual(got, unix) {
 		t.Fatalf("a Unix-socket call before the base: Charged = %+v, want %+v", got, unix)
 	}
 	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() || CaptureLossAppBytesLost.PerTest() {
@@ -70,10 +70,10 @@ func TestAnAbandonedHandshakeIsATestsOwnAndLeavesItNotJudged(t *testing.T) {
 	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n, What: "to a:443"}} }
 	// Abandoned before the set's mark: not the set's, whatever the run's
 	// base (a Unix-socket call before it would be).
-	if got := at(2).SinceWithin(at(2), at(2), nil); len(got) != 0 {
+	if got := at(2).SinceWithin(LossBases{Set: at(2), App: at(2)}); len(got) != 0 {
 		t.Fatalf("SinceWithin = %+v: one before the mark is not this set's", got)
 	}
-	if got := at(3).Charged(at(1), at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+	if got := at(3).Charged(LossBases{Set: at(1), App: at(1)}, at(2)); !reflect.DeepEqual(got, at(1)) {
 		t.Fatalf("Charged = %+v, want the one since the previous test", got)
 	}
 	judged, notJudged := at(1).Split()
@@ -189,11 +189,11 @@ func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
 	// The set's mark is after the connect; the run's base before it.
 	now := CaptureLosses{tls, unixAt(1)}
 	mark := CaptureLosses{tls, unixAt(1)}
-	got := now.SinceWithin(mark, mark, nil)
+	got := now.SinceWithin(LossBases{Set: mark, App: mark})
 	if len(got) != 1 || got[0].Kind != CaptureLossUnixSocket {
 		t.Fatalf("SinceWithin = %+v, want the Unix socket only, from the run's base", got)
 	}
-	if got := now.SinceWithin(mark, mark, CaptureLosses{unixAt(1)}); len(got) != 0 {
+	if got := now.SinceWithin(LossBases{Set: mark, App: mark, Run: CaptureLosses{unixAt(1)}, Capture: CaptureLosses{unixAt(1)}}); len(got) != 0 {
 		t.Fatalf("SinceWithin with the connect before the run's base = %+v, want nothing", got)
 	}
 }
@@ -210,7 +210,7 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 	if got := now.Since(now); len(got) != 1 || got[0] != unseen {
 		t.Fatalf("Since(itself) = %+v, want unix_unseen kept: a state, no mark takes it away", got)
 	}
-	if got := now.SinceWithin(now, now, now); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {
+	if got := now.SinceWithin(SameBases(now)); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {
 		t.Fatalf("SinceWithin = %+v, want unix_unseen", got)
 	}
 	judged, notJudged := now.Split()
@@ -240,7 +240,7 @@ func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
 	}
 	before := CaptureLosses{{Kind: k, Count: 2, What: "to 10.0.0.9:25"}}
 	now := CaptureLosses{{Kind: k, Count: 5, What: "to 10.0.0.9:25"}}
-	charged := now.Charged(nil, nil, nil, before)
+	charged := now.Charged(SameBases(nil), before)
 	if len(charged) != 1 || charged[0].Count != 3 {
 		t.Fatalf("charged %+v; want what passed in this test only", charged)
 	}
@@ -285,7 +285,7 @@ func TestAContainerReadTheDaemonDidNotAnswerLeavesItsTestNotJudged(t *testing.T)
 	at := func(n uint64) CaptureLosses {
 		return CaptureLosses{{Kind: k, Count: n, What: "container pg (postgres:16)"}}
 	}
-	if got := at(3).Charged(at(1), at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+	if got := at(3).Charged(LossBases{Set: at(1), App: at(1)}, at(2)); !reflect.DeepEqual(got, at(1)) {
 		t.Fatalf("Charged = %+v, want the one since the previous test", got)
 	}
 	judged, notJudged := at(1).Split()
@@ -331,13 +331,13 @@ func TestAKernelSkipIsEvidenceNotAVerdict(t *testing.T) {
 		t.Fatal("a skipped connection report covers every later test")
 	}
 	// Counted from the run's base: a test after the skip still carries it.
-	if got := at(k, 3).Charged(at(k, 3), at(k, 3), at(k, 1), at(k, 3)); !reflect.DeepEqual(got, at(k, 2)) {
+	if got := at(k, 3).Charged(LossBases{Set: at(k, 3), App: at(k, 3), Run: at(k, 1), Capture: at(k, 1)}, at(k, 3)); !reflect.DeepEqual(got, at(k, 2)) {
 		t.Fatalf("Charged = %+v, want what grew since the run began", got)
 	}
 	if !call.PerTest() || call.runScoped() {
 		t.Fatal("a skipped call's run is its test's own")
 	}
-	if got := at(call, 3).Charged(at(call, 1), at(call, 1), nil, at(call, 2)); !reflect.DeepEqual(got, at(call, 1)) {
+	if got := at(call, 3).Charged(LossBases{Set: at(call, 1), App: at(call, 1)}, at(call, 2)); !reflect.DeepEqual(got, at(call, 1)) {
 		t.Fatalf("Charged = %+v, want the one since the previous test", got)
 	}
 	for _, l := range []CaptureLosses{at(k, 1), at(call, 1)} {
@@ -402,7 +402,7 @@ func TestWhatADownstreamCaptureLostFailsTheTestsItTaints(t *testing.T) {
 		if tc.perTest {
 			want = at(2)
 		}
-		if got := at(5).Charged(at(2), at(1), nil, at(3)); !reflect.DeepEqual(got, want) {
+		if got := at(5).Charged(LossBases{Set: at(2), App: at(1)}, at(3)); !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s: Charged = %+v, want %+v", tc.k, got, want)
 		}
 		if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
@@ -416,13 +416,15 @@ func TestWhatADownstreamCaptureLostFailsTheTestsItTaints(t *testing.T) {
 
 // Each kind is charged from the base its loss lasts from: a test's own from
 // the previous test's end; a process of the application's keploy could not
-// place (AppLife) from the running application's start; a process that
-// outlives the application (one keploy could not classify, or could not
-// exclude: it predates the recording) from the run's; every other kind from
-// the set's.
+// place (AppLife) from the running application's start; one that outlives
+// the application (one keploy could not exclude: it predates the recording)
+// from the run's start; what keploy cannot capture at all, a process it
+// could not classify among it, from that base, however far back; every
+// other kind from the set's.
 func TestEachKindIsChargedFromTheBaseItsLossLastsFrom(t *testing.T) {
-	// Now 9; the run began at 1, the running application started at 3, the
-	// set at 5, and the previous test ended at 7.
+	// Now 9; the hooks loaded at 0 (what keploy cannot capture is counted
+	// from there), the run began at 1, the running application started at 3,
+	// the set at 5, and the previous test ended at 7.
 	for _, tc := range []struct {
 		k    CaptureLossKind
 		want uint64
@@ -432,20 +434,20 @@ func TestEachKindIsChargedFromTheBaseItsLossLastsFrom(t *testing.T) {
 		{CaptureLossPIDMap, 6},
 		{CaptureLossAppSubtreeUntracked, 6},
 		{CaptureLossPIDMapExcluded, 8},
-		{CaptureLossUnclassified, 8},
+		{CaptureLossUnclassified, 9},
 	} {
 		at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: tc.k, Count: n}} }
-		if got := at(9).Charged(at(5), at(3), at(1), at(7)); !reflect.DeepEqual(got, at(tc.want)) {
+		if got := at(9).Charged(LossBases{Set: at(5), App: at(3), Run: at(1), Capture: nil}, at(7)); !reflect.DeepEqual(got, at(tc.want)) {
 			t.Errorf("%s: Charged = %+v, want %d", tc.k, got, tc.want)
 		}
 	}
 	for _, k := range []CaptureLossKind{CaptureLossPIDMap, CaptureLossAppSubtreeUntracked} {
-		if !k.AppLife() || k.runScoped() || k.PerTest() {
-			t.Errorf("%s: AppLife %v, runScoped %v, PerTest %v; want application-life only", k, k.AppLife(), k.runScoped(), k.PerTest())
+		if !k.AppLife() || k.runLife() || k.runScoped() || k.PerTest() {
+			t.Errorf("%s: AppLife %v, runLife %v, runScoped %v, PerTest %v; want application-life only", k, k.AppLife(), k.runLife(), k.runScoped(), k.PerTest())
 		}
 	}
-	if CaptureLossPIDMapExcluded.AppLife() || CaptureLossPIDMapExcluded.NotJudged() || !CaptureLossPIDMapExcluded.runScoped() {
-		t.Error("pid_map_refused_excluded: want judged and run-scoped, not application-life")
+	if k := CaptureLossPIDMapExcluded; !k.runLife() || k.AppLife() || k.runScoped() || k.NotJudged() {
+		t.Errorf("%s: want judged and run-life only", k)
 	}
 }
 
@@ -496,7 +498,7 @@ func TestAKindThisBuildDoesNotKnowIsKeptAndJudged(t *testing.T) {
 	if newer.PerTest() {
 		t.Fatal("an unknown kind is a test's own: an older reader would charge it to one test only")
 	}
-	if got := at(5).Charged(at(1), at(1), nil, at(3)); !reflect.DeepEqual(got, at(4)) {
+	if got := at(5).Charged(LossBases{Set: at(1), App: at(1)}, at(3)); !reflect.DeepEqual(got, at(4)) {
 		t.Fatalf("Charged = %+v, want the 4 since the set's base", got)
 	}
 }

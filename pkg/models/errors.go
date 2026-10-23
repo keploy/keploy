@@ -24,6 +24,12 @@ type AppError struct {
 	// grace ran out. "" when it exited within it, or when the stop was
 	// another's.
 	StopKilled string
+	// LeftRunning, under the proven switch, says what of the application's
+	// daemons its stop left running: one keploy cannot see (not dumpable, or
+	// another user's), which it does not stop, or one the kernel holds after
+	// its kill. The application is then not known to have ended: what it lost
+	// runs on with it. "" when none was.
+	LeftRunning string
 }
 
 // ErrAppStoppedForSetEnd is the cause keploy cancels an application's run

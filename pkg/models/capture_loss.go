@@ -24,7 +24,7 @@ const (
 	// the application's. Such a process predates the recording (the
 	// pre-existing-process filter excludes those), so it is no part of the
 	// application and outlives it, a restart of it included: counted from the
-	// run's base (runScoped).
+	// run's start (runLife).
 	CaptureLossPIDMapExcluded CaptureLossKind = "pid_map_refused_excluded"
 	// CaptureLossTLSAbort: a client-side TLS handshake with keploy's proxy
 	// failed other than by the client giving it up: the client rejected the
@@ -235,26 +235,32 @@ func (k CaptureLossKind) Evidence() bool {
 // AppLife says a loss of kind k lasts as long as the application whose
 // process it lost runs: a test set the same application serves after the one
 // it happened in (--keep-app-alive) is charged it too, from the
-// application's start (SinceWithin's appBase), rather than from the set's
-// own mark. That is a process of the application's that keploy could not
-// place: one the kernel refused a place in the PID map (pid_map_refused), or
-// one the capture could not mark as in the application's subtree
-// (app_subtree_untracked). A process that outlives the application is
-// counted from the run's base instead (runScoped); every other kind from the
-// set's mark.
+// application's start (LossBases.App), rather than from the set's own mark.
+// That is a process of the application's that keploy could not place: one
+// the kernel refused a place in the PID map (pid_map_refused), or one the
+// capture could not mark as in the application's subtree
+// (app_subtree_untracked).
 func (k CaptureLossKind) AppLife() bool {
 	return k == CaptureLossPIDMap || k == CaptureLossAppSubtreeUntracked
 }
 
-// runScoped says a loss of kind k is counted from the run's base however far
-// back it was made (SinceWithin): what keploy cannot capture at all over a
-// connection that outlives tests (NotJudged), but for a test's own kind
-// (PerTest), which is counted from the test's mark as every other kind is;
-// and a process that outlives the application, which keploy could not
-// classify (process_unclassified: NotJudged) or could not exclude
-// (pid_map_refused_excluded: one that predates the recording).
+// runLife says a loss of kind k is a process that outlives the application,
+// counted from the run's start (LossBases.Run): one the kernel refused a
+// place in excluded_pids (pid_map_refused_excluded), which predates the
+// recording.
+func (k CaptureLossKind) runLife() bool {
+	return k == CaptureLossPIDMapExcluded
+}
+
+// runScoped says a loss of kind k is counted from the base of what keploy
+// cannot capture at all however far back it was made (LossBases.Capture):
+// what keploy cannot capture at all over a connection that outlives tests
+// (NotJudged), a process keploy could not classify (process_unclassified),
+// and the kernel's count of skipped runs (Evidence), but for a test's own
+// kind (PerTest), which is counted from the test's mark as every other kind
+// is.
 func (k CaptureLossKind) runScoped() bool {
-	return (k.NotJudged() || k.Evidence()) && !k.PerTest() || k == CaptureLossPIDMapExcluded
+	return (k.NotJudged() || k.Evidence()) && !k.PerTest()
 }
 
 // Split is l's losses that fail a test (judged) and those that leave it
@@ -311,29 +317,51 @@ func (l CaptureLosses) EvidenceText() string {
 	return strings.Join(parts, "; ")
 }
 
-// SinceWithin is what grew from base on, but for what keploy cannot capture
-// at all over a connection that outlives tests (runScoped: a Unix socket),
-// from runBase on: that connection outlives the test, the test set and the
-// session it was opened in, so the application's first call over one taints
-// every test after it in the run, however far back it was made. A process
-// that lives as long as the application (AppLife) is counted from appBase
-// on, the counts as the running application started: base where it started
-// for this test set, earlier where one application serves several. A test's
-// own kind that leaves it without a verdict (an abandoned TLS handshake) is
-// counted from base, as the losses that fail a test are.
-func (l CaptureLosses) SinceWithin(base, appBase, runBase CaptureLosses) CaptureLosses {
+// LossBases are the counts a caller's losses are counted from, each kind
+// from the one its loss lasts from (SinceWithin):
+//   - Set: the test set's mark (a record's or a session's: its start), for
+//     every kind but those below;
+//   - App: the running application's start (AppLife): Set where it started
+//     for this set, earlier where one application serves several;
+//   - Run: the run's start (runLife): a process that outlives the
+//     application;
+//   - Capture: what keploy cannot capture at all, and the kernel's skips
+//     (runScoped), however far back: the run's first mark, or the hooks'
+//     load (nil) where the application may have run before it.
+type LossBases struct {
+	Set, App, Run, Capture CaptureLosses
+}
+
+// SameBases is LossBases with every base b: a caller whose one base is the
+// start of everything it counts (a record, a single run).
+func SameBases(b CaptureLosses) LossBases { return LossBases{Set: b, App: b, Run: b, Capture: b} }
+
+// SinceWithin is what grew from each kind's base on (LossBases). What keploy
+// cannot capture at all over a connection that outlives tests (runScoped: a
+// Unix socket) outlives the test, the test set and the session it was opened
+// in, so the application's first call over one taints every test after it in
+// the run, however far back it was made. A process that lives as long as the
+// application (AppLife), or outlives it (runLife), taints every test while it
+// lives. A test's own kind that leaves it without a verdict (an abandoned TLS
+// handshake) is counted from Set, as the losses that fail a test are.
+func (l CaptureLosses) SinceWithin(b LossBases) CaptureLosses {
 	var out CaptureLosses
-	for _, c := range l.Since(base) {
-		if !c.Kind.runScoped() && !c.Kind.AppLife() {
+	for _, c := range l.Since(b.Set) {
+		if !c.Kind.runScoped() && !c.Kind.AppLife() && !c.Kind.runLife() {
 			out = append(out, c)
 		}
 	}
-	for _, c := range l.Since(appBase) {
+	for _, c := range l.Since(b.App) {
 		if c.Kind.AppLife() {
 			out = append(out, c)
 		}
 	}
-	for _, c := range l.Since(runBase) {
+	for _, c := range l.Since(b.Run) {
+		if c.Kind.runLife() {
+			out = append(out, c)
+		}
+	}
+	for _, c := range l.Since(b.Capture) {
 		if c.Kind.runScoped() {
 			out = append(out, c)
 		}
@@ -490,14 +518,12 @@ func (k CaptureLossKind) PerTest() bool {
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
-// that taints every later test as SinceWithin(base, appBase, runBase) has it
-// (base: the counts as the run, or the test set, began; appBase: as the
-// running application started), and each kind that is the test's own
-// (PerTest) as it grew since test (the counts as the previous test ended, or
-// base for the first). Sorted by kind.
-func (l CaptureLosses) Charged(base, appBase, runBase, test CaptureLosses) CaptureLosses {
+// that taints every later test as SinceWithin(b) has it, and each kind that
+// is the test's own (PerTest) as it grew since test (the counts as the
+// previous test ended, or b.Set for the first). Sorted by kind.
+func (l CaptureLosses) Charged(b LossBases, test CaptureLosses) CaptureLosses {
 	var out CaptureLosses
-	for _, c := range l.SinceWithin(base, appBase, runBase) {
+	for _, c := range l.SinceWithin(b) {
 		if !c.Kind.PerTest() {
 			out = append(out, c)
 		}
