@@ -108,8 +108,10 @@ type Known interface {
 // reports, as Excused does, whether the leaf is not compared by value there
 // (WordsAdmit) and whether its type is still enforced (typed). Compare finds
 // it on the Known it is given by a type assertion, so Known is unchanged and
-// every Known outside this package still satisfies Compare. It is asked of a
-// leaf both sides hold, of one type, that Excused does not excuse.
+// every Known outside this package still satisfies Compare. It is asked only
+// of a named leaf both sides hold, of one type, that Excused does not
+// excuse, so Compare reads excused alone: of one type, typed changes
+// nothing.
 type KnownLive interface {
 	ExcusedLive(rec, live Leaf) (excused, typed bool)
 }
@@ -210,11 +212,14 @@ func Compare(live, rec Shape, known Known) Diff {
 			return d
 		case l.Value == r.Value || excused:
 			continue
-		case byLive != nil && excusedLive(byLive, r, l):
-			continue
 		case r.Unnamed:
+			// No words are learned of a leaf no path names alone (the learn
+			// step refuses it here), so none excuse it: an entry at its path
+			// is another leaf's, or a hand's.
 			d.Structural = p + " drifted, and no path names it alone"
 			return d
+		case byLive != nil && excusedLive(byLive, r, l):
+			continue
 		}
 		d.Drift = append(d.Drift, p)
 	}

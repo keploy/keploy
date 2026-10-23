@@ -1605,4 +1605,12 @@ func TestCompareReadsATypeChangeBeforeTheWords(t *testing.T) {
 	if d := Compare(shape(String, "300"), shape(String, "100"), excuseAll{}); d.Structural != "" || len(d.Drift) != 0 {
 		t.Fatalf("one type, admitted by its words: %+v", d)
 	}
+	// A leaf no path names alone has no words learned of it: what an entry
+	// at its path admits never excuses it.
+	unnamed := func(v string) Shape {
+		return Shape{Key: "k", Leaves: map[string]Leaf{"body.a.b": {Path: "body.a.b", Noise: "body.a.b", Type: String, Value: v, Unnamed: true}}}
+	}
+	if d := Compare(unnamed("300"), unnamed("100"), excuseAll{}); d.Structural != "body.a.b drifted, and no path names it alone" {
+		t.Fatalf("an unnamed leaf, excused by words: %+v", d)
+	}
 }
