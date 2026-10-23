@@ -177,8 +177,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// Legacy encodeHTTP treats EOF after some bytes as
 				// end-of-response. Respect that shape: emit what we have.
 				// Only a stream that ran out (io.EOF) ended where its capture
-				// did: ErrClosed is its reader being closed, possibly with
-				// chunks still on their way.
+				// did: ErrClosed is its reader being closed while the capture
+				// could still send. A capture that dropped chunks before it
+				// ended the stream (its tee gave up on a consumer) marked the
+				// mock incomplete for them.
 				streamEnded = errors.Is(err, io.EOF)
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
