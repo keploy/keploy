@@ -110,6 +110,12 @@ type AgentClient struct {
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
 
+	// concurrentServing holds what the agent's last /storemocks answer said
+	// of serving a test the recordings it shares with the tests that ran
+	// beside it (models.ExactConcurrentHeader). Each StoreMocks clears it
+	// first: a store addresses an agent, possibly a fresh one.
+	concurrentServing atomic.Bool
+
 	// run is the agent's current start (startAgent); guarded by mu. A stop
 	// reads how to end the agent from the run it stops, never from a later one.
 	run *agentRun
@@ -255,6 +261,14 @@ func (a *AgentClient) currentRun() *agentRun {
 // must be sent.
 func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
 	return a.consumedPerTest.Load()
+}
+
+// ServesConcurrent reports whether the agent's last /storemocks answer said it
+// serves a test the recordings it shares with the tests that ran beside it at
+// record time (models.ExactConcurrentHeader). False until a store has said so,
+// and from the start of every StoreMocks.
+func (a *AgentClient) ServesConcurrent() bool {
+	return a.concurrentServing.Load()
 }
 
 // var initStopScript []byte
@@ -1179,6 +1193,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		}
 	}()
 	a.consumedPerTest.Store(false)
+	a.concurrentServing.Store(false)
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
 	// goroutine's pw.Write if the agent responded (e.g. 400) before consuming the
@@ -1206,6 +1221,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	if err := decodeStoreMocksResp(res); err != nil {
 		return err
 	}
+	a.concurrentServing.Store(res.Header.Get(models.ExactConcurrentHeader) == models.ExactConcurrentServes)
 	a.logger.Info("stored the mocks on the agent",
 		zap.Int("mocks", len(filtered)+len(unFiltered)),
 		zap.Int64("bytes", sent.raw.Load()),
@@ -1425,7 +1441,11 @@ func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.M
 		return fmt.Errorf("send legacy request for storemocks: %s", err.Error())
 	}
 	defer res.Body.Close()
-	return decodeStoreMocksResp(res)
+	if err := decodeStoreMocksResp(res); err != nil {
+		return err
+	}
+	a.concurrentServing.Store(res.Header.Get(models.ExactConcurrentHeader) == models.ExactConcurrentServes)
+	return nil
 }
 
 // decodeStoreMocksResp reads the agent's single AgentResp gob reply, shared by

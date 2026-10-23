@@ -961,7 +961,8 @@ func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signa
 // recording's end, under the proven switch): it waits for each group's
 // leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
 // a group only when it made no progress on its way out for StopStallBudget
-// of keploy's runnable time. A starved group takes as long as it takes.
+// of the time both it and keploy could run (ExitClock). A starved group,
+// whether the host is or only the group is, takes as long as it takes.
 // Elsewhere it is InterruptProcessTreeReached, with its grace.
 //
 // Each step a group takes on its way out is a movement of moved, the

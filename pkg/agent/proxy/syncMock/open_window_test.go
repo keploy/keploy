@@ -839,17 +839,17 @@ func heldCount(mgr *SyncMockManager) int {
 // the hold, and the bound — which never gives up a claimed window — let it
 // grow without limit. Sends no longer wait (they queue), so the test has the
 // resolve's send dropped inside the resolve's own call: a drainer is said to
-// be live and the process's out queue to be at its byte bound, and OnDrop,
-// told with no lock held, looks from there. (Dropped by a real drainer, on its
-// own goroutine, the look raced the resolve's end of the window: a window
-// ended after the sends passed 40 runs of 40.) Not parallel: the process's
-// bound (processOutQueued) is every manager's.
+// be live with a mock in hand, and the process's out queue to be at its byte
+// bound, and OnDrop, told with no lock held, looks from there. (Dropped by a
+// real drainer, on its own goroutine, the look raced the resolve's end of the
+// window: a window ended after the sends passed 40 runs of 40.) Not parallel:
+// the process's bound (processOutQueued) is every manager's.
 func TestResolveKeptEndsTheWindowBeforeItsSends(t *testing.T) {
 	out := make(chan *models.Mock) // never read
 	maps := make(chan models.TestMockMapping, 16)
 	mgr := openWindowManager(out, maps)
 	mgr.outQueueMu.Lock()
-	mgr.out.draining = true
+	mgr.out.draining, mgr.out.inHand = true, true // a drainer with a mock in hand
 	mgr.outQueueMu.Unlock()
 	processOutQueued.Add(outQueueMaxBytes)
 	defer processOutQueued.Add(-outQueueMaxBytes)

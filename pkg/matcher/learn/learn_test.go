@@ -350,6 +350,54 @@ func TestRawOfLeavesOutWhereAndWhen(t *testing.T) {
 	}
 }
 
+// A Postgres recording's invocation id says which statement, on which
+// connection, when and in what order it was recorded: where and when, as the
+// spec's timestamps do, never a value that flowed. It is left out of the
+// recording's text, and the recording itself is not changed.
+func TestRawOfLeavesOutAPostgresInvocationsWhereAndWhen(t *testing.T) {
+	inv := "sha256:71318920f30ed480b5cfcb2615d5a23f3d3d0c0104366db7828f0e830c15755d:0:2026-10-21T04:05:09.291827863Z:2"
+	m := &models.Mock{Name: "mock-2", Kind: models.PostgresV3, Spec: models.MockSpec{PostgresV3: &models.PostgresV3Spec{
+		Type: models.PostgresV3TypeQuery,
+		Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: "CREATE TABLE IF NOT EXISTS twins (name TEXT PRIMARY KEY)",
+			InvocationID:  inv,
+		},
+	}}}
+	r := RawOf(m, false)
+	if strings.Contains(r.Text, "2026") || strings.Contains(r.Text, "71318920f30e") || !strings.Contains(r.Text, "CREATE TABLE IF NOT EXISTS twins") {
+		t.Fatalf("raw text %q: it holds the payload only", r.Text)
+	}
+	if m.Spec.PostgresV3.Query.InvocationID != inv {
+		t.Fatalf("RawOf changed the recording's invocation id to %q", m.Spec.PostgresV3.Query.InvocationID)
+	}
+}
+
+// F runs each test FullRoundLead past its recorded instant from when it
+// begins, so an app that reads its clock late in F (a loaded box) binds a
+// value the lead does not account for: it drifted, and it flowed from
+// nowhere, so it is noise. Read as payload, a recording's invocation id made
+// it a value that flowed from that recording (its date and time words), and
+// the call was refused as changed (flaky/request_changed).
+func TestALateClockReadIsNoiseBesideAPostgresRecordingOfTheSameMinute(t *testing.T) {
+	recAt := time.Date(2026, 10, 21, 4, 5, 9, 989222587, time.UTC)
+	earlier := &models.Mock{Name: "mock-2", Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: recAt.Add(-700 * time.Millisecond),
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: "CREATE TABLE IF NOT EXISTS twins (name TEXT PRIMARY KEY)",
+			InvocationID:  "sha256:71318920f30ed480b5cfcb2615d5a23f3d3d0c0104366db7828f0e830c15755d:0:" + recAt.Add(-700*time.Millisecond).Format(time.RFC3339Nano) + ":2",
+		}},
+	}}
+	const lay = "2006-01-02 15:04:05.999999999Z07:00"
+	rec := Shape{Leaves: map[string]Leaf{"bind.$3": {Path: "bind.$3", Value: recAt.Format(lay)}}}
+	for _, late := range []time.Duration{10 * time.Millisecond, 600 * time.Millisecond, 2500 * time.Millisecond} {
+		live := Shape{Leaves: map[string]Leaf{"bind.$3": {Path: "bind.$3", Value: recAt.Add(FullRoundLead + late).Format(lay)}}}
+		out := Classify(NewDriftCache(), []string{"bind.$3"}, live, rec, recAt.Add(2*time.Millisecond), nil, []Raw{RawOf(earlier, false)}, nil)
+		if len(out) != 1 || out[0].Kind != KindNoise {
+			t.Fatalf("a clock read %v late: %+v, want noise", late, out)
+		}
+	}
+}
+
 func TestTokens(t *testing.T) {
 	for _, tc := range []struct {
 		s, v string

@@ -285,6 +285,9 @@ type MockMismatchReport struct {
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
+	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
+	// the tests the call's recordings were made beside.
+	Concurrent *ConcurrentNote
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

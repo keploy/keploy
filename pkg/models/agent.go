@@ -501,7 +501,26 @@ type ExactServing struct {
 	// test case is open or not, after the open test case's own, at most one
 	// request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Concurrent is, on a call that opens a test case (Test), the
+	// recordings it may answer with beside Owned: those recorded while its
+	// request and other tests' requests were open together, which keploy
+	// record's full round shares between those tests (Mapping.Groups). Each
+	// answers at most once in the staging, for whichever of those tests
+	// makes its call first, and is never required of the test. Owned answer
+	// before them. Sent only to an agent that says it serves them
+	// (ExactConcurrentHeader); an agent that predates it ignores it.
+	Concurrent []string `json:"concurrent,omitempty"`
 }
+
+// ExactConcurrentHeader is the /storemocks response header in which an agent
+// with the proven switch on says it serves a test case the recordings it
+// shares with the tests that ran beside it (ExactServing.Concurrent).
+// ExactConcurrentServes is its value. An agent that does not send it is never
+// sent them.
+const (
+	ExactConcurrentHeader = "Keploy-Exact-Concurrent"
+	ExactConcurrentServes = "1"
+)
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
 // begins a test's variables as it applies this filter: a filter that opens a

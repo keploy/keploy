@@ -88,7 +88,7 @@ func TestTheSwitchedSetEndStopKillsANativeAppOnlyOnTheStallRule(t *testing.T) {
 	utils.StopStallBudget = 300 * time.Millisecond
 	ignores := `trap "" INT; touch started; exec sleep 600`
 	if appErr := runNative(t, ignores, models.ErrAppStoppedForSetEnd); appErr.AppErrorType != models.ErrCtxCanceled ||
-		!strings.Contains(appErr.StopKilled, "made no progress on its way out for 300ms of keploy's runnable time after keploy interrupted it, so keploy killed it") {
+		!strings.Contains(appErr.StopKilled, "made no progress on its way out for 300ms of its and keploy's runnable time after keploy interrupted it, so keploy killed it") {
 		t.Fatalf("an app that ignores the interrupt: run ended %+v, says %q; want a kill named with the stall", appErr, appErr.StopKilled)
 	}
 	// The teardown's stop keeps its grace: with a stall bound of ten

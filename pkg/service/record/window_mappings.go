@@ -3,6 +3,7 @@ package record
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -199,6 +200,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		_, gone := deleted[id]
 		return !gone && !strings.HasPrefix(id, lostTestPrefix)
 	}
+	conc := keptConcurrencyOf(derived, kept)
 	byTest := make(map[string][]models.MockEntry, len(derived.Tests))
 	mappedMocks := 0
 	for _, tc := range derived.Tests {
@@ -242,18 +244,113 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return
 	}
+	// The concurrency groups (models.Mapping.Groups) and the calls recorded
+	// while several tests were open whose first-opened test was not kept
+	// (models.Mapping.Shared): keploy record's full round works out which
+	// of the kept tests made each. Written whole, as the worker scope is: a
+	// recording with none clears what a file it writes into held (a store
+	// leaves a file it changes nothing of as it is).
+	if cs, ok := db.(concurrencyStore); ok || len(conc.groups) > 0 {
+		if !ok {
+			logger.Error("mappings.yaml cannot hold which tests were open together while a call was recorded: this keploy's mapping store does not write them, so each such call stays the test whose request came first",
+				zap.String("testSetID", testSetID),
+				zap.String("next_step", "record the test set again with a keploy whose mapping store writes mappings.yaml's groups"))
+		} else if err := cs.UpsertConcurrency(ctx, testSetID, conc.groups, conc.shared); err != nil {
+			logger.Error("failed to save which tests were open together while each call was recorded",
+				zap.String("testSetID", testSetID),
+				zap.Error(err),
+				zap.String("next_step", "keploy record's full round cannot tell which of them made each such call without mappings.yaml's groups; fix the error above and re-record this test set"))
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			return
+		}
+	}
 	logger.Info("Saved the test-mock mappings derived from the test windows",
 		zap.String("testSetID", testSetID),
 		zap.Int("numTests", len(byTest)),
 		zap.Int("mappedMocks", mappedMocks),
-		zap.Int("workerMocks", len(worker)))
+		zap.Int("workerMocks", len(worker)),
+		zap.Int("concurrencyGroups", len(conc.groups)),
+		zap.Int("sharedMocks", len(conc.shared)))
 	if n := len(concurrent); n > 0 {
-		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while two tests were open is mapped to the test whose request came first, which may not be the test that made it",
+		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while several tests were open is listed under the test whose request came first, which time alone cannot tell made it",
 			zap.String("testSetID", testSetID),
 			zap.Int("count", n),
 			zap.Strings("tests", concurrent[:min(n, 20)]),
-			zap.String("next_step", "if one of these tests fails in keploy test with a call it did not make or a call no recorded mock answered, record them one request at a time"))
+			zap.String("next_step", "only plain keploy record's full round (KEPLOY_PROVEN=1) gives such a call to the test that made it, when it can tell; every other replay, keploy record sandbox's too, serves it to the test it is listed under. A test whose call keploy cannot settle fails with the reason: record those tests one request at a time"))
 	}
+}
+
+// concurrencyStore is the part of a mapping store that writes a set's
+// concurrency groups and shared calls (models.Mapping.Groups, Shared), whole,
+// keeping its other sections.
+type concurrencyStore interface {
+	UpsertConcurrency(ctx context.Context, testSetID string, groups []models.ConcurrencyGroup, shared []models.MockEntry) error
+}
+
+// keptConcurrency is what the recording writes of derived's concurrency
+// groups, kept is the test cases it keeps.
+type keptConcurrency struct {
+	// groups are the groups an entry it writes names, each with the kept
+	// tests of it in window order and how many it did not keep (deleted,
+	// or lost), in derived's order.
+	groups []models.ConcurrencyGroup
+	// shared are the grouped mocks whose first-opened test was not kept,
+	// when their group has a kept test, in recorded order: any kept test of
+	// the group may have made them.
+	shared []models.MockEntry
+}
+
+// keptConcurrency is derived's concurrency as the recording writes it: an entry
+// listed by a kept test keeps its group; one whose test the recording did not
+// keep (deleted, or lost) is shared when its group has a kept test, and
+// dropped as before when it has none (no kept test was open as it was
+// recorded).
+func keptConcurrencyOf(derived models.WindowMappings, kept func(id string) bool) keptConcurrency {
+	var out keptConcurrency
+	if len(derived.Groups) == 0 {
+		return out
+	}
+	byID := make(map[string]models.ConcurrencyGroup, len(derived.Groups))
+	for _, g := range derived.Groups {
+		k := models.ConcurrencyGroup{ID: g.ID}
+		for _, t := range g.Tests {
+			if kept(t) {
+				k.Tests = append(k.Tests, t)
+			} else {
+				k.Unkept++
+			}
+		}
+		byID[g.ID] = k
+	}
+	used := map[string]bool{}
+	for _, tc := range derived.Tests {
+		for _, e := range tc.Mocks {
+			if e.Group == "" {
+				continue
+			}
+			if kept(tc.ID) {
+				used[e.Group] = true
+				continue
+			}
+			if len(byID[e.Group].Tests) > 0 {
+				used[e.Group] = true
+				out.shared = append(out.shared, e)
+			}
+		}
+	}
+	for _, g := range derived.Groups {
+		if used[g.ID] {
+			out.groups = append(out.groups, byID[g.ID])
+		}
+	}
+	sort.SliceStable(out.shared, func(i, j int) bool { return entryAt(out.shared[i]).Before(entryAt(out.shared[j])) })
+	return out
+}
+
+// entryAt is when an entry's request was recorded.
+func entryAt(e models.MockEntry) time.Time {
+	at, _ := models.ParseMockTimestamp(e.ReqTimestampMock)
+	return at
 }
 
 // keptPlaces is derived's worker scope with each place a test case kept

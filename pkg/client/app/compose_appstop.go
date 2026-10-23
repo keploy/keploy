@@ -495,9 +495,10 @@ func (a *App) composeAppHalt() *composeHalt {
 // app's stop waits (stopDockerRunByEvents): the daemon's word, or its main
 // process exiting (its pidfd), which a starved daemon is slow to report. It
 // kills only when the container's processes made no progress on its way out
-// for utils.StopStallBudget of keploy's runnable time, or at the user's
-// Ctrl+C, which it offers; never on a number of seconds. It says why it had
-// to kill, "" when the app exited on the interrupt, or had exited already.
+// for utils.StopStallBudget of the time both they and keploy could run
+// (utils.ExitClock), or at the user's Ctrl+C, which it offers; never on a
+// number of seconds. It says why it had to kill, "" when the app exited on
+// the interrupt, or had exited already.
 // The drains wait for it (utils.BeginAppStop). The app's exit is not a halt
 // (watchComposeApp) until StartComposeApp starts it again.
 func (a *App) StopComposeApp(ctx context.Context) (killed string, err error) {
@@ -581,14 +582,15 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 			return
 		}
 	}()
-	switch utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()) {
+	end, bound := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load())
+	switch end {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 	default:
 		if w.readable {
-			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
+			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		} else {
 			killed = fmt.Sprintf("keploy could not read its container's processes, and the docker daemon did not say it had stopped, for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
 		}
@@ -604,7 +606,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// The kill ends it but in the kernel: wait for that at the same rule;
 	// a container still there after it is an error the next set's start
 	// would meet.
-	if utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()) != utils.StopExited {
+	if end, _ := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
 	return killed, nil

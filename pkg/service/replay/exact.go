@@ -85,6 +85,9 @@ type exactPlan struct {
 	// aheadNamed is the test case the latest pool call named the calls in
 	// flight of (serveExactPool's next), "" for none.
 	aheadNamed string
+	// share is the set's shares (concurrent_shares.go): nil for a set whose
+	// mapping states no concurrency.
+	share *sharePlan
 }
 
 // noteAhead fills p.ahead from what each test case of cases owns: its mapped
@@ -133,6 +136,9 @@ func (p *exactPlan) begin(name string) {
 		p.begun = map[string]bool{}
 	}
 	p.begun[name] = true
+	if p.share != nil && p.share.sharing {
+		p.share.noteRun(name, len(p.share.cands[name]) > 0)
+	}
 }
 
 // staged is the worker scope the agent stages: the entries of the mocks it
@@ -224,36 +230,45 @@ func (r *Replayer) exactServing() bool {
 // mappings.yaml with no source is trusted as recorded: one keploy test wrote
 // before it said so cannot be told from keploy record's.
 func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, string, error) {
+	mappings, worker, _, why, err := r.provenMappingsOf(ctx, testSetID)
+	return mappings, worker, why, err
+}
+
+// provenMappingsOf is provenMappings, and the set's concurrency as its
+// mappings.yaml states it (models.Mapping.Groups, Shared): nil for none.
+func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, *setConcurrency, string, error) {
 	const absent = "the test set has no mappings.yaml"
 	if r.mappingDB == nil {
-		return map[string][]models.MockEntry{}, nil, absent, nil
+		return map[string][]models.MockEntry{}, nil, nil, absent, nil
 	}
 	if mr, ok := r.mappingDB.(mappingReader); ok {
 		m, err := mr.GetMapping(ctx, testSetID)
 		if err != nil {
-			return nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+			return nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 		}
 		if m != nil && m.Source == models.MappingSourceKeployTest {
-			return map[string][]models.MockEntry{}, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
+			return map[string][]models.MockEntry{}, nil, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
 		}
 		mappings := map[string][]models.MockEntry{}
 		var worker []models.MockEntry
+		var conc *setConcurrency
 		if m != nil {
 			for _, tc := range m.TestCases {
 				mappings[tc.ID] = tc.Mocks
 			}
 			worker = m.Worker
+			conc = concurrencyOf(m.Groups, mappings, m.Shared)
 		}
-		return mappings, worker, absent, nil
+		return mappings, worker, conc, absent, nil
 	}
 	mappings, _, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+		return nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 	}
 	if mappings == nil {
 		mappings = map[string][]models.MockEntry{}
 	}
-	return mappings, nil, absent, nil
+	return mappings, nil, nil, absent, nil
 }
 
 // mappingReader is the part of a mapping store that reads a set's whole
@@ -276,6 +291,14 @@ type mappingReader interface {
 // recorded call this keploy cannot serve, and is judged for it. The replay
 // never writes what it derives.
 func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, why string, skipped []models.WindowedMock, stored ...[]*models.Mock) (map[string][]models.MockEntry, []models.MockEntry) {
+	out, worker, _ := r.windowOwnershipOf(testSetID, cases, why, skipped, stored...)
+	return out, worker
+}
+
+// windowOwnershipOf is windowOwnership, and the concurrency its windows
+// derive (models.WindowMappings.Groups): which tests were open together while
+// each call was recorded.
+func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase, why string, skipped []models.WindowedMock, stored ...[]*models.Mock) (map[string][]models.MockEntry, []models.MockEntry, *setConcurrency) {
 	windows := make([]models.TestWindow, 0, len(cases))
 	for _, tc := range cases {
 		windows = append(windows, models.RecordedWindow(tc))
@@ -319,7 +342,7 @@ func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, w
 			zap.Strings("tests", derived.Concurrent[:min(n, 20)]),
 			zap.String("next_step", "if one of these tests fails with a call it did not make or a call no recorded mock answered, record the test set again under KEPLOY_PROVEN, one request at a time"))
 	}
-	return out, derived.Worker
+	return out, derived.Worker, concurrencyOf(derived.Groups, out, nil)
 }
 
 // newExactPlan is the plan for a set whose test cases own mappings, whose
@@ -419,9 +442,13 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 // mocks; vars are the test variables its request carries.
 func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, vars ...models.VariableBinding) error {
 	plan.begin(name)
+	ex := &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)}
+	// keploy record's full round: the recordings it shares with the tests
+	// that ran beside it, after its own.
+	ex.Concurrent = plan.concurrentServing(name)
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
 		Variables: vars,
-		Exact:     &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)},
+		Exact:     ex,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))

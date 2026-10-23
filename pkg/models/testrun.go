@@ -372,6 +372,26 @@ type UnconsumedMock struct {
 	// shared mock pool served the two can decide which test it counts for,
 	// until each test's consumption is exact. Empty when no test consumed it.
 	ConsumedBy string `json:"consumed_by,omitempty" yaml:"consumed_by,omitempty"`
+	// Concurrent names, under the proven switch, the other tests whose
+	// requests were open while this mock was recorded (Mapping.Groups),
+	// comma-separated in window order (a string, so the struct stays
+	// comparable). Unkept counts the tests whose requests were open beside
+	// them that the recording did not keep (models.ConcurrencyGroup.Unkept):
+	// one of those may have made it.
+	Concurrent string `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// WhyNot says why this replay did not share the mock between those
+	// tests (ConcurrentNotShared*: it lists it under this test by time
+	// alone, or where keploy record's full round left it, unproven), with
+	// Stated for ConcurrentNotSharedStates. Empty, with Concurrent or Unkept
+	// set, only for the one case keploy proved: keploy record's full round
+	// shared it between them and no call of theirs matched it exactly (it
+	// learns nothing against a recording they share), so it is charged to
+	// each of them that ran; Closest then names the one whose call came
+	// closest to it, when the learn step saw one.
+	WhyNot  string `json:"why_not,omitempty" yaml:"why_not,omitempty"`
+	Stated  string `json:"stated,omitempty" yaml:"stated,omitempty"`
+	Closest string `json:"closest,omitempty" yaml:"closest,omitempty"`
+	Unkept  int    `json:"unkept,omitempty" yaml:"unkept,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -469,7 +489,141 @@ type UnmatchedCall struct {
 	// everywhere else, and for a call of that round keploy could not judge
 	// because its own store could not read a recorded answer back.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	// Concurrent is, under the proven switch, what keploy knows of the call
+	// when the test was recorded while other tests' requests were open
+	// (Mapping.Groups): with whom, and which of them its recording was
+	// attributed to or taken by. nil for a call of a test recorded alone.
+	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
 }
+
+// ConcurrentNote is what keploy knows of a call made by a test that was
+// recorded while other tests' requests were open (UnmatchedCall.Concurrent):
+// names of tests and mocks only, never a value.
+type ConcurrentNote struct {
+	// With are the other tests whose requests were open beside this test's
+	// while the call's recordings were made, in window order; Unkept counts
+	// those the recording did not keep (deleted, or lost).
+	With   []string `json:"with,omitempty" yaml:"with,omitempty"`
+	Unkept int      `json:"unkept,omitempty" yaml:"unkept,omitempty"`
+	// AttributedTo is the test the recording closest to the call, one made
+	// while this test's request and others' were open, is listed under by
+	// time alone (the one whose request came first), when it is not this
+	// test. WhyNot says why this replay did not share that recording with
+	// this test.
+	AttributedTo string `json:"attributed_to,omitempty" yaml:"attributed_to,omitempty"`
+	// MayBe are, for a call with no closest recording, the other tests that
+	// list a recording of the call's own kind (KindsOfProtocol) made while
+	// their requests and this test's were open, which this replay did not
+	// share with this test: the call's recording may be one of theirs.
+	// WhyNot then says why they were not shared, when it is one reason for
+	// all of them.
+	MayBe []string `json:"may_be,omitempty" yaml:"may_be,omitempty"`
+	// Claimant is the test that answered its call with the recording this
+	// call pairs with, recorded once while both were open.
+	Claimant string `json:"claimant,omitempty" yaml:"claimant,omitempty"`
+	// Class names the recordings keploy cannot tell apart for this call
+	// (Case ConcurrentCaseClass: they got different answers;
+	// ConcurrentCaseIncomparable: each is closer to it in some place).
+	Class []string `json:"class,omitempty" yaml:"class,omitempty"`
+	// Case is what keploy record's full round could not settle of the call
+	// (ConcurrentCase*), for a call it charged with MissConcurrentAmbiguous
+	// or MissConcurrentConflict; "" on a call it merely notes.
+	Case string `json:"case,omitempty" yaml:"case,omitempty"`
+	// Places are the call's places that differ from the recording closest
+	// to it (bind.$N, literal.N), for ConcurrentCaseNotOwn.
+	Places []string `json:"places,omitempty" yaml:"places,omitempty"`
+	// WhyNot says why keploy did not share the call's recordings between
+	// the tests (ConcurrentNotShared*), when it did not; Kind is the kind
+	// keploy shares none of yet (ConcurrentNotSharedKind), and Stated what
+	// the recording states that keploy does not share
+	// (ConcurrentNotSharedStates: noise, variables, volatile positions, a
+	// redacted value).
+	WhyNot string `json:"why_not,omitempty" yaml:"why_not,omitempty"`
+	Kind   string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Stated string `json:"stated,omitempty" yaml:"stated,omitempty"`
+}
+
+// What keploy record's full round could not settle of a call of a test
+// recorded beside others (ConcurrentNote.Case).
+const (
+	// ConcurrentCaseClass: recordings of the call keploy cannot tell apart
+	// got different answers.
+	ConcurrentCaseClass = "class"
+	// ConcurrentCaseIncomparable: the recordings closest to the call are
+	// each closer to it in some place.
+	ConcurrentCaseIncomparable = "incomparable"
+	// ConcurrentCaseNotOwn: it differs (at Places) from the recording
+	// closest to it (Class), which another of the tests open while it was
+	// recorded may have made: keploy does not learn what changed against a
+	// recording another test may own.
+	ConcurrentCaseNotOwn = "not_own"
+	// ConcurrentCaseRetry: its attempts were answered by different
+	// recordings.
+	ConcurrentCaseRetry = "retry"
+	// ConcurrentCaseConflict: it and another test's call (Claimant) pair
+	// with one recording.
+	ConcurrentCaseConflict = "conflict"
+	// ConcurrentCaseUnresolved: the test lists a recording keploy record's
+	// full round could not give to one test (MockEntryUnresolvedAmbiguous).
+	ConcurrentCaseUnresolved = "unresolved"
+)
+
+// Why keploy did not share a call's recordings between the tests recorded
+// beside each other (ConcurrentNote.WhyNot).
+const (
+	// ConcurrentNotSharedKind: keploy shares no recording of the kind yet.
+	ConcurrentNotSharedKind = "kind"
+	// ConcurrentNotSharedStates: the recording states what keploy does not
+	// share (ConcurrentNote.Stated).
+	ConcurrentNotSharedStates = "states"
+	// ConcurrentNotSharedStrict: only keploy record's full round shares
+	// recordings; this replay serves each to the test that lists it.
+	ConcurrentNotSharedStrict = "strict"
+	// ConcurrentNotSharedUnkept: it was recorded while a test the recording
+	// did not keep was open, and no kept test lists it.
+	ConcurrentNotSharedUnkept = "unkept"
+	// ConcurrentNotSharedCall: keploy shares recordings of the kind, not
+	// this one (ConcurrentNote.Kind): for SQL, only queries it compares by
+	// value.
+	ConcurrentNotSharedCall = "call"
+	// ConcurrentNotSharedAgent: keploy record's full round, with an agent
+	// that does not share recordings between tests (another version).
+	ConcurrentNotSharedAgent = "agent"
+	// ConcurrentNotSharedUnproven: keploy record's full round shared it, could
+	// not tell which of the tests made its call, and left it with the test
+	// that lists it now, which it charged (MockEntry.Unresolved).
+	ConcurrentNotSharedUnproven = "unproven"
+)
+
+// Clone is a copy of n that shares nothing with it; nil for nil.
+func (n *ConcurrentNote) Clone() *ConcurrentNote {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.With = append([]string(nil), n.With...)
+	c.MayBe = append([]string(nil), n.MayBe...)
+	c.Class = append([]string(nil), n.Class...)
+	c.Places = append([]string(nil), n.Places...)
+	return &c
+}
+
+// The reasons a call of a test recorded beside other tests carries
+// (UnmatchedCall.Reason) when keploy record's full round, which shares their
+// recordings, cannot tell which of them made it.
+const (
+	// MissConcurrentAmbiguous: the call's recordings, made while several
+	// tests' requests were open, cannot be told apart for it: they got
+	// different answers, or the learn step found none of them closest, or
+	// the one closest to it is one another of the tests may have made
+	// (keploy learns nothing against such a recording), or retries were
+	// answered by different recordings.
+	MissConcurrentAmbiguous = "concurrent_ambiguous"
+	// MissConcurrentConflict: the call pairs with a recording another test
+	// that was open beside it already answered with: one of the two made a
+	// call it did not record.
+	MissConcurrentConflict = "concurrent_conflict"
+)
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
 // as the learn step decides them (package matcher/learn).

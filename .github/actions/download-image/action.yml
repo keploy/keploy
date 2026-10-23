@@ -15,59 +15,59 @@ runs:
   using: composite
   steps:
     - name: Download image artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: ${{ inputs.artifact_name }}
         path: ${{ runner.temp }}/keploy-image
 
-    # An artifact download can end "successfully" with a truncated file: the
-    # blob store closes the connection early and download-artifact reports
-    # success on a short read. `docker load` then fails on a tarball it cannot
-    # parse --
+    # download-artifact before v6 could end a download "successfully" with a
+    # truncated file (check-artifact-downloads.sh says how), and `docker load`
+    # then failed on a tarball it could not parse --
     #   short read: expected 40205004 bytes but got 22221063: unexpected EOF
-    # -- which reads like a corrupt image and fails the job, three steps away
-    # from the download that actually went wrong. Seen on the self-hosted macOS
-    # runners, where the artifact takes over a minute to pull.
+    # -- which reads like a corrupt image and fails the job three steps away
+    # from the download that went wrong. Seen on the self-hosted macOS
+    # runners, where the artifact takes minutes to pull. This action then
+    # checked the tarball and, when it was not whole, downloaded it again.
     #
-    # So: check the archive is complete, and if it is not, pull it once more
-    # before blaming the image. A second short read fails the job, loudly, at
-    # the step that owns the problem.
+    # On v8 a download step that passes has the bytes that were uploaded: it
+    # retries a stream that stops part-way, fails when one never completes,
+    # and fails on a digest that does not match the upload's. A second
+    # download would fetch the same bytes, so there is none. The check stays,
+    # as the job's own proof that the tarball is whole: one that is not was
+    # uploaded so, and the job fails here, naming the artifact, not at
+    # `docker load`.
     - name: Check the image tarball is complete (Unix)
-      id: check
       if: runner.os != 'Windows'
       shell: bash
       run: |
         TAR="${{ runner.temp }}/keploy-image/image.tar"
-        if [ -f "$TAR" ] && tar -tf "$TAR" >/dev/null 2>&1; then
-          echo "complete=true" >> "$GITHUB_OUTPUT"
-          exit 0
+        why='no image.tar'
+        if [ -f "$TAR" ]; then
+          if why=$(tar -tf "$TAR" 2>&1 >/dev/null); then
+            exit 0
+          fi
+          why="tar -tf: $(printf '%s' "${why:-no message}" | tr '\n' ' ')"
         fi
-        echo "::warning::the downloaded image tarball is incomplete or unreadable; downloading it again"
+        echo "::error::image.tar in the ${{ inputs.artifact_name }} artifact is missing or not a whole tar archive ($why), though download-artifact passed the download: these are the bytes that were uploaded"
         ls -la "${{ runner.temp }}/keploy-image" 2>/dev/null || true
-        rm -rf "${{ runner.temp }}/keploy-image"
-        echo "complete=false" >> "$GITHUB_OUTPUT"
+        exit 1
 
     # Same check on Windows, in PowerShell: a composite `shell: bash` step
     # needs Git Bash, which not every self-hosted Windows runner in the fleet
     # has (see the Load image (Windows) step's note on pwsh).
     #
     # The runner puts `$ErrorActionPreference = 'stop'` before a powershell
-    # step's text and `exit $LASTEXITCODE` after it. So:
-    #   - tar runs with 'Continue' in a scope of its own. In Windows PowerShell
-    #     5.1, each line a native command writes to a redirected stderr is an
-    #     error record, and under 'stop' the first one ends the step. In run
-    #     38739210530 a truncated tarball's "tar.exe: Truncated input file
-    #     (needed 29843456 bytes, only 29806563 available)" did that: the step
-    #     failed as a NativeCommandError, and the download below never ran.
-    #     tar's exit code alone says whether the archive is complete, and its
-    #     stderr goes into the warning.
-    #   - the incomplete path ends with `exit 0`: otherwise the runner's own
-    #     `exit $LASTEXITCODE` exits with tar's code, and the failed step skips
-    #     the second download just the same.
-    # reap-keploy-containers.tests.ps1 runs both Windows checks, wrapped as the
-    # runner wraps them, on a complete, a truncated and a missing tarball.
+    # step's text and `exit $LASTEXITCODE` after it. So tar runs with
+    # 'Continue' in a scope of its own. In Windows PowerShell 5.1, each line a
+    # native command writes to a redirected stderr is an error record, and
+    # under 'stop' the first one ends the step. In run 38739210530 a truncated
+    # tarball's "tar.exe: Truncated input file (needed 29843456 bytes, only
+    # 29806563 available)" did that: the step failed as a NativeCommandError,
+    # not with its own error. tar's exit code alone says whether the archive
+    # is whole, and its stderr goes into the error.
+    # reap-keploy-containers.tests.ps1 runs this check, wrapped as the runner
+    # wraps it, on a complete, a truncated and a missing tarball.
     - name: Check the image tarball is complete (Windows)
-      id: checkwin
       if: runner.os == 'Windows'
       shell: powershell
       run: |
@@ -84,58 +84,9 @@ runs:
           $why = "tar -tf exit ${LASTEXITCODE}: $(@($why) -join '; ')"
         }
         if ($complete) {
-          "complete=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           exit 0
         }
-        Write-Host "::warning::the downloaded image tarball is incomplete or unreadable ($why); downloading it again"
-        Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "$($_.Length) $($_.Name)" }
-        Remove-Item -Recurse -Force -LiteralPath $dir -ErrorAction SilentlyContinue
-        "complete=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-        exit 0
-
-    - name: Download image artifact (second attempt)
-      if: steps.check.outputs.complete == 'false' || steps.checkwin.outputs.complete == 'false'
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ inputs.artifact_name }}
-        path: ${{ runner.temp }}/keploy-image
-
-    - name: Check the image tarball is complete (second attempt, Unix)
-      if: steps.check.outputs.complete == 'false'
-      shell: bash
-      run: |
-        TAR="${{ runner.temp }}/keploy-image/image.tar"
-        if [ -f "$TAR" ] && tar -tf "$TAR" >/dev/null 2>&1; then
-          echo "The second download is complete."
-          exit 0
-        fi
-        echo "::error::the image artifact ${{ inputs.artifact_name }} downloaded incomplete twice"
-        ls -la "${{ runner.temp }}/keploy-image" 2>/dev/null || true
-        exit 1
-
-    # As the first Windows check: tar in a scope of its own, judged by its exit
-    # code, so a second short download fails here with this step's own error.
-    - name: Check the image tarball is complete (second attempt, Windows)
-      if: steps.checkwin.outputs.complete == 'false'
-      shell: powershell
-      run: |
-        $dir = Join-Path "${{ runner.temp }}" 'keploy-image'
-        $tar = Join-Path $dir 'image.tar'
-        $why = 'no image.tar'
-        $complete = $false
-        if (Test-Path -LiteralPath $tar) {
-          $why = & {
-            $ErrorActionPreference = 'Continue'
-            tar -tf $tar 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }
-          }
-          $complete = ($LASTEXITCODE -eq 0)
-          $why = "tar -tf exit ${LASTEXITCODE}: $(@($why) -join '; ')"
-        }
-        if ($complete) {
-          Write-Host "The second download is complete."
-          exit 0
-        }
-        Write-Host "::error::the image artifact ${{ inputs.artifact_name }} downloaded incomplete twice ($why)"
+        Write-Host "::error::image.tar in the ${{ inputs.artifact_name }} artifact is missing or not a whole tar archive ($why), though download-artifact passed the download: these are the bytes that were uploaded"
         Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "$($_.Length) $($_.Name)" }
         exit 1
 
