@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -247,7 +248,9 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	if r.client == nil && canAskClientSockets && src != nil && cfg.Logger != nil {
 		cfg.Logger.Debug("relay: the client conn has no TCP socket under it to ask; what the destination sends "+
 			"once the client has closed is teed as it is written",
-			zap.String("conn", fmt.Sprintf("%T", src)),
+			// The type's name only: the conn's own value is what the
+			// client sent through it (a CONNECT's headers among them).
+			zap.Stringer("conn", reflect.TypeOf(src)),
 		)
 	}
 

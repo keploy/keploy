@@ -5,6 +5,7 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -627,6 +628,30 @@ func TestClientSocketOfFindsTheSocketUnderTheProxysWrappers(t *testing.T) {
 	_ = proxyClient.Close()
 	if l := s.look(); l.said != clientUnknown || l.acked != 0 {
 		t.Fatalf("a socket keploy closed says %d (%d acknowledged), want that it cannot say", l.said, l.acked)
+	}
+}
+
+// A client conn with no TCP socket under it to ask is named in the relay's
+// debug line by its type alone: the conn's value is what the client sent
+// through it (a CONNECT's headers among them), which is never logged.
+func TestAClientConnWithNoSocketIsNamedByItsTypeAlone(t *testing.T) {
+	t.Parallel()
+	pipeA, pipeB := net.Pipe()
+	proxyServer, server := loopbackPair(t)
+	defer func() { _ = pipeA.Close(); _ = pipeB.Close(); _ = proxyServer.Close(); _ = server.Close() }()
+	core, logs := observer.New(zapcore.DebugLevel)
+	r := New(Config{Logger: zap.New(core)}, pipeA, connseq.NewUpstream(proxyServer))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Run(ctx) }()
+	cancel()
+	<-done
+	got := logs.FilterMessageSnippet("has no TCP socket under it to ask").AllUntimed()
+	if len(got) != 1 {
+		t.Fatalf("%d lines say the client conn has no socket to ask, want 1", len(got))
+	}
+	if c, want := got[0].ContextMap()["conn"], fmt.Sprintf("%T", pipeA); c != want {
+		t.Fatalf("the client conn is named %q, want its type %q", c, want)
 	}
 }
 
