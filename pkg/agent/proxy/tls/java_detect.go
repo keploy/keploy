@@ -1,6 +1,6 @@
 // Package tls — java_detect.go implements app-aware java.home detection.
 //
-// Motivation: installJavaCA installs the Keploy MITM CA into a JDK
+// Motivation: the native install imports the Keploy MITM CA into a JDK
 // truststore by shelling out to `keytool`. Historically it resolved
 // `keytool` from PATH, which is the shell's current Java — NOT
 // necessarily the JDK the app under instrumentation is actually running
@@ -24,10 +24,11 @@
 //
 // The fix in this file: given the app's PID, read /proc/<pid>/environ
 // for JAVA_HOME, falling back to /proc/<pid>/exe's symlink target. The
-// caller (installJavaCA via installJavaCAForHome) then passes the
+// caller (setupNativeForApp, through resolveJavaStore) then passes the
 // detected path to keytool -keystore $javaHome/lib/security/cacerts,
 // using $javaHome/bin/keytool as the executable, so the import lands
-// in the app's actual truststore regardless of what's on PATH.
+// in the app's actual truststore regardless of what's on PATH, and the
+// teardown deletes it from that same truststore.
 package tls
 
 import (
@@ -51,7 +52,7 @@ import (
 //  2. detectJavaHomeForPID(appPID) — /proc-based auto-detect. Covers
 //     the common cases (SDKMAN, Maven wrapper, fat-jar launch).
 //
-//  3. "" — caller falls back to PATH keytool. Correct on single-JDK
+//  3. "" — caller falls back to PATH java's JDK. Correct on single-JDK
 //     hosts and backward-compatible with pre-Track-C behaviour.
 //
 // The logger is written at Debug so operators can grep the agent log
@@ -74,7 +75,7 @@ func resolveAppJavaHome(logger *zap.Logger, appPID int, override string) string 
 			return detected
 		}
 	}
-	logger.Debug("no app-aware java.home available; falling back to PATH keytool",
+	logger.Debug("no app-aware java.home available; falling back to PATH java's JDK",
 		zap.String("ca_java_home_source", "path"),
 		zap.Int("app_pid", appPID))
 	return ""
@@ -85,10 +86,9 @@ func resolveAppJavaHome(logger *zap.Logger, appPID int, override string) string 
 // /proc/<pid>/exe as a fallback.
 //
 // Returns "" when detection fails. This is never an error condition
-// that should abort CA install — the caller falls back to the legacy
-// PATH-resolved keytool behaviour, which is either also correct
-// (common single-JDK hosts) or silently wrong in the same way it has
-// always been.
+// that should abort CA install — the caller falls back to PATH java's
+// JDK, which is either also correct (common single-JDK hosts) or
+// silently wrong in the same way it has always been.
 //
 // Permission model: /proc/<pid>/environ is readable only by the
 // process's uid (or CAP_SYS_PTRACE). The agent attaches eBPF to the
@@ -135,7 +135,7 @@ func detectJavaHomeForPID(pid int) string {
 //     trimming the final two path components gives the JDK root
 //     whose lib/security/cacerts is the right target.
 //
-// Both empty → "" → caller falls back to PATH keytool.
+// Both empty → "" → caller falls back to PATH java's JDK.
 func detectJavaHomeFromSources(environ []byte, exeLink string) string {
 	if javaHome := extractJavaHomeFromEnviron(environ); javaHome != "" {
 		return javaHome

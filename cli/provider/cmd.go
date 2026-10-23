@@ -2348,9 +2348,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		// Trim whitespace so accidental `--ca-java-home=" "` doesn't
-		// short-circuit auto-detection with a junk path that will
-		// stat-fail in installJavaCAForHome and fall back to PATH
-		// keytool anyway (but logged at Debug as a spurious override).
+		// short-circuit auto-detection with a junk path that has no
+		// JDK keystore (resolveJavaStore refuses it, and the run imports
+		// its CA into no JDK).
 		c.cfg.Agent.CAJavaHome = strings.TrimSpace(caJavaHome)
 
 		mode, err := cmd.Flags().GetString("mode")
