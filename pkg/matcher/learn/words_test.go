@@ -340,6 +340,28 @@ func TestTheWordsGuardsAreStable(t *testing.T) {
 	}
 }
 
+// What a declared layout reads across the edge of an accepted read is no
+// instant of its own: "+01:00:30" after an RFC 3339 instant holds a time
+// of day ("01:00:30") that begins inside the read, and the word after it
+// that changed is learned. A clock read right after an escape is still
+// one, and a UUID-shaped word that reads as no instant (its clock before
+// 2000) is plain words, learned where they changed.
+func TestWhatStandsBesideAClockReadIsLearned(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	plus1 := time.FixedZone("", 3600)
+	for _, tc := range []struct{ name, rec, f, slots string }{
+		{"a time of day across an instant's edge", wAt.In(plus1).Format(time.RFC3339) + ":30", later.In(plus1).Format(time.RFC3339) + ":45", "s0i:iso8601:d4-d2-d2Td2:d2:d2F+d2:d2 s1r0"},
+		{"an instant after a backslash", `x\` + wAt.Format(time.RFC3339), `x\` + later.Format(time.RFC3339), "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ"},
+		{"a UUID that reads as no instant", "id 00000000-0000-7000-8000-00000000000a x", "id 00000000-0000-7000-8000-00000000000b x", "s1r4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slotsOf(learnedWords(t, tc.rec, tc.f)); got != tc.slots {
+				t.Fatalf("slots %s, want %s", got, tc.slots)
+			}
+		})
+	}
+}
+
 // An instant that is no accepted read is refused only where a changed word
 // stands inside it: a token that begins right after it (a JS date's ')')
 // is learned.
@@ -422,6 +444,10 @@ func TestWhatWordsCannotBeLearned(t *testing.T) {
 		{"beyond ASCII where the runs drifted", "id 订单A7", "id 订单-B8x", whyScript, nil},
 		{"after a percent escape", "q=a%20ref1", "q=a%20ref2", whyEscape, nil},
 		{"a token holding a percent", "t a%b-c_1", "t a%b_c-d_2", whyEscape, nil},
+		{"a token holding a percent recorded only", "t a%b-c_1", "t ab_c-d_2", whyEscape, nil},
+		{"a token holding a percent in F only", "t ab-c_1", "t a%b_c-d_2", whyEscape, nil},
+		{"beyond ASCII where the runs drifted, recorded only", "id 订单A7", "id x-B8x", whyScript, nil},
+		{"beyond ASCII where the runs drifted, in F only", "id A7-x", "id 订单B8", whyScript, nil},
 		{"an instant whose zone changed", "at " + wAt.Format(time.RFC3339), "at " + later.In(plus1).Format(time.RFC3339), whyZone, nil},
 		{"an instant that did not move as F's clock does", "at " + wAt.Format(time.RFC3339), "at " + wAt.Add(3*time.Hour).Format(time.RFC3339), whyInstant, nil},
 		{"an epoch that moved otherwise", "ts " + strconv.FormatInt(wAt.Unix(), 10), "ts " + strconv.FormatInt(wAt.Unix()+3600, 10), whyInstant, nil},

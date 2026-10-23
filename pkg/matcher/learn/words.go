@@ -323,8 +323,8 @@ func layoutHash(t wtoks) string {
 		fmt.Fprintf(h, "s%d,%d", sg.from, sg.to)
 		if sg.inst >= 0 {
 			fmt.Fprintf(h, "i%s", clockLayouts[sg.lay].name)
-			continue
 		}
+		// (An instant's segment holds no runs.)
 		for _, r := range sg.runs {
 			fmt.Fprintf(h, "r%d,%d,%s", r.from, r.to, r.class)
 		}
