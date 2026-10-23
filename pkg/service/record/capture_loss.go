@@ -200,7 +200,7 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		test = w.base
 	}
 	w.last = now
-	charged := now.Charged(w.base, w.base, test)
+	charged := now.Charged(w.base, w.base, w.base, test) // one application, the recording's
 	if len(charged) > 0 {
 		w.addEvidence(name, charged)
 	}

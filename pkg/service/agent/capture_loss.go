@@ -174,7 +174,7 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 // first test claims the session, and every test after that rides on it
 // (decision 20) -- and every other kind from the run's mark.
 func sinceRun(now models.CaptureLosses, mark captureLossMark) models.CaptureLosses {
-	return now.SinceWithin(mark.at, nil)
+	return now.SinceWithin(mark.at, mark.at, nil)
 }
 
 // captureLossesSince is what a test is charged as it ends (models.Charged):
@@ -213,5 +213,5 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, te
 	if test == nil {
 		test = mark.at
 	}
-	return now.Charged(mark.at, nil, test), now, nil
+	return now.Charged(mark.at, mark.at, nil, test), now, nil
 }

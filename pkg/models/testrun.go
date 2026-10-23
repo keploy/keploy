@@ -247,9 +247,12 @@ type FailureInfo struct {
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
 	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
-	//     kind not PerTest): what the agent lost since the test set began, as
-	//     this test ended. Such a loss taints the test running when it
-	//     happened and every later test of the set (design v14 §3.2).
+	//     other kind): what the agent lost since the test set began, as this
+	//     test ended. Such a loss taints the test running when it happened
+	//     and every later test of the set (design v14 §3.2); a process lost
+	//     for as long as its application runs (AppLife) taints every test
+	//     since that application started, in this set or an earlier one it
+	//     served (--keep-app-alive).
 	//   - a test's own kind (CaptureLossKind.PerTest: tls_handshake_failed,
 	//     capture_unread, connection_unrecorded and the others): what the
 	//     agent lost while this test ran, since the previous test ended, for

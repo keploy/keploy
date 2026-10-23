@@ -243,6 +243,11 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 		// cannot capture at all is counted from here for the whole run.
 		r.lossRunBase, r.lossRunBaseSet = at, true
 	}
+	if !r.lossAppKept {
+		// The application starts after this mark.
+		r.lossAppBase = at
+	}
+	r.lossAppKept = false
 }
 
 // readCaptureLosses reads the agent's counts with no deadline of its own (the
@@ -286,7 +291,7 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 		from = r.lossLast
 	}
 	r.lossLast, r.lossLastRead = now, true
-	return now.Charged(r.lossMark.at, r.lossRunBase, from), nil
+	return now.Charged(r.lossMark.at, r.lossAppBase, r.lossRunBase, from), nil
 }
 
 // captureTaintsTheSet reports whether, under the proven switch, the agent's
@@ -302,7 +307,7 @@ func (r *Replayer) captureTaintsTheSet() bool {
 	if !provenswitch.On() || !r.lossMark.known || !r.lossLastRead {
 		return false
 	}
-	for _, c := range r.lossLast.SinceWithin(r.lossMark.at, r.lossRunBase) {
+	for _, c := range r.lossLast.SinceWithin(r.lossMark.at, r.lossAppBase, r.lossRunBase) {
 		if !c.Kind.PerTest() && !c.Kind.Evidence() {
 			return true
 		}
@@ -312,20 +317,32 @@ func (r *Replayer) captureTaintsTheSet() bool {
 
 // endCaptureLosses reads, at a test set's end under the proven switch, what
 // the agent lost after the set's last per-test read (after its mark, when no
-// test read), and moves the mark to now for the next test set. Nothing for
-// an agent that cannot count or a run that does not mock. An error is a read
-// that failed: what the set's tail lost cannot be told, and the next set's
-// tests cannot be counted.
-func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+// test read), and moves the mark to now for the next test set. appRuns says
+// the set's application runs on into the next set (--keep-app-alive), which
+// is then charged what that application's processes lost from its start
+// (lossAppBase), not from this mark. Nothing for an agent that cannot count
+// or a run that does not mock. An error is a read that failed: what the
+// set's tail lost cannot be told, and the next set's tests cannot be
+// counted.
+func (r *Replayer) endCaptureLosses(ctx context.Context, appRuns bool) (models.CaptureLosses, error) {
 	reader, ok := r.instrumentation.(CaptureLossReader)
 	mark, last, lastRead := r.lossMark, r.lossLast, r.lossLastRead
 	r.lossLast, r.lossLastRead = nil, false
+	r.lossAppKept = appRuns
 	if !provenswitch.On() || !ok || !r.mocksDependencies() || r.noAgent || errors.Is(mark.err, models.ErrCaptureLossesUnsupported) {
 		r.markCaptureLosses(ctx)
 		return nil, nil
 	}
 	now, err := readCaptureLosses(ctx, reader)
 	r.lossMarked = true
+	if !appRuns {
+		// The next set's application starts after this read: what this
+		// one's processes lost is not the next one's. A read that failed
+		// leaves no base to count from, but the hooks' load (nil): more,
+		// never less.
+		r.lossAppBase = now
+	}
+	r.lossAppKept = false
 	if err != nil {
 		r.lossMark = captureLossMark{err: err}
 		return nil, err
@@ -351,7 +368,7 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	// Not the PID-map refusals: the set's PID-map check
 	// (pidMapCaptureIncomplete) reports those, once.
 	var out models.CaptureLosses
-	for _, l := range now.SinceWithin(from, notFrom) {
+	for _, l := range now.SinceWithin(from, from, notFrom) {
 		if l.Kind != models.CaptureLossPIDMap && l.Kind != models.CaptureLossPIDMapExcluded {
 			out = append(out, l)
 		}

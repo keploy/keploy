@@ -248,11 +248,11 @@ func TestTwoSourcesOfOneKindAreOneCount(t *testing.T) {
 		{Kind: models.CaptureLossKernelSkip, Count: 7, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"},
 	}, got)
 	// Nothing grew: nothing is charged.
-	require.Empty(t, got.Charged(got, got, got))
+	require.Empty(t, got.Charged(got, got, got, got))
 	own[0].Count++
 	again, err := a.CaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 1, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"}}, again.Charged(got, got, got))
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossKernelSkip, Count: 1, What: "k_unix_stream_connect 2; keploy_tcp_recvmsg 5"}}, again.Charged(got, got, got, got))
 
 	// With hooks and a proxy that count nothing, the reporter's count is
 	// the agent's: never "unsupported".

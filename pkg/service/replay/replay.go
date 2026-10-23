@@ -590,6 +590,15 @@ type Replayer struct {
 	// 20: a Unix-socket connection outlives the test set it was opened in).
 	lossRunBase    models.CaptureLosses
 	lossRunBaseSet bool
+	// lossAppBase is the capture-loss mark the running application started
+	// after, from which a process lost for as long as its application runs
+	// (models.CaptureLossKind.AppLife) is counted: the set's mark where the
+	// set starts its application, an earlier set's where the application
+	// was kept running (--keep-app-alive); nil (the hooks' load) for an
+	// application keploy did not start. lossAppKept says the set that just
+	// ended left its application running for the next.
+	lossAppBase models.CaptureLosses
+	lossAppKept bool
 	// setEnd is how the final report of the test set RunTestSet is running
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd); setEndCalls, the calls it charged to the set
@@ -922,6 +931,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// RunTestSet, which marks it there.
 	r.pidMarked, r.lossMarked = false, false
 	r.lossRunBase, r.lossRunBaseSet = nil, false
+	r.lossAppBase, r.lossAppKept = nil, false
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
 	}
@@ -2933,6 +2943,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.lossRunBase, r.lossRunBaseSet = nil, true
 		}
 		r.markCaptureLosses(runTestSetCtx)
+		// Nor what its processes lost: from the hooks' load, too.
+		r.lossAppBase = nil
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -5632,8 +5644,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Under the proven switch, what the agent lost after this set's last
 	// per-test read is the set's own, charged to none of its tests: the set
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
-	// next test set's tests count from here.
-	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
+	// next test set's tests count from here. The set's application runs on
+	// into the next set where keploy did not start it for this set: one kept
+	// alive across sets (serveTest), or one keploy does not start. (A compose
+	// stack's app keploy stops at the set's end is started again after a mark
+	// of its own, which the next set's processes count from.)
+	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx), serveTest || !r.instrument)
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
 	lateJudged, lateNotJudged := late.Split()
