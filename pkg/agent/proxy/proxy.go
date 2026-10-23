@@ -1074,6 +1074,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// zone in its local zone, the agent's own, or in UTC
 	// (learn.Tracker.SetAppZone).
 	proxy.learnTracker.SetAppZone(time.Local)
+	proxy.sayLearnWaits()
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
 	// settled here; nothing is read off disk (see upstreamTLSOnce).
@@ -4545,14 +4546,15 @@ func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
 	}
 }
 
-// AwaitTestRequest marks the running test as one keploy test opened, whose
-// request its opening filter brings (agent.TestRequestTaker;
-// learn.Tracker.Await), under the proven switch.
-func (p *Proxy) AwaitTestRequest() {
-	if provenswitch.On() {
-		p.learnTracker.Await()
-	}
-}
+// BeginTestCaseCapture is BeginTestErrorCapture of a test keploy test opens
+// (agent.TestRequestTaker): under the proven switch the learn step's test
+// begins awaiting its test case's request, which its opening filter brings
+// (TakeTestRequest), in the same step (learn.Tracker.BeginAwaiting).
+func (p *Proxy) BeginTestCaseCapture() { p.openTestErrorCapture(false, true) }
+
+// ContinueTestCaseCapture is ContinueTestErrorCapture of a test keploy test
+// opens, as BeginTestCaseCapture is BeginTestErrorCapture's.
+func (p *Proxy) ContinueTestCaseCapture() { p.openTestErrorCapture(true, true) }
 
 var _ agent.TestRequestTaker = (*Proxy)(nil)
 
@@ -5043,7 +5045,7 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // fails the set. One made after that read reaches no verdict.
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
-func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
+func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
 
 // ContinueTestErrorCapture opens the next test's window, as
 // BeginTestErrorCapture does, but carries into it the misses made since the
@@ -5054,12 +5056,23 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
 // Discarding it would drop a real miss silently: a SEND the app publishes in
 // reaction to something the replay did between two tests is reported against
 // no test at all.
-func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true) }
+func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true, false) }
 
-func (p *Proxy) openTestErrorCapture(carry bool) {
+// openTestErrorCapture opens the next test's capture window (carry: as
+// ContinueTestErrorCapture). Under the proven switch the learn step's test
+// begins with it, awaiting its test case's request where keploy test opened
+// it (awaits: learn.Tracker.BeginAwaiting), in one step: no call reads the
+// test's places between its begin and the wait.
+func (p *Proxy) openTestErrorCapture(carry, awaits bool) {
 	if provenswitch.On() {
 		// The learn step's earlier places are the running test's.
-		p.learnBoundary(func(t *learn.Tracker) { t.Begin() })
+		p.learnBoundary(func(t *learn.Tracker) {
+			if awaits {
+				t.BeginAwaiting()
+			} else {
+				t.Begin()
+			}
+		})
 	}
 	acc := &testErrorAccumulator{}
 	p.captureMu.Lock()
@@ -5138,6 +5151,28 @@ func (p *Proxy) logDroppedMisses(msg string, errs []error) {
 		}
 	}
 	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", missSummaries(errs)))
+}
+
+// sayLearnWaits has the learn step's tracker say in the agent's log as a call
+// waits for its test case's request, and, at the default level, as a test's
+// window closes without it.
+func (p *Proxy) sayLearnWaits() {
+	// A call made after keploy test opened a test's window and before the
+	// filter that opens it brought its test case's request waits for the
+	// request (learn.Tracker.AwaitRequest): said, so a call that waits is
+	// never silent.
+	p.learnTracker.OnAwait(func() {
+		p.logger.Debug("a call waits for its test case's request, which the filter that opens the test brings, before the learn step reads it")
+	})
+	// A test's window that closes before that filter brought the request
+	// leaves the calls that waited, and every later call of the test,
+	// learning from a request the learn step could not read: each value
+	// that changed in them is refused. Said at the default level.
+	p.learnTracker.OnUnreadClose(func(waiting int) {
+		p.logger.Warn("a test case's capture window closed before the filter that opens the test brought its request to the agent: the learn step refuses every value that changed in the test's calls, as it could not read the request the application was given; the test's mocks keep comparing those fields",
+			zap.Int("callsWaiting", waiting),
+			zap.String("next_step", "check that keploy test reached the agent with the test case's filter (its log says why it did not), and that keploy and its agent run the same version"))
+	})
 }
 
 // missSummaries names, for a log line, the calls of up to the first 10 misses.

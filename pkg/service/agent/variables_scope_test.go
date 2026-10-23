@@ -293,7 +293,9 @@ func TestAKeployTestCasesWindowOpensWithItsVariables(t *testing.T) {
 // request (coreAgent.TestRequestTaker).
 type requestProxy struct{ openerProxy }
 
-func (p *requestProxy) AwaitTestRequest() { p.log("await") }
+func (p *requestProxy) BeginTestCaseCapture() { p.log("begin awaiting") }
+
+func (p *requestProxy) ContinueTestCaseCapture() { p.log("continue awaiting") }
 
 func (p *requestProxy) TakeTestRequest(req *models.TestRequest) {
 	if req == nil {
@@ -305,11 +307,12 @@ func (p *requestProxy) TakeTestRequest(req *models.TestRequest) {
 
 var _ coreAgent.TestRequestTaker = (*requestProxy)(nil)
 
-// A keploy test case's filter hands its request to the learn step before its
-// window opens (the replay sends the request once the filter is answered);
-// a filter that carries none (a keploy older than its agent) is handed as
-// none, which the learn step reads as a request it could not read. A set's
-// staging hands nothing.
+// A keploy test case's filter hands its request to the learn step once its
+// window is in (the replay sends the request once the filter is answered), so
+// a call that waited for the request reads the test's own mocks; a filter that
+// carries none (a keploy older than its agent) is handed as none, which the
+// learn step reads as a request it could not read, and so is one whose window
+// could not go in: no call waits for it. A set's staging hands nothing.
 func TestAKeployTestCaseHandsItsRequestToTheLearnStepFirst(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	open := models.MockFilterParams{
@@ -323,8 +326,8 @@ func TestAKeployTestCaseHandsItsRequestToTheLearnStepFirst(t *testing.T) {
 		params models.MockFilterParams
 		want   string
 	}{
-		{"with its request", open, "request test-1, open-window"},
-		{"from a keploy older than its agent", unsent, "request none, open-window"},
+		{"with its request", open, "open-window, request test-1"},
+		{"from a keploy older than its agent", unsent, "open-window, request none"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &requestProxy{}
@@ -345,10 +348,10 @@ func TestAKeployTestCaseHandsItsRequestToTheLearnStepFirst(t *testing.T) {
 	}
 }
 
-// keploy test opening a test's capture window tells the learn step the test
-// has a request of its own, which its opening filter brings: until then the
-// learn step reads it as one it could not read. With the switch off it tells
-// nothing.
+// keploy test opening a test's capture window begins the learn step's test
+// awaiting a request of its own, which its opening filter brings, in the
+// window's own step: no call reads the test's places between the two. With
+// the switch off it opens the window as before, and tells nothing.
 func TestKeployTestsCaptureWindowAwaitsTheTestCasesRequest(t *testing.T) {
 	for _, on := range []string{"1", "0"} {
 		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
@@ -362,7 +365,7 @@ func TestKeployTestsCaptureWindowAwaitsTheTestCasesRequest(t *testing.T) {
 			if err := a.ContinueTestErrorCapture(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			want := "await, await"
+			want := "begin awaiting, continue awaiting"
 			if on != "1" {
 				want = ""
 			}
@@ -371,13 +374,13 @@ func TestKeployTestsCaptureWindowAwaitsTheTestCasesRequest(t *testing.T) {
 			}
 			// A proxy that carries a window's misses into the next one
 			// (keploy test's path for every test after a set's first)
-			// awaits the request too, after the window opens.
+			// awaits the request too, as the window opens.
 			c := &continuingRequestProxy{}
 			a.Proxy = c
 			if err := a.ContinueTestErrorCapture(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			want = "continue, await"
+			want = "continue awaiting"
 			if on != "1" {
 				want = "continue"
 			}

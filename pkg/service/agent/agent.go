@@ -972,8 +972,13 @@ func (a *Agent) PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, erro
 func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	// a.Proxy is the agent.Proxy interface; reach the concrete capability via a
 	// type-assertion so the interface stays unchanged. Older proxies without it
-	// simply fall back to the legacy global queue.
-	if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
+	// simply fall back to the legacy global queue. Under the proven switch a
+	// proxy whose learn step reads the test case's request opens the window
+	// with the learn step's test awaiting it, in one step
+	// (coreAgent.TestRequestTaker).
+	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok && provenswitch.On() {
+		taker.BeginTestCaseCapture()
+	} else if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
 		b.BeginTestErrorCapture()
 	}
 	if t := a.realTracker(); t != nil && provenswitch.On() {
@@ -982,35 +987,33 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 		// uses start here.
 		t.BeginTest()
 	}
-	a.awaitTestRequest()
 	return nil
-}
-
-// awaitTestRequest tells the learn step that the test keploy test opens has
-// a request of its own, which the filter that opens it brings
-// (coreAgent.TestRequestTaker), under the proven switch.
-func (a *Agent) awaitTestRequest() {
-	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok && provenswitch.On() {
-		taker.AwaitTestRequest()
-	}
 }
 
 // ContinueTestErrorCapture opens the next test's capture window, carrying in
 // the misses made since the previous test's window closed (the proxy's
-// ContinueTestErrorCapture). A proxy without it opens a window as Begin does.
+// ContinueTestErrorCapture; under the proven switch, with the learn step's
+// test awaiting its request, ContinueTestCaseCapture). A proxy without it
+// opens a window as Begin does.
 func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
-	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
-		c.ContinueTestErrorCapture()
-		if t := a.realTracker(); t != nil && provenswitch.On() {
-			// What was not captured while no test case ran is the run's
-			// (design v14 §3.2 as amended for class e); this one's starts
-			// here.
-			t.BeginTest()
-		}
-		a.awaitTestRequest()
-		return nil
+	taker, takes := a.Proxy.(coreAgent.TestRequestTaker)
+	takes = takes && provenswitch.On()
+	c, carries := a.Proxy.(interface{ ContinueTestErrorCapture() })
+	if !takes && !carries {
+		return a.BeginTestErrorCapture(ctx)
 	}
-	return a.BeginTestErrorCapture(ctx)
+	if takes {
+		taker.ContinueTestCaseCapture()
+	} else {
+		c.ContinueTestErrorCapture()
+	}
+	if t := a.realTracker(); t != nil && provenswitch.On() {
+		// What was not captured while no test case ran is the run's
+		// (design v14 §3.2 as amended for class e); this one's starts
+		// here.
+		t.BeginTest()
+	}
+	return nil
 }
 
 // collectAsyncMocks returns the async subset (Mock.IsAsync, i.e. Spec.Async != nil).
@@ -1853,16 +1856,27 @@ func (a *Agent) OpenTestCase(ctx context.Context, params models.MockFilterParams
 	if !provenswitch.On() || !params.BeginsTestVariables() {
 		return errors.New("this mock filter opens no test case, and begins no test's variables")
 	}
-	// The test case's own request, for the learn step, before its mocks go
-	// live: the replay sends the request only after the filter is answered.
-	// A filter that carries none (a keploy older than its agent) is given
-	// as such, and the learn step refuses what only the request could
-	// account for.
-	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok {
-		taker.TakeTestRequest(params.TestRequest)
+	// The test case's own request, for the learn step: the replay sends the
+	// request only after the filter is answered. A filter that carries none
+	// (a keploy older than its agent) is given as such, and the learn step
+	// refuses what only the request could account for. Giving it releases
+	// the calls that wait for it (learn.Tracker.AwaitRequest), each of which
+	// then reads its scope: under exact serving before the test's mocks go
+	// live, since the test opens only once every call made before is
+	// answered (settle_proven.go), the released ones among them, from the
+	// pool; with its window staged otherwise, once the window is in, so
+	// that a released call reads the test's own mocks, never the ones
+	// before them by where the scheduler put it. Given whatever the
+	// opening's outcome: no call waits for a test that did not open.
+	taker, takes := a.Proxy.(coreAgent.TestRequestTaker)
+	give := func() {
+		if takes {
+			taker.TakeTestRequest(params.TestRequest)
+		}
 	}
 	open := &opening{given: params.Variables}
 	if params.Exact != nil {
+		give()
 		// Refused before anything of the test case is served or settled.
 		if _, ok := a.Proxy.(coreAgent.ExactTestOpener); !ok {
 			if err := a.opensWithoutVariables(open.given); err != nil {
@@ -1871,6 +1885,7 @@ func (a *Agent) OpenTestCase(ctx context.Context, params models.MockFilterParams
 		}
 		return a.serveKeployTestExactly(ctx, params, open)
 	}
+	defer give()
 	return a.stageMocks(ctx, params, nil, open)
 }
 

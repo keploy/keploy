@@ -483,12 +483,17 @@ type VariableResetter interface {
 // step reads it as the test's earliest place. A proxy that lacks it
 // reads none.
 //
-// AwaitTestRequest marks the running test as one keploy test opened, whose
-// request its opening filter brings: until TakeTestRequest gives it, the
-// learn step reads the request as one it could not read. The agent calls it
-// as keploy test opens the test's capture window.
+// BeginTestCaseCapture and ContinueTestCaseCapture open the capture window of
+// a test keploy test opens, as BeginTestErrorCapture and
+// ContinueTestErrorCapture do, and in the same step begin the learn step's
+// test awaiting its request, which its opening filter brings: until
+// TakeTestRequest gives it, a call that reads the test's places waits for it,
+// so the learn step's verdict on a call does not hang on whether the call
+// came before the filter or after it. The agent calls one as keploy test
+// opens the test's capture window.
 type TestRequestTaker interface {
-	AwaitTestRequest()
+	BeginTestCaseCapture()
+	ContinueTestCaseCapture()
 	TakeTestRequest(req *models.TestRequest)
 }
 

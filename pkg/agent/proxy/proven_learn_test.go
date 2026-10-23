@@ -20,6 +20,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // learnCall sends one request through the HTTP integration in record's full
@@ -1016,7 +1018,7 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 		return m
 	}
 	body := `{"slots":["11:13","11:14","11:15"]}`
-	slots := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: body, Sent: body}}}
+	slots := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}, {Name: "body", Recorded: body, Sent: body}}}
 	for _, tc := range []struct {
 		name string
 		req  *models.TestRequest
@@ -1097,5 +1099,57 @@ func TestAMockModeAgentsLearnStepReadsTheAppsZoneAndATestsRecordedBegin(t *testi
 				t.Fatalf("switch off: window %+v; want none", w)
 			}
 		})
+	}
+}
+
+// A capture window keploy test opens for a test case begins the learn step's
+// test awaiting its request, in the window's own step, until the filter that
+// opens the test brings it (TakeTestRequest); a window opened otherwise
+// (keploy mock's, or with the switch off) awaits none.
+func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for name, open := range map[string]func(*Proxy){
+		"begin":    (*Proxy).BeginTestCaseCapture,
+		"continue": (*Proxy).ContinueTestCaseCapture,
+	} {
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		open(p)
+		if _, _, _, _, awaiting := p.learnTracker.Places(); !awaiting {
+			t.Fatalf("%s: the test does not await its request", name)
+		}
+		p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+		if _, earlier, _, _, awaiting := p.learnTracker.Places(); awaiting || len(earlier) != 1 || earlier[0].Mock != "test case test-1" {
+			t.Fatalf("%s: after the request: %+v, awaiting %v", name, earlier, awaiting)
+		}
+	}
+	// A window that closes before the filter brought the request is said at
+	// the default level; one whose request came says nothing.
+	for name, give := range map[string]bool{"closed unread": false, "its request given": true} {
+		p := startedDrainProxy(t, 100)
+		core, logs := observer.New(zapcore.InfoLevel)
+		p.logger = zap.New(core)
+		p.learnTracker = learn.NewTracker()
+		p.sayLearnWaits()
+		p.BeginTestCaseCapture()
+		if give {
+			p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+		}
+		p.EndTestErrorCapture()
+		warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("closed before the filter that opens the test brought its request").Len()
+		if want := map[bool]int{false: 1, true: 0}[give]; warned != want {
+			t.Fatalf("%s: %d warnings that the window closed without its request; want %d", name, warned, want)
+		}
+	}
+	for name, open := range map[string]func(*Proxy){
+		"keploy mock's begin":    (*Proxy).BeginTestErrorCapture,
+		"keploy mock's continue": (*Proxy).ContinueTestErrorCapture,
+	} {
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		open(p)
+		if _, _, _, _, awaiting := p.learnTracker.Places(); awaiting {
+			t.Fatalf("%s: the test awaits a request", name)
+		}
 	}
 }
