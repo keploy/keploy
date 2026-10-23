@@ -211,6 +211,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		Kind:          models.HTTP,
 		Created:       time.Now().Unix(),
 		SourcePod:     SourcePodFromContext(ctx),
+		ServedBy:      ServedByFromContext(ctx),
 		HasBinaryFile: hasBinaryFile,
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
@@ -626,6 +627,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Kind:      models.GRPC_EXPORT,
 		Created:   time.Now().Unix(),
 		SourcePod: SourcePodFromContext(ctx),
+		ServedBy:  ServedByFromContext(ctx),
 		SchemaKey: schemaKey,
 		GrpcReq:   *http2Stream.GRPCReq,
 		GrpcResp:  *http2Stream.GRPCResp,

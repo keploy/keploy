@@ -525,7 +525,7 @@ func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
 // RecordOrphanWindow itself no-ops on a zero start and a nil manager.
 //
 // Reader/writer symmetry: the suppressor (routes/record.go) must query
-// WasMockOrphanedInWindow on the SAME manager this writes to. In OSS that always
+// WasMockOrphanedFor on the SAME manager this writes to. In OSS that always
 // holds — nothing calls syncMock.NewContext, so s.Mgr is always nil and both the
 // write here and the read there resolve to syncMock.Get(). A multi-app composer
 // that sets a per-app s.Mgr must likewise give its suppressor a per-app reader;

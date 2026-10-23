@@ -25,3 +25,29 @@ func SourcePodFromContext(ctx context.Context) string {
 	}
 	return ""
 }
+
+// servedByCtxKey carries the process that serves the capture context's
+// connection: its TGID in the initial PID namespace. Reentrancy seam: the
+// enterprise low-latency capture sets it per connection (WithServedBy) so
+// Capture stamps TestCase.ServedBy, by which the record route tells which test
+// cases a scoped span of unrecorded traffic can have stranded. Unset, the
+// stamp is 0, which every such span takes as stranded.
+type servedByCtxKey struct{}
+
+// WithServedBy returns a context carrying tgid, the process that serves the
+// connection whose test cases the context's Capture builds.
+func WithServedBy(ctx context.Context, tgid uint32) context.Context {
+	return context.WithValue(ctx, servedByCtxKey{}, tgid)
+}
+
+// ServedByFromContext returns the serving process carried on ctx, 0 when none
+// was set.
+func ServedByFromContext(ctx context.Context) uint32 {
+	if ctx == nil {
+		return 0
+	}
+	if tgid, ok := ctx.Value(servedByCtxKey{}).(uint32); ok {
+		return tgid
+	}
+	return 0
+}

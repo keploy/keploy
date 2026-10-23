@@ -350,7 +350,14 @@ func TestStreamHandlersNoteAFrameTheyCarried(t *testing.T) {
 		name string
 		send func(streamsSvc)
 	}{
-		{"incoming", func(svc streamsSvc) { svc.tc <- &models.TestCase{Name: "test-1", Kind: models.HTTP} }},
+		{"incoming", func(svc streamsSvc) {
+			// A window in a stretch of its own, before every span another
+			// test recorded (newStretch): a test case with no window is left
+			// out by every span (WasMockOrphanedFor), and not carried.
+			at := newStretch()
+			svc.tc <- &models.TestCase{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at},
+				HTTPResp: models.HTTPResp{Timestamp: at.Add(time.Microsecond)}}
+		}},
 		{"outgoing", func(svc streamsSvc) { svc.mocks <- &models.Mock{Name: "mock-1", Kind: models.HTTP} }},
 	} {
 		t.Run(s.name, func(t *testing.T) {
