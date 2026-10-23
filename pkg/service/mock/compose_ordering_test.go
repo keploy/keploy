@@ -89,6 +89,21 @@ type composeInstr struct {
 	// compose, the only account of the run there is.
 	leftOutcome    models.MockOutcome
 	leftOutcomeErr error
+	// relayed is what the agent answers the read of the calls it relayed to
+	// a live server with (RelayedLiveReader), and relayedErr what that read
+	// fails with: by default it relayed none. Under compose the account it
+	// leaves carries relayed too, unless leftOutcome says otherwise or
+	// leftNoRelayed (an older agent's account, which has no such field).
+	relayed       models.RelayedLives
+	relayedErr    error
+	leftNoRelayed bool
+	// relayedAfterRun, when set, is what the read answers once the test
+	// command has run: the agent's count grew by what the run relayed.
+	relayedAfterRun models.RelayedLives
+	// leaveOut is what the agent's answer to StoreMocks says it leaves out
+	// of the pool it serves (models.StoreMocksResp.LeftOut): the set's Redis
+	// mocks, when it relays Redis live.
+	leaveOut []string
 	// agentFailure is what the agent's container says about how it stopped
 	// (ComposeAgentFailureReader); nil: it outlived the app.
 	agentFailure func() error
@@ -231,7 +246,27 @@ func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.
 }
 
 func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
-	return f.leftOutcome, f.leftOutcomeErr
+	out := f.leftOutcome
+	if out.Relayed == nil && !f.leftNoRelayed {
+		rows := append(models.RelayedLives{}, f.relayed...)
+		out.Relayed = &rows
+	}
+	return out, f.leftOutcomeErr
+}
+
+// GetRelayedLive answers what the agent relayed to a live server
+// (RelayedLiveReader): relayed, or relayedErr.
+func (f *composeInstr) GetRelayedLive(context.Context) (models.RelayedLives, error) {
+	if f.relayedErr != nil {
+		return nil, f.relayedErr
+	}
+	f.mu.Lock()
+	ran := f.runs > 0
+	f.mu.Unlock()
+	if ran && f.relayedAfterRun != nil {
+		return append(models.RelayedLives{}, f.relayedAfterRun...), nil
+	}
+	return append(models.RelayedLives{}, f.relayed...), nil
 }
 
 func (f *composeInstr) ComposeAgentFailure() error {
@@ -267,11 +302,14 @@ func (f *composeInstr) MakeAgentReadyForDockerCompose(context.Context) error {
 	return nil
 }
 
-func (f *composeInstr) StoreMocks(_ context.Context, filtered, unfiltered []*models.Mock) error {
+func (f *composeInstr) StoreMocks(ctx context.Context, filtered, unfiltered []*models.Mock) error {
 	f.record("store")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stored = append(append(f.stored, filtered...), unfiltered...)
+	if into := models.StoreMocksAnswerOf(ctx); into != nil {
+		*into = models.StoreMocksResp{IsSuccess: true, SkipsRedis: len(f.leaveOut) > 0, LeftOut: f.leaveOut}
+	}
 	return nil
 }
 

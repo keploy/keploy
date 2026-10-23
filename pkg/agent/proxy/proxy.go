@@ -180,6 +180,10 @@ type Proxy struct {
 	// redisSkipOn says the Redis skip is installed (installRedisSkip): only
 	// then does a replay's DNS note whose its answers are (dns_live.go).
 	redisSkipOn atomic.Bool
+	// relayed counts the connections the proxy relayed live to a
+	// dependency instead of answering them from a recording, for the
+	// agent's life (relayed_live.go).
+	relayed relayedLive
 	// serverFirstDests is the destinations found to speak a server-first
 	// protocol: a later record connection to one, its port learned not to
 	// be MySQL, is probed again rather than skipped (probeMysql), so it is
@@ -2806,6 +2810,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// From the session's snapshot, as the handshake hold decides it: the
 	// proxy field is rewritten by Record while connections are handled.
 	if outgoingOpts.OpportunisticTLSIntercept {
+		// Relayed to the live service (with keploy's MITM for its keys), not
+		// answered from a recording (relayedLive).
+		p.relayed.note(models.RelayedPassThrough, dstAddr)
 		if err := p.opportunisticTLSIntercept(parserCtx, srcConn, dstAddr, predialed, rule.Backdate, outgoingOpts); err != nil {
 			utils.LogError(p.logger, err, "opportunistic TLS intercept failed",
 				zap.String("server address", dstAddr))
@@ -2816,6 +2823,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
+		// Sent to the live service, reached or not (relayedLive).
+		p.relayed.note(models.RelayedPassThrough, dstAddr)
 		dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
@@ -3560,27 +3569,27 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// mocked, for each test the connection carries a call in
 		// (mockedNote.relayed).
 		src := mocked.relayed(srcConn, string(integrations.REDIS_SKIP))
-		return p.serveRedisSkip(parserCtx, logger, dstAddr, src, &dstConn, func() (net.Conn, string, error) {
-			addr := dstAddr
-			if isTLS {
-				addr = dstCfg.Addr
-			}
-			target := util.DialTarget{Addr: p.liveAddr(addr)}
+		addr := dstAddr
+		if isTLS {
+			addr = dstCfg.Addr
+		}
+		return p.serveRedisSkip(parserCtx, logger, dstAddr, src, &dstConn, func() (string, string) {
+			return p.redisTarget(dstAddr, addr)
+		}, func(live string) (net.Conn, error) {
+			target := util.DialTarget{Addr: live}
 			if target.Addr == addr {
 				target.Predialed = predialed
 			}
 			if !isTLS {
-				c, err := util.DialDestination(parserCtx, p.logger, "tcp", target)
-				return c, target.Addr, err
+				return util.DialDestination(parserCtx, p.logger, "tcp", target)
 			}
 			cfg := dstCfg.TLSCfg.Clone()
 			if isMTLS && clientPeerCert != nil {
 				if err := p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey); err != nil {
-					return nil, target.Addr, err
+					return nil, err
 				}
 			}
-			c, err := util.DialDestinationTLS(parserCtx, p.logger, "tcp", target, cfg)
-			return c, target.Addr, err
+			return util.DialDestinationTLS(parserCtx, p.logger, "tcp", target, cfg)
 		})
 	}
 

@@ -672,6 +672,13 @@ type MockOutcome struct {
 	// counts" (an older agent, or hooks without PID maps), which a nil
 	// PIDMapRefusals alone cannot.
 	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
+	// Relayed is the connections the agent relayed live to a dependency over
+	// its life, which under compose is the replay's, instead of answering
+	// them from a recording (RelayedLives; empty when it relayed none). nil
+	// when it does not count them: an older agent, which leaves no such
+	// field, or a proxy that cannot count. That is "unknown", and keploy
+	// mock replay then claims no isolation.
+	Relayed *RelayedLives `json:"relayed,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.

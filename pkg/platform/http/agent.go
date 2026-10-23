@@ -1761,6 +1761,46 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 	return losses, nil
 }
 
+// GetRelayedLive fetches GET /agent/relayed: the connections the agent
+// relayed live to a dependency instead of answering them from a recording,
+// per reason and destination, each counted since it started
+// (models.RelayedLives). An agent older than the route (404) or one that
+// cannot count them (501) gives models.ErrRelayedLiveUnsupported, which is
+// "unknown", not "none".
+func (a *AgentClient) GetRelayedLive(ctx context.Context) (models.RelayedLives, error) {
+	url := fmt.Sprintf("%s/relayed", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask the agent which connections it relayed to a live server: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for relayed")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrRelayedLiveUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get the connections relayed live", res, rawBody)
+	}
+	var rows models.RelayedLives
+	if err := json.NewDecoder(res.Body).Decode(&rows); err != nil {
+		return nil, fmt.Errorf("failed to decode the connections relayed live: %w", err)
+	}
+	if rows == nil {
+		// A 200 whose body is null says nothing was relayed only if the
+		// agent says so: an empty list. null is no count.
+		return nil, fmt.Errorf("%w: the agent answered null", models.ErrRelayedLiveUnsupported)
+	}
+	return rows, nil
+}
+
 // GetUnchargedCaptureLosses asks the agent what it could not capture since
 // the run began that no test was charged with: what was lost after the last
 // test ended (GET /agent/capturelosses/uncharged). An agent that cannot say

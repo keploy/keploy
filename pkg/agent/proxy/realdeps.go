@@ -272,6 +272,8 @@ func (c *treeRealConn) CloseWrite() error {
 // failure.
 func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader, dec realdeps.Decision, dstAddr string, connID int64, predialed *util.Predialed) error {
 	logger := p.logger.With(zap.Int64("Client ConnectionID", connID), zap.String("destination", dstAddr), zap.String("real", dec.Label))
+	// Sent to the live destination, reached or not (relayedLive).
+	p.relayed.note(models.RelayedReal, dstAddr)
 	// Exactly the address the app dialed, with no loopback-family fallback
 	// and no budget of keploy's: a fallback could reach an address mock.real
 	// does not list, count it reached under the listed label, and let a

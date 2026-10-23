@@ -566,8 +566,12 @@ jobs:
   # compose service name, Redis is recreated at other addresses between the
   # record and the replay, and the replay passes with Redis relayed live to
   # where the name points now, not to the address the recording's DNS answer
-  # holds. Not record_build_replay_latest: a release that predates the skip
-  # mocks Redis at replay, and this build records none.
+  # holds. keploy mock replay of a test command that calls Redis and a mocked
+  # memcached passes with Redis live, and its receipt says the run is not
+  # isolated (Redis relayed to the live server, with as many connections as
+  # the Redis counted), its loaded count leaving out the Redis mocks an older
+  # keploy recorded. Not record_build_replay_latest: a release that predates
+  # the skip mocks Redis at replay, and this build records none.
   redis_skip:
     timeout-minutes: 30
     if: ${{ inputs.jobs_to_run == 'all' }}

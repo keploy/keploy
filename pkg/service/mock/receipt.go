@@ -100,6 +100,14 @@ type Receipt struct {
 	// when the run ends, so the log line and every reader agree.
 	Isolated      bool   `yaml:"isolated" json:"isolated"`
 	IsolationNote string `yaml:"isolationNote,omitempty" json:"isolationNote,omitempty"`
+	// Relayed is the calls keploy's agent relayed to a live server during the
+	// run instead of answering them from the recording, per destination and
+	// why (a Redis the open-source keploy does not mock, the agent's
+	// pass-through, mock.real), with how many connections: a run with any is
+	// not isolated.
+	// Absent when none was, and when the agent could not say (IsolationNote
+	// then says the run's isolation is unknown).
+	Relayed models.RelayedLives `yaml:"relayed,omitempty" json:"relayed,omitempty"`
 	// MocksDigest is the sha256 of the mocks file this run replayed, taken
 	// before the run, so a reader can tell a receipt about THIS recording
 	// from one about a set that has since been re-recorded. Under
@@ -270,12 +278,16 @@ type TestReceipt struct {
 
 // isolation decides whether a finished run proved isolation: the runner
 // passed, a call the recording lacks could not reach a real service, the
-// agent's miss list was read and was empty, and the agent served at least one
-// recorded call -- the only evidence the test command's traffic went through
-// keploy at all. A run keploy never intercepted also passes with nothing
-// missed; on macOS that is what `npm test` does, because the shell npm runs
-// scripts through drops the interception.
-func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, bypass []string) (bool, string) {
+// agent relayed no call to a live server (relayed: a Redis the open-source
+// keploy does not mock, the agent's pass-through, mock.real's) and said
+// so, the agent's miss list was read and was empty, and the agent served at
+// least one recorded call -- the only evidence the test command's traffic
+// went through keploy at all. A run keploy never intercepted also passes with
+// nothing missed; on macOS that is what `npm test` does, because the shell
+// npm runs scripts through drops the interception. An agent that cannot say
+// what it relayed (an older one) proves nothing: the run's isolation is
+// unknown, said last, as the weakest reason.
+func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, bypass []string, relayed relayedCheck) (bool, string) {
 	switch {
 	case runnerExit != 0:
 		return false, "the test command failed"
@@ -283,6 +295,10 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 		return false, fmt.Sprintf("--on-miss %s lets a call the recording does not have reach the real dependency", policy)
 	case len(bypass) > 0:
 		return false, "bypass rules send calls to " + strings.Join(bypass, ", ") + " to the real service"
+	case relayed.known && len(relayed.rows) > 0:
+		// Nothing missed, yet a dependency answered live: the call was
+		// never the recording's to answer.
+		return false, relayed.note()
 	case counts.missed < 0:
 		return false, "the agent could not report every call no recorded mock answered"
 	case counts.missedData > 0:
@@ -295,6 +311,8 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 		return false, "the agent never reported which recorded calls it served"
 	case counts.consumed == 0:
 		return false, "no recorded call was served, so nothing shows the test command's traffic went through keploy"
+	case !relayed.known:
+		return false, relayed.note()
 	}
 	return true, ""
 }

@@ -84,26 +84,33 @@ func (d *dnsAnswered) name(addr netip.Addr) (string, bool) {
 	return n, ok
 }
 
-// liveAddr is where a replay reaches dstAddr for real. When keploy's DNS
-// answered the application's lookup of a name with dstAddr's address from a
-// recorded mock, and the name no longer has that address (as the resolver
-// keploy forwards to answers now), it is the name's first address of the
-// same family, at dstAddr's port. Otherwise it is dstAddr: an address the
-// name still has is dialled as the application dialled it (one node of a
-// name with many is not another), and so is one whose name keploy cannot
-// resolve now, nor any address no mock gave.
+// liveAddr is liveTarget's address.
+func (p *Proxy) liveAddr(dstAddr string) string {
+	addr, _ := p.liveTarget(dstAddr)
+	return addr
+}
+
+// liveTarget is where a replay reaches dstAddr for real, and the name that
+// takes it there. When keploy's DNS answered the application's lookup of a
+// name with dstAddr's address from a recorded mock, and the name no longer
+// has that address (as the resolver keploy forwards to answers now), it is
+// the name's first address of the same family, at dstAddr's port, and the
+// name, fully qualified (with its trailing dot). Otherwise it is dstAddr and
+// "": an address the name still has is dialled as the application dialled
+// it (one node of a name with many is not another), and so is one whose
+// name keploy cannot resolve now, nor any address no mock gave.
 //
 // It asks the resolver once for each connection it is asked about, bounded
 // as every forward is (dnsForwardTimeout).
-func (p *Proxy) liveAddr(dstAddr string) string {
+func (p *Proxy) liveTarget(dstAddr string) (string, string) {
 	ap, err := containerkey.ParseAddrPort(dstAddr)
 	if err != nil {
-		return dstAddr
+		return dstAddr, ""
 	}
 	ip := ap.Addr()
 	name, ok := p.dnsAnswered.name(ip)
 	if !ok {
-		return dstAddr
+		return dstAddr, ""
 	}
 	qtype := dns.TypeA
 	if ip.Is6() {
@@ -114,11 +121,11 @@ func (p *Proxy) liveAddr(dstAddr string) string {
 	if err != nil || msg == nil || msg.Rcode != dns.RcodeSuccess || len(now) == 0 {
 		p.logger.Debug("keploy could not resolve, now, the name a recorded DNS answer gave this address; dialling the recorded address",
 			zap.String("name", name), zap.String("recorded address", dstAddr), zap.Error(err))
-		return dstAddr
+		return dstAddr, ""
 	}
 	for _, a := range now {
 		if a == ip {
-			return dstAddr
+			return dstAddr, ""
 		}
 	}
 	for _, a := range now {
@@ -126,8 +133,8 @@ func (p *Proxy) liveAddr(dstAddr string) string {
 			live := netip.AddrPortFrom(a, ap.Port()).String()
 			p.logger.Debug("dialling the name's address now: the address the recording's DNS answer gave is no longer the name's",
 				zap.String("name", name), zap.String("recorded address", dstAddr), zap.String("address", live))
-			return live
+			return live, name
 		}
 	}
-	return dstAddr
+	return dstAddr, ""
 }

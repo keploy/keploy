@@ -308,10 +308,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		utils.LogError(m.logger, err, "failed to load "+failedPool+" mocks", zap.String("mock-set", name))
 		return err
 	}
-	// What the agent holds: the pools less what this keploy never sends it
+	// What the agent is sent: the pools less what this keploy never sends it
 	// (models.AgentBound: the connection failures, which it does not replay).
-	// loaded counts exactly that, for the empty-set WARN, the "verified
-	// nothing" exit, the receipt and the metered count.
+	// loaded, below, counts what of it the agent holds to serve, for the
+	// empty-set WARN, the "verified nothing" exit, the receipt and the
+	// metered count.
 	// Under the proven switch, every mock the set decoded, before what the
 	// agent never holds is left out: what a mapping may name
 	// (pushProvenTable).
@@ -320,18 +321,29 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		decoded = append(append([]*models.Mock(nil), filtered...), unfiltered...)
 	}
 	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
-	loaded := len(filtered) + len(unfiltered)
 	// The recording this run replays, for the receipt: read after Pull, so in
 	// enterprise it is the registry's copy that was actually served.
 	digest := MocksDigest(m.config.Path, name)
-	if loaded == 0 {
+	// The agent's answer to the store says what of the set it leaves out of
+	// the pool it serves (models.StoreMocksResp): the set's Redis mocks, when
+	// it relays Redis to the real server. An agent that predates the answer
+	// leaves nothing out, and says so by saying nothing.
+	var stored models.StoreMocksResp
+	if err := m.instrumentation.StoreMocks(models.WithStoreMocksAnswer(ctx, &stored), filtered, unfiltered); err != nil {
+		utils.LogError(m.logger, err, "failed to store mocks on the agent")
+		return err
+	}
+	// loaded is what the agent holds to serve: what it left out answers no
+	// call of this run, whose calls it makes for real.
+	loaded, leftOut := servedPool(filtered, unfiltered, stored)
+	if loaded == 0 && leftOut > 0 {
+		m.logger.Warn("every mock of the set is a Redis mock this keploy does not serve: the runner's Redis calls go to the real Redis, which must be running",
+			zap.String("mock-set", name), zap.Int("redis_mocks", leftOut),
+			zap.String("next_step", "to replay Redis from its mocks, use Keploy Enterprise: "+models.RedisEnterpriseURL))
+	} else if loaded == 0 {
 		m.logger.Warn("the mock set is empty; the runner will hit a miss on every dependency call",
 			zap.String("mock-set", name),
 			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", m.userCommand, name)))
-	}
-	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
-		utils.LogError(m.logger, err, "failed to store mocks on the agent")
-		return err
 	}
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
@@ -377,6 +389,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     (PIDMapReader). Read here, with the compose app still parked.
 	pidBase := m.pidMapBaseline(ctx, "replay")
 	lossesBase := m.captureLossBaseline(ctx)
+	// And which calls it had relayed to a live server (RelayedLiveReader):
+	// the run's are what that count grows by.
+	relayedBase := m.relayedBaseline(ctx)
 
 	// 7. Release the compose app now that the mock pool is armed. This is the
 	//    post-arm half of step 2 — see releaseComposeApp.
@@ -611,6 +626,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// (and each later one, but for a failed TLS handshake), and this covers
 	// a loss outside every test too.
 	lostAll, lostErr := m.captureLossesDuring(ctx, lossesBase)
+	// What the agent relayed live during the run: a call it sent to a live
+	// server is no call the recording answered (isolation).
+	relayed := m.relayedDuring(ctx, relayedBase)
 	if parent.Err() != nil {
 		// The user's Ctrl+C came while keploy read the agent's counts (what
 		// it served and missed, its PID maps, its capture losses): a read it
@@ -749,7 +767,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     receipt cannot disagree -- then how much of the code it exercised,
 	//     from the runner's own report, and the --min-coverage floor.
 	bypass := bypassList(m.config.BypassRules)
-	isolated, isolationNote := isolation(runnerExit, policy, counts, bypass)
+	isolated, isolationNote := isolation(runnerExit, policy, counts, bypass, relayed)
 	tests := countTests(counts.tests, gate.reason)
 	if note, ungated := gateReport(gate, detail.windows); note != "" {
 		m.logger.Warn("this replay was asked to run only some tests, and did not", zap.String("mock-set", name), zap.String("why", note),
@@ -795,8 +813,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
 	} else {
-		m.logger.Info("this replay did not prove the tests run with the dependencies off",
-			zap.String("mock-set", name), zap.String("reason", isolationNote))
+		fields := []zap.Field{zap.String("mock-set", name), zap.String("reason", isolationNote)}
+		if next := relayed.nextStep(); next != "" && isolationNote == relayed.note() {
+			// The reason is what the agent relayed live, or that it cannot
+			// say: how to have those calls answered from a recording (for
+			// Redis, Keploy Enterprise), or the agent say what it relays.
+			fields = append(fields, zap.String("next_step", next))
+		}
+		m.logger.Info("this replay did not prove the tests run with the dependencies off", fields...)
 	}
 
 	//     Leave the verdict where the editor, an agent and a status command
@@ -820,6 +844,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Bypass:         bypass,
 		Isolated:       isolated,
 		IsolationNote:  isolationNote,
+		Relayed:        relayed.receiptRows(),
 		MocksDigest:    digest,
 		Coverage:       cov,
 		CoverageNote:   covNote,
@@ -2110,4 +2135,26 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			// would otherwise read it as "when this happened".
 			zap.String("recordedReqTimestamp", state.ReqTimestampMock))
 	}
+}
+
+// servedPool counts the mocks of filtered and unfiltered, those a replay
+// stored on the agent, that the agent holds to serve, and those it said it
+// leaves out of the pool it serves (stored.LeftOut: the set's Redis mocks,
+// when it relays Redis to the real server). A left-out mock answers no call
+// of the run: its call is made for real, so it is no mock the run loaded.
+func servedPool(filtered, unfiltered []*models.Mock, stored models.StoreMocksResp) (loaded, leftOut int) {
+	left := make(map[string]bool, len(stored.LeftOut))
+	for _, n := range stored.LeftOut {
+		left[n] = true
+	}
+	for _, pool := range [][]*models.Mock{filtered, unfiltered} {
+		for _, mk := range pool {
+			if mk != nil && left[mk.Name] {
+				leftOut++
+				continue
+			}
+			loaded++
+		}
+	}
+	return loaded, leftOut
 }

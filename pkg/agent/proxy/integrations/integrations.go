@@ -105,8 +105,10 @@ const (
 	// RedisSkipNotice is logged once per destination. It is never put in
 	// Registered: the proxy adds it to its own parsers, so Keploy
 	// Enterprise, whose agent runs this proxy, never has it, on any
-	// platform, whatever order its packages' inits ran in.
-	REDIS_SKIP IntegrationType = "redis_enterprise_only"
+	// platform, whatever order its packages' inits ran in. Its name is the
+	// reason the agent gives for the connections it relays
+	// (models.RelayedRedisEnterpriseOnly).
+	REDIS_SKIP IntegrationType = models.RelayedRedisEnterpriseOnly
 )
 
 // RedisEnterpriseURL is where the RedisSkipNotice sends a user who wants

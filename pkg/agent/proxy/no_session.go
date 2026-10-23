@@ -87,6 +87,11 @@ func (p *Proxy) serveWithoutSession(ctx context.Context, srcConn net.Conn, dstAd
 	if action != noSessionPassThrough {
 		return nil
 	}
+	if p.GlobalPassthrough {
+		// Sent to the live service, reached or not (relayedLive); an agent
+		// started to record passes through only what it records later.
+		p.relayed.note(models.RelayedPassThrough, dstAddr)
+	}
 
 	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: pre})
 	if err != nil {

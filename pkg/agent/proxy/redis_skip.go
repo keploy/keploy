@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/redisskip"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -91,11 +92,12 @@ func (e redisUnreachable) Unwrap() error { return e.err }
 // serveRedisSkip relays a connection the Redis skip matched to the real
 // Redis, raw, and records nothing of it. *dst is the connection to the
 // destination when one was dialled before dispatch (a record); otherwise (a
-// replay, which dials nothing before dispatch) dial reaches the real Redis
-// and *dst is set to what it returns, so the caller's deferred close closes
-// it; dial also returns the address it dialled (liveAddr's), which the error
-// names. The notice is said before the dial, so a replay whose Redis is down
-// still tells the user why keploy needs it up.
+// replay, which dials nothing before dispatch) target says where to dial
+// (redisTarget: liveAddr's address, and the name the count gives it), dial
+// reaches the real Redis there, and *dst is set to what it returns, so the
+// caller's deferred close closes it; the error names the address dialled.
+// The notice is said before the dial, so a replay whose Redis is down still
+// tells the user why keploy needs it up.
 //
 // util.RelayRawPassthrough, not globalPassThrough: it forwards a client's
 // half-close (FIN) on a clean EOF and lets the surviving direction finish,
@@ -104,11 +106,21 @@ func (e redisUnreachable) Unwrap() error { return e.err }
 // A replay's dial goes to the destination itself: a connection that reached
 // its Redis through an HTTP CONNECT proxy at record is dialled direct at
 // replay, where keploy answered the CONNECT itself (connect.go).
-func (p *Proxy) serveRedisSkip(ctx context.Context, logger *zap.Logger, dstAddr string, src net.Conn, dst *net.Conn, dial func() (net.Conn, string, error)) error {
+func (p *Proxy) serveRedisSkip(ctx context.Context, logger *zap.Logger, dstAddr string, src net.Conn, dst *net.Conn, target func() (addr, named string), dial func(addr string) (net.Conn, error)) error {
 	said := p.said()
 	said.skipped.Log(p.logger, dstAddr)
+	// Counted as soon as it is matched, before anything is dialled, reached
+	// or not: a replay whose Redis was relayed did not answer Redis from the
+	// recording (relayedLive). Named as the application dialled it, and, once
+	// a replay's dial target is known, by that (redisTarget).
+	p.relayed.note(models.RelayedRedisEnterpriseOnly, dstAddr)
 	if *dst == nil {
-		c, dialled, err := dial()
+		addr, named := target()
+		if named != "" {
+			p.relayed.rename(models.RelayedRedisEnterpriseOnly, dstAddr, named)
+		}
+		c, err := dial(addr)
+		dialled := addr
 		if err != nil {
 			// The connection or the agent ending (its context) is no
 			// failure to reach the Redis, and must not use up the one

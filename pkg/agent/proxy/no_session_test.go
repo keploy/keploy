@@ -158,6 +158,17 @@ func TestHandleConnectionWithoutASessionPassesThrough(t *testing.T) {
 			if err := awaitEvent(t, upstreamEnded, "the destination seeing its connection end"); err != nil {
 				t.Fatalf("the destination's connection did not end cleanly: %v", err)
 			}
+			// What global passthrough sends to the live service is counted
+			// as relayed live (relayedLive), so a keploy mock replay that
+			// ran under it never claims isolation; an agent started to
+			// record passes through only what it records later.
+			var want models.RelayedLives
+			if tc.global {
+				want = models.RelayedLives{{Reason: models.RelayedPassThrough, Destination: upstream, Connections: 1}}
+			}
+			if got := p.RelayedLive(); len(got) != len(want) || (len(want) > 0 && got[0] != want[0]) {
+				t.Fatalf("relayed %+v, want %+v", got, want)
+			}
 		})
 	}
 }

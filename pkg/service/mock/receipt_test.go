@@ -76,6 +76,11 @@ type replayCase struct {
 	// losses: the agent counts what it could not capture (GET
 	// /agent/capturelosses).
 	losses *lossCounter
+	// relayedBefore and relayedAfter are what the agent says it relayed to
+	// a live server before and after the test command ran (GET
+	// /agent/relayed); relayedErr is what that read fails with.
+	relayedBefore, relayedAfter models.RelayedLives
+	relayedErr                  error
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -115,6 +120,7 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	base.mockErrors = c.mockErrs
 	base.mockErrorsErr = c.mockErrErr
 	base.windowsErr = c.windowsErr
+	base.relayed, base.relayedAfterRun, base.relayedErr = c.relayedBefore, c.relayedAfter, c.relayedErr
 	if !c.noneServed {
 		base.consumedMocks = []models.MockState{{Name: "mock-0"}}
 	}

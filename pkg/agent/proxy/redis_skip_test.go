@@ -617,14 +617,14 @@ func TestAnEndedDialDoesNotUseUpTheUnreachableError(t *testing.T) {
 	cancel()
 	var none net.Conn
 	// Even a reset, once the connection has ended, is the ending's.
-	if err := p.serveRedisSkip(ended, p.logger, dst, nil, &none, func() (net.Conn, string, error) { return nil, dst, opErr(syscall.ECONNRESET) }); err == nil {
+	if err := p.serveRedisSkip(ended, p.logger, dst, nil, &none, func() (string, string) { return dst, "" }, func(string) (net.Conn, error) { return nil, opErr(syscall.ECONNRESET) }); err == nil {
 		t.Fatal("a dial that ended was served")
 	}
 	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
 		t.Fatalf("a dial that ended with its connection was logged as an error: %v", logs.All())
 	}
 	for _, errno := range []syscall.Errno{syscall.ECONNRESET, syscall.ECONNREFUSED} {
-		err := p.serveRedisSkip(context.Background(), p.logger, dst, nil, &none, func() (net.Conn, string, error) { return nil, dst, opErr(errno) })
+		err := p.serveRedisSkip(context.Background(), p.logger, dst, nil, &none, func() (string, string) { return dst, "" }, func(string) (net.Conn, error) { return nil, opErr(errno) })
 		if !errors.As(err, new(redisUnreachable)) {
 			t.Fatalf("a dial that failed with %v returned %v, want it marked as said", errno, err)
 		}

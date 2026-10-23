@@ -143,6 +143,13 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 		a.logger.Warn("could not read the refused PID map inserts to leave in the replay outcome: keploy cannot prove that every process of the test command was tracked", zap.Error(err),
 			zap.String("next_step", "check this agent's logs for a WARN about its PID maps"))
 	}
+	// Nor which connections it relayed live: a proxy that does not count them
+	// leaves the field out, which the CLI reads as "unknown".
+	if relayed, err := a.RelayedLive(ctx); err == nil {
+		outcome.Relayed = &relayed
+	} else {
+		a.logger.Debug("this agent does not count the connections it relays live; none are left in the replay outcome", zap.Error(err))
+	}
 	body, err := json.Marshal(outcome)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the replay outcome: %w", err)

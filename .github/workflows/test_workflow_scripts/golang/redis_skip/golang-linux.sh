@@ -72,6 +72,18 @@
 #      Redis mocks after an OSS replay rewrote its mapping (by default; under
 #      the proven switch keploy test leaves the file as it is).
 #   5. No ERROR in a log this build wrote, and no data race in any log.
+#   6. keploy mock: the client (./client) is a test command that SETs and
+#      GETs on Redis A and gets from memcached. keploy mock record (the
+#      RECORD_BIN, Redis and memcached live) records its calls: memcached
+#      through Generic, and Redis through Generic too when the latest release
+#      that predates the skip records it. keploy mock replay (this build),
+#      Redis A live and memcached down, passes on the memcached mock, and its
+#      receipt (keploy/<set>/last-replay.yaml) says the run is NOT isolated:
+#      its Redis was relayed to the live server ("open-source keploy does not
+#      mock Redis"), listed as relayed, with as many connections as Redis A
+#      counted. The terminal never says "every dependency answered from the
+#      recording". Its loaded count leaves out the Redis mocks an older
+#      keploy recorded, which the agent does not serve.
 #
 # RECORD_PROVEN=1 records under the proven switch (the
 # record_build_proven_replay_build cell): keploy record then writes the set's
@@ -149,10 +161,10 @@ WORK=$(realpath -m "$WORK")
 [ -z "${FIXTURE_OUT:-}" ] || FIXTURE_OUT=$(realpath -m "$FIXTURE_OUT")
 mkdir -p "$WORK"
 echo "work dir: $WORK"
-(cd "$SRC" && go_retry mod download && go build -o "$WORK/redis-app" ./app && go build -o "$WORK/echo-server" ./echo) || { echo "::error::build failed"; exit 1; }
+(cd "$SRC" && go_retry mod download && go build -o "$WORK/redis-app" ./app && go build -o "$WORK/echo-server" ./echo && go build -o "$WORK/redis-client" ./client) || { echo "::error::build failed"; exit 1; }
 cd "$WORK" || exit 1
 # A runner may reuse WORK: nothing of an earlier run is read as this one's.
-sudo rm -rf keploy keploy.yml fixture-* own-*
+sudo rm -rf keploy keploy.yml fixture-* own-* mock
 rm -f ./*.log
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -559,6 +571,38 @@ if [ -n "${FIXTURE_OUT:-}" ]; then
     fi
 fi
 
+# --- 6, first half. keploy mock record, Redis and memcached live -----------
+# In a directory of its own, so its set is nobody else's; never under the
+# proven switch, where this build's keploy mock replay refuses to run.
+MOCK_SET=redis-mock
+MOCK_DIR="$WORK/mock"
+mkdir -p "$MOCK_DIR"
+mock_cmd() {
+    (cd "$MOCK_DIR" && sudo -E env -u KEPLOY_PROVEN PATH="$PATH" REDIS_ADDR="$REDIS_A" CACHE_ADDR="$CACHE" "$@" \
+        -c "$WORK/redis-client" --name "$MOCK_SET" --disable-tele --debug) </dev/null
+}
+mock_cmd "$RECORD_BIN" mock record >mock-record.log 2>&1
+RC=$?
+own
+MOCK_MOCKS="$MOCK_DIR/keploy/$MOCK_SET/mocks.yaml"
+if [ "$RC" -ne 0 ] || ! grep -qF "client: ok" mock-record.log; then
+    fail "keploy mock record of the client failed (exit $RC)"
+    plain mock-record.log | tail -30
+fi
+[ -s "$MOCK_MOCKS" ] || { fail "keploy mock record wrote no mocks"; MOCK_MOCKS=/dev/null; }
+mock_mem=$(count_kind "$MOCK_MOCKS" memcached)
+mock_redis=$(count_kind "$MOCK_MOCKS" redis)
+mock_all=$(yq -N '.name' "$MOCK_MOCKS" 2>/dev/null | grep -c .)
+# A connection failure keploy recorded is never sent to the agent
+# (models.AgentBound), so it is no mock the replay loads either.
+mock_cf=$(yq -N 'select(.kind == "ConnectionFailure") | .name' "$MOCK_MOCKS" 2>/dev/null | grep -c .)
+echo "keploy mock record wrote $mock_all mock(s): $mock_mem memcached, $mock_redis Redis, $mock_cf connection failure(s)"
+[ "$mock_mem" -ge 1 ] || fail "keploy mock record wrote no memcached mock: the replay below would serve nothing from the recording"
+if is_build "$RECORD_BIN"; then
+    [ "$mock_redis" -eq 0 ] || fail "this build's keploy mock record recorded $mock_redis Redis mock(s)"
+    no_errors "mock record" mock-record.log
+fi
+
 # --- 3, 4. Replay, Redis live, memcached and the echo server down -----------
 docker compose stop memcached >/dev/null 2>&1 || fail "cannot stop memcached for the replay"
 stop_echo
@@ -721,6 +765,44 @@ if [ -z "${FIXTURE_OUT:-}" ]; then
         done
     done
 fi
+
+# --- 6, second half. keploy mock replay, Redis A live, memcached down -------
+# memcached is down since the replays above: a pass is the memcached mock's.
+a0=$(conns redis-a)
+mock_cmd "$REPLAY_BIN" mock replay >mock-replay.log 2>&1
+RC=$?
+own
+mock_da=$(since "$a0" "$(conns redis-a)")
+RECEIPT="$MOCK_DIR/keploy/$MOCK_SET/last-replay.yaml"
+echo "keploy mock replay: exit $RC; Redis A accepted $mock_da connection(s)"
+if [ "$RC" -ne 0 ] || ! grep -qF "client: ok" mock-replay.log; then
+    fail "keploy mock replay of the client failed (exit $RC): with Redis live and memcached mocked it must pass"
+    plain mock-replay.log | tail -30
+fi
+no_errors "mock replay" mock-replay.log
+if [ ! -s "$RECEIPT" ]; then
+    fail "keploy mock replay wrote no receipt ($RECEIPT)"
+else
+    yq -N '{"isolated": .isolated, "isolationNote": .isolationNote, "relayed": .relayed, "loaded": .loaded, "consumed": .consumed}' "$RECEIPT"
+    [ "$(yq -N '.isolated' "$RECEIPT")" = false ] ||
+        fail "mock replay: the receipt says the run is isolated, but its Redis answered live"
+    note=$(yq -N '.isolationNote' "$RECEIPT")
+    grep -qF "Redis relayed to the live server at $REDIS_A" <<<"$note" && grep -qF "open-source keploy does not mock Redis" <<<"$note" ||
+        fail "mock replay: the receipt's isolation note does not say Redis was relayed to the live server, and why: $note"
+    relayed=$(R="$REDIS_A" yq -N '[.relayed[] | select(.reason == "redis_enterprise_only" and .destination == strenv(R)) | .connections] | .[0] // 0' "$RECEIPT")
+    [ "$relayed" -ge 1 ] && [ "$relayed" -eq "$mock_da" ] ||
+        fail "mock replay: the receipt lists $relayed Redis connection(s) relayed to $REDIS_A, want every connection Redis A accepted ($mock_da)"
+    [ "$(yq -N '.consumed' "$RECEIPT")" -ge 1 ] || fail "mock replay: the receipt says no recorded call was served: memcached's mock should have answered"
+    loaded=$(yq -N '.loaded' "$RECEIPT")
+    want_loaded=$((mock_all - mock_redis - mock_cf))
+    [ "$loaded" -eq "$want_loaded" ] ||
+        fail "mock replay: the receipt says $loaded mock(s) loaded, want $want_loaded: the set's $mock_redis Redis mock(s), which the agent leaves out, and its $mock_cf connection failure(s), which it is never sent, are not the run's"
+fi
+if grep -qF "every dependency answered from the recording" < <(plain mock-replay.log); then
+    fail "mock replay: keploy said the run had every dependency answered from the recording, but its Redis answered live"
+fi
+grep -qF "this replay did not prove the tests run with the dependencies off" < <(plain mock-replay.log) ||
+    fail "mock replay: keploy did not say the run is not isolated"
 
 # --- 5. --------------------------------------------------------------------
 if grep -l 'WARNING: DATA RACE' ./*.log; then fail "data race in a keploy log"; fi
