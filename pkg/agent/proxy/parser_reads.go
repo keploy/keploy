@@ -13,8 +13,10 @@ import (
 // not by when the relay got to tell of a chunk.
 //
 // A parser that returns on its own recorded the exchanges it read. What it
-// did not record are the requests it never read: the client bytes past where
-// its client stream stood when it returned (fakeconn.FakeConn.ReadThrough).
+// did not record are the requests it never read, which are the client bytes
+// past where it was done with its client stream when it returned
+// (fakeconn.FakeConn.ProcessedThrough). For a parser that reads ahead, that
+// is the first byte it read ahead and had not processed.
 // The test cases over them are left out. The server bytes past where its
 // server stream stood are not a loss here: they are the server's own, or the
 // rest of an answer the parser left out and reported itself, by the rule the
@@ -84,6 +86,9 @@ type parserReads struct {
 	// before the relay runs.
 	client readStream
 	teed   func(fakeconn.Direction) int64
+	// done is how far the parser was done with its client stream when the
+	// stream last said so exactly (readThrough).
+	done int64
 
 	// stopAt is the connection's first stop (stop), and recordingStopAt when
 	// its recording stopped (recordingStopped). Zero until then; times are on
@@ -116,9 +121,10 @@ type unrecordedConn interface {
 }
 
 // readStream is how far a parser is through one of its streams
-// (fakeconn.FakeConn).
+// (fakeconn.FakeConn): exact false when the stream cannot say, and the parser
+// is done with no less than the last exact answer.
 type readStream interface {
-	ReadThrough() int64
+	ProcessedThrough() (through int64, exact bool)
 }
 
 // carriedChunk is a client chunk the parser may not have read: where it ends
@@ -203,7 +209,7 @@ func (p *parserReads) carried(dir fakeconn.Direction, at time.Time, teed bool, t
 // backing array only once they are half of it, so a parser far behind a deep
 // queue costs no copy per chunk.
 func (p *parserReads) keep(through int64, at time.Time) {
-	read := p.client.ReadThrough()
+	read := p.readThrough()
 	for p.head < len(p.unread) && p.unread[p.head].through <= read {
 		p.head++
 	}
@@ -221,6 +227,15 @@ func (p *parserReads) keep(through int64, at time.Time) {
 		p.unread, p.head = p.unread[:copy(p.unread, p.unread[p.head:])], 0
 	}
 	p.unread = append(p.unread, carriedChunk{through: through, at: at})
+}
+
+// readThrough is how far the parser is done with its client stream: where the
+// stream last said so exactly (done). Caller holds mu.
+func (p *parserReads) readThrough() int64 {
+	if through, exact := p.client.ProcessedThrough(); exact {
+		p.done = max(p.done, through)
+	}
+	return p.done
 }
 
 // beforeCutoff reports whether a chunk read at `at` came before the stop or
@@ -241,7 +256,7 @@ func (p *parserReads) parserReturned() {
 	}
 	p.returned = true
 	if p.client != nil {
-		p.read = p.client.ReadThrough()
+		p.read = p.readThrough()
 	}
 	if p.teed != nil {
 		p.teedAt = [2]int64{fakeconn.FromClient: p.teed(fakeconn.FromClient), fakeconn.FromDest: p.teed(fakeconn.FromDest)}

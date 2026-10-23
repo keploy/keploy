@@ -50,13 +50,20 @@ func span(start, end time.Time) string {
 }
 
 // readsStreams stands in for the parser's client stream (how far it has
-// read) and for the relay's count of what it has teed to each stream.
+// read, and whether it can say so exactly) and for the relay's count of what
+// it has teed to each stream.
 type readsStreams struct {
-	read atomic.Int64
-	teed [2]atomic.Int64
+	read    atomic.Int64
+	inexact atomic.Bool
+	teed    [2]atomic.Int64
 }
 
-func (s *readsStreams) ReadThrough() int64 { return s.read.Load() }
+func (s *readsStreams) ProcessedThrough() (int64, bool) {
+	if s.inexact.Load() {
+		return 0, false
+	}
+	return s.read.Load(), true
+}
 
 func (s *readsStreams) teedOf(dir fakeconn.Direction) int64 { return s.teed[dir].Load() }
 
@@ -138,6 +145,57 @@ func TestParserReads_ARequestTheParserNeverReadIsLeftOutWheneverTheRelayTellsOfI
 		if fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 			t.Errorf("told of after the return: %v; left out %v, want %v: from the unread request to the idle grace past it", toldAfter, r.conn.spans, want)
 		}
+	}
+}
+
+// A request a parser that reads ahead of itself took off its client stream,
+// and whose loop never got to it, is left out as one it never read: what
+// counts is what the parser processed, not what its reader took.
+func TestParserReads_ARequestReadAheadAndNeverProcessedIsLeftOut(t *testing.T) {
+	c := &connRecorder{}
+	s := &readsStreams{}
+	ch := make(chan fakeconn.Chunk, 2)
+	client := fakeconn.New(ch, nil, nil)
+	p := newParserReads(c, c.leftOut, func() bool { return c.stopping }, readsIdleGrace, nil)
+	p.follow(client, s.teedOf)
+	for i, req := range []string{"first", "next"} {
+		at := msAfter(10 * i)
+		ch <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(req), ReadAt: at}
+		p.carried(fakeconn.FromClient, at, true, s.teed[fakeconn.FromClient].Add(int64(len(req))))
+	}
+	// Its reader takes both requests; its loop is done with the first.
+	var ahead []fakeconn.Chunk
+	for range 2 {
+		got, err := client.ReadAhead()
+		if err != nil {
+			t.Fatalf("ReadAhead: %v", err)
+		}
+		ahead = append(ahead, got)
+	}
+	client.MarkProcessed(ahead[0])
+	p.parserReturned()
+	want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}
+	if fmt.Sprint(c.spans) != fmt.Sprint(want) {
+		t.Errorf("left out %v, want %v: from the request read ahead and never processed to the idle grace past it", c.spans, want)
+	}
+}
+
+// Where the client stream cannot say exactly how far the parser is done with
+// it (fakeconn.FakeConn.ProcessedThrough), the last exact answer holds: a
+// request past it is left out, not taken for read on a guess, and one before
+// it, told of after the return, is not.
+func TestParserReads_WhereTheStreamCannotSayHowFarTheParserIsTheLastExactAnswerHolds(t *testing.T) {
+	r := newReadsUnderTest()
+	first := r.tee(fakeconn.FromClient, 5)
+	r.streams.read.Store(5)
+	r.carry(fakeconn.FromClient, 10, 4)
+	r.streams.read.Store(9)
+	r.streams.inexact.Store(true)
+	r.parserReturned()
+	r.carried(fakeconn.FromClient, msAfter(0), true, first)
+	want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}
+	if fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
+		t.Errorf("left out %v, want %v: the stream said exactly only that the first request was read", r.conn.spans, want)
 	}
 }
 
