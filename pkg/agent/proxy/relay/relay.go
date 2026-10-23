@@ -306,10 +306,11 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		remoteAddr = src.RemoteAddr()
 	}
 	r.clientStream = fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr)
-	// What the parser has consumed of each stream tells the capture
-	// watermark how far it has got (progress.go). Set, with the reader lag,
-	// before the drains start.
-	r.teeC2D.consumed, r.teeC2D.readerLag = r.clientStream.Consumed, cfg.ReaderLag
+	// What the parser has consumed and processed of each stream tells the
+	// capture watermark how far it has got (progress.go). Set, with the
+	// reader lag, before the drains start.
+	r.teeC2D.consumed, r.teeC2D.processedThrough = r.clientStream.Consumed, r.clientStream.ProcessedThrough
+	r.teeC2D.readerLag = cfg.ReaderLag
 	// The tee may only abandon a queued chunk once this stream is closed,
 	// so its drain cannot start until the stream exists.
 	r.teeC2D.start(r.clientStream.Done())
@@ -319,7 +320,8 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		destRemote = dst.RemoteAddr()
 	}
 	r.destStream = fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
-	r.teeD2C.consumed, r.teeD2C.readerLag = r.destStream.Consumed, cfg.ReaderLag
+	r.teeD2C.consumed, r.teeD2C.processedThrough = r.destStream.Consumed, r.destStream.ProcessedThrough
+	r.teeD2C.readerLag = cfg.ReaderLag
 	r.teeD2C.start(r.destStream.Done())
 
 	return r
@@ -844,6 +846,8 @@ func (r *Relay) forward(
 				if (r.preDispatchActive.Load() || r.holdClient.Load()) && dir == fakeconn.FromClient {
 					chunk.SeqNo = seq.Add(1)
 					teed := t.push(chunk)
+					// Queued or refused: out of this forwarder's hand (progress.go).
+					t.noteReleased()
 					r.noteCarried(t, chunk, teed)
 					if teed && r.cfg.OnClientChunkTeed != nil {
 						r.cfg.OnClientChunkTeed()
@@ -922,6 +926,8 @@ func (r *Relay) forward(
 				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
 				chunk.SeqNo = seq.Add(1)
 				teed := t.push(chunk)
+				// Queued or refused: out of this forwarder's hand (progress.go).
+				t.noteReleased()
 				r.noteCarried(t, chunk, teed)
 				if teed && r.cfg.OnClientChunkTeed != nil {
 					r.cfg.OnClientChunkTeed()
@@ -1012,6 +1018,8 @@ func (r *Relay) forward(
 					r.cfg.beforeTee(dir)
 				}
 				teed := t.push(chunk)
+				// Queued or refused: out of this forwarder's hand (progress.go).
+				t.noteReleased()
 				r.noteCarried(t, chunk, teed)
 				// On a successful client→dest tee, signal the supervisor
 				// that a request chunk is in flight and awaiting a mock
@@ -1024,6 +1032,10 @@ func (r *Relay) forward(
 				if teed && dir == fakeconn.FromClient && r.cfg.OnClientChunkTeed != nil {
 					r.cfg.OnClientChunkTeed()
 				}
+			} else {
+				// Set aside (tee.awaiting, where a look finds it) or refused:
+				// out of this forwarder's hand either way (progress.go).
+				t.noteReleased()
 			}
 
 			if werr != nil {

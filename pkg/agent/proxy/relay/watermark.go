@@ -3,7 +3,6 @@ package relay
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -33,10 +32,13 @@ import (
 type Watermark struct {
 	mu    sync.Mutex
 	conns map[*Relay]string
-	// retired is what the connections no longer followed consumed, plus one
-	// for each: with what the followed ones consumed, a count that moves
-	// whenever a parser makes progress or returns (Progress).
-	retired atomic.Uint64
+	// retired is what the connections no longer followed consumed and
+	// processed (consumedBytes), plus one for each: with what the followed
+	// ones consumed and processed, a count that moves whenever a parser makes
+	// progress or returns (Progress). Under mu with
+	// conns, so a connection that leaves conns is in retired at that moment
+	// and Progress counts it once, never twice and never not at all.
+	retired uint64
 }
 
 // NewWatermark returns a Watermark that follows no connection yet.
@@ -57,8 +59,8 @@ func (w *Watermark) Track(r *Relay, name string) (untrack func()) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			w.retired.Add(r.consumedBytes() + 1)
 			w.mu.Lock()
+			w.retired += r.consumedBytes() + 1
 			delete(w.conns, r)
 			w.mu.Unlock()
 		})
@@ -146,24 +148,31 @@ func (w *Watermark) PendingOn(before time.Time) fmt.Stringer {
 	return nil
 }
 
-// Progress is a count that moves whenever a followed parser consumes bytes or
-// returns: a stop that waits on the capture can tell a parser working through
+// Progress is a count that moves whenever a followed parser consumes or
+// processes bytes (a parser that reads ahead processes them after it consumed
+// them), or returns: a stop that waits on the capture can tell a parser working through
 // its backlog from one that is not moving.
 func (w *Watermark) Progress() uint64 {
 	if w == nil {
 		return 0
 	}
-	n := w.retired.Load()
-	for _, c := range w.snapshot() {
-		n += c.r.consumedBytes()
+	// One critical section with untrack's: read apart, a connection retired
+	// between the two reads is counted twice, and the next Progress drops.
+	// consumedBytes takes no lock.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := w.retired
+	for r := range w.conns {
+		n += r.consumedBytes()
 	}
 	return n
 }
 
 // HeldProgress is a count that moves whenever a parser that keeps the verdict
 // for a test case recorded over [start, end] from being final gets further:
-// the bytes consumed by the followed connections that carried bytes within
-// it and whose parser is not done with them (behind). One that gets past the
+// the bytes consumed and processed (consumedBytes) by the followed
+// connections that carried bytes within it and whose parser is not done with
+// them (behind). One that gets past the
 // window, or returns, leaves the sum, which moves it too; one that returns
 // having consumed nothing leaves it as it was, and with it gone the verdict
 // is final unless another parser still holds it. What other connections do

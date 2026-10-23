@@ -349,6 +349,28 @@ func (s *Session) MarkEndedWithConnection(dir fakeconn.Direction) {
 	s.endedWithConnection[dir].Store(true)
 }
 
+// MarkProcessed says the parser processed c, bytes of dir's stream its reader
+// took ahead of it (fakeconn.FakeConn.ReadAhead, MarkProcessed): a parser that
+// reads ahead marks each chunk so once its loop is done with it (has emitted
+// what it completes), each stream's bytes in stream order. What it took and
+// never processed is then known when it stops, as is where it got to.
+// Nil-safe, and a no-op for a direction with no stream.
+func (s *Session) MarkProcessed(dir fakeconn.Direction, c fakeconn.Chunk) {
+	if s == nil {
+		return
+	}
+	var fc *fakeconn.FakeConn
+	switch dir {
+	case fakeconn.FromClient:
+		fc = s.ClientStream
+	case fakeconn.FromDest:
+		fc = s.DestStream
+	}
+	if fc != nil {
+		fc.MarkProcessed(c)
+	}
+}
+
 // EndedWithConnection reports whether dir's stream ended because its
 // connection did (MarkEndedWithConnection). Nil-safe.
 func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {

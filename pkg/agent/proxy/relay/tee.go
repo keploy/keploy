@@ -195,7 +195,7 @@ type tee struct {
 	// after its FIN that wait for the client's answer before they are
 	// pushed or refused (client_took.go), oldest first. They are newer than
 	// every chunk on q, and count as unconsumed for the capture watermark
-	// (oldestUnconsumed). They are not counted against the tee's cap or
+	// (oldestUnprocessed). They are not counted against the tee's cap or
 	// memory check until they are pushed, which is where a chunk dropped for
 	// either is stamped: when the client's answer came. What waits is
 	// bounded by what the client's socket takes before the client answers:
@@ -283,6 +283,10 @@ type tee struct {
 	// FakeConn its parser reads (fakeconn.FakeConn.Consumed). Set by [New]
 	// before the drain starts.
 	consumed func() int64
+	// processedThrough is how far into this direction's stream its parser
+	// is done (fakeconn.FakeConn.ProcessedThrough). Set by [New] before the
+	// drain starts.
+	processedThrough func() (int64, bool)
 
 	// readerLag, when positive, delays each chunk's delivery to the parser
 	// until this long after it was read ([Config.ReaderLag]). Read-only

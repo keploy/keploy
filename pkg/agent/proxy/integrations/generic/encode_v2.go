@@ -72,7 +72,7 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	// order) instead of trusting the order these events turn up in.
 	events := make(chan chunkEvent, 16)
 
-	initial, err := sess.ClientStream.ReadChunk()
+	initial, err := readFirst(sess.ClientStream)
 	if err != nil {
 		// No client bytes ever arrived: nothing to mock.
 		if logger != nil && !isBenignReadErr(err) {
@@ -298,8 +298,16 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// Drain every event the two reader goroutines produce. The closer
 	// goroutine above closes `events` once both readers return, which
 	// is the only termination signal this loop observes.
+	// inHand is the chunk the loop took last. It is processed once the loop
+	// is done with it, which is when it comes back for the next: what it
+	// completes is emitted by then, and a chunk in its hand when it fails is
+	// not processed (the readers read ahead: fakeconn.FakeConn.ReadAhead).
+	var inHand chunkEvent
 drain:
 	for {
+		sess.MarkProcessed(inHand.dir,
+			fakeconn.Chunk{Bytes: inHand.bytes, ReadAt: inHand.readAt, WrittenAt: inHand.writtenAt})
+		inHand = chunkEvent{}
 		// While the recorder holds the connection's first exchange, the
 		// window that may own it leaving the open ones may decide it, and the
 		// recording's stop, or the parser's end, decides it.
@@ -328,6 +336,7 @@ drain:
 			}
 			ev = e
 		}
+		inHand = ev
 		if ev.err != nil {
 			// End-of-stream for this side. Classify benign terminations
 			// (EOF / ErrClosed / deadline) distinctly from unexpected
@@ -653,20 +662,28 @@ func order(x, y stamp) (first, known bool) {
 	return x.at.Before(y.at), true
 }
 
+// readFirst takes the client's first chunk ahead of the loop, as the readers
+// take theirs (ReadAhead): the loop marks it processed once it is done with
+// it, as it does theirs.
+func readFirst(fc *fakeconn.FakeConn) (fakeconn.Chunk, error) { return fc.ReadAhead() }
+
 // readStream pumps Chunks from one FakeConn onto the shared events
-// channel. It returns on EOF / ErrClosed / deadline-exceeded, or at its
-// first send once stop has closed. The supervisor.Session's ctx is observed
-// indirectly: when the ctx is cancelled the relay ends the FakeConn streams
-// and closes them, which surfaces here as EOF (ErrClosed when the session's
-// abort closes them while the relay still captures). A panic of the main
-// loop aborts the session too, and closes stop, and nothing drains events
-// after it, so every send to out, the end-of-stream error's included,
-// selects on stop: a reader waiting on a read with nothing queued reads the
-// abort's ErrClosed, and its error send may find out full. A send looks at
-// stop before it tries out, so a reader takes at most one more chunk off its
-// stream once stop has closed: each chunk it takes can count as read
-// (FakeConn.ReadThrough) when the proxy decides which requests the parser
-// left unread, and nothing records it.
+// channel. It reads ahead of the loop (ReadAhead): the loop marks each
+// chunk processed once it is done with it (pairChunkEvents), so what this
+// took and the loop never finished is known when the parser stops. It
+// returns on EOF / ErrClosed / deadline-exceeded, or at its first send once
+// stop has closed. The supervisor.Session's ctx is observed indirectly: when
+// the ctx is cancelled the relay ends the FakeConn streams and closes them,
+// which surfaces here as EOF (ErrClosed when the session's abort closes them
+// while the relay still captures). A panic of the main loop aborts the
+// session too, and closes stop, and nothing drains events after it, so every
+// send to out, the end-of-stream error's included, selects on stop: a reader
+// waiting on a read with nothing queued reads the abort's ErrClosed, and its
+// error send may find out full. A send looks at stop before it tries out, so
+// a reader takes at most one more chunk off its stream once stop has closed.
+// What it took and the loop never processed stays unprocessed (MarkProcessed
+// is the loop's alone), so it is counted where the connection is released and
+// left out of what the parser read (FakeConn.ProcessedThrough).
 func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkEvent, stop <-chan struct{}, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 	send := func(ev chunkEvent) bool {
@@ -689,7 +706,7 @@ func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkE
 		return
 	}
 	for {
-		c, err := fc.ReadChunk()
+		c, err := fc.ReadAhead()
 		if err != nil {
 			send(chunkEvent{dir: dir, err: err})
 			return

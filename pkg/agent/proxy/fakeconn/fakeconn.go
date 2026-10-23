@@ -60,7 +60,8 @@ var ErrUnnumbered = errors.New("fakeconn: a chunk without a capture sequence (Co
 // not touch any real socket — the relay owns those.
 //
 // FakeConn is safe for a single reader goroutine concurrent with
-// calls to Close, SetReadDeadline and DiscardBefore. Concurrent Read
+// calls to Close, SetReadDeadline and DiscardBefore, and, for a parser
+// that reads ahead (ReadAhead), its loop's MarkProcessed. Concurrent Read
 // callers are not supported; parsers are single-consumer by
 // construction. DiscardBefore carries one extra rule that the mutex
 // cannot enforce — it must not be called while the parser is inside a
@@ -100,29 +101,39 @@ type FakeConn struct {
 	runFirst       uint32
 	runFrom, runTo int64
 	reportRun      func(Dropped)
-	// pos is the absolute offset, in bytes of this stream, of the next
-	// byte the parser will be handed. Equivalently: how many bytes have
-	// already left this FakeConn, counting bytes delivered to the parser,
-	// bytes swallowed on its behalf by [FakeConn.DiscardBefore], and chunks
-	// the floor dropped ([FakeConn.DropBefore]).
+	// consumed is the absolute offset, in bytes of this stream, of the
+	// next byte the parser will be handed (pos). Equivalently: how many
+	// bytes have already left this FakeConn, counting bytes delivered to
+	// the parser, bytes swallowed on its behalf by [FakeConn.DiscardBefore],
+	// and chunks the floor dropped ([FakeConn.DropBefore]).
 	//
 	// pending therefore holds the bytes at offsets [pos, pos+len(pending)),
 	// and pos+len(pending) is the number of bytes pulled off ch so far — the
 	// quantity the producer counts on its side.
-	pos int64
+	//
+	// Written under mu, and atomic so Consumed takes no lock.
+	consumed atomic.Int64
+	// processed is how much of consumed the parser has processed: all of
+	// it, less what ReadAhead handed out and the parser has not marked
+	// processed ([FakeConn.MarkProcessed]). Written under mu, with consumed,
+	// and atomic so Processed takes no lock. It took the place of a pos field
+	// consumed mirrored, so a FakeConn stays in the 288 B size class.
+	processed atomic.Int64
 	// discardTo is the discard watermark set by [FakeConn.DiscardBefore]:
 	// every byte below it is swallowed rather than delivered. Monotonic.
-	// Written under mu, and atomic so ReadThrough takes no lock.
+	// Written under mu, and atomic so ProcessedThrough takes no lock.
 	discardTo atomic.Int64
-	// consumed mirrors pos, for Consumed.
-	consumed atomic.Int64
 	// waits counts the times the reader found nothing to take and blocked
-	// for the next chunk; waiting is set while it is blocked so. See
-	// Waiting.
-	waits   atomic.Uint64
-	waiting atomic.Bool
+	// for the next chunk. reader holds the reader's state bits:
+	// readerWaiting while it is blocked so (Waiting), and readerAheadGap
+	// while processed counts bytes past the first it has not processed
+	// (ProcessedThrough). Written atomically, readerAheadGap under mu too,
+	// so Waiting and ProcessedThrough take no lock. One word for both, where
+	// a waiting bool was, so a FakeConn stays in the 288 B size class.
+	waits  atomic.Uint64
+	reader atomic.Uint32
 	// hasPending is pending's (guarded by mu), placed here, in the padding
-	// after waiting, so the FakeConn is no larger than it was before it
+	// after reader, so the FakeConn is no larger than it was before it
 	// kept the chunk in hand.
 	hasPending bool
 	// started is set (guarded by mu) once the stream's start is behind it.
@@ -155,6 +166,18 @@ type FakeConn struct {
 	local  net.Addr
 	remote net.Addr
 }
+
+// The bits of FakeConn.reader.
+const (
+	// readerWaiting: the reader is blocked for the next chunk (Waiting).
+	readerWaiting uint32 = 1 << iota
+	// readerAheadGap: bytes left the FakeConn processed (advanceLocked: read,
+	// swallowed or dropped for a reader) while bytes ReadAhead handed out
+	// were not marked processed, so processed counts bytes past the first
+	// unprocessed one, and is not that byte's offset. Set as such bytes are
+	// counted, cleared once every byte that left is processed.
+	readerAheadGap
+)
 
 // logger is the minimal surface FakeConn needs from the outside
 // world. Zero-value-safe — nil is treated as no-op.
@@ -254,6 +277,59 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 	return c, nil
 }
 
+// ReadAhead is ReadChunk for a parser that reads ahead of itself: a reader
+// goroutine takes the chunks and queues them, and the parser's own loop
+// processes them later. The chunk has left the FakeConn (Consumed) but is not
+// processed (Processed) until the parser marks it so (MarkProcessed), and
+// LastReadTime and LastWrittenTime stay at the last chunk it processed. So
+// what such a parser took and never processed, when it stops, is Consumed
+// less Processed, and where it stopped is LastReadTime, as for a parser that
+// reads synchronously. Such a parser takes its streams only by ReadAhead,
+// never by Read or ReadChunk: those move LastReadTime as they hand a chunk
+// on, before its loop has processed it. The parser marks a chunk once its
+// loop is done with it (emitted what it completes), not as the loop takes it:
+// a chunk in the loop's hand when it fails is then not processed, and a
+// reader waiting with all it took marked is done (Waiting). SkipThrough,
+// DiscardBefore and the floor are for a parser that reads synchronously:
+// SkipThrough takes LastReadTime for the last chunk read, and a discard or
+// drop between chunks read ahead counts processed at once, before the chunks
+// ahead of it are, so ProcessedThrough is not exact until the parser has
+// processed all it read ahead.
+func (f *FakeConn) ReadAhead() (Chunk, error) {
+	if err := f.fill(); err != nil {
+		return Chunk{}, err
+	}
+	f.mu.Lock()
+	c := f.pending
+	f.consumed.Add(int64(len(c.Bytes)))
+	f.pending, f.hasPending, f.partial = Chunk{}, false, false
+	f.mu.Unlock()
+	return c, nil
+}
+
+// MarkProcessed says the parser processed c, bytes ReadAhead handed out: a
+// chunk, part of one, or bytes of several with the times of the last. It
+// counts them processed, never more than ReadAhead handed out, and makes c's
+// times the last read (LastReadTime, LastWrittenTime). It counts bytes, not
+// which ones: a parser marks a stream's bytes in the order ReadAhead handed
+// them out, and once its loop is done with them, or Processed,
+// ProcessedThrough and LastReadTime say it processed bytes it has not.
+func (f *FakeConn) MarkProcessed(c Chunk) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.processed.Add(min(int64(len(c.Bytes)), f.consumed.Load()-f.processed.Load())) == f.consumed.Load() {
+		// All that left is processed: it is the first unprocessed byte's
+		// offset again (ProcessedThrough).
+		f.reader.And(^readerAheadGap)
+	}
+	if !c.ReadAt.IsZero() {
+		f.lastReadNano.Store(c.ReadAt.UnixNano())
+	}
+	if !c.WrittenAt.IsZero() {
+		f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+	}
+}
+
 // Peek returns what ReadChunk would, without taking it: the next read hands
 // out the same bytes. It blocks, and fails, as ReadChunk does. The chunk's
 // Bytes are the FakeConn's: the caller must not change them. A peeked chunk is
@@ -280,10 +356,20 @@ func (f *FakeConn) skipLocked(n int) {
 	f.partial = f.partial || n > 0
 }
 
-// advanceLocked counts n bytes as having left the FakeConn. Caller holds mu.
+// pos is the offset of the next byte the parser will be handed (consumed).
+// Caller holds mu.
+func (f *FakeConn) pos() int64 { return f.consumed.Load() }
+
+// advanceLocked counts n bytes as having left the FakeConn, processed: the
+// reader reads them itself, or they are swallowed or dropped for it. Behind
+// bytes read ahead and not yet processed, they lie past the first unprocessed
+// byte: readerAheadGap is set first (ProcessedThrough). Caller holds mu.
 func (f *FakeConn) advanceLocked(n int) {
-	f.pos += int64(n)
-	f.consumed.Store(f.pos)
+	if n > 0 && f.consumed.Load() > f.processed.Load() {
+		f.reader.Or(readerAheadGap)
+	}
+	f.consumed.Add(int64(n))
+	f.processed.Add(int64(n))
 }
 
 // deliverLocked hands the reader n bytes of c: they leave the FakeConn, and
@@ -309,11 +395,11 @@ func (f *FakeConn) deliverLocked(c Chunk, n int) {
 func (f *FakeConn) next() error {
 	for {
 		f.mu.Lock()
-		if n := min(f.discardTo.Load()-f.pos, int64(len(f.pending.Bytes))); n > 0 {
+		if n := min(f.discardTo.Load()-f.pos(), int64(len(f.pending.Bytes))); n > 0 {
 			f.skipLocked(int(n))
 			f.advanceLocked(int(n))
 		}
-		if f.hasPending && f.pos >= f.discardTo.Load() {
+		if f.hasPending && f.pos() >= f.discardTo.Load() {
 			f.mu.Unlock()
 			return nil
 		}
@@ -467,7 +553,7 @@ func (f *FakeConn) AtChunkBoundary() bool {
 func (f *FakeConn) SkipThrough(t time.Time) (n int64, last time.Time, err error) {
 	for {
 		f.mu.Lock()
-		if !f.hasPending && f.pos >= f.discardTo.Load() {
+		if !f.hasPending && f.pos() >= f.discardTo.Load() {
 			// Nothing in hand: the last chunk read, all of it, was captured
 			// at t or after it. (A chunk the skip discards was captured
 			// before t, so this holds or not for the whole of the skip.)
@@ -551,6 +637,16 @@ func SetCloseHookForTest(f func(*FakeConn)) (restore func()) {
 	return func() { closeHook.CompareAndSwap(p, nil) }
 }
 
+// BeforeWaitForTest makes h run where beforeWait does, on each reader's
+// goroutine as it is about to wait, until restore puts back what was there.
+// It is for tests of other packages that act once a reader is blocked, on
+// that event, instead of polling Waiting. Tests that set it must not run in
+// parallel with others that do.
+func BeforeWaitForTest(h func(*FakeConn)) (restore func()) {
+	old := beforeWait.Swap(&h)
+	return func() { beforeWait.Store(old) }
+}
+
 // receive takes the next Chunk off ch. While the FakeConn is open it blocks
 // for one (Waiting), subject to the read deadline and Close, and returns
 // io.EOF once ch is closed. Once closed it does not block: Close means "no
@@ -599,26 +695,26 @@ func (f *FakeConn) receive() (Chunk, error) {
 		// Nothing to take: the reader is done with all it was handed, and
 		// blocks for more (Waiting).
 		f.waits.Add(1)
-		f.waiting.Store(true)
+		f.reader.Or(readerWaiting)
 		if h := beforeWait.Load(); h != nil {
 			(*h)(f)
 		}
 		select {
 		case c, ok := <-f.ch:
-			f.waiting.Store(false)
+			f.reader.And(^readerWaiting)
 			if !ok {
 				return Chunk{}, io.EOF
 			}
 			return c, nil
 		case <-f.closeCh:
 			// Closed: loop to take what ch already holds.
-			f.waiting.Store(false)
+			f.reader.And(^readerWaiting)
 		case <-dlCh:
-			f.waiting.Store(false)
+			f.reader.And(^readerWaiting)
 			return Chunk{}, ErrDeadlineExceeded
 		case <-changedCh:
 			// deadline changed; loop and re-fetch.
-			f.waiting.Store(false)
+			f.reader.And(^readerWaiting)
 		}
 	}
 }
@@ -758,22 +854,59 @@ func (f *FakeConn) SettleStart() {
 // take.
 func (f *FakeConn) Consumed() int64 { return f.consumed.Load() }
 
-// ReadThrough is how far into this stream the reader is done: past what has
-// left the FakeConn (Consumed), and past what is below the discard watermark
-// (DiscardBefore), which it will never be handed though it is swallowed only
-// as the reader next pulls. A reader that stops reading recorded nothing past
-// it. It takes no lock.
-func (f *FakeConn) ReadThrough() int64 {
-	return max(f.consumed.Load(), f.discardTo.Load())
+// Processed is how many of the bytes that left the FakeConn (Consumed) the
+// parser has processed: all of them, less what ReadAhead handed out and the
+// parser has not marked processed (MarkProcessed). Once the parser has
+// stopped, Consumed less Processed is what it took and never processed. It
+// takes no lock, and moves only forward. The two are separate atomics, both
+// written under the lock with consumed first: read Processed before Consumed
+// for a pair with Processed no more than Consumed.
+func (f *FakeConn) Processed() int64 { return f.processed.Load() }
+
+// ProcessedThrough is how far into this stream the parser is done, as an
+// offset: it has processed every byte below that, or will never be handed it,
+// and a parser that stops recorded nothing past it. With nothing read ahead and
+// unprocessed, that is past what has left the FakeConn (Consumed), and past
+// what is below the discard watermark (DiscardBefore), which it will never be
+// handed though it is swallowed only as the reader next pulls. Otherwise it
+// is the first byte ReadAhead handed out that the parser has not marked
+// processed, which is Processed while every byte that left the FakeConn
+// processed in some other way (read, swallowed or dropped for the reader) left
+// it while nothing read ahead was unprocessed. When one left it so, Processed
+// counts it though it lies past that first byte, and the offset of that first
+// byte is not kept: exact is false and through 0, and the parser is done with no less than
+// the last offset ProcessedThrough returned exact. It is exact again once the
+// parser has marked processed all it read ahead. It takes no lock.
+func (f *FakeConn) ProcessedThrough() (through int64, exact bool) {
+	// Processed first: consumed moves first, so equal says nothing was
+	// unprocessed when processed was read, and that consumed did not move
+	// until it was read. The discard watermark is read between the two, so
+	// a ReadAhead after it would have moved consumed: nothing read ahead
+	// below it is unprocessed.
+	p := f.processed.Load()
+	d := f.discardTo.Load()
+	if c := f.consumed.Load(); p == c {
+		return max(c, d), true
+	}
+	// readerAheadGap is set before processed counts a byte past the first
+	// unprocessed one, and cleared only once processed is all that left; clear
+	// now, processed (no less than p) was that byte's offset.
+	if f.reader.Load()&readerAheadGap != 0 {
+		return 0, false
+	}
+	return p, true
 }
 
 // Waiting reports whether the reader is blocked for the next chunk with
 // nothing buffered for it, and how many times it has blocked so. A reader that
 // reads one message at a time and is blocked so is done with everything it
-// was handed. A caller that sees the same count before and after checking
-// other state knows the reader stayed blocked in between.
+// was handed. One that reads ahead (ReadAhead) is done once it has also
+// marked it all processed (Processed equals Consumed), if it marks a chunk
+// only once its loop is done with it. A caller that sees the same count
+// before and after checking other state knows the reader stayed blocked in
+// between.
 func (f *FakeConn) Waiting() (waiting bool, waits uint64) {
-	return f.waiting.Load(), f.waits.Load()
+	return f.reader.Load()&readerWaiting != 0, f.waits.Load()
 }
 
 // DiscardBefore declares that the parser must never be handed a stream
@@ -831,7 +964,7 @@ func (f *FakeConn) DiscardBefore(offset int64) int64 {
 	if offset > f.discardTo.Load() {
 		f.discardTo.Store(offset)
 	}
-	if n := f.discardTo.Load() - f.pos; n > 0 {
+	if n := f.discardTo.Load() - f.pos(); n > 0 {
 		return n
 	}
 	return 0
@@ -851,7 +984,8 @@ func (f *FakeConn) Write(p []byte) (int, error) {
 
 // LastReadTime returns the ReadAt timestamp of the Chunk the reader was last
 // handed bytes of (Read, ReadChunk; not Peek, nor a chunk the floor dropped),
-// or the zero time if none carried one.
+// or, for a parser that reads ahead, of the bytes it last marked processed
+// (ReadAhead, MarkProcessed), or the zero time if none carried one.
 func (f *FakeConn) LastReadTime() time.Time {
 	n := f.lastReadNano.Load()
 	if n == 0 {
@@ -860,12 +994,13 @@ func (f *FakeConn) LastReadTime() time.Time {
 	return time.Unix(0, n)
 }
 
-// LastWrittenTime returns the WrittenAt timestamp of the most recently
-// delivered Chunk, or the zero time if no Chunk has been delivered or
-// no chunk carried a non-zero WrittenAt. Parsers that need response-
-// side semantics (time the relay handed the byte off to the real peer)
-// should prefer this over LastReadTime for consistency with other V2
-// recorders that anchor ResTimestampMock to chunk.WrittenAt.
+// LastWrittenTime returns the WrittenAt timestamp of the Chunk the reader was
+// last handed bytes of, or, for a parser that reads ahead, of the bytes it
+// last marked processed (as LastReadTime), or the zero time if none carried a
+// non-zero WrittenAt. Parsers that need response-side semantics (time the
+// relay handed the byte off to the real peer) should prefer this over
+// LastReadTime for consistency with other V2 recorders that anchor
+// ResTimestampMock to chunk.WrittenAt.
 func (f *FakeConn) LastWrittenTime() time.Time {
 	n := f.lastWrittenNano.Load()
 	if n == 0 {

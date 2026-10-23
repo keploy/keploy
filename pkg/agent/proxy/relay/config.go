@@ -266,7 +266,7 @@ type Config struct {
 	// that direction: its direction, when it was read (Chunk.ReadAt), and
 	// whether the tee took it. through is the position just past the chunk
 	// in its direction's stream, in the offsets fakeconn.FakeConn counts
-	// what its reader is done with in (Consumed, ReadThrough): the reader
+	// what its reader is done with in (Consumed, ProcessedThrough): the reader
 	// has taken the whole chunk once those reach it. When the tee refused
 	// the chunk, through is where the stream already stood (the chunk moved
 	// nothing). That is what tells a chunk the parser read from one it never

@@ -104,7 +104,7 @@ type tookHarness struct {
 	marks []string
 	// carried is what the relay told of the chunks it handed the tee
 	// (Config.OnCarried), and pushing what the capture watermark found as
-	// each push began (oldestUnconsumed, from the tee's memCheck hook,
+	// each push began (oldestUnprocessed, from the tee's memCheck hook,
 	// which runs inside push before the chunk is queued).
 	carried []carriedChunk
 	pushing []int64
@@ -122,7 +122,7 @@ type carriedChunk struct {
 func newTookHarness(script ...clientLook) *tookHarness {
 	h := &tookHarness{sock: &scriptedSocket{script: script, wrote: script[0].acked}}
 	h.t = newTee(fakeconn.FromDest, 1<<20, 16, time.Second, func() bool {
-		at, _, ok := h.t.oldestUnconsumed(unstampedInAnyWindow)
+		at, _, ok := h.t.oldestUnprocessed(unstampedInAnyWindow)
 		if !ok {
 			at = 0
 		}
@@ -337,7 +337,7 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 		if n := h.t.awaitingLen(); n != 0 {
 			t.Fatalf("%d chunks still set aside after the client refused them all, want none", n)
 		}
-		if _, _, held := h.t.oldestUnconsumed(unstampedInAnyWindow); held {
+		if _, _, held := h.t.oldestUnprocessed(unstampedInAnyWindow); held {
 			t.Fatal("the capture watermark still waits for a refused chunk")
 		}
 		if q := h.queued(); len(q) != 0 || h.stops.Load() != 1 {
@@ -544,7 +544,7 @@ func TestTheRelaysEndWaitsForTheClientsAnswer(t *testing.T) {
 }
 
 // A chunk set aside for the client's answer is one its parser has not
-// consumed, so the capture watermark waits for it (oldestUnconsumed): from the
+// consumed, so the capture watermark waits for it (oldestUnprocessed): from the
 // moment it is set aside, through its move onto the tee's queue as it is
 // teed. A refused chunk is no longer waited for.
 func TestAChunkSetAsideHoldsTheCaptureWatermark(t *testing.T) {
@@ -557,7 +557,7 @@ func TestAChunkSetAsideHoldsTheCaptureWatermark(t *testing.T) {
 		}
 	}
 	oldest := func(h *tookHarness) (int64, bool) {
-		at, unstamped, ok := h.t.oldestUnconsumed(unstampedInAnyWindow)
+		at, unstamped, ok := h.t.oldestUnprocessed(unstampedInAnyWindow)
 		if unstamped {
 			t.Fatal("the oldest unconsumed chunk is unstamped, want the one set aside")
 		}

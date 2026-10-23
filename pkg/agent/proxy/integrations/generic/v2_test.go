@@ -2,13 +2,17 @@ package generic
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -399,4 +403,192 @@ func drainMocks(ch <-chan *models.Mock) []*models.Mock {
 		out = append(out, m)
 	}
 	return out
+}
+
+// The readers read ahead of the loop (ReadAhead), and the loop marks each
+// chunk processed once it is done with it: what a reader took that the loop
+// never got to stays unprocessed, so it is counted when the parser stops,
+// and the stream's LastReadTime is where the loop got to.
+func TestV2_TheLoopMarksProcessedWhatItIsDoneWith(t *testing.T) {
+	t.Parallel()
+
+	clientCh := make(chan fakeconn.Chunk, 1)
+	destCh := make(chan fakeconn.Chunk, 2)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("PING\r\n"), ReadAt: time.Unix(1000, 0)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("PONG\r\n"), ReadAt: time.Unix(1001, 0), WrittenAt: time.Unix(1002, 0)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("never queued"), ReadAt: time.Unix(1003, 0)}
+	sess, _ := newV2Session(t, clientCh, destCh)
+
+	// The readers: each takes its chunks ahead of the loop; the second dest
+	// chunk is still in its reader's hand when the parser stops.
+	events := make(chan chunkEvent, 2)
+	for _, fc := range []*fakeconn.FakeConn{sess.ClientStream, sess.DestStream} {
+		c, err := fc.ReadAhead()
+		if err != nil {
+			t.Fatalf("ReadAhead: %v", err)
+		}
+		events <- chunkEvent{dir: c.Dir, bytes: c.Bytes, readAt: c.ReadAt, writtenAt: c.WrittenAt}
+	}
+	if _, err := sess.DestStream.ReadAhead(); err != nil {
+		t.Fatalf("ReadAhead: %v", err)
+	}
+	close(events)
+
+	if err := pairChunkEvents(events, sess, sess.Logger); err != nil {
+		t.Fatalf("pairChunkEvents: %v", err)
+	}
+	if c, p := sess.ClientStream.Consumed(), sess.ClientStream.Processed(); c != 6 || p != 6 {
+		t.Errorf("client Consumed, Processed = %d, %d, want 6, 6: the loop processed its one chunk", c, p)
+	}
+	if c, p := sess.DestStream.Consumed(), sess.DestStream.Processed(); c != 18 || p != 6 {
+		t.Errorf("dest Consumed, Processed = %d, %d, want 18, 6: the loop processed the answer, not the chunk its reader held", c, p)
+	}
+	if got, want := sess.DestStream.LastReadTime(), time.Unix(1001, 0); !got.Equal(want) {
+		t.Errorf("dest LastReadTime = %v, want %v, the last chunk the loop processed", got, want)
+	}
+	if got, want := sess.DestStream.LastWrittenTime(), time.Unix(1002, 0); !got.Equal(want) {
+		t.Errorf("dest LastWrittenTime = %v, want %v, the last chunk the loop processed", got, want)
+	}
+}
+
+// The readers, and the first read, take chunks ahead of the loop: a chunk one
+// of them has handed on is taken (Consumed) but not processed until the loop
+// is done with it.
+func TestV2_TheReadersReadAhead(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan fakeconn.Chunk, 3)
+	ch <- fakeconn.Chunk{Bytes: []byte("first")}
+	ch <- fakeconn.Chunk{Bytes: []byte("one")}
+	ch <- fakeconn.Chunk{Bytes: []byte("two")}
+	close(ch)
+	fc := fakeconn.New(ch, nil, nil)
+
+	if c, err := readFirst(fc); err != nil || string(c.Bytes) != "first" {
+		t.Fatalf("readFirst = %q, %v", c.Bytes, err)
+	}
+	if c, p := fc.Consumed(), fc.Processed(); c != 5 || p != 0 {
+		t.Fatalf("after the first read, Consumed, Processed = %d, %d, want 5, 0", c, p)
+	}
+
+	out := make(chan chunkEvent, 1)
+	done := make(chan struct{}, 1)
+	go readStream(fc, fakeconn.FromClient, out, make(chan struct{}), done)
+	if ev := <-out; string(ev.bytes) != "one" {
+		t.Fatalf("readStream handed on %q, want %q", ev.bytes, "one")
+	}
+	if p := fc.Processed(); p != 0 {
+		t.Fatalf("Processed = %d once the reader handed a chunk on, want 0: it read ahead", p)
+	}
+	for ev := range out {
+		if ev.err != nil {
+			break
+		}
+	}
+	<-done
+	if c, p := fc.Consumed(), fc.Processed(); c != 11 || p != 0 {
+		t.Fatalf("after the reader ended, Consumed, Processed = %d, %d, want 11, 0", c, p)
+	}
+}
+
+// errEmitFailed is what a test's emit fails with to stop the loop mid-chunk.
+var errEmitFailed = errors.New("the emit failed")
+
+// v2Feed hands the loop each next chunk of a stream as its reader would: read
+// ahead, then queued for the loop.
+func v2Feed(t *testing.T, events chan<- chunkEvent, fc *fakeconn.FakeConn) {
+	t.Helper()
+	c, err := fc.ReadAhead()
+	if err != nil {
+		t.Fatalf("ReadAhead: %v", err)
+	}
+	events <- chunkEvent{dir: c.Dir, bytes: c.Bytes, connSeq: c.ConnSeq, readAt: c.ReadAt, writtenAt: c.WrittenAt}
+}
+
+// A chunk in the loop's hand when it fails is not processed: the answer that
+// completes the first exchange is in its hand while that exchange is emitted,
+// and the emit fails.
+func TestV2_AChunkInTheLoopsHandWhenItFailsIsNotProcessed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // emitted at once, not held
+	t0 := time.Unix(5000, 0)
+	clientCh := make(chan fakeconn.Chunk, 1)
+	destCh := make(chan fakeconn.Chunk, 1)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("REQ1"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("RES1"), ReadAt: t0.Add(2 * time.Second), WrittenAt: t0.Add(2 * time.Second)}
+	sess, _ := newV2Session(t, clientCh, destCh)
+	emitted := 0
+	sess.AddPostRecordHook(func(*models.Mock) {
+		emitted++
+		panic(errEmitFailed)
+	})
+	events := make(chan chunkEvent, 2)
+	v2Feed(t, events, sess.ClientStream)
+	v2Feed(t, events, sess.DestStream)
+	close(events)
+
+	failed := func() (r any) {
+		defer func() { r = recover() }()
+		_ = pairChunkEvents(events, sess, sess.Logger)
+		return nil
+	}()
+	if failed != errEmitFailed || emitted != 1 {
+		t.Fatalf("the loop ended with %v after %d emits, want the failed emit of the first exchange", failed, emitted)
+	}
+	if c, p := sess.ClientStream.Consumed(), sess.ClientStream.Processed(); c != 4 || p != 4 {
+		t.Errorf("client Consumed, Processed = %d, %d, want 4, 4: the loop was done with the request", c, p)
+	}
+	if c, p := sess.DestStream.Consumed(), sess.DestStream.Processed(); c != 4 || p != 0 {
+		t.Errorf("dest Consumed, Processed = %d, %d, want 4, 0: the answer was in the loop's hand", c, p)
+	}
+}
+
+// The loop marks each chunk processed once: a turn that takes no chunk (the
+// hold's hand-on as the recording's stop begins) marks nothing, so what a
+// reader read ahead is not counted processed in its place.
+func TestV2_ATurnThatTakesNoChunkMarksNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetWatermark(neverBehind{})
+	_ = mgr.OpenWindow(t0, nil) // open: the first exchange may be its test's, so it is held
+	clientCh := make(chan fakeconn.Chunk, 3)
+	destCh := make(chan fakeconn.Chunk, 1)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("REQ1"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("RES1"), ReadAt: t0.Add(2 * time.Second), WrittenAt: t0.Add(2 * time.Second)}
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("REQ2"), ReadAt: t0.Add(3 * time.Second)}
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("read ahead"), ReadAt: t0.Add(4 * time.Second)}
+	sess, _ := newV2Session(t, clientCh, destCh)
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	mocks := make(chan *models.Mock) // unbuffered: the test is told of each emit
+	sess.Mocks = mocks
+	events := make(chan chunkEvent) // unbuffered: the loop has each chunk as the feed returns
+	done := make(chan error, 1)
+	go func() { done <- pairChunkEvents(events, sess, sess.Logger) }()
+
+	v2Feed(t, events, sess.ClientStream)
+	v2Feed(t, events, sess.DestStream) // completes the first exchange, which is held
+	v2Feed(t, events, sess.ClientStream)
+	if _, err := sess.ClientStream.ReadAhead(); err != nil {
+		t.Fatalf("ReadAhead: %v", err)
+	}
+	mgr.BacklogBefore(t0.Add(10 * time.Second)) // the stop begins: the hold is handed on
+	<-mocks
+	close(events)
+	var err error
+	for waiting := true; waiting; {
+		select {
+		case <-mocks: // what the loop emits as it ends
+		case err = <-done:
+			waiting = false
+		}
+	}
+	if err != nil {
+		t.Fatalf("pairChunkEvents: %v", err)
+	}
+	if c, p := sess.ClientStream.Consumed(), sess.ClientStream.Processed(); c != 18 || p != 8 {
+		t.Errorf("client Consumed, Processed = %d, %d, want 18, 8: the loop processed two requests, not the chunk read ahead", c, p)
+	}
+	if c, p := sess.DestStream.Consumed(), sess.DestStream.Processed(); c != 4 || p != 4 {
+		t.Errorf("dest Consumed, Processed = %d, %d, want 4, 4", c, p)
+	}
 }
