@@ -269,6 +269,38 @@ func asciiToken(s string) bool {
 	return true
 }
 
+// tokens are a drifted value read into segments and runs, recorded (tr) and
+// live (tf), its accepted clock reads (c.pairs) each collapsed on its side.
+func tokens(rec, live string, c clockSet) (tr, tf wtoks) {
+	return tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
+}
+
+// sameParts reports whether a value's segments stand alike recorded (tr)
+// and live (tf): as many, its clock reads at the same ones.
+func sameParts(tr, tf wtoks) bool {
+	if len(tr.segs) != len(tf.segs) {
+		return false
+	}
+	for i := range tr.segs {
+		if tr.segs[i].inst != tf.segs[i].inst {
+			return false
+		}
+	}
+	return true
+}
+
+// sameSeps reports whether the structural text between a value's segments,
+// before the first and after the last too, stands alike recorded (tr) and
+// live (tf), whose segments are as many.
+func sameSeps(tr, tf wtoks) bool {
+	for i := 0; i <= len(tr.segs); i++ {
+		if tr.sep(i) != tf.sep(i) {
+			return false
+		}
+	}
+	return true
+}
+
 // spansOf are a value's collapsed reads: of the recorded value (rec) or the
 // live one, from its accepted pairs, sorted by place.
 func spansOf(pairs []clockPair, rec bool) []collapsed {
@@ -393,19 +425,12 @@ func learnWords(rec, live string, c clockSet) (models.WordsEntry, string) {
 			return models.WordsEntry{}, whyVariant
 		}
 	}
-	tr, tf := tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
-	if len(tr.segs) != len(tf.segs) {
+	tr, tf := tokens(rec, live, c)
+	if !sameParts(tr, tf) {
 		return models.WordsEntry{}, whyParts
 	}
-	for i := range tr.segs {
-		if tr.segs[i].inst != tf.segs[i].inst {
-			return models.WordsEntry{}, whyParts
-		}
-	}
-	for i := 0; i <= len(tr.segs); i++ {
-		if tr.sep(i) != tf.sep(i) {
-			return models.WordsEntry{}, whySeparators
-		}
+	if !sameSeps(tr, tf) {
+		return models.WordsEntry{}, whySeparators
 	}
 	var slots []models.WordSlot
 	var spans []changedSpan
@@ -717,18 +742,14 @@ func gluedPieces(a, b run) bool { return pieceIn(a, b) || pieceIn(b, a) }
 // clock is no value that flowed. A UUID's random part is no clock's, so a
 // value glued inside it (a short id cut from it) carries it.
 func wordPieces(rec, live string, c clockSet) []run {
-	tr, tf := tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
-	aligned := len(tr.segs) == len(tf.segs)
-	for i := 0; aligned && i < len(tr.segs); i++ {
-		aligned = tr.segs[i].inst == tf.segs[i].inst
-	}
+	tr, tf := tokens(rec, live, c)
 	var out []run
 	add := func(r, f string) {
 		if p, ok := changedPiece(r, f); ok {
 			out = append(out, p)
 		}
 	}
-	if !aligned {
+	if !sameParts(tr, tf) {
 		add(rec, live)
 		return out
 	}
@@ -739,9 +760,8 @@ func wordPieces(rec, live string, c clockSet) []run {
 			}
 			continue
 		}
-		if tr.text(g) == tf.text(g) {
-			continue
-		}
+		// (A segment that did not change gives no piece: each of its runs
+		// is unchanged.)
 		if !sameRunLayout(tr, tf, g) {
 			add(tr.text(g), tf.text(g))
 			continue
@@ -763,19 +783,11 @@ func instantOnly(rec, live string, c clockSet) bool {
 	if rec == live {
 		return false
 	}
-	tr, tf := tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
-	if len(tr.segs) != len(tf.segs) {
+	tr, tf := tokens(rec, live, c)
+	if !sameParts(tr, tf) || !sameSeps(tr, tf) {
 		return false
 	}
-	for i := 0; i <= len(tr.segs); i++ {
-		if tr.sep(i) != tf.sep(i) {
-			return false
-		}
-	}
 	for g, sg := range tr.segs {
-		if sg.inst != tf.segs[g].inst {
-			return false
-		}
 		if sg.inst >= 0 {
 			if sg.lay == uuidLayout {
 				return false
@@ -808,15 +820,18 @@ func (lay clockLayout) skeleton(m string) string {
 	if lay.name == UUIDClockLayout {
 		return uuidSkeleton(m)
 	}
+	// (m is a match of lay: its submatches are there, its zone's name
+	// among them where it writes one.)
 	na, nb := -1, -1
 	if lay.nameGroup > 0 {
-		if sub := lay.re.FindStringSubmatchIndex(m); sub != nil && sub[2*lay.nameGroup] >= 0 {
+		if sub := lay.re.FindStringSubmatchIndex(m); sub[2*lay.nameGroup] >= 0 {
 			na, nb = sub[2*lay.nameGroup], sub[2*lay.nameGroup+1]
 		}
 	}
 	var b strings.Builder
-	colons := 0 // digit groups joined by ':' so far: 3 at the seconds
-	prevMonth := false
+	// colons counts the digit groups joined by ':' so far, 3 at the
+	// seconds: every other byte sets it to 0.
+	colons := 0
 	digit := func(c byte) bool { return c >= '0' && c <= '9' }
 	letter := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 	for i := 0; i < len(m); {
@@ -825,37 +840,35 @@ func (lay clockLayout) skeleton(m string) string {
 		case i == na:
 			b.WriteByte('N')
 			i = nb
-			colons, prevMonth = 0, false
-		case lay.dayPad && prevMonth && c == ' ' && i+2 < len(m) && (m[i+1] == ' ' || digit(m[i+1])) && digit(m[i+2]):
+			colons = 0
+		case lay.dayPad && i >= 3 && months[m[i-3:i]]:
+			// A day-padded layout (Unix date) writes " [ \d]\d" right after
+			// its month: the day, padded with a space or a zero.
 			b.WriteString(" D")
 			i += 3
-			colons, prevMonth = 0, false
+			colons = 0
 		case digit(c):
 			j := i
 			for j < len(m) && digit(m[j]) {
 				j++
 			}
-			if i > 0 && m[i-1] == ':' && colons > 0 {
-				colons++
-			} else {
-				colons = 1
-			}
+			colons++
 			b.WriteString("d" + strconv.Itoa(j-i))
 			// The seconds: of a time, its third group joined by ':'; of an
-			// epoch, its ten leading digits.
-			seconds := colons == 3 || lay.name == "epoch" && i == 0 && j-i == 10
+			// epoch, its ten leading digits (no other layout writes ten).
+			seconds := colons == 3 || lay.name == "epoch" && j-i == 10
 			i = j
 			if lay.frac && seconds {
+				// A fraction after the seconds, if the match holds one:
+				// a '.' or a ',' and its digits.
 				b.WriteByte('F')
-				if i+1 < len(m) && (m[i] == '.' || m[i] == ',') && digit(m[i+1]) {
+				if i < len(m) && (m[i] == '.' || m[i] == ',') {
 					i++
 					for i < len(m) && digit(m[i]) {
 						i++
 					}
 				}
-				colons = 0
 			}
-			prevMonth = false
 		case letter(c):
 			j := i
 			for j < len(m) && letter(m[j]) {
@@ -870,7 +883,6 @@ func (lay clockLayout) skeleton(m string) string {
 			default:
 				b.WriteString(w)
 			}
-			prevMonth = months[w]
 			i = j
 			colons = 0
 		default:
@@ -878,9 +890,6 @@ func (lay clockLayout) skeleton(m string) string {
 			i++
 			if c != ':' {
 				colons = 0
-			}
-			if c != ' ' {
-				prevMonth = false
 			}
 		}
 	}
@@ -901,7 +910,8 @@ func uuidSkeleton(u string) string {
 			upper = true
 		}
 	}
-	if lower && upper || len(u) != 36 {
+	// (u is a match of the UUID layout: 36 bytes, hex and dashes.)
+	if lower && upper {
 		return ""
 	}
 	x, v := "x", "v"
@@ -1102,7 +1112,8 @@ func WordsAdmit(rec, live string, e models.WordsEntry) (ok bool, why string) {
 			return true
 		}
 		return false
-	}); exhausted && !found {
+	}); exhausted {
+		// (A collapse found stops the walk before it is cut short.)
 		return false, whyTooMany
 	}
 	if !found {
@@ -1122,15 +1133,14 @@ func WordsAdmit(rec, live string, e models.WordsEntry) (ok bool, why string) {
 			if clockLayouts[sg.lay].skeleton(tr.text(s.Seg)) != s.Skeleton {
 				return false, whyRecSkeleton
 			}
-		case models.WordSlotToken:
-			if sg.inst >= 0 {
-				return false, whyRange
-			}
 		case models.WordSlotRun:
-			if sg.inst >= 0 || s.Run >= len(sg.runs) {
+			// (An instant's segment holds no runs.)
+			if s.Run >= len(sg.runs) {
 				return false, whyRange
 			}
 		}
+		// (A token or a run slot at an instant's segment is a second slot
+		// there, which the loop below refuses.)
 		bySeg[s.Seg] = append(bySeg[s.Seg], s)
 	}
 	// Every collapsed instant is one instant slot's, and is read as it
@@ -1139,11 +1149,8 @@ func WordsAdmit(rec, live string, e models.WordsEntry) (ok bool, why string) {
 	// slot, or slots of its runs, each once.
 	for g, sg := range tr.segs {
 		slots := bySeg[g]
-		if sg.inst >= 0 {
-			if len(slots) != 1 {
-				return false, whyRange
-			}
-			continue
+		if sg.inst >= 0 && len(slots) != 1 {
+			return false, whyRange
 		}
 		runs := map[int]bool{}
 		for _, s := range slots {
@@ -1348,7 +1355,7 @@ func WholeDrift(rec, live string, w *Window) (whole bool, why string) {
 		return false, whySame
 	}
 	c := clockInBy(rec, live, w, true)
-	tr, tf := tokenize(rec, spansOf(c.pairs, true)), tokenize(live, spansOf(c.pairs, false))
+	tr, tf := tokens(rec, live, c)
 	recRuns, liveRuns := runTexts(tr), runTexts(tf)
 	if len(recRuns) == 0 {
 		return false, "it holds no word"

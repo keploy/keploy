@@ -24,11 +24,11 @@ func learnedWords(t *testing.T, rec, live string) models.WordsEntry {
 	if why != "" {
 		t.Fatalf("%q -> %q: no words learned: %s", rec, live, why)
 	}
-	if ok, why := WordsAdmit(rec, live, e); !ok {
-		t.Fatalf("%q -> %q: the words learned of F do not admit F: %s", rec, live, why)
+	if ok, why := WordsAdmit(rec, live, e); !ok || why != "" {
+		t.Fatalf("%q -> %q: the words learned of F do not admit F: %v %s", rec, live, ok, why)
 	}
-	if ok, why := WordsAdmit(rec, rec, e); !ok {
-		t.Fatalf("%q -> %q: the words learned do not admit the recording: %s", rec, live, why)
+	if ok, why := WordsAdmit(rec, rec, e); !ok || why != "" {
+		t.Fatalf("%q -> %q: the words learned do not admit the recording: %v %s", rec, live, ok, why)
 	}
 	return e
 }
@@ -77,8 +77,18 @@ func TestOnlyTheWordsThatChangedMayChange(t *testing.T) {
 		{"ORD-1 paid 100 ref=ünï", false},
 		{"ORD-1 paid 100 ref=a.b-c_d", true}, // the run alone in its segment: any ASCII token (N1)
 	} {
-		if ok, why := WordsAdmit(rec, tc.live, e); ok != tc.ok {
+		if ok, why := WordsAdmit(rec, tc.live, e); ok != tc.ok || ok == (why != "") {
 			t.Errorf("%q admitted %v (%s), want %v", tc.live, ok, why, tc.ok)
+		}
+	}
+	// Each red value says what of it did not hold, read by the first way
+	// its instants were placed.
+	for live, want := range map[string]string{
+		"ORD-1 paid 999 ref=0c9d": "a part of it that is not learned to change changed",
+		"ORD-1 paid 100 ref=":     "it holds another number of parts than when it was recorded",
+	} {
+		if ok, why := WordsAdmit(rec, live, e); ok || why != want {
+			t.Errorf("%q admitted %v (%q), want %q", live, ok, why, want)
 		}
 	}
 }
@@ -203,7 +213,15 @@ func TestAnAcceptedClockReadIsOneInstantSlot(t *testing.T) {
 					t.Errorf("%q admitted, want red", live)
 				}
 			}
+			// A value with no instant of the layout where one was says so.
+			if ok, why := WordsAdmit(tc.rec, "no instant here", e); ok || why == "" {
+				t.Errorf("a value with no instant: admitted %v (%q)", ok, why)
+			}
 		})
+	}
+	e := learnedWords(t, "at "+wAt.Format(time.RFC3339), "at "+later.Format(time.RFC3339))
+	if ok, why := WordsAdmit("at "+wAt.Format(time.RFC3339), "at soon", e); ok || why != "an instant of it is not where it was recorded, in its layout" {
+		t.Errorf("no instant where one was recorded: admitted %v (%q)", ok, why)
 	}
 }
 
@@ -265,6 +283,62 @@ func TestAUUIDInstantKeepsItsCaseVersionAndVariant(t *testing.T) {
 	glued := "x" + uuid7Of(wAt, "abc123456789abcdef", 'a', false)
 	if _, why := NewDriftCache().Words(glued, "x"+uuid7Of(later, "def0123456789abcde", 'a', false), nil); why != whyGluedUUID {
 		t.Errorf("a UUID glued to a word: %q, want %q", why, whyGluedUUID)
+	}
+}
+
+// Each layout's skeleton, of every month's and every weekday's name: the
+// names are classes, the digits their lengths, Unix date's padded day D
+// (with a numeric offset too), a fraction F (a ',' as well as a '.').
+func TestEachLayoutsSkeleton(t *testing.T) {
+	for m := time.January; m <= time.December; m++ {
+		for d := 1; d <= 7; d++ {
+			at := time.Date(2026, m, d+9*(d%2), 3, 4, 5, 0, time.UTC)
+			for name, tc := range map[string][2]string{
+				"unixdate": {at.Format(time.UnixDate), "W M D d2:d2:d2 N d4"},
+				"rfc1123":  {at.Format(time.RFC1123), "W, d2 M d4 d2:d2:d2 N"},
+				"jsdate":   {at.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)", "W M d2 d4 d2:d2:d2 GMT+d4 (N)"},
+			} {
+				lay := clockLayouts[layoutNamed(name)]
+				if m := lay.re.FindString(tc[0]); m != tc[0] {
+					t.Fatalf("%s: %q reads %q", name, tc[0], m)
+				}
+				if got := lay.skeleton(tc[0]); got != tc[1] {
+					t.Errorf("%s: skeleton of %q is %q, want %q", name, tc[0], got, tc[1])
+				}
+			}
+		}
+	}
+	for _, tc := range []struct{ layout, m, want string }{
+		{"unixdate", "Wed Oct 21 10:28:02 +0000 2026", "W M D d2:d2:d2 +d4 d4"},
+		{"unixdate", "Wed Oct  1 10:28:02 2026", "W M D d2:d2:d2 d4"},
+		{"iso8601", "2026-10-21T10:28:02,123Z", "d4-d2-d2Td2:d2:d2FZ"},
+		{"iso8601", "2026-10-21T10:28:02.5+01:00", "d4-d2-d2Td2:d2:d2F+d2:d2"},
+		{"iso8601", "2026-10-21 10:28:02 +0100 BST", "d4-d2-d2 d2:d2:d2F +d4 N"},
+		{"epoch", "1761042482.25", "d10F"},
+		{"epoch", "1761042482250", "d13"},
+		{"timeofday", "10:28:02.5", "d2:d2:d2F"},
+		{"timeofday", "10:28", "d2:d2"},
+	} {
+		lay := clockLayouts[layoutNamed(tc.layout)]
+		if m := lay.re.FindString(tc.m); m != tc.m {
+			t.Fatalf("%s: %q reads %q", tc.layout, tc.m, m)
+		}
+		if got := lay.skeleton(tc.m); got != tc.want {
+			t.Errorf("%s: skeleton of %q is %q, want %q", tc.layout, tc.m, got, tc.want)
+		}
+	}
+	for u, want := range map[string]string{
+		"0192b3c4-5d6e-7abc-a123-456789abcdef": "x8-x4-7x3-vx3-x12",
+		"0192B3C4-5D6E-7ABC-A123-456789ABCDEF": "X8-X4-7X3-VX3-X12",
+		"01923334-5162-7123-8123-456789012345": "x8-x4-7x3-vx3-x12",
+		"a192B3C4-5D6E-7ABC-A123-456789ABCDEF": "",
+		"0192B3C4-5D6E-7ABC-A123-456789ABCDEf": "",
+		"f0000000-0000-7000-8000-00000000000A": "",
+		"F0000000-0000-1000-8000-00000000000a": "",
+	} {
+		if got := uuidSkeleton(u); got != want {
+			t.Errorf("uuidSkeleton(%q) = %q, want %q", u, got, want)
+		}
 	}
 }
 
@@ -673,6 +747,28 @@ func TestTieOf(t *testing.T) {
 	}
 }
 
+// TieOf reads the clock reads in the call's window: two values whose only
+// change is an instant read within it are exempt there, and are not by the
+// lead alone.
+func TestTieOfReadsTheCallsWindow(t *testing.T) {
+	boot := wAt.Add(4 * time.Minute)
+	w := &Window{Rec: Span{From: wAt.Add(-time.Second), To: wAt.Add(time.Second)}, F: Span{From: boot.Add(-time.Second), To: boot.Add(time.Second)}}
+	a := [2]string{wAt.Format(time.RFC3339), boot.Format(time.RFC3339)}
+	b := [2]string{"at " + wAt.Format(time.RFC3339), "at " + boot.Format(time.RFC3339)}
+	if got := NewDriftCache().TieOf(a, b, w); got != TieExempt {
+		t.Errorf("in the window: %v, want exempt", got)
+	}
+	if got := NewDriftCache().TieOf(b, a, w); got != TieExempt {
+		t.Errorf("in the window, the other order: %v, want exempt", got)
+	}
+	if got := NewDriftCache().TieClass(a, b, w); got != "" {
+		t.Errorf("in the window: class %q, want none", got)
+	}
+	if got := NewDriftCache().TieOf(a, b, nil); got == TieExempt {
+		t.Errorf("by the lead alone: exempt, want not")
+	}
+}
+
 // Across calls, the glued test is part of sources: a value glued inside an
 // earlier call's is a variable inside a longer value, which keploy cannot
 // follow, never noise.
@@ -786,6 +882,7 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		}), whyRange},
 		{"a run slot twice", rec, with(func(c *models.WordsEntry) { c.Slots = append(c.Slots, c.Slots[0]) }), whyRange},
 		{"a negative segment", rec, with(func(c *models.WordsEntry) { c.Slots[0].Seg = -1 }), whyRange},
+		{"a segment one past the last", rec, with(func(c *models.WordsEntry) { c.Slots[0].Seg = 7 }), whyRange},
 		{"a negative run", rec, with(func(c *models.WordsEntry) { c.Slots[0].Run = -1 }), whyRange},
 		{"an instant slot of a negative segment", rec, with(func(c *models.WordsEntry) { c.Slots[1].Seg = -1 }), whyRange},
 		{"an instant slot naming a run", rec, with(func(c *models.WordsEntry) { c.Slots[1].Run = 1 }), whyGuard},
@@ -802,6 +899,74 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 		if ok, _ := WordsAdmit(tc.rec, tc.rec, tc.e); ok && tc.rec == rec {
 			t.Errorf("%s: a void entry admits even the recording", tc.name)
 		}
+	}
+}
+
+// An instant slot names the layout its segment collapses by: one moved to a
+// plain segment, even of the first layout's name, and two whose layouts
+// swapped, are void.
+func TestAnInstantSlotNamesItsSegmentsLayout(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	rec, f := "ORD-1 at "+wAt.Format(time.RFC1123), "ORD-1 at "+later.Format(time.RFC1123)
+	e := learnedWords(t, rec, f)
+	if got := slotsOf(e); got != "s2i:rfc1123:W, d2 M d4 d2:d2:d2 N" {
+		t.Fatalf("slots %s", got)
+	}
+	moved := e.Clone()
+	moved.Slots[0].Seg = 0
+	if ok, why := WordsAdmit(rec, f, moved); ok || why != whyRange {
+		t.Errorf("an rfc1123 slot at a plain segment: admitted %v (%q), want void %q", ok, why, whyRange)
+	}
+	rec2, f2 := "from "+wAt.Format(time.RFC3339)+" ts "+strconv.FormatInt(wAt.Unix(), 10), "from "+later.Format(time.RFC3339)+" ts "+strconv.FormatInt(later.Unix(), 10)
+	e2 := learnedWords(t, rec2, f2)
+	if got := slotsOf(e2); got != "s1i:iso8601:d4-d2-d2Td2:d2:d2FZ s3i:epoch:d10F" {
+		t.Fatalf("slots %s", got)
+	}
+	swapped := e2.Clone()
+	swapped.Slots[0].Layout, swapped.Slots[1].Layout = swapped.Slots[1].Layout, swapped.Slots[0].Layout
+	swapped.Slots[0].Skeleton, swapped.Slots[1].Skeleton = swapped.Slots[1].Skeleton, swapped.Slots[0].Skeleton
+	if ok, why := WordsAdmit(rec2, f2, swapped); ok || why != whyRange {
+		t.Errorf("two instant slots whose layouts swapped: admitted %v (%q), want void %q", ok, why, whyRange)
+	}
+}
+
+// WordsAdmit tries maxCollapses ways at most: a recorded value whose read is
+// the 256th way of placing it is learned, and served; one more is refused at
+// learn. A value of many more instants than its slots is refused promptly,
+// the ways it did not try never walked.
+func TestTheWaysToPlaceAnInstantAreBounded(t *testing.T) {
+	later := wAt.Add(FullRoundLead)
+	at := func(t time.Time) string { return t.Format(time.RFC3339) }
+	static := func(n int) string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = at(wAt.Add(-time.Duration(i+1) * time.Hour))
+		}
+		return strings.Join(out, " ")
+	}
+	learnedWords(t, static(maxCollapses-1)+" at "+at(wAt), static(maxCollapses-1)+" at "+at(later))
+	if _, why := NewDriftCache().Words(static(maxCollapses)+" at "+at(wAt), static(maxCollapses)+" at "+at(later), nil); why != whyTooMany {
+		t.Errorf("one way more than WordsAdmit tries: %q, want %q", why, whyTooMany)
+	}
+	var rec, f []string
+	for i := 0; i < 5; i++ {
+		rec = append(rec, at(wAt.Add(time.Duration(i)*time.Second)))
+		f = append(f, at(later.Add(time.Duration(i)*time.Second)))
+	}
+	e := learnedWords(t, strings.Join(rec, " / "), strings.Join(f, " / "))
+	many := make([]string, 200)
+	for i := range many {
+		many[i] = at(later.Add(time.Duration(i) * time.Minute))
+	}
+	done := make(chan string, 1)
+	go func() { _, why := WordsAdmit(strings.Join(rec, " / "), strings.Join(many, " / "), e); done <- why }()
+	select {
+	case why := <-done:
+		if why != whyTooMany {
+			t.Errorf("200 instants for 5 slots: %q, want %q", why, whyTooMany)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("200 instants for 5 slots: WordsAdmit walked past the ways it tries")
 	}
 }
 
