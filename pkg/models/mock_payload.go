@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // A replay reads a test set's mocks before its first test: it sorts them into
@@ -68,9 +69,13 @@ var ErrPayloadMutatorChangedMock = errors.New("a mock payload hook changed what 
 type payloadOnDisk struct {
 	src PayloadSource
 	at  PayloadAt
-	// summary and target are MockSummaryFromSpec's and MockTargetFromSpec's.
-	summary string
-	target  string
+	// summary and target are MockSummaryFromSpec's and MockTargetFromSpec's,
+	// when no longer than maxKeptDisplay. A longer one (a Mongo mock's carries
+	// its whole recorded command) is not kept (longSummary, longTarget): it
+	// is worked out again from the payload when it is asked for, which only
+	// a report naming the mock does.
+	summary, target         string
+	longSummary, longTarget bool
 	// matched has the bit of each registry in onDiskPredicates that matched
 	// the mock.
 	matched uint8
@@ -103,11 +108,11 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d := &payloadOnDisk{
 		src:                     src,
 		at:                      at,
-		summary:                 MockSummaryFromSpec(m),
-		target:                  MockTargetFromSpec(m),
 		mysqlStatementLifecycle: m.IsMySQLStatementLifecycle(),
 		mysqlSessionReusable:    mysqlIsSessionReusableCommand(m),
 	}
+	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
+	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
 	for i, r := range onDiskPredicates {
 		if r.match(m) {
 			d.matched |= 1 << i
@@ -124,6 +129,36 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	}
 	m.Noise = nil
 	m.onDisk = d
+}
+
+// maxKeptDisplay is the longest summary or target (MockSummaryFromSpec,
+// MockTargetFromSpec) a mock whose payload is on disk keeps.
+const maxKeptDisplay = 256
+
+// keptDisplay is s as a mock whose payload is on disk keeps it: a copy of its
+// own, which holds nothing of the payload, or none when s is longer than
+// maxKeptDisplay (long).
+func keptDisplay(s string) (kept string, long bool) {
+	if len(s) > maxKeptDisplay {
+		return "", true
+	}
+	return strings.Clone(s), false
+}
+
+// display works out of (MockSummaryFromSpec or MockTargetFromSpec) for m, a
+// mock whose payload is on disk, from its payload read back as recorded:
+// the source's mutator does not change it. A payload that cannot be read
+// back (its file was rewritten once its set ran) has its kind's own, as a mock
+// that carries nothing identifying does.
+func (d *payloadOnDisk) display(m *Mock, of func(*Mock) string, unknown string) string {
+	read, err := d.src.LoadPayload(context.Background(), d.at)
+	if err != nil {
+		return unknown
+	}
+	c := *m
+	c.onDisk = nil
+	c.Spec = read.Spec
+	return of(&c)
 }
 
 // PayloadOnDisk reports whether m's payload was left on disk

@@ -3971,7 +3971,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 									testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
 										MockName: m.Name,
 										Protocol: protocol,
-										Summary:  info.summary,
+										Summary:  info.summaryOf(),
 									})
 								}
 							}
@@ -6507,9 +6507,14 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 }
 
 // addMockDisplayInfo adds each mock's display info to the lookup, keyed by
-// name; a later mock of the same name replaces an earlier one.
+// name; a later mock of the same name replaces an earlier one. A mock whose
+// payload is on disk is kept itself, and asked when a report names it.
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
 	for _, mock := range mocks {
+		if mock.PayloadOnDisk() {
+			lookup[mock.Name] = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}
+			continue
+		}
 		lookup[mock.Name] = mockDisplayInfo{
 			summary:  models.MockSummaryFromSpec(mock),
 			protocol: string(mock.Kind),

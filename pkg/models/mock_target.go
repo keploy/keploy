@@ -31,8 +31,11 @@ func MockTargetFromSpec(mock *Mock) string {
 	if mock == nil {
 		return ""
 	}
-	if mock.onDisk != nil {
-		return mock.onDisk.target
+	if d := mock.onDisk; d != nil {
+		if d.longTarget {
+			return d.display(mock, MockTargetFromSpec, "")
+		}
+		return d.target
 	}
 	if t := httpTargetFromReq(mock.Spec.HTTPReq); t != "" {
 		return t

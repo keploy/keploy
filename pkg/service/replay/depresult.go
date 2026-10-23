@@ -23,6 +23,27 @@ type mockDisplayInfo struct {
 	summary  string
 	protocol string
 	target   string
+	// onDisk is the mock when a replay's read left its payload on disk
+	// (models.Mock.LeavePayloadOnDisk): its summary and target, which can
+	// carry a whole recorded command, are worked out when a report names it
+	// rather than held for every mock of the set.
+	onDisk *models.Mock
+}
+
+// summaryOf is the mock's summary (models.MockSummaryFromSpec).
+func (i mockDisplayInfo) summaryOf() string {
+	if i.onDisk != nil {
+		return models.MockSummaryFromSpec(i.onDisk)
+	}
+	return i.summary
+}
+
+// targetOf is the mock's target (mockTargetFromSpec).
+func (i mockDisplayInfo) targetOf() string {
+	if i.onDisk != nil {
+		return mockTargetFromSpec(i.onDisk)
+	}
+	return i.target
 }
 
 // mockTargetFromSpec is models.MockTargetFromSpec: a human-meaningful
@@ -396,7 +417,7 @@ func depTypeFor(m models.MockEntry, mockKindByName map[string]models.Kind, looku
 // Empty is a legitimate answer (r.mockDB may be nil, or the mock carries
 // nothing identifying); DepRowName renders correctly without it.
 func depTargetFor(m models.MockEntry, lookup map[string]mockDisplayInfo) string {
-	return lookup[m.Name].target
+	return lookup[m.Name].targetOf()
 }
 
 // isUnassertedMockEntry reports whether a mapping entry refers to a mock of a

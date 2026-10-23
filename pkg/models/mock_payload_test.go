@@ -72,6 +72,17 @@ func payloadMocks() map[string]func() *Mock {
 				ReqTimestampMock: payloadAt, ResTimestampMock: payloadAt.Add(time.Millisecond),
 			}}
 		},
+		// Its summary and target, which carry the whole recorded command, are
+		// longer than a mock whose payload is on disk keeps: they are worked
+		// out again from the payload read back.
+		"mongo-long": func() *Mock {
+			return &Mock{Version: "api.keploy.io/v1beta1", Name: "mongo-long", Kind: Mongo, Spec: MockSpec{
+				Metadata:         map[string]string{"type": "mocks", "operation": `{"insert":"apps","documents":["` + strings.Repeat("d", 4096) + `"]}`},
+				MongoRequests:    []MongoRequest{{ReadDelay: 3}},
+				MongoResponses:   []MongoResponse{{ReadDelay: 4}},
+				ReqTimestampMock: payloadAt, ResTimestampMock: payloadAt.Add(time.Millisecond),
+			}}
+		},
 		"mysql-prepare": mysqlOf("mysql-prepare", "COM_STMT_PREPARE"),
 		"mysql-ping":    mysqlOf("mysql-ping", "COM_PING"),
 		"mysql-query":   mysqlOf("mysql-query", "COM_QUERY"),
@@ -177,6 +188,33 @@ func TestLeavePayloadOnDiskAnswersAsTheWholeMock(t *testing.T) {
 				t.Error("a deep copy of the mock lost where its payload is, or what it answers")
 			}
 		})
+	}
+}
+
+// A summary longer than a mock whose payload is on disk keeps is read from
+// the file as recorded, without the source's mutator; one that cannot be read
+// back is the mock's kind, as a mock with nothing identifying it is summed up.
+func TestALongSummaryIsReadBackAsRecorded(t *testing.T) {
+	src := &fileSource{recorded: payloadMocks()}
+	src.SetPayloadMutator(func(_ context.Context, m *Mock) error {
+		m.Spec.Metadata["operation"] = "decrypted"
+		return nil
+	})
+	whole := src.recorded["mongo-long"]()
+	m := src.recorded["mongo-long"]()
+	m.LeavePayloadOnDisk(src, PayloadAt{Name: "mongo-long"})
+	if m.onDisk.summary != "" || !m.onDisk.longSummary {
+		t.Fatalf("the mock kept a %d-byte summary", len(m.onDisk.summary))
+	}
+	if got, want := MockSummaryFromSpec(m), MockSummaryFromSpec(whole); got != want {
+		t.Fatalf("the summary read back is %.40q...; want the recorded %.40q...", got, want)
+	}
+	src.err = ErrPayloadFileReplaced
+	if got := MockSummaryFromSpec(m); got != string(Mongo) {
+		t.Fatalf("a summary that cannot be read back is %q; want the kind", got)
+	}
+	if got := MockTargetFromSpec(m); got != "" {
+		t.Fatalf("a target that cannot be read back is %q; want none", got)
 	}
 }
 
