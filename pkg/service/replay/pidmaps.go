@@ -355,24 +355,58 @@ func (r *Replayer) appStartsAnew() {
 	}
 }
 
-// agentSetUpAgain is told the agent process that answers now was set up
-// again in full before the application ran against it (the docker compose
-// bring-up's retry, on a stack whose app never ran against the agent it
-// replaced: ensureAgentHoldsStoredMocks): nothing of this set's was on the
-// process it replaced, so every count this one holds is the set's and its
-// application's, counted from its start (nil bases). A read of the counts
-// names it; one that fails leaves the set's tests unread, as a mark that
-// could not be read does.
-func (r *Replayer) agentSetUpAgain(ctx context.Context) {
+// agentsStartedBeforeApp is an optional Instrumentation extension: whether an
+// agent process (models.AgentInstanceHeader) is one docker compose's
+// bring-up retry started in place of keploy's agent while the application's
+// container had never started (the keploy agent client's
+// AgentStartedBeforeApp).
+type agentsStartedBeforeApp interface {
+	AgentStartedBeforeApp(instance string) bool
+}
+
+// agentStartedBeforeApp is told, under the proven switch, that a compose
+// set's bring-up is done (its stack up and its application waited for,
+// before its first test). Where docker compose's bring-up retry started the
+// agent that answers now in place of the one before while the application's
+// container had never started, the application ran against none of the
+// process it replaced, and nothing of the set's was there: the set's watch
+// keeps to the new one, and every count it holds is the set's and its
+// application's, from its start (nil bases), the bases that outlive a set
+// included. That is asked of whether the app ran against the agent replaced,
+// not of where the replacement was noticed (the retry's own setup, or the
+// stored-mocks check finding the mocks gone). Any other agent found replaced
+// (docker or kubelet started it again under an application that ran) keeps
+// the bases read from the one before, so each test is charged
+// models.CaptureLossAgentStartedAgain, and the watch says the set's agent was
+// started again. A read that fails leaves the bases as they are, so a test
+// read from an agent started again is charged as such.
+func (r *Replayer) agentStartedBeforeApp(ctx context.Context, agentWatch models.AgentInstanceWatch) {
+	retry, ok := r.instrumentation.(agentsStartedBeforeApp)
+	if !provenswitch.On() || !ok {
+		return
+	}
+	if agentWatch != nil {
+		if rep, replaced := agentWatch.Replacement(); replaced && retry.AgentStartedBeforeApp(rep.Next) {
+			agentWatch.Accept()
+		}
+	}
 	reader, ok := r.instrumentation.(CaptureLossReader)
 	if !ok || !r.lossMarked || errors.Is(r.lossMark.err, models.ErrCaptureLossesUnsupported) {
 		return
 	}
 	_, agent, err := readCaptureLosses(ctx, reader)
-	if err != nil {
-		r.lossMark = captureLossMark{err: err}
+	if err != nil || !retry.AgentStartedBeforeApp(agent) {
 		return
 	}
+	if !otherAgent(r.lossMark.agent, agent) && !otherAgent(r.lossBasesAgent, agent) {
+		return // the set's bases are this one's already
+	}
+	replaced := r.lossMark.agent
+	if replaced == "" || replaced == agent {
+		replaced = r.lossBasesAgent
+	}
+	r.logger.Info("keploy's agent was started again by docker compose's bring-up retry before the application ever ran; what keploy could not capture is counted from the new agent's start",
+		zap.String("agent replaced", replaced), zap.String("agent", agent))
 	r.lossMark = captureLossMark{known: true, agent: agent}
 	r.lossLast, r.lossLastRead, r.lossLastAgent = nil, false, ""
 	r.lossAppBase, r.lossAppKept, r.lossRunStart, r.lossRunBase = nil, "", nil, nil

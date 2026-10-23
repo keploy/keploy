@@ -271,7 +271,7 @@ func TestEnsureAgentHoldsStoredMocks_ReRegistersReplacementAgent(t *testing.T) {
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("re-registration against the replacement agent should succeed, got: %v", err)
 	}
 	// A re-registration of the set, not a set boundary: what the app
@@ -300,6 +300,14 @@ type rearmLossInstr struct {
 	*rearmInstr
 	agent  string
 	losses models.CaptureLosses
+	// beforeApp is the agent process the compose bring-up's retry started
+	// in place of the one before while the app had never started
+	// (AgentStartedBeforeApp); "" for none.
+	beforeApp string
+}
+
+func (f *rearmLossInstr) AgentStartedBeforeApp(instance string) bool {
+	return instance != "" && instance == f.beforeApp
 }
 
 func (f *rearmLossInstr) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
@@ -311,20 +319,21 @@ func (f *rearmLossInstr) GetCaptureLossesAndAgent(context.Context) (models.Captu
 	return f.losses, f.agent, nil
 }
 
-// Under the proven switch, the capture-loss counts of a replacement agent set
-// up again before the application ran against it (the compose bring-up's
-// retry) are all the set's: its tests are charged what it lost from its
-// start, the app's own startup included, and judged on it, though the set's
-// mark, and the application's and the run's bases, were read from the agent
-// it replaced. That one had counted as many of each kind as the replacement
+// Under the proven switch, the capture-loss counts of a replacement agent the
+// compose bring-up's retry started while the application had never started
+// are all the set's: its tests are charged what it lost from its start, the
+// app's own startup included, and judged on it, though the set's mark, and
+// the application's and the run's bases, were read from the agent it
+// replaced. That one had counted as many of each kind as the replacement
 // holds, so a base kept from it would count nothing of the replacement's: a
 // kind lost on the way, for each base (the set's mark, the application's
-// start, the run's start, and what keploy cannot capture at all). Where the
-// application may have run against the agent replaced (a stack kept across
-// sets, past its first bring-up), what that one counted went with it: the
-// bases stay its, and the test is charged the agent started again, which
-// leaves it without a verdict.
-func TestEnsureAgentHoldsStoredMocks_CountsTheReplacementsLossesFromItsStart(t *testing.T) {
+// start, the run's start, and what keploy cannot capture at all). So whether
+// the retry's own setup took (the stored-mocks check finds the mocks held)
+// or not (it stores them again). Any other replacement (one docker started
+// again under an application that had started) took what it counted with
+// it, wherever it was noticed: the bases stay its, and the test is charged
+// the agent started again, which leaves it without a verdict.
+func TestAgentStartedBeforeApp_CountsTheRetrysReplacementsLossesFromItsStart(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	// One of each base's kinds: the set's mark (a parser stall), the
 	// application's start (a refused process of the application's), the
@@ -344,26 +353,34 @@ func TestEnsureAgentHoldsStoredMocks_CountsTheReplacementsLossesFromItsStart(t *
 		{Kind: models.CaptureLossPIDMapExcluded, Count: 1, What: "pid 3"},
 		{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/run/app.sock"},
 	}
+	startedAgain := append(models.CaptureLosses{agentStartedAgain(models.AgentReplacement{First: "a1", Next: "b2"})}, lost...)
 	for _, tc := range []struct {
-		name         string
-		appRanBefore bool
-		want         models.CaptureLosses
+		name      string
+		beforeApp string
+		held      bool
+		want      models.CaptureLosses
 	}{
-		{"set up again before the application ran", false, lost},
-		{"replaced under an application that may have run", true,
-			append(models.CaptureLosses{agentStartedAgain(models.AgentReplacement{First: "a1", Next: "b2"})}, lost...)},
+		{"the retry's, set up again by it", "b2", true, lost},
+		{"the retry's, its setup not taken", "b2", false, lost},
+		{"not the retry's, found holding the mocks", "", true, startedAgain},
+		{"not the retry's, found holding none", "", false, startedAgain},
+		{"another the retry started", "c3", false, startedAgain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", losses: lost}
+			f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", losses: lost, beforeApp: tc.beforeApp}
+			filtered, unfiltered, consumed, cases := rearmSessionArgs()
+			if tc.held {
+				f.loaded = len(filtered) + len(unfiltered)
+			}
 			r := newRearmReplayer(f.rearmInstr)
 			r.instrumentation = f
 			r.lossMark, r.lossMarked = captureLossMark{at: a1, known: true, agent: "a1"}, true
 			r.lossAppBase, r.lossRunStart, r.lossRunBase = a1, a1, a1
 			r.lossAgent, r.lossBasesAgent = "a1", "a1"
-			filtered, unfiltered, consumed, cases := rearmSessionArgs()
-			if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, tc.appRanBefore); err != nil {
+			if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 				t.Fatal(err)
 			}
+			r.agentStartedBeforeApp(context.Background(), nil)
 			charged, err := r.testCaptureLosses(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -381,7 +398,9 @@ func TestEnsureAgentHoldsStoredMocks_CountsTheReplacementsLossesFromItsStart(t *
 // client's do. Its counts become lost from the read numbered lossAt (from 1)
 // on. At the first stored-mocks check after replaceAtCheck is set, the agent
 // is found replaced by b2 (docker starting again an agent container that
-// crashed): b2 holds no mocks, and counts nothing of a1's.
+// crashed): b2 holds no mocks, and counts nothing of a1's. With byRetry, b2
+// is one the compose bring-up's retry started while the app had never
+// started, whose setup there did not take (AgentStartedBeforeApp).
 type replacedAtCheckInstr struct {
 	*composeInstr
 	mu             sync.Mutex
@@ -391,6 +410,13 @@ type replacedAtCheckInstr struct {
 	loaded         int
 	replaceAtCheck bool
 	replaced       bool
+	byRetry        bool
+}
+
+func (f *replacedAtCheckInstr) AgentStartedBeforeApp(instance string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.byRetry && f.replaced && instance == "b2"
 }
 
 func (f *replacedAtCheckInstr) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
@@ -435,8 +461,9 @@ func (f *replacedAtCheckInstr) StoreMocks(ctx context.Context, filtered, unfilte
 // judged when b2 is found in a1's place: each of its tests is charged the
 // agent started again, rather than passing on b2's empty counts. Set 3,
 // whose app keploy starts anew under b2, is judged on b2's counts. Where the
-// agent is replaced in the stack's first bring-up, before its app ever ran,
-// the replacement's counts are all the set's, and the set is judged.
+// bring-up's retry replaced the agent in the stack's first bring-up, before
+// its app ever ran, the replacement's counts are all the set's, and the set
+// is judged.
 func TestUnderTheSwitchAnAgentReplacedUnderAComposeAppThatRanLeavesTheSetUnjudged(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}
@@ -498,26 +525,24 @@ func TestUnderTheSwitchAnAgentReplacedUnderAComposeAppThatRanLeavesTheSetUnjudge
 			}
 		})
 	}
-	t.Run("the agent is replaced in the stack's first bring-up", func(t *testing.T) {
+	t.Run("the retry replaced the agent in the stack's first bring-up", func(t *testing.T) {
 		h, _, f := harness(t, nil)
-		f.replaceAtCheck = true
+		f.replaceAtCheck, f.byRetry = true, true
 		if s, n := h.runServing(t), unjudged(h); s != models.TestSetStatusPassed || n != 0 || !f.replaced {
 			t.Fatalf("set 1: %s, %d tests charged the agent started again, replaced %v; want PASSED, judged on b2's counts: the app never ran against a1", s, n, f.replaced)
 		}
 	})
 }
 
-// Whether a kept stack's app may have run against its agent is the run's
-// own to note: a run's first bring-up is one, whatever an earlier run of the
-// same replayer noted. Through Start, an agent found replaced in the first
-// set's bring-up is the retry's, before the run's app ran, and the set is
-// judged on the replacement's counts.
-func TestUnderTheSwitchARunsFirstBringUpIsItsOwnWhateverAnEarlierRunNoted(t *testing.T) {
+// Through Start, an agent the bring-up's retry started in the first set's
+// bring-up, before the run's app ran, holds all the set's evidence: the set
+// is judged on the replacement's counts.
+func TestUnderTheSwitchThroughStartTheRetrysAgentInTheFirstBringUpIsJudged(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	c := &composeInstr{}
 	h := composeHarness(t, c)
 	h.mocks.filtered = []*models.Mock{{Name: "mock-a", Kind: models.HTTP}}
-	f := &replacedAtCheckInstr{composeInstr: c, agent: "a1", replaceAtCheck: true}
+	f := &replacedAtCheckInstr{composeInstr: c, agent: "a1", replaceAtCheck: true, byRetry: true}
 	h.replayer.instrumentation = f
 	h.replayer.config.Test.Mocking = true
 	h.replayer.config.Command = "docker compose up"
@@ -528,8 +553,6 @@ func TestUnderTheSwitchARunsFirstBringUpIsItsOwnWhateverAnEarlierRunNoted(t *tes
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 	defer agent.Close()
 	h.replayer.config.Agent.AgentURI = agent.URL
-	// An earlier run of this replayer had run its stack's app.
-	h.replayer.composeAppMayHaveRun = true
 	saved := utils.ErrCode
 	t.Cleanup(func() { utils.ErrCode = saved })
 	utils.ErrCode = 0
@@ -554,7 +577,7 @@ func TestEnsureAgentHoldsStoredMocks_FailsLoudlyWhenReRegistrationUnconfirmed(t 
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false)
+	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
 	if err == nil {
 		t.Fatal("an unconfirmed re-registration must fail the test set instead of firing tests mockless")
 	}
@@ -578,7 +601,7 @@ func TestEnsureAgentHoldsStoredMocks_NoOpWhenAgentHoldsCorpus(t *testing.T) {
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("an agent holding the corpus must pass the guard, got: %v", err)
 	}
 
@@ -594,7 +617,7 @@ func TestEnsureAgentHoldsStoredMocks_SkipsProbeForEmptyCorpus(t *testing.T) {
 	f := &rearmInstr{}
 	r := newRearmReplayer(f)
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, nil, nil, map[string]models.MockState{}, false, []*models.TestCase{{}}, nil, false); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, nil, nil, map[string]models.MockState{}, false, []*models.TestCase{{}}); err != nil {
 		t.Fatalf("an empty corpus must be a no-op, got: %v", err)
 	}
 
@@ -613,7 +636,7 @@ func TestEnsureAgentHoldsStoredMocks_ProbeFailureFallsThroughToReRegistration(t 
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("re-registration should succeed once the agent answers again, got: %v", err)
 	}
 
@@ -642,7 +665,7 @@ func TestEnsureAgentHoldsStoredMocks_SkipsWhenAgentCannotReportStats(t *testing.
 	r := newRearmReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("an agent that cannot report stats must not fail the test set, got: %v", err)
 	}
 
@@ -665,7 +688,7 @@ func TestEnsureAgentHoldsStoredMocks_AcceptsUnconfirmableReRegistration(t *testi
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 	f.afterFirstStats = func() { f.statsUnsupported = true }
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("an unconfirmable re-registration must not fail the test set, got: %v", err)
 	}
 
@@ -694,7 +717,7 @@ func TestEnsureAgentHoldsStoredMocks_ProbeHonoursCallerCancellation(t *testing.T
 	done := make(chan struct{})
 	go func() {
 		_ = r.ensureAgentHoldsStoredMocks(ctx, "run-1", "test-set-0", models.OutgoingOptions{},
-			filtered, unfiltered, consumed, false, cases, nil, false)
+			filtered, unfiltered, consumed, false, cases)
 		close(done)
 	}()
 	select {
@@ -730,7 +753,7 @@ func TestEnsureAgentHoldsStoredMocks_BoundsTheWholeGuardAgainstAWedgedAgent(t *t
 	done := make(chan error, 1)
 	go func() {
 		done <- r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-			models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false)
+			models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
 	}()
 
 	select {
@@ -751,7 +774,7 @@ func TestEnsureAgentHoldsStoredMocks_ReRunsBeforeTestSetComposeOnRepair(t *testi
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 	if got := h.beforeCalls(); got != 1 {
@@ -776,7 +799,7 @@ func TestEnsureAgentHoldsStoredMocks_NoHookWhenAgentIsHealthy(t *testing.T) {
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("healthy path failed: %v", err)
 	}
 	if got := h.beforeCalls(); got != 0 {
@@ -801,7 +824,7 @@ func TestEnsureAgentHoldsStoredMocks_RepairDoesNotDeferToTheReplacementsOwnHisto
 	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 
@@ -857,7 +880,7 @@ func TestConsumedHistoryRebuildSticksAfterARepair(t *testing.T) {
 
 	// The repair.
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 
@@ -897,7 +920,7 @@ func TestRepairLatchesBeforeItResetsTheAgentsMockManager(t *testing.T) {
 
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
-		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
 
@@ -959,7 +982,7 @@ func TestEnsureAgentHoldsStoredMocks_ReportsTheAppsExitWhenTheAgentWentWithIt(t 
 	r, logs := newAppExitReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false)
+	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
 	if err == nil {
 		t.Fatal("an agent that went with the app must still fail the test set")
 	}
@@ -1005,7 +1028,7 @@ func TestEnsureAgentHoldsStoredMocks_KeepsReplacedWhenTheAppStillRuns(t *testing
 	r, _ := newAppExitReplayer(f)
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false)
+	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
 	if err == nil {
 		t.Fatal("a gone agent must fail the test set")
 	}
@@ -1032,7 +1055,7 @@ func TestEnsureAgentHoldsStoredMocks_LooksAtTheAppOnlyWhenTheAgentFails(t *testi
 			r, _ := newAppExitReplayer(f)
 			filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-			if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil, false); err != nil {
+			if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 				t.Fatalf("got: %v", err)
 			}
 			if n := f.appExitCalls(); n != 0 {
@@ -1042,40 +1065,222 @@ func TestEnsureAgentHoldsStoredMocks_LooksAtTheAppOnlyWhenTheAgentFails(t *testi
 	}
 }
 
-// acceptsWatch is a set's watch of its agent's process that counts Accepts.
-type acceptsWatch struct{ accepts int }
+// acceptsWatch is a set's watch of its agent's process that counts Accepts;
+// rep is the replacement it says, where replaced.
+type acceptsWatch struct {
+	rep      models.AgentReplacement
+	replaced bool
+	accepts  int
+}
 
 func (w *acceptsWatch) Replacement() (models.AgentReplacement, bool) {
-	return models.AgentReplacement{}, false
+	return w.rep, w.replaced
 }
 func (w *acceptsWatch) Accept() { w.accepts++ }
 func (w *acceptsWatch) Stop()   {}
 
-// The replacement compose started in its bring-up's retry, once set up again
-// here, holds all the set's watch keeps to (the app never ran against the one
-// it replaced): the watch keeps to it. An agent that held the corpus was not
-// replaced, and one the repair refuses to run against is not set up: neither
-// moves the watch. Nor does one replaced once the app may have run against
-// the one before (a stack kept across sets, past its first bring-up): what
-// the app did against that one went with it, and the watch says so.
-func TestEnsureAgentHoldsStoredMocks_TheWatchKeepsToAReplacementSetUpAgain(t *testing.T) {
-	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+// The replacement compose's bring-up retry started while the app had never
+// started holds all the set's watch keeps to (the app never ran against the
+// one it replaced): where the watch says the agent was replaced by it, the
+// watch keeps to it, whether the retry's own setup took or the stored-mocks
+// check stored the mocks again. A replacement the retry did not start (one
+// docker started again under an app that ran), wherever it was noticed, does
+// not move the watch, which says so; nor does a watch that says no
+// replacement, or a run with the switch off.
+func TestAgentStartedBeforeApp_TheWatchKeepsToTheRetrysReplacement(t *testing.T) {
+	ab := models.AgentReplacement{First: "a1", Next: "b2"}
 	for _, tc := range []struct {
-		name         string
-		f            *rearmInstr
-		appRanBefore bool
-		accepts      int
+		name      string
+		off       bool
+		beforeApp string
+		replaced  bool
+		accepts   int
 	}{
-		{"replaced and set up again", &rearmInstr{storeTakesEffect: true}, false, 1},
-		{"not replaced", &rearmInstr{loaded: 2, storeTakesEffect: true}, false, 0},
-		{"the replacement cannot be run against", &rearmInstr{storeTakesEffect: true, readyErr: fmt.Errorf("%w: the switch is on in this keploy and off in its agent", provenswitch.ErrAgentSwitch)}, false, 0},
-		{"replaced once the app may have run against the one before", &rearmInstr{storeTakesEffect: true}, true, 0},
+		{"replaced by the retry's", false, "b2", true, 1},
+		{"replaced by one the retry did not start", false, "", true, 0},
+		{"replaced by another than the retry's", false, "c3", true, 0},
+		{"not replaced", false, "b2", false, 0},
+		{"the switch off", true, "b2", true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &acceptsWatch{}
-			_ = newRearmReplayer(tc.f).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, w, tc.appRanBefore)
+			if !tc.off {
+				t.Setenv(provenswitch.Env, "1")
+			}
+			f := &rearmLossInstr{rearmInstr: &rearmInstr{storeTakesEffect: true}, agent: "b2", beforeApp: tc.beforeApp}
+			r := newRearmReplayer(f.rearmInstr)
+			r.instrumentation = f
+			w := &acceptsWatch{rep: ab, replaced: tc.replaced}
+			r.agentStartedBeforeApp(context.Background(), w)
 			if w.accepts != tc.accepts {
 				t.Fatalf("%d Accept(s), want %d", w.accepts, tc.accepts)
+			}
+		})
+	}
+}
+
+// retryInstr is a compose stack (composeInstr) whose agent names itself in
+// its capture-loss reads, as the keploy agent client's do.
+//
+//   - retryAtReady: from the end of the set's MakeAgentReadyForDockerCompose
+//     on, the agent that answers is b2, holding the set's mocks: compose's
+//     bring-up retry started it in place of a1 while the app's container
+//     had never started, and the client set it up again (stored the mocks,
+//     accepted the watches) and noted it (AgentStartedBeforeApp), so the
+//     stored-mocks check finds the mocks held.
+//   - lossAfterReady: a1 counts lost from the end of MakeAgentReady on (the
+//     app's startup lost a process under a1).
+//   - replaceAtCheck: at the first stored-mocks check the agent is b2, which
+//     holds no mocks and counts nothing: docker started the agent container
+//     again during the app's readiness wait, after the app started under a1.
+type retryInstr struct {
+	*composeInstr
+	mu             sync.Mutex
+	agent          string
+	counts, lost   models.CaptureLosses
+	loaded         int
+	retryAtReady   bool
+	lossAfterReady bool
+	replaceAtCheck bool
+	replaced       bool
+	byRetry        bool
+}
+
+func (f *retryInstr) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	l, _, err := f.GetCaptureLossesAndAgent(ctx)
+	return l, err
+}
+
+func (f *retryInstr) GetCaptureLossesAndAgent(context.Context) (models.CaptureLosses, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.counts, f.agent, nil
+}
+
+func (f *retryInstr) AgentStartedBeforeApp(instance string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.byRetry && instance == "b2"
+}
+
+func (f *retryInstr) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+	err := f.composeInstr.MakeAgentReadyForDockerCompose(ctx)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retryAtReady {
+		f.retryAtReady, f.replaced, f.byRetry = false, true, true
+		f.agent, f.counts = "b2", nil
+	}
+	if f.lossAfterReady && !f.replaced {
+		f.counts = f.lost
+	}
+	return err
+}
+
+func (f *retryInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.replaceAtCheck {
+		f.replaceAtCheck, f.replaced = false, true
+		f.agent, f.counts, f.loaded = "b2", nil, 0
+	}
+	return models.MockStats{Loaded: f.loaded}, nil
+}
+
+func (f *retryInstr) StoreMocks(ctx context.Context, filtered, unfiltered []*models.Mock) error {
+	f.mu.Lock()
+	f.loaded = len(filtered) + len(unfiltered)
+	f.mu.Unlock()
+	return f.composeInstr.StoreMocks(ctx, filtered, unfiltered)
+}
+
+func retryHarness(t *testing.T) (*prRun, *retryInstr) {
+	c := &composeInstr{}
+	h := composeHarness(t, c)
+	h.mocks.filtered = []*models.Mock{{Name: "mock-a", Kind: models.HTTP}}
+	f := &retryInstr{composeInstr: c, agent: "a1"}
+	h.replayer.instrumentation = f
+	h.replayer.config.Test.Mocking = true
+	return h, f
+}
+
+// chargedStartedAgain is how many of the set's tests are charged
+// models.CaptureLossAgentStartedAgain.
+func chargedStartedAgain(h *prRun) int {
+	n := 0
+	for _, r := range h.report.report.Tests {
+		for _, cc := range r.FailureInfo.CannotCapture {
+			if cc.Kind == models.CaptureLossAgentStartedAgain {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// Under the proven switch, compose's bring-up retry on its normal path: the
+// retry starts the agent again while the app's container is only created
+// (never started), and the client sets the replacement up again, mocks and
+// all. The set's mark was read from a1 (the pids are marked before the agent
+// is made ready), and the stored-mocks check finds the mocks held. The app
+// never ran against a1, and nothing was lost: the set is judged, and passes.
+func TestUnderTheSwitchTheRetrysAgentSetUpAgainLeavesTheSetJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h, f := retryHarness(t)
+	core, logs := observer.New(zapcore.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	f.retryAtReady = true
+	s := h.runServing(t)
+	if !f.replaced {
+		t.Fatal("premise: the retry did not start the agent again at MakeAgentReady")
+	}
+	if n := chargedStartedAgain(h); s != models.TestSetStatusPassed || n != 0 {
+		t.Fatalf("%s, %d of 2 tests charged the agent started again (reason %q); want PASSED, judged: the app never ran against a1",
+			s, n, h.report.report.FailureReason)
+	}
+	// The log says so, naming both agent processes.
+	said := logs.FilterMessageSnippet("bring-up retry before the application ever ran").
+		FilterField(zap.String("agent replaced", "a1")).FilterField(zap.String("agent", "b2"))
+	if said.Len() != 1 {
+		t.Fatalf("%d logs say the retry's agent counts from its start, naming a1 and b2; want 1", said.Len())
+	}
+}
+
+// Under the proven switch, an agent docker started again after the app
+// started under a1 (during the app's readiness wait), as a stack is brought
+// up: a1 counted a process of the app's it could not place as the app
+// started, which no read of keploy's saw before a1 went. The replacement
+// holds no mocks, so the stored-mocks check stores them again; but it is no
+// replacement the bring-up's retry started, and the app did run against a1:
+// a1's count went with it, so each test is charged the agent started again,
+// and the set is not judged, rather than passing on b2's empty counts.
+// Control: with no replacement the set fails, both tests charged the loss.
+func TestUnderTheSwitchAnAgentReplacedAfterTheAppStartedDoesNotForgetItsStartupLoss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}
+	for _, replaced := range []bool{false, true} {
+		name := "not replaced"
+		if replaced {
+			name = "replaced during the readiness wait"
+		}
+		t.Run(name, func(t *testing.T) {
+			h, f := retryHarness(t)
+			f.lost, f.lossAfterReady, f.replaceAtCheck = lost, true, replaced
+			s := h.runServing(t)
+			if replaced != f.replaced {
+				t.Fatalf("premise: replaced %v, want %v", f.replaced, replaced)
+			}
+			charged, n := chargedWith(h, models.CaptureLossPIDMap), chargedStartedAgain(h)
+			if !replaced {
+				if s != models.TestSetStatusFailed || charged != 2 {
+					t.Fatalf("%s, %d of 2 tests charged pid_map_refused; want FAILED, both", s, charged)
+				}
+				return
+			}
+			if s != models.TestSetStatusInternalErr || n != 2 || !h.replayer.notJudged("test-set-0") {
+				t.Fatalf("%s, %d of 2 tests charged the agent started again; want INTERNAL_ERR, not judged, both: the app started under a1, which is gone with what it counted", s, n)
+			}
+			if reason := h.report.report.FailureReason; !strings.Contains(reason, "agent process a1, then b2") {
+				t.Fatalf("reason %q; want it to name both agent processes", reason)
 			}
 		})
 	}
