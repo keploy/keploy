@@ -600,6 +600,7 @@ func TestTheChangedPiece(t *testing.T) {
 		{"seq17", "seq18", "17", "18"},
 		{"ab-cd", "ab-ef", "cd", "ef"},
 		{"ab-cd", "cd", "ab-cd", "cd"},
+		{"ab-cd", "ab-cd-ef", "cd", "cd-ef"},
 		{"cd", "ab-cd", "cd", "ab-cd"},
 		{"x.1", "x_1", ".", "_"},
 		{"AZaz09", "AZbz09", "AZaz", "AZbz"},
@@ -678,6 +679,8 @@ func TestGluedContainment(t *testing.T) {
 		// At one offset from the start, the recorded container ending there; at
 		// one from the end, the recorded one beginning there.
 		{"start-aligned at the recorded end", [2]string{"P1042", "Q5678zz"}, [2]string{"1042", "5678"}, true},
+		{"start-aligned at the live end", [2]string{"P1042Q", "R5678"}, [2]string{"1042", "5678"}, true},
+		{"end-aligned at the live start", [2]string{"Q1042P", "5678R"}, [2]string{"1042", "5678"}, true},
 		{"end-aligned at the recorded start", [2]string{"1042P", "zz5678Q"}, [2]string{"1042", "5678"}, true},
 		{"no glue, the container longer live", [2]string{"1042P", "zz5678Q"}, [2]string{"1043", "5679"}, false},
 		{"no glue, the container longer recorded", [2]string{"zz5678Q", "1042P"}, [2]string{"5679", "1043"}, false},
@@ -731,6 +734,10 @@ func TestTieOf(t *testing.T) {
 		{"a UUID v7 in a path and a body", [2]string{v7, v7f}, [2]string{v7, v7f}, TieWhole, models.RefusedTie},
 		{"one id at two places", [2]string{"o-1111", "o-9999"}, [2]string{"o-1111", "o-9999"}, TieWhole, models.RefusedTie},
 		{"two fresh ids", [2]string{"r-3f2b8c", "r-a7c4e2"}, [2]string{"n-91d0e3", "n-5be7aa"}, TieNone, ""},
+		// A value that did not change is no instant alone, beside one that is; nor
+		// is one that dropped a word beside an instant.
+		{"an unchanged value beside an instant", [2]string{"x", "x"}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
+		{"an instant beside a word F dropped", [2]string{"at " + wAt.Format(time.RFC3339) + " now", "at " + later.Format(time.RFC3339)}, [2]string{wAt.Format(time.RFC3339), later.Format(time.RFC3339)}, TieNone, ""},
 		// Instants in F written with a fraction they lacked recorded are still
 		// instants alone.
 		{"createdAt and updatedAt, F's with a fraction", [2]string{"at " + wAt.Format(time.RFC3339) + " x", "at " + later.Format("2006-01-02T15:04:05.000Z") + " x"}, [2]string{wAt.Format(time.RFC3339), later.Format("2006-01-02T15:04:05.000Z")}, TieExempt, ""},
@@ -783,6 +790,14 @@ func TestTieOfReadsTheCallsWindow(t *testing.T) {
 	}
 	if got := NewDriftCache().TieOf(a, b, nil); got == TieExempt {
 		t.Errorf("by the lead alone: exempt, want not")
+	}
+	// One instant at two places (createdAt = updatedAt) read within the
+	// window is exempt there, both places read in it.
+	if got := NewDriftCache().TieOf(a, a, w); got != TieExempt {
+		t.Errorf("twins in the window: %v, want exempt", got)
+	}
+	if got := NewDriftCache().TieClass(a, a, w); got != "" {
+		t.Errorf("twins in the window: class %q, want none", got)
 	}
 }
 
@@ -885,6 +900,10 @@ func TestAnEntryThatDoesNotHoldIsVoid(t *testing.T) {
 	}{
 		{"another recorded value", "ORD-2 paid 100 ref=a1 at " + wAt.Format(time.RFC3339), e, whyDigest},
 		{"a digest guard missing", rec, with(func(c *models.WordsEntry) { c.Digest = "" }), whyGuard},
+		{"a digest guard in upper case", rec, with(func(c *models.WordsEntry) { c.Digest = strings.ToUpper(c.Digest) }), whyGuard},
+		{"a digest guard of sixteen letters past f", rec, with(func(c *models.WordsEntry) { c.Digest = "ghijklmnopqrstuv" }), whyGuard},
+		{"a digest guard of sixteen other bytes", rec, with(func(c *models.WordsEntry) { c.Digest = "----------------" }), whyGuard},
+		{"a layout guard of seventeen digits", rec, with(func(c *models.WordsEntry) { c.Layout = "01234567890123456" }), whyGuard},
 		{"a layout guard malformed", rec, with(func(c *models.WordsEntry) { c.Layout = "XYZ" }), whyGuard},
 		{"another layout", rec, with(func(c *models.WordsEntry) { c.Layout = "0000000000000000" }), whyLayoutGuard},
 		{"a void entry", rec, models.VoidWords(e.Digest), whyVoidMerged},
