@@ -49,6 +49,15 @@ type MockEntry struct {
 	// lists it. Empty for a mock recorded while one test's request was
 	// open, or none.
 	Group string `json:"group,omitempty" yaml:"group,omitempty" bson:"group,omitempty"`
+	// Cause is, for a mock of the worker scope, what made its call:
+	// CauseTimer for a call a repeating timer made (a page's poller), as the
+	// test's harness reported it. Such a recording is never charged to a test,
+	// nor required at the set's end, and answers only within its Stretch.
+	Cause string `json:"cause,omitempty" yaml:"cause,omitempty" bson:"cause,omitempty"`
+	// Stretch is, for a timer's recording (Cause), the stretch of the set's
+	// writes it was recorded in: it answers only after its After write and
+	// before its Until write were answered.
+	Stretch *Stretch `json:"stretch,omitempty" yaml:"stretch,omitempty" bson:"stretch,omitempty"`
 	// Unresolved says, under the proven switch, that keploy record's full
 	// round could not tell which test of its group made this mock's call,
 	// and charged the test that lists it now (it placed it there, not time):

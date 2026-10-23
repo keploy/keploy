@@ -67,6 +67,10 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 	p.mm.ServeExactWorker(names)
 	return nil
 }
+func (p *servingProxy) ServeExactStretches(stretches map[string]models.Stretch) error {
+	p.mm.ServeExactStretches(stretches)
+	return nil
+}
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
 	return nil
@@ -1476,4 +1480,54 @@ func TestKeployMockReplayOpensATestWithItsVariablesInOneStep(t *testing.T) {
 	require.False(t, strings.HasPrefix(got, "200 "), "T2's call, which only uses key, was answered %s with T1's value", got)
 	require.Equal(t, 2, p.opened, "a test opened without its variables")
 	require.Zero(t, p.served, "a test opened without its variables")
+}
+
+// keploy mock replay serves the set's worker scope (models.ScopeTableReq.Worker)
+// a timer's recordings each within the stretch of writes it was recorded in:
+// a page's poll made before the test's write is answered with the state before
+// it, one made after with the state after, and neither is charged to the test.
+// A poll the replay never makes is required by no one; one more than the
+// stretch recorded misses.
+func TestKeployMockReplayAnswersATimersCallWithinItsStretch(t *testing.T) {
+	mocks := []*models.Mock{
+		pingMock("poll-1", "/jobs", "none", t0),
+		pingMock("create", "/create", "created", t0.Add(time.Second)),
+		pingMock("poll-2", "/jobs", "one", t0.Add(2*time.Second)),
+	}
+	worker := []models.MockEntry{
+		{Name: "poll-1", Kind: "Http", Cause: models.CauseTimer, Stretch: &models.Stretch{Until: "create"}},
+		{Name: "poll-2", Kind: "Http", Cause: models.CauseTimer, Stretch: &models.Stretch{After: "create"}},
+	}
+	replay := func() (*Agent, *servingProxy) {
+		a, _ := wireAgent(t, models.MODE_TEST)
+		p := newServingProxy()
+		a.Proxy = p
+		ctx := context.Background()
+		require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+		require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"create"}}))
+		require.NoError(t, a.SetScopeWorker(ctx, worker))
+		require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+		claimSelf(t, a)
+		return a, p
+	}
+
+	a, p := replay()
+	got, e := runTest(t, a, p, "TestA", "/jobs", "/create", "/jobs")
+	require.Equal(t, []string{"200 none", "200 created", "200 one"}, got, "each poll is answered with the state its stretch recorded")
+	require.Empty(t, e.Action, "the test failed: %s", e.Reason)
+
+	// The poller fired only after the write: the stretch before it is never
+	// read, and nothing requires it.
+	a, p = replay()
+	got, e = runTest(t, a, p, "TestA", "/create", "/jobs")
+	require.Equal(t, []string{"200 created", "200 one"}, got)
+	require.Empty(t, e.Action, "a poll the replay never made failed the test: %s", e.Reason)
+
+	// The poller fired twice after the write, where the recording has one:
+	// the second misses (keploy serves no recording again).
+	a, p = replay()
+	got, e = runTest(t, a, p, "TestA", "/create", "/jobs", "/jobs")
+	require.Equal(t, "200 one", got[1])
+	require.True(t, strings.HasPrefix(got[2], "502"), "a poll more than its stretch recorded was answered: %s", got[2])
+	require.Equal(t, models.ScopeActionFail, e.Action)
 }

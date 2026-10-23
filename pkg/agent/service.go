@@ -535,6 +535,16 @@ type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
 }
 
+// ExactStretchServer is implemented by a proxy that serves a timer's
+// recordings of the worker scope (models.MockEntry.Cause) only within the
+// stretch of the set's writes each was recorded in (models.Stretch):
+// ServeExactStretches names each such mock's stretch, and each view installed
+// after it shows one only once its After write answered in the staging and
+// while its Until write has not.
+type ExactStretchServer interface {
+	ServeExactStretches(stretches map[string]models.Stretch) error
+}
+
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
 // exact serving (a call that is a recording made elsewhere) can read, beside
 // what is staged, the set's recordings the agent keeps on disk: a test's own

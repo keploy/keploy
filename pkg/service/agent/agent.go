@@ -192,8 +192,8 @@ type Agent struct {
 	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
 	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
-	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
-	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
+	testWorker   []models.MockEntry   // keploy test and keploy mock replay, proven switch: the set's worker scope, each mock with its place and a timer's with its stretch (exact_proven.go)
+	testBegun    map[string]bool      // keploy test and keploy mock replay, proven switch: the set's test cases begun since its staging (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: test name -> what its harness gave in its recording, and claim
 	// key -> what the key's harness gave outside every test (SetTestGiven).
