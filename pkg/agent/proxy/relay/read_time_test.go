@@ -27,6 +27,11 @@ type layerConn struct {
 	// them (n from 1); beforeRaw before the nth read under the layer.
 	beforeHand func(n int)
 	beforeRaw  func(n int)
+	// failHand, when not 0, is the Read with bytes in hand that returns
+	// failWith instead and keeps them, as tls.Conn does when what it holds
+	// after a record is the peer's close_notify (io.EOF).
+	failHand int
+	failWith error
 
 	buf          []byte
 	hands, raws  int
@@ -54,6 +59,9 @@ func (c *layerConn) Read(p []byte) (int, error) {
 		}
 	}
 	c.hands++
+	if c.hands == c.failHand {
+		return 0, c.failWith
+	}
 	if c.beforeHand != nil {
 		c.beforeHand(c.hands)
 	}
@@ -75,13 +83,30 @@ func (c *layerConn) Read(p []byte) (int, error) {
 // to TLS, served by the layer layer builds over the conn the upgrade hands it.
 func upgradedThrough(t *testing.T, layer func(net.Conn) net.Conn) *relayHarness {
 	t.Helper()
+	return upgradedSideThrough(t, false, layer)
+}
+
+// upgradedDestThrough is upgradedThrough for the destination side: the layer
+// carries the server's replies, what most mocks are built from.
+func upgradedDestThrough(t *testing.T, layer func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
+	return upgradedSideThrough(t, true, layer)
+}
+
+func upgradedSideThrough(t *testing.T, dest bool, layer func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
 	h := newHarness(t, Config{TLSUpgradeFn: func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
-		if isClient {
+		// isClient: the relay is the TLS client, on the destination side.
+		if isClient != dest {
 			return conn, nil
 		}
 		return layer(conn), nil
 	}})
-	h.r.Directives() <- directive.UpgradeTLS(nil, &tls.Config{}, "client-side upgrade")
+	d := directive.UpgradeTLS(nil, &tls.Config{}, "client-side upgrade")
+	if dest {
+		d = directive.UpgradeTLS(&tls.Config{}, nil, "dest-side upgrade")
+	}
+	h.r.Directives() <- d
 	select {
 	case ack := <-h.r.Acks():
 		if !ack.OK {
@@ -91,8 +116,12 @@ func upgradedThrough(t *testing.T, layer func(net.Conn) net.Conn) *relayHarness 
 		t.Fatal("no ack for the TLS upgrade")
 	}
 	// The forwarder writes each chunk on before it tees it, and a pipe's
-	// Write waits for its reader: the destination takes whatever comes.
-	go func() { _, _ = io.Copy(io.Discard, h.destSvc) }()
+	// Write waits for its reader: the far end takes whatever comes.
+	far := h.destSvc
+	if dest {
+		far = h.clientApp
+	}
+	go func() { _, _ = io.Copy(io.Discard, far) }()
 	return h
 }
 
@@ -189,6 +218,56 @@ func TestWatermark_HoldsBytesATLSLayerReadAndHasNotHandedOn(t *testing.T) {
 	}
 	awaitParserWaiting(t, h.r.ClientStream())
 	awaitState(t, "the window to pass once the parser has the chunk", func() bool {
+		return w.Settled("", "", start, end)
+	})
+}
+
+// The destination's twin: the server's reply, read by the destination side's
+// TLS layer and not handed to the forwarder yet, holds a window over its stamp
+// until the parser has it.
+func TestWatermark_HoldsAReplyTheDestTLSLayerReadAndHasNotHandedOn(t *testing.T) {
+	inHand, release := make(chan struct{}), make(chan struct{})
+	h := upgradedDestThrough(t, func(c net.Conn) net.Conn {
+		return &layerConn{Conn: c, beforeHand: func(n int) {
+			if n == 1 {
+				close(inHand)
+				<-release
+			}
+		}}
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+	chunks := chunksOf(h.r.DestStream())
+	awaitParserWaiting(t, h.r.DestStream())
+
+	go func() { _, _ = h.destSvc.Write([]byte("reply")) }()
+	await(t, inHand, "the destination's TLS layer to hold the reply")
+	end := time.Now()
+	start := end.Add(-time.Second)
+	if w.Settled("", "", start, end) {
+		t.Error("Settled: true for a window over a reply the destination's TLS layer read and still holds")
+	}
+	if !w.PendingBefore(end) {
+		t.Error("PendingBefore: false while the destination's TLS layer still holds a reply read before then")
+	}
+	close(release)
+
+	c := nextChunk(t, chunks)
+	if string(c.Bytes) != "reply" {
+		t.Fatalf("chunk = %q, want reply", c.Bytes)
+	}
+	if c.ReadAt.After(end) {
+		t.Fatalf("chunk stamped %v, after the window's end %v: the row did not hold it in the layer's hand", c.ReadAt, end)
+	}
+	awaitParserWaiting(t, h.r.DestStream())
+	awaitState(t, "the window to pass once the parser has the reply", func() bool {
 		return w.Settled("", "", start, end)
 	})
 }
@@ -329,6 +408,49 @@ func TestWatermark_ATLSLayerHoldingBytesInAWindowAfterAnEarlierChunkHoldsIt(t *t
 	}
 }
 
+// The TLS layer holds the bytes of a read from after a window: the chunk the
+// connection carried inside the window was consumed, and the layer's mark is
+// that later read's stamp, so the window passes.
+func TestWatermark_ATLSLayerHoldingALaterReadLetsAnEarlierWindowPass(t *testing.T) {
+	inHand, release := make(chan struct{}), make(chan struct{})
+	h := upgradedThrough(t, func(c net.Conn) net.Conn {
+		return &layerConn{Conn: c, beforeHand: func(n int) {
+			if n == 2 {
+				close(inHand)
+				<-release
+			}
+		}}
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+	chunks := chunksOf(h.r.ClientStream())
+	awaitParserWaiting(t, h.r.ClientStream())
+
+	go func() { _, _ = h.clientApp.Write([]byte("early")) }()
+	early := nextChunk(t, chunks)
+	awaitParserWaiting(t, h.r.ClientStream())
+	end := time.Now()
+	start := early.ReadAt.Add(-time.Second)
+	time.Sleep(time.Millisecond) // the next read is stamped after end
+	go func() { _, _ = h.clientApp.Write([]byte("query")) }()
+	await(t, inHand, "the TLS layer to hold the later bytes")
+	if !w.Settled("", "", start, end) {
+		t.Errorf("Settled: false for a window before the read the TLS layer holds: %v", w.HeldBy("", "", start, end, 0))
+	}
+	close(release)
+	c := nextChunk(t, chunks)
+	if !c.ReadAt.After(end) {
+		t.Fatalf("chunk stamped %v, not after the window's end %v", c.ReadAt, end)
+	}
+}
+
 // A client-side upgrade whose handshake read bytes and then failed drops the
 // layer it started, and what that layer read: nothing it read will reach the
 // parser, so it holds no window.
@@ -366,5 +488,100 @@ func TestWatermark_AFailedHandshakeLeavesNothingHeld(t *testing.T) {
 	end := time.Now()
 	if !w.Settled("", "", start, end) {
 		t.Errorf("Settled: false over a failed handshake's read: %v", w.HeldBy("", "", start, end, 0))
+	}
+}
+
+// noCloseConn is a layer whose Close leaves the conn under it open.
+type noCloseConn struct{ net.Conn }
+
+func (noCloseConn) Close() error { return nil }
+
+// An upgrade of both sides: the destination's handshake read the server's
+// bytes and succeeded, then the client's read the client's and failed. The
+// upgrade drops both layers it started, so neither holds a window over what
+// its handshake read. (The destination's layer is closed without closing the
+// conn under it, so its forwarder goes on reading the plain conn and does not
+// stop: the failed upgrade alone clears the marks.)
+func TestWatermark_AFailedUpgradeLeavesNeitherSidesLayerHeld(t *testing.T) {
+	var h *relayHarness
+	h = newHarness(t, Config{TLSUpgradeFn: func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
+		// The forwarders are parked by now, so each handshake reads these.
+		peer, hello := h.clientApp, "hello"
+		if isClient {
+			peer, hello = h.destSvc, "server-hello"
+		}
+		go func() { _, _ = peer.Write([]byte(hello)) }()
+		buf := make([]byte, 16)
+		if _, err := conn.Read(buf); err != nil {
+			return nil, err
+		}
+		if isClient {
+			return noCloseConn{conn}, nil
+		}
+		return nil, errors.New("bad handshake")
+	}})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	start := time.Now()
+	h.r.Directives() <- directive.UpgradeTLS(&tls.Config{}, &tls.Config{}, "upgrade of both sides")
+	select {
+	case ack := <-h.r.Acks():
+		if ack.OK {
+			t.Fatal("the upgrade succeeded; the row needs it to fail")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no ack for the TLS upgrade")
+	}
+	end := time.Now()
+	if !w.Settled("", "", start, end) {
+		t.Errorf("Settled: false over a failed upgrade's handshake reads: %v", w.HeldBy("", "", start, end, 0))
+	}
+}
+
+// The client's TLS layer handed one record of a read on, and what it still
+// holds from that read ends the stream (the client's close_notify after the
+// record), so the forwarder stops at EOF while the relay goes on carrying the
+// server's side. Nothing the layer still holds will reach the parser, so once
+// the forwarder has stopped it holds no window.
+func TestWatermark_AStoppedForwarderLeavesNothingItsTLSLayerHeld(t *testing.T) {
+	h := newHalfCloseHarness(t, Config{
+		HalfCloseGrace: time.Minute, // the relay stays up while the row looks
+		TLSUpgradeFn: func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
+			if isClient {
+				return conn, nil
+			}
+			return &layerConn{Conn: conn, piece: 4, failHand: 2, failWith: io.EOF}, nil
+		},
+	})
+	h.r.Directives() <- directive.UpgradeTLS(nil, &tls.Config{}, "client-side upgrade")
+	select {
+	case ack := <-h.r.Acks():
+		if !ack.OK {
+			t.Fatalf("TLS upgrade failed: %+v", ack)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no ack for the TLS upgrade")
+	}
+	finPassed := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, h.destSvc); close(finPassed) }()
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+	chunks := chunksOf(h.r.ClientStream())
+	_ = chunksOf(h.r.DestStream())
+	awaitParserWaiting(t, h.r.ClientStream())
+
+	start := time.Now()
+	go func() { _, _ = h.clientApp.Write([]byte("AAAABBBB")) }()
+	if c := nextChunk(t, chunks); string(c.Bytes) != "AAAA" {
+		t.Fatalf("chunk = %q, want AAAA", c.Bytes)
+	}
+	// The relay passes the client's end on to the server once the
+	// forwarder has stopped.
+	await(t, finPassed, "the client's end to reach the server")
+	awaitParserWaiting(t, h.r.DestStream())
+	end := time.Now()
+	if !w.Settled("", "", start, end) {
+		t.Errorf("Settled: false once the forwarder stopped, over bytes its TLS layer held: %v", w.HeldBy("", "", start, end, 0))
 	}
 }
