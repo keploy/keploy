@@ -247,18 +247,23 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				stub  *models.Mock
 				diag  *matchDiag
 				lmiss *learnMiss
+				// call is where the request's first read of the round
+				// found it made (callRound): a miss's lookup of a
+				// recording made elsewhere is asked of that round.
+				call callRound
 			)
 			switch {
 			case provenswitch.On() && opts.Learn:
 				// Record's full round: the learn step decides every request
-				// (design v14 §7.2).
-				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+				// (design v14 §7.2), and its first pass is the request's
+				// first read of the round.
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, &call)
 				ok = stub != nil
 				if !ok && err == nil {
 					// Then the pairing, under the background rules:
 					// a call that is exactly another test's recording is
 					// answered with it, reported for judging, not missed.
-					if answer, x := h.pairExactly(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise)); answer != nil {
+					if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call); answer != nil {
 						reportPairing(reqCtx, input, x)
 						stub, ok, lmiss = answer, true, nil
 					}
@@ -269,6 +274,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// matcher as before.
 				proven := provenswitch.On()
 				if proven {
+					// The request's first read of the round, before any
+					// matcher reads the store.
+					call = readFirstRound(mockDb)
 					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
@@ -322,14 +330,22 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// or a worker-scope one not reached yet) is named as that
 				// recording: it did not change, so no learn-step reason
 				// explains it.
+				// It is asked of the round the request's first read found it
+				// made in (notOwnedRecordingIn): never a recording that read
+				// held as its view's own, nor one of a set the replay staged
+				// under the request, which the miss then says.
 				var elsewhere *models.Mock
+				restaged := false
 				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+					elsewhere, restaged = notOwnedRecordingIn(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report)
+				}
+				if restaged {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-

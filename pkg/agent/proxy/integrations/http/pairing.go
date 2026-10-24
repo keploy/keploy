@@ -45,6 +45,14 @@ import (
 // (integrations.ClaimPairingIn): one the round moved under is looked at
 // again, in the round as it is now.
 func (h *HTTP) pairExactly(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) (answer, recording *models.Mock) {
+	return h.pairExactlyFrom(ctx, input, mockDb, n, callRound{})
+}
+
+// pairExactlyFrom is pairExactly for a call whose first read of the round is
+// call (callRound): a look pairs the call with no recording the first
+// read's view held as its own (the replay ended the call's test under it:
+// that test's recordings are no other test's for the call).
+func (h *HTTP) pairExactlyFrom(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call callRound) (answer, recording *models.Mock) {
 	if sqsPoll(input) {
 		return nil, nil
 	}
@@ -68,7 +76,7 @@ func (h *HTTP) pairExactly(ctx context.Context, input *req, mockDb integrations.
 				zap.String("mock", e.Name), zap.Error(e.Err),
 				zap.String("next_step", "fix the error above and record the test set again"))
 		}
-		answer, recording, moved := h.pairExactlyInRound(ctx, input, n, mockDb, snap, cands)
+		answer, recording, moved := h.pairExactlyInRound(ctx, input, n, mockDb, snap, cands, call.own)
 		if !moved {
 			return answer, recording
 		}
@@ -78,10 +86,12 @@ func (h *HTTP) pairExactly(ctx context.Context, input *req, mockDb integrations.
 
 // pairExactlyInRound is pairExactly of one snapshot of the round, cands its
 // candidates decoded: moved when a claim found the round moved since.
-func (h *HTTP) pairExactlyInRound(ctx context.Context, input *req, n strictNoise, mockDb integrations.MockMemDb, snap integrations.RoundSnapshot, cands []*models.Mock) (answer, recording *models.Mock, moved bool) {
+// own are the recordings the call's first read held as its view's own
+// (callRound.own): never another test's for the call.
+func (h *HTTP) pairExactlyInRound(ctx context.Context, input *req, n strictNoise, mockDb integrations.MockMemDb, snap integrations.RoundSnapshot, cands []*models.Mock, own map[string]bool) (answer, recording *models.Mock, moved bool) {
 	answer, recording = h.pairExactlyIn(ctx, input, n, cands,
 		// None of the view's own: it is the view's, never another test's.
-		func(m *models.Mock) bool { return snap.Owner(m) == integrations.OwnerNone },
+		func(m *models.Mock) bool { return snap.Owner(m) == integrations.OwnerNone && !own[m.Name] },
 		func() []*models.Mock { return snap.BackgroundUnused },
 		func(x *models.Mock) (bool, bool) {
 			claimed, m, _ := integrations.ClaimPairingIn(mockDb, x, snap.At)

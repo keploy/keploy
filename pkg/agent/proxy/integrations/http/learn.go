@@ -1008,6 +1008,14 @@ func (h *HTTP) orderMiss(ctx context.Context, input *req, mockDb integrations.Mo
 // otherwise it is a miss with its reason. It returns the mock to serve, or
 // the miss.
 func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, *learnMiss, error) {
+	return h.learnMatchIn(ctx, input, mockDb, n, opts, nil)
+}
+
+// learnMatchIn is learnMatch, telling call, when set, where the call's first
+// read of the round found it made (callRound): its first pass's, from a
+// store that reads the round in one snapshot. A miss's lookup of a
+// recording made elsewhere is asked of that round (notOwnedRecordingIn).
+func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, call *callRound) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
@@ -1040,9 +1048,13 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
+		first := call != nil && !call.read
+		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool, first)
 		if err != nil {
 			return nil, nil, err
+		}
+		if first {
+			*call = read.call
 		}
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
 		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
@@ -1241,6 +1253,9 @@ type learnRead struct {
 	windows  integrations.TestWindows
 	claimDb  integrations.MockMemDb
 	at       learnPass
+	// call is, of a call's first pass (readLearnPass's first), where the
+	// call was made (firstRound); zero from a store that reads no round.
+	call callRound
 }
 
 // readLearnPass reads a pass of the learn step. From a store that reads its
@@ -1251,8 +1266,9 @@ type learnRead struct {
 // other store, the reads one after another: the scope first, then the
 // tracker, so a mock a concurrent call consumed before the scope was read is
 // gone from the scope, and in the tracker's account (the store tells it
-// first: MockManager.observeServed).
-func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
+// first: MockManager.observeServed). first, for a call's first pass, reads
+// where the call was made too (learnRead.call).
+func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool, first bool) (learnRead, error) {
 	rev := storeRevision(mockDb)
 	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
 		r := learnRead{
@@ -1267,6 +1283,9 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			windows:  snap,
 			claimDb:  integrations.WithinRound(mockDb, snap.At),
 			at:       learnPass{rev: rev, round: snap.At},
+		}
+		if first {
+			r.call = firstRound(snap)
 		}
 		return r, nil
 	}

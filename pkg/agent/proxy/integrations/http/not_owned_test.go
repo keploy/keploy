@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,5 +211,99 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// pacedDb is a store that stages more than its reads show and says its
+// staging (integrations.WindowPacer): epoch is the staging, named runs right
+// after match accepted a recording, before the store names it, and refuse
+// makes the store refuse that name (another miss spent it first). asked
+// counts the lookups, accepted what match accepted.
+type pacedDb struct {
+	*mockMemDb
+	staged   []*models.Mock
+	epoch    *atomic.Uint64
+	named    func()
+	refuse   bool
+	asked    int
+	accepted []string
+}
+
+func (d *pacedDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	d.asked++
+	for _, m := range d.staged {
+		if m.Kind == kind && match(m) {
+			d.accepted = append(d.accepted, m.Name)
+			if d.named != nil {
+				d.named()
+			}
+			if d.refuse {
+				continue
+			}
+			return m.Name
+		}
+	}
+	return ""
+}
+
+func (d *pacedDb) WindowChanged() <-chan struct{} { return make(chan struct{}) }
+func (d *pacedDb) StagingEpoch() uint64           { return d.epoch.Load() }
+
+// A call's lookup of a recording made elsewhere is asked of the round its
+// first read found it made in (notOwnedRecordingIn): a recording that read
+// held as its view's own is never named (the replay ended the call's test
+// under it), nor is any once the replay staged another set, checked before
+// the store names one (its one miss is never spent in the next set) and
+// after (a name of the call's staging the replay left is dropped), and the
+// lookup says the set moved. A store that read a round but cannot say its
+// staging is asked nothing, and a recording whose name the store refused
+// (another miss spent it) is not named.
+func TestALookupIsAskedOfTheRoundTheCallWasMadeIn(t *testing.T) {
+	const host = "localhost:50001"
+	n := newHTTP().newStrictNoise(nil, nil, nil)
+	ctx := context.Background()
+	call := getTo("/delete", host)
+	fresh := func() (*pacedDb, *models.Mock) {
+		r := onHost("other-test-delete", "/delete", host)
+		e := &atomic.Uint64{}
+		e.Store(1)
+		return &pacedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{r}, epoch: e}, r
+	}
+	at := callRound{read: true, epoch: 1}
+
+	db, r := fresh()
+	if got, moved := notOwnedRecordingIn(ctx, call, db, n, at); got != r || moved {
+		t.Fatalf("in the call's own round: named %v (restaged %v), want %s", got, moved, r.Name)
+	}
+
+	db, r = fresh()
+	if got, moved := notOwnedRecordingIn(ctx, call, db, n, callRound{read: true, epoch: 1, own: map[string]bool{r.Name: true}}); got != nil || moved {
+		t.Fatalf("a recording the call's first read held as its own was named: %v (restaged %v)", got, moved)
+	}
+
+	db, _ = fresh()
+	db.epoch.Store(2)
+	if got, moved := notOwnedRecordingIn(ctx, call, db, n, at); got != nil || !moved {
+		t.Fatalf("after the replay staged another set: named %v (restaged %v), want none, restaged", got, moved)
+	}
+	if len(db.accepted) != 0 {
+		t.Fatalf("the lookup let the next set's store name %v for a call of the set before", db.accepted)
+	}
+
+	db, _ = fresh()
+	db.named = func() { db.epoch.Store(2) }
+	if got, moved := notOwnedRecordingIn(ctx, call, db, n, at); got != nil || !moved {
+		t.Fatalf("staged right after the store named one: named %v (restaged %v), want none, restaged", got, moved)
+	}
+
+	db, _ = fresh()
+	if got, _ := notOwnedRecordingIn(ctx, call, stagedDb{mockMemDb: db.mockMemDb, staged: db.staged}, n, at); got != nil {
+		t.Fatalf("a store that cannot say its staging named %s for a call that read a round", got.Name)
+	}
+
+	db, _ = fresh()
+	db.refuse = true
+	if got, _ := notOwnedRecordingIn(ctx, call, db, n, at); got != nil || len(db.accepted) != 1 {
+		t.Fatalf("a recording whose name the store refused was named: %v (accepted %v)", got, db.accepted)
 	}
 }
