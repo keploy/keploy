@@ -283,7 +283,7 @@ func TestHalfClose_SurvivesTheTLSReadTimeWrapper(t *testing.T) {
 	defer func() { _ = peer.Close() }()
 
 	// Exactly what directive_proc.go stores after a TLS upgrade.
-	tracked := newReadTrackingConn(raw)
+	tracked := newReadTrackingConn(raw, nil)
 	wrapped := newReadTimeReportingConn(tracked, tracked)
 	var asConn net.Conn = wrapped
 
@@ -415,7 +415,7 @@ func TestHalfClose_SurvivesTheProductionConnWrappers(t *testing.T) {
 			return &proxyutil.Conn{Conn: c, Reader: c, Logger: zap.NewNop()}
 		}},
 		{"readTimeReportingConn (installed by the TLS upgrade)", func(c net.Conn) net.Conn {
-			tracked := newReadTrackingConn(c)
+			tracked := newReadTrackingConn(c, nil)
 			return newReadTimeReportingConn(tracked, tracked)
 		}},
 	} {

@@ -637,8 +637,10 @@ func (r *Relay) forward(
 	log := r.cfg.Logger
 	// The chunk a Read returned is in this forwarder's hand until it is
 	// queued, refused or stashed (progress.go): released at the top of each
-	// iteration, before any park, and on the way out.
+	// iteration, before any park, and on the way out. On the way out nothing
+	// the TLS layer it read through still holds will reach the parser either.
 	defer t.noteReleased()
+	defer t.noteLayerGone()
 
 	for {
 		t.noteReleased()
