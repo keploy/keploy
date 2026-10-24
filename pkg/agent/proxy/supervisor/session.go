@@ -337,7 +337,11 @@ func (s *Session) MarkMockIncomplete(reason string) {
 // record a message its stream ends in the middle of as the client had it: the
 // client read that much and closed the connection. Without it the end is not
 // known to be the client's (the rest may have been lost, or never captured),
-// and such a message is not recorded. Nil-safe.
+// and such a message is not recorded. On the proxy path the relay marks it
+// (relay.Config.EndedWithConnection) when the peer closed that direction and
+// its tee lost nothing: a parser can then tell the end of what the peer sent
+// from a stop, as a Couchbase recorder must for a quiet request, which is
+// answered only when it fails. Nil-safe.
 func (s *Session) MarkEndedWithConnection(dir fakeconn.Direction) {
 	if s == nil || int(dir) >= len(s.endedWithConnection) {
 		return

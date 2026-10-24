@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -452,5 +454,101 @@ func TestHalfClose_SurvivesTheProductionConnWrappers(t *testing.T) {
 					err, wrapped)
 			}
 		})
+	}
+}
+
+// endedWith records each call of Config.EndedWithConnection.
+type endedWith struct {
+	mu   sync.Mutex
+	dirs []fakeconn.Direction
+}
+
+func (e *endedWith) end(dir fakeconn.Direction) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.dirs = append(e.dirs, dir)
+}
+
+func (e *endedWith) has(dir fakeconn.Direction) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, d := range e.dirs {
+		if d == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// A connection that ends the usual way, the client sending its request and
+// half-closing, the server answering and closing, ends both of its streams
+// with their connection (Config.EndedWithConnection): each peer closed its
+// direction, and the relay teed every byte of it. Each is said once, before
+// its stream ends, so a parser that reads a stream to its end finds it said.
+func TestHalfClose_BothStreamsEndWithTheirConnection(t *testing.T) {
+	rec := &endedWith{}
+	h := newHalfCloseHarness(t, Config{EndedWithConnection: rec.end})
+
+	// The parser: each stream read to its end, noting what it carried and
+	// whether its end was said by then.
+	type end struct {
+		got    string
+		marked bool
+	}
+	ends := make(chan [2]end, 1)
+	go func() {
+		var res [2]end
+		var wg sync.WaitGroup
+		for d, fc := range [2]*fakeconn.FakeConn{h.r.ClientStream(), h.r.DestStream()} {
+			wg.Add(1)
+			go func(d int, fc *fakeconn.FakeConn) {
+				defer wg.Done()
+				var b bytes.Buffer
+				for {
+					c, err := fc.ReadChunk()
+					if err != nil {
+						res[d] = end{got: b.String(), marked: rec.has(fakeconn.Direction(d))}
+						return
+					}
+					b.Write(c.Bytes)
+				}
+			}(d, fc)
+		}
+		wg.Wait()
+		ends <- res
+	}()
+
+	// The server reads the request to its end, answers, and closes.
+	go func() {
+		_, _ = io.ReadAll(h.destSvc)
+		_, _ = h.destSvc.Write([]byte("reply"))
+		_ = h.destSvc.Close()
+	}()
+
+	if _, err := h.clientApp.Write([]byte("req")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := h.clientApp.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("half-close: %v", err)
+	}
+	if reply, err := io.ReadAll(h.clientApp); err != nil || string(reply) != "reply" {
+		t.Fatalf("client read %q, %v; want %q", reply, err, "reply")
+	}
+
+	res := <-ends
+	for d, want := range [2]string{"req", "reply"} {
+		dir := fakeconn.Direction(d)
+		if res[d].got != want {
+			t.Fatalf("the %s stream carried %q, want %q", dir, res[d].got, want)
+		}
+		if !res[d].marked {
+			t.Fatalf("the %s stream ended with its connection, but the relay had not said so by its end", dir)
+		}
+	}
+	<-h.done
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.dirs) != 2 {
+		t.Fatalf("EndedWithConnection called for %v, want once for each direction", rec.dirs)
 	}
 }

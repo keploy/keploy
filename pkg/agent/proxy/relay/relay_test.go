@@ -1333,3 +1333,74 @@ func TestAFailedTLSUpgradeIsACaptureLoss(t *testing.T) {
 		t.Fatalf("capture losses %v, want one %s", kinds, models.CaptureLossSTARTTLS)
 	}
 }
+
+// readEntering is a net.Conn that signals entered each time a Read begins, so
+// a test knows its forwarder is parked in Read.
+type readEntering struct {
+	net.Conn
+	entered chan struct{}
+}
+
+func (c *readEntering) Read(p []byte) (int, error) {
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	return c.Conn.Read(p)
+}
+
+// A relay stopped while both peers carry on (its context cancelled) says no
+// stream ended with its connection (Config.EndedWithConnection), though its
+// forwarders were parked in Read and the stop woke each with a read error (the
+// deadline it nudges into the past): only a source's io.EOF says its peer
+// closed. A parser would otherwise take a stopped stream to carry all its peer
+// sent, and record a quiet request whose error reply was still to come as a
+// success.
+func TestRelay_AStopIsNotAStreamEndedWithItsConnection(t *testing.T) {
+	clientApp, srcProxy := net.Pipe()
+	dstProxy, destSvc := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientApp.Close()
+		_ = destSvc.Close()
+		_ = srcProxy.Close()
+		_ = dstProxy.Close()
+	})
+	src := &readEntering{Conn: srcProxy, entered: make(chan struct{}, 1)}
+	dst := &readEntering{Conn: dstProxy, entered: make(chan struct{}, 1)}
+	rec := &endedWith{}
+	r := New(Config{Logger: zap.NewNop(), EndedWithConnection: rec.end}, src, connseq.NewUpstream(dst))
+
+	// The parser: each stream read to its end.
+	var parsed sync.WaitGroup
+	for _, fc := range [2]*fakeconn.FakeConn{r.ClientStream(), r.DestStream()} {
+		parsed.Add(1)
+		go func(fc *fakeconn.FakeConn) {
+			defer parsed.Done()
+			for {
+				if _, err := fc.ReadChunk(); err != nil {
+					return
+				}
+			}
+		}(fc)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan struct{})
+	go func() {
+		defer close(ran)
+		_ = r.Run(ctx)
+	}()
+	// Both forwarders are in Read, with nothing to read.
+	<-src.entered
+	<-dst.entered
+	cancel()
+	<-ran
+	parsed.Wait()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.dirs) != 0 {
+		t.Fatalf("the relay was stopped while both peers carried on, but it said %v ended with its connection", rec.dirs)
+	}
+}

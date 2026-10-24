@@ -254,6 +254,12 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		r.teeC2D.endAtHole = func(reason string) { end(fakeconn.FromClient, reason) }
 		r.teeD2C.endAtHole = func(reason string) { end(fakeconn.FromDest, reason) }
 	}
+	// Whether a tee says its stream ended with its connection. See
+	// [Config.EndedWithConnection].
+	if ended := cfg.EndedWithConnection; ended != nil {
+		r.teeC2D.endedWithConn = func() { ended(fakeconn.FromClient) }
+		r.teeD2C.endedWithConn = func() { ended(fakeconn.FromDest) }
+	}
 
 	var localAddr, remoteAddr net.Addr
 	if src != nil {
@@ -947,6 +953,10 @@ func (r *Relay) forward(
 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// The peer closed this direction: every byte it sent was
+				// read, and the chunk the Read returned with it was teed
+				// above (see [Config.EndedWithConnection]).
+				t.noteSourceEnded()
 				return io.EOF
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause
