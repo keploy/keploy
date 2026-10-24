@@ -1332,8 +1332,25 @@ func TestAConsumeHeldToACallsMarkIsRefusedOnceTheSetIsStagedAgain(t *testing.T) 
 	if readOwn(held) != nil {
 		t.Fatal("a read of the held store shows the set staged again after the call's mark")
 	}
+	byName := &integrations.MockIndex{Keys: func(mk *models.Mock) []string { return []string{mk.Name} }}
+	walked := func(db integrations.MockMemDb) (names []string) {
+		t.Helper()
+		if err := db.(integrations.SessionKeyReader).RangeSessionMocksWithKey(byName, own.Name, func(mk *models.Mock) bool {
+			names = append(names, mk.Name)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return names
+	}
+	if got := walked(held); len(got) != 0 {
+		t.Fatalf("a keyed walk of the held store's session tier shows the set staged again after the call's mark: %v", got)
+	}
 
 	again, restagedAgain := mm.HoldToRound(mm.MarkCallRound())
+	if got := walked(again); len(got) != 1 || got[0] != own.Name {
+		t.Fatalf("a keyed walk of a store held in the new staging shows %v; want its recording %s", got, own.Name)
+	}
 	if mk := readOwn(again); mk == nil || !consume(again, mk) {
 		t.Fatal("a call marked in the new staging does not consume its test's recording")
 	}

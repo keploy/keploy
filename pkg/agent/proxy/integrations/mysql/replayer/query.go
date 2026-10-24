@@ -212,7 +212,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// from an empty mock pool.
 					CandidateCount: miss.candidateCount,
 				}
-				if miss.matchPhase == models.MatchPhaseNoMocks {
+				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged {
 					// The pool held no data mock for the command phase to compare
 					// against — at most handshake/config mocks survived the
 					// lifetime filter, or the pool was empty. That is a
@@ -222,6 +222,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// closest_mock: nothing scoring is the NORMAL shape of a query
 					// that merely drifted from its recording, and reporting that as
 					// a lost mock sends the reader hunting for the wrong bug.
+					//
+					// Nor is a command the replay staged a test set again under
+					// (restaged): its matcher, held to its first read, read
+					// nothing, and the miss says so.
 					logger.Error("REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time",
 						zap.String("sql_query", truncate(actualQuery, 300)),
 						zap.String("request_type", req.Header.Type),

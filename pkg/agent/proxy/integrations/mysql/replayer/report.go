@@ -100,6 +100,9 @@ type mockMiss struct {
 	// in place of the generic diff note and advice.
 	why       string
 	nextSteps string
+	// restaged is set when the replay staged a test set again under the
+	// command (matchCommand): the miss is no recording-side shortfall.
+	restaged bool
 }
 
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement

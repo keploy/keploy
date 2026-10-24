@@ -836,6 +836,18 @@ func (h *heldScope) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, err
 	return h.held(h.MockManager.GetStartupMocksByKind(kind))
 }
 
+// RangeSessionMocksWithKey is the manager's keyed walk of the session tier
+// (integrations.SessionKeyReader), each mock checked after it is read: the
+// walk stops once the staging moved.
+func (h *heldScope) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	if h.moved() {
+		return nil
+	}
+	return h.MockManager.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
+		return !h.moved() && fn(mk)
+	})
+}
+
 func (h *heldScope) GetConnectionMocks(connID string) ([]*models.Mock, error) {
 	return h.held(h.MockManager.GetConnectionMocks(connID))
 }

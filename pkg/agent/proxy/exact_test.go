@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -1865,6 +1866,12 @@ func genericMiss(t *testing.T, mm *MockManager, req string) *models.MockMismatch
 // parser with no miss.
 func genericServe(t *testing.T, mm *MockManager, req string) *models.MockMismatchReport {
 	t.Helper()
+	return genericServeIn(t, context.Background(), mm, req)
+}
+
+// genericServeIn is genericServe with the parser's ctx made from ctx.
+func genericServeIn(t *testing.T, ctx context.Context, mm *MockManager, req string) *models.MockMismatchReport {
+	t.Helper()
 	answered := make(chan bool, 1)
 	app, proxySide := net.Pipe()
 	t.Cleanup(func() { app.Close(); proxySide.Close() })
@@ -1878,7 +1885,7 @@ func genericServe(t *testing.T, mm *MockManager, req string) *models.MockMismatc
 			app.Close()
 		}
 	}()
-	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "1")
+	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "1")
 	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
 	err := generic.New(zap.NewNop()).MockOutgoing(ctx, proxySide, nil, mm, models.OutgoingOptions{})
 	var r interface {
@@ -1972,6 +1979,49 @@ func TestAGenericRequestHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *test
 	// Never spent on the request before, it answers the next set's own.
 	if r := genericServe(t, mm, "AUTH step4"); r != nil {
 		t.Fatalf("the next set's own request missed after a request of the set before: %+v", r)
+	}
+}
+
+// aloftHolder is a connection with one request aloft (learn.Flight): the
+// parser's ctx carries it as the proxy's kept connection does.
+type aloftHolder struct{ f *learn.Flight }
+
+func (aloftHolder) Hold() func()              { return func() {} }
+func (a aloftHolder) InFlight() *learn.Flight { return a.f }
+
+// The Generic parser's consume says whose request it serves
+// (integrations.ServingIn): the mock manager tells the learn step the serve
+// is the request's connection's, so a request aloft on a parallel
+// connection that reads no recording (a health check) never makes the serve
+// one keploy cannot place. From the session tier and from an open test's own
+// exchanges alike.
+func TestAGenericServeIsToldInItsRequest(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		t.Run("exact serving "+strconv.FormatBool(exact), func(t *testing.T) {
+			ex := genericExchange("ex", 0, "AUTH step2")
+			mm := stagedManager(t, nil, []*models.Mock{ex})
+			if exact {
+				mm.ServeExactTest("T1", []*models.Mock{ex})
+			}
+			var told []*learn.Flight
+			mm.SetServedObserver(func(m *models.Mock) {
+				if m.Name == ex.Name {
+					told = append(told, nil)
+				}
+			})
+			mm.SetServedInObserver(func(m *models.Mock, f *learn.Flight) {
+				if m.Name == ex.Name {
+					told = append(told, f)
+				}
+			})
+			in := learn.NewTracker().Lift()
+			if r := genericServeIn(t, integrations.WithRequestHolder(context.Background(), aloftHolder{in}), mm, "AUTH step2"); r != nil {
+				t.Fatalf("the request missed: %+v", r)
+			}
+			if len(told) != 1 || told[0] != in {
+				t.Fatalf("the serve of %s was told %d time(s), in %v; want once, in the request's", ex.Name, len(told), told)
+			}
+		})
 	}
 }
 
