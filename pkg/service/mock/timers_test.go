@@ -34,7 +34,9 @@ func stretchesOf(worker []models.MockEntry) (map[string]models.Stretch, map[stri
 // A test whose page fetched the job list on load (its own call) and then
 // polled it on a timer: the poll its harness reported moves to the worker
 // scope, placed at the test, with the stretch of writes its answer holds in,
-// and the load stays the test's, though the two calls are the same.
+// and the load stays the test's, though the two calls are the same. The load
+// answered alike, so it is in the poll's run (With): the stretch spans it,
+// from the write before it.
 func TestTimerScopeMovesTheReportedCallWithItsStretch(t *testing.T) {
 	poll := timerKey("POST", "localhost:8083", "/query", pollBody)
 	mocks := []capturedMock{
@@ -54,7 +56,7 @@ func TestTimerScopeMovesTheReportedCallWithItsStretch(t *testing.T) {
 	if len(worker) != 1 || worker[0].Name != "mock-3" || worker[0].Place != "test-1" || worker[0].Cause != models.CauseTimer || worker[0].Kind != "Http" {
 		t.Fatalf("worker %+v", worker)
 	}
-	if want := (models.Stretch{After: "mock-2", Until: "mock-4"}); stretch["mock-3"] != want || run["mock-3"] == "" {
+	if want := (models.Stretch{After: "mock-0", Until: "mock-4", With: []string{"mock-1"}}); !reflect.DeepEqual(stretch["mock-3"], want) || run["mock-3"] == "" {
 		t.Fatalf("stretch %+v run %q, want %+v and a run", stretch["mock-3"], run["mock-3"], want)
 	}
 }
@@ -64,7 +66,8 @@ func TestTimerScopeMovesTheReportedCallWithItsStretch(t *testing.T) {
 // ping share one stretch, so the ping cuts nothing; the write after which the
 // poll answered differently ends it, and the next answer's stretch starts at
 // the last write before it. A timer's own write (reported like the polls)
-// never ends a stretch, and a poll made between tests stays the pool's.
+// never ends a stretch, and a poll made between tests stays the pool's, in
+// the run of the polls that answered alike after it (With).
 func TestTimerScopeEndsAStretchOnlyWhereTheAnswerChanged(t *testing.T) {
 	poll := timerKey("POST", "localhost:8083", "/query", pollBody)
 	ping := timerKey("POST", "localhost:8083", "/auth/session/activity", pollBody)
@@ -93,8 +96,8 @@ func TestTimerScopeEndsAStretchOnlyWhereTheAnswerChanged(t *testing.T) {
 	}
 	stretch, run := stretchesOf(worker)
 	want := map[string]models.Stretch{
-		"mock-1": {Until: "mock-5"},
-		"mock-3": {Until: "mock-5"},
+		"mock-1": {Until: "mock-5", With: []string{"mock-0"}},
+		"mock-3": {Until: "mock-5", With: []string{"mock-0"}},
 		"mock-4": {After: "mock-2", Until: "mock-5"},
 		"mock-7": {After: "mock-6"},
 	}
@@ -221,5 +224,59 @@ func TestSessionOf(t *testing.T) {
 	}
 	if sessionOf(with(map[string]string{"Authorization": "Bearer x"})) == sessionOf(with(map[string]string{"Authorization": "Bearer y"})) {
 		t.Fatal("two bearer tokens are one session")
+	}
+}
+
+// A generation test's app is read on load (before the test configures it),
+// twice by the streaming page's timer, and again by the test after it goes
+// back. The three after the configure answered alike, with a keep-alive ping
+// between the timer's and the test's: the timer's run spans the test's read
+// after the ping (With) and ends at the write after it, so the ping cuts
+// nothing. The load answered otherwise and is in no run of the timer's.
+func TestTimerScopeRunSpansTheTestsOwnReadsThatAnsweredAlike(t *testing.T) {
+	app := timerKey("POST", "localhost:8083", "/query", "appById")
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(1), fp: app, ans: "unconfigured"},                                    // the load
+		{name: "mock-1", ts: at(2), fp: timerKey("POST", "localhost:8083", "/run", ""), write: true}, // configure + run
+		{name: "mock-2", ts: at(3), fp: app, ans: "configured"},                                      // stream page, timer
+		{name: "mock-3", ts: at(4), fp: app, ans: "configured"},                                      // stream page, timer
+		{name: "mock-4", ts: at(5), fp: timerKey("POST", "localhost:8083", "/auth/session/activity", pollBody), write: true},
+		{name: "mock-5", ts: at(6), fp: app, ans: "configured"}, // back on the page
+		{name: "mock-6", ts: at(7), fp: timerKey("POST", "localhost:8083", "/query", "save"), write: true},
+	}
+	windows := []models.ScopeWindow{{Name: "T1", Timers: []models.TimerCall{
+		{Method: "POST", Host: "localhost:8083", URL: "/query", Body: "appById", N: 1},
+		{Method: "POST", Host: "localhost:8083", URL: "/query", Body: "appById", N: 2},
+	}}}
+	byTest := map[string][]models.MockEntry{"T1": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}, {Name: "mock-3"}, {Name: "mock-4"}, {Name: "mock-5"}, {Name: "mock-6"}}}
+	got, worker := timerScope(windows, mocks, byTest)
+	if want := []string{"mock-0", "mock-1", "mock-4", "mock-5", "mock-6"}; !reflect.DeepEqual(entryNamesOf(got["T1"]), want) {
+		t.Fatalf("T1 keeps %v, want %v", entryNamesOf(got["T1"]), want)
+	}
+	stretch, run := stretchesOf(worker)
+	want := models.Stretch{After: "mock-1", Until: "mock-6", With: []string{"mock-5"}}
+	if !reflect.DeepEqual(stretch, map[string]models.Stretch{"mock-2": want, "mock-3": want}) {
+		t.Fatalf("stretches %+v, want mock-2 and mock-3 at %+v", stretch, want)
+	}
+	if run["mock-2"] == "" || run["mock-2"] != run["mock-3"] {
+		t.Fatalf("runs %v", run)
+	}
+}
+
+// A read the test made that answered otherwise than the timer's is in no run
+// of the timer's: the timer's stretch ends at the write after its own, as the
+// call's answer may have changed there.
+func TestTimerScopeLeavesAReadThatAnsweredOtherwiseOutOfTheRun(t *testing.T) {
+	jobs := timerKey("POST", "localhost:8083", "/query", pollBody)
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(1), fp: jobs, ans: "none"}, // timer
+		{name: "mock-1", ts: at(2), fp: timerKey("POST", "localhost:8083", "/query", "create"), write: true},
+		{name: "mock-2", ts: at(3), fp: jobs, ans: "one"}, // the test's own
+	}
+	windows := []models.ScopeWindow{{Name: "T1", Timers: []models.TimerCall{{Method: "POST", Host: "localhost:8083", URL: "/query", Body: pollBody, N: 0}}}}
+	_, worker := timerScope(windows, mocks, map[string][]models.MockEntry{"T1": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}})
+	stretch, _ := stretchesOf(worker)
+	if want := map[string]models.Stretch{"mock-0": {Until: "mock-1"}}; !reflect.DeepEqual(stretch, want) {
+		t.Fatalf("stretches %+v, want %+v", stretch, want)
 	}
 }

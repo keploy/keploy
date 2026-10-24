@@ -1456,6 +1456,53 @@ func TestATimersRecordingAnswersOnlyWithinItsStretch(t *testing.T) {
 	shown("with no stretches", "w-poll-a", "w-poll-b", "w-poll-c", "plain")
 }
 
+// A timer's stretch also opens once one of its run's other recordings
+// (models.Stretch.With: the test's own read of the call, that answered alike)
+// has answered in the staging, though the write recorded before the run (a
+// keep-alive ping) was never made: the run has reached the state the
+// recordings read. It still closes at the write recorded after the run.
+func TestATimersStretchOpensOnceARecordingOfItsRunAnswered(t *testing.T) {
+	ping := httpCall("ping", 0, "/auth/session/activity")
+	own := httpCall("own-app", time.Second, "/app")
+	poll := httpCall("w-app", 2*time.Second, "/app")
+	save := httpCall("save", 3*time.Second, "/save")
+	mm := stagedManager(t, nil, []*models.Mock{ping, own, poll, save})
+	shown := func(what string, want bool) {
+		t.Helper()
+		sess, _ := mm.GetSessionScopedMocks()
+		got := false
+		for _, n := range exactNames(sess) {
+			got = got || n == "w-app"
+		}
+		if got != want {
+			t.Fatalf("%s: the worker scope shows w-app %v, want %v", what, got, want)
+		}
+	}
+	answer := func(name string) {
+		t.Helper()
+		pt, _ := mm.GetPerTestMocksInWindow()
+		for _, mk := range pt {
+			if mk.Name == name {
+				if !mm.DeleteFilteredMock(*mk) {
+					t.Fatalf("the test's %s was refused", name)
+				}
+				return
+			}
+		}
+		t.Fatalf("the test's %s is not shown: %v", name, exactNames(pt))
+	}
+
+	mm.ServeExactStretches(map[string]models.Stretch{"w-app": {After: "ping", Until: "save", With: []string{"own-app"}}}, nil)
+	mm.ServeExactWorker([]string{"w-app"})
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T1", []*models.Mock{own, save})
+	shown("before the test's own read answered, the ping never made", false)
+	answer("own-app")
+	shown("after the test's own read answered", true)
+	answer("save")
+	shown("after the write recorded after the run", false)
+}
+
 // A miss's diagnosis (FindStagedNotOwned) names a staged recording the open
 // view does not show and no call of the set consumed: another test's, in a
 // test or between tests, and a worker-scope one whose place the run has not

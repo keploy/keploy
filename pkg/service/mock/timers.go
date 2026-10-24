@@ -114,8 +114,11 @@ func answerOf(mk *models.Mock) string {
 // (answerOf) share one stretch, from the
 // last write before the first of them to the first write after the last of
 // them, so a write between them (a session's keep-alive ping) cuts nothing:
-// the recording proves the call read the same on both sides of it. They share
-// its Run too: each answers once, then the last again. The writes
+// the recording proves the call read the same on both sides of it. Its reads
+// no timer made (its test's own, the pool's) are in the run too and stay
+// where they are, named in the stretch (models.Stretch.With): the call read
+// the same there as well. The timer's recordings share its Run: each answers
+// once, then the last again. The writes
 // are the set's HTTP writes no report names (a timer's own write comes as often
 // as its timer fires). mocks are the set's data-plane recordings. It returns
 // byTest less what moved, and the worker scope in recorded order; byTest
@@ -183,18 +186,27 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 	at := func(mk capturedMock) int {
 		return sort.Search(len(writes), func(i int) bool { return writes[i].ts.After(mk.ts) })
 	}
-	// Each call's recordings in each session, in recorded order, joined into
-	// runs that answered alike: a run's stretch is from the write before its
+	// Each timer's call's recordings in each session, in recorded order,
+	// joined into runs that answered alike: the timer's, and the reads of the
+	// call no timer made (its test made it, or it came between tests), which
+	// prove its answer held at their time too and stay where they were
+	// recorded (Stretch.With). A run's stretch is from the write before its
 	// first to the write after its last. A recording of another session is
 	// never in the run: a replay call cannot match it, so it must not count
 	// as the run's to answer.
+	timerCall := map[string]bool{}
+	for _, mk := range ordered {
+		if timer[mk.name] {
+			timerCall[mk.fp+"\x00"+mk.sess] = true
+		}
+	}
 	byCall := map[string][]capturedMock{}
 	var calls []string
 	for _, mk := range ordered {
-		if !timer[mk.name] {
+		call := mk.fp + "\x00" + mk.sess
+		if mk.fp == "" || !timerCall[call] || (!timer[mk.name] && mk.write) {
 			continue
 		}
-		call := mk.fp + "\x00" + mk.sess
 		if _, ok := byCall[call]; !ok {
 			calls = append(calls, call)
 		}
@@ -217,7 +229,11 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 				st.Until = writes[k].name
 			}
 			for _, mk := range recs[i : j+1] {
-				stretch[mk.name] = st
+				if timer[mk.name] {
+					stretch[mk.name] = st
+				} else {
+					st.With = append(st.With, mk.name)
+				}
 			}
 			i = j + 1
 		}
@@ -226,6 +242,7 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 	for _, mk := range ordered {
 		if st, ok := stretch[mk.name]; ok {
 			cp := *st
+			cp.With = append([]string(nil), st.With...)
 			worker = append(worker, models.MockEntry{Name: mk.name, Kind: string(models.HTTP), Place: place[mk.name], Cause: models.CauseTimer, Stretch: &cp})
 		}
 	}

@@ -1177,14 +1177,24 @@ func (v *exactView) isWorker(name string) bool {
 // before it has answered a call of the staging or the run has gone past it,
 // and the one after it has neither. Its answer is the state those writes left,
 // so a call made before the first or after the second would read a state the
-// recording never saw. A mock with no stretch is always within its own.
+// recording never saw. One of the run's other recordings (models.Stretch.With)
+// answered in the staging opens it as well: the run has reached the state
+// they read, whatever write it made before them. A mock with no stretch is
+// always within its own.
 func (v *exactView) inStretch(name string) bool {
 	st, ok := v.stretch[name]
 	if !ok || v.answered == nil {
 		return true
 	}
 	done := func(write string) bool { return v.passed[write] || v.answered(write) }
-	return (st.After == "" || done(st.After)) && (st.Until == "" || !done(st.Until))
+	open := st.After == "" || done(st.After)
+	for _, n := range st.With {
+		if open {
+			break
+		}
+		open = v.answered(n)
+	}
+	return open && (st.Until == "" || !done(st.Until))
 }
 
 // lastOfRun reports whether name is the last of a timer's recordings of one

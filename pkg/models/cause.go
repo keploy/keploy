@@ -60,8 +60,15 @@ type TimerCall struct {
 // answered alike: each answers once, and once every one the run has reached
 // answered, the last answers again, as the pool answers a call once, then its
 // last.
+//
+// With names the run's recordings no timer made (the call made by its test,
+// or between tests), which stay where they were recorded: they answered alike
+// too, so the stretch spans them, and one of them answered in a replay is the
+// replay having reached the run's state, so the stretch is open from then on
+// whether or not the write named After was answered.
 type Stretch struct {
-	After string `json:"after,omitempty" yaml:"after,omitempty" bson:"after,omitempty"`
-	Until string `json:"until,omitempty" yaml:"until,omitempty" bson:"until,omitempty"`
-	Run   string `json:"run,omitempty" yaml:"run,omitempty" bson:"run,omitempty"`
+	After string   `json:"after,omitempty" yaml:"after,omitempty" bson:"after,omitempty"`
+	Until string   `json:"until,omitempty" yaml:"until,omitempty" bson:"until,omitempty"`
+	Run   string   `json:"run,omitempty" yaml:"run,omitempty" bson:"run,omitempty"`
+	With  []string `json:"with,omitempty" yaml:"with,omitempty" bson:"with,omitempty"`
 }
