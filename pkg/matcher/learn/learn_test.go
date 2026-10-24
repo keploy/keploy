@@ -438,6 +438,53 @@ func TestADriftedValueBesideAPostgresRecordingsWireTypingIsNoise(t *testing.T) {
 	}
 }
 
+// Of a Postgres recording's answer, the result formats (0 text, 1 binary)
+// are the wire's typing, and a value equal to one did not flow from it; the
+// column names are what the server answered, and a value equal to one may
+// have. Here a 1 is only a result format and the column names are only in
+// the answer's description (the statement selects *), so each word is read
+// only where this row puts it.
+func TestAPostgresRecordingsResultFormatsAreNotPayloadButItsColumnNamesAre(t *testing.T) {
+	recAt := time.Date(2026, 10, 24, 6, 22, 0, 748987707, time.UTC)
+	earlier := &models.Mock{Name: "mock-12", Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: recAt.Add(-4 * time.Millisecond),
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: `SELECT * FROM "public"."flyway_schema_history" WHERE "installed_rank" > $1`,
+			BindValues:    models.PostgresV3Cells{{Value: "0"}},
+			ResultFormats: []int{1, 1},
+			Response: &models.PostgresV3Response{
+				RowDescription: []models.PostgresV3ColumnDescriptor{
+					{Name: "script", TypeOID: 1043, TypeSize: -1, TypeMod: 1004, Format: 1},
+					{Name: "checksum", TypeOID: 23, TypeSize: 4, TypeMod: -1, Format: 1},
+				},
+				Rows:            []models.PostgresV3Cells{{{Value: "init.sql"}, {Value: "4242"}}, {{Value: "seed.sql"}, {Value: "5150"}}},
+				CommandComplete: "SELECT 2",
+			},
+		}},
+	}}
+	raw := []Raw{RawOf(earlier, false)}
+	classify := func(recorded string) Kind {
+		rec := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: recorded}}}
+		live := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: recorded + "37"}}}
+		out := Classify(NewDriftCache(), []string{"bind.$8"}, live, rec, recAt, nil, raw, nil)
+		if len(out) != 1 {
+			t.Fatalf("recorded %s: %+v", recorded, out)
+		}
+		return out[0].Kind
+	}
+	if k := classify("1"); k != KindNoise {
+		t.Errorf("a value 1, which the earlier recording holds only as its result formats: %s, want noise", k)
+	}
+	for _, name := range []string{"script", "checksum"} {
+		if k := classify(name); k != KindVariable {
+			t.Errorf("a value %s, an answer column's name in the earlier recording: %s, want a variable", name, k)
+		}
+	}
+	if k := classify("4242"); k != KindVariable {
+		t.Errorf("a value 4242 the earlier recording answered: %s, want a variable", k)
+	}
+}
+
 // The SQL text of an earlier Postgres recording names its parameters by
 // position: the 4 of Flyway's "c.relkind = $4" probe is no value, so a
 // duration the app bound later (execution_time, 58 ms at record, 4 in F) is
