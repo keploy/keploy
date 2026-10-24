@@ -20,10 +20,18 @@ import (
 var eRecAt = time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
 
 // ePg is a Postgres query recording made before eRecAt, answering rows and
-// tag: a start-up place whose words the application may copy.
+// tag a millisecond after its request: a start-up place whose words the
+// application may copy.
 func ePg(name string, before time.Duration, sql string, rows []models.PostgresV3Cells, tag string) Raw {
+	return ePgAnswered(name, before, eRecAt.Add(-before+time.Millisecond), sql, rows, tag)
+}
+
+// ePgAnswered is ePg answered at answered (the zero time: its mock holds no
+// answer time).
+func ePgAnswered(name string, before time.Duration, answered time.Time, sql string, rows []models.PostgresV3Cells, tag string) Raw {
 	return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
 		ReqTimestampMock: eRecAt.Add(-before),
+		ResTimestampMock: answered,
 		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
 			SQLNormalized: sql,
 			Response:      &models.PostgresV3Response{Rows: rows, CommandComplete: tag},
@@ -96,10 +104,12 @@ func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
 }
 
 // eLeaf is an exchange record's full round served before the call, recorded
-// at at, served as the n-th serve of the set, whose leaf body.retries held
-// recorded at record and was served as live.
+// at at and answered a millisecond later, served as the n-th serve of the
+// set, whose leaf body.retries held recorded at record and was served as
+// live.
 func eLeaf(at time.Time, n int, recorded, live string) Earlier {
-	return Earlier{Mock: "mock-8", At: at, Payload: payloadOf("mock-8", at).ServedAs(n), Seen: []Seen{
+	payload := RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+	return Earlier{Mock: "mock-8", At: at, Payload: payload.ServedAs(n), Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "body.retries", Type: Number, Value: recorded}, Live: live},
 	}}
 }
@@ -124,7 +134,7 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 	)
 	mock1 := func(at time.Time) Raw {
 		return RawOf(&models.Mock{Name: "mock-1", Kind: models.PostgresV3, Spec: models.MockSpec{
-			ReqTimestampMock: at,
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
 			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
 				SQLNormalized: "SELECT 1", Response: &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: "1"}}}, CommandComplete: "SELECT 1"},
 			}},
@@ -248,5 +258,145 @@ func TestARoundThatGaveTheEarlierAnswersInAnotherOrderThanTheRecordingRefuses(t 
 		if got := classifyF(t, "slot 82", "slot 7", earlier, raw, nil); got.Kind != KindNoise {
 			t.Errorf("%s, slot 82 at record, slot 7 in F: %s (%q), want noise", tc.name, got.Kind, got.Why)
 		}
+	}
+}
+
+// eSpan is eAnswer requested before and answered answered before eRecAt.
+func eSpan(name string, before, answered time.Duration, word string) Raw {
+	return ePgAnswered(name, before, eRecAt.Add(-answered), "SELECT next_slot FROM "+name, []models.PostgresV3Cells{{{Value: word}}}, "SELECT 1")
+}
+
+// Two requests in flight together: the recording gave the application
+// their answers in the order the dependency and the network gave them,
+// which keploy cannot tell from when the requests were recorded. mock-a is
+// requested first and answered last, so the application had b's answer
+// first. Ordered by request, the recording's order would be F's (a then b),
+// and the value learned as varying: refused, saying why, on any two
+// connections. On one connection whose protocol answers in the order sent,
+// the positions tell the order (a pipelined client); positions that disagree
+// with the recorded requests refuse. A recording whose answer time keploy
+// cannot read shows nothing, and one still in flight when the application
+// made the call gave it nothing before the call (recordedGave).
+// Sequential places stay in their time order (the Flyway start-up,
+// TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying).
+func TestTwoRequestsInFlightTogetherAreInAnOrderTheRecordingShowsOnlyOnOneConnection(t *testing.T) {
+	a := eSpan("mock-a", 300*time.Millisecond, 100*time.Millisecond, "7")
+	b := eSpan("mock-b", 250*time.Millisecond, 200*time.Millisecond, "9")
+	const tail = ", so keploy cannot tell a copy from a varying value"
+	const inFlight = "the recording's requests for mock-a and mock-b were in flight together (mock-b's was recorded before mock-a was answered), so keploy cannot tell which answer it gave the application first" + tail
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+		want string
+	}{
+		{"answered in reverse order, F served a then b", []Raw{a.ServedAs(1), b.ServedAs(2)}, inFlight},
+		{"answered in reverse order, F served b then a", []Raw{a.ServedAs(2), b.ServedAs(1)}, inFlight},
+		{"a answered at the instant b's request was recorded", []Raw{eSpan("mock-a", 300*time.Millisecond, 250*time.Millisecond, "7").ServedAs(1), b.ServedAs(2)}, inFlight},
+		{"on one connection at positions that disagree with the requests", []Raw{a.SentOn("0", 2).ServedAs(1), b.SentOn("0", 1).ServedAs(2)},
+			"the recording carried mock-a and mock-b on one connection at positions that disagree with when their requests were recorded, so keploy cannot tell the order it gave them in" + tail},
+		{"on two connections at positions", []Raw{a.SentOn("0", 1).ServedAs(1), b.SentOn("1", 2).ServedAs(2)}, inFlight},
+		{"a's mock holds no answer time", []Raw{ePgAnswered("mock-a", 300*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-a", []models.PostgresV3Cells{{{Value: "7"}}}, "SELECT 1").ServedAs(1), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2)},
+			"keploy cannot read when the recording answered mock-a (its mock holds no answer time it can read), so the recording cannot show the value does not follow that word"},
+		{"b's mock holds no answer time", []Raw{a.ServedAs(1), ePgAnswered("mock-b", 200*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-b", []models.PostgresV3Cells{{{Value: "9"}}}, "SELECT 1").ServedAs(2)},
+			"keploy cannot read when the recording answered mock-b (its mock holds no answer time it can read)" + tail},
+		{"a in flight when the application made the call", []Raw{eSpan("mock-a", 300*time.Millisecond, -50*time.Millisecond, "7").ServedAs(1)},
+			"the recording did not give the application that word there before the call, so it cannot show the value does not follow it"},
+		{"a's answer recorded before its request", []Raw{eSpan("mock-a", 300*time.Millisecond, 400*time.Millisecond, "7").ServedAs(1), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2)},
+			"keploy cannot read when the recording answered mock-a"},
+	} {
+		got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil)
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) {
+			t.Errorf("FALSE GREEN? %s, slot 82 at record, slot 7 in F: %s (%q), want refused: %q", tc.name, got.Kind, got.Why, tc.want)
+		}
+	}
+	// One connection, positions in the order of the requests: the protocol
+	// answered a first, as F did. And sequential places: a answered before
+	// b's request, whatever the positions say.
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+	}{
+		{"pipelined on one connection", []Raw{a.SentOn("0", 1).ServedAs(1), b.SentOn("0", 2).ServedAs(2)}},
+		{"sequential", []Raw{eSpan("mock-a", 300*time.Millisecond, 260*time.Millisecond, "7").ServedAs(1), b.ServedAs(2)}},
+		{"sequential on one connection, positions the other way", []Raw{eSpan("mock-a", 300*time.Millisecond, 260*time.Millisecond, "7").SentOn("0", 2).ServedAs(1), b.SentOn("0", 1).ServedAs(2)}},
+	} {
+		if got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil); got.Kind != KindNoise {
+			t.Errorf("%s, slot 82 at record, slot 7 in F: %s (%q), want noise", tc.name, got.Kind, got.Why)
+		}
+	}
+}
+
+// From the Flyway item (lane flyway-e1-on3): pgjdbc sends a block's BEGIN in
+// one write with the statement after it (SET ROLE), and the Postgres
+// recorder samples one request time per decoded client bundle, so both
+// mocks carry one recorded instant; the recorder keeps their order on the
+// connection (the invocation id's sequence), which its adapter hands as the
+// places' positions (Raw.SentOn). Places of different mocks recorded at one
+// instant are in the order their client sent them where both were carried
+// on one connection at known, distinct positions; otherwise the order stays
+// untold and the value is refused. mock-9 and mock-10's names sort the
+// other way, so no order by name passes. The same holds for an exchange
+// served leaf by leaf (Earlier.Payload's position).
+func TestPlacesSentInOneWriteAreInTheOrderTheirConnectionCarriedThem(t *testing.T) {
+	first := eAnswer("mock-9", 300*time.Millisecond, "7").SentOn("0", 9)
+	second := eAnswer("mock-10", 300*time.Millisecond, "9").SentOn("0", 10)
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{first.ServedAs(1), second.ServedAs(2)}, nil); got.Kind != KindNoise {
+		t.Errorf("one write on one connection, F served it in the connection's order: %s (%q), want noise", got.Kind, got.Why)
+	}
+	const tail = ", so keploy cannot tell a copy from a varying value"
+	const tie = "at one instant, so keploy cannot tell the order it gave them in" + tail
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+		want string
+	}{
+		{"F served them against the connection's order", []Raw{first.ServedAs(2), second.ServedAs(1)},
+			"the recording and record's full round gave the application the earlier answers in a different order (the 1st earlier answer was mock-9 in the recording and mock-10 in record's full round)" + tail},
+		{"one instant on two connections", []Raw{first.ServedAs(1), second.SentOn("1", 10).ServedAs(2)}, tie},
+		{"one instant, a position unknown", []Raw{first.ServedAs(1), second.SentOn("0", 0).ServedAs(2)}, tie},
+		{"one instant, no connection", []Raw{first.ServedAs(1), second.SentOn("", 10).ServedAs(2)}, tie},
+		{"one instant, one position twice", []Raw{first.ServedAs(1), second.SentOn("0", 9).ServedAs(2)}, tie},
+	} {
+		got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil)
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) {
+			t.Errorf("FALSE GREEN? %s: %s (%q), want refused: %q", tc.name, got.Kind, got.Why, tc.want)
+		}
+	}
+	// Three in one write, handed out of order: told by position, all three.
+	third := eAnswer("mock-11", 300*time.Millisecond, "x").SentOn("0", 11)
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{third.ServedAs(3), first.ServedAs(1), second.ServedAs(2)}, nil); got.Kind != KindNoise {
+		t.Errorf("three in one write, F served them in the connection's order: %s (%q), want noise", got.Kind, got.Why)
+	}
+	// Distinct instants keep their time order whatever the positions say:
+	// positions order only requests in flight together.
+	early := eAnswer("mock-a", 400*time.Millisecond, "7").SentOn("0", 20)
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{early.ServedAs(1), second.ServedAs(2)}, nil); got.Kind != KindNoise {
+		t.Errorf("distinct instants: %s (%q), want noise by time order", got.Kind, got.Why)
+	}
+	// An exchange served leaf by leaf, in one write with a recording: its
+	// payload's position tells it on the recording's connection; on another
+	// it is refused. And one answered before a later request is ordered by
+	// time: its payload's answer time is read.
+	at := eRecAt.Add(-300 * time.Millisecond)
+	leaf := func(conn string, pos uint64, answered time.Time) []Earlier {
+		e := eLeaf(at, 1, "7", "7")
+		e.Payload = RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: answered}}, true).SentOn(conn, pos).ServedAs(1)
+		return []Earlier{e}
+	}
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("0", 9, at.Add(time.Millisecond)), []Raw{second.ServedAs(2)}, nil); got.Kind != KindNoise {
+		t.Errorf("an exchange in one write with mock-10, on its connection: %s (%q), want noise", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("1", 9, at.Add(time.Millisecond)), []Raw{second.ServedAs(2)}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "and mock-8 at one instant, so keploy cannot tell the order it gave them in") {
+		t.Errorf("FALSE GREEN? an exchange in one write with mock-10, on another connection: %s (%q), want refused", got.Kind, got.Why)
+	}
+	later := eAnswer("mock-12", 200*time.Millisecond, "9")
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, at.Add(time.Millisecond)), []Raw{later.ServedAs(2)}, nil); got.Kind != KindNoise {
+		t.Errorf("an exchange answered before a later request: %s (%q), want noise", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, time.Time{}), []Raw{later.ServedAs(2)}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "keploy cannot read when the recording answered mock-8") {
+		t.Errorf("FALSE GREEN? an exchange whose answer time keploy cannot read: %s (%q), want refused", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, eRecAt), []Raw{later.ServedAs(2)}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording did not give the application that word there before the call") {
+		t.Errorf("FALSE GREEN? an exchange answered at the call's own instant: %s (%q), want refused", got.Kind, got.Why)
 	}
 }

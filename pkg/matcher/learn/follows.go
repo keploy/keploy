@@ -27,10 +27,11 @@ import (
 // would otherwise be noise, is learned as varying (noise) where
 //   - the recording and F both gave the application each word the rule
 //     found, at the place it found it, before the call: the recording by a
-//     place recorded strictly before the call (one made at the call's own
-//     instant may have been given after it; one whose recorded time keploy
-//     cannot read shows nothing), F by a place it served (a recording F did
-//     not serve, F did not give);
+//     place whose answer it recorded strictly before the call (one requested
+//     at the call's own instant, or still in flight when the application
+//     made the call, may have been given after it; one whose recorded
+//     request or answer time keploy cannot read shows nothing), F by a place
+//     it served (a recording F did not serve, F did not give);
 //   - the recorded value and the value F saw do not both hold it (one holds
 //     it: that is why the rule found it; the other must lack it). The two
 //     values differ wherever the rule finds a changed word at all;
@@ -38,6 +39,9 @@ import (
 //     in the same order (recordedOrder, servedOrder), so an application that
 //     copies an answer by its position (the last one it got) took the same
 //     place's word in both, and a value that lacks it shows no copy of it.
+//     The recording shows the order of its answers only where each was
+//     recorded before the next request, or where requests in flight together
+//     were carried on one connection at known positions (Raw.SentOn).
 //
 // Otherwise the value is refused, the reason naming which of these failed.
 // Nothing is read from a value's shape. Everything else the classifier
@@ -96,42 +100,50 @@ func (f *follows) excused(t string, recGave, fGave bool, untimed, why string) bo
 // excusedSeen is excused of word t, found in reading i at a leaf of an
 // exchange record's full round served before the call (e), whose recorded
 // and served text ed reads: the recording gave the application the leaf's
-// recorded text there where it recorded e strictly before the call (the test
-// case's own request: before every call of the test), and F gave it what it
-// served there (Seen.Live).
+// recorded text there where it recorded e's answer strictly before the call
+// (recordedGave; the test case's own request: before every call of the
+// test), and F gave it what it served there (Seen.Live).
 func (f *follows) excusedSeen(e Earlier, ed *valueDrift, i int, t string, at time.Time, why string) bool {
 	if f == nil {
 		return false
 	}
 	before, untimed := e.Given, ""
 	if !e.Given {
-		before, untimed = recordedBefore(e.At, at, e.Mock)
+		before, untimed = recordedGave(e.At, e.Payload.answered, at, e.Mock)
 	}
 	return f.excused(t, before && ed.recTok[i][t], ed.liveTok[i][t], untimed, why)
 }
 
 // excusedRaw is excused of word t, found in reading i in x's payload: the
-// recording gave the application the payload where it recorded x strictly
-// before the call, and F gave it where it served x. A payload's clock stamps
+// recording gave the application the payload where it recorded x's answer
+// strictly before the call (recordedGave), and F gave it where it served x. A payload's clock stamps
 // are read blanked: F may have stamped its own there, so a word that stands
 // only in one is no word both gave.
 func (f *follows) excusedRaw(x Raw, i int, t string, at time.Time, why string) bool {
 	if f == nil {
 		return false
 	}
-	before, untimed := recordedBefore(x.at, at, x.mock)
+	before, untimed := recordedGave(x.at, x.answered, at, x.mock)
 	held := f.dc.searchedTokens(x, false)[i][t]
 	return f.excused(t, before && held, x.served && held, untimed, why)
 }
 
-// recordedBefore reports whether a place recorded at rat was given to the
-// recorded application before a call recorded at at: recorded strictly
-// before it. untimed says why it cannot be told: no recorded time.
-func recordedBefore(rat, at time.Time, mock string) (before bool, untimed string) {
-	if rat.IsZero() {
+// recordedGave reports whether the recording gave the application a place
+// whose request was recorded at req and its answer at answered before a call
+// recorded at at: answered strictly before the call's request was recorded.
+// A request in flight when the application made the call (recorded before
+// it, answered at or after it) gave the application nothing before the call,
+// so the recorded value shows nothing of its answer's words. untimed says
+// why it cannot be told: no recorded time, or no answer time keploy can read
+// (none, or one before its request).
+func recordedGave(req, answered, at time.Time, mock string) (before bool, untimed string) {
+	switch {
+	case req.IsZero():
 		return false, "keploy cannot read when the recording gave the application " + mock + " (its mock holds no recorded time)"
+	case answered.IsZero() || answered.Before(req):
+		return false, "keploy cannot read when the recording answered " + mock + " (its mock holds no answer time it can read)"
 	}
-	return rat.Before(at), ""
+	return answered.Before(at), ""
 }
 
 // holdsWord reports whether value holds t as a word, in any reading and
@@ -184,24 +196,31 @@ func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.
 }
 
 // recordedOrder is the places the recording gave the application before a
-// call recorded at at, in the order it gave them: the test case's request
-// first; then every place recorded strictly before the call, served by F or
-// not, by when it was recorded. untold, where that order cannot be told,
-// says why: two places of different mocks recorded at one instant, or a
-// place whose recorded time keploy cannot read.
+// call recorded at at, in the order it gave them their answers: the test
+// case's request first; then every place whose answer was recorded strictly
+// before the call (recordedGave), served by F or not. The recording shows the
+// order of two places where one was answered strictly before the other's
+// request was recorded (keploy stamped its answer first), or, for two
+// requests in flight together, where both were carried on one connection at
+// known, distinct positions there (Raw.SentOn) that agree with when their
+// requests were recorded: its protocol answers them in the order they were
+// sent, and a client that sends a block of statements in one write gives
+// them one recorded instant. A position orders only requests in flight
+// together; it is no second clock. untold, where the order of any two places
+// of different mocks cannot be told, says why: two requests in flight
+// together on two connections, or at an unknown or shared position (the
+// order of their answers is then the dependency's and the network's, which
+// the recording does not hold); a place whose recorded request or answer
+// time keploy cannot read.
 func recordedOrder(at time.Time, earlier []Earlier, raw []Raw) (order []string, untold string) {
-	type place struct {
-		at   time.Time
-		mock string
-	}
-	var places []place
-	add := func(mock string, rat time.Time) string {
-		before, untimed := recordedBefore(rat, at, mock)
+	var places []recPlace
+	add := func(p recPlace) string {
+		before, untimed := recordedGave(p.at, p.answered, at, p.mock)
 		if untimed != "" {
 			return untimed
 		}
 		if before {
-			places = append(places, place{rat, mock})
+			places = append(places, p)
 		}
 		return ""
 	}
@@ -210,28 +229,80 @@ func recordedOrder(at time.Time, earlier []Earlier, raw []Raw) (order []string, 
 			order = append(order, "the test case's request")
 			continue
 		}
-		if why := add(e.Mock, e.At); why != "" {
+		if why := add(recPlace{e.Mock, e.At, e.Payload.answered, e.Payload.conn, e.Payload.pos}); why != "" {
 			return nil, why
 		}
 	}
 	for _, x := range raw {
-		if why := add(x.mock, x.at); why != "" {
+		if why := add(recPlace{x.mock, x.at, x.answered, x.conn, x.pos}); why != "" {
 			return nil, why
 		}
 	}
+	// By when each request was recorded, and among those recorded at one
+	// instant on one connection by position; the name only makes the sort
+	// stable, never an order: two places it alone orders are refused below.
 	sort.SliceStable(places, func(i, j int) bool {
-		if !places[i].at.Equal(places[j].at) {
-			return places[i].at.Before(places[j].at)
+		a, b := places[i], places[j]
+		switch {
+		case !a.at.Equal(b.at):
+			return a.at.Before(b.at)
+		case a.conn != b.conn:
+			return a.conn < b.conn
+		case a.pos != b.pos:
+			return a.pos < b.pos
 		}
-		return places[i].mock < places[j].mock
+		return a.mock < b.mock
 	})
-	for i, p := range places {
-		if i > 0 && p.at.Equal(places[i-1].at) && p.mock != places[i-1].mock {
-			return nil, "the recording gave the application " + places[i-1].mock + " and " + p.mock + " at one instant, so keploy cannot tell the order it gave them in"
+	// Every place must be told after every one sorted before it. Where each
+	// earlier one was answered before its request (the usual sequential
+	// application), one comparison with the latest answer says so.
+	var latest time.Time
+	for j, p := range places {
+		if !latest.Before(p.at) {
+			for _, q := range places[:j] {
+				if why := answeredBefore(q, p); why != "" {
+					return nil, why
+				}
+			}
+		}
+		if p.answered.After(latest) {
+			latest = p.answered
 		}
 		order = append(order, p.mock)
 	}
 	return order, ""
+}
+
+// recPlace is a place the recording gave the application before the call
+// (recordedOrder): its mock, when its request and its answer were recorded
+// (both read: recordedGave), and where its request was carried (Raw.SentOn).
+type recPlace struct {
+	mock         string
+	at, answered time.Time
+	conn         string
+	pos          uint64
+}
+
+// answeredBefore says why keploy cannot tell that the recording gave the
+// application q's answer before p's, q sorted before p (recordedOrder); ""
+// where it can: one recording; q answered strictly before p's request was
+// recorded; or both carried on one connection, at known and distinct
+// positions, q's first.
+func answeredBefore(q, p recPlace) string {
+	switch {
+	case q.mock == p.mock:
+		return ""
+	case q.answered.Before(p.at):
+		return ""
+	case q.conn != "" && q.conn == p.conn && q.pos != 0 && p.pos != 0 && q.pos != p.pos:
+		if q.pos < p.pos {
+			return ""
+		}
+		return "the recording carried " + q.mock + " and " + p.mock + " on one connection at positions that disagree with when their requests were recorded, so keploy cannot tell the order it gave them in"
+	case q.at.Equal(p.at):
+		return "the recording gave the application " + q.mock + " and " + p.mock + " at one instant, so keploy cannot tell the order it gave them in"
+	}
+	return "the recording's requests for " + q.mock + " and " + p.mock + " were in flight together (" + p.mock + "'s was recorded before " + q.mock + " was answered), so keploy cannot tell which answer it gave the application first"
 }
 
 // servedOrder is the places record's full round gave the application before

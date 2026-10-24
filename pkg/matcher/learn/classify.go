@@ -99,7 +99,10 @@ type Earlier struct {
 	// answer read back, where the adapter that served it leaf by leaf gives
 	// it (the zero Raw where it does not): the answer's fields name the same
 	// places as another recording's of its kind, which the offset rule reads
-	// (offsetFrom). Nothing else reads it: the leaves are the exchange's.
+	// (offsetFrom). Its answer's recorded time and its connection position
+	// (Raw.SentOn) are the exchange's, which the order the recording gave the
+	// application its earlier answers in reads (recordedOrder). Nothing else
+	// reads it: the leaves are the exchange's.
 	Payload Raw
 }
 
@@ -123,6 +126,14 @@ type Raw struct {
 	mock   string
 	at     time.Time
 	served bool
+	// answered is when the mock's answer was recorded (RawOf: its
+	// ResTimestampMock), the zero time where keploy cannot read it; conn and
+	// pos are where the recording carried its request (SentOn): "" and 0
+	// where its adapter does not say. recordedOrder tells by them the order
+	// the recording gave the application its earlier answers in.
+	answered time.Time
+	conn     string
+	pos      uint64
 	// first and last are the first and the last of F's serves of the mock,
 	// in one order across the set's start-up, its tests and the gaps
 	// between them (ServedIn: 1 the first serve; learn.Order.Of), 0 where
@@ -253,6 +264,21 @@ func (r Raw) ServedIn(first, last int) Raw {
 // adapter gave none of, was not.
 func (r Raw) fromMock() bool {
 	return r.read || r.mock != "" || r.served || r.call != "" || !r.at.IsZero()
+}
+
+// SentOn is r as its recording carried its request: on connection conn, the
+// pos-th request its client sent there (1 the first; 0 unknown), with the
+// same text, fields and answer clock reads. An adapter says it only where
+// its protocol answers a connection's requests in the order they were sent
+// (a Postgres connection: the invocation id's sequence), so that the
+// recording gave the application the answers to two requests in flight
+// together on one connection in the order of their positions
+// (recordedOrder): a client that sends a block of statements in one write
+// gives them one recorded instant. "" or 0 says nothing, and keploy then
+// cannot tell the order of two such requests (fail closed).
+func (r Raw) SentOn(conn string, pos uint64) Raw {
+	r.conn, r.pos = conn, pos
+	return r
 }
 
 // Nth is where F first served r's mock (ServedIn), 0 where it was not served
@@ -575,7 +601,7 @@ func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) 
 func (e Earlier) lateOf(late bool) []Raw {
 	x := e.Payload
 	if !x.read {
-		x = Raw{mock: e.Mock, at: e.At, unread: payloadUnread(e)}
+		x = Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, unread: payloadUnread(e)}
 	}
 	x.served = true
 	out := []Raw{x}
@@ -605,7 +631,7 @@ func (e Earlier) servedAnswer() (Raw, bool) {
 			break
 		}
 	}
-	x := Raw{mock: e.Mock, at: e.At, served: true, read: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call}
+	x := Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, served: true, read: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call}
 	var sb strings.Builder
 	for _, s := range e.Seen {
 		if s.Side != Response || s.Stamp {
@@ -1407,7 +1433,7 @@ func ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	}
 	full := m.ShallowCopy()
 	if err := full.HydrateResponse(); err != nil {
-		return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served, call: callOf(m)}, err
+		return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m)}, err
 	}
 	return RawOf(full, served), nil
 }
@@ -2217,7 +2243,7 @@ var payloadKeys = map[string]bool{
 // RawOf is a mock as Classify reads it when no leaf names its values: its
 // recorded request and answer, the payload only, as one text.
 func RawOf(m *models.Mock, served bool) Raw {
-	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, served: served, call: callOf(m)}
+	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m)}
 	b, err := json.Marshal(payloadSpec(m.Spec))
 	if err != nil {
 		return r
