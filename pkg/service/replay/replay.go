@@ -938,9 +938,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		// The error Start returns stays flat (#4792), so the code the setup's
-		// failure is tagged with (an agent that lacked privileges: 3) is
-		// armed here, while the tag is still in hand; armRunExitCode keeps it.
+		// Unlike the cancelled run's return above and a failed test set's
+		// below, this return is flat (#4792), so the code the setup's failure
+		// is tagged with (an agent that lacked privileges: 3) is armed here,
+		// while the tag is still in hand; armRunExitCode keeps it.
 		utils.SetExitCodeOnce(utils.ExitCodeFor(err))
 		return fmt.Errorf("%s", stopReason)
 	}
@@ -1573,8 +1574,9 @@ func replayRunOutcome(testRunResult bool, keepAliveAppErr *models.AppError) (int
 // change from the unconditional `utils.ErrCode = 1` this replaces.
 //
 // A run that ended with an error that still carries its tag (one Start
-// returns as it is, such as a run the errgroup cancelled) ends with the code
-// that tag calls for (utils.ExitCodeFor), not a bare 1.
+// returns as it is, such as a run the errgroup cancelled, or wraps, as a
+// failed test set's) ends with the code that tag calls for
+// (utils.ExitCodeFor), not a bare 1.
 func armRunExitCode(runErr error, testRunResult bool, failedTests int) {
 	switch {
 	case runErr != nil:

@@ -8,12 +8,14 @@ package http_test
 // an agent is named in the error instead (models.ErrAgentPredatesMockStream).
 
 import (
+	"bytes"
 	"context"
 	"encoding/gob"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -144,10 +146,47 @@ func TestStoreMocks_AnAgentFromBeforeTheStreamIsNamed(t *testing.T) {
 	}
 }
 
+// preStreamingReply is the body of that agent's 400: its AgentResp type, which
+// the encoder sends whole, and then nothing, since the encoder fails on the
+// value's error.
+func preStreamingReply(t *testing.T) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := gob.NewEncoder(&b).Encode(preStreamingAgentResp{Error: errors.New("gob: bad data")}); err == nil {
+		t.Fatal("encoding an AgentResp whose error is not registered succeeded; the pre-stream agent's reply cannot be built")
+	}
+	if b.Len() == 0 {
+		t.Fatal("the encoder wrote nothing before it failed; the pre-stream agent's reply cannot be built")
+	}
+	return b.Bytes()
+}
+
+// reply400 answers 400 with body under the media type ctype ("" sends none,
+// and stops net/http from sniffing one).
+func reply400(ctype string, body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if ctype != "" {
+			w.Header().Set("Content-Type", ctype)
+		} else {
+			w.Header()["Content-Type"] = nil
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(body)
+	}
+}
+
 // A 400 that is not that agent's is not blamed on the agent's version: an empty
 // one (a proxy in front of the agent, say) and a current agent's, which says
-// why, both keep their own reading.
+// why, both keep their own reading. So do text 400s, from a Go middleware or
+// proxy (http.Error) or from net/http itself, which gob reads as a message
+// length and then runs out of bytes on: the reply has to be a gob one
+// (application/x-gob, as every agent's /storemocks sets) that holds whole type
+// definitions and nothing else. A reply cut short, or that agent's bytes under
+// a text media type, is not that agent's reply either: a call that is wrongly
+// called too old is never retried by a caller that trusts the error.
 func TestStoreMocks_Other400sAreNotCalledAnOldAgent(t *testing.T) {
+	old := preStreamingReply(t)
 	cases := map[string]http.HandlerFunc{
 		"an empty 400": func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -157,6 +196,22 @@ func TestStoreMocks_Other400sAreNotCalledAnOldAgent(t *testing.T) {
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.WriteHeader(http.StatusBadRequest)
 			_ = gob.NewEncoder(w).Encode(models.AgentResp{ErrorMsg: "storemocks: decode stream header: bad"})
+		},
+		"a proxy's text 400": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+		},
+		"net/http's own 400":                         reply400("text/plain; charset=utf-8", []byte("400 Bad Request")),
+		"a text 400 labelled application/x-gob":      reply400("application/x-gob", []byte("Bad Request\n")),
+		"that agent's reply cut short":               reply400("application/x-gob", old[:len(old)-1]),
+		"that agent's reply under a text media type": reply400("text/plain; charset=utf-8", old),
+		"that agent's reply with no media type":      reply400("", old),
+		"that agent's reply on a connection cut before the end": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/x-gob")
+			w.Header().Set("Content-Length", strconv.Itoa(len(old)+8))
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(old)
 		},
 	}
 	for name, h := range cases {
@@ -176,5 +231,32 @@ func TestStoreMocks_Other400sAreNotCalledAnOldAgent(t *testing.T) {
 				t.Fatalf("StoreMocks called %s an agent from before the stream: %v", name, err)
 			}
 		})
+	}
+}
+
+// An agent that reads the stream but has no ErrorMsg (keploy v3.5.85 to
+// v3.6.61) answers a failure of its service with 500 and the same reply as the
+// pre-stream agent's 400: its AgentResp type, which still has the error field,
+// and no value. The next call may pass, so it is not called an agent too old
+// for the stream.
+func TestStoreMocks_AStreamAgents500WithNoReasonIsNotCalledTooOld(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/agent/storemocks", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/x-gob")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = gob.NewEncoder(w).Encode(preStreamingAgentResp{Error: errors.New("store the mocks: disk full")})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := newClient(t, srv.URL+"/agent")
+	f, u := fixtures()
+	err := client.StoreMocks(context.Background(), f, u)
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("StoreMocks returned %v; want the 500", err)
+	}
+	if errors.Is(err, models.ErrAgentPredatesMockStream) {
+		t.Fatalf("StoreMocks called a stream agent's 500 with no reason an agent too old for the stream: %v", err)
 	}
 }

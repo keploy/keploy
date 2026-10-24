@@ -1434,28 +1434,108 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 	return res, sent, nil
 }
 
+// maxStoreMocksFailBody bounds what of a failed /storemocks reply is read to
+// tell whether it is the pre-stream agent's, which is one type definition of
+// some 50 bytes. A longer reply is still decoded, but is not taken for it.
+const maxStoreMocksFailBody = 64 << 10
+
+// agentGobMediaType is the media type of an agent's gob replies.
+const agentGobMediaType = "application/x-gob"
+
+// preStreamAgentReply reports whether a failed /storemocks reply is the one an
+// agent from before the mock stream gives: under the agent's gob media type,
+// one or more whole gob messages that each define a type, and nothing after
+// them, so the decoder read them all and then met the end where the value
+// should be (decodeErr is io.ErrUnexpectedEOF). That agent's encoder sends the
+// AgentResp type whole and fails on the value's error, which it cannot encode.
+func preStreamAgentReply(contentType string, body []byte, decodeErr error) bool {
+	if !errors.Is(decodeErr, io.ErrUnexpectedEOF) {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != agentGobMediaType || len(body) > maxStoreMocksFailBody {
+		return false
+	}
+	return gobTypeDefinitionsOnly(body)
+}
+
+// gobTypeDefinitionsOnly reports whether b is one or more whole gob messages
+// (a byte count, then that many bytes), each opening with a negative type id,
+// which marks a type definition, and ends where the last one ends. A value's
+// message opens with its type's positive id.
+func gobTypeDefinitionsOnly(b []byte) bool {
+	messages := 0
+	for len(b) > 0 {
+		size, rest, ok := gobUint(b)
+		if !ok || size > uint64(len(rest)) {
+			return false
+		}
+		// An empty message has no type id, and fails here.
+		id, _, ok := gobUint(rest[:size])
+		// gob sends a signed int as a uint whose low bit is the sign: an
+		// odd one is negative.
+		if !ok || id&1 == 0 {
+			return false
+		}
+		b = rest[size:]
+		messages++
+	}
+	return messages > 0
+}
+
+// gobUint reads one gob unsigned integer off the front of b: a byte below 128
+// is its value, and a higher one is minus the count (at most 8) of the
+// big-endian bytes that follow and hold it.
+func gobUint(b []byte) (uint64, []byte, bool) {
+	if len(b) == 0 {
+		return 0, nil, false
+	}
+	if b[0] < 0x80 {
+		return uint64(b[0]), b[1:], true
+	}
+	n := -int(int8(b[0]))
+	if n > 8 || len(b) < 1+n {
+		return 0, nil, false
+	}
+	var x uint64
+	for _, c := range b[1 : 1+n] {
+		x = x<<8 | uint64(c)
+	}
+	return x, b[1+n:], true
+}
+
 // decodeStoreMocksResp reads the agent's single AgentResp gob reply.
 func decodeStoreMocksResp(res *http.Response) error {
 	// Non-2xx? Try to decode anyway; if that fails, return status text.
 	// An OLD agent reaches the decode failure here on every error: its gob
-	// encode aborted on the `error` interface field, having already written a
-	// PARTIAL type descriptor, so the decode fails with "unexpected EOF" on a
-	// truncated value rather than on an empty body — hence the bare
+	// encode aborted on the `error` interface field, having already written
+	// the AgentResp type's definition but none of the value, so the decode
+	// fails with "unexpected EOF" rather than on an empty body — hence the bare
 	// "storemocks http 500" this used to give. Unchanged for an old agent;
 	// a new one now carries its reason in ErrorMsg.
 	//
-	// A 400 whose reply is that truncated value (a type and then the end,
-	// io.ErrUnexpectedEOF) is the agent from before the stream: it fails to
-	// read the stream's header on every call, and nothing else answers 400 so.
-	// An agent that reads the stream but not its reason in ErrorMsg (keploy
-	// v3.5.85 to v3.6.61) answers 400 only to a header it cannot read, which
-	// this side sends compressed only to an agent that says it reads zstd
-	// (v3.6.99 on). An empty 400, from a proxy in front of the agent, ends at
-	// io.EOF and is not blamed on the agent.
+	// A 400 whose reply is that type with no value is the agent from before
+	// the stream: it fails to read the stream's header on every call. The
+	// call is exact, since a caller may take the error as permanent and stop
+	// retrying the agent: the reply is application/x-gob, as every agent's
+	// /storemocks sets it, and it holds whole type definitions and then ends,
+	// where the value would be (preStreamAgentReply). A text 400, from a
+	// proxy or middleware in front of the agent (http.Error) or from net/http
+	// itself, keeps the plain error: a short one fails with
+	// io.ErrUnexpectedEOF too, since gob reads its first byte as a message
+	// length. An empty 400 and a reply cut short keep it too. An agent that
+	// reads the stream but not its reason in ErrorMsg (keploy v3.5.85 to v3.6.61)
+	// sends the same type with no value when its service fails, as a 500,
+	// which the next call may pass; it answers 400 only to a header it cannot
+	// read, which this side sends compressed only to an agent that says it
+	// reads zstd (v3.6.99 on).
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, readErr := io.ReadAll(io.LimitReader(res.Body, maxStoreMocksFailBody+1))
 		var fail models.AgentResp
-		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
-			if res.StatusCode == http.StatusBadRequest && errors.Is(err, io.ErrUnexpectedEOF) {
+		// The decode goes on past the bound, so a reason of any length is
+		// still read; the bytes past it are not judged.
+		if err := gob.NewDecoder(io.MultiReader(bytes.NewReader(body), res.Body)).Decode(&fail); err != nil {
+			if res.StatusCode == http.StatusBadRequest && readErr == nil && preStreamAgentReply(res.Header.Get("Content-Type"), body, err) {
 				return fmt.Errorf("storemocks http %d: %w", res.StatusCode, models.ErrAgentPredatesMockStream)
 			}
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
