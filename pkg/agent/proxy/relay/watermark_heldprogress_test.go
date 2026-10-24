@@ -3,6 +3,8 @@ package relay
 import (
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 )
 
 // HeldProgress counts the bytes the parsers behind a test case's window have
@@ -64,5 +66,78 @@ func TestWatermark_HeldProgressIsNotMovedByOtherConnections(t *testing.T) {
 	untrack() // and its parser returns
 	if got := w.HeldProgress("", "", before, after); got != held {
 		t.Fatalf("HeldProgress moved from %d to %d as a connection outside the window retired", held, got)
+	}
+}
+
+// A chunk being stamped (heldUnstamped) on another connection does not move a
+// test case's held progress, whether that connection's chunks came before the
+// window or after it, or within it with its parser past them, waiting for
+// more. Counted, it would take in that connection's bytes for the
+// moment between its forwarder's Read and the stamp, and drop them again: each
+// such move restarts the hold's stall clock for a test case whose own parser
+// has stopped, and an app that keeps opening connections would keep it held.
+// The verdict still takes such a chunk as one that can land in the window.
+// Progress is set by hand on relays that are never run (unrunRelay), whose
+// parsers took a chunk through the tee.
+func TestWatermark_HeldProgressIsNotMovedByAChunkBeingStamped(t *testing.T) {
+	t.Parallel()
+	start := time.Now().UnixNano()
+	end := start + int64(time.Second)
+	// took has r's parser take a chunk stamped at, through its client tee.
+	took := func(r *Relay, at int64) {
+		t.Helper()
+		r.teeC2D.progress.first.Store(at)
+		r.teeC2D.progress.last.Store(at)
+		if !r.teeC2D.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("one"), ReadAt: time.Unix(0, at)}) {
+			t.Fatal("setup: the tee refused the chunk")
+		}
+		readChunk(t, r.ClientStream())
+	}
+
+	s, e := time.Unix(0, start), time.Unix(0, end)
+	w := NewWatermark()
+	behind := unrunRelay(t) // behind the window: its parser has not got to the answer
+	took(behind, start)
+	behind.teeD2C.progress.first.Store(start)
+	behind.teeD2C.progress.last.Store(start)
+	behind.teeD2C.progress.held.Store(start)
+	defer w.Track(behind, "conn-1")()
+
+	for _, row := range []struct {
+		name string
+		at   int64
+		// waits: the parser took the chunk and waits for more.
+		waits bool
+	}{
+		{"a connection whose chunks came after the window", end + int64(time.Second), false},
+		{"a connection whose chunks came before the window", start - int64(time.Hour), false},
+		{"a connection whose chunk came within the window, its parser past it", start, true},
+	} {
+		other := unrunRelay(t)
+		took(other, row.at)
+		if row.waits {
+			blockInRead(t, other.ClientStream())
+		}
+		untrack := w.Track(other, "conn-2")
+		held := w.HeldProgress("", "", s, e)
+		if held == 0 {
+			t.Fatalf("%s: setup: HeldProgress is 0 with conn-1's parser behind the window", row.name)
+		}
+		other.teeD2C.progress.held.Store(heldUnstamped)
+		if got := w.HeldProgress("", "", s, e); got != held {
+			t.Errorf("%s: HeldProgress moved from %d to %d while its forwarder stamped a chunk", row.name, held, got)
+		}
+
+		only := NewWatermark()
+		untrackOnly := only.Track(other, "conn-2")
+		if only.Settled("", "", s, e) {
+			t.Errorf("%s: Settled: true while a chunk that can land in the window is being stamped", row.name)
+		}
+		other.teeD2C.progress.held.Store(0)
+		if !only.Settled("", "", s, e) {
+			t.Errorf("%s: setup: Settled: false for a window the connection carried nothing in: %v", row.name, only.HeldBy("", "", s, e, 0))
+		}
+		untrackOnly()
+		untrack()
 	}
 }
