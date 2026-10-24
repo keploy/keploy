@@ -14,9 +14,14 @@ import (
 // A chunk's time is its ReadAt: when the relay read it off the socket (or, for
 // TLS, when the bytes under it were read). The relay forwards in-line, so a
 // chunk is read before its bytes reach the peer, and a test case that used the
-// bytes completed after that. From the read on, a chunk is in one of four
+// bytes completed after that. From the read on, a chunk is in one of five
 // places until its parser has consumed it whole:
 //
+//   - in the layer the forwarder reads through, read off the socket and not
+//     yet handed on (layer): a TLS layer holds the bytes under a record from
+//     the read that brought them in (readTrackingConn) until it hands the
+//     record to the forwarder, and can hold more records than it hands on in
+//     one Read;
 //   - in the forwarder's hand, between the read and the push (held);
 //   - on the tee's queue (tee.q);
 //   - delivered: taken off the queue by the drain, in the drain's hand, on the
@@ -29,9 +34,10 @@ import (
 // miss a chunk moving between two of them (oldestUnconsumed).
 
 // heldUnstamped is held while the forwarder has a chunk in hand and has not yet
-// stamped it. Its stamp, once taken, is no earlier than when held was set, so a
-// look that read the clock before it saw held clear can tell that no chunk the
-// forwarder holds is from before then.
+// stamped it, and layer while the layer under it stamps a read. The stamp, once
+// taken, is no earlier than when the mark was set, so a look that read the
+// clock before it saw the mark clear can tell that no chunk the forwarder, or
+// the layer, holds is from before then.
 const heldUnstamped int64 = -1
 
 // teeProgress is one direction's capture progress. held, first and last are
@@ -41,6 +47,14 @@ type teeProgress struct {
 	// yet queued, refused or stashed: 0 when it holds none, heldUnstamped
 	// while it is stamping one.
 	held atomic.Int64
+	// layer is the stamp (UnixNano) of the read under the layer the forwarder
+	// reads through (a TLS layer over a readTrackingConn), when that layer
+	// may hold bytes from it it has not handed on: 0 when it holds none,
+	// heldUnstamped while that read is being stamped. The layer's reads keep
+	// it (readTrackingConn.Read); it is cleared as the layer reads again
+	// (which it does only once it has handed on every whole record it held),
+	// when its handshake fails, and when the forwarder stops.
+	layer atomic.Int64
 	// first and last are the stamps of the first and the newest chunk the
 	// forwarder read on this direction (0: none yet): what the connection
 	// carried, whether the tee queued it or not.
@@ -84,6 +98,11 @@ func (t *tee) noteReading() { t.progress.held.Store(heldUnstamped) }
 // stashed the one it read.
 func (t *tee) noteReleased() { t.progress.held.Store(0) }
 
+// noteLayerGone says nothing the layer the forwarder read through holds will
+// reach the parser: the forwarder stopped, or the layer's handshake failed and
+// the relay drops it.
+func (t *tee) noteLayerGone() { t.progress.layer.Store(0) }
+
 // noteDeliveringLocked follows a chunk the drain took off the queue until its
 // parser consumes it whole. Caller holds t.mu.
 func (t *tee) noteDeliveringLocked(c fakeconn.Chunk) {
@@ -112,15 +131,24 @@ func (t *tee) trimDeliveredLocked() {
 }
 
 // oldestUnconsumed is the stamp of the oldest chunk of this direction that its
-// parser has not consumed whole: delivered, queued, or in the forwarder's hand.
-// ok is false when there is none; unstamped is true when the only one is in
-// the forwarder's hand, not yet stamped (it can be from any time from now on).
+// parser has not consumed whole: delivered, queued, in the forwarder's hand,
+// or in the layer it reads through. ok is false when there is none; unstamped
+// is true when the only one is in the forwarder's or the layer's hand, not yet
+// stamped (it can be from any time from now on).
 //
-// held is read before the lock: the forwarder sets it before it queues the
-// chunk and clears it after, so a chunk it queues after this look read held
-// clear is one it stamped no earlier than the look (heldUnstamped), and one it
-// queued before is on the queue under the lock.
+// The places are read in the order a chunk moves through them, so a chunk
+// moving on during the look is seen in the place it moves to. layer is read
+// first: the layer sets it before it takes the stamp of a read and clears it
+// only as it reads again, by when the forwarder has queued every chunk from
+// the reads before (a chunk it hands on over that read takes that read's
+// stamp, or, when the read brought nothing, the forwarder's). held is read
+// next, before the lock: the forwarder sets it before it queues the chunk and
+// clears it after, so a chunk it queues after this look read held clear is one
+// it stamped no earlier than the look (heldUnstamped), and one it queued
+// before is on the queue under the lock. A chunk further on is older than one
+// behind it, so the first place that holds one gives the oldest.
 func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
+	l := t.progress.layer.Load()
 	h := t.progress.held.Load()
 	t.mu.Lock()
 	t.trimDeliveredLocked()
@@ -134,11 +162,13 @@ func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
 	if ok {
 		return at, false, true
 	}
-	switch {
-	case h == heldUnstamped:
-		return 0, true, true
-	case h > 0:
-		return h, false, true
+	for _, m := range [2]int64{h, l} {
+		switch {
+		case m == heldUnstamped:
+			return 0, true, true
+		case m > 0:
+			return m, false, true
+		}
 	}
 	return 0, false, false
 }
@@ -169,7 +199,7 @@ func (t *tee) directionState() string {
 	where := "nothing unconsumed"
 	switch {
 	case unstamped:
-		where = "a chunk in the forwarder's hand, being stamped"
+		where = "a chunk in the forwarder's or its TLS layer's hand, being stamped"
 	case ok:
 		where = "oldest unconsumed chunk read at " + time.Unix(0, at).Format(time.RFC3339Nano)
 	}
@@ -177,22 +207,28 @@ func (t *tee) directionState() string {
 	if t.consumed != nil {
 		consumed = t.consumed()
 	}
-	return fmt.Sprintf("%s: %s, parser took %d of %d bytes", t.dir, where, consumed, t.acceptedBytes())
+	layer := ""
+	if l := t.progress.layer.Load(); l > 0 {
+		layer = ", its TLS layer holds bytes read at " + time.Unix(0, l).Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("%s: %s, parser took %d of %d bytes%s", t.dir, where, consumed, t.acceptedBytes(), layer)
 }
 
 // carriedNothingIn reports whether this connection carried no byte stamped
 // within [start, end]: its first chunk came after end, or its newest before
-// start with none in the forwarders' hands.
+// start with none in the forwarders' hands or their TLS layers'.
 func (r *Relay) carriedNothingIn(start, end int64) bool {
+	inHand := r.teeC2D.progress.layer.Load() != 0 || r.teeD2C.progress.layer.Load() != 0 ||
+		r.teeC2D.progress.held.Load() != 0 || r.teeD2C.progress.held.Load() != 0
 	first := minNonZero(r.teeC2D.progress.first.Load(), r.teeD2C.progress.first.Load())
 	if first == 0 {
 		// Nothing read yet: whatever it reads is stamped from now on.
-		return r.teeC2D.progress.held.Load() == 0 && r.teeD2C.progress.held.Load() == 0
+		return !inHand
 	}
 	if first > end {
 		return true
 	}
-	if r.teeC2D.progress.held.Load() != 0 || r.teeD2C.progress.held.Load() != 0 {
+	if inHand {
 		return false
 	}
 	return max(r.teeC2D.progress.last.Load(), r.teeD2C.progress.last.Load()) < start
