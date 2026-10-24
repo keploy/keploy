@@ -202,6 +202,11 @@ type exactState struct {
 	// stamped is which tests' views were installed in the learn tracker's
 	// latest open test a view was installed in (stampTest).
 	stamped atomic.Pointer[stampedTest]
+	// stampLoaded, set by tests alone and before the state is shared, runs
+	// in stampTest between its read of the latest stamp and its swap: an
+	// install that lands there makes the swap fail, and the stamp is read
+	// again.
+	stampLoaded func()
 }
 
 // stampedTest is, of the learn tracker's open test epoch, the test whose
@@ -231,6 +236,9 @@ func (e *exactState) stampTest(open *func() uint64, test string) uint64 {
 	}
 	for {
 		prev := e.stamped.Load()
+		if e.stampLoaded != nil {
+			e.stampLoaded()
+		}
 		next := &stampedTest{epoch: n, test: test}
 		if prev != nil && prev.epoch == n {
 			next.mixed = prev.mixed || prev.test != test
