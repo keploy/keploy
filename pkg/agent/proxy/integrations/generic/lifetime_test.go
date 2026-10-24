@@ -182,12 +182,12 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 		t.Fatal("the fixture's near request is not within the per-test similarity of mock-frame")
 	}
 	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", string(frame): "mock-frame", string(like): "", "GET y": "", "HELLO": "", "SET z": ""} {
-		if got := notOwnedExchange([][]byte{[]byte(req)}, store, store.MarkCallRound()); got != want {
+		if got, _ := notOwnedExchange([][]byte{[]byte(req)}, store, store.MarkCallRound()); got != want {
 			t.Errorf("%q: %q, want %q", req, got, want)
 		}
 	}
 	store.exact = false
-	if got := notOwnedExchange([][]byte{[]byte("AUTH step2")}, store, store.MarkCallRound()); got != "" {
+	if got, _ := notOwnedExchange([][]byte{[]byte("AUTH step2")}, store, store.MarkCallRound()); got != "" {
 		t.Fatalf("without exact serving: %q", got)
 	}
 	// The miss the parser files names it, says it is not the test's, and

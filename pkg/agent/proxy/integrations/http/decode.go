@@ -251,6 +251,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
 				call integrations.CallRound
+				// db is the store the request's matcher and its miss read:
+				// under the switch held to call's staging
+				// (integrations.HoldToRound), so a request is never answered
+				// with, nor diagnosed against, a recording of a set the
+				// replay staged after its first read. The miss's lookup of a
+				// recording made elsewhere (notOwnedRecording) checks the
+				// staging last, and says that it moved.
+				db = mockDb
 			)
 			switch {
 			case provenswitch.On() && opts.Learn:
@@ -268,6 +276,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						stub, ok, lmiss = answer, true, nil
 					}
 				}
+				if !ok {
+					// The miss is diagnosed in the round the learn step's
+					// first pass read.
+					db, _ = integrations.HoldToRound(mockDb, call)
+				}
 			default:
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
@@ -278,7 +291,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// matcher reads the store: its staging and view, kept
 					// in O(1) for a miss to be asked of.
 					call = integrations.MarkCallRound(mockDb)
-					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					// Every matcher reads the store held to it: once the
+					// replay stages another set, the request finds nothing
+					// to be answered with, and misses saying so.
+					db, _ = integrations.HoldToRound(mockDb, call)
+					stub, err = h.learnedMatch(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
 				if !ok && err == nil {
@@ -291,7 +308,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if proven {
 						detect, correlate = false, true
 					}
-					ok, stub, diag, err = h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					ok, stub, diag, err = h.match(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 				}
 			}
 			if err != nil {
@@ -307,7 +324,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
-					lmiss = h.orderMiss(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
 				}
 				if lmiss != nil {
 					diag = lmiss.diag()
@@ -318,12 +335,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				n := h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
-					diag = h.answeredDiag(reqCtx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
+					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				}
@@ -338,7 +355,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var elsewhere *models.Mock
 				restaged := false
 				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere, restaged = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)

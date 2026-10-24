@@ -403,6 +403,35 @@ func MarkCallRound(mockDb MockMemDb) CallRound {
 	return CallRound{}
 }
 
+// RoundHolder is an optional MockMemDb capability under exact serving: the
+// store held to the staging a call's first read was made in (call, from
+// MarkCallRound). Once the replay staged a test set after that read, every
+// read of held finds nothing and every consume door of it is refused, so a
+// matcher that reads the store after the mark never answers the call with a
+// recording of the next set, nor names one as its closest: the call misses,
+// and restaged then reports true, for the miss to say why. A read is checked
+// after it is made (a staging moves its epoch before it changes what a read
+// shows), a consume in the step that settles it. held is one call's, as a
+// ServingIn store is: not for sharing between goroutines, nor for keeping as
+// the parser's store. The agent's MockManager and its connection views
+// implement it.
+type RoundHolder interface {
+	HoldToRound(call CallRound) (held MockMemDb, restaged func() bool)
+}
+
+// HoldToRound is db held to call (RoundHolder): the store a parser's matcher
+// reads for the call it marked, and its miss's diagnosis reads too. db
+// itself, never restaged, for the zero CallRound or a store that does not
+// hold.
+func HoldToRound(db MockMemDb, call CallRound) (MockMemDb, func() bool) {
+	if h, ok := db.(RoundHolder); ok && call.Read() {
+		return h.HoldToRound(call)
+	}
+	return db, notRestaged
+}
+
+func notRestaged() bool { return false }
+
 // BegunOwnerReader is an optional MockMemDb extension under exact serving:
 // whether a staged mock (one StagedFinder names) is owned by a test that has
 // begun in the current staging. A parser whose answer depends on what a test

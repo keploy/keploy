@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // roundStore is a set staged under exact serving with the background
@@ -1275,5 +1276,68 @@ func TestTheRoundsCandidatesOnDiskNameWhatCouldNotBeRead(t *testing.T) {
 	}
 	if len(errs) != 2 || errs[0].Name != "" || !errors.Is(errs[0], closed) || errs[1].Name != "disk-bad" || !errors.Is(errs[1], broken) {
 		t.Fatalf("what could not be read: %+v", errs)
+	}
+}
+
+// A consume door of a store held to a call's mark (HoldToRound) is refused
+// once the replay staged a test set again, even the same set, whose test
+// owns a recording of the very name the call read: what the call read was of
+// the staging before, and is never spent in the next. A read of it then
+// finds nothing, and the store says it was restaged. A call marked in the
+// new staging consumes the recording.
+func TestAConsumeHeldToACallsMarkIsRefusedOnceTheSetIsStagedAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	own := r3Mock("t-jobs", now, "GET", "/jobs/1", "", `{"job":1}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	stage := func() {
+		mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, now.Add(time.Hour))
+		mm.ServeExactTest("T", []*models.Mock{own})
+	}
+	readOwn := func(db integrations.MockMemDb) *models.Mock {
+		t.Helper()
+		mocks, err := db.GetPerTestMocksInWindow()
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := db.GetSessionMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, mk := range append(mocks, session...) {
+			if mk.Name == own.Name {
+				return mk
+			}
+		}
+		return nil
+	}
+	consume := func(db integrations.MockMemDb, mk *models.Mock) bool {
+		c := *mk
+		return db.DeleteFilteredMock(c) || db.UpdateUnFilteredMock(mk, &c)
+	}
+	stage()
+	held, restaged := mm.HoldToRound(mm.MarkCallRound())
+	read := readOwn(held)
+	if read == nil {
+		t.Fatal("precondition: the held store does not show the open test's recording")
+	}
+	stage()
+	if consume(held, read) {
+		t.Fatal("a call's read of the staging before was spent in the set staged again")
+	}
+	if !restaged() {
+		t.Fatal("the held store does not say the set was staged again under the call")
+	}
+	if readOwn(held) != nil {
+		t.Fatal("a read of the held store shows the set staged again after the call's mark")
+	}
+
+	again, restagedAgain := mm.HoldToRound(mm.MarkCallRound())
+	if mk := readOwn(again); mk == nil || !consume(again, mk) {
+		t.Fatal("a call marked in the new staging does not consume its test's recording")
+	}
+	if restagedAgain() {
+		t.Fatal("a call marked in the staging it consumed in says the set was staged again")
 	}
 }

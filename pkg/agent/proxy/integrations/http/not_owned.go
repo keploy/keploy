@@ -57,9 +57,12 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 }
 
 // restagedNote is what a miss says when the replay staged a test set again
-// while the call was decided (notOwnedRecording): the next set, or the same
-// set for a replaced agent, which the store does not tell apart.
-const restagedNote = "keploy replay staged a test set again while it decided this request, so keploy names no recording made elsewhere for it: a request is never named as a recording of a staging made after it began."
+// while the call was decided: its matcher, held to the call's first read
+// (integrations.HoldToRound), found nothing to answer it with, or its lookup
+// of a recording made elsewhere (notOwnedRecording) named none. The next
+// set, or the same set for a replaced agent, which the store does not tell
+// apart.
+const restagedNote = "keploy replay staged a test set again while it decided this request, so keploy answered it with no recording and names none made elsewhere for it: a request is never answered with, nor named as, a recording of a staging made after it began."
 
 // amzTargetHeader names an AWS JSON-protocol call's action.
 const amzTargetHeader = "X-Amz-Target"

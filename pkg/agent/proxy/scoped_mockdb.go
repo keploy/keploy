@@ -417,6 +417,24 @@ func (s *scopedMockDb) ServingFor(f *learn.Flight) integrations.MockMemDb {
 
 var _ integrations.ServeTeller = (*scopedMockDb)(nil)
 
+// HoldToRound implements integrations.RoundHolder: this view over the store
+// held to call, so a parser on a connection whose view was made before exact
+// serving began reads and consumes only while the staging is still its
+// call's, as on the bare manager, filtered by this worker's view. s itself,
+// never restaged, from a store that does not hold. The copy is one call's
+// (RoundHolder), as ServingFor's is.
+func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	inner, restaged := integrations.HoldToRound(s.MockMemDb, call)
+	if inner == s.MockMemDb {
+		return s, restaged
+	}
+	c := *s
+	c.MockMemDb = inner
+	return &c, restaged
+}
+
+var _ integrations.RoundHolder = (*scopedMockDb)(nil)
+
 // passThrough reports whether this view passes every read and consume
 // straight to the store it wraps: while the store serves each test exactly
 // its own mocks (exact serving, the proven switch), it alone decides what

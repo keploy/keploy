@@ -3,6 +3,7 @@ package proxy
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -281,12 +282,19 @@ func (m *MockManager) bumpStagingEpoch() {
 // roundGuard is a take checked against a snapshot's round (at): refused, and
 // why kept, once the store moved from it. in is the request the take serves,
 // as its parser said (integrations.ServingIn), told to the served observer;
-// free: a guard of ServingFor that checks no round.
+// free: a guard of ServingFor that checks no round. staging: a guard of a
+// call's mark (HoldToRound) that checks the staging alone (at.Epoch): a view
+// replaced within it, at a test's begin or end, is still the call's set, and
+// a consume that finds its view closed is settled in the view that replaces
+// it, as one with no guard is. restaged: a staging guard found the staging
+// moved.
 type roundGuard struct {
-	at    integrations.RoundAt
-	moved string
-	in    *learn.Flight
-	free  bool
+	at       integrations.RoundAt
+	moved    string
+	in       *learn.Flight
+	free     bool
+	staging  bool
+	restaged bool
 }
 
 // checks says g checks its take against a round: a guard, not ServingFor's.
@@ -320,7 +328,7 @@ func (m *MockManager) movedLocked(at integrations.RoundAt, v *exactView) (why st
 	case m.exactView() == nil:
 		return "exact serving ended", nil
 	case m.stagingEpoch.Load() != at.Epoch:
-		return "the staging moved: the test set was staged again", nil
+		return restagedWhy, nil
 	case r.gen != at.Gen:
 		return "the round moved since it was read: " + r.moved, nil
 	}
@@ -339,6 +347,15 @@ func (m *MockManager) movedLocked(at integrations.RoundAt, v *exactView) (why st
 func (m *MockManager) guardLocked(g *roundGuard, v *exactView) (ok bool, wait <-chan struct{}) {
 	if !g.checks() {
 		return true, nil
+	}
+	if g.staging {
+		if m.stagingEpoch.Load() == g.at.Epoch {
+			return true, nil
+		}
+		m.exact.round.mu.Unlock()
+		g.restaged = true
+		g.refuse(restagedWhy)
+		return false, nil
 	}
 	why, wait := m.movedLocked(g.at, v)
 	if why == "" && wait == nil {
@@ -719,3 +736,160 @@ var (
 	_ integrations.ServeTeller = (*MockManager)(nil)
 	_ integrations.ServeTeller = (*roundScope)(nil)
 )
+
+// restagedWhy is what a guard keeps when the staging moved under its take.
+const restagedWhy = "the staging moved: the test set was staged again"
+
+// HoldToRound implements integrations.RoundHolder: the manager held to the
+// staging call was marked in (heldScope). restaged reports whether a read or
+// a consume door of it found the staging moved since.
+func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	h := &heldScope{roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
+	return h, h.restaged
+}
+
+var (
+	_ integrations.RoundHolder = (*MockManager)(nil)
+	_ integrations.ServeTeller = (*heldScope)(nil)
+)
+
+// heldScope is the manager held to one call's staging (HoldToRound): its
+// consume doors (roundScope's, and the background spend and claim) settle
+// only while the staging is still the call's, and each read that serves or
+// diagnoses a call finds nothing once the staging moved, checked after the
+// read is made: a staging moves its epoch before it changes the trees or
+// installs a view, so a read the staging is still the call's after was of
+// the call's set. One call's: not for sharing between goroutines.
+type heldScope struct{ roundScope }
+
+// restaged reports whether a read or a consume door of h found the staging
+// moved since its call's mark.
+func (h *heldScope) restaged() bool { return h.g.restaged }
+
+// moved reports whether the staging moved since h's call's mark, h then
+// restaged.
+func (h *heldScope) moved() bool {
+	if h.stagingEpoch.Load() == h.g.at.Epoch {
+		return false
+	}
+	h.g.restaged = true
+	h.g.refuse(restagedWhy)
+	return true
+}
+
+// held is mocks when the staging is still h's call's after they were read;
+// none once it moved.
+func (h *heldScope) held(mocks []*models.Mock, err error) ([]*models.Mock, error) {
+	if h.moved() {
+		return nil, nil
+	}
+	return mocks, err
+}
+
+// heldOf is held for a read that returns no error.
+func (h *heldScope) heldOf(mocks []*models.Mock) []*models.Mock {
+	out, _ := h.held(mocks, nil)
+	return out
+}
+
+// ServingFor implements integrations.ServeTeller: h, whose consume doors
+// also tell the served observer that what they serve is served in the
+// request f. h is one call's, so it is told in place.
+func (h *heldScope) ServingFor(f *learn.Flight) integrations.MockMemDb {
+	h.g.in = f
+	return h
+}
+
+func (h *heldScope) GetFilteredMocks() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetFilteredMocks())
+}
+
+func (h *heldScope) GetFilteredMocksInWindow() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetFilteredMocksInWindow())
+}
+
+func (h *heldScope) GetUnFilteredMocks() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetUnFilteredMocks())
+}
+
+func (h *heldScope) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetPerTestMocksInWindow())
+}
+
+func (h *heldScope) GetSessionMocks() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetSessionMocks())
+}
+
+func (h *heldScope) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetSessionMocksInWindow(start, end))
+}
+
+func (h *heldScope) GetSessionScopedMocks() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetSessionScopedMocks())
+}
+
+func (h *heldScope) GetStartupMocks() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetStartupMocks())
+}
+
+func (h *heldScope) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetStartupMocksByKind(kind))
+}
+
+func (h *heldScope) GetConnectionMocks(connID string) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetConnectionMocks(connID))
+}
+
+func (h *heldScope) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetFilteredMocksByKind(kind))
+}
+
+func (h *heldScope) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetUnFilteredMocksByKind(kind))
+}
+
+func (h *heldScope) GetCarryOverMocks() ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetCarryOverMocks())
+}
+
+func (h *heldScope) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetCarryOverMocksByKind(kind))
+}
+
+func (h *heldScope) Background(kind models.Kind) []*models.Mock {
+	return h.heldOf(h.MockManager.Background(kind))
+}
+
+func (h *heldScope) SpentBackground(kind models.Kind) []*models.Mock {
+	return h.heldOf(h.MockManager.SpentBackground(kind))
+}
+
+func (h *heldScope) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
+	unused, spent = h.MockManager.KindBackground(kind)
+	if h.moved() {
+		return nil, nil
+	}
+	return unused, spent
+}
+
+func (h *heldScope) PairingCandidates(kind models.Kind) []*models.Mock {
+	return h.heldOf(h.MockManager.PairingCandidates(kind))
+}
+
+func (h *heldScope) ConsumedTestMocks() []*models.Mock {
+	return h.heldOf(h.MockManager.ConsumedTestMocks())
+}
+
+func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {
+	return h.heldOf(h.MockManager.ExactTakenCandidates(kind))
+}
+
+func (h *heldScope) SpendByKind(mk *models.Mock) bool {
+	ok, _ := h.spendByKindAt(mk, &h.g)
+	return ok
+}
+
+func (h *heldScope) ClaimPairing(mk *models.Mock) bool {
+	ok, _ := h.claimPairingAt(mk, &h.g)
+	return ok
+}
