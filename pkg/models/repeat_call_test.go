@@ -56,3 +56,92 @@ func TestRepeatNoteExplains(t *testing.T) {
 		t.Error("a nil note says something")
 	}
 }
+
+// Two HTTP recordings have one fingerprint when they sent the same method,
+// URL (the query in any order), X-Amz-Target and body, whatever their other
+// headers; any of those that differs, or a mock of another kind, gives none
+// in common. A mock whose payload a read left on disk answers as it did in
+// memory.
+func TestRequestFingerprintNamesOneIdenticalRequest(t *testing.T) {
+	mk := func(method, u, target, body string, header map[string]string) *Mock {
+		h := map[string]string{"X-Trace": "1"}
+		for k, v := range header {
+			h[k] = v
+		}
+		if target != "" {
+			h["x-amz-target"] = target
+		}
+		return &Mock{Name: "m", Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: Method(method), URL: u, Header: h, Body: body}}}
+	}
+	base := mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "Svc.Get", `{"k":1}`, nil).RequestFingerprint()
+	if base == "" {
+		t.Fatal("an HTTP recording has no fingerprint")
+	}
+	if got := mk("POST", "http://sap:8080/odata/Rates?a=1&b=2", "Svc.Get", `{"k":1}`, map[string]string{"X-Trace": "2", "Date": "now"}).RequestFingerprint(); got != base {
+		t.Error("the query's order or another header split one request in two")
+	}
+	for name, m := range map[string]*Mock{
+		"method": mk("PUT", "http://sap:8080/odata/Rates?b=2&a=1", "Svc.Get", `{"k":1}`, nil),
+		"host":   mk("POST", "http://sap2:8080/odata/Rates?b=2&a=1", "Svc.Get", `{"k":1}`, nil),
+		"query":  mk("POST", "http://sap:8080/odata/Rates?b=3&a=1", "Svc.Get", `{"k":1}`, nil),
+		"target": mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "Svc.Put", `{"k":1}`, nil),
+		"body":   mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "Svc.Get", `{"k":2}`, nil),
+	} {
+		if m.RequestFingerprint() == base {
+			t.Errorf("a request with another %s has the same fingerprint", name)
+		}
+	}
+	a := &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://x/", Body: "a|", Binary: "b"}}}
+	b := &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://x/", Body: "a", Binary: "|b"}}}
+	if a.RequestFingerprint() == b.RequestFingerprint() {
+		t.Error("two splits of the same bytes between body and binary are one request")
+	}
+	if fp := (&Mock{Kind: Postgres, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://x/"}}}).RequestFingerprint(); fp != "" {
+		t.Error("a mock of another kind has a fingerprint")
+	}
+	onDisk := mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "Svc.Get", `{"k":1}`, nil)
+	onDisk.LeavePayloadOnDisk(&fileSource{}, PayloadAt{Name: "m"})
+	if onDisk.Spec.HTTPReq != nil || onDisk.RequestFingerprint() != base {
+		t.Error("a mock whose payload is on disk lost its request's fingerprint")
+	}
+}
+
+// The mirror's sentence, on a recorded call the replay never made, names the
+// recording and test it is identical to, both gaps, and the cause the gaps
+// support: a replay gap shorter than at record is the likely sign.
+func TestRepeatNoteExplainsAnUnmadeCall(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	fresh := NewRepeatNote("mock-2", rec, rec, rec.Add(1500*time.Millisecond), rec.Add(70*time.Second))
+	fresh.Test = "get-rates-1"
+	if likely, known := fresh.ElapsedTimeFreshLikely(); !likely || !known {
+		t.Fatalf("a replay gap shorter than at record is not fresh: %v %v", likely, known)
+	}
+	got := fresh.ExplainUnmade("keploy record")
+	for _, want := range []string{"call identical to mock-2", "test get-rates-1's call", "never made it", "began 1.50s after", "at record it began 70.00s after", "likely still held the earlier answer", "'keploy record'"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the unmade note lacks %q: %s", want, got)
+		}
+	}
+	slower := NewRepeatNote("mock-2", rec, rec, rec.Add(80*time.Second), rec.Add(70*time.Second))
+	if likely, _ := slower.ElapsedTimeFreshLikely(); likely {
+		t.Fatal("a replay gap longer than at record was judged fresh")
+	}
+	if s := slower.ExplainUnmade("keploy record"); !strings.Contains(s, "less likely cause") || strings.Contains(s, "likely still held") {
+		t.Errorf("the unmade note of a slower replay: %s", s)
+	}
+	if s := NewRepeatNote("mock-2", rec, rec, rec.Add(time.Second), time.Time{}).ExplainUnmade("keploy record"); !strings.Contains(s, "an earlier test of this set") || strings.Contains(s, "at record it began") || !strings.Contains(s, "If the application keeps that answer") {
+		t.Errorf("the unmade note with no test and no record gap: %s", s)
+	}
+	if _, known := (*RepeatNote)(nil).ElapsedTimeFreshLikely(); known || (*RepeatNote)(nil).ExplainUnmade("x") != "" || (*RepeatNote)(nil).Brief(true) != "" {
+		t.Error("a nil note says something")
+	}
+	if b := fresh.Brief(true); b != "identical to mock mock-2, which answered test get-rates-1's call 1.50s earlier at replay and 70.00s earlier at record: likely an answer the application keeps for a span of elapsed time" {
+		t.Errorf("the unmade brief is %q", b)
+	}
+	if b := fresh.Brief(false); strings.Contains(b, "likely") {
+		t.Errorf("a miss whose replay gap is shorter claims a likely cause: %q", b)
+	}
+	if b := NewRepeatNote("mock-2", rec, rec, rec.Add(time.Second), time.Time{}).Brief(false); b != "identical to mock mock-2, which answered an earlier test's call 1.00s earlier at replay" {
+		t.Errorf("the brief with no test and no record gap is %q", b)
+	}
+}

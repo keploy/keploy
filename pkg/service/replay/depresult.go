@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -23,6 +24,10 @@ type mockDisplayInfo struct {
 	summary  string
 	protocol string
 	target   string
+	// request is the mock's models.Mock.RequestFingerprint and recordedAt
+	// its request's time at record, for a mock whose payload is in memory.
+	request    string
+	recordedAt time.Time
 	// onDisk is the mock when a replay's read left its payload on disk
 	// (models.Mock.LeavePayloadOnDisk): its summary and target, which can
 	// carry a whole recorded command, are worked out when a report names it
@@ -36,6 +41,22 @@ func (i mockDisplayInfo) summaryOf() string {
 		return models.MockSummaryFromSpec(i.onDisk)
 	}
 	return i.summary
+}
+
+// requestOf is the mock's request fingerprint (models.Mock.RequestFingerprint).
+func (i mockDisplayInfo) requestOf() string {
+	if i.onDisk != nil {
+		return i.onDisk.RequestFingerprint()
+	}
+	return i.request
+}
+
+// recordedAtOf is when the mock's request was recorded.
+func (i mockDisplayInfo) recordedAtOf() time.Time {
+	if i.onDisk != nil {
+		return i.onDisk.Spec.ReqTimestampMock
+	}
+	return i.recordedAt
 }
 
 // targetOf is the mock's target (mockTargetFromSpec).

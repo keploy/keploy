@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -102,3 +104,171 @@ func TestMarkRepeatOfMeasuresTheRecordGapFromTheTest(t *testing.T) {
 		t.Fatalf("the end-of-run row's note is %+v", row.Repeat)
 	}
 }
+
+// The mirror: a recorded call the replay never made is named with the newest
+// identical recording (by fingerprint) that answered another test's call
+// before this test began at replay and was recorded before it, with that
+// test and both gaps from the controlled timeline; every recording that is
+// no such twin is passed over, and an unconsumed recording with another
+// explanation, or of no fingerprinted kind, is left as it was.
+func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	replay := rec.Add(time.Hour)
+	http := func(name, body string, at time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at,
+			HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://sap/rates", Body: body}}}
+	}
+	lookup := map[string]mockDisplayInfo{}
+	addMockDisplayInfo(lookup, []*models.Mock{
+		http("mock-1", "", rec.Add(time.Second)),      // test-1's: the oldest twin
+		http("mock-2", "", rec.Add(2*time.Second)),    // test-2's: the newest twin before test-9
+		http("mock-3", "", rec.Add(3*time.Second)),    // test-3's: answered after test-9 began
+		http("mock-4", "", rec.Add(4*time.Second)),    // test-9's own: consumed by it alone
+		http("mock-5", "", rec.Add(80*time.Second)),   // test-5's: recorded after mock-9
+		http("mock-6", "", rec.Add(5*time.Second)),    // a session recording
+		http("mock-7", "other", rec.Add(time.Second)), // another request
+		http("mock-9", "", rec.Add(70*time.Second)),   // test-9's unconsumed recording
+		http("mock-10", "", rec.Add(71*time.Second)),  // test-9's, consumed by a sibling
+		{Name: "pg-1", Kind: models.Postgres},
+		{Name: "pg-0", Kind: models.Postgres},
+	})
+	served := func(name string, after time.Duration, lt models.Lifetime) models.MockState {
+		return models.MockState{Name: name, Timestamp: replay.Add(after).UnixNano(), Lifetime: lt}
+	}
+	consumed := map[string]models.MockState{
+		"mock-1": served("mock-1", time.Second, models.LifetimePerTest),
+		"mock-2": served("mock-2", 2*time.Second, models.LifetimePerTest),
+		"mock-3": served("mock-3", 9*time.Second, models.LifetimePerTest),
+		"mock-4": served("mock-4", 3*time.Second, models.LifetimePerTest),
+		"mock-5": served("mock-5", 3*time.Second, models.LifetimePerTest),
+		"mock-6": served("mock-6", 3500*time.Millisecond, models.LifetimeSession),
+		"mock-7": served("mock-7", 3*time.Second, models.LifetimePerTest),
+		"pg-0":   served("pg-0", 3*time.Second, models.LifetimePerTest),
+	}
+	consumers := map[string][]string{
+		"mock-1": {"test-1"}, "mock-2": {"test-2"}, "mock-3": {"test-3"}, "mock-4": {"test-9"},
+		"mock-5": {"test-5"}, "mock-6": {"test-6"}, "mock-7": {"test-7"}, "pg-0": {"test-1"},
+	}
+	unconsumed := []models.UnconsumedMock{
+		{Name: "mock-9", Kind: "Http"},
+		{Name: "mock-10", Kind: "Http", ConsumedBy: "test-8"},
+		{Name: "pg-1", Kind: "Postgres"},
+		{Name: "mock-9", Kind: "Http", Concurrent: "test-8"},
+		{Name: "mock-9", Kind: "Http", WhyNot: models.ConcurrentNotSharedKind},
+		{Name: "mock-9", Kind: "Http", Unkept: 1},
+	}
+	results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnconsumedMocks: unconsumed}}}
+	testCases := []*models.TestCase{{Name: "test-9", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: rec.Add(69 * time.Second)}}}
+	starts := map[string]time.Time{"test-9": replay.Add(4 * time.Second)}
+
+	named := markUnmadeRepeats(results, consumers, consumed, lookup, starts, testCases)
+	u := results[0].FailureInfo.UnconsumedMocks
+	n := u[0].RepeatOf
+	if n == nil || n.Mock != "mock-2" || n.Test != "test-2" {
+		t.Fatalf("the unmade call's twin is %+v, want mock-2 of test-2", n)
+	}
+	if n.ReplayGapSeconds != 2 || !n.RecordGapKnown || n.RecordGapSeconds != 67 {
+		t.Fatalf("the gaps are %+v, want 2s at replay and 67s at record", n)
+	}
+	if !strings.Contains(u[0].NextSteps, "test test-2's call") || !strings.Contains(u[0].NextSteps, "likely still held") {
+		t.Fatalf("the unmade call's next step: %s", u[0].NextSteps)
+	}
+	for _, other := range u[1:] {
+		if other.RepeatOf != nil || other.NextSteps != "" {
+			t.Fatalf("a recording with another explanation, or of no fingerprinted kind, was noted: %+v", other)
+		}
+	}
+	if len(named) != 1 || named[0] != "test-9: recorded mock-9 was not called; identical to mock-2, answered for test-2 2.00s before this test began at replay, 67.00s before it at record" {
+		t.Fatalf("the set log lines are %q", named)
+	}
+
+	// Without its replay start the test counts its result's Started, to the
+	// second; with every twin answered after that, nothing is noted.
+	again := []models.TestResult{{TestCaseID: "test-9", Started: replay.Unix(), FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-9"}}}}}
+	if named := markUnmadeRepeats(again, consumers, consumed, lookup, nil, testCases); len(named) != 0 || again[0].FailureInfo.UnconsumedMocks[0].RepeatOf != nil {
+		t.Fatalf("a twin answered after the test began was named: %q", named)
+	}
+	again[0].Started = replay.Add(2500 * time.Millisecond).Unix() // 2s, so mock-2, answered at 2s, is not before it
+	if markUnmadeRepeats(again, consumers, consumed, lookup, nil, testCases); again[0].FailureInfo.UnconsumedMocks[0].RepeatOf == nil || again[0].FailureInfo.UnconsumedMocks[0].RepeatOf.Mock != "mock-1" {
+		t.Fatalf("the result's Started was not the fallback: %+v", again[0].FailureInfo.UnconsumedMocks[0].RepeatOf)
+	}
+}
+
+// The twin chosen is the one that answered last before the test began, of a
+// test other than its own, never the recording itself, and recorded before
+// it, where both times are known: a time unknown on either side counts as
+// before. Twins answered at one instant are told apart by name, so the
+// choice does not hang on map order.
+func TestNewestTwinBefore(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	began := rec.Add(time.Hour)
+	twin := func(name string, answered time.Duration, recorded time.Time, tests ...string) answeredTwin {
+		return answeredTwin{name: name, tests: tests, answeredAt: began.Add(-answered), recordedAt: recorded}
+	}
+	for _, c := range []struct {
+		name       string
+		twins      []answeredTwin
+		recordedAt time.Time
+		want, by   string
+	}{
+		{"the recording itself is no twin", []answeredTwin{twin("a", 2*time.Second, rec, "t1"), twin("self", time.Second, time.Time{}, "t8")}, time.Time{}, "a", "t1"},
+		{"an unknown recorded time of the call rules no twin out", []answeredTwin{twin("a", time.Second, rec.Add(time.Hour), "t1")}, time.Time{}, "a", "t1"},
+		{"an unknown recorded time of the twin counts as before", []answeredTwin{twin("a", time.Second, time.Time{}, "t1")}, rec, "a", "t1"},
+		{"the test's own recording is skipped for an earlier one", []answeredTwin{twin("a", 2*time.Second, rec, "t9", "t1"), twin("b", time.Second, rec, "t9")}, rec.Add(time.Minute), "a", "t1"},
+		{"none answered before the test", []answeredTwin{twin("a", 0, rec, "t1")}, rec.Add(time.Minute), "", ""},
+	} {
+		got, by, ok := newestTwinBefore(c.twins, "self", "t9", c.recordedAt, began)
+		if got.name != c.want || by != c.by || ok != (c.want != "") {
+			t.Errorf("%s: got %q by %q (ok %v), want %q by %q", c.name, got.name, by, ok, c.want, c.by)
+		}
+	}
+
+	lookup := map[string]mockDisplayInfo{}
+	consumed := map[string]models.MockState{}
+	consumers := map[string][]string{}
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("tie-%d", i)
+		addMockDisplayInfo(lookup, []*models.Mock{{Name: name, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://sap/x"}}}})
+		consumed[name] = models.MockState{Name: name, Timestamp: began.Add(-time.Second).UnixNano()}
+		consumers[name] = []string{fmt.Sprintf("t%d", i)}
+	}
+	addMockDisplayInfo(lookup, []*models.Mock{{Name: "late", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://sap/x"}}}})
+	consumers["late"] = []string{"t8"} // answered when, unknown: no twin
+	twins := answeredTwins(consumers, consumed, lookup)
+	fp := lookup["tie-0"].requestOf()
+	if list := twins[fp]; len(list) != 8 || list[7].name != "tie-7" {
+		t.Fatalf("the tied twins are %+v, want the eight in name order and no twin whose answer time is unknown", list)
+	}
+}
+
+// A recording whose payload a read left on disk is named as one held in
+// memory is: the lookup asks the mock for its kept fingerprint and recorded
+// time.
+func TestMockLookupKeepsTheRequestOfAMockOnDisk(t *testing.T) {
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	mk := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at, HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://sap/rates"}}}
+	}
+	held, disk := mk("held"), mk("disk")
+	disk.LeavePayloadOnDisk(noPayloads{}, models.PayloadAt{Name: "disk"})
+	lookup := map[string]mockDisplayInfo{}
+	addMockDisplayInfo(lookup, []*models.Mock{held, disk})
+	if lookup["disk"].onDisk == nil {
+		t.Fatal("the mock on disk was not kept as such")
+	}
+	if fp := lookup["held"].requestOf(); fp == "" || lookup["disk"].requestOf() != fp {
+		t.Fatal("a mock on disk lost the fingerprint of its request")
+	}
+	if !lookup["disk"].recordedAtOf().Equal(at) || !lookup["held"].recordedAtOf().Equal(at) {
+		t.Fatal("the lookup lost when a request was recorded")
+	}
+}
+
+// noPayloads is a mock file no test reads back.
+type noPayloads struct{}
+
+func (noPayloads) LoadPayload(context.Context, models.PayloadAt) (*models.Mock, error) {
+	return nil, models.ErrPayloadFileReplaced
+}
+func (noPayloads) SetPayloadMutator(models.PayloadMutator) {}
+func (noPayloads) PayloadMutator() models.PayloadMutator   { return nil }
