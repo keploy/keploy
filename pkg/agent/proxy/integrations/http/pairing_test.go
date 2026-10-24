@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // pairingDb is a store in record's full round of a set served by the background
@@ -438,5 +439,60 @@ func TestAPairingFromAStoreOfNoSnapshotPairsOnlyInTheCallsStaging(t *testing.T) 
 	d, x = db(1)
 	if _, rec := h.pairExactlyFrom(ctx, call, d.pairingDb, n, integrations.CallRound{}); rec != x {
 		t.Fatalf("a call of no read: paired %v, want %s", rec, x.Name)
+	}
+}
+
+// aloftOn is a connection whose request aloft is f (integrations.FlightCarrier),
+// as the proxy's kept connection is.
+type aloftOn struct{ f *learn.Flight }
+
+func (a aloftOn) Hold() func()            { return func() {} }
+func (a aloftOn) InFlight() *learn.Flight { return a.f }
+
+// servingDb tells tr which request each consume serves
+// (integrations.ServeTeller), as the agent's mock manager does.
+type servingDb struct {
+	*mockMemDb
+	tr *learn.Tracker
+	in *learn.Flight
+}
+
+func (d *servingDb) ServingFor(f *learn.Flight) integrations.MockMemDb {
+	return &servingDb{mockMemDb: d.mockMemDb, tr: d.tr, in: f}
+}
+
+func (d *servingDb) DeleteFilteredMock(m models.Mock) bool {
+	c := m
+	d.tr.ServedMockIn(&c, d.in)
+	return true
+}
+
+// HTTP says its serves are its connection's request's, a consume's and a
+// pairing's alike: a heartbeat aloft on a parallel connection, which reads
+// no recording, leaves the call's serve in F's order.
+func TestHTTPSaysWhoseRequestItServes(t *testing.T) {
+	m := &models.Mock{Name: "mock-a", Kind: models.HTTP, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest}}
+	for name, serve := range map[string]func(ctx context.Context, tr *learn.Tracker){
+		"a consume": func(ctx context.Context, tr *learn.Tracker) {
+			h := &HTTP{Logger: zap.NewNop()}
+			if !h.consumeWith(ctx, m, &servingDb{mockMemDb: &mockMemDb{}, tr: tr}, func(*models.MockSpec) {}) {
+				t.Fatal("the consume was refused")
+			}
+		},
+		"a pairing": func(ctx context.Context, _ *learn.Tracker) {
+			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := learn.NewTracker()
+			call, heartbeat := tr.Lift(), tr.Lift()
+			ctx := learn.WithTracker(integrations.WithRequestHolder(context.Background(), aloftOn{call}), tr)
+			serve(ctx, tr)
+			heartbeat.Land()
+			call.Land()
+			if f, l := tr.Placed().Order.Of(m); f != 1 || l != 1 {
+				t.Fatalf("the call's serve at %d,%d; want 1,1: the heartbeat read no recording", f, l)
+			}
+		})
 	}
 }

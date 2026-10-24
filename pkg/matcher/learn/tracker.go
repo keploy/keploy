@@ -47,7 +47,7 @@ type Tracker struct {
 	serves map[string][]int
 	seq    int
 	// flights are the request each serve of the set was made in, by its
-	// number (nil: none, or several aloft; flightOfLocked). NewSet
+	// number (nil: none, or one keploy cannot tell; flightOfLocked). NewSet
 	// replaces it, as serves. aloft are the requests in flight now,
 	// landings the count of those that landed, and flying whether any
 	// connection was ever lifted (Lift): F's order is then read by
@@ -620,7 +620,19 @@ func (t *Tracker) Placed() Placed {
 func (t *Tracker) ServedMock(m *models.Mock) { t.ServedMockAt(m, time.Now()) }
 
 // ServedMockAt is ServedMock of a mock served at the real instant at.
-func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
+func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, nil) }
+
+// ServedMockIn is ServedMock of a mock served in the request in, as the
+// parser that served it said (integrations.ServingIn): the serve is that
+// request's whatever other requests are aloft (Flight). A nil in is
+// ServedMock.
+func (t *Tracker) ServedMockIn(m *models.Mock, in *Flight) { t.servedIn(m, time.Now(), in) }
+
+// ServedMockAtIn is ServedMockIn of a mock served at the real instant at.
+func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) { t.servedIn(m, at, in) }
+
+// servedIn is ServedMockAt of a serve made in the request in (nil: not said).
+func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight) {
 	if t == nil || m == nil {
 		return
 	}
@@ -640,7 +652,7 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
-	if f := t.flightOfLocked(m.IsProtocolPhase()); f != nil {
+	if f := t.flightOfLocked(m.IsProtocolPhase(), in); f != nil {
 		if t.flights == nil {
 			t.flights = map[int]*Flight{}
 		}

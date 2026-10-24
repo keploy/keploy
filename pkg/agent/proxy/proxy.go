@@ -1839,6 +1839,7 @@ func (p *Proxy) setMockManager(m *MockManager) {
 		// Every mock served in a test is an earlier place of its recording
 		// for the learn step (package matcher/learn).
 		m.SetServedObserver(p.learnTracker.ServedMock)
+		m.SetServedInObserver(p.learnTracker.ServedMockIn)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager

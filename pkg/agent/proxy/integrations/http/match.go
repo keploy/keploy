@@ -1690,7 +1690,12 @@ func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb 
 // mock's state written by attach, onto the copies it hands the mock DB
 // (never the shared pooled mock): detected noise, or what the learn step
 // learned.
+//
+// What it consumes is told to the learn step as served in this connection's
+// request (integrations.ServingIn), so a request aloft on another connection
+// that reads no recording leaves this one's serve in F's order.
 func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, attach func(spec *models.MockSpec)) bool {
+	mockDb = integrations.ServingIn(ctx, mockDb)
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()

@@ -279,10 +279,25 @@ func (m *MockManager) bumpStagingEpoch() {
 }
 
 // roundGuard is a take checked against a snapshot's round (at): refused, and
-// why kept, once the store moved from it.
+// why kept, once the store moved from it. in is the request the take serves,
+// as its parser said (integrations.ServingIn), told to the served observer;
+// free: a guard of ServingFor that checks no round.
 type roundGuard struct {
 	at    integrations.RoundAt
 	moved string
+	in    *learn.Flight
+	free  bool
+}
+
+// checks says g checks its take against a round: a guard, not ServingFor's.
+func (g *roundGuard) checks() bool { return g != nil && !g.free }
+
+// flight is the request g's take serves; nil for none said, or no g.
+func (g *roundGuard) flight() *learn.Flight {
+	if g == nil {
+		return nil
+	}
+	return g.in
 }
 
 // refuse keeps why the first move refused a take.
@@ -322,7 +337,7 @@ func (m *MockManager) movedLocked(at integrations.RoundAt, v *exactView) (why st
 // the lock let go, when it is about to (movedLocked). ok: the take goes on,
 // holding the lock. With no g, every take goes on.
 func (m *MockManager) guardLocked(g *roundGuard, v *exactView) (ok bool, wait <-chan struct{}) {
-	if g == nil {
+	if !g.checks() {
 		return true, nil
 	}
 	why, wait := m.movedLocked(g.at, v)
@@ -684,3 +699,23 @@ func (s *roundScope) MarkMockAsUsed(mock models.Mock) bool {
 }
 
 var _ integrations.RoundScope = (*roundScope)(nil)
+
+// ServingFor implements integrations.ServeTeller: the manager, whose consume
+// doors tell the served observer that what they serve is served in the
+// request f, and check no round.
+func (m *MockManager) ServingFor(f *learn.Flight) integrations.MockMemDb {
+	return &roundScope{MockManager: m, g: roundGuard{in: f, free: true}}
+}
+
+// ServingFor implements integrations.ServeTeller: s, whose consume doors tell
+// the served observer that what they serve is served in the request f. s is
+// one call's, so it is told in place.
+func (s *roundScope) ServingFor(f *learn.Flight) integrations.MockMemDb {
+	s.g.in = f
+	return s
+}
+
+var (
+	_ integrations.ServeTeller = (*MockManager)(nil)
+	_ integrations.ServeTeller = (*roundScope)(nil)
+)

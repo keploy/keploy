@@ -12,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -70,6 +71,10 @@ type MockManager struct {
 	// outside the manager's own locks: under the proven switch, the learn
 	// step's earlier places of the test's recording (learn.Tracker.ServedMock).
 	servedObserver atomic.Pointer[func(*models.Mock)]
+	// servedInObserver, when set, is told instead of a mock a consume door
+	// serves in a request its parser said (integrations.ServingIn,
+	// learn.Tracker.ServedMockIn).
+	servedInObserver atomic.Pointer[func(*models.Mock, *learn.Flight)]
 
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
@@ -3263,15 +3268,15 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 		served = old
 	}
 	if m.exactView() == nil {
-		if g != nil {
+		if g.checks() {
 			g.refuse("exact serving is off")
 			return false
 		}
-		m.observeServed(new)
+		m.observeServed(new, g.flight())
 	} else {
 		// Under exact serving the served observer is told in the step that
 		// settles the consume, holding the round lock (exactConsumeAt).
-		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new) }) {
+		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new, g.flight()) }) {
 		case exactServed:
 			return true
 		case exactRefused:
@@ -4187,14 +4192,32 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	m.servedObserver.Store(&f)
 }
 
+// SetServedInObserver sets the observer told, instead of the served
+// observer, of a mock served in a request its parser said (ServingFor);
+// nil clears it. The same rules as SetServedObserver's hold.
+func (m *MockManager) SetServedInObserver(f func(*models.Mock, *learn.Flight)) {
+	if f == nil {
+		m.servedInObserver.Store(nil)
+		return
+	}
+	m.servedInObserver.Store(&f)
+}
+
 // observeServed tells the served observer of mock before a parser's claim
 // takes it out of the pool, so a request reading the pool and then the
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
-// same mock: the observer is told of a mock that was served either way.
-func (m *MockManager) observeServed(mock *models.Mock) {
+// same mock: the observer is told of a mock that was served either way. in
+// is the request it is served in, as its parser said (nil: not said).
+func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	if mock == nil || mock.Name == "" {
 		return
+	}
+	if in != nil {
+		if f := m.servedInObserver.Load(); f != nil {
+			(*f)(mock, in)
+			return
+		}
 	}
 	if f := m.servedObserver.Load(); f != nil {
 		(*f)(mock)
@@ -4204,9 +4227,16 @@ func (m *MockManager) observeServed(mock *models.Mock) {
 // observeServedCopy is observeServed of a mock a door took by value: the
 // observer keeps a copy of its own, made only when there is an observer (the
 // proven switch), so the door's mock does not move to the heap without one.
-func (m *MockManager) observeServedCopy(mock models.Mock) {
+func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	if mock.Name == "" {
 		return
+	}
+	if in != nil {
+		if f := m.servedInObserver.Load(); f != nil {
+			c := mock
+			(*f)(&c, in)
+			return
+		}
 	}
 	if f := m.servedObserver.Load(); f != nil {
 		c := mock

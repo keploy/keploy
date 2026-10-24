@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // beforeWrite is a conn whose Write runs before first, as the application
@@ -144,6 +148,90 @@ func TestAKeptConnectionTellsTheLearnStepItsRequests(t *testing.T) {
 		}
 		if err := c.Close(); err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+// A parser that says whose request it serves (integrations.ServingIn) has
+// the mock manager tell the learn step the serve is that connection's
+// request's: a heartbeat aloft on a parallel connection, which reads no
+// recording, leaves it in F's order, through each consume door, and through
+// a round scope too. A connection told to no tracker says nothing.
+func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
+	doors := map[string]func(db integrations.MockMemDb, m models.Mock) bool{
+		"MarkMockAsUsed":       func(db integrations.MockMemDb, m models.Mock) bool { return db.MarkMockAsUsed(m) },
+		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.UpdateUnFilteredMock(&m, &m); return true },
+		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteFilteredMock(m); return true },
+		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteUnFilteredMock(m); return true },
+		"DeleteStartupMock":    func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteStartupMock(m); return true },
+	}
+	for name, door := range doors {
+		t.Run(name, func(t *testing.T) {
+			tr := learn.NewTracker()
+			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+			defer mm.Close()
+			mm.SetServedObserver(tr.ServedMock)
+			mm.SetServedInObserver(tr.ServedMockIn)
+			c1, app1 := flyingPair(t, tr, nil)
+			heartbeat, app2 := flyingPair(t, tr, nil)
+			request(t, c1, app1)
+			request(t, heartbeat, app2)
+			ctx := integrations.WithRequestHolder(context.Background(), c1)
+			door(integrations.ServingIn(ctx, mm), models.Mock{Name: "mock-a", Kind: models.HTTP})
+			_, _ = heartbeat.Write([]byte("H"))
+			_, _ = c1.Write([]byte("A"))
+			if fa, la := tr.Placed().Order.Of(&models.Mock{Name: "mock-a", Kind: models.HTTP}); fa != 1 || la != 1 {
+				t.Fatalf("A at %d,%d; want 1,1: the heartbeat read no recording", fa, la)
+			}
+		})
+	}
+	for name, door := range doors {
+		t.Run("under exact serving, through the proxy's observers: "+name, func(t *testing.T) {
+			provenswitch.Pin(true)
+			t.Cleanup(provenswitch.Unpin)
+			tr := learn.NewTracker()
+			p := &Proxy{learnTracker: tr}
+			a := exactMock("a", 0, models.LifetimeSession)
+			mm := stagedManager(t, nil, []*models.Mock{a})
+			mm.ServeExactPool("-", nil)
+			mm.ServeExactTest("T", []*models.Mock{a})
+			p.setMockManager(mm)
+			c1, app1 := flyingPair(t, tr, nil)
+			heartbeat, app2 := flyingPair(t, tr, nil)
+			request(t, c1, app1)
+			request(t, heartbeat, app2)
+			pt, _ := mm.GetPerTestMocksInWindow()
+			if len(pt) != 1 {
+				t.Fatalf("the test shows %d mocks; want a", len(pt))
+			}
+			door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), mm), *pt[0])
+			_, _ = heartbeat.Write([]byte("H"))
+			_, _ = c1.Write([]byte("A"))
+			if fa, la := tr.Placed().Order.Of(pt[0]); fa != 1 || la != 1 {
+				t.Fatalf("a at %d,%d; want 1,1: the heartbeat read no recording", fa, la)
+			}
+		})
+	}
+	t.Run("a round scope", func(t *testing.T) {
+		tr := learn.NewTracker()
+		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+		defer mm.Close()
+		c1, app1 := flyingPair(t, tr, nil)
+		request(t, c1, app1)
+		scope := mm.WithinRound(integrations.RoundAt{})
+		got := integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), scope)
+		rs, ok := got.(*roundScope)
+		if !ok || got != integrations.MockMemDb(scope) || rs.g.in != c1.InFlight() || rs.g.free {
+			t.Fatalf("a round scope serving c1's request is %#v; want the scope itself, guarded, told c1's request", got)
+		}
+	})
+	t.Run("told to no tracker", func(t *testing.T) {
+		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+		defer mm.Close()
+		c, app := flyingPair(t, nil, nil)
+		request(t, c, app)
+		if got := integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c), mm); got != integrations.MockMemDb(mm) {
+			t.Fatalf("a connection told to no tracker serves through %T; want the manager itself", got)
 		}
 	})
 }

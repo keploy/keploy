@@ -263,10 +263,13 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock) {
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
 	models.ReportAnswer(ctx, r)
 	if t := learn.TrackerFrom(ctx); t != nil {
+		// In this connection's request (integrations.InFlightOf), as a
+		// consume door tells it (consumeWith).
+		in := integrations.InFlightOf(ctx)
 		if input.arrived.IsZero() {
-			t.ServedMock(x)
+			t.ServedMockIn(x, in)
 		} else {
-			t.ServedMockAt(x, input.arrived)
+			t.ServedMockAtIn(x, input.arrived, in)
 		}
 	}
 }

@@ -1,6 +1,10 @@
 package integrations
 
-import "context"
+import (
+	"context"
+
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+)
 
 // A test's end count (KEPLOY_PROVEN, design v14 §5.2) waits, in a replay,
 // until no accepted connection holds a request the proxy has read and not yet
@@ -156,4 +160,48 @@ func HoldsUnknown(t IntegrationType, p any) bool {
 	}
 	h, ok := p.(RequestHolding)
 	return !ok || !h.HoldsRequests()
+}
+
+// FlightCarrier is a connection whose requests are told to the learn step
+// (learn.Flight), under the proven switch: InFlight is its request aloft
+// now, nil with none.
+type FlightCarrier interface {
+	InFlight() *learn.Flight
+}
+
+// InFlightOf is the request aloft now on the connection ctx's parser serves
+// (WithRequestHolder, FlightCarrier); nil with none, or none told.
+func InFlightOf(ctx context.Context) *learn.Flight {
+	if c, ok := ctx.Value(requestHolderKey{}).(FlightCarrier); ok && c != nil {
+		return c.InFlight()
+	}
+	return nil
+}
+
+// ServeTeller is an optional MockMemDb capability: ServingFor is the store
+// whose consume doors tell the learn step that what they serve is served in
+// the request f (learn.Tracker.ServedMockIn). For one call's consumes: not
+// for sharing between goroutines, nor for keeping as the parser's store (a
+// wrapper is a new store identity). The agent's MockManager and its round
+// scopes implement it.
+type ServeTeller interface {
+	ServingFor(f *learn.Flight) MockMemDb
+}
+
+// ServingIn is db for one consume of a parser serving its connection's
+// request (ctx is the parser's: WithRequestHolder): the store that tells the
+// learn step the serve is that request's, so another request aloft on a
+// parallel connection that reads no recording (a driver's heartbeat, a
+// health check) never makes it one keploy cannot tell (learn.Flight). db
+// itself where ctx carries no request aloft, or db does not tell
+// (ServeTeller): its serves are the one request aloft's, as before.
+func ServingIn(ctx context.Context, db MockMemDb) MockMemDb {
+	f := InFlightOf(ctx)
+	if f == nil {
+		return db
+	}
+	if s, ok := db.(ServeTeller); ok {
+		return s.ServingFor(f)
+	}
+	return db
 }

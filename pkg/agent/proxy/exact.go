@@ -1726,19 +1726,19 @@ func (m *MockManager) waitReplaced(wait <-chan struct{}) {
 // without it.
 func (m *MockManager) exactConsumeValueAt(mock models.Mock, evicts bool, g *roundGuard, observe bool) exactVerdict {
 	if m.exactView() == nil {
-		if g != nil {
+		if g.checks() {
 			g.refuse("exact serving is off")
 			return exactRefused
 		}
 		if observe {
-			m.observeServedCopy(mock)
+			m.observeServedCopy(mock, g.flight())
 		}
 		return exactPass
 	}
 	mk := mock
 	var tell func()
 	if observe {
-		tell = func() { m.observeServedCopy(mk) }
+		tell = func() { m.observeServedCopy(mk, g.flight()) }
 	}
 	return m.exactConsumeAt(&mk, evicts, g, tell)
 }

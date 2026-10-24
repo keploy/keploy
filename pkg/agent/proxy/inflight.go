@@ -404,6 +404,19 @@ func (c *trackedConn) lift() {
 	c.fmu.Unlock()
 }
 
+// InFlight implements integrations.FlightCarrier: c's request aloft now, nil
+// with none, or told to no tracker.
+func (c *trackedConn) InFlight() *learn.Flight {
+	if c.flights == nil {
+		return nil
+	}
+	c.fmu.Lock()
+	defer c.fmu.Unlock()
+	return c.flight
+}
+
+var _ integrations.FlightCarrier = (*trackedConn)(nil)
+
 // land ends c's request in flight, if one is aloft (learn.Flight.Land);
 // ground too stops any later read lifting one.
 func (c *trackedConn) land(ground bool) {
