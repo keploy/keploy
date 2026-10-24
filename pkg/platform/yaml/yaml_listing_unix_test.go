@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -129,6 +130,75 @@ func TestReadSessionIndices_AMissingFolderIsEmpty(t *testing.T) {
 						t.Fatalf("listing missing %s (mode %v) = %q, %v; want empty, nil", p, m, ids, err)
 					}
 				}
+			}
+		})
+	}
+}
+
+// A test set that is a symbolic link fails the listing with an error that
+// names the link and says to replace it with a real folder: keploy writes
+// into test sets, often under sudo, and a link would have it write wherever
+// the link points. It used to be passed over without a word, so the next
+// test set id could be the link's own name and keploy record wrote into the
+// set it points to. A link that cannot be followed is refused too.
+func TestReadSessionIndices_ASymlinkedTestSetIsRefused(t *testing.T) {
+	for _, l := range indexListers() {
+		for _, how := range []string{"to a folder", "target missing", "loop"} {
+			t.Run(l.name+"/"+how, func(t *testing.T) {
+				base := t.TempDir()
+				root := filepath.Join(base, "keploy")
+				seedTestSet(t, root)
+				link := filepath.Join(root, "test-set-1")
+				switch how {
+				case "to a folder":
+					seedTestSet(t, filepath.Join(base, "elsewhere"))
+					if err := os.Symlink(filepath.Join(base, "elsewhere", "test-set-0"), link); err != nil {
+						t.Fatal(err)
+					}
+				case "target missing":
+					if err := os.Symlink(filepath.Join(base, "gone"), link); err != nil {
+						t.Fatal(err)
+					}
+				case "loop":
+					makeLoop(t, link)
+				}
+				ids, err := l.list(root, ModeDir)
+				if err == nil || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "replace the link with a real folder") {
+					t.Fatalf("listing a keploy folder holding a symlinked test set = %q, %v; want an error naming %s and saying to replace it with a real folder", ids, err, link)
+				}
+				if len(ids) != 0 {
+					t.Fatalf("listing failed but returned ids %q", ids)
+				}
+			})
+		}
+	}
+}
+
+// A symbolic link to a file is no test set, like a file, and fails nothing;
+// nor does a link in the place of a folder the listing passes over by name
+// (the reports folder).
+func TestReadSessionIndices_ALinkThatIsNoTestSetIsPassedOver(t *testing.T) {
+	for _, l := range indexListers() {
+		t.Run(l.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "keploy")
+			seedTestSet(t, root)
+			notes := filepath.Join(base, "notes.txt")
+			if err := os.WriteFile(notes, []byte("not a set\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(notes, filepath.Join(root, "notes.txt")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(base, "shared-reports"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(base, "shared-reports"), filepath.Join(root, FolderReports)); err != nil {
+				t.Fatal(err)
+			}
+			ids, err := l.list(root, ModeDir)
+			if err != nil || len(ids) != 1 || ids[0] != "test-set-0" {
+				t.Fatalf("listing = %q, %v; want [test-set-0], nil", ids, err)
 			}
 		})
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
@@ -55,6 +56,29 @@ func TestGetNextTestSetID_FailsWhenTheTestSetsCannotBeListed(t *testing.T) {
 				t.Fatalf("GetNextTestSetID failed but still named a test set %q", id)
 			}
 		})
+	}
+}
+
+// A test set that is a symbolic link to another set stops the recording.
+// It used to be passed over, so with test-set-0 recorded and test-set-1 a
+// link to an existing set, the next test set was named test-set-1 and the
+// recording was written into the set the link points to.
+func TestGetNextTestSetID_FailsOnASymlinkedTestSet(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "keploy")
+	seedRecordedTestSet(t, root)
+	elsewhere := filepath.Join(base, "elsewhere")
+	seedRecordedTestSet(t, elsewhere)
+	if err := os.Symlink(filepath.Join(elsewhere, "test-set-0"), filepath.Join(root, "test-set-1")); err != nil {
+		t.Fatal(err)
+	}
+	r := &Recorder{logger: zap.NewNop(), config: &config.Config{}, testDB: testdb.New(zap.NewNop(), root)}
+	id, err := r.GetNextTestSetID(context.Background())
+	if err == nil || id != "" {
+		t.Fatalf("GetNextTestSetID = %q, %v; want no id and an error (test-set-1 is a symlink to an existing set)", id, err)
+	}
+	if !strings.Contains(err.Error(), "replace the link with a real folder") {
+		t.Fatalf("GetNextTestSetID = %v; want the error to say to replace the link with a real folder", err)
 	}
 }
 

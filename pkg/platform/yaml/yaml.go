@@ -613,6 +613,47 @@ func openIndexDir(path string, logger *zap.Logger) (*os.File, bool, error) {
 	return nil, false, err
 }
 
+// listedDir reports whether v, an entry of the folder at path that
+// ReadSessionIndicesF / ReadSessionIndicesAny list in ModeDir, is one of its
+// folders: a test set, or a test run's reports. A link to a folder -- a
+// symbolic link, or a junction on Windows -- is refused, neither listed nor
+// passed over: keploy writes into these folders (record, the replay's
+// denoise, normalize, templatize, a run's reports), often under sudo, and a
+// link, which a cloned repository can carry, would have it write wherever
+// the link points. Passed over, the link's own name could be handed out as
+// the next test set's, and keploy record would write into the set it points
+// to. A link keploy cannot follow is refused too: keploy cannot rule out
+// that it points to a folder. A link to a file is no folder, like a file.
+func listedDir(path string, v fs.DirEntry) (bool, error) {
+	if v.IsDir() {
+		return true, nil
+	}
+	// Anything else but a regular file may be a link: a symbolic link, or on
+	// Windows a junction, which the listing reports as irregular, not as a
+	// link. os.Stat follows both, and tells a FIFO or a socket for no folder.
+	if v.Type().IsRegular() {
+		return false, nil
+	}
+	p := filepath.Join(path, v.Name())
+	info, err := os.Stat(p)
+	if err == nil && !info.IsDir() {
+		return false, nil
+	}
+	const why = "keploy does not follow a link among the folders it writes into (test sets, test runs)"
+	if err != nil {
+		if _, lerr := os.Lstat(p); errors.Is(lerr, fs.ErrNotExist) {
+			// Gone since the listing: no entry at all.
+			return false, nil
+		}
+		return false, fmt.Errorf("%s is a link keploy cannot follow (%w), and %s: remove it, or replace the link with a real folder", p, err, why)
+	}
+	target := ""
+	if t, rerr := os.Readlink(p); rerr == nil {
+		target = " (" + t + ")"
+	}
+	return false, fmt.Errorf("%s is a link to a folder%s, and %s: replace the link with a real folder holding what it points to", p, target, why)
+}
+
 func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	return ReadSessionIndicesF(ctx, path, logger, mode, FormatYAML)
 }
@@ -646,7 +687,11 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 
 		switch mode {
 		case ModeDir:
-			if v.IsDir() {
+			isDir, err := listedDir(path, v)
+			if err != nil {
+				return nil, err
+			}
+			if isDir {
 				indices = append(indices, name)
 			}
 		case ModeFile:
@@ -694,7 +739,11 @@ func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger,
 
 		switch mode {
 		case ModeDir:
-			if v.IsDir() {
+			isDir, err := listedDir(path, v)
+			if err != nil {
+				return nil, err
+			}
+			if isDir {
 				if _, ok := seen[name]; !ok {
 					seen[name] = struct{}{}
 					indices = append(indices, name)

@@ -60,7 +60,9 @@ func setDirs(dir string, named func(string) bool) ([]string, error) {
 			names = append(names, e.Name())
 			continue
 		}
-		if e.Type()&fs.ModeSymlink == 0 {
+		// Anything else but a regular file may be a link: a symbolic link,
+		// or on Windows a junction, which the listing reports as irregular.
+		if e.Type().IsRegular() {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
