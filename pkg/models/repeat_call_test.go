@@ -63,6 +63,16 @@ func TestRepeatNoteGapsFromAControlledTimeline(t *testing.T) {
 	if likely, known := anchoredNote("m", answered, rec, answered.Add(time.Second), rec.Add(2*time.Second)).ElapsedTimeExpiryLikely(); likely || !known {
 		t.Fatalf("a replay gap shorter than the record gap was judged likely %v (known %v)", likely, known)
 	}
+	// Equal gaps support neither cause: a span measured in elapsed time that
+	// the recording stayed inside and the replay passed (or the other way)
+	// needs the two gaps to differ, and to the hundredth they do not.
+	even := anchoredNote("m", answered, rec, answered.Add(3050*time.Millisecond), rec.Add(3050*time.Millisecond))
+	if likely, known := even.ElapsedTimeExpiryLikely(); likely || !known {
+		t.Fatalf("equal gaps (%+v) were judged an expiry: likely %v, known %v", even, likely, known)
+	}
+	if likely, known := even.ElapsedTimeFreshLikely(); likely || !known {
+		t.Fatalf("equal gaps (%+v) were judged a fresh answer: likely %v, known %v", even, likely, known)
+	}
 }
 
 // The sentence names the recording, the test once it is named, both gaps,
