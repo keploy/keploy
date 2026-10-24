@@ -853,11 +853,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 // changed asks): a word v holds now in any of them; a word it held when
 // recorded in one recorded before the call (at), which the recording gave
 // the application before it too. keploy follows no value of another test's
-// (only a test's own calls carry its variables), so a value copied word for
-// word from what F gave there is refused, never noise, naming where; and so
-// is every such word where one of them could not be read (unread). Stamps
-// are searched as any text where the call's own places say so
-// (stampsEchoed).
+// (only a test's own calls carry its variables), nor of a recording made
+// after the call that F gave the application before it (the recording
+// could not have read it there), so a value copied word for word from what
+// F gave there is refused, never noise, naming where and which of the two
+// it is; and so is every such word where one of them could not be read
+// (unread). Stamps are searched as any text where the call's own places say
+// so (stampsEchoed).
 func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
 	keep, kept := false, false
 	return v.eachChanged(func(i int, t string, recorded bool) string {
@@ -873,7 +875,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording F gave the application before the call that is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				whose := "another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
+				if !g.at.Before(at) {
+					whose = "another test's or was recorded after the call, so no earlier place of the call's own test (the recording made the call before it): keploy follows no value of another test's, nor of a recording made after the call"
+				}
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording F gave the application before the call that is " + whose + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
 			}
 		}
 		return ""

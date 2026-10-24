@@ -98,6 +98,46 @@ func TestAnInstantBuiltOnAServedOneByAnOffsetIsRefused(t *testing.T) {
 	}
 }
 
+// unreadPayload is the payload RawOf gives of m where it cannot read m's
+// text: its name, recorded instant, serve and call, nothing read.
+func unreadPayload(m *models.Mock) Raw {
+	r := RawOf(m, true)
+	return Raw{mock: r.mock, at: r.at, served: r.served, call: r.call}
+}
+
+// An exchange F served leaf by leaf whose payload RawOf could not read is a
+// place the offset rule and the word rule cannot search, never one they
+// drop: an instant built on it by an offset and a word copied from its
+// answer are each refused, naming it and why, never learned as noise. An
+// exchange whose adapter gave no payload (the zero Raw) is read as before.
+func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
+	receive, delivered := offReceives()
+	const p = "body.visible_after"
+	const why = "keploy could not read mock-11, an exchange F served the application leaf by leaf before the call, from its mock (learn.RawOf)"
+	for _, row := range []struct {
+		name      string
+		rec, live Shape
+	}{
+		{"an instant by an offset", strLeaf(p, offSent.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, offGot.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00"))},
+		{"a word", strLeaf(p, "slot-7"), strLeaf(p, "slot-9")},
+	} {
+		for _, payload := range []string{"unread", "none given"} {
+			dc := NewDriftCache()
+			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock}
+			if payload == "unread" {
+				e.Payload = unreadPayload(delivered)
+			}
+			ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, []Earlier{e}, []Raw{dc.RawOf(receive, false)}, nil, nil)[0]
+			switch {
+			case payload == "unread" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, why)):
+				t.Fatalf("%s, %s payload: %s (%s); want it refused, naming mock-11's unread payload", row.name, payload, ln.Kind, ln.Why)
+			case payload != "unread" && strings.Contains(ln.Why, "could not read"):
+				t.Fatalf("%s, %s payload: %s (%s); want no unread place where the adapter gave no payload", row.name, payload, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
 // At the day too: a due date two days before the delivered message's sent
 // day, F delivering a message sent across midnight, moves a day as a read of
 // the clock across midnight does, and no earlier place holds either day. It

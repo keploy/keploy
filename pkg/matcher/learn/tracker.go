@@ -1110,3 +1110,50 @@ func (t *Tracker) State() (number uint64, open, began bool) {
 	defer t.mu.Unlock()
 	return t.epoch, t.open, t.began
 }
+
+// InServeOrder is earlier with the payload of each exchange a learn step
+// served leaf by leaf (Earlier.Payload: keploy's HTTP learn step serves them)
+// read as F served it (Raw.ServedIn: the first and the last of its serves in
+// the one order F served the set's mocks in, by order), where mocks (those F
+// served in the test or before it, as the learn step reads them as earlier
+// places) holds its recording; one they do not hold, or order does not
+// number, keeps an order keploy cannot tell, which the offset rule fails
+// closed on. A copy: earlier is the round's. Nothing is numbered where no
+// payload was read. Every learn step numbers them by it, so a payload reads
+// the same in each.
+func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlier {
+	read := false
+	for _, e := range earlier {
+		read = read || e.Payload.Read()
+	}
+	if !read {
+		return earlier
+	}
+	byID := make(map[string]*models.Mock, len(mocks))
+	var list []*models.Mock
+	for _, m := range mocks {
+		if m == nil {
+			continue
+		}
+		id := m.Name + "\x00" + m.Spec.ReqTimestampMock.String()
+		if _, ok := byID[id]; !ok {
+			byID[id] = m
+			list = append(list, m)
+		}
+	}
+	spans := order.Spans(list)
+	span := make(map[*models.Mock][2]int, len(list))
+	for k, m := range list {
+		span[m] = spans[k]
+	}
+	out := append([]Earlier(nil), earlier...)
+	for i, e := range out {
+		if !e.Payload.Read() {
+			continue
+		}
+		if m, ok := byID[e.Payload.Mock()+"\x00"+e.Payload.At().String()]; ok && span[m][0] > 0 {
+			out[i].Payload = e.Payload.ServedIn(span[m][0], span[m][1])
+		}
+	}
+	return out
+}

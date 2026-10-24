@@ -2654,7 +2654,7 @@ func TestLearnMatchAnOwnCallInFlightReadsEveryEarlierRecording(t *testing.T) {
 // on A and F's on B: refused, naming both. F serving A first, as recorded, F
 // gave the application nothing in the other's place: the move is the lead's,
 // learned as noise. Through the payloads any parser served, and through the
-// exchanges the learn step served leaf by leaf (inServeOrder).
+// exchanges the learn step served leaf by leaf (learn.InServeOrder).
 func TestLearnMatchReadsTheOrderFServedTheTestsMocksIn(t *testing.T) {
 	sentA := learnAt.Add(-4*time.Minute + 473*time.Millisecond)
 	sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
@@ -2974,6 +2974,46 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 	}
 }
 
+// A mock F served before the test (at the start-up, or in the previous
+// test) but recorded after the call is no earlier place of the call's own
+// test for any rule but the offset rule and the word rule: the recording
+// made the call before it. A value of the test's own call that changed to a
+// word of that mock's answer (an id, a whole id, an instant, copied word for
+// word) is bound to nothing and refused, naming the mock and that it was
+// recorded after the call; never learned as noise.
+func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServedBefore(t *testing.T) {
+	inst := learnAt.Add(5 * time.Minute).Format(time.RFC3339)
+	for _, tc := range []struct{ name, rec, live, answer string }{
+		{"a word", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"42"}`},
+		{"an id", `{"ref":"ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323"}`, `{"ref":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, `{"id":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`},
+		{"an instant", `{"ref":"` + learnAt.Add(-3*time.Hour).Format(time.RFC3339) + `"}`, `{"ref":"` + inst + `"}`, `{"at":"` + inst + `"}`},
+	} {
+		for _, where := range []string{"at the start-up", "in the previous test"} {
+			t.Run(tc.name+", "+where, func(t *testing.T) {
+				h, n, opts := learnOn(t)
+				call := learnRecorded("mock-1", time.Millisecond, "POST", "/v1/messages", tc.rec, nil, `{}`)
+				late := learnRecorded("mock-2", 5*time.Millisecond, "GET", "/stats", "", nil, tc.answer)
+				db := &learnDb{perTest: []*models.Mock{call}}
+				tr := learn.NewTracker()
+				if where == "in the previous test" {
+					tr.Begin()
+				}
+				tr.ServedMock(late)
+				tr.Begin()
+				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", tc.live, nil), db, n, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.consumed) != 0 ||
+					!strings.Contains(miss.res.Why, "body.ref changed") ||
+					!strings.Contains(miss.res.Why, "appears in mock-2, a recording F gave the application before the call that is another test's or was recorded after the call") {
+					t.Fatalf("served %v miss %+v consumed %d; want body.ref refused naming mock-2 as recorded after the call, never noise nor bound", got, miss, len(db.consumed))
+				}
+			})
+		}
+	}
+}
+
 // A mock F served before the test is a place of every rule where it is an
 // earlier place of the call's own test (the previous test's, the start-up's,
 // between tests': ofPairedTest) recorded before it, read as F served it, at
@@ -3045,7 +3085,7 @@ func TestEarlierRawReadsTheOwnTestsPlacesAndLeavesTheSetToTheOffsetRule(t *testi
 	}
 }
 
-// inServeOrder reads each leafed exchange's payload as F served it in the
+// learn.InServeOrder reads each leafed exchange's payload as F served it in the
 // set (the read's Order: its first and last serve), leaves one the served
 // mocks do not hold, or F's order does not number, in an order keploy cannot
 // tell, and leaves the round's slice as it was.
@@ -3061,7 +3101,7 @@ func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
 	tr.ServedMock(b)
 	tr.ServedMock(a)
 	tr.ServedMock(b)
-	got := inServeOrder(earlier, []*models.Mock{nil, b, a, b, c}, tr.Placed().Order)
+	got := learn.InServeOrder(earlier, []*models.Mock{nil, b, a, b, c}, tr.Placed().Order)
 	var spans [][2]int
 	for _, e := range got {
 		f, l := e.Payload.Span()

@@ -220,6 +220,13 @@ func (r Raw) ServedIn(first, last int) Raw {
 	return r
 }
 
+// fromMock reports whether r was read from a mock (RawOf, ReadRaw), whether
+// its text could be read or not: the zero Raw, an exchange's payload its
+// adapter gave none of, was not.
+func (r Raw) fromMock() bool {
+	return r.read || r.mock != "" || r.served || r.call != "" || !r.at.IsZero()
+}
+
 // Nth is where F first served r's mock (ServedIn), 0 where it was not served
 // or that order is not known.
 func (r Raw) Nth() int { return r.first }
@@ -427,7 +434,9 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 				}
 			}
 			op = dc.offsetPlacesOf(at, served, all, set)
-			op.unread = unread
+			if unread != "" {
+				op.unread = unread
+			}
 		}
 		return op
 	}

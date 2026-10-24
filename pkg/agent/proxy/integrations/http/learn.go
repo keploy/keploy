@@ -935,51 +935,6 @@ func givenEarlier(paired *models.Mock, set, served, given []*models.Mock, earlie
 	}
 }
 
-// inServeOrder is earlier with the payload of each exchange the learn step
-// served leaf by leaf read as F served it (learn.Raw.ServedIn: the first and
-// the last of its serves in the one order F served the set's mocks in, by
-// order), where mocks (those F served in the test or before it, as
-// earlierRaw reads them) holds its recording; one they do not hold, or
-// order does not number, keeps an order keploy cannot tell, which the
-// offset rule fails closed on. A copy: earlier is the round's. Nothing is
-// numbered where no payload was read.
-func inServeOrder(earlier []learn.Earlier, mocks []*models.Mock, order learn.Order) []learn.Earlier {
-	read := false
-	for _, e := range earlier {
-		read = read || e.Payload.Read()
-	}
-	if !read {
-		return earlier
-	}
-	byID := make(map[string]*models.Mock, len(mocks))
-	var list []*models.Mock
-	for _, m := range mocks {
-		if m == nil {
-			continue
-		}
-		id := m.Name + "\x00" + m.Spec.ReqTimestampMock.String()
-		if _, ok := byID[id]; !ok {
-			byID[id] = m
-			list = append(list, m)
-		}
-	}
-	spans := order.Spans(list)
-	span := make(map[*models.Mock][2]int, len(list))
-	for k, m := range list {
-		span[m] = spans[k]
-	}
-	out := append([]learn.Earlier(nil), earlier...)
-	for i, e := range out {
-		if !e.Payload.Read() {
-			continue
-		}
-		if m, ok := byID[e.Payload.Mock()+"\x00"+e.Payload.At().String()]; ok && span[m][0] > 0 {
-			out[i].Payload = e.Payload.ServedIn(span[m][0], span[m][1])
-		}
-	}
-	return out
-}
-
 // orderMiss is the order rule's reading, under the proven switch outside
 // record's full round, of a request no mock answered: when the recorded call
 // it most resembles holds an array it sent with the recorded elements in
@@ -1170,7 +1125,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			// The exchanges served leaf by leaf, each as the n-th mock F
 			// served, as the payloads among raw are.
-			earlier = inServeOrder(earlier, append(append([]*models.Mock(nil), served...), before...), order)
+			earlier = learn.InServeOrder(earlier, append(append([]*models.Mock(nil), served...), before...), order)
 			// A pool mock's call need not run on the clock F set for a
 			// test (at the start-up and between tests none is set, and a
 			// call made in a test was recorded in none): its clock reads
