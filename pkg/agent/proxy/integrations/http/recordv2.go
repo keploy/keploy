@@ -207,11 +207,21 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// failed, which never reached it (FinalHTTP.ClientLeft). A stream
 		// the server ended, or the capture lost, is not that, and is not
 		// recorded, as before.
+		//
+		// The connection's teardown can close the server's stream before the
+		// relay ends it (ErrClosed rather than io.EOF): which comes first is
+		// timing. ErrClosed comes only once every chunk already captured has
+		// been read (fakeconn: Close never discards what was delivered), and
+		// the relay tees what it relayed in before it closes, so with the
+		// client gone the stream holds all keploy relayed, as at its end, and
+		// is recorded the same way.
 		clientLeft := false
-		if streamEnded && !sess.Opts.SkipTLSMITM && provenswitch.On() {
+		closedOrEnded := streamEnded || err != nil && errors.Is(err, fakeconn.ErrClosed)
+		if closedOrEnded && !sess.Opts.SkipTLSMITM && provenswitch.On() {
 			var undelivered int
 			if undelivered, clientLeft = sess.ReceiverGone(fakeconn.FromDest); clientLeft {
 				finalResp = finalResp[:len(finalResp)-min(undelivered, len(finalResp))]
+				streamEnded = true
 			}
 		}
 
