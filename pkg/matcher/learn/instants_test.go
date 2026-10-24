@@ -1157,6 +1157,19 @@ func TestAPickFromATimetableTheTestWasServedStaysChecked(t *testing.T) {
 	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-0 at body.departures[1]") {
 		t.Errorf("a pick listed in F only: %s (%s); want it refused, naming mock-0's body.departures[1]", ln.Kind, ln.Why)
 	}
+	// The same pick from a timetable its protocol types (a decoder's
+	// datetimes, Leaf.Type Instant): a typed instant has no words the word
+	// rule could search (unaccounted skips it), so only the echo, held one
+	// way, finds F's moment there; it is refused all the same, naming it.
+	typed := servedTimetable(at.Add(-2*time.Second), "2026-10-22T11:13:00Z", "2026-10-22T11:15:00Z", "2026-10-22T11:16:00Z")
+	for i := range typed[0].Seen {
+		if strings.HasPrefix(typed[0].Seen[i].Leaf.Path, "body.departures[") {
+			typed[0].Seen[i].Leaf.Type = Instant
+		}
+	}
+	if ln := classifyDeparture("2026-10-22 11:14", "2026-10-22 11:15", at, nil, typed); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-0 at body.departures[1]") {
+		t.Errorf("a pick a typed timetable lists in F only: %s (%s); want it refused, naming mock-0's body.departures[1]", ln.Kind, ln.Why)
+	}
 	// In a window a pending call widened: the timetable served at 11:13:50,
 	// another flow's call sent at 11:14:01 and answered after the POST
 	// (11:14:04), which is no previous call of the POST's.

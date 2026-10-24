@@ -771,6 +771,56 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 	}
 }
 
+// Where the call's own places say a stamp is a place the value was built on
+// (stampsEchoed: the value's minute moved as the minute of a Date header F
+// served at record to that of another F served), stamps are searched as any
+// text, another test's answer's too: a word the value holds now that
+// another test's answer's Date header alone holds is refused, naming it,
+// as any word of that answer is; without the echo it is noise (the first
+// row of TestAWordOfAnotherTestsAnswerIsRefusedNamingIt).
+func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T) {
+	const p = "body.slot"
+	date := func(v string) Seen {
+		return Seen{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: true}
+	}
+	own := []Earlier{
+		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
+		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
+	}
+	// The value's instant moves by the lead, so its minute and second are
+	// clock words the word rules skip; only "03" -> "54" changed besides.
+	rec := "slot-03 " + r1Insert.Format(time.RFC3339)
+	live := "slot-54 " + r1Insert.Add(FullRoundLead).Format(time.RFC3339)
+	for _, stampHolds := range []bool{false, true} {
+		// Another test's answer, its Date header its own clock stamp (its
+		// span holds it): 10:54:17 holds the word 54, 10:53:17 does not.
+		at := r1Insert.Add(-21 * time.Minute)
+		if stampHolds {
+			at = r1Insert.Add(-20 * time.Minute)
+		}
+		other := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+		other.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+		for _, echoed := range []bool{false, true} {
+			var earlier []Earlier
+			if echoed {
+				earlier = own
+			}
+			dc := NewDriftCache()
+			x := dc.RawOf(other, true).ServedAs(3).OfAnotherTest()
+			ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, earlier, []Raw{x}, nil, nil)[0]
+			if stampHolds && echoed {
+				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21, a recording F gave the application before the call that is another test's") {
+					t.Errorf("another test's stamp holds 54, the value echoes a stamp: %s (%s); want it refused, naming mock-21", ln.Kind, ln.Why)
+				}
+				continue
+			}
+			if ln.Kind != KindNoise {
+				t.Errorf("another test's stamp holds 54 %v, the value echoes a stamp %v: %s (%s); want noise", stampHolds, echoed, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
 // A recording of a kind that holds its answer apart from its request that
 // holds no answer (a generic parser's frames the application sent, that
 // nothing answered) gave the application nothing (answerApart): the offset
