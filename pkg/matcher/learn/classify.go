@@ -65,12 +65,16 @@ type Earlier struct {
 // Raw is any other mock of the test's recording, of any kind: served earlier
 // in the test (Served), or recorded before the request L classifies (At).
 // Text is its recorded request and answer, the payload only, as one text: a
-// value found there flowed from that mock, at a place no leaf names.
+// value found there flowed from that mock, at a place no leaf names. Unread
+// says why keploy cannot read a value of it as the value it is ("": it
+// reads every one): what it held cannot be told, so a drift that may have
+// come from it is refused (ClassifyIn), never learned.
 type Raw struct {
 	Mock   string
 	At     time.Time
 	Served bool
 	Text   string
+	Unread string
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -147,7 +151,10 @@ type Learned struct {
 //   - Noise otherwise: not compared, its type still enforced.
 //
 //   - Unaccounted: none of these, and yet the declared readings cannot show
-//     it came from nowhere (unaccounted): refused, never noise.
+//     it came from nowhere (unaccounted): refused, never noise. So is a
+//     drift of a call, found in no earlier place it reads, where one of
+//     them is a recording keploy cannot read every value of (Raw.Unread):
+//     it may have come from there.
 //
 // An empty recorded value is never followed: it carries nothing to follow.
 // dc keeps what each value drifted for the test (nil: for this call).
@@ -165,6 +172,7 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	out := make([]Learned, 0, len(drift))
+	unread := rawUnread(at, raw)
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
@@ -175,8 +183,14 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 				ln.Kind, ln.Echo = KindEcho, echo
 			}
 		}
-		// Noise, or an echo, only where its readings account for all it
-		// changed: an echo is answered, never asserted against a source.
+		// Noise, or an echo, only where no earlier place it may have come
+		// from is one keploy cannot read (a variable is asserted against
+		// the source it was found in), and where its readings account for
+		// all it changed: an echo is answered, never asserted against a
+		// source.
+		if (ln.Kind == KindNoise || ln.Kind == KindEcho) && unread != "" && r.Value != "" {
+			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, unread, nil
+		}
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			if why := unaccounted(dc, dc.ofIn(r.Value, l.Value, w), at, served, raw); why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
@@ -194,6 +208,23 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 		out = append(out, ln)
 	}
 	return out
+}
+
+// rawUnread is why a drift of a call made at at may have come from a value
+// keploy cannot read: of a recording served earlier in the test, or recorded
+// before the call, that holds one (Raw.Unread). "": every one is read.
+func rawUnread(at time.Time, raw []Raw) string {
+	for _, x := range raw {
+		if x.Unread == "" || !x.Served && !x.At.Before(at) {
+			continue
+		}
+		name := "an earlier recording of the test"
+		if x.Mock != "" {
+			name = "the earlier recording " + x.Mock
+		}
+		return "it may have come from " + name + ", which keploy cannot read all of: " + x.Unread + ". keploy cannot tell where the changed value came from, so it refuses to leave it unchecked"
+	}
+	return ""
 }
 
 // echoedPart says where the call's recorded answer (resp) holds a word of
@@ -562,16 +593,16 @@ type DriftCache struct {
 	rawTok map[string][]map[string]bool
 	// mockText is each mock's text as Classify reads it (RawOf), by mock:
 	// the store's mocks are read once per test, not once per request.
-	mockText map[*models.Mock]string
+	mockText map[*models.Mock]Raw
 	// readText is each mock's text with its answer read back (ReadRaw), by
 	// mock: apart from mockText, which RawOf fills with a parked mock's
 	// text without its answer.
-	readText map[*models.Mock]string
+	readText map[*models.Mock]Raw
 }
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}, readText: map[*models.Mock]string{}}
+	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}}
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -588,10 +619,11 @@ func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
 		return dc.RawOf(m, served), nil
 	}
 	dc.mu.Lock()
-	text, ok := dc.readText[m]
+	read, ok := dc.readText[m]
 	dc.mu.Unlock()
 	if ok {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}, nil
+		read.Served = served
+		return read, nil
 	}
 	r, err := ReadRaw(m, served)
 	if err != nil {
@@ -599,9 +631,9 @@ func (dc *DriftCache) ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	}
 	dc.mu.Lock()
 	if dc.readText == nil {
-		dc.readText = map[*models.Mock]string{}
+		dc.readText = map[*models.Mock]Raw{}
 	}
-	dc.readText[m] = r.Text
+	dc.readText[m] = r
 	dc.mu.Unlock()
 	return r, nil
 }
@@ -627,14 +659,15 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 		return RawOf(m, served)
 	}
 	dc.mu.Lock()
-	text, ok := dc.mockText[m]
+	read, ok := dc.mockText[m]
 	dc.mu.Unlock()
 	if ok {
-		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}
+		read.Served = served
+		return read
 	}
 	r := RawOf(m, served)
 	dc.mu.Lock()
-	dc.mockText[m] = r.Text
+	dc.mockText[m] = r
 	dc.mu.Unlock()
 	return r
 }
@@ -1134,13 +1167,20 @@ var payloadKeys = map[string]bool{
 // recorded request and answer, the payload only, as one text.
 func RawOf(m *models.Mock, served bool) Raw {
 	r := Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served}
-	b, err := json.Marshal(payloadSpec(m.Spec))
+	spec, unread := payloadSpec(m.Spec)
+	r.Unread = unread
+	b, err := json.Marshal(spec)
 	if err != nil {
+		r.Unread = "keploy cannot write it as JSON: " + err.Error()
 		return r
 	}
 	v, ok := DecodeJSON(b)
 	if !ok {
+		r.Unread = "keploy cannot read back the JSON it wrote it as"
 		return r
+	}
+	if spec.PostgresV3 != nil {
+		pgColumnsByName(v, m.Spec.PostgresV3)
 	}
 	// The payload's own text, not its JSON: a JSON string escapes what
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
@@ -1153,7 +1193,10 @@ func RawOf(m *models.Mock, served bool) Raw {
 
 // payloadSpec is spec without what, below the spec's own fields
 // (payloadKeys), says where, when and how it was recorded rather than what it
-// carried. Of a Postgres query (models.PostgresV3QuerySpec) that is:
+// carried, with each value read as the value it is; unread says why a value
+// of it cannot be (Raw.Unread). Of a Postgres recording (pgPayload) that is,
+// of its session, the protocol version, the server's answer to the SSL
+// request and the authentication mode keploy observed; of a query:
 //
 //   - its invocation id (its statement's hash, connection, recorded instant
 //     and sequence). Its date and time words are the recording's own clock:
@@ -1163,47 +1206,32 @@ func RawOf(m *models.Mock, served bool) Raw {
 //     transaction state it ran in and moved to, its volatile positions.
 //   - the wire's typing of what was sent and answered: the parameter types
 //     and formats, the result formats, and each answer column's type, size,
-//     modifier, table, column number and format (its name stays).
+//     modifier, table, column number and format (its name stays,
+//     pgColumnsByName), and the format code of a cell the recorder kept as
+//     bytes. Its bound values and cells are read by them, as values: a
+//     binary int4 00 00 00 21 is 33, not the base64 "AAAAIQ==".
 //   - the numbers of its SQL text's placeholders ($4 is read "$"): a
 //     parameter's position, not a value (withoutPlaceholders).
 //
 // None is a value the app sent or was answered, and none can drift between
 // record and replay: the replay serves them from the recording. Read as
 // payload, a small number among them (a parameter type 23, a size 4, a
-// column number 8) was a value that flowed from that recording, and a
-// duration or count the app bound (Flyway's execution_time) was refused as
-// changed at random, by the milliseconds it took. The rest of the SQL text
-// (its constants, quoted names, bodies and comments), the bound values and
-// constants, the rows, the command tag, the error, the copy and
-// the row mutations are read as before. spec is not changed: the copy is.
-func payloadSpec(spec models.MockSpec) models.MockSpec {
-	pg := spec.PostgresV3
-	if pg == nil || pg.Query == nil {
-		return spec
+// column number 8, the protocol version 3.0, a format code 1) was a value
+// that flowed from that recording, and a duration or count the app bound
+// (Flyway's execution_time) was refused as changed at random, by the
+// milliseconds it took. The rest of the SQL text (its constants, quoted
+// names, bodies and comments), the command tag, the error, the row
+// mutations and the server's own start-up words are read as before; the
+// bound values, constants, rows, a fastpath call's arguments and result and
+// a text COPY's data as values (pgPayload), without the COPY's and the
+// call's formats. spec is not changed: the copy is.
+func payloadSpec(spec models.MockSpec) (models.MockSpec, string) {
+	if spec.PostgresV3 == nil {
+		return spec, ""
 	}
-	q := *pg.Query
-	q.InvocationID, q.SQLAstHash, q.Class, q.Lifetime, q.PrecedingTxState = "", "", "", "", ""
-	q.VolatilePositions, q.ParamOIDs, q.BindFormats, q.ResultFormats = nil, nil, nil, nil
-	q.SQLNormalized = withoutPlaceholders(q.SQLNormalized)
-	if q.Response != nil {
-		resp := *q.Response
-		if len(resp.RowDescription) > 0 {
-			resp.RowDescription = make([]models.PostgresV3ColumnDescriptor, len(q.Response.RowDescription))
-			for i, c := range q.Response.RowDescription {
-				resp.RowDescription[i] = models.PostgresV3ColumnDescriptor{Name: c.Name}
-			}
-		}
-		q.Response = &resp
-	}
-	if q.SideEffects != nil {
-		se := *q.SideEffects
-		se.TxTransition = ""
-		q.SideEffects = &se
-	}
-	p := *pg
-	p.Query = &q
-	spec.PostgresV3 = &p
-	return spec
+	var unread string
+	spec.PostgresV3, unread = pgPayload(spec.PostgresV3, spec.Metadata[pgBindEncodingKey] == pgBindEncodingWire)
+	return spec, unread
 }
 
 // textOf writes v's keys and scalars to sb, each on a line of its own, in a
