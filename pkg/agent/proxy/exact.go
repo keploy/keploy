@@ -1022,10 +1022,11 @@ func (m *MockManager) ServeExactWorker(names []string) {
 
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
-// and so does the window signal. v is complete as it is published: its test,
-// its mocks and its stamp, which the door installing it sets, and the
-// manager's outside answers, staging epoch and worker set, which this sets,
-// are all set before the swap that publishes it, and never written after.
+// and so does the window signal. v is complete as it is published: what the
+// door installing it gives it (its test and its mocks, and a test's view's
+// stamp) and what this gives it from the manager (the outside answers, the
+// staging epoch and the worker set) are all set before the swap that
+// publishes it.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if w := m.exact.worker.Load(); w != nil {
