@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -124,17 +125,46 @@ func (n *RepeatNote) Clone() *RepeatNote {
 	return &c
 }
 
+// MinGapDifferenceSeconds and MinGapDifferenceShare are how far apart a
+// note's two gaps must be before they speak for or against a span of elapsed
+// time (GapDifferenceMeaningful): at least a second, and more than a tenth of
+// the longer gap. Closer than that, the difference is what a replay's timing
+// gives any repeated call, a poller's included, and says nothing of a cache.
+const (
+	MinGapDifferenceSeconds = 1.0
+	MinGapDifferenceShare   = 0.1
+)
+
+// GapDifferenceMeaningful reports whether a replay gap and a record gap, in
+// seconds, are far enough apart to judge a likely cause by: at least
+// MinGapDifferenceSeconds, and more than MinGapDifferenceShare of the longer.
+func GapDifferenceMeaningful(replay, record float64) bool {
+	d := math.Abs(replay - record)
+	return d >= MinGapDifferenceSeconds && d > MinGapDifferenceShare*math.Max(replay, record)
+}
+
 // ElapsedTimeExpiryLikely reports whether the gaps look like a span measured
 // in elapsed time that the recording stayed inside and the replay passed:
 // the test came later after its earlier twin's call at replay than after the
-// newest identical call before it at record (RecordedLast). Unknown when the
-// record gap is not known, or the replay gap runs to the call, not to the
-// test's start (ReplayGapFromStart): unlike gaps say nothing.
+// newest identical call before it at record (RecordedLast), by a meaningful
+// difference (GapDifferenceMeaningful). Unknown when the record gap is not
+// known, or the replay gap runs to the call, not to the test's start
+// (ReplayGapFromStart): unlike gaps say nothing.
 func (n *RepeatNote) ElapsedTimeExpiryLikely() (likely, known bool) {
 	if n == nil || !n.RecordGapKnown || !n.ReplayGapFromStart {
 		return false, false
 	}
-	return n.ReplayGapSeconds > n.RecordGapSeconds, true
+	return n.ReplayGapSeconds > n.RecordGapSeconds && GapDifferenceMeaningful(n.ReplayGapSeconds, n.RecordGapSeconds), true
+}
+
+// GapsTooClose reports whether n's gaps compare like for like but are too
+// close to judge a cause by (GapDifferenceMeaningful): then a sentence states
+// the gaps and claims neither cause.
+func (n *RepeatNote) GapsTooClose() bool {
+	if n == nil || !n.RecordGapKnown || !n.ReplayGapFromStart {
+		return false
+	}
+	return !GapDifferenceMeaningful(n.ReplayGapSeconds, n.RecordGapSeconds)
 }
 
 // Explain is the note's sentence for a report and the CLI: which recording
@@ -164,6 +194,8 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	switch likely, known := n.ElapsedTimeExpiryLikely(); {
 	case known && likely:
 		b.WriteString("The application likely kept the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that the recording stayed inside and this slower replay passed, so it asked again; keploy's time freeze does not slow that clock. ")
+	case n.GapsTooClose():
+		b.WriteString(gapsTooClose(true))
 	case known:
 		b.WriteString("The gap at replay was not longer than at record, so an expired cache, token or refresh window is a less likely cause: keploy cannot tell from here why the application asked again. ")
 	default:
@@ -181,9 +213,10 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 // not give this test, and it repeats the earlier answer, which says why the
 // application asked again here. Neither replaces the other: the recording
 // made elsewhere is the reason the call missed, the repeat the likely cause.
-// keploy record's judging reads such a call as a repeat, not as a call to
-// move to the worker scope: the recording is the same answer, made again at
-// record by a test whose cache had expired there.
+// keploy record's judging treats it as any call made elsewhere: it moves the
+// recording to the test set's worker scope, and its confirming round still
+// compares the test's response. The repeat is named for information, as the
+// likely reason the application asked again; it changes neither.
 func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd string) string {
 	if n == nil {
 		return ""
@@ -195,7 +228,7 @@ func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd s
 	if recordedIn != "" {
 		where = "a recording keploy made in test " + recordedIn + "'s window"
 	}
-	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s keploy record's judging reads this miss as that repeat: it does not move %s to the test set's worker scope, and sets the test aside as a repeat of an earlier recorded call only when its confirming round sees the same again.", closest, where, n.Explain(recordCmd), closest)
+	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s keploy record's judging treats this miss as any call made elsewhere: it moves %s to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information, as the likely reason the application asked again.", closest, where, n.Explain(recordCmd), closest)
 }
 
 // recordedLastPhrase names, in a sentence, the recording the record gap runs
@@ -212,15 +245,27 @@ func formatGap(s float64) string {
 	return fmt.Sprintf("%.2fs", s)
 }
 
+// gapsTooClose is the cause sentence of a note whose gaps are too close to
+// judge by (GapsTooClose), for a call the application made (asked) or a
+// recorded call it did not make: it claims neither cause.
+func gapsTooClose(asked bool) string {
+	why := "why the application asked again"
+	if !asked {
+		why = "why the application did not ask again"
+	}
+	return "The two gaps are too close to tell a span of elapsed time (a cache, a token, a refresh window) from the replay's own timing: keploy cannot tell from here " + why + ". "
+}
+
 // ElapsedTimeFreshLikely is ElapsedTimeExpiryLikely's mirror, for a note on
 // an unconsumed recording (ExplainUnmade): the test came sooner after the
-// earlier twin at replay than at record, as a span the recording passed and
-// the replay stayed inside does. Unknown when the record gap is not known.
+// earlier twin at replay than at record, by a meaningful difference
+// (GapDifferenceMeaningful), as a span the recording passed and the replay
+// stayed inside does. Unknown when the record gap is not known.
 func (n *RepeatNote) ElapsedTimeFreshLikely() (likely, known bool) {
 	if n == nil || !n.RecordGapKnown || !n.ReplayGapFromStart {
 		return false, false
 	}
-	return n.ReplayGapSeconds < n.RecordGapSeconds, true
+	return n.ReplayGapSeconds < n.RecordGapSeconds && GapDifferenceMeaningful(n.ReplayGapSeconds, n.RecordGapSeconds), true
 }
 
 // ExplainUnmade is Explain's sentence for a note on an unconsumed recording:
@@ -246,6 +291,8 @@ func (n *RepeatNote) ExplainUnmade(recordCmd string) string {
 	switch likely, known := n.ElapsedTimeFreshLikely(); {
 	case known && likely:
 		b.WriteString("The application likely still held the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that this faster replay stayed inside and the recording passed, so it did not ask again; keploy's time freeze does not change that clock. ")
+	case n.GapsTooClose():
+		b.WriteString(gapsTooClose(false))
 	case known:
 		b.WriteString("The gap at replay was not shorter than at record, so a cache, token or refresh window still fresh is a less likely cause: keploy cannot tell from here why the application did not ask again. ")
 	default:
@@ -310,10 +357,19 @@ func requestFingerprint(m *Mock) string {
 	if m.Kind != HTTP || r == nil {
 		return ""
 	}
+	// The target as the parser's request keys read it (recordedRequestKeys):
+	// of the header's spellings, the first in sorted order, so a mock that
+	// carries two spellings has one digest, not one per map order.
+	names := make([]string, 0, len(r.Header))
+	for k := range r.Header {
+		names = append(names, k)
+	}
+	sort.Strings(names)
 	target := ""
-	for k, v := range r.Header {
+	for _, k := range names {
 		if strings.EqualFold(k, "X-Amz-Target") {
-			target = v
+			target = r.Header[k]
+			break
 		}
 	}
 	h := sha256.New()

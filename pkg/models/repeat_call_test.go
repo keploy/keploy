@@ -75,6 +75,72 @@ func TestRepeatNoteGapsFromAControlledTimeline(t *testing.T) {
 	}
 }
 
+// Gaps judge a cause only when they differ meaningfully: by a second at
+// least, and by more than a tenth of the longer one. A poller asked again
+// 0.02 s after its twin at replay and 0.01 s at record says nothing of a
+// cache: its note states the gaps and claims neither cause, in a miss's
+// sentence, an unmade call's and the brief alike.
+func TestRepeatNoteNeedsAMeaningfulGapDifference(t *testing.T) {
+	for _, c := range []struct {
+		replay, record float64
+		want           bool
+	}{
+		{0.02, 0.01, false}, // a poller's jitter: far more than a tenth, far less than a second
+		{2, 1, true},        // a second exactly is enough
+		{1.99, 1, false},    // 0.99 s is not
+		{65, 60, false},     // 5 s, not more than a tenth of 65 s
+		{70, 60, true},      // 10 s, more than a tenth of 70 s
+		{10, 9, false},      // 1 s, a tenth of 10 s exactly: not more than it
+		{9, 10, false},      // the mirror's order
+		{60, 70, true},
+	} {
+		if got := GapDifferenceMeaningful(c.replay, c.record); got != c.want {
+			t.Errorf("gaps %.2fs at replay and %.2fs at record: meaningful %v, want %v", c.replay, c.record, got, c.want)
+		}
+	}
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	poller := anchoredNote("mock-6", rec, rec, rec.Add(20*time.Millisecond), rec.Add(10*time.Millisecond))
+	if likely, known := poller.ElapsedTimeExpiryLikely(); likely || !known || !poller.GapsTooClose() {
+		t.Fatalf("a poller 0.02s after its twin at replay and 0.01s at record: likely %v, known %v, too close %v", likely, known, poller.GapsTooClose())
+	}
+	got := poller.Explain("keploy record")
+	if !strings.Contains(got, "At replay this test began 0.02s after that call; at record this test began 0.01s after it,") || !strings.Contains(got, "too close to tell a span of elapsed time") || !strings.Contains(got, "why the application asked again") || strings.Contains(got, "likely kept") || strings.Contains(got, "less likely") {
+		t.Errorf("the poller's sentence: %s", got)
+	}
+	if b := poller.Brief(false); strings.Contains(b, "likely") {
+		t.Errorf("the poller's brief claims a cause: %s", b)
+	}
+	unmade := anchoredNote("mock-6", rec, rec, rec.Add(10*time.Millisecond), rec.Add(20*time.Millisecond))
+	if likely, known := unmade.ElapsedTimeFreshLikely(); likely || !known {
+		t.Fatalf("an unmade poller call 0.01s at replay and 0.02s at record: likely %v, known %v", likely, known)
+	}
+	if s := unmade.ExplainUnmade("keploy record"); !strings.Contains(s, "too close to tell") || !strings.Contains(s, "why the application did not ask again") || strings.Contains(s, "likely still held") || strings.Contains(s, "less likely") {
+		t.Errorf("the unmade poller's sentence: %s", s)
+	}
+	if b := unmade.Brief(true); strings.Contains(b, "likely") {
+		t.Errorf("the unmade poller's brief claims a cause: %s", b)
+	}
+	// Apart by a meaningful difference the other way, the gaps still speak
+	// against the cause.
+	against := anchoredNote("mock-6", rec, rec, rec.Add(time.Second), rec.Add(5*time.Second))
+	if against.GapsTooClose() || !strings.Contains(against.Explain("keploy record"), "less likely cause") {
+		t.Errorf("1 s at replay against 5 s at record: %s", against.Explain("keploy record"))
+	}
+	// With no record gap, or a replay gap that runs to the call, there is
+	// nothing to compare, however small the replay gap: the conditional
+	// sentence stays.
+	var none *RepeatNote
+	unanchored := NewRepeatNote("m", rec, rec, rec.Add(10*time.Millisecond))
+	halfway := NewRepeatNote("m", rec, rec, rec.Add(10*time.Millisecond))
+	halfway.Anchor(time.Time{}, rec.Add(20*time.Millisecond), "m", rec)
+	if none.GapsTooClose() || unanchored.GapsTooClose() || halfway.GapsTooClose() {
+		t.Error("a nil note, or one with gaps that do not compare like for like, was judged too close")
+	}
+	if s := unanchored.Explain("keploy record"); strings.Contains(s, "too close") || !strings.Contains(s, "If the application keeps that answer") {
+		t.Errorf("a note with no record gap: %s", s)
+	}
+}
+
 // The sentence names the recording, the test once it is named, both gaps,
 // the cause that the gaps support, and the remedies; the cause is never
 // claimed as certain.
@@ -154,6 +220,18 @@ func TestRequestFingerprintNamesOneIdenticalRequest(t *testing.T) {
 	if fp := (&Mock{Kind: Postgres, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://x/"}}}).RequestFingerprint(); fp != "" {
 		t.Error("a mock of another kind has a fingerprint")
 	}
+	// Two spellings of the target: the first in sorted order is the one, as
+	// the parser's request keys read it, whatever order the map gives.
+	one := mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "", `{"k":1}`, map[string]string{"X-Amz-Target": "Svc.Get"}).RequestFingerprint()
+	if one != base {
+		t.Error("the target's spelling split one request in two")
+	}
+	for i := 0; i < 64; i++ {
+		two := mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "", `{"k":1}`, map[string]string{"X-AMZ-TARGET": "Svc.Get", "X-Amz-Target": "Svc.Put", "x-amz-target": "Svc.Del"})
+		if got := two.RequestFingerprint(); got != one {
+			t.Fatalf("a mock with three spellings of its target took one other than the first in sorted order (X-AMZ-TARGET: Svc.Get) on read %d", i)
+		}
+	}
 	onDisk := mk("POST", "http://sap:8080/odata/Rates?b=2&a=1", "Svc.Get", `{"k":1}`, nil)
 	onDisk.LeavePayloadOnDisk(&fileSource{}, PayloadAt{Name: "m"})
 	if onDisk.Spec.HTTPReq != nil || onDisk.RequestFingerprint() != base {
@@ -214,8 +292,11 @@ func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time
 // A miss's next step is the note's Explain, unless the call is also a
 // recording made elsewhere (not owned, with a closest): then it names that
 // recording first, with the test it was recorded in when known, keeps
-// Explain's words whole, and says judging reads it as the repeat. A nil note
-// says nothing.
+// Explain's words whole, and says what judging does with it: it moves the
+// recording to the worker scope, as any call made elsewhere, its confirming
+// round still compares the test's response, and the repeat is information.
+// It never says judging keeps the recording where it is. A nil note says
+// nothing.
 func TestExplainMissNamesANotOwnedRecordingBesideTheRepeat(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	n := NewRepeatNote("mock-7", rec, rec, rec.Add(6*time.Second))
@@ -228,7 +309,7 @@ func TestExplainMissNamesANotOwnedRecordingBesideTheRepeat(t *testing.T) {
 		t.Fatalf("a not-owned call with no closest got %q, want Explain's", got)
 	}
 	got := n.ExplainMiss(true, "mock-w", "test-5", "keploy record")
-	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "does not move mock-w to the test set's worker scope, and sets the test aside as a repeat of an earlier recorded call only when its confirming round sees the same again.") {
+	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "keploy record's judging treats this miss as any call made elsewhere: it moves mock-w to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information, as the likely reason the application asked again.") || strings.Contains(got, "does not move") {
 		t.Fatalf("a not-owned repeat's next step is %q", got)
 	}
 	if got := n.ExplainMiss(true, "mock-w", "", "keploy record"); !strings.HasPrefix(got, "This request is mock-w, a recording keploy made between tests or in another test's window,") {

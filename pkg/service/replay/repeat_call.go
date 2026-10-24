@@ -49,7 +49,10 @@ func markRepeatOf(results []models.TestResult, consumers map[string][]string, te
 			}
 			start := began[r.TestCaseID]
 			last, ok := recordAnchor(recorded[lookup[n.Mock].requestOf()], start)
-			if !ok {
+			if !ok && n.RecordedAt.Before(start) {
+				// A twin the set's lookup does not hold is measured from
+				// its own recording, made before the test began; one
+				// made after it began gives no gap at record.
 				last = recordedTwin{name: n.Mock, recordedAt: n.RecordedAt}
 			}
 			n.Anchor(replayStarts[r.TestCaseID], start, last.name, last.recordedAt)
@@ -170,11 +173,11 @@ func markUnmadeRepeats(results []models.TestResult, consumers map[string][]strin
 				continue
 			}
 			n := models.NewRepeatNote(twin.name, twin.answeredAt, twin.recordedAt, time.Time{})
+			// The twin is one of recorded when it was recorded at all,
+			// so with no identical per-test recording made before the
+			// test began at record there is no gap at record to give.
 			start := recordStarts[r.TestCaseID]
-			last, ok := recordAnchor(recorded[info.requestOf()], start)
-			if !ok {
-				last = recordedTwin{name: twin.name, recordedAt: twin.recordedAt}
-			}
+			last, _ := recordAnchor(recorded[info.requestOf()], start)
 			n.Anchor(began, start, last.name, last.recordedAt)
 			n.Test = by
 			u.RepeatOf = n

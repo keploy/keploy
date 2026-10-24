@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,11 +20,14 @@ import (
 
 // earlierDb is a mockMemDb whose reads show nothing, that remembers the
 // recordings that answered earlier in the set (integrations.AnsweredFinder):
-// answered, oldest first. asked are the keys each lookup asked by.
+// answered, oldest first. asked are the keys each lookup asked by. byKeys
+// makes a lookup see only the answers recorded under one of its keys
+// (models.RequestKeys), as the agent's answered log does.
 type earlierDb struct {
 	*mockMemDb
 	answered []integrations.AnsweredCall
 	asked    *[][]string
+	byKeys   bool
 }
 
 func (d earlierDb) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
@@ -31,6 +36,9 @@ func (d earlierDb) FindAnsweredEarlier(kind models.Kind, keys []string, match fu
 	}
 	for i := len(d.answered) - 1; i >= 0; i-- {
 		a := d.answered[i]
+		if d.byKeys && !slices.ContainsFunc(models.RequestKeys(a.Mock), func(k string) bool { return slices.Contains(keys, k) }) {
+			continue
+		}
 		if a.Mock.Kind == kind && match(a.Mock) {
 			return a, true
 		}
@@ -217,6 +225,13 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 // HTTP parser answers from db, with a request id no recording carries.
 func missReport(t *testing.T, db integrations.MockMemDb, addr, host, path string, opts models.OutgoingOptions) *models.MockMismatchReport {
 	t.Helper()
+	return missReportOf(t, db, addr, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\nX-Request-Id: live-9\r\n\r\n", opts)
+}
+
+// missReportOf is the mismatch report of raw, a whole HTTP/1.1 request to
+// addr, that the HTTP parser answers from db.
+func missReportOf(t *testing.T, db integrations.MockMemDb, addr, raw string, opts models.OutgoingOptions) *models.MockMismatchReport {
+	t.Helper()
 	var reported error
 	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
 	app, prox := net.Pipe()
@@ -225,7 +240,7 @@ func missReport(t *testing.T, db integrations.MockMemDb, addr, host, path string
 	go func() {
 		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, opts)
 	}()
-	if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\nX-Request-Id: live-9\r\n\r\n"); err != nil {
+	if _, err := io.WriteString(app, raw); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
@@ -273,9 +288,9 @@ func (d gateDb) ConsumedTestMocks() []*models.Mock { return d.consumed }
 // stays named as that recording made elsewhere (not owned): it is the reason
 // the call missed, and its closest. When an earlier test's identical
 // recording already answered, the note joins it beside that reason, never
-// instead of it: the next step names both, and says judging reads it as the
-// repeat rather than moving the recording to the worker scope (at record a
-// test in between refilled the cache with the same call). With no earlier
+// instead of it: the next step names both, and says judging moves the
+// recording to the worker scope as any call made elsewhere, the repeat being
+// information about why the application asked again. With no earlier
 // answer the miss is the plain not-owned one. A call the test recorded fewer
 // times than it made stays one call more than recorded (extra_call), the
 // test's own recording its closest, with no note.
@@ -297,10 +312,13 @@ func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 	if !r.NotOwned || r.ClosestMock != "mock-w" || len(r.FieldDiffs) != 0 || r.Repeat == nil || r.Repeat.Mock != "mock-7" {
 		t.Fatalf("a call made elsewhere that repeats an earlier answer is closest %q, not owned %v, diffs %v, note %+v; want mock-w made elsewhere with the note on mock-7 beside it", r.ClosestMock, r.NotOwned, r.FieldDiffs, r.Repeat)
 	}
-	for _, want := range []string{"This request is mock-w, a recording keploy made between tests or in another test's window", "identical to mock-7", "does not move mock-w to the test set's worker scope"} {
+	for _, want := range []string{"This request is mock-w, a recording keploy made between tests or in another test's window", "identical to mock-7", "it moves mock-w to the test set's worker scope", "its confirming round still compares this test's response"} {
 		if !strings.Contains(r.NextSteps, want) {
 			t.Fatalf("the next step of a call made elsewhere that repeats an earlier answer lacks %q: %s", want, r.NextSteps)
 		}
+	}
+	if strings.Contains(r.NextSteps, "does not move") {
+		t.Fatalf("the next step says judging keeps mock-w where it is: %s", r.NextSteps)
 	}
 
 	// In record's full round a learn step may name a recording the request
@@ -324,5 +342,102 @@ func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 	r = missReport(t, gateDb{earlierDb: earlier, consumed: []*models.Mock{own}}, addr, host, path, models.OutgoingOptions{})
 	if r.MissKind != models.MissExtraCall || r.Recorded != 1 || r.Repeat != nil || strings.Contains(r.NextSteps, "identical to mock-7") {
 		t.Fatalf("one call more than recorded is kind %q (recorded %d), note %+v, next step %q; want extra_call, recorded once, and no note", r.MissKind, r.Recorded, r.Repeat, r.NextSteps)
+	}
+}
+
+// perTestDb is earlierDb whose per-test read shows perTest, or fails with
+// readErr; spent are the recordings it reports spent (integrations.
+// SpentReader), and others those it tells are not the open test's own
+// (integrations.TestOwner).
+type perTestDb struct {
+	earlierDb
+	perTest []*models.Mock
+	readErr error
+	spent   map[*models.Mock]bool
+	others  map[*models.Mock]bool
+}
+
+func (d perTestDb) GetPerTestMocksInWindow() ([]*models.Mock, error) { return d.perTest, d.readErr }
+func (d perTestDb) Spent(m *models.Mock) bool                        { return d.spent[m] }
+func (d perTestDb) OwnedByOpenTest(m *models.Mock) bool              { return !d.others[m] }
+
+// Only the open test's own live recording under the call's keys keeps the
+// note off (ownRecordingUnder): its diff explains the miss. Another test's
+// recording the per-test read shows, and a stateful recording of an
+// earlier test the store reports spent, are not the open test's to explain
+// it, and leave the note; a per-test read that fails keeps it off, the side
+// that hides nothing.
+func TestOnlyTheOpenTestsOwnLiveRecordingKeepsTheNoteOff(t *testing.T) {
+	const host, path = "localhost:8099", "/sap/A_BusinessPartner/$count"
+	keys := RequestKeysOf("GET", path, "", false)
+	mine := onHost("mock-own", path+"?$filter=y", host)
+	other := onHost("mock-other", path+"?$filter=y", host)
+	cursor := onHost("mock-cursor", path+"?$filter=y", host)
+	base := earlierDb{mockMemDb: &mockMemDb{}}
+	for _, c := range []struct {
+		name string
+		db   perTestDb
+		want bool
+	}{
+		{"the open test's own recording", perTestDb{earlierDb: base, perTest: []*models.Mock{mine}}, true},
+		{"a per-test read that fails", perTestDb{earlierDb: base, readErr: errors.New("read failed")}, true},
+		{"another test's recording", perTestDb{earlierDb: base, perTest: []*models.Mock{other}, others: map[*models.Mock]bool{other: true}}, false},
+		{"a spent stateful recording", perTestDb{earlierDb: base, perTest: []*models.Mock{cursor}, spent: map[*models.Mock]bool{cursor: true}}, false},
+		{"none", perTestDb{earlierDb: base}, false},
+	} {
+		if got := ownRecordingUnder(c.db, keys); got != c.want {
+			t.Errorf("%s: own recording under the call's keys %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// When the twin becomes a miss's closest, the miss names no difference: a
+// call that first came closest to another recording, with that recording's
+// diffs, is identical to the twin, and naming the twin with the other's
+// diffs would say the call differs from it.
+func TestARepeatNamesTheTwinWithNoOtherRecordingsDiffs(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/sap/A_BusinessPartner/$count?$filter=x"
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	near := onHost("mock-near", "/sap/A_BusinessPartner/$count?$filter=y", host)
+	alone := earlierDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{near}}}
+	if r := missReport(t, alone, addr, host, path, models.OutgoingOptions{}); r.ClosestMock != "mock-near" || len(r.FieldDiffs) == 0 {
+		t.Fatalf("with no earlier answer the miss is closest %q with diffs %v; want mock-near with its query's diff", r.ClosestMock, r.FieldDiffs)
+	}
+	twin := earlierDb{mockMemDb: alone.mockMemDb, answered: []integrations.AnsweredCall{{Mock: sapCount("mock-7", host, rec), AnsweredAt: time.Now().Add(-time.Minute)}}}
+	r := missReport(t, twin, addr, host, path, models.OutgoingOptions{})
+	if r.ClosestMock != "mock-7" || r.Repeat == nil || len(r.FieldDiffs) != 0 || len(r.Differs) != 0 || r.Diff != "" {
+		t.Fatalf("the repeat's miss is closest %q, note %+v, diffs %v, differs %v, diff %q; want mock-7 with no difference named", r.ClosestMock, r.Repeat, r.FieldDiffs, r.Differs, r.Diff)
+	}
+}
+
+// An AWS JSON call names its action in its X-Amz-Target, which is part of
+// its request keys: a repeat of one is found under the key that carries its
+// target, and gets the note; a call with another target is another action,
+// and gets none.
+func TestARepeatedAWSCallIsFoundUnderItsTarget(t *testing.T) {
+	const addr, host = "127.0.0.1:4566", "localhost:4566"
+	const body = `{"QueueUrl":"http://localhost:4566/000000000000/orders"}`
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	recorded := onHost("mock-sqs", "/", host)
+	recorded.Spec.HTTPReq.Method = "POST"
+	recorded.Spec.HTTPReq.Header["X-Amz-Target"] = "AmazonSQS.GetQueueAttributes"
+	recorded.Spec.HTTPReq.Header["Content-Type"] = "application/x-amz-json-1.0"
+	recorded.Spec.HTTPReq.Body = body
+	recorded.Spec.ReqTimestampMock = rec
+	var asked [][]string
+	db := earlierDb{mockMemDb: &mockMemDb{}, byKeys: true, asked: &asked, answered: []integrations.AnsweredCall{{Mock: recorded, AnsweredAt: time.Now().Add(-time.Minute)}}}
+	call := func(target string) string {
+		return "POST / HTTP/1.1\r\nHost: " + host + "\r\nContent-Type: application/x-amz-json-1.0\r\nX-Amz-Target: " + target + "\r\nX-Amz-Date: 20261024T100000Z\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+	}
+	r := missReportOf(t, db, addr, call("AmazonSQS.GetQueueAttributes"), models.OutgoingOptions{})
+	if r.Repeat == nil || r.Repeat.Mock != "mock-sqs" || r.ClosestMock != "mock-sqs" {
+		t.Fatalf("a repeated SQS call's miss is closest %q, note %+v (asked by %q); want the note on mock-sqs", r.ClosestMock, r.Repeat, asked)
+	}
+	if want := RequestKeysOf("POST", "/", "AmazonSQS.GetQueueAttributes", false); len(asked) == 0 || !slices.Equal(asked[len(asked)-1], want) {
+		t.Fatalf("the lookup asked by %q, want %q", asked, want)
+	}
+	if r := missReportOf(t, db, addr, call("AmazonSQS.ReceiveMessage"), models.OutgoingOptions{}); r.Repeat != nil {
+		t.Fatalf("a call with another target got the note %+v", r.Repeat)
 	}
 }
