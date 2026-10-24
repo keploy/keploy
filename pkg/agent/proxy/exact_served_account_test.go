@@ -402,7 +402,11 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 // stamp changed. A write once it is published that the install undoes
 // before it returns, or that writes the value the view already carries,
 // leaves the two reads equal and passes this row: it is the next row's to
-// catch, and that row may miss it.
+// catch, and that row may miss it. At the same seam the row checks the rest
+// of what installExact's doc says a view is published with: its test, its
+// mocks, and what installExact gives it from the manager (the outside
+// answers, the staging epoch and the worker set, seeded here). Any of those
+// set after the swap fails it.
 // A view published before its stamp was set would be read with no stamp by a
 // learn step reading ServedInOpenTest beside the install: a learn step that
 // refuses a 0 would drop its calls at random, and the stamp's write would
@@ -436,11 +440,26 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 			}
 			var published []publication
 			mm.exact.beforePublish = func(v *exactView) {
+				// What installExact gives every view from the manager is
+				// there as it is published: with no outside answers a reader
+				// would show again a recording consumed outside every test.
+				if v.outside != &mm.exact.outside || v.epoch != &mm.stagingEpoch {
+					t.Errorf("a view (test %q) was about to be published without the manager's outside answers and staging epoch: a reader loading it first would show again what calls outside every test consumed", v.test)
+				}
 				if v.test == "" {
 					return // a pool view: never stamped
 				}
 				if mm.exact.view.Load() == v {
 					t.Errorf("%s's view was already published as the seam saw it: the row reads a view as it is published only if beforePublish runs before the swap", v.test)
+				}
+				// The worker set the manager holds (seeded below), and the
+				// test's own mocks, are there as it is published: with no
+				// worker set a reader would refuse a worker-scope mock.
+				if _, ok := v.worker["w-boot"]; !ok || len(v.worker) != 1 {
+					t.Errorf("%s's view was about to be published with the worker set %v; want the manager's, [w-boot]: a reader loading it first would refuse its worker-scope mocks", v.test, v.worker)
+				}
+				if len(v.owned) != 1 || v.owned[0].Name != own.Name {
+					t.Errorf("%s's view was about to be published with %d test mocks; want its one, %s", v.test, len(v.owned), own.Name)
 				}
 				published = append(published, publication{test: v.test, stamp: v.stamp})
 				if !held() {
@@ -462,6 +481,7 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 			}
 			t.Cleanup(mm.Close)
 			mm.SetMocksWithWindow([]*models.Mock{own}, nil, models.BaseTime, time.Now())
+			mm.ServeExactWorker([]string{"w-boot"})
 			tr := learn.NewTracker()
 			reads := 0
 			mm.SetOpenTestEpoch(func() uint64 {
