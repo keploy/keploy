@@ -314,7 +314,7 @@ type stampedTest struct {
 }
 
 // stampTest is the stamp of test's view as it is installed (exactView.stamp),
-// called under installMu: the learn tracker's open test (open,
+// called under installMu and the round lock: the learn tracker's open test (open,
 // learn.Tracker.OpenEpoch; nil when the manager has none), so a reader
 // compares the view's test with the tracker's by number. It is 0 when there
 // is no tracker, when no test is open in it (the view was installed before
@@ -998,19 +998,23 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		v.carried[a.owned.Name] = true
 	}
 	install := func() {
-		// Stamped as it is installed: what the tracker's open test is when
-		// the view starts serving. The lock is taken here, on every door, so
-		// on the open doors (OpenExactTest, OpenExactTestConcurrent) it is
-		// held under the variables' lock; the round lock the install takes
-		// is taken under it.
+		// The install lock is taken here, on every door, so on the open
+		// doors (OpenExactTest, OpenExactTestConcurrent) it is held under
+		// the variables' lock; the round lock the install takes is taken
+		// under it.
 		m.exact.installMu.Lock()
 		defer m.exact.installMu.Unlock()
-		v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 		// One step with the swap, holding the round lock: no snapshot sees
 		// the claims of a retried test released, what its earlier view
 		// answered given back, its mocks begun, or its carried answers,
 		// before the view that holds them.
 		m.installExactWith(v, func(r *roundState) {
+			// Stamped as it is installed: what the tracker's open test is
+			// when the view starts serving, read holding the round lock
+			// with the view's binding to the tracker's test
+			// (roundState.bindLocked), so no snapshot reads the tracker
+			// between the stamp's read and the view's start.
+			v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 			epoch := m.stagingEpoch.Load()
 			m.exact.claims.release(epoch, test)
 			m.reopenLocked(v)

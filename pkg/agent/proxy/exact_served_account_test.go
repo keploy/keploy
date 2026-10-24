@@ -535,7 +535,9 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 // A view published before its stamp was set would be read with no stamp by a
 // learn step reading ServedInOpenTest beside the install: a learn step that
 // refuses a 0 would drop its calls at random, and the stamp's write would
-// race that read in a switch-on replay.
+// race that read in a switch-on replay. The stamp is read holding the round
+// lock too, with the view's binding to the tracker's test, so no snapshot
+// reads the tracker between the two.
 func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	shared := exactMock("shared", 0, models.LifetimePerTest)
@@ -657,6 +659,10 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 				reads++
 				if !held() {
 					t.Errorf("install %d read the tracker's open test with no install lock held: another test's view could be installed before its view is published", reads)
+				}
+				if mm.exact.round.mu.TryLock() {
+					mm.exact.round.mu.Unlock()
+					t.Errorf("install %d read the tracker's open test with no round lock held: a snapshot could read the tracker between the stamp and the view's binding to the tracker's test", reads)
 				}
 				return tr.OpenEpoch()
 			})
