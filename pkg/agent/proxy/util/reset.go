@@ -1,6 +1,7 @@
 package util
 
 import (
+	"errors"
 	"io"
 	"net"
 
@@ -10,17 +11,33 @@ import (
 
 // ResetOnClose makes c's socket send a reset rather than a FIN when it is
 // closed (SO_LINGER 0), looking beneath the wrappers the proxy puts on its
-// connections. It does nothing to a connection with no TCP socket beneath
-// it.
+// connections (SetLingerBeneath). It does nothing to a connection with no
+// TCP socket beneath it.
 //
 // It does not close c. Whoever owns the socket closes it, and that close is
 // what sends the reset; SafeConn's own Close is a no-op on purpose.
-func ResetOnClose(c net.Conn) {
-	for i := 0; i < 8 && c != nil; i++ { // bounded: a cycle must not hang
+func ResetOnClose(c net.Conn) { _ = SetLingerBeneath(c, 0) }
+
+// errNoLinger is SetLingerBeneath's answer for a connection with no socket
+// that takes SO_LINGER beneath it.
+var errNoLinger = errors.New("no TCP socket beneath the connection to set SO_LINGER on")
+
+// SetLingerBeneath sets SO_LINGER to sec on the TCP socket beneath c. It
+// walks beneath connseq.Upstream, SafeConn and any connection with a
+// NetConn method (a tls.Conn, and the proxy's own wrappers that expose the
+// connection beneath them, such as trackedConn), and stops at the first
+// connection that sets the linger itself. A wrapper that other walkers of
+// connection wrappers must not see beneath (treeRealConn, liveReader)
+// exposes SetLinger instead of NetConn, so that only the linger goes
+// through.
+func SetLingerBeneath(c net.Conn, sec int) error {
+	// Bounded, so that a cycle of NetConn wrappers cannot hang it. A SetLinger
+	// method that walks on starts a walk of its own; none leads back to its
+	// own wrapper.
+	for i := 0; i < 8 && c != nil; i++ {
 		switch v := c.(type) {
 		case interface{ SetLinger(sec int) error }:
-			_ = v.SetLinger(0)
-			return
+			return v.SetLinger(sec)
 		case *connseq.Upstream:
 			c = v.Conn
 		case *SafeConn:
@@ -28,9 +45,10 @@ func ResetOnClose(c net.Conn) {
 		case interface{ NetConn() net.Conn }:
 			c = v.NetConn()
 		default:
-			return
+			return errNoLinger
 		}
 	}
+	return errNoLinger
 }
 
 // ReadRecorder is a reader that keeps the error its last Read returned.
@@ -65,9 +83,16 @@ func (r *ReadRecorder) Read(p []byte) (int, error) {
 //     between queries) is never told, and the relay waits out its idle
 //     window on it.
 //
-// Bytes the copy wrote to dst that its socket has not sent yet are dropped
-// with the reset, as the source's own unsent bytes were when its peer
-// reset.
+// SO_LINGER 0 drops whatever dst's socket has not transmitted yet when it
+// is closed. That includes bytes the resetting peer did send, which the
+// copy read and wrote to dst, if dst's socket still holds them. A socket
+// holds written bytes untransmitted while its peer's receive window is full
+// (a receiver that is not reading) or, off loopback, while its congestion
+// window is. With no proxy in between, a full window would hold the same
+// bytes in the resetting peer's own send queue, and its reset would drop
+// them there: the receiver gets what fits its receive queue either way.
+// So passing the reset on loses nothing a reset would not; only the socket
+// that held the bytes differs.
 func PassOnReset(dst net.Conn, readErr error) bool {
 	if !neterr.IsConnReset(readErr) {
 		return false

@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	incoming "go.keploy.io/server/v3/pkg/agent/proxy/incoming"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -269,4 +272,128 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	}
 	_ = cli.Close()
 	<-done
+}
+
+// A destination that a listener of the run's own tree serves is relayed by
+// serveTreeListener, and when it resets, the app reads a reset, as it would
+// with no proxy in between: the relay passes the reset on beneath the
+// wrappers of the app's connection (their SetLinger), and the caller's close
+// of it sends the reset. Without that the close sends a FIN, and the app
+// takes a reset upstream for a clean end. Under the proven switch, with the
+// topology sink agent.New always installs, a call from another process of
+// the tree is wrapped in a liveReader first. Five calls: a mock.real
+// destination's from each caller, and an unlisted one's from the two
+// callers that are another process:
+//   - from the listener's own process: treeRealConn alone (mock.real);
+//   - from another process of the tree (a child here): the tree relay, a
+//     liveReader, and on a mock.real destination treeRealConn over it; the
+//     usual such listener is a database the test command started;
+//   - from a process the listener's owner descends from (this process's
+//     parent here, as a runner calls the app it started): the live
+//     handler's raw relay, incoming.ServeLive, over the same wrappers.
+func TestATreeDestinationThatResetsResetsTheApp(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		listed bool
+		caller string // "own", "child" or "parent"
+	}{
+		{"a mock.real destination, called from the listener's own process", true, "own"},
+		{"a mock.real destination, called from another process of the tree", true, "child"},
+		{"an unlisted destination, called from another process of the tree", false, "child"},
+		{"a mock.real destination, called by the live handler's raw relay", true, "parent"},
+		{"an unlisted destination, called by the live handler's raw relay", false, "parent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorded.reset()
+			defer recorded.reset()
+
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			dst := l.Addr().String()
+			port := uint32(l.Addr().(*net.TCPAddr).Port)
+			// The destination reads the request, then resets.
+			go func() {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				_, _ = io.ReadFull(c, make([]byte, len("hello")))
+				_ = c.(*net.TCPConn).SetLinger(0)
+				_ = c.Close()
+			}()
+
+			var listed []string
+			if tc.listed {
+				listed = []string{dst}
+			}
+			p := realProxy(t, listed, nil) // the proven switch
+			p.mockMode, p.appPID = true, uint32(os.Getpid())
+			// The open test's mock.real uses: only treeRealConn's reads add
+			// the caller's connection to one, so they say it wrapped it.
+			p.realTracker.BeginTest()
+			sink := &rowSink{}
+			liveCalled := make(chan struct{}, 1)
+			caller := os.Getpid()
+			switch tc.caller {
+			case "child":
+				p.SetTopologySink(sink)
+				caller = hold(t).Process.Pid
+			case "parent":
+				p.SetTopologySink(sink)
+				caller = os.Getppid()
+				ip := incoming.New(zap.NewNop(), nil, &config.Config{}) // RecordRequests off: the raw relay
+				p.live = func(ctx context.Context, conn net.Conn, upstream string, port uint16) {
+					liveCalled <- struct{}{}
+					ip.ServeLive(ctx, conn, upstream, port)
+				}
+			}
+			app, accepted := realConnPair(t)
+			dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(caller)}
+			servedCh := make(chan bool, 1)
+			go func() {
+				served, _, _ := p.serveTreeListener(context.Background(), accepted, dest, dst, "1")
+				_ = accepted.Close() // the caller closes the real connection once it returns
+				servedCh <- served
+			}()
+
+			if _, err := app.Write([]byte("hello")); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if !<-servedCh {
+				t.Fatal("precondition: the connection was not served on the tree path")
+			}
+			select {
+			case <-liveCalled:
+				if tc.caller != "parent" {
+					t.Fatal("precondition: the live handler served a call it was not to")
+				}
+			default:
+				if tc.caller == "parent" {
+					t.Fatal("precondition: the live handler did not serve the call")
+				}
+			}
+			uses, _ := p.realTracker.EndTest()
+			if wrapped := len(uses) == 1 && uses[0].Conns == 1; wrapped != tc.listed {
+				t.Fatalf("precondition: treeRealConn is to wrap the caller's connection on a mock.real "+
+					"destination only (mock.real %v, wrapped %v, uses %+v)", tc.listed, wrapped, uses)
+			}
+			run := p.RealRun()
+			if tc.listed && tc.caller != "parent" && (len(run.Reached) != 1 || run.Reached[0] != dst) {
+				t.Fatalf("precondition: the relay did not count %s reached as mock.real (reached %v)", dst, run.Reached)
+			}
+			if !tc.listed && len(run.Reached) != 0 {
+				t.Fatalf("precondition: an unlisted destination was counted as mock.real (reached %v)", run.Reached)
+			}
+			if live, _ := sink.rows(); tc.caller != "own" && len(live) == 0 {
+				t.Fatal("precondition: the call was not counted live, so no liveReader wrapped it")
+			}
+			if _, err := app.Read(make([]byte, 1)); !neterr.IsConnReset(err) {
+				t.Fatalf("the app read %v; want a reset. Its destination reset, and a FIN "+
+					"tells the app the destination ended cleanly", err)
+			}
+		})
+	}
 }

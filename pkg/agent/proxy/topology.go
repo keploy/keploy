@@ -109,6 +109,15 @@ func (c *liveReader) CloseWrite() error {
 	return util.CloseWriteIfPossible(c.Conn)
 }
 
+// SetLinger sets SO_LINGER on the caller's socket beneath, so a reset the
+// relay passes on to the caller (util.ResetOnClose) reaches it. That is
+// every relay of a call from another process of the tree: the tree relay of
+// an unlisted destination, the one through treeRealConn on a mock.real
+// destination, and the live handler's raw relay. Like treeRealConn, it lets
+// only that through: no NetConn, so no other walker of connection wrappers
+// goes beneath it.
+func (c *liveReader) SetLinger(sec int) error { return util.SetLingerBeneath(c.Conn, sec) }
+
 // programOf is the program process pid runs: its executable, else its
 // command name; "" when neither can be read.
 func programOf(pid int) string {

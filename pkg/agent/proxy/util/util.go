@@ -1083,11 +1083,33 @@ func recovered(logger *zap.Logger, r any, client, dest net.Conn) {
 }
 
 // RelayDrainIdle is how long a surviving copy direction may go with NO
-// progress before it is abandoned. It is an IDLE timeout, not a deadline
-// on the transfer: a survivor that is still moving bytes keeps going for
-// as long as it keeps moving them.
+// progress before it is abandoned. It is a no-progress bound, not a
+// deadline on the transfer: it ends the wait only once a whole window has
+// passed with nothing moved, and a survivor that is still moving bytes
+// keeps going for as long as it keeps moving them.
 //
-// That distinction is the whole point. A fixed wall clock is just a
+// It is kept for the breaks no event ends, where the survivor's source is
+// alive and silent:
+//   - one half of a tls.Conn has failed (its read half on a bad record or
+//     an alert, say) and both peers are alive. tls.Conn keeps its two
+//     halves' errors apart, so the failed half says nothing about the
+//     survivor, and no FIN or reset arrives because neither peer has ended:
+//     the client may wait for the reply to a request that died on the
+//     broken half while its destination waits for the next request;
+//   - a peer vanished without a reset (its host went down, or the network
+//     or a NAT entry between dropped it), so its copy ended on a timeout or
+//     an unreachable host (ETIMEDOUT, EHOSTUNREACH), not a reset, and the
+//     other peer is alive and silent.
+//
+// Keploy cannot wake the survivor's blocked read either, since SafeConn's
+// Close and all three of its deadline setters are no-ops (the session owns
+// the socket). So the absence of progress is the only signal left. The
+// other breaks end on an event and never wait out this window: a reset
+// read ends the relay at once (PassOnReset), a clean EOF forwards its FIN,
+// and a write that failed because its peer is gone leaves the survivor
+// reading that same peer, whose FIN or reset then ends it.
+//
+// Bounding progress, not time, is the whole point. A fixed wall clock is a
 // slower version of abandoning the survivor — measured at 33% of a
 // 960 KiB response delivered before the cut — and this proxy sits in
 // front of real upstreams, where a response taking longer than a fixed

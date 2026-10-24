@@ -266,9 +266,12 @@ func (c *treeRealConn) CloseWrite() error {
 	return util.CloseWriteIfPossible(c.Conn)
 }
 
-// NetConn is the connection underneath, so a reset the relay passes on to
-// the app (util.ResetOnClose) reaches its socket.
-func (c *treeRealConn) NetConn() net.Conn { return c.Conn }
+// SetLinger sets SO_LINGER on the app's socket beneath, so a reset the
+// relay passes on to the app (util.ResetOnClose) reaches it. It is the one
+// thing treeRealConn lets through: a NetConn method would let every walker of
+// connection wrappers (the TLS layer checks, the raw socket peeks, connseq,
+// tcpConnOf) go beneath it as well, where they stop today.
+func (c *treeRealConn) SetLinger(sec int) error { return util.SetLingerBeneath(c.Conn, sec) }
 
 // relayReal dials a REAL connection's destination and relays every byte to
 // it (realdeps.Relay). A dial that fails is the app's to see, as it would be
