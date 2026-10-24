@@ -594,6 +594,66 @@ func fileDirF(ctx context.Context, Logger *zap.Logger, path string, fileName str
 	return filePath, true, nil
 }
 
+// openIndexDir opens the folder ReadSessionIndicesF / ReadSessionIndicesAny
+// list. A folder that does not exist yet is empty (empty is true, err nil):
+// the first recording, or a reports folder no run has written. Any other
+// failure to open it -- permission denied, an I/O error, a symlink loop, a
+// path that is not a directory -- is returned: the folder may well hold test
+// sets, and reading it as empty makes `keploy record` pick test-set-0 again
+// and record into the user's existing test-set-0.
+func openIndexDir(path string, logger *zap.Logger) (*os.File, bool, error) {
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err == nil {
+		return dir, false, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		logger.Debug("folder does not exist yet; nothing to list", zap.String("path", path))
+		return nil, true, nil
+	}
+	return nil, false, err
+}
+
+// listedDir reports whether v, an entry of the folder at path that
+// ReadSessionIndicesF / ReadSessionIndicesAny list in ModeDir, is one of its
+// folders: a test set, or a test run's reports. A link to a folder -- a
+// symbolic link, or a junction on Windows -- is refused, neither listed nor
+// passed over: keploy writes into these folders (record, the replay's
+// denoise, normalize, templatize, a run's reports), often under sudo, and a
+// link, which a cloned repository can carry, would have it write wherever
+// the link points. Passed over, the link's own name could be handed out as
+// the next test set's, and keploy record would write into the set it points
+// to. A link keploy cannot follow is refused too: keploy cannot rule out
+// that it points to a folder. A link to a file is no folder, like a file.
+func listedDir(path string, v fs.DirEntry) (bool, error) {
+	if v.IsDir() {
+		return true, nil
+	}
+	// Anything else but a regular file may be a link: a symbolic link, or on
+	// Windows a junction, which the listing reports as irregular, not as a
+	// link. os.Stat follows both, and tells a FIFO or a socket for no folder.
+	if v.Type().IsRegular() {
+		return false, nil
+	}
+	p := filepath.Join(path, v.Name())
+	info, err := os.Stat(p)
+	if err == nil && !info.IsDir() {
+		return false, nil
+	}
+	const why = "keploy does not follow a link among the folders it writes into (test sets, test runs)"
+	if err != nil {
+		if _, lerr := os.Lstat(p); errors.Is(lerr, fs.ErrNotExist) {
+			// Gone since the listing: no entry at all.
+			return false, nil
+		}
+		return false, fmt.Errorf("%s is a link keploy cannot follow (%w), and %s: remove it, or replace the link with a real folder", p, err, why)
+	}
+	target := ""
+	if t, rerr := os.Readlink(p); rerr == nil {
+		target = " (" + t + ")"
+	}
+	return false, fmt.Errorf("%s is a link to a folder%s, and %s: replace the link with a real folder holding what it points to", p, target, why)
+}
+
 func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	return ReadSessionIndicesF(ctx, path, logger, mode, FormatYAML)
 }
@@ -601,14 +661,9 @@ func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mo
 func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, mode IndexMode, format Format) ([]string, error) {
 	var indices []string
 
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if errors.Is(err, safeyaml.ErrNotDir) {
-		// There, and not a directory: an error, as listing it always was.
+	dir, empty, err := openIndexDir(path, logger)
+	if empty || err != nil {
 		return indices, err
-	}
-	if err != nil {
-		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
 	}
 	defer func() { _ = dir.Close() }()
 
@@ -632,7 +687,11 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 
 		switch mode {
 		case ModeDir:
-			if v.IsDir() {
+			isDir, err := listedDir(path, v)
+			if err != nil {
+				return nil, err
+			}
+			if isDir {
 				indices = append(indices, name)
 			}
 		case ModeFile:
@@ -655,14 +714,9 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	var indices []string
 
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if errors.Is(err, safeyaml.ErrNotDir) {
-		// There, and not a directory: an error, as listing it always was.
+	dir, empty, err := openIndexDir(path, logger)
+	if empty || err != nil {
 		return indices, err
-	}
-	if err != nil {
-		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
 	}
 	defer func() { _ = dir.Close() }()
 
@@ -685,7 +739,11 @@ func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger,
 
 		switch mode {
 		case ModeDir:
-			if v.IsDir() {
+			isDir, err := listedDir(path, v)
+			if err != nil {
+				return nil, err
+			}
+			if isDir {
 				if _, ok := seen[name]; !ok {
 					seen[name] = struct{}{}
 					indices = append(indices, name)
