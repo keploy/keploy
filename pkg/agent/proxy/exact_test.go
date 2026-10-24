@@ -545,6 +545,143 @@ func TestAMissIsToldOfAStagingOnlyWhereItsCallWasDecided(t *testing.T) {
 	}
 }
 
+// A miss is filed where its call was made, in its test or outside every
+// test, as the call's first read of the round found it (its parser marked
+// it: integrations.StampMark), never from the view serving when the miss
+// reaches the proxy: a call made in a test whose miss is reported once the
+// test ended is that test's miss, and one made between tests whose miss is
+// reported once the next test opened is no miss of that test. HTTP
+// (replay's matcher and record's full round) and Generic alike. A miss of a
+// parser that marks no round is filed from the view serving then
+// (TestAMissIsFiledByWhereItWasMade).
+func TestAMissIsFiledWhereItsCallWasMade(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	staged := func(mm *MockManager) {
+		mm.StageExactBackground(models.RecordedWithS12Routing)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	inTest := func(mm *MockManager) { mm.ServeExactTest("T1", nil) }
+	between := func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }
+	serve := map[string]func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport{
+		"HTTP replay": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), jobsCall)
+		},
+		"HTTP record's full round": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{Learn: true, LearnPool: true}, learn.NewTracker(), jobsCall)
+		},
+		"Generic": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return genericServeIn(t, context.Background(), db, "AUTH step4")
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		want          string
+	}{
+		{"made in a test, reported once the test ended", inTest, between, models.MissInTest},
+		{"made between tests, reported once the next test opened", between, inTest, models.MissOutsideTest},
+	} {
+		for parser, send := range serve {
+			t.Run(parser+": "+tc.name, func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				p.setMockManager(mm)
+				staged(mm)
+				tc.before(mm)
+				if got := mm.exactMissKind(nil); got != tc.want {
+					t.Fatalf("precondition: the call's view files a miss %q; want %q", got, tc.want)
+				}
+				db := &heldFirstRead{MockManager: mm, moved: func() { tc.under(mm) }}
+				r := send(t, db)
+				if r == nil {
+					t.Fatal("the call was answered")
+				}
+				if !db.fired.Load() {
+					t.Fatal("precondition: the replay never moved under the call")
+				}
+				if got := mm.exactMissKind(nil); got == tc.want {
+					t.Fatalf("precondition: the view serving as the miss is reported files it %q too", got)
+				}
+				p.BeginTestErrorCapture()
+				p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, r))
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil || len(got) != 1 {
+					t.Fatalf("want the one call, got %+v (%v)", got, err)
+				}
+				if got[0].Kind != tc.want {
+					t.Fatalf("WRONG KIND: the miss is filed %q; want %q, where its call was made", got[0].Kind, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// Whether a call's set was served by proven routing is read from the view
+// the call's first read found (integrations.S12BackgroundIn), through the
+// store's mark, a round snapshot and a scoped view alike, never from the
+// view serving when a parser reports the call's miss: a call of a set
+// served by proven routing whose miss is reported once the replay staged a
+// set recorded without it is one of a set whose varying fields record's full
+// round learned, and the reverse. Without a mark (the zero CallRound), the
+// store's now.
+func TestACallsProvenRoutingIsReadFromTheViewItsFirstReadFound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stage := func(rules string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			mm.StageExactBackground(rules)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			mm.ServeExactBackground(rules, nil, nil)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	marks := map[string]func(mm *MockManager) integrations.CallRound{
+		"the store's mark": func(mm *MockManager) integrations.CallRound { return mm.MarkCallRound() },
+		"a scoped view's mark": func(mm *MockManager) integrations.CallRound {
+			return integrations.MarkCallRound(&scopedMockDb{MockMemDb: mm})
+		},
+		"a round snapshot": func(mm *MockManager) integrations.CallRound {
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{})
+			if !ok {
+				t.Fatal("no snapshot")
+			}
+			return snap.CallRound()
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		want          bool
+	}{
+		{"marked in a set served by proven routing, read once one recorded without it is staged", stage(models.RecordedWithS12Routing), stage(""), true},
+		{"marked in a set recorded without proven routing, read once one served by it is staged", stage(""), stage(models.RecordedWithS12Routing), false},
+	} {
+		for how, mark := range marks {
+			t.Run(how+": "+tc.name, func(t *testing.T) {
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				tc.before(mm)
+				call := mark(mm)
+				if !call.Read() {
+					t.Fatal("precondition: the call was not marked")
+				}
+				tc.under(mm)
+				if integrations.S12Background(mm) == tc.want {
+					t.Fatalf("precondition: the view serving now reads %v too", tc.want)
+				}
+				if got := integrations.S12BackgroundIn(call, mm); got != tc.want {
+					t.Fatalf("WRONG SET: the call's set reads as served by proven routing: %v; want %v, as its first read found it", got, tc.want)
+				}
+				if got := integrations.S12BackgroundIn(integrations.CallRound{}, mm); got != integrations.S12Background(mm) {
+					t.Fatalf("an unmarked call reads %v; want the store's now", got)
+				}
+			})
+		}
+	}
+}
+
 // A pool slice's per-test-lifetime mock (a Postgres query a second test
 // process's TestMain made) is staged in the startup tree only. Between tests
 // every reusable read shows it, whichever tier a parser reads: after a test

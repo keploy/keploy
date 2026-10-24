@@ -329,6 +329,13 @@ type MockMismatchReport struct {
 	// (the zero value) from a parser that marks no round. Never written to a
 	// report: the proxy's sink reads it in the agent.
 	Mark RoundMark `json:"-" yaml:"-"`
+	// MarkedInTest is, with Mark set, that the call's first read found a
+	// test's view (integrations.CallRound.InTest): the proxy files the miss
+	// as made in that test (MissInTest), or outside every test when false,
+	// from it, never from the view serving when the miss reaches the proxy,
+	// which can be the pool view after the call's test ended, or the next
+	// test's. Never written to a report.
+	MarkedInTest bool `json:"-" yaml:"-"`
 }
 
 // RoundMark is where a call was when its first read of the round was made

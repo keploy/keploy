@@ -517,8 +517,9 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // together under the round lock, in O(1). The view is kept, never copied: a
 // view is not changed once installed, and tells its own by name later, for
 // a miss's lookup, and whether it is a staging's (exactView.staging), for
-// the miss to say so (integrations.StampMark). The zero CallRound without
-// exact serving.
+// the miss to say so (integrations.StampMark), a test's (exactView.test),
+// for the miss to be filed in it, and one of a set served by proven routing
+// (exactView.bg). The zero CallRound without exact serving.
 func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r := &m.exact.round
 	r.mu.Lock()
@@ -531,7 +532,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	if v == nil {
 		return integrations.CallRound{}
 	}
-	return integrations.NewCallRound(epoch, v.holds).InStaging(v.staging)
+	return integrations.NewCallRound(epoch, v.holds).InStaging(v.staging).InView(v.test != "", v.bg != nil)
 }
 
 // holds reports whether the view holds the recording name as its own (the
@@ -1290,9 +1291,20 @@ func (m *MockManager) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 
 var _ integrations.ExactConcurrentReader = (*MockManager)(nil)
 
-// exactMissKind is where a miss reported now was made: in the open test, or
-// outside every test. "" when exact serving is off.
-func (m *MockManager) exactMissKind() string {
+// exactMissKind is where the miss of report r, reported now, was made: in
+// a test, or outside every test. A parser that marked the call's round says
+// it (models.MockMismatchReport.MarkedInTest): the call was made where its
+// first read found it, and the view serving as the report reaches the proxy
+// can be the pool view after the call's test ended, or the next test's. A
+// marked call was made under exact serving. For a miss of a parser that
+// marks no round, the view serving now: "" when exact serving is off.
+func (m *MockManager) exactMissKind(r *models.MockMismatchReport) string {
+	if r != nil && r.Mark != models.RoundUnmarked {
+		if r.MarkedInTest {
+			return models.MissInTest
+		}
+		return models.MissOutsideTest
+	}
 	v := m.exactView()
 	switch {
 	case v == nil:

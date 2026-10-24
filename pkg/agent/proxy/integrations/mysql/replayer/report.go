@@ -5,6 +5,7 @@
 package replayer
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -53,6 +54,45 @@ func newConnectionMiss(dst, step, why, phase string, candidates int) error {
 		WithNextSteps(next).
 		Build()
 	return models.NewMockMismatchError(fmt.Errorf("mysql connection phase, %s: %s: %w", step, why, models.ErrNoMockMatched), report)
+}
+
+// restagedConnectionNote is what a connection-phase miss says when the
+// replay staged a test set again after the connection first read the round
+// (markConnectionMiss).
+const restagedConnectionNote = "keploy replay staged a test set again while it answered this connection's handshake, so keploy answered it with no recording: a connection is never answered with, nor compared with, a recording of a staging made after it opened."
+
+// markConnectionMiss is err, a miss of the connection phase, carrying where
+// the connection first read the round (call: integrations.StampMark): the
+// proxy says from it whether the miss was made while the set's mocks were
+// being staged, and in a test or outside every test, never from the view
+// serving as the miss reaches it. When the replay staged a test set again
+// after that read (restaged), or the store marked the connection's round but
+// could not hold it (integrations.UnheldWhy of held), the connection phase
+// read nothing of the set for it (heldAway): the miss says so in place of its
+// next steps, as no shortfall of the recording. Any other error is err.
+func markConnectionMiss(err error, call integrations.CallRound, restaged func() bool, held integrations.MockMemDb) error {
+	var r interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+		return err
+	}
+	report := r.MismatchReport()
+	integrations.StampMark(report, call)
+	if unheld := integrations.UnheldWhy(held); unheld != "" {
+		report.NextSteps = unheld
+	} else if restaged() {
+		report.NextSteps = restagedConnectionNote
+	}
+	return err
+}
+
+// heldAway reports whether the connection phase's store, held to its
+// connection's mark, read nothing of the set because of the hold: the replay
+// staged a test set again after the mark (restaged), or the store could not
+// hold it (integrations.UnheldWhy).
+func heldAway(restaged func() bool, held integrations.MockMemDb) bool {
+	return restaged() || integrations.UnheldWhy(held) != ""
 }
 
 // matchedHandshakeMiss is a miss of the connection phase at step after the

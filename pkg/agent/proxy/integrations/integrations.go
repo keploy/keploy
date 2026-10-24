@@ -373,13 +373,20 @@ type StagedKeyFinder interface {
 // what it needs to tell them later (StagedFinder.MarkCallRound); a round
 // snapshot is one too (RoundSnapshot.CallRound). It also says whether that
 // view was one the replay serves while it stages a set's mocks (Staging),
-// for the call's miss to say so (StampMark). The zero CallRound is of no
-// read.
+// for the call's miss to say so (StampMark); whether it was a test's view
+// (InTest), for the miss to be filed where its call was made; and whether
+// its set was served by proven routing (Background), for a parser to say of
+// the call's miss what that view's set learned. Each is the view the read
+// found, never the one serving when the miss is reported: the replay can end
+// the call's test, or stage the next set, before then. The zero CallRound is
+// of no read.
 type CallRound struct {
-	read    bool
-	staging bool
-	epoch   uint64
-	held    func(name string) bool
+	read       bool
+	staging    bool
+	inTest     bool
+	background bool
+	epoch      uint64
+	held       func(name string) bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -409,12 +416,45 @@ func (c CallRound) InStaging(staging bool) CallRound {
 // Staging reports whether c's read found the replay staging a set's mocks.
 func (c CallRound) Staging() bool { return c.staging }
 
+// InView is c, of a read whose view was a test's (an open test's view, not a
+// pool view between tests) when inTest is true, and whose set was served by
+// proven routing (S12Background) when background is true. A store sets it as
+// it marks the call, from the view it read, with InStaging.
+func (c CallRound) InView(inTest, background bool) CallRound {
+	c.inTest, c.background = inTest, background
+	return c
+}
+
+// InTest reports whether c's read found a test's view: a miss of the call
+// was made in that test (models.MissInTest), wherever the replay was when
+// the miss is reported.
+func (c CallRound) InTest() bool { return c.inTest }
+
+// Background reports whether c's read found its set served by proven routing
+// (S12Background of the store then).
+func (c CallRound) Background() bool { return c.background }
+
+// S12BackgroundIn is S12Background as the call marked call found it: the
+// view its first read found (CallRound.Background), never the one serving
+// when the parser asks, which can be the next set's. A parser that says of a
+// call's miss whether its set was served by proven routing asks this, not
+// S12Background(db), once the call is marked. For the zero CallRound (a
+// store that marks no round), db's now.
+func S12BackgroundIn(call CallRound, db MockMemDb) bool {
+	if call.Read() {
+		return call.Background()
+	}
+	return S12Background(db)
+}
+
 // StampMark writes onto r, the miss report of the call marked call, where
 // that call was when it first read the round (models.MockMismatchReport.Mark):
 // the proxy says from it whether the miss was made while the set's mocks were
-// being staged. A miss is decided where its call was marked, and the view
-// serving when the report reaches the proxy can be the next staging's, or the
-// staged set's after the call's staging. Nothing for the zero CallRound (a
+// being staged, and whether in a test or outside every test
+// (models.MockMismatchReport.MarkedInTest). A miss is decided where its call
+// was marked, and the view serving when the report reaches the proxy can be
+// the next staging's, the staged set's after the call's staging, or the pool
+// view after the call's test ended. Nothing for the zero CallRound (a
 // store that marks no round): the proxy reads the view serving then.
 func StampMark(r *models.MockMismatchReport, call CallRound) {
 	if r == nil || !call.Read() {
@@ -424,6 +464,7 @@ func StampMark(r *models.MockMismatchReport, call CallRound) {
 	if call.Staging() {
 		r.Mark = models.RoundMarkedStaging
 	}
+	r.MarkedInTest = call.InTest()
 }
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the

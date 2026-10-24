@@ -5595,7 +5595,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
 		proxyErr.Recorded = r.Recorded
 	}
 	if m := p.getMockManager(); m != nil {
-		if proxyErr.MissKind = m.exactMissKind(); proxyErr.MissKind != "" {
+		if proxyErr.MissKind = m.exactMissKind(proxyErr.MismatchReport); proxyErr.MissKind != "" {
 			// Only a miss made in the open test is an extra call, and only
 			// an extra call says how often the call was recorded. The
 			// matcher found it one against the test's own answered mocks,
