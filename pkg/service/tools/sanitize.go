@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -990,6 +991,11 @@ const testFileMode = 0o644
 // sanitize and normalize often run under sudo, as recording does: tests ->
 // /etc/netplan would have had root rewrite every *.yaml there. Checking up
 // front means a test set is rewritten whole or not at all.
+//
+// Only a tests directory that does not exist means no tests (hasTests
+// false). One that is there but is not a directory, or cannot be looked at
+// or listed, is an error: read as "no tests", sanitize would leave whatever
+// the set holds unsanitized and report success.
 func testSetFiles(testSetDir string) (files []string, hasTests bool, err error) {
 	if fi, err := os.Lstat(testSetDir); err != nil {
 		return nil, false, err
@@ -1006,7 +1012,7 @@ func testSetFiles(testSetDir string) (files []string, hasTests bool, err error) 
 	case fi.Mode()&os.ModeSymlink != 0:
 		return nil, false, fmt.Errorf("%s is a symbolic link; keploy does not follow it", testsDir)
 	case !fi.IsDir():
-		return nil, false, nil
+		return nil, false, fmt.Errorf("keploy cannot tell what tests the set holds: %w", &fs.PathError{Op: "lstat", Path: testsDir, Err: syscall.ENOTDIR})
 	}
 	ents, err := os.ReadDir(testsDir)
 	if err != nil {
