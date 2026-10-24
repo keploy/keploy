@@ -211,3 +211,97 @@ func TestTrackerCallWindowIsOneRunOfTheAppsClock(t *testing.T) {
 		t.Fatalf("a previous call at the paired one's own time gave %+v", w)
 	}
 }
+
+// The running test's number (Epoch) moves on Begin and NewSet and on nothing
+// else: an End, a serve and an answer keep it. It is Test's number, and a nil
+// tracker's is 0. A learn step reads it as a call is matched and as it
+// decides, and equal numbers are one test of one set.
+func TestTrackerEpochMovesOnlyWithTheRunningTest(t *testing.T) {
+	var none *Tracker
+	if got := none.Epoch(); got != 0 {
+		t.Fatalf("a nil tracker's epoch is %d; want 0", got)
+	}
+	tr := NewTracker()
+	same := func(step string, want uint64) {
+		t.Helper()
+		if got := tr.Epoch(); got != want {
+			t.Fatalf("after %s the epoch is %d; want %d", step, got, want)
+		}
+		if n, _, _, _ := tr.Test(); n != want {
+			t.Fatalf("after %s Test's number is %d; want the epoch, %d", step, n, want)
+		}
+	}
+	e := tr.Epoch()
+	same("NewTracker", e)
+	m := &models.Mock{Name: "mock-1", Kind: models.HTTP}
+	tr.ServedMock(m)
+	same("a start-up serve", e)
+	tr.Begin()
+	e1 := tr.Epoch()
+	if e1 == e {
+		t.Fatalf("Begin kept the epoch %d", e)
+	}
+	same("Begin", e1)
+	tr.ServedMock(m)
+	tr.Answer(e1, m)
+	same("a serve and an answer", e1)
+	tr.End()
+	same("End", e1)
+	tr.Begin()
+	e2 := tr.Epoch()
+	if e2 == e1 {
+		t.Fatalf("the next Begin kept the epoch %d", e1)
+	}
+	tr.NewSet()
+	if e3 := tr.Epoch(); e3 == e2 {
+		t.Fatalf("NewSet kept the epoch %d", e2)
+	}
+}
+
+// The open test's number (OpenEpoch) is the epoch while a test is open, from
+// Begin until End or NewSet, and 0 while none is: before the first Begin,
+// after End, after NewSet. It is never 0 for an open test (Begin moves the
+// epoch off 0), so a store that stamps a test's view with it can say "no
+// test of the tracker's" with 0.
+func TestTrackerOpenEpochIsTheEpochOnlyWhileATestIsOpen(t *testing.T) {
+	var none *Tracker
+	if got := none.OpenEpoch(); got != 0 {
+		t.Fatalf("a nil tracker's open epoch is %d; want 0", got)
+	}
+	tr := NewTracker()
+	closed := func(step string) {
+		t.Helper()
+		if got := tr.OpenEpoch(); got != 0 {
+			t.Fatalf("after %s, with no test open, the open epoch is %d; want 0", step, got)
+		}
+	}
+	open := func(step string) {
+		t.Helper()
+		e := tr.Epoch()
+		if e == 0 {
+			t.Fatalf("after %s an open test's epoch is 0", step)
+		}
+		if got := tr.OpenEpoch(); got != e {
+			t.Fatalf("after %s the open epoch is %d; want the epoch, %d", step, got, e)
+		}
+	}
+	closed("NewTracker")
+	m := &models.Mock{Name: "mock-1", Kind: models.HTTP}
+	tr.ServedMock(m)
+	closed("a start-up serve")
+	tr.Begin()
+	open("Begin")
+	tr.ServedMock(m)
+	tr.Answer(tr.Epoch(), m)
+	open("a serve and an answer")
+	tr.End()
+	closed("End")
+	tr.ServedMock(m)
+	closed("a serve between tests")
+	tr.Begin()
+	open("the next Begin")
+	tr.NewSet()
+	closed("NewSet")
+	tr.Begin()
+	open("the new set's first Begin")
+}

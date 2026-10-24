@@ -351,6 +351,17 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// ServedInOpenTest forwards the store's stamp of its open test and account of
+// what it was served (integrations.ExactServedReader), 0 and none when it
+// keeps none, so a learn step on a scoped view reads the store's account as
+// it would the bare manager's.
+func (s *scopedMockDb) ServedInOpenTest() (uint64, []*models.Mock) {
+	if er, ok := s.MockMemDb.(integrations.ExactServedReader); ok {
+		return er.ServedInOpenTest()
+	}
+	return 0, nil
+}
+
 // FindAnsweredEarlier forwards the store's lookup of a recording that
 // answered an identical call earlier in the set (integrations.AnsweredFinder).
 func (s *scopedMockDb) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
@@ -364,6 +375,7 @@ var (
 	_ integrations.AnsweredFinder      = (*scopedMockDb)(nil)
 	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
+	_ integrations.ExactServedReader   = (*scopedMockDb)(nil)
 )
 
 // ClaimantOf and ExactTakenCandidates forward what the store's open test's view says of the recordings it shares

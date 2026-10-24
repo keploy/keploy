@@ -85,6 +85,11 @@ type exactPlan struct {
 	// aheadNamed is the test case the latest pool call named the calls in
 	// flight of (serveExactPool's next), "" for none.
 	aheadNamed string
+	// testView is the test case whose own view the agent may still serve:
+	// set as serveExactTest asks for it (a call that failed may have reached
+	// the agent all the same), "" once a pool call succeeds. The next test
+	// case begins only over the pool (poolBeforeBegin).
+	testView string
 	// share is the set's shares (concurrent_shares.go): nil for a set whose
 	// mapping states no concurrency.
 	share *sharePlan
@@ -442,6 +447,7 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 // mocks; vars are the test variables its request carries.
 func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, vars ...models.VariableBinding) error {
 	plan.begin(name)
+	plan.testView = name
 	ex := &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)}
 	// keploy record's full round: the recordings it shares with the tests
 	// that ran beside it, after its own.
@@ -524,7 +530,65 @@ func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next str
 		return err
 	}
 	plan.aheadNamed = next
+	plan.testView = ""
 	return nil
+}
+
+// endStreamOnFailure logs the pool call a streamed test case that failed
+// makes as it ends (endStream), when the agent did not take it: the test
+// case has failed already, and the next one's loop head serves the pool
+// again before it begins (poolBeforeBegin), or stops the set.
+func endStreamOnFailure(logger *zap.Logger, name string, err error) {
+	if err != nil {
+		logger.Warn("keploy could not serve the test set's pool as a failed streaming test case ended; it serves it again before the next test case begins",
+			zap.String("testCase", name), zap.Error(err))
+	}
+}
+
+// poolBeforeBegin serves the pool before test case name begins, when the
+// agent may still serve the last test case's own view: a test case that
+// ended on an exit that served no pool, or whose pool call the agent did not
+// take. Beginning name opens its capture window, and with it the learn
+// step's running test on the agent (Proxy.ContinueTestErrorCapture): over
+// the last test case's view, the agent's tracker files what that test case
+// served as served before name, while the store still answers name's calls
+// with the last one's recordings, so a value the last test case's recording
+// held read as noise onto one of its own. An error when the pool cannot be
+// served: name must not begin then. A no-op for no plan, or when the latest
+// pool call succeeded.
+func (r *Replayer) poolBeforeBegin(ctx context.Context, plan *exactPlan, name string) error {
+	if plan == nil || plan.testView == "" {
+		return nil
+	}
+	last := plan.testView
+	if err := r.serveExactPool(ctx, plan, name); err != nil {
+		return fmt.Errorf("keploy could not serve the test set's pool after test case %s, so it did not begin test case %s over %s's mocks: %w", last, name, last, err)
+	}
+	return nil
+}
+
+// logStoppedBeforeTest says, where it happens, that keploy stopped a set
+// because it did not begin a test case on its agent under exact serving
+// (poolBeforeBegin, openTestErrorCapture), and why. It says nothing of the
+// set's verdict, which the set's end gives (logNotBegun): an agent that
+// refuses while the app runs on is said even when the set ends with the
+// app's status, or a failed post-script ends it before its end.
+func (r *Replayer) logStoppedBeforeTest(testSetID string, err error) {
+	r.logger.Warn("keploy did not begin a test case on its agent, so it stopped the test-set before that test case",
+		zap.String("test-set", testSetID),
+		zap.String("reason", err.Error()))
+}
+
+// logNotBegun says, at the end of a set keploy stopped because it did not
+// begin a test case on its agent under exact serving (poolBeforeBegin,
+// openTestErrorCapture), that the set is not judged, why, and what to do.
+func (r *Replayer) logNotBegun(testSetID string, err error) {
+	// Not utils.LogError, which drops an error that wraps context.Canceled:
+	// a set marked not judged is always said.
+	r.logger.Error("test-set is not judged: keploy did not begin one of its test cases on its agent, so it stopped the set before that test case; the run goes on to the next test-set",
+		zap.String("test-set", testSetID),
+		zap.String("reason", err.Error()),
+		zap.String("next_step", "check the agent's log for why it did not answer and whether it is still running, then run the test-set again"))
 }
 
 // noteMappingAlwaysUsed says once per run that disableMapping does not apply
