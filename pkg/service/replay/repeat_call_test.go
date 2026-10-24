@@ -45,8 +45,11 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	store.AddUnmatchedCallForTest("set-1", "test-9", models.UnmatchedCall{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7"), NextSteps: "set-1's"})
 	keep := results[0].FailureInfo.UnmatchedCalls[0].Repeat
 
-	lines := markRepeatOf(results, consumers, nil, nil, nil)
+	lines, likely := markRepeatOf(results, consumers, nil, nil, nil)
 	calls := results[0].FailureInfo.UnmatchedCalls
+	if likely != 3 {
+		t.Fatalf("of three notes 6.00s at replay against 2.00s at record, %d count as likely, want 3", likely)
+	}
 	if calls[0].Repeat.Test != "test-3" || !strings.Contains(calls[0].NextSteps, "test test-3's call") {
 		t.Fatalf("the repeat is named %q: %s", calls[0].Repeat.Test, calls[0].NextSteps)
 	}
@@ -245,7 +248,7 @@ func TestMarkRepeatOfAnchorsOnlyOnARecordingMadeBeforeTheTest(t *testing.T) {
 			{ActualSummary: "GET /count", ClosestMock: "mock-7", NextSteps: "the agent's", Repeat: note},
 		}}}}
 		tcs := []*models.TestCase{{Name: "test-9", HTTPReq: models.HTTPReq{Timestamp: start}}}
-		named := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, lookup, map[string]time.Time{"test-9": replay.Add(20 * time.Second)})
+		named, _ := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, lookup, map[string]time.Time{"test-9": replay.Add(20 * time.Second)})
 		return results[0].FailureInfo.UnmatchedCalls[0], named
 	}
 	// mock-7's time is not known to the lookup, and mock-13, the only other
@@ -334,8 +337,11 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 	testCases := []*models.TestCase{{Name: "test-9", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: rec.Add(69 * time.Second)}}}
 	starts := map[string]time.Time{"test-9": replay.Add(4 * time.Second)}
 
-	named := markUnmadeRepeats(results, consumers, consumed, lookup, starts, testCases)
+	named, likely := markUnmadeRepeats(results, consumers, consumed, lookup, starts, testCases)
 	u := results[0].FailureInfo.UnconsumedMocks
+	if likely != 1 {
+		t.Fatalf("one note 2.00s at replay against 65.00s at record counts %d as likely, want 1", likely)
+	}
 	n := u[0].RepeatOf
 	if n == nil || n.Mock != "mock-2" || n.Test != "test-2" {
 		t.Fatalf("the unmade call's twin is %+v, want mock-2 of test-2", n)
@@ -360,7 +366,7 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 	// Without its replay start the test counts its result's Started, to the
 	// second; with every twin answered after that, nothing is noted.
 	again := []models.TestResult{{TestCaseID: "test-9", Started: replay.Unix(), FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-9"}}}}}
-	if named := markUnmadeRepeats(again, consumers, consumed, lookup, nil, testCases); len(named) != 0 || again[0].FailureInfo.UnconsumedMocks[0].RepeatOf != nil {
+	if named, _ := markUnmadeRepeats(again, consumers, consumed, lookup, nil, testCases); len(named) != 0 || again[0].FailureInfo.UnconsumedMocks[0].RepeatOf != nil {
 		t.Fatalf("a twin answered after the test began was named: %q", named)
 	}
 	// At record test-9 began before every identical recording but its own:
@@ -368,12 +374,53 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 	// record to give (none of zero).
 	early := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-9"}}}}}
 	earlyCases := []*models.TestCase{{Name: "test-9", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: rec.Add(500 * time.Millisecond)}}}
-	if markUnmadeRepeats(early, consumers, consumed, lookup, starts, earlyCases); early[0].FailureInfo.UnconsumedMocks[0].RepeatOf == nil || early[0].FailureInfo.UnconsumedMocks[0].RepeatOf.Mock != "mock-2" || early[0].FailureInfo.UnconsumedMocks[0].RepeatOf.RecordGapKnown {
-		t.Fatalf("with test-9 begun before mock-2 at record the note is %+v, want mock-2 and no gap at record", early[0].FailureInfo.UnconsumedMocks[0].RepeatOf)
+	if _, likely := markUnmadeRepeats(early, consumers, consumed, lookup, starts, earlyCases); early[0].FailureInfo.UnconsumedMocks[0].RepeatOf == nil || early[0].FailureInfo.UnconsumedMocks[0].RepeatOf.Mock != "mock-2" || early[0].FailureInfo.UnconsumedMocks[0].RepeatOf.RecordGapKnown || likely != 0 {
+		t.Fatalf("with test-9 begun before mock-2 at record the note is %+v (counted likely %d), want mock-2, no gap at record, and not likely", early[0].FailureInfo.UnconsumedMocks[0].RepeatOf, likely)
 	}
 	again[0].Started = replay.Add(2500 * time.Millisecond).Unix() // 2s, so mock-2, answered at 2s, is not before it
 	if markUnmadeRepeats(again, consumers, consumed, lookup, nil, testCases); again[0].FailureInfo.UnconsumedMocks[0].RepeatOf == nil || again[0].FailureInfo.UnconsumedMocks[0].RepeatOf.Mock != "mock-1" {
 		t.Fatalf("the result's Started was not the fallback: %+v", again[0].FailureInfo.UnconsumedMocks[0].RepeatOf)
+	}
+}
+
+// The set's log line claims an elapsed-time span as the likely cause only
+// when every call it names has gaps that support it. A poller asked again
+// 0.02 s after its twin at replay and 0.01 s at record, named beside a cache
+// refill 6 s after against 2 s, makes the line count the calls instead, and
+// neither the line nor the poller's own next step (a call made elsewhere,
+// too) says "likely". Its mirror, for recorded calls the replay never made,
+// reads its own count the same way.
+func TestRepeatCauseClaimsLikelyOnlyWhenEveryNoteDoes(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	refill := anchoredNote("mock-7", rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
+	poller := anchoredNote("mock-8", rec, rec, rec.Add(20*time.Millisecond), rec.Add(10*time.Millisecond))
+	results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: refill},
+		{ActualSummary: "GET /tick", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: poller},
+	}}}}
+	named, likely := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}, "mock-8": {"test-3"}}, nil, nil, nil)
+	if len(named) != 2 || likely != 1 {
+		t.Fatalf("a refill and a poller: %d named, %d likely; want 2 and 1", len(named), likely)
+	}
+	if steps := results[0].FailureInfo.UnmatchedCalls[1].NextSteps; !strings.Contains(steps, "This request is mock-w") || !strings.Contains(steps, "too close to tell") || strings.Contains(steps, "likely") {
+		t.Errorf("the poller's next step claims a cause: %s", steps)
+	}
+	for _, c := range []struct {
+		name          string
+		got           string
+		likely        bool
+		wantSubstring string
+	}{
+		{"misses, every one likely", repeatMissCause(2, 2), true, "likely the application kept the earlier answer"},
+		{"misses, one of two likely", repeatMissCause(likely, len(named)), false, "the gaps point to it for 1 of these 2 calls"},
+		{"misses, the one named not likely", repeatMissCause(0, 1), false, "and this call's gaps do not point to it;"},
+		{"misses, none of two likely", repeatMissCause(0, 2), false, "the gaps point to it for 0 of these 2 calls"},
+		{"unmade, every one likely", repeatUnmadeCause(3, 3), true, "likely the application still held the earlier answer"},
+		{"unmade, two of three likely", repeatUnmadeCause(2, 3), false, "the gaps point to it for 2 of these 3 calls"},
+	} {
+		if !strings.Contains(c.got, c.wantSubstring) || strings.Contains(c.got, "likely") != c.likely {
+			t.Errorf("%s: the cause clause is %q; want %q, saying likely %v", c.name, c.got, c.wantSubstring, c.likely)
+		}
 	}
 }
 
@@ -519,6 +566,43 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 	})
 	if len(named) != 1 || named[0] != "r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)" {
 		t.Fatalf("in the branch markRepeatOf named calls in, RunTestSet writes the end-of-run rows with %v, want one r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)", named)
+	}
+	// Each branch's log line takes its cause clause from the counts its
+	// mark returned, never a fixed sentence that says "likely" of every
+	// call.
+	causes := map[string][]string{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		s, ok := n.(*ast.IfStmt)
+		if !ok || s.Init == nil {
+			return true
+		}
+		init, ok := s.Init.(*ast.AssignStmt)
+		if !ok || len(init.Rhs) != 1 {
+			return true
+		}
+		call, ok := init.Rhs[0].(*ast.CallExpr)
+		if !ok || (calleeName(call) != "markRepeatOf" && calleeName(call) != "markUnmadeRepeats") {
+			return true
+		}
+		lhs := make([]string, 0, len(init.Lhs))
+		for _, l := range init.Lhs {
+			lhs = append(lhs, printNode(t, fset, l))
+		}
+		ast.Inspect(s.Body, func(b ast.Node) bool {
+			if c, ok := b.(*ast.CallExpr); ok && (calleeName(c) == "repeatMissCause" || calleeName(c) == "repeatUnmadeCause") {
+				causes[calleeName(call)] = append(causes[calleeName(call)], strings.Join(lhs, ", ")+" -> "+printNode(t, fset, c))
+			}
+			return true
+		})
+		return false
+	})
+	for mark, want := range map[string]string{
+		"markRepeatOf":      "named, likely -> repeatMissCause(likely, len(named))",
+		"markUnmadeRepeats": "named, likely -> repeatUnmadeCause(likely, len(named))",
+	} {
+		if got := causes[mark]; len(got) != 1 || got[0] != want {
+			t.Errorf("RunTestSet's %s branch words its log line's cause with %v, want one %q", mark, got, want)
+		}
 	}
 	var writes []string
 	ast.Inspect(fn, func(n ast.Node) bool {

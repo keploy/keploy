@@ -26,16 +26,17 @@ import (
 // RepeatNote is what the miss then says: the call is identical to a recording
 // an earlier test of the set made, which already answered at this replay, and
 // how far apart the two calls were at replay and at record. A replay gap
-// longer than the record gap is what an elapsed-time span that expired at
+// longer than the record gap by a meaningful difference
+// (GapDifferenceMeaningful) is what an elapsed-time span that expired at
 // replay looks like; keploy cannot see the application's clock, so the note
-// names that as the likely cause, never as a certainty.
+// names that as the likely cause only then, and never as a certainty.
 //
 // The mirror is a replay faster than the recording: the recording passed the
 // span, so a later test's recording has the call again, and the replay,
 // still inside it, never makes that call. Its recording is then unconsumed,
 // and RepeatNote on it (UnconsumedMock.RepeatOf) names the earlier identical
-// recording that answered at this replay; there a replay gap shorter than
-// the record gap is the likely sign.
+// recording that answered at this replay; there a replay gap meaningfully
+// shorter than the record gap is the likely sign.
 
 // RepeatNote says that a call no mock answered is identical to a recording an
 // earlier test of the set made, which had already answered the same call at
@@ -210,13 +211,14 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 // make it (notOwned: another test's, named by recordedIn when the replay
 // knows it, or one made between tests). Both explanations hold then, and the
 // sentence names both: the call is that recording, which exact serving does
-// not give this test, and it repeats the earlier answer, which says why the
-// application asked again here. Neither replaces the other: the recording
-// made elsewhere is the reason the call missed, the repeat the likely cause.
-// keploy record's judging treats it as any call made elsewhere: it moves the
-// recording to the test set's worker scope, and its confirming round still
-// compares the test's response. The repeat is named for information, as the
-// likely reason the application asked again; it changes neither.
+// not give this test, and it repeats the earlier answer, which may say why
+// the application asked again here. Neither replaces the other: the
+// recording made elsewhere is the reason the call missed, and the repeat a
+// possible cause, which Explain judges by its gaps and claims only when
+// they support it. keploy record's judging treats it as any call made
+// elsewhere: it moves the recording to the test set's worker scope, and its
+// confirming round still compares the test's response. The repeat is named
+// for information only; it changes neither.
 func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd string) string {
 	if n == nil {
 		return ""
@@ -228,7 +230,7 @@ func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd s
 	if recordedIn != "" {
 		where = "a recording keploy made in test " + recordedIn + "'s window"
 	}
-	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s keploy record's judging treats this miss as any call made elsewhere: it moves %s to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information, as the likely reason the application asked again.", closest, where, n.Explain(recordCmd), closest)
+	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s keploy record's judging treats this miss as any call made elsewhere: it moves %s to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information only.", closest, where, n.Explain(recordCmd), closest)
 }
 
 // recordedLastPhrase names, in a sentence, the recording the record gap runs

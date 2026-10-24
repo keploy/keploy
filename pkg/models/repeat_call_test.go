@@ -139,6 +139,20 @@ func TestRepeatNoteNeedsAMeaningfulGapDifference(t *testing.T) {
 	if s := unanchored.Explain("keploy record"); strings.Contains(s, "too close") || !strings.Contains(s, "If the application keeps that answer") {
 		t.Errorf("a note with no record gap: %s", s)
 	}
+	// A replay gap from the test's start with no record gap (no identical
+	// per-test recording made before the test began at record) is one gap,
+	// with nothing to be too close to: 0.30 s at replay keeps the
+	// conditional sentence, for a miss and an unmade call alike.
+	oneGap := anchoredNote("m", rec, rec, rec.Add(300*time.Millisecond), time.Time{})
+	if !oneGap.ReplayGapFromStart || oneGap.RecordGapKnown || oneGap.GapsTooClose() {
+		t.Fatalf("a 0.30s replay gap from the start with no record gap: from start %v, record gap %v, too close %v", oneGap.ReplayGapFromStart, oneGap.RecordGapKnown, oneGap.GapsTooClose())
+	}
+	if s := oneGap.Explain("keploy record"); strings.Contains(s, "too close") || !strings.Contains(s, "At replay this test began 0.30s after that call, and") || !strings.Contains(s, "If the application keeps that answer") {
+		t.Errorf("a miss with one gap: %s", s)
+	}
+	if s := oneGap.ExplainUnmade("keploy record"); strings.Contains(s, "too close") || !strings.Contains(s, "If the application keeps that answer") {
+		t.Errorf("an unmade call with one gap: %s", s)
+	}
 }
 
 // The sentence names the recording, the test once it is named, both gaps,
@@ -295,8 +309,10 @@ func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time
 // Explain's words whole, and says what judging does with it: it moves the
 // recording to the worker scope, as any call made elsewhere, its confirming
 // round still compares the test's response, and the repeat is information.
-// It never says judging keeps the recording where it is. A nil note says
-// nothing.
+// It never says judging keeps the recording where it is, and it claims the
+// likely cause only where Explain does: a note whose gaps are too close, run
+// the wrong way, or do not compare says "likely" nowhere (but in "less
+// likely"). A nil note says nothing.
 func TestExplainMissNamesANotOwnedRecordingBesideTheRepeat(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	n := NewRepeatNote("mock-7", rec, rec, rec.Add(6*time.Second))
@@ -309,11 +325,28 @@ func TestExplainMissNamesANotOwnedRecordingBesideTheRepeat(t *testing.T) {
 		t.Fatalf("a not-owned call with no closest got %q, want Explain's", got)
 	}
 	got := n.ExplainMiss(true, "mock-w", "test-5", "keploy record")
-	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "keploy record's judging treats this miss as any call made elsewhere: it moves mock-w to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information, as the likely reason the application asked again.") || strings.Contains(got, "does not move") {
+	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "keploy record's judging treats this miss as any call made elsewhere: it moves mock-w to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information only.") || strings.Contains(got, "does not move") {
 		t.Fatalf("a not-owned repeat's next step is %q", got)
 	}
 	if got := n.ExplainMiss(true, "mock-w", "", "keploy record"); !strings.HasPrefix(got, "This request is mock-w, a recording keploy made between tests or in another test's window,") {
 		t.Fatalf("with no test named it says %q", got)
+	}
+	for name, note := range map[string]*RepeatNote{
+		"too close":     anchoredNote("mock-7", rec, rec, rec.Add(20*time.Millisecond), rec.Add(10*time.Millisecond)),
+		"the wrong way": anchoredNote("mock-7", rec, rec, rec.Add(time.Second), rec.Add(5*time.Second)),
+		"unanchored":    n,
+		"no record gap": anchoredNote("mock-7", rec, rec, rec.Add(300*time.Millisecond), time.Time{}),
+	} {
+		for _, notOwned := range []bool{true, false} {
+			got := strings.ReplaceAll(note.ExplainMiss(notOwned, "mock-w", "test-5", "keploy record"), "less likely", "")
+			if strings.Contains(got, "likely") {
+				t.Errorf("a note whose gaps are %s (not owned %v) claims a likely cause: %s", name, notOwned, got)
+			}
+		}
+	}
+	likely := anchoredNote("mock-7", rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
+	if got := likely.ExplainMiss(true, "mock-w", "test-5", "keploy record"); strings.Count(got, "likely") != 1 || !strings.Contains(got, "The application likely kept the earlier answer") {
+		t.Errorf("a likely note's not-owned next step names the cause other than once, in Explain's words: %s", got)
 	}
 	var none *RepeatNote
 	if got := none.ExplainMiss(true, "mock-w", "test-5", "keploy record"); got != "" {

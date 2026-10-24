@@ -27,11 +27,12 @@ const repeatRecordCommand = "keploy record"
 // recording made elsewhere (NotOwned; markRecordedIn names its test first)
 // keeps that recording as its closest, and its next step names both
 // (models.RepeatNote.ExplainMiss). It returns one line per call it named, for
-// the set's log.
-func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time) []string {
+// the set's log, and how many of those notes' gaps make an elapsed-time span
+// the likely cause (models.RepeatNote.ElapsedTimeExpiryLikely), which the
+// log's cause clause reads (repeatMissCause).
+func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time) (named []string, likely int) {
 	began := recordedStarts(testCases)
 	var recorded map[string][]recordedTwin
-	var named []string
 	for i := range results {
 		r := &results[i]
 		for j := range r.FailureInfo.UnmatchedCalls {
@@ -59,9 +60,45 @@ func markRepeatOf(results []models.TestResult, consumers map[string][]string, te
 			c.Repeat = n
 			c.NextSteps = c.Repeat.ExplainMiss(c.NotOwned, c.ClosestMock, c.RecordedIn, repeatRecordCommand)
 			named = append(named, repeatLine(r.TestCaseID, c))
+			if l, _ := n.ElapsedTimeExpiryLikely(); l {
+				likely++
+			}
 		}
 	}
-	return named
+	return named, likely
+}
+
+// repeatMissCause is the cause clause of the set's log line for the total
+// calls markRepeatOf named, likely of whose notes' gaps make an elapsed-time
+// span the likely cause. It says "likely" only when every one's does: a
+// poller asked again at its own pace, whose gaps are too close to tell, must
+// not be told it hit a cache. Otherwise it names the span as a common cause
+// and counts the calls whose gaps point to it.
+func repeatMissCause(likely, total int) string {
+	if likely == total {
+		return "likely the application kept the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that the recording stayed inside and this replay passed"
+	}
+	return "a common cause is an answer the application keeps for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that the recording stays inside and a slower replay passes, " + gapsPointing(likely, total) + "; each call's note says what its own gaps show"
+}
+
+// repeatUnmadeCause is repeatMissCause's mirror, for the total recorded
+// calls markUnmadeRepeats named, likely of whose notes' gaps make a span
+// still fresh at this replay the likely cause
+// (models.RepeatNote.ElapsedTimeFreshLikely).
+func repeatUnmadeCause(likely, total int) string {
+	if likely == total {
+		return "likely the application still held the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that this replay stayed inside and the recording passed"
+	}
+	return "a common cause is an answer the application keeps for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that a faster replay stays inside and the recording passed, " + gapsPointing(likely, total) + "; each call's note says what its own gaps show"
+}
+
+// gapsPointing counts, in a clause, the likely of total named calls whose
+// gaps point to that cause, where likely is less than total.
+func gapsPointing(likely, total int) string {
+	if total == 1 {
+		return "and this call's gaps do not point to it"
+	}
+	return fmt.Sprintf("and the gaps point to it for %d of these %d calls", likely, total)
 }
 
 // recordedTwin is a per-test recording of the set, with when its request was
@@ -137,20 +174,20 @@ func recordedStarts(testCases []*models.TestCase) map[string]time.Time {
 // the newest identical recording (models.Mock.RequestFingerprint) another
 // test of the set recorded before it that answered that test's call at this
 // replay before this test began (UnconsumedMock.RepeatOf, with its sentence
-// in NextSteps): the application likely still held that answer and did not
-// ask again. consumed is the set's consumed mocks by name, whose Timestamp
+// in NextSteps): the application may still have held that answer, and so
+// did not ask again. consumed is the set's consumed mocks by name, whose Timestamp
 // is when each first answered; replayStarts is when each test began at this
 // replay (a test missing from it counts its result's Started, to the
 // second). A session or connection recording is no earlier twin: only a
 // test's own recording says that test made the call. The gap at record runs
 // from the newest identical per-test recording made before this test began
 // then (recordAnchor), as markRepeatOf's does. It returns one line per note,
-// for the set's log.
-func markUnmadeRepeats(results []models.TestResult, consumers map[string][]string, consumed map[string]models.MockState, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time, testCases []*models.TestCase) []string {
+// for the set's log, and how many of those notes' gaps make a span still
+// fresh at this replay the likely cause (repeatUnmadeCause).
+func markUnmadeRepeats(results []models.TestResult, consumers map[string][]string, consumed map[string]models.MockState, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time, testCases []*models.TestCase) (named []string, likely int) {
 	var byRequest map[string][]answeredTwin
 	var recorded map[string][]recordedTwin
 	var recordStarts map[string]time.Time
-	var named []string
 	for i := range results {
 		r := &results[i]
 		for j := range r.FailureInfo.UnconsumedMocks {
@@ -187,9 +224,12 @@ func markUnmadeRepeats(results []models.TestResult, consumers map[string][]strin
 				line += fmt.Sprintf(", %.2fs after %s at record", n.RecordGapSeconds, n.RecordedLast)
 			}
 			named = append(named, line)
+			if l, _ := n.ElapsedTimeFreshLikely(); l {
+				likely++
+			}
 		}
 	}
-	return named
+	return named, likely
 }
 
 // answeredTwin is a consumed per-test recording that may be an unconsumed

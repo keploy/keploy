@@ -93,8 +93,8 @@ func sameRequest(diffs []strictField) bool {
 // that is also a recording made elsewhere (report.NotOwned, markNotOwned)
 // keeps that recording as its closest, the reason it missed, and its next
 // step names both (models.RepeatNote.ExplainMiss). The replay measures the
-// gaps at record and the likely cause at the set's end (markRepeatOf), from
-// the set's recordings, which the agent does not hold.
+// gaps at record and the cause they support at the set's end (markRepeatOf),
+// from the set's recordings, which the agent does not hold.
 func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall) {
 	m := a.Mock
 	if !report.NotOwned {

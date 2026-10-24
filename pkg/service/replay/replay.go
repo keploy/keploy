@@ -5129,25 +5129,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	// A call no mock answered that repeats a recording an earlier test made,
 	// which already answered at this replay, is named with that test: the
-	// application asked again where its recording did not, likely as an
+	// application asked again where its recording did not, perhaps as an
 	// answer it kept for a span of elapsed time ran out (models.RepeatNote).
-	if named := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
+	// The line claims that cause only when every note's gaps support it.
+	if named, likely := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
 		r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)
-		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: likely the application kept the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that the recording stayed inside and this replay passed; each is named under unmatched_calls.repeat_of",
+		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: "+repeatMissCause(likely, len(named))+"; each is named under unmatched_calls.repeat_of",
 			zap.String("test-set", testSetID),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.Int("count", len(named)),
+			zap.Int("likely_elapsed_time", likely),
 			zap.String("next_step", "record with that cache disabled or its span longer than the replay, or make the call in every test that needs it"))
 	}
 	// Its mirror, for a replay faster than the recording: a recorded call
 	// this replay never made, identical to a recording an earlier test made
 	// that answered at this replay, is named with that recording; the
-	// application likely still held the earlier answer.
-	if named := markUnmadeRepeats(testCaseResults, consumers, totalConsumedMocks, mockLookup, replayStarts, testCases); len(named) > 0 {
-		r.logger.Warn("tests did not make a recorded call identical to one an earlier test made, which keploy answered at this replay with that test's recording: likely the application still held the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that this replay stayed inside and the recording passed; each is named under unconsumed_mocks.repeat_of",
+	// application may still have held the earlier answer, which the line
+	// claims only when every note's gaps support it.
+	if named, likely := markUnmadeRepeats(testCaseResults, consumers, totalConsumedMocks, mockLookup, replayStarts, testCases); len(named) > 0 {
+		r.logger.Warn("tests did not make a recorded call identical to one an earlier test made, which keploy answered at this replay with that test's recording: "+repeatUnmadeCause(likely, len(named))+"; each is named under unconsumed_mocks.repeat_of",
 			zap.String("test-set", testSetID),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.Int("count", len(named)),
+			zap.Int("likely_elapsed_time", likely),
 			zap.String("next_step", "record with that cache disabled, or make the call in every test that needs it"))
 	}
 	// Under the proven switch a test whose call got no recorded answer fails,
