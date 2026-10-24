@@ -373,6 +373,63 @@ func TestWatermark_HoldsAChunkInTheForwardersHand(t *testing.T) {
 	}
 }
 
+// A chunk the forwarder has read and stamped stays in its hand until it is
+// queued. The forwarder lets go of it (noteReleased) at the top of its next
+// loop, after push has queued it. Here the forwarder is held just before the
+// push. Nothing is queued. The parser waits on its stream. Only the
+// forwarder's hand says the parser has not been given the chunk. A window the
+// chunk's stamp falls in is not settled. Were the hand let go of before the
+// push, the chunk would be in neither the hand nor the queue for a moment. A
+// look then would take the waiting parser as caught up. It would pass the
+// window with the chunk still to come (#4900's missing mock).
+func TestWatermark_AChunkJustBeforeItsQueueHoldsItsWindowWhileTheParserWaits(t *testing.T) {
+	release := make(chan struct{})
+	var holding atomic.Bool
+	h := newHarness(t, Config{beforeTee: func(dir fakeconn.Direction) {
+		if dir == fakeconn.FromClient {
+			holding.Store(true)
+			<-release
+		}
+	}})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	start := time.Now()
+	h.writeClient([]byte("req"))
+	h.readDest(3)
+	awaitState(t, "the forwarder to hold the chunk before its queue", holding.Load)
+	got := make(chan string, 1)
+	go func() {
+		c, err := h.r.ClientStream().ReadChunk()
+		if err != nil {
+			got <- "error: " + err.Error()
+			return
+		}
+		got <- string(c.Bytes)
+	}()
+	awaitState(t, "the parser to wait on its stream", func() bool { ok, _ := h.r.ClientStream().Waiting(); return ok })
+	end := time.Now()
+	if w.Settled("", "", start, end) {
+		t.Error("Settled: true for a window holding the stamp of a chunk not yet queued, the parser waiting")
+	}
+	close(release)
+	released = true
+	select {
+	case s := <-got:
+		if s != "req" {
+			t.Fatalf("the parser got %q, want req", s)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the parser never got the chunk")
+	}
+}
+
 // A forwarder marks a chunk it read as in its hand, being stamped
 // (heldUnstamped), before it reads the clock for the chunk's stamp, so a look
 // that found its hand empty is older than the stamp. Were the clock read
@@ -501,6 +558,40 @@ func TestWatermark_ADeliveredChunkOnTheOtherDirectionHoldsIt(t *testing.T) {
 	}
 	if w.Settled("", "", mid.Add(-time.Second), mid) {
 		t.Fatal("Settled = true for a window whose response the parser never consumed")
+	}
+}
+
+// A connection's newest stamp is the newer of its two directions'. Here the
+// client's request is stamped before the window. The parser has taken it and
+// waits for more. The destination's reply is stamped inside the window. It
+// waits for a parser that has not read it. Only the reply holds the window,
+// and it is not settled. Taking the newest stamp from the client's side alone
+// would put all the connection's traffic before the window. The window would
+// then pass.
+func TestWatermark_AReplyInsideAWindowAfterATakenRequestHoldsIt(t *testing.T) {
+	h := newHarness(t, Config{})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	h.writeClient([]byte("req"))
+	h.readDest(3)
+	if c := readChunk(t, h.r.ClientStream()); string(c.Bytes) != "req" {
+		t.Fatalf("setup: the parser took %q, want req", c.Bytes)
+	}
+	blockInRead(t, h.r.ClientStream())
+	start := time.Now()
+	for start.UnixNano() <= h.r.teeC2D.progress.last.Load() {
+		start = time.Now() // the window opens after the request's stamp
+	}
+	h.writeDest([]byte("ans"))
+	h.readClient(3)
+	awaitState(t, "the reply to leave the forwarder's hand", func() bool { return h.r.teeD2C.progress.held.Load() == 0 })
+	end := time.Now()
+	if h.r.teeD2C.progress.last.Load() < start.UnixNano() {
+		t.Fatal("setup: the reply was stamped before the window")
+	}
+	if w.Settled("", "", start, end) {
+		t.Error("Settled: true for a window holding a reply the parser has not taken")
 	}
 }
 
