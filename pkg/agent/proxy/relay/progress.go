@@ -295,7 +295,18 @@ func (r *Relay) carriedNothingIn(start, end int64, view stampView) bool {
 		newest = max(newest, m)
 	}
 	if first == 0 {
-		// Nothing read yet: whatever it reads is stamped from now on.
+		// No stamp in first or any mark. In the verdict's view
+		// (unstampedInAnyWindow) no mark is unstamped here (one would have
+		// answered above), so whatever chunk the relay has read or reads next
+		// is stamped no earlier than this look: a forwarder's or a TLS layer's
+		// read marks itself before it reads the clock (noteReading,
+		// readTrackingConn), and the stash a prependingConn stamps with its
+		// own, older stamp is made of chunks the forwarder stamped
+		// (tee.noteCarried) before it stashed them (stashInflightFromPause),
+		// so first is set by then. In stampsOnly any mark not stamped yet was
+		// passed over: the read under it may have taken from the clock, before
+		// this look, a stamp inside the window, and that view leaves it out
+		// until the stamp is stored.
 		return true
 	}
 	if first > end {
