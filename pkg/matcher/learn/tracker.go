@@ -51,11 +51,14 @@ type Tracker struct {
 	// replaces it, as serves. aloft are the requests in flight now,
 	// landings the count of those that landed, and flying whether any
 	// connection was ever lifted (Lift): F's order is then read by
-	// flights (Order.told).
+	// flights (Order.told). lifts are the requests lifted in the set, in
+	// the order they lifted (Flight.lift), for a serve one of them caused
+	// (Flight.LiftCaused); NewSet replaces it.
 	flights  map[int]*Flight
 	aloft    map[*Flight]struct{}
 	landings uint64
 	flying   bool
+	lifts    []*Flight
 	// places are the instants of each mock F served in the running set, as
 	// the offset rule reads them (GivenPlaces), read from its recording once
 	// for the set (Order.GivenPlaces): no text of it is kept. NewSet
@@ -174,7 +177,7 @@ func (t *Tracker) NewSet() {
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq = nil, nil, 0
-	t.flights = nil
+	t.flights, t.lifts = nil, nil
 	t.places = newSetPlaces()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
@@ -624,8 +627,9 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at,
 
 // ServedMockIn is ServedMock of a mock served in the request in, as the
 // parser that served it said (integrations.ServingIn): the serve is that
-// request's whatever other requests are aloft (Flight). A nil in is
-// ServedMock.
+// request's whatever other requests are aloft (Flight); in NoRequest, no
+// request's; in one a request caused (Flight.LiftCaused), that one's. A nil
+// in is ServedMock.
 func (t *Tracker) ServedMockIn(m *models.Mock, in *Flight) { t.servedIn(m, time.Now(), in) }
 
 // ServedMockAtIn is ServedMockIn of a mock served at the real instant at.

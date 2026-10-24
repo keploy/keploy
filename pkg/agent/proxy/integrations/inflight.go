@@ -183,7 +183,12 @@ func InFlightOf(ctx context.Context) *learn.Flight {
 // the request f (learn.Tracker.ServedMockIn). For one call's consumes: not
 // for sharing between goroutines, nor for keeping as the parser's store (a
 // wrapper is a new store identity). The agent's MockManager and its round
-// scopes implement it.
+// scopes implement it. A serve made in no request of the connection's (a
+// server push) is told with ServingFor(learn.NoRequest()) when nothing the
+// application sent caused it, so it makes no request aloft a serve; and with
+// ServingFor(cause.LiftCaused()) when the request cause let it go, whether
+// cause landed by then or not, the caller landing that flight as it starts
+// to write the push.
 type ServeTeller interface {
 	ServingFor(f *learn.Flight) MockMemDb
 }

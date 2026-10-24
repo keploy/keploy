@@ -32,12 +32,21 @@ package learn
 // one that waited for it; and a serve made by a parser that does not say
 // whose request it serves (integrations.ServingIn) while several requests
 // are aloft is no one request's: it is in an order keploy cannot tell, and
-// every request aloft then counts as a serve (fail closed).
+// every request aloft then counts as a serve (fail closed). A serve the
+// parser says was made in no request (NoRequest) makes none a serve. A serve
+// a request caused (LiftCaused: the push its PUBLISH let go) is ordered
+// after that request's serves, as F claimed them, as one request's are,
+// although the application may read it on another connection before the
+// cause's own answer.
 type Flight struct {
 	t *Tracker
 	// overlaps are the requests aloft at an instant this one was: those
 	// aloft when it lifted, and those lifted while it was aloft.
 	overlaps []*Flight
+	// set and lift are where it lifted: the set's epoch (Tracker.setEpoch)
+	// and its number in that set's lifts (1 the first; Tracker.lifts).
+	set  uint64
+	lift int
 	// serving is the number of the serve that made this request a serve (0
 	// while it is none): the first data-plane serve made in it, or one made
 	// while it was aloft that no parser said whose request it was.
@@ -60,22 +69,90 @@ func (t *Tracker) Lift() *Flight {
 	f := &Flight{t: t}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.flying = true
-	if t.aloft == nil {
-		t.aloft = map[*Flight]struct{}{}
-	}
 	for g := range t.aloft {
 		g.overlaps = append(g.overlaps, f)
 		f.overlaps = append(f.overlaps, g)
 	}
-	t.aloft[f] = struct{}{}
+	t.aloftLocked(f)
 	return f
+}
+
+// aloftLocked puts f aloft, the set's latest lift: F's order is read by
+// flights from now on. t.mu is held.
+func (t *Tracker) aloftLocked(f *Flight) {
+	t.flying = true
+	if t.aloft == nil {
+		t.aloft = map[*Flight]struct{}{}
+	}
+	t.aloft[f] = struct{}{}
+	t.lifts = append(t.lifts, f)
+	f.set, f.lift = t.setEpoch, len(t.lifts)
+}
+
+// noRequest is NoRequest's: no tracker's, never aloft.
+var noRequest = &Flight{}
+
+// NoRequest is the request a serve made in no request of the application's
+// is told in (Tracker.ServedMockIn, integrations.ServeTeller.ServingFor): a
+// server push nothing the application sent caused (another client's
+// PUBLISH, a keyspace notification). The serve makes no request aloft a
+// serve, so a heartbeat or a test's own command aloft beside it keeps its
+// place in F's order; and, once a connection lifted (Lift), it is itself in
+// an order keploy cannot tell (Order.Of: 0, 0, which the offset rule fails
+// closed on): the application holds it whenever it reads it, which no
+// request of its tells. It never lifts or lands: Land on it is nothing, and
+// LiftCaused of it is it.
+func NoRequest() *Flight { return noRequest }
+
+// LiftCaused is the request of a serve f caused, made once f's own serve
+// was (a server push f's PUBLISH let go, consumed on the subscriber's
+// connection, whether f landed by then or not): aloft from f's lift until
+// its own Land, which its caller calls as it starts to write the serve's
+// answer back. It overlaps every request aloft at an instant of that span
+// but f: those aloft when f lifted, those lifted since, landed or not (the
+// set's lifts; with f lifted in an earlier set, every lift of this one), and
+// those that lift before it lands. A serve told in it (Tracker.ServedMockIn)
+// is in F's order once it landed, if none of those was a serve by the read;
+// and after f's serves, as F claimed them, as a serve made in f's own
+// request is. A nil f, or NoRequest, is a serve in no request: NoRequest.
+func (f *Flight) LiftCaused() *Flight {
+	if f == nil || f.t == nil {
+		return noRequest
+	}
+	t := f.t
+	p := &Flight{t: t}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	crossed := map[*Flight]struct{}{f: {}}
+	cross := func(g *Flight) {
+		if _, ok := crossed[g]; ok {
+			return
+		}
+		crossed[g] = struct{}{}
+		g.overlaps = append(g.overlaps, p)
+		p.overlaps = append(p.overlaps, g)
+	}
+	for _, g := range f.overlaps {
+		cross(g)
+	}
+	since := 0
+	if f.set == t.setEpoch {
+		since = f.lift
+	}
+	for _, g := range t.lifts[since:] {
+		cross(g)
+	}
+	for g := range t.aloft {
+		cross(g)
+	}
+	t.aloftLocked(p)
+	return p
 }
 
 // Land is the end of f: keploy starts to write its answer back, or its
 // connection closed. Landed once; a nil or landed flight is nothing.
 func (f *Flight) Land() {
-	if f == nil {
+	if f == nil || f.t == nil {
 		return
 	}
 	t := f.t
@@ -93,11 +170,12 @@ func (f *Flight) Land() {
 // which it makes a serve (Flight.serving): in, the request its parser said
 // it serves, while that one is aloft; with none said, the one request
 // aloft. nil for a protocol phase (a greeting the server sends first is no
-// request's, and makes none a serve), for a serve in no request, in one
-// already landed, or with several aloft and none said, when every one aloft
-// becomes a serve. t.mu is held.
+// request's, and makes none a serve), for a serve its parser said was made
+// in no request (NoRequest), which makes none a serve either, for a serve in
+// no request, in one already landed, or with several aloft and none said,
+// when every one aloft becomes a serve. t.mu is held.
 func (t *Tracker) flightOfLocked(protocol bool, in *Flight) *Flight {
-	if protocol {
+	if protocol || in == noRequest {
 		return nil
 	}
 	serves := func(f *Flight) {

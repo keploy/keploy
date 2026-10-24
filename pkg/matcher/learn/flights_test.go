@@ -148,10 +148,11 @@ func interleavings[T any](a, b []T) [][]T {
 }
 
 // flightStep is one event of a request: its lift, a serve in it (said:
-// the parser says whose request it is, ServedMockIn), or its landing.
+// the parser says whose request it is, ServedMockIn; none: the parser says it
+// is no request's, NoRequest), or its landing.
 type flightStep struct {
 	c    string
-	what string // "lift", "said", "unsaid", "land"
+	what string // "lift", "said", "unsaid", "none", "land"
 	m    *models.Mock
 }
 
@@ -165,6 +166,8 @@ func runFlights(tr *Tracker, steps []flightStep) {
 			tr.ServedMockIn(s.m, fs[s.c])
 		case "unsaid":
 			tr.ServedMock(s.m)
+		case "none":
+			tr.ServedMockIn(s.m, NoRequest())
 		case "land":
 			fs[s.c].Land()
 		}
@@ -270,5 +273,133 @@ func TestACrossingIsReadFromTheServeThatMadeIt(t *testing.T) {
 	}
 	if f, l := after.Of(b); f != 0 || l != 0 {
 		t.Fatalf("B at %d,%d; want 0,0", f, l)
+	}
+}
+
+// A serve its parser says was made in no request of the application's
+// (NoRequest: a server push nothing the application sent caused) makes no
+// request aloft a serve: a request beside it, and a heartbeat aloft with that
+// one, keep the request's own serve in F's order wherever the scheduler put
+// the push, and the push itself is in an order keploy cannot tell. The same
+// push told as no parser's (ServedMock) makes every request aloft a serve, or
+// is the one aloft's.
+func TestAServeMadeInNoRequestMakesNoRequestAServe(t *testing.T) {
+	a, push := &models.Mock{Name: "mock-a"}, &models.Mock{Name: "mock-push"}
+	served := []flightStep{{"A", "lift", nil}, {"A", "said", a}, {"A", "land", nil}}
+	beside := []flightStep{{"H", "lift", nil}, {"P", "none", push}, {"H", "land", nil}}
+	for i, steps := range interleavings(served, beside) {
+		tr := NewTracker()
+		runFlights(tr, steps)
+		o := tr.Placed().Order
+		if f, l := o.Of(a); f == 0 || f != l {
+			t.Fatalf("interleaving %d %v: A at %d,%d; want its serve's number: the push was made in no request", i, steps, f, l)
+		}
+		if f, l := o.Of(push); f != 0 || l != 0 {
+			t.Fatalf("interleaving %d %v: the push at %d,%d; want 0,0: it was made in no request", i, steps, f, l)
+		}
+	}
+	tr := NewTracker()
+	runFlights(tr, []flightStep{{"A", "lift", nil}, {"H", "lift", nil}, {"P", "unsaid", push}, {"A", "said", a}, {"H", "land", nil}, {"A", "land", nil}})
+	if f, l := tr.Placed().Order.Of(a); f != 0 || l != 0 {
+		t.Fatalf("A, beside a heartbeat and a push no parser said, at %d,%d; want 0,0", f, l)
+	}
+	tr = NewTracker()
+	runFlights(tr, []flightStep{{"A", "lift", nil}, {"P", "unsaid", push}, {"A", "said", a}, {"A", "land", nil}})
+	if f, l := tr.Placed().Order.Of(push); f != 1 || l != 1 {
+		t.Fatalf("a push no parser said, made with A alone aloft, at %d,%d; want 1,1: A's", f, l)
+	}
+	NoRequest().Land()
+	if NoRequest().LiftCaused() != NoRequest() || (*Flight)(nil).LiftCaused() != NoRequest() {
+		t.Fatal("what no request, or a nil one, caused is not NoRequest")
+	}
+}
+
+// A serve a request caused (Flight.LiftCaused: the push its PUBLISH let go)
+// is told in that request whenever it lands: after the request's own serve,
+// as F claimed them, and in no order keploy can tell beside a serve whose
+// request was aloft at an instant from the cause's lift to the push's
+// landing, whether it landed before the push was made or not, and whether
+// the cause lifted in this set or before it began (an earlier set's serves
+// are no serves of this one's). A request that serves nothing crosses no
+// serve; one landed before the cause lifted, or lifted once the push landed,
+// keeps F's order.
+func TestAServeARequestCausedIsToldInItWheneverItLanded(t *testing.T) {
+	a, b, push := &models.Mock{Name: "mock-a"}, &models.Mock{Name: "mock-b"}, &models.Mock{Name: "mock-push"}
+	type step func(tr *Tracker, fs map[string]*Flight)
+	lift := func(c string) step { return func(tr *Tracker, fs map[string]*Flight) { fs[c] = tr.Lift() } }
+	land := func(c string) step { return func(_ *Tracker, fs map[string]*Flight) { fs[c].Land() } }
+	said := func(c string, m *models.Mock) step {
+		return func(tr *Tracker, fs map[string]*Flight) { tr.ServedMockIn(m, fs[c]) }
+	}
+	caused := func(c, by string) step {
+		return func(_ *Tracker, fs map[string]*Flight) { fs[c] = fs[by].LiftCaused() }
+	}
+	newSet := func(tr *Tracker, _ map[string]*Flight) { tr.NewSet() }
+	inNone := func(m *models.Mock) step {
+		return func(tr *Tracker, _ map[string]*Flight) { tr.ServedMockIn(m, NoRequest()) }
+	}
+	x := &models.Mock{Name: "mock-x"}
+	pushed := []step{caused("P", "C"), said("P", push), land("P")}
+	cause := []step{lift("C"), said("C", a), land("C")}
+	join := func(parts ...[]step) []step {
+		var out []step
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name               string
+		steps              []step
+		wantA, wantB, want [2]int
+	}{
+		{"consumed once its cause landed", join(cause, pushed), [2]int{1, 1}, [2]int{}, [2]int{2, 2}},
+		{"consumed while its cause is aloft", []step{lift("C"), said("C", a), caused("P", "C"), said("P", push), land("P"), land("C")}, [2]int{1, 1}, [2]int{}, [2]int{2, 2}},
+		{"a request lifted and landed between the cause's landing and the push", join(cause, []step{lift("R"), said("R", b), land("R")}, pushed), [2]int{1, 1}, [2]int{}, [2]int{}},
+		{"a request lifted once the push landed", join(cause, pushed, []step{lift("R"), said("R", b), land("R")}), [2]int{1, 1}, [2]int{3, 3}, [2]int{2, 2}},
+		{"a request aloft when the cause lifted, landed before it", []step{lift("R"), lift("C"), said("R", b), land("R"), said("C", a), land("C"), caused("P", "C"), said("P", push), land("P")}, [2]int{}, [2]int{}, [2]int{}},
+		{"a request lifted while the push is aloft", join(cause, []step{caused("P", "C"), said("P", push), lift("R"), said("R", b), land("R"), land("P")}), [2]int{1, 1}, [2]int{}, [2]int{}},
+		{"a heartbeat between the cause and the push", join(cause, []step{lift("H"), land("H")}, pushed), [2]int{1, 1}, [2]int{}, [2]int{2, 2}},
+		{"the cause lifted before the set began", join(cause, []step{newSet, lift("R"), said("R", b), land("R")}, pushed), [2]int{}, [2]int{}, [2]int{}},
+		{"a request lifted before the set began, aloft at the push", join(cause, []step{lift("R"), newSet, said("R", b), caused("P", "C"), said("P", push), land("R"), land("P")}), [2]int{}, [2]int{}, [2]int{}},
+		{"the push aloft at the read", join(cause, []step{caused("P", "C"), said("P", push)}), [2]int{1, 1}, [2]int{}, [2]int{}},
+		{"a request landed before the cause lifted, in a later set", join([]step{newSet, lift("R"), said("R", b), land("R")}, cause, pushed), [2]int{2, 2}, [2]int{1, 1}, [2]int{3, 3}},
+		{"the cause lifted before the set began, an earlier set's request after it", join(cause, []step{lift("R"), said("R", b), land("R"), newSet, inNone(x)}, pushed), [2]int{}, [2]int{}, [2]int{2, 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker()
+			fs := map[string]*Flight{}
+			for _, s := range tc.steps {
+				s(tr, fs)
+			}
+			o := tr.Placed().Order
+			for _, w := range []struct {
+				m    *models.Mock
+				want [2]int
+			}{{a, tc.wantA}, {b, tc.wantB}, {push, tc.want}} {
+				if f, l := o.Of(w.m); [2]int{f, l} != w.want {
+					t.Fatalf("%s at %d,%d; want %v", w.m.Name, f, l, w.want)
+				}
+			}
+		})
+	}
+	// A read made before the push was served keeps the request it read as
+	// told after the push crossed it.
+	tr := NewTracker()
+	fc := tr.Lift()
+	tr.ServedMockIn(a, fc)
+	fc.Land()
+	fr := tr.Lift()
+	tr.ServedMockIn(b, fr)
+	fr.Land()
+	before := tr.Placed().Order
+	fp := fc.LiftCaused()
+	tr.ServedMockIn(push, fp)
+	fp.Land()
+	if f, l := before.Of(b); f != 2 || l != 2 {
+		t.Fatalf("the read made before the push says B at %d,%d; want 2,2 still", f, l)
+	}
+	if f, l := tr.Placed().Order.Of(b); f != 0 || l != 0 {
+		t.Fatalf("B, read after the push its span crossed, at %d,%d; want 0,0", f, l)
 	}
 }

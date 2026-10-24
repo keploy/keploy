@@ -271,3 +271,70 @@ func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
 		}
 	})
 }
+
+// A parser that serves in no request of the application's (a server push
+// nothing it sent caused) tells the store so (ServingFor(learn.NoRequest())):
+// through each consume door, the push makes neither the request nor the
+// heartbeat aloft beside it a serve, so the request's own serve keeps its
+// place in F's order, and the push itself is in an order keploy cannot tell.
+// A push a request caused, consumed once that request's answer went out, is
+// told in it (learn.Flight.LiftCaused): after the request's serve, in F's
+// order once it landed.
+func TestAServeToldInNoRequestOrInItsCauseThroughTheStore(t *testing.T) {
+	doors := map[string]func(db integrations.MockMemDb, m models.Mock) bool{
+		"MarkMockAsUsed":       func(db integrations.MockMemDb, m models.Mock) bool { return db.MarkMockAsUsed(m) },
+		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.UpdateUnFilteredMock(&m, &m); return true },
+		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteFilteredMock(m); return true },
+		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteUnFilteredMock(m); return true },
+		"DeleteStartupMock":    func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteStartupMock(m); return true },
+	}
+	a := &models.Mock{Name: "mock-a", Kind: models.REDIS}
+	push := &models.Mock{Name: "mock-push", Kind: models.REDIS}
+	for name, door := range doors {
+		t.Run("in no request: "+name, func(t *testing.T) {
+			tr := learn.NewTracker()
+			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+			defer mm.Close()
+			mm.SetServedObserver(tr.ServedMock)
+			mm.SetServedInObserver(tr.ServedMockIn)
+			c1, app1 := flyingPair(t, tr, nil)
+			heartbeat, app2 := flyingPair(t, tr, nil)
+			request(t, c1, app1)
+			request(t, heartbeat, app2)
+			door(mm.ServingFor(learn.NoRequest()), *push)
+			door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), mm), *a)
+			_, _ = heartbeat.Write([]byte("H"))
+			_, _ = c1.Write([]byte("A"))
+			o := tr.Placed().Order
+			if f, l := o.Of(a); f != 2 || l != 2 {
+				t.Fatalf("A at %d,%d; want 2,2: the push was made in no request", f, l)
+			}
+			if f, l := o.Of(push); f != 0 || l != 0 {
+				t.Fatalf("the push at %d,%d; want 0,0", f, l)
+			}
+		})
+		t.Run("in its cause, once the cause's answer went out: "+name, func(t *testing.T) {
+			tr := learn.NewTracker()
+			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+			defer mm.Close()
+			mm.SetServedObserver(tr.ServedMock)
+			mm.SetServedInObserver(tr.ServedMockIn)
+			c1, app1 := flyingPair(t, tr, nil)
+			request(t, c1, app1)
+			ctx := integrations.WithRequestHolder(context.Background(), c1)
+			cause := integrations.InFlightOf(ctx)
+			door(integrations.ServingIn(ctx, mm), *a)
+			_, _ = c1.Write([]byte("A"))
+			p := cause.LiftCaused()
+			door(mm.ServingFor(p), *push)
+			p.Land()
+			o := tr.Placed().Order
+			if f, l := o.Of(a); f != 1 || l != 1 {
+				t.Fatalf("A at %d,%d; want 1,1", f, l)
+			}
+			if f, l := o.Of(push); f != 2 || l != 2 {
+				t.Fatalf("the push at %d,%d; want 2,2: told in its cause", f, l)
+			}
+		})
+	}
+}
