@@ -39,10 +39,10 @@ func TestUnescapedSkipsAPassWithNoLeadByte(t *testing.T) {
 		"plain text":       "plain text",
 		"a%20b":            "a b",
 		`a%5Cnb`:           "a b",
-		`xéy`:         "xéy",
+		`xéy`:              "xéy",
 		`q\"r`:             "q r",
 		`%255C`:            `\`,
-		`😀 ok`:  "\U0001F600 ok",
+		`😀 ok`:             "\U0001F600 ok",
 		`%zz and \q stays`: `%zz and \q stays`,
 	} {
 		if got := unescaped(in); got != want {
