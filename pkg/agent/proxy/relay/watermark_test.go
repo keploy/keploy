@@ -1,11 +1,14 @@
 package relay
 
 import (
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.uber.org/zap"
 )
 
 // awaitState polls cond until it holds: it waits only for a goroutine the test
@@ -116,20 +119,220 @@ func TestWatermark_AParserPastATimeIsDoneWithIt(t *testing.T) {
 	}
 }
 
-// A connection that carried nothing within a test case's window holds it back
-// whatever its parser is doing.
+// A connection that carried nothing within a test case's window does not hold
+// it back, whatever its parser is doing.
 func TestWatermark_AConnectionIdleOverAWindowDoesNotHoldIt(t *testing.T) {
 	h := newHarness(t, Config{})
 	w := NewWatermark()
 	defer w.Track(h.r, "conn-1")()
 
 	h.writeClient([]byte("early"))
-	h.readDest(5) // never read by the parser
-	time.Sleep(2 * time.Millisecond)
+	h.readDest(5) // never read by the parser, perhaps still in the forwarder's hand
+	// The window starts after the chunk's stamp, which the forwarder took
+	// before its Write.
 	start := time.Now()
+	for start.UnixNano() <= h.r.teeC2D.progress.last.Load() {
+		start = time.Now()
+	}
 	end := start.Add(time.Millisecond)
 	if !w.Settled("", "", start, end) {
 		t.Fatalf("Settled: false for a window the connection carried nothing in: %v", w.HeldBy("", "", start, end, 0))
+	}
+}
+
+// A chunk still in the forwarder's hand (its Write to a slow reader blocks,
+// or the forwarder is descheduled after it) does not hold a window that
+// started after the chunk's stamp: the connection carried nothing in that
+// window. A window the stamp falls in is still held (the row after this one).
+func TestWatermark_AChunkInTheForwardersHandDoesNotHoldALaterWindow(t *testing.T) {
+	release := make(chan struct{})
+	var holding atomic.Bool
+	cfg := Config{beforeTee: func(dir fakeconn.Direction) {
+		if dir == fakeconn.FromDest {
+			holding.Store(true)
+			<-release
+		}
+	}}
+	h := newHarness(t, cfg)
+	defer close(release)
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	h.writeDest([]byte("answer"))
+	h.readClient(6)
+	awaitState(t, "the forwarder to hold the chunk", holding.Load)
+	start := time.Now()
+	for start.UnixNano() <= h.r.teeD2C.progress.last.Load() {
+		start = time.Now()
+	}
+	end := start.Add(time.Millisecond)
+	if !w.Settled("", "", start, end) {
+		t.Fatalf("Settled: false for a window after the stamp of the chunk in the forwarder's hand: %v", w.HeldBy("", "", start, end, 0))
+	}
+	if w.Settled("", "", start.Add(-time.Second), end) {
+		t.Fatal("Settled: true for a window the chunk in the forwarder's hand was stamped in")
+	}
+}
+
+// The TLS twin of the row above: the destination's TLS layer handed a reply
+// on, and the forwarder's Write of it to a slow client blocks. The layer keeps
+// the mark of the read under the reply all that while (it reads again only on
+// the forwarder's next Read), with the same stamp as the forwarder's hand. That
+// mark counts by its stamp too: it holds a window the stamp falls in, and no
+// window that started after it.
+func TestWatermark_AReplyATLSForwardersWriteBlocksOnDoesNotHoldALaterWindow(t *testing.T) {
+	h := upgradedSideUndrained(t, true, func(c net.Conn) net.Conn { return &layerConn{Conn: c} })
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	go func() { _, _ = h.destSvc.Write([]byte("answer")) }()
+	d2c := &h.r.teeD2C.progress
+	awaitState(t, "the forwarder to hold the reply its layer handed on", func() bool {
+		return d2c.held.Load() > 0 && d2c.layer.Load() == d2c.held.Load()
+	})
+	start := time.Now()
+	for start.UnixNano() <= d2c.last.Load() {
+		start = time.Now()
+	}
+	end := start.Add(time.Millisecond)
+	if !w.Settled("", "", start, end) {
+		t.Errorf("Settled: false for a window after the stamp of a reply a TLS forwarder's Write blocks on: %v", w.HeldBy("", "", start, end, 0))
+	}
+	if w.Settled("", "", start.Add(-time.Second), end) {
+		t.Error("Settled: true for a window a reply a TLS forwarder's Write blocks on was stamped in")
+	}
+	if d2c.held.Load() == 0 || d2c.layer.Load() == 0 {
+		t.Fatal("the forwarder's Write did not block for the whole look: the row did not test what it says")
+	}
+	if got := string(h.readClient(6)); got != "answer" {
+		t.Fatalf("client read %q, want answer", got)
+	}
+}
+
+// unrunRelay is a relay made and never run: no forwarder exists, so progress a
+// test sets by hand stays as it was set.
+func unrunRelay(t *testing.T) *Relay {
+	t.Helper()
+	c1, c2 := net.Pipe()
+	d1, d2 := net.Pipe()
+	r := New(Config{Logger: zap.NewNop()}, c1, connseq.NewUpstream(d1))
+	t.Cleanup(func() {
+		r.teeC2D.close()
+		r.teeD2C.close()
+		r.teeC2D.waitDone()
+		r.teeD2C.waitDone()
+		for _, c := range []net.Conn{c1, c2, d1, d2} {
+			_ = c.Close()
+		}
+	})
+	return r
+}
+
+// A chunk the forwarder holds counts by its stamp, and one it is still
+// stamping (heldUnstamped) can be stamped within any window from now on, so it
+// holds them all, whatever the other direction carried. A held chunk's stamp
+// counts before its direction's first stamp is published (noteCarried stores
+// held, then first): a direction's first chunk, stamped in the window and
+// still in its forwarder's hand, holds the window even when the other
+// direction's first chunk came after it. HeldProgress's view (stampsOnly)
+// passes over a chunk not stamped yet and answers by the stamps alone. The
+// progress is set by hand on a relay that is never run, so no forwarder
+// touches it.
+func TestWatermark_AChunkBeingStampedHoldsEveryWindow(t *testing.T) {
+	t.Parallel()
+	start := time.Now().UnixNano()
+	end := start + int64(time.Second)
+	old, late := start-int64(time.Hour), end+int64(time.Second)
+	type dirProgress struct{ first, last, held int64 }
+	// carriedNothingIn is the verdict's answer (unstampedInAnyWindow);
+	// stampsOnly is HeldProgress's, which passes over a chunk not stamped yet.
+	for _, row := range []struct {
+		name                         string
+		client, dest                 dirProgress
+		carriedNothingIn, stampsOnly bool
+	}{
+		{"idle since before the window", dirProgress{}, dirProgress{old, old, 0}, true, true},
+		{"a held chunk stamped before the window", dirProgress{}, dirProgress{old, old, old + 1}, true, true},
+		{"a held chunk not stamped yet", dirProgress{}, dirProgress{old, old, heldUnstamped}, false, true},
+		{"a held chunk stamped at the window's start", dirProgress{}, dirProgress{old, old, start}, false, false},
+		{"a direction's first chunk held, stamped in the window, the other's first after it",
+			dirProgress{late, late, 0}, dirProgress{0, 0, start}, false, false},
+		{"a direction's first chunk held, stamped after the window, the other's first after it",
+			dirProgress{late, late, 0}, dirProgress{0, 0, late + 1}, true, true},
+		{"the connection's first chunk held, stamped in the window", dirProgress{}, dirProgress{0, 0, start}, false, false},
+		{"the connection's first chunk held, stamped before the window", dirProgress{}, dirProgress{0, 0, old}, true, true},
+		{"the connection's first chunk not stamped yet", dirProgress{}, dirProgress{0, 0, heldUnstamped}, false, true},
+		{"a direction's first chunk not stamped yet, the other's first, held, after the window",
+			dirProgress{0, 0, late}, dirProgress{0, 0, heldUnstamped}, false, true},
+		{"a direction's first chunk not stamped yet, the other's first after the window",
+			dirProgress{late, late, 0}, dirProgress{0, 0, heldUnstamped}, false, true},
+		{"a direction's chunk not stamped yet, the other's held chunk stamped in the window",
+			dirProgress{old, old, start}, dirProgress{old, old, heldUnstamped}, false, false},
+	} {
+		r := unrunRelay(t)
+		for _, d := range []struct {
+			p *teeProgress
+			v dirProgress
+		}{{&r.teeC2D.progress, row.client}, {&r.teeD2C.progress, row.dest}} {
+			d.p.first.Store(d.v.first)
+			d.p.last.Store(d.v.last)
+			d.p.held.Store(d.v.held)
+		}
+		if got := r.carriedNothingIn(start, end, unstampedInAnyWindow); got != row.carriedNothingIn {
+			t.Errorf("%s: carriedNothingIn = %v, want %v", row.name, got, row.carriedNothingIn)
+		}
+		if got := r.carriedNothingIn(start, end, stampsOnly); got != row.stampsOnly {
+			t.Errorf("%s: carriedNothingIn, stamps only = %v, want %v", row.name, got, row.stampsOnly)
+		}
+	}
+}
+
+// Bytes in the hand of the TLS layer a forwarder reads through count as a
+// chunk in the forwarder's hand does: by the stamp of the read that brought
+// them (layer), which the record the layer hands on takes, toward the
+// connection's first stamp as well as its newest; a read the layer is still
+// stamping (heldUnstamped) is taken as view says. A TLS forwarder blocked in
+// its Write holds the record and the layer the read under it, both with one
+// stamp, and so holds no window after it. Progress set by hand on a relay
+// that is never run.
+func TestWatermark_BytesInATLSLayersHandCountByTheirStamp(t *testing.T) {
+	t.Parallel()
+	start := time.Now().UnixNano()
+	end := start + int64(time.Second)
+	old, late := start-int64(time.Hour), end+int64(time.Second)
+	type dirProgress struct{ first, last, held, layer int64 }
+	for _, row := range []struct {
+		name                         string
+		client, dest                 dirProgress
+		carriedNothingIn, stampsOnly bool
+	}{
+		{"the layer holds bytes read before the window", dirProgress{}, dirProgress{old, old, 0, old + 1}, true, true},
+		{"a TLS forwarder blocked in its Write since before the window", dirProgress{}, dirProgress{old, old + 1, old + 1, old + 1}, true, true},
+		{"the layer holds bytes read at the window's start", dirProgress{}, dirProgress{old, old, 0, start}, false, false},
+		{"a TLS forwarder blocked in its Write on a reply read in the window", dirProgress{}, dirProgress{old, start, start, start}, false, false},
+		{"the layer is stamping a read", dirProgress{}, dirProgress{old, old, 0, heldUnstamped}, false, true},
+		{"the layer holds a direction's first bytes, read in the window, the other's first after it",
+			dirProgress{late, late, 0, 0}, dirProgress{0, 0, 0, start}, false, false},
+		{"the layer holds the connection's first bytes, read after the window", dirProgress{}, dirProgress{0, 0, 0, late}, true, true},
+		{"the layer is stamping a read, the other's held chunk stamped in the window",
+			dirProgress{old, old, start, 0}, dirProgress{old, old, 0, heldUnstamped}, false, false},
+	} {
+		r := unrunRelay(t)
+		for _, d := range []struct {
+			p *teeProgress
+			v dirProgress
+		}{{&r.teeC2D.progress, row.client}, {&r.teeD2C.progress, row.dest}} {
+			d.p.first.Store(d.v.first)
+			d.p.last.Store(d.v.last)
+			d.p.held.Store(d.v.held)
+			d.p.layer.Store(d.v.layer)
+		}
+		if got := r.carriedNothingIn(start, end, unstampedInAnyWindow); got != row.carriedNothingIn {
+			t.Errorf("%s: carriedNothingIn = %v, want %v", row.name, got, row.carriedNothingIn)
+		}
+		if got := r.carriedNothingIn(start, end, stampsOnly); got != row.stampsOnly {
+			t.Errorf("%s: carriedNothingIn, stamps only = %v, want %v", row.name, got, row.stampsOnly)
+		}
 	}
 }
 
