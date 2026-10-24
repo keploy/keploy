@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -24,97 +23,34 @@ type mockDisplayInfo struct {
 	summary  string
 	protocol string
 	target   string
+	// onDisk is the mock when a replay's read left its payload on disk
+	// (models.Mock.LeavePayloadOnDisk): its summary and target, which can
+	// carry a whole recorded command, are worked out when a report names it
+	// rather than held for every mock of the set.
+	onDisk *models.Mock
 }
 
-// mockTargetFromSpec derives a human-meaningful destination for a mock.
-//
-// Neither models.MockEntry (the mapping / expected side) nor models.MockState
-// (the consumed side) records a destination, so the loaded *models.Mock is the
-// only place one exists. Priority order, MOST DISCRIMINATING first — the row
-// name has to tell five outgoing calls to the same service apart:
-//
-//  1. HTTP: method + host + path. A bare host collapses every call to one
-//     service into indistinguishable rows; `GET api.internal:8080/orders` is
-//     the string a human acts on and an agent keys off.
-//  2. Metadata["destAddr"] ("host:port", written by the MySQL and Postgres
-//     recorders) PLUS the mock's operation token when it has one, so the two
-//     protocols that route every call through a single address still produce
-//     distinct rows ("mysql:3306 COM_QUERY").
-//  3. The protocol-generic summary (models.MockSummaryFromSpec), which is what
-//     the report UI already shows for MatchedCalls. It beats the bare
-//     `operation` token below because for Mongo/MySQL/Postgres it is
-//     "<protocol> <operation>" rather than a naked verb.
-//  4. The operation token on its own — the only identifying thing some v1
-//     mocks carry.
-//
-// Returns "" when none is available; DepRowName renders correctly without it.
+// summaryOf is the mock's summary (models.MockSummaryFromSpec).
+func (i mockDisplayInfo) summaryOf() string {
+	if i.onDisk != nil {
+		return models.MockSummaryFromSpec(i.onDisk)
+	}
+	return i.summary
+}
+
+// targetOf is the mock's target (mockTargetFromSpec).
+func (i mockDisplayInfo) targetOf() string {
+	if i.onDisk != nil {
+		return mockTargetFromSpec(i.onDisk)
+	}
+	return i.target
+}
+
+// mockTargetFromSpec is models.MockTargetFromSpec: a human-meaningful
+// destination for a mock, which a mock whose payload a replay left on disk
+// answers from what it kept.
 func mockTargetFromSpec(mock *models.Mock) string {
-	if mock == nil {
-		return ""
-	}
-	if t := httpTargetFromReq(mock.Spec.HTTPReq); t != "" {
-		return t
-	}
-	md := mock.Spec.Metadata
-	op := mockOperationToken(md)
-	if v := strings.TrimSpace(md["destAddr"]); v != "" {
-		if op != "" {
-			return v + " " + op
-		}
-		return v
-	}
-	// MockSummaryFromSpec falls back to the bare Kind when a mock carries
-	// nothing identifying. That is already the row's `type` token, so using it
-	// as the target too would render "deps[0] redis Redis (presence)".
-	if s := strings.TrimSpace(models.MockSummaryFromSpec(mock)); s != "" && s != string(mock.Kind) {
-		return s
-	}
-	return op
-}
-
-// mockOperationToken returns the most specific operation verb a mock's
-// metadata carries.
-//
-// "operation" is the key every v1 recorder writes and the only one
-// models.MockSummaryFromSpec reads. The MySQL v2 recorder writes
-// "requestOperation"/"responseOperation" instead (see
-// integrations/mysql/recorder/record_v2.go), which is why MockSummaryFromSpec
-// returns a bare "MySQL" for those mocks — and why every MySQL dependency row
-// would otherwise collapse to the shared "mysql:3306" address with only the
-// index to tell them apart. The response side is deliberately not consulted:
-// it names the server's reply status ("OK"), not the call.
-func mockOperationToken(md map[string]string) string {
-	for _, key := range []string{"operation", "requestOperation"} {
-		if v := strings.TrimSpace(md[key]); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// httpTargetFromReq renders an outgoing HTTP call as "<METHOD> <host><path>".
-// The scheme is dropped (it is implied by the port and adds noise to a name
-// that is already long) but the path is not: the path is the only thing that
-// distinguishes two calls to the same service.
-func httpTargetFromReq(req *models.HTTPReq) string {
-	if req == nil {
-		return ""
-	}
-	method := strings.TrimSpace(string(req.Method))
-	raw := strings.TrimSpace(req.URL)
-	target := raw
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
-		target = u.Host + u.EscapedPath()
-	}
-	switch {
-	case method == "" && target == "":
-		return ""
-	case method == "":
-		return target
-	case target == "":
-		return method
-	}
-	return method + " " + target
+	return models.MockTargetFromSpec(mock)
 }
 
 // eligibleExpectedEntries is THE SINGLE DEFINITION of "which of the
@@ -481,7 +417,7 @@ func depTypeFor(m models.MockEntry, mockKindByName map[string]models.Kind, looku
 // Empty is a legitimate answer (r.mockDB may be nil, or the mock carries
 // nothing identifying); DepRowName renders correctly without it.
 func depTargetFor(m models.MockEntry, lookup map[string]mockDisplayInfo) string {
-	return lookup[m.Name].target
+	return lookup[m.Name].targetOf()
 }
 
 // isUnassertedMockEntry reports whether a mapping entry refers to a mock of a

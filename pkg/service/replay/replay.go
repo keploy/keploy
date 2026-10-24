@@ -2120,6 +2120,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// guard's among them) agrees with what was sent. The compose and the
 	// native path both load through it.
 	loadMocksForAgent := func() (filtered, unfiltered []*models.Mock, err error) {
+		if _, ok := r.hookImpl.(wholeSetMockMutator); ok {
+			return nil, nil, errWholeSetMockMutator
+		}
 		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		// fromWindows: under the proven switch, a set with no mappings.yaml,
 		// whose test windows say what each test case owns once its mocks are
@@ -2191,7 +2194,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		// Get all mocks for mapping-based filtering
-		filtered, unfiltered, lookup, skipped, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+		filtered, unfiltered, payloads, lookup, skipped, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2206,25 +2209,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 		filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
-
-		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
-		if r.runDomainSet != nil {
-			for _, m := range filtered {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-			for _, m := range unfiltered {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-		}
-
-		if mutator, ok := r.hookImpl.(MockMutator); ok {
-			if err := mutator.AfterGetMocks(ctx, filtered, unfiltered); err != nil {
-				return nil, nil, err
-			}
-			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
-			// stable-metadata promotion): move retagged mocks from the per-test pool
-			// into the reusable pool so SetMocksWithWindow does not window-filter them.
-			filtered, unfiltered = rebalanceReusableMocks(filtered, unfiltered)
+		if err := r.mutatePayloads(ctx, payloads, filtered, unfiltered); err != nil {
+			utils.LogError(r.logger, err, "failed to prepare the mocks' payloads for the agent")
+			return nil, nil, err
 		}
 
 		if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
@@ -2235,7 +2222,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
-			r.exact.share = newSharePlan(conc, workerScope, filtered, unfiltered)
+			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
+				return nil, nil, err
+			}
 			// keploy record's full round shares the recordings made while
 			// several tests' requests were open between those tests, when
 			// the agent serves them (models.ExactConcurrentHeader, read
@@ -4065,7 +4054,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 									testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
 										MockName: m.Name,
 										Protocol: protocol,
-										Summary:  info.summary,
+										Summary:  info.summaryOf(),
 									})
 								}
 							}
@@ -6467,17 +6456,25 @@ func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksR
 // running test expects from, and the session half from the session pool it
 // loaded when the prune had nothing to drop, else from a read of its own.
 //
-// The lookup is built here, before AfterGetMocks may change the mocks in place
-// (a mutator decrypts them, for one), so it describes them as they are on disk.
-// skipped is the documents the store's decoders skipped (models.TestSetMocks
-// Skipped and SkippedWindowed); none from a store that reads one pool per
-// call.
-func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped skippedDocs, err error) {
-	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
-	if !ok {
+// A store that indexes the set's mock file (pkg.TestSetMockIndexReader) leaves
+// each mock's payload in the file: the mocks returned are small entries, whose
+// payloads (payloads) are read back one at a time as they are sent. The lookup
+// is built from what each mock kept of its payload, so it describes the mocks
+// as they are on disk, before a MockPayloadMutator changes one.
+// skipped is the documents of the mock file the store's decoders skipped
+// (models.TestSetMocks Skipped and SkippedWindowed); none from a store that
+// reads one pool per call.
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, payloads models.PayloadSource, lookup map[string]mockDisplayInfo, skipped skippedDocs, err error) {
+	var set models.TestSetMocks
+	switch reader := r.mockDB.(type) {
+	case pkg.TestSetMockIndexReader:
+		set, err = reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	case pkg.TestSetMocksReader:
+		set, err = reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	default:
 		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return nil, nil, nil, skippedDocs{}, err
+			return nil, nil, nil, nil, skippedDocs{}, err
 		}
 		allSession := unfiltered
 		if len(mocksThatHaveMappings) > 0 {
@@ -6488,13 +6485,60 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 				allSession = nil
 			}
 		}
-		return filtered, unfiltered, newMockLookup(filtered, allSession), skippedDocs{}, nil
+		return filtered, unfiltered, nil, newMockLookup(filtered, allSession), skippedDocs{}, nil
 	}
-	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, nil, skippedDocs{}, err
+		// The pass that failed is the one the per-test pool was read in.
+		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		return nil, nil, nil, nil, skippedDocs{}, err
 	}
-	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+	return set.Filtered, set.Unfiltered, set.Payloads, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+}
+
+// errWholeSetMockMutator refuses a run whose hooks still implement
+// AfterGetMocks (wholeSetMockMutator).
+var errWholeSetMockMutator = errors.New("the replay hooks implement AfterGetMocks, which keploy no longer calls: a test set's mocks are no longer loaded whole before they are sent to the agent, so a hook that changes them (a decryption) has to implement MutateMockPayload (replay.MockPayloadMutator), which is handed one mock at a time")
+
+// payloadMutator is what each mock goes through on its way to the agent: its
+// host domains are noted for telemetry (HTTP and gRPC only), and its payload
+// is changed by the hooks' MockPayloadMutator. nil when neither is wanted.
+func (r *Replayer) payloadMutator() models.PayloadMutator {
+	hook, _ := r.hookImpl.(MockPayloadMutator)
+	domains := r.runDomainSet
+	if hook == nil && domains == nil {
+		return nil
+	}
+	return func(ctx context.Context, m *models.Mock) error {
+		if domains != nil {
+			domains.AddAll(telemetry.ExtractDomainsFromMock(m))
+		}
+		if hook != nil {
+			return hook.MutateMockPayload(ctx, m)
+		}
+		return nil
+	}
+}
+
+// mutatePayloads has each of a test set's mocks go through payloadMutator on
+// its way to the agent: a mock whose payload the read left on disk each time
+// its payload is read back to be sent (payloads), one held whole (a gob
+// file's, or a store's that indexes no file) now, once.
+func (r *Replayer) mutatePayloads(ctx context.Context, payloads models.PayloadSource, pools ...[]*models.Mock) error {
+	mutate := r.payloadMutator()
+	if payloads != nil {
+		payloads.SetPayloadMutator(mutate)
+	}
+	for _, pool := range pools {
+		for _, m := range pool {
+			if m == nil || m.PayloadOnDisk() {
+				continue
+			}
+			if err := models.MutatePayload(ctx, m, mutate); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // skippedDocs is the documents of a set's mock file the store's decoders
@@ -6516,6 +6560,14 @@ func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[str
 	logFailed := func(pool string, err error) {
 		r.logger.Debug("failed to read the "+pool+" mocks for the report's mock lookup; the report will not describe them",
 			zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	if reader, ok := r.mockDB.(pkg.TestSetMockIndexReader); ok {
+		set, err := reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+		if err != nil {
+			logFailed("per-test and session", err)
+			return map[string]mockDisplayInfo{}
+		}
+		return newMockLookup(set.AllPerTest, set.AllSession)
 	}
 	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
 		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
@@ -6551,9 +6603,14 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 }
 
 // addMockDisplayInfo adds each mock's display info to the lookup, keyed by
-// name; a later mock of the same name replaces an earlier one.
+// name; a later mock of the same name replaces an earlier one. A mock whose
+// payload is on disk is kept itself, and asked when a report names it.
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
 	for _, mock := range mocks {
+		if mock.PayloadOnDisk() {
+			lookup[mock.Name] = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}
+			continue
+		}
 		lookup[mock.Name] = mockDisplayInfo{
 			summary:  models.MockSummaryFromSpec(mock),
 			protocol: string(mock.Kind),
@@ -8630,50 +8687,6 @@ func isReusableTierMock(m *models.Mock) bool {
 		}
 	}
 	return false
-}
-
-// rebalanceReusableMocks moves any mock that a MockMutator.AfterGetMocks
-// re-tagged as reusable (isReusableTierMock — Lifetime Session/Connection or
-// metadata type config/connection) out of the per-test `filtered` pool and into
-// the reusable `unfiltered` pool, and returns the adjusted slices.
-//
-// It exists because AfterGetMocks receives the two pools BY VALUE: a mutator can
-// retag a mock's Lifetime/metadata in place, but it cannot move a mock between
-// the slices (a shrink of `filtered` or a grow of `unfiltered` does not
-// propagate to the caller). Since the agent's SetMocksWithWindow window-filters
-// every mock in `filtered` regardless of its per-mock tag, a mock retagged
-// reusable but left in `filtered` would still be dropped when it fires outside
-// its record-time window — defeating the retag. Running this immediately after
-// AfterGetMocks honours the retag by physically re-partitioning.
-//
-// Memory: `filtered` is compacted in place (its backing array is reused via the
-// [:0] read/write cursor); `unfiltered` grows only by the promoted count. No
-// second copy of the corpus is allocated. Relative order within each pool is
-// preserved. Safe on nil/empty inputs.
-func rebalanceReusableMocks(filtered, unfiltered []*models.Mock) ([]*models.Mock, []*models.Mock) {
-	if len(filtered) == 0 {
-		return filtered, unfiltered
-	}
-	keep := filtered[:0]
-	for _, m := range filtered {
-		if m == nil {
-			// A nil entry can never match; drop it from the per-test pool rather
-			// than carrying it forward (SetMocksWithWindow skips nils anyway).
-			continue
-		}
-		// A window-bound mock (a connection failure) stays per-test even when
-		// a mutator re-tagged it reusable: moving it to the reusable pool
-		// would serve a failure recorded in one test to every test. This
-		// keploy never reaches it (its only caller has dropped the connection
-		// failures, which it does not replay, by models.AgentBound); it is
-		// here for the keploy that replays them, which keeps them in the pools.
-		if isReusableTierMock(m) && !models.WindowBound(m.Kind) {
-			unfiltered = append(unfiltered, m)
-			continue
-		}
-		keep = append(keep, m)
-	}
-	return keep, unfiltered
 }
 
 // isReusableTierState is the MockState (consumed-mock) equivalent of

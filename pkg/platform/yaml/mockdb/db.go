@@ -1629,6 +1629,18 @@ func (ys *MockYaml) GetTestSetMocks(ctx context.Context, testSetID string, after
 // that drifted from it would silently send them back to one read per pool.
 var _ pkg.TestSetMocksReader = (*MockYaml)(nil)
 
+// IndexTestSetMocks is GetTestSetMocks that leaves every mock's payload in a
+// yaml or json mock file (models.Mock.LeavePayloadOnDisk): what it returns
+// holds a small entry per mock, and TestSetMocks.Payloads reads each payload
+// back, one mock at a time, when the mock is sent. A mocks.gob is one gob
+// stream, whose mocks cannot be read back one at a time: its mocks are
+// returned whole, and Payloads is nil.
+func (ys *MockYaml) IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error) {
+	return ys.readMockPools(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed, poolPerTest|poolSession|poolAllSession|poolAllPerTest|payloadsOnDisk)
+}
+
+var _ pkg.TestSetMockIndexReader = (*MockYaml)(nil)
+
 // mockPools selects the pools readMockPools builds.
 type mockPools uint8
 
@@ -1641,6 +1653,9 @@ const (
 	poolAllSession
 	// poolAllPerTest builds TestSetMocks.AllPerTest.
 	poolAllPerTest
+	// payloadsOnDisk is no pool: it has a yaml or json file's mocks leave
+	// their payloads in it (IndexTestSetMocks).
+	payloadsOnDisk
 )
 
 // mockRouter sorts a mock file's mocks into the candidate lists of the pools
@@ -1926,6 +1941,13 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// The decoders' skip ERRORs name the mock, and mock names repeat in every
 	// test set, so they say which file.
 	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
+	var src *payloadSource
+	if want&payloadsOnDisk != 0 {
+		if src, err = newPayloadSource(reader); err != nil {
+			return models.TestSetMocks{}, err
+		}
+		out.Payloads = src
+	}
 	hasContent := false
 	connFailures := 0
 	var deps models.MockDepsCheck
@@ -1955,6 +1977,10 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			}
 			r.route(mock, false)
 			deps.Add(mock) // after routing, as the gob reader
+			if src != nil {
+				// Last: routing and the links read the payload.
+				mock.LeavePayloadOnDisk(src, models.PayloadAt{Offset: doc.off, Length: doc.n, Name: mock.Name})
+			}
 		}
 	}
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)

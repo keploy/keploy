@@ -688,6 +688,12 @@ type MockOutcome struct {
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
 func MockSummaryFromSpec(mock *Mock) string {
+	if d := mock.onDisk; d != nil {
+		if d.longSummary {
+			return d.display(mock, MockSummaryFromSpec, string(mock.Kind))
+		}
+		return d.summary
+	}
 	if mock.Spec.HTTPReq != nil {
 		return string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
 	}

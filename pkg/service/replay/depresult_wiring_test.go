@@ -732,16 +732,22 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 		})
 	}
 
-	if len(found) != 1 {
-		t.Fatalf("expected exactly one mockDisplayInfo literal in replay.go, found %d: %v", len(found), found)
+	// Two literals: a mock whose payload is on disk keeps itself, and its
+	// target is worked out from it when asked (mockDisplayInfo.targetOf,
+	// which reads mockTargetFromSpec); a whole mock's is worked out here.
+	if len(found) != 2 {
+		t.Fatalf("expected exactly two mockDisplayInfo literals in replay.go, found %d: %v", len(found), found)
+	}
+	if want := "addMockDisplayInfo: mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}"; found[0] != want {
+		t.Fatalf("the mock display lookup of a mock whose payload is on disk is now %s, want %s", found[0], want)
 	}
 	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
-	if found[0] != want {
+	if found[1] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+
 			"can carry — neither models.MockEntry (the mapping side) nor models.MockState (the "+
 			"consumed side) records one. Dropping it collapses five outgoing calls to the same "+
-			"service into rows that differ only by index.", found[0], want)
+			"service into rows that differ only by index.", found[1], want)
 	}
 }
 
