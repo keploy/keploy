@@ -141,3 +141,47 @@ func TestWatermark_HeldProgressIsNotMovedByAChunkBeingStamped(t *testing.T) {
 		untrack()
 	}
 }
+
+// Bytes a TLS layer read within the window keep the connection behind it while
+// its forwarder stamps the record they bring (held is heldUnstamped):
+// HeldProgress's view passes over the chunk not stamped yet, not the layer's
+// stamp under it. Passed over too, the connection would leave the count for
+// that moment and come back once the stamp is stored, and each such move
+// restarts the hold's stall clock for a test case whose parser has stopped.
+// Progress is set by hand on a relay that is never run, whose parser took a
+// chunk read after the window, so its last read alone would take it as past
+// the window.
+func TestWatermark_HeldProgressCountsATLSLayersReadWhileItsRecordIsStamped(t *testing.T) {
+	t.Parallel()
+	start := time.Now().UnixNano()
+	end := start + int64(time.Second)
+	late := end + int64(time.Second)
+	s, e := time.Unix(0, start), time.Unix(0, end)
+
+	r := unrunRelay(t)
+	r.teeC2D.progress.first.Store(late)
+	r.teeC2D.progress.last.Store(late)
+	if !r.teeC2D.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("one"), ReadAt: time.Unix(0, late)}) {
+		t.Fatal("setup: the tee refused the chunk")
+	}
+	readChunk(t, r.ClientStream())
+	r.teeD2C.progress.layer.Store(start)
+	w := NewWatermark()
+	defer w.Track(r, "conn-1")()
+
+	held := w.HeldProgress("", "", s, e)
+	if held == 0 {
+		t.Fatal("setup: HeldProgress is 0 with the layer holding a reply read in the window")
+	}
+	r.teeD2C.progress.held.Store(heldUnstamped)
+	if ok, _ := r.passedThrough(end, stampsOnly); ok {
+		t.Error("passedThrough, stamps only: true while the layer holds bytes read in the window and the forwarder stamps their record")
+	}
+	if got := w.HeldProgress("", "", s, e); got != held {
+		t.Errorf("HeldProgress moved from %d to %d while the forwarder stamped the record of a read in the window", held, got)
+	}
+	r.teeD2C.progress.held.Store(start)
+	if got := w.HeldProgress("", "", s, e); got != held {
+		t.Errorf("HeldProgress moved from %d to %d as the forwarder stored the record's stamp", held, got)
+	}
+}
