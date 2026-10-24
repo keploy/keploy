@@ -2420,7 +2420,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			raw := clientConn
 			var tracked *trackedConn
 			if p.keepsConnections() {
-				tracked = p.inflight.track(clientConn)
+				tracked = p.inflight.trackTold(clientConn, p.flights())
 				clientConn = tracked
 			}
 			// Its sequence number is taken before anything else is done
@@ -2432,7 +2432,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// before it happens (pairbytes.go).
 			if p.paired.holds(raw) {
 				if tracked == nil {
-					tracked = p.inflight.track(clientConn)
+					tracked = p.inflight.trackTold(clientConn, p.flights())
 					clientConn = tracked
 				}
 				tracked.beforeClose = func() { p.pairClosing(clientConnCtx, raw, tracked) }

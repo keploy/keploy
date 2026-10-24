@@ -46,6 +46,16 @@ type Tracker struct {
 	set    []*models.Mock
 	serves map[string][]int
 	seq    int
+	// flights are the request each serve of the set was made in, by its
+	// number (nil: none, or several aloft; flightOfLocked). NewSet
+	// replaces it, as serves. aloft are the requests in flight now,
+	// landings the count of those that landed, and flying whether any
+	// connection was ever lifted (Lift): F's order is then read by
+	// flights (Order.told).
+	flights  map[int]*Flight
+	aloft    map[*Flight]struct{}
+	landings uint64
+	flying   bool
 	// places are the instants of each mock F served in the running set, as
 	// the offset rule reads them (GivenPlaces), read from its recording once
 	// for the set (Order.GivenPlaces): no text of it is kept. NewSet
@@ -164,6 +174,7 @@ func (t *Tracker) NewSet() {
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq = nil, nil, 0
+	t.flights = nil
 	t.places = newSetPlaces()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
@@ -598,7 +609,7 @@ func (t *Tracker) Placed() Placed {
 	return Placed{
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Set:   t.set[:len(t.set):len(t.set)],
-		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places},
+		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places, flights: t.flights, landings: t.landings, flying: t.flying},
 	}
 }
 
@@ -629,6 +640,12 @@ func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) {
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
+	if f := t.flightOfLocked(m.IsProtocolPhase()); f != nil {
+		if t.flights == nil {
+			t.flights = map[int]*Flight{}
+		}
+		t.flights[t.seq] = f
+	}
 	// Kept between tests too: the next Begin moves it to before.
 	if !t.kept[id] {
 		if t.kept == nil {
@@ -659,16 +676,25 @@ type Order struct {
 	serves map[string][]int
 	upTo   int
 	places *setPlaces
+	// flights, landings and flying are the set's requests of each serve,
+	// the landings the read saw and whether F's order is read by flights
+	// (Order.told).
+	flights  map[int]*Flight
+	landings uint64
+	flying   bool
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
 // its tests and the gaps between them (1 the first serve): the first and the
 // last of its serves the read saw. A mock F served once has one number for
 // both; a mock F served again (a pool's reusable recording) spans every
-// other serve in between. 0, 0 where the read saw no serve of m: an order
-// keploy cannot tell, which the offset rule fails closed on
-// (learn.Raw.ServedIn). The same for every call of the same read, whatever
-// F served since, in this set or after the next began.
+// other serve in between. 0, 0 where the read saw no serve of m, or where
+// one of its serves is in an order keploy cannot tell (Order.told: made
+// while another request of the application's was in flight on a parallel
+// connection, or whose request was still in flight at the read; Flight),
+// which the offset rule fails closed on (learn.Raw.ServedIn). The same for
+// every call of the same read, whatever F served or the application sent
+// since, in this set or after the next began.
 func (o Order) Of(m *models.Mock) (first, last int) {
 	if o.t == nil || m == nil {
 		return 0, 0
@@ -701,6 +727,11 @@ func (o Order) ofLocked(id string) (first, last int) {
 	k := sort.SearchInts(n, o.upTo+1)
 	if k == 0 {
 		return 0, 0
+	}
+	for _, s := range n[:k] {
+		if !o.told(s) {
+			return 0, 0
+		}
 	}
 	return n[0], n[k-1]
 }

@@ -2714,6 +2714,83 @@ func TestLearnMatchReadsTheOrderFServedTheTestsMocksIn(t *testing.T) {
 	}
 }
 
+// F served A and B in the recorded order, but each in a request the
+// application had in flight on its own connection while the other was too
+// (learn.Flight): which answer the application held first is not told by
+// the order F claimed them in, so a value built by an offset on one of them
+// is refused, never learned as noise; the same requests one after the other
+// keep the recorded order's verdict. The verdict is the one whichever F
+// claimed first, and whether B's request reached keploy before A's answer
+// went out with B claimed after it.
+func TestLearnMatchRefusesAnOffsetOnServesInParallelRequests(t *testing.T) {
+	sentA := learnAt.Add(-4*time.Minute + 473*time.Millisecond)
+	sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
+	receive := func(name string, at time.Duration, sent time.Time) *models.Mock {
+		m := learnRecorded(name, at, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"`+name+`","Attributes":{"SentTimestamp":"`+strconv.FormatInt(sent.UnixMilli(), 10)+`"}}]}`)
+		m.Spec.HTTPResp.Header["Date"] = learnAt.Add(-time.Hour).Format(http.TimeFormat)
+		return m
+	}
+	minute := func(t time.Time) string { return t.Format("2006-01-02T15:04Z07:00") }
+	for _, tc := range []struct {
+		name    string
+		order   string // per step: 1/2 lift A's/B's request, a/b serve A/B, x/y land A's/B's
+		refused bool
+	}{
+		{"one after the other", "1ax2by", false},
+		{"both aloft, A claimed first", "12abxy", true},
+		{"both aloft, B claimed first, A's answer out first", "12baxy", true},
+		{"B in before A's answer went out, claimed after", "1a2xby", true},
+		{"B's answer still to go out at the read", "1ax2b", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			a, b := receive("mock-0", 0, sentA), receive("mock-1", time.Millisecond, sentB)
+			insert := learnRecorded("mock-2", 4*time.Millisecond, "POST", "/v1/messages", `{"visible_after":"`+minute(sentA.Add(time.Minute))+`"}`, nil, `{}`)
+			db := &learnDb{perTest: []*models.Mock{insert}}
+			tr := learn.NewTracker()
+			tr.Begin()
+			served := learnAt.Add(40 * time.Second)
+			var fa, fb *learn.Flight
+			for _, s := range tc.order {
+				switch s {
+				case '1':
+					fa = tr.Lift()
+				case '2':
+					fb = tr.Lift()
+				case 'a':
+					tr.ServedMockAt(a, served)
+				case 'b':
+					tr.ServedMockAt(b, served.Add(time.Millisecond))
+				case 'x':
+					fa.Land()
+				case 'y':
+					fb.Land()
+				}
+			}
+			// The call that carries the value is the application's next
+			// request, on a connection of its own.
+			call := tr.Lift()
+			defer call.Land()
+			in := live("POST", "/v1/messages", `{"visible_after":"`+minute(sentB.Add(time.Minute))+`"}`, nil)
+			in.arrived = served.Add(2 * time.Millisecond)
+			got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refused {
+				if got != nil || miss == nil || !strings.Contains(miss.res.Why, "gave the application mock-0 and mock-1 in an order keploy cannot tell: in requests the application had in flight at once") {
+					t.Fatalf("served %v miss %+v; want refused, naming mock-0 and mock-1", got, miss)
+				}
+				t.Logf("refused: %s", miss.res.Why)
+				return
+			}
+			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			}
+		})
+	}
+}
+
 // F gave the application every mock it served before the test as much as one
 // it served in the test: an application that long-polls a queue at start-up
 // (or consumed a message in an earlier test) builds a later write on what it

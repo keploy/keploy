@@ -722,7 +722,13 @@ func offsetWhy(m offsetMatch) string {
 		rel = (-off).String() + " before"
 	}
 	unit := unitName(max(m.rec.res, m.live.res))
-	return "its moment, to the " + unit + ", stands " + rel + " the moment " + m.hr.where + " holds as the recording gave it, and record's full round saw it " + rel + " the moment " + m.hf.where + " holds, which record's full round gave the application in its place: a value built on what the application was given by an offset moves so, as a read of the clock does, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it is built on " + m.hf.mock + "'s instant, which keploy cannot follow with an offset yet"
+	why := "its moment, to the " + unit + ", stands " + rel + " the moment " + m.hr.where + " holds as the recording gave it, and record's full round saw it " + rel + " the moment " + m.hf.where + " holds, which record's full round gave the application in its place: a value built on what the application was given by an offset moves so, as a read of the clock does, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it is built on " + m.hf.mock + "'s instant, which keploy cannot follow with an offset yet"
+	if m.hr.mock != m.hf.mock && (m.hr.given && m.hr.first == 0 || m.hf.given && m.hf.first == 0) {
+		// Both runs gave both: the order F gave them in is what is not
+		// known (Order.Of), most often two requests aloft at once.
+		why += ". Record's full round gave the application " + m.hr.mock + " and " + m.hf.mock + " in an order keploy cannot tell: in requests the application had in flight at once, on parallel connections, or outside any request of its own"
+	}
+	return why
 }
 
 // unitName names a resolution as a reason reads it: "minute", "second",
