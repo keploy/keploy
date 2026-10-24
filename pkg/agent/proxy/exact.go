@@ -108,6 +108,10 @@ type exactView struct {
 	// bg is the set's background under the background rules (ServeExactBackground)
 	// when the view was installed; nil for today's rules.
 	bg *backgroundState
+	// staging is whether the view was installed while a set's mocks were
+	// being staged (StageExactBackground until ServeExactBackground): a miss
+	// it refuses says so (stagingMissNote).
+	staging bool
 	// workerOrder is, under the background rules, each shown worker-scope mock's
 	// position in the order ServeExactWorker gave (its place's order, then
 	// delivering before idle, then recorded order).
@@ -178,6 +182,10 @@ type exactState struct {
 	// bg is the staged set's background under the background rules
 	// (ServeExactBackground), nil for today's (exact_background.go).
 	bg atomic.Pointer[backgroundState]
+	// staging is set while a set's mocks are staged: from its staging's
+	// StageExactBackground to its ServeExactBackground (exact_background.go).
+	// A view installed meanwhile is a staging view (exactView.staging).
+	staging atomic.Bool
 	// poolCursor is the key of the pool view installed last: the cursors
 	// the calls between tests advance are under it (exactCursorKey), and so
 	// are the background's (BackgroundCursor).
@@ -1118,6 +1126,8 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if w != nil {
 		v.worker = w.set
 	}
+	// A test's view is never a staging's: a test opens once its set is staged.
+	v.staging = v.test == "" && m.exact.staging.Load()
 	// Under the background rules the view orders its worker scope as the
 	// agent placed it, and shows the pool in a test (exact_background.go).
 	if bg := m.exact.bg.Load(); bg != nil {
@@ -1289,6 +1299,14 @@ func (m *MockManager) exactMissKind() string {
 	default:
 		return models.MissOutsideTest
 	}
+}
+
+// exactMissStaging reports whether a miss reaching the proxy now was made
+// while a set's mocks were being staged: the view serving is a staging view
+// (exactView.staging), which no test's recording answers.
+func (m *MockManager) exactMissStaging() bool {
+	v := m.exactView()
+	return v != nil && v.staging
 }
 
 // unanswered is the view's test mocks that have not answered, of kind (every

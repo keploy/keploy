@@ -75,9 +75,12 @@ func (b *backgroundState) inPool(name string) bool {
 // proven routing. Such a view names no recording of the background, since
 // the trees still hold the previous set's, whose names may be this set's
 // (names are unique only within a set), and pairs nothing (pairing). Any
-// other rules are today's, as ServeExactBackground's. It installs no view
-// itself.
+// other rules are today's, as ServeExactBackground's. Whatever the rules, a
+// view installed from now until ServeExactBackground settles the set is a
+// staging view: a call it refuses is told it was refused while the set's
+// mocks were being staged (exactMissStaging). It installs no view itself.
 func (m *MockManager) StageExactBackground(rules string) {
+	m.exact.staging.Store(true)
 	if rules == models.RecordedWithS12Routing && provenswitch.On() {
 		m.exact.bg.Store(&backgroundState{settling: true})
 		return
@@ -94,6 +97,8 @@ func (m *MockManager) StageExactBackground(rules string) {
 // and before the view that serves them, so a set never inherits the previous
 // one's rules.
 func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) {
+	// The set's mocks are staged: the views from now on are no staging's.
+	m.exact.staging.Store(false)
 	if rules != models.RecordedWithS12Routing || !provenswitch.On() {
 		m.exact.bg.Store(nil)
 		return

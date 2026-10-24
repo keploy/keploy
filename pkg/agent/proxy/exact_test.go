@@ -401,6 +401,75 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 	}
 }
 
+// A miss made while the replay stages a set's mocks, from the staging's
+// opening (StageExactBackground) to its settling (ServeExactBackground), is
+// told so first in its next steps (stagingMissNote), whatever rules the set
+// was recorded under, and whether or not its parser built a report. A miss
+// once the staging is settled, one in a test's view, and an answered call
+// are not.
+func TestAMissMadeWhileASetIsStagedSaysSo(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	window := func(rules string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			mm.StageExactBackground(rules)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	settled := func(rules string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			window(rules)(mm)
+			mm.ServeExactBackground(rules, nil, nil)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	miss := func() error {
+		return models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", NextSteps: "check the recording."})
+	}
+	bare := func() error { return fmt.Errorf("no recording: %w", models.ErrNoMockMatched) }
+	answered := func() error {
+		return models.NewMockMismatchError(models.ErrAnswered, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", Answer: models.AnswerByKind})
+	}
+	for _, tc := range []struct {
+		name string
+		arm  func(mm *MockManager)
+		err  func() error
+		told bool
+	}{
+		{"a marked set's staging", window(models.RecordedWithS12Routing), miss, true},
+		{"an unmarked set's staging", window(""), miss, true},
+		{"a staging, a miss with no report", window(models.RecordedWithS12Routing), bare, true},
+		{"a marked set settled", settled(models.RecordedWithS12Routing), miss, false},
+		{"an unmarked set settled", settled(""), miss, false},
+		{"a test's view during a staging", func(mm *MockManager) {
+			mm.StageExactBackground(models.RecordedWithS12Routing)
+			mm.ServeExactTest("T", nil)
+		}, miss, false},
+		{"an answered call in a staging", window(models.RecordedWithS12Routing), answered, false},
+		{"no staging", func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }, miss, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			p.setMockManager(mm)
+			tc.arm(mm)
+			p.BeginTestErrorCapture()
+			p.sendMockNotFoundError(tc.err())
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil || len(got) != 1 {
+				t.Fatalf("want the one call, got %+v (%v)", got, err)
+			}
+			if told := strings.HasPrefix(got[0].NextSteps, stagingMissNote); told != tc.told {
+				t.Fatalf("the call's next steps %q tell the staging %v; want %v", got[0].NextSteps, told, tc.told)
+			}
+			if tc.told && !strings.Contains(got[0].NextSteps, "refused while the test set's mocks were being staged") {
+				t.Fatalf("the staging note %q does not say it plainly", got[0].NextSteps)
+			}
+		})
+	}
+}
+
 // A pool slice's per-test-lifetime mock (a Postgres query a second test
 // process's TestMain made) is staged in the startup tree only. Between tests
 // every reusable read shows it, whichever tier a parser reads: after a test

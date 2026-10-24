@@ -324,11 +324,15 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.testBg = bg
 		a.scopeMu.Unlock()
 		// the background rules with the set's pool and whole worker scope; today's
-		// with neither (they name nothing).
+		// with neither (they name nothing). Either settles the staging the
+		// proxy opened (stageBackgroundExactly): the views from here on are
+		// no staging's.
 		if bg != nil {
 			if err := a.serveBackgroundExactly(es, models.RecordedWithS12Routing, ex.Pool, entryNames(ex.Worker)); err != nil {
 				return err
 			}
+		} else if err := a.serveBackgroundExactly(es, "", nil, nil); err != nil {
+			return err
 		}
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err

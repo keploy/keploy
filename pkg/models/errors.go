@@ -366,6 +366,10 @@ type ParserError struct {
 	// Recorded is, for MissExtraCall, how many times the call was recorded
 	// for the test.
 	Recorded int
+	// Staging is, under exact serving, that the miss was made while the
+	// replay was staging a test set's mocks, which then answer no call: its
+	// read says so in the call's next steps.
+	Staging bool
 }
 
 type ParserErrorType string

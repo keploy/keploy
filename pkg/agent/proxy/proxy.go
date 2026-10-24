@@ -4837,6 +4837,20 @@ func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 	}
 }
 
+// stagingMissNote is what a miss made while the replay was staging a test
+// set's mocks says first in its next steps (models.ParserError.Staging):
+// no recording answers a call made then, whatever it recorded.
+const stagingMissNote = "This call was refused while the test set's mocks were being staged: no recording answers a call made then, whatever the set recorded for it, so a call the application makes between test sets (a background job, or a connection kept alive from the previous set) is refused."
+
+// withStagingNote is next, a miss's next steps, led by stagingMissNote when
+// the miss was made while a set's mocks were being staged.
+func withStagingNote(e models.ParserError, next string) string {
+	if !e.Staging || (e.MismatchReport != nil && e.MismatchReport.Answer != "") {
+		return next
+	}
+	return strings.TrimSpace(stagingMissNote + " " + next)
+}
+
 // beforeSetMiss is a miss made before a test set's first test began, with no
 // test's window open: the application's startup, as it is readied for the
 // set. Under the proven switch it is the set's, no test's: the first test's
@@ -5337,7 +5351,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
 					Diff:          parserErr.MismatchReport.Diff,
-					NextSteps:     parserErr.MismatchReport.NextSteps,
+					NextSteps:     withStagingNote(parserErr, parserErr.MismatchReport.NextSteps),
 					MatchPhase:    parserErr.MismatchReport.MatchPhase,
 					// Separate axis from MatchPhase: the phase still reports
 					// where the cascade stopped, the scope says whether any
@@ -5382,7 +5396,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					At:            parserErr.At,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
-					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
+					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details."),
 					Kind:          parserErr.MissKind,
 				})
 			}
@@ -5592,6 +5606,9 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
 			} else {
 				proxyErr.Recorded = 0
 			}
+			// A miss made while the replay was staging the set's mocks says
+			// so (stagingMissNote).
+			proxyErr.Staging = m.exactMissStaging()
 		}
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing

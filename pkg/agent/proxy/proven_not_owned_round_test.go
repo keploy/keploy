@@ -121,7 +121,7 @@ func TestACallHeldWhileTheNextSetIsStagedNamesNoRecordingOfIt(t *testing.T) {
 			if r.NotOwned {
 				t.Fatalf("a call of the set before was named as the next set's %s made elsewhere: %+v", next.Name, r)
 			}
-			if !strings.Contains(r.NextSteps, "staged the next test set while it decided this request") {
+			if !strings.Contains(r.NextSteps, "staged a test set again while it decided this request") {
 				t.Fatalf("the miss does not say the set moved under the call: %q", r.NextSteps)
 			}
 			if !db.fired.Load() {

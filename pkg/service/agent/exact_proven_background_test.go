@@ -232,7 +232,8 @@ func TestSettleBackgroundNeedsTheSwitch(t *testing.T) {
 // recording with no identical sibling from the set's start, though it is
 // placed after a test not begun. A staging that names none is today's: it
 // opens under today's rules, the previous set's withdrawn, every view reads
-// today's, and the placed recording waits for its test. A proxy that cannot
+// today's, it is settled under today's once its mocks are staged, and the
+// placed recording waits for its test. A proxy that cannot
 // serve the background rules is staged by today's, and the agent says so.
 // Without the switch nothing is staged exactly.
 func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *testing.T) {
@@ -250,7 +251,9 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 		{"the background rules", true, models.RecordedWithS12Routing,
 			[]string{"stage:" + models.RecordedWithS12Routing, models.RecordedWithS12Routing + "|boot-config|w-delete,w-poll"},
 			[]string{models.RecordedWithS12Routing, models.RecordedWithS12Routing}, []string{"w-delete", "w-poll"}},
-		{"today's rules", true, "", []string{"stage:"}, []string{"", ""}, []string{"w-delete"}},
+		// Settled too (ServeExactBackground with no rules): the views from
+		// then on are no staging's.
+		{"today's rules", true, "", []string{"stage:", "||"}, []string{"", ""}, []string{"w-delete"}},
 		{"the background rules, a proxy that cannot serve them", true, models.RecordedWithS12Routing, nil, nil, []string{"w-delete"}},
 		// Without the switch nothing is staged exactly: nothing is told.
 		{"the background rules named without the switch", false, models.RecordedWithS12Routing, nil, nil, nil},
