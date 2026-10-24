@@ -17,7 +17,13 @@ import (
 	"go.uber.org/zap"
 )
 
+// decodeGeneric answers the client's requests from the mocks, on a goroutine,
+// and returns only once that goroutine has returned, ctx's end included: then
+// its read or write of clientConn is ended (pUtil.InterruptOnDone), and it is
+// waited for (pUtil.JoinParser). It used to return ctx's error at once and
+// leave the goroutine reading, matching and logging after it had returned.
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
 	// The requests it has read are held from the read on: it reads on with
@@ -160,13 +166,5 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		}
 	}(errCh, genericRequests)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
+	return pUtil.JoinParser(ctx, errCh)
 }

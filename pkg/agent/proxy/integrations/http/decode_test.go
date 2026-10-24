@@ -4,9 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
+	"net"
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,9 +20,128 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 	yamlLib "gopkg.in/yaml.v3"
 )
+
+// readWatchedConn is a connection with its reads in progress counted. Each
+// read that starts once the connection has been written to (the parser's
+// answer) is told on reading, when nothing waits there already.
+type readWatchedConn struct {
+	net.Conn
+	inFlight atomic.Int32
+	answered atomic.Bool
+	reading  chan struct{}
+}
+
+func (c *readWatchedConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.answered.Store(true)
+	return n, err
+}
+
+func (c *readWatchedConn) Read(p []byte) (int, error) {
+	c.inFlight.Add(1)
+	defer c.inFlight.Add(-1)
+	if c.answered.Load() {
+		select {
+		case c.reading <- struct{}{}:
+		default:
+		}
+	}
+	return c.Conn.Read(p)
+}
+
+// A replay whose context ends while decodeHTTP waits for the client's next
+// request returns only once the goroutine that reads the client has ended:
+// its read ended, and its last line logged. decodeHTTP returned the context's
+// error at once and left that goroutine blocked on the read, which logged its
+// failed read once the connection closed: in a parser test, through the
+// test's logger after the test had ended (a DATA RACE under go test -race).
+// Nothing closes the client here, so only the context's end can end the read.
+func TestDecodeHTTPReturnsOnlyOnceItsReaderHasEnded(t *testing.T) {
+	app, proxy := tcpPair(t)
+	conn := &readWatchedConn{Conn: proxy, reading: make(chan struct{}, 1)}
+	// Not the test's logger: what the goroutine logs after a failure here
+	// must not fail the run by racing the test's end.
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	rec := recorded("u", "/u", nil, "")
+	rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, []byte("POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"), conn, nil,
+			&mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	}()
+	// The bounds below only turn a hang into a failure.
+	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("the request was answered %q, want the mock's 200", got)
+	}
+	select {
+	case <-conn.reading: // waiting for the next request
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not read on for the next request")
+	}
+	cancel()
+	var err error
+	select {
+	case err = <-returned:
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not return once its context was cancelled")
+	}
+	if n := conn.inFlight.Load(); n != 0 {
+		t.Fatalf("decodeHTTP returned with %d read(s) of the client still in progress: the goroutine it started outlives it", n)
+	}
+	if logs.FilterMessage("failed to read the request buffer from the client").Len() == 0 {
+		t.Fatal("decodeHTTP returned before the goroutine it started had logged its last line")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("decodeHTTP = %v, want the context's error", err)
+	}
+	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+		t.Errorf("logged an ERROR at the context's end: %s %v", e.Message, e.Context)
+	}
+}
+
+// A replay whose context ends while it reads the rest of a request's header
+// section returns the context's error and logs no ERROR: it logged the read's
+// end with no error, so not as the context's. Nothing writes the rest here,
+// so only the context's end can end the read.
+func TestDecodeHTTPStoppedMidRequestLogsNoError(t *testing.T) {
+	_, proxy := tcpPair(t)
+	conn := &readWatchedConn{Conn: proxy, reading: make(chan struct{}, 1)}
+	conn.answered.Store(true) // tell every read: the first is the header's
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, []byte("GET /u HTTP/1.1\r\nHost: api"), conn, nil, &mockMemDb{}, models.OutgoingOptions{})
+	}()
+	// The bounds below only turn a hang into a failure.
+	select {
+	case <-conn.reading:
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not read the rest of the request")
+	}
+	cancel()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("decodeHTTP = %v, want the context's error", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not return once its context was cancelled")
+	}
+	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+		t.Errorf("logged an ERROR at the context's end: %s %v", e.Message, e.Context)
+	}
+}
 
 // A mock answers with the response header lines the dependency sent, not one
 // comma-joined line per name. Two Set-Cookie lines joined into one is a single

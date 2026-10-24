@@ -31,7 +31,17 @@ import (
 var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
+//
+// The requests are read and answered on a goroutine, and decodeHTTP returns
+// only once that goroutine has returned, ctx's end included: then its read or
+// write of clientConn is ended (pUtil.InterruptOnDone), and it is waited for
+// (pUtil.JoinParser). decodeHTTP used to return ctx's error at once and leave
+// the goroutine blocked reading clientConn for the next request; once the
+// client closed, it logged its failed read after decodeHTTP had returned (in a
+// parser test, through the test's logger after the test had ended: a DATA RACE
+// under go test -race).
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
@@ -344,6 +354,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// captures it for the CLI to append to the set at end-of-run.
 				if opts.OnMiss.PassesThroughOnMiss() {
 					handled, phErr := h.serveOnMiss(ctx, clientConn, reqBuf, request, input.body, dstCfg, opts)
+					if phErr != nil && ctx.Err() != nil {
+						// The call's end cut the passthrough short (its
+						// dial, the dependency's answer, which
+						// pUtil.InterruptOnDone ends then, or the write to
+						// the client): no answer is owed, and it is no miss.
+						return
+					}
 					if phErr != nil {
 						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
 					} else if handled {
@@ -434,15 +451,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 	}(errCh, reqBuf, opts)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
+	return pUtil.JoinParser(ctx, errCh)
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when
