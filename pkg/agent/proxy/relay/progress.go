@@ -136,16 +136,17 @@ func (t *tee) trimDeliveredLocked() {
 // is true when the only one is in the forwarder's or the layer's hand, not yet
 // stamped (it can be from any time from now on).
 //
-// The places are read in the order a chunk moves through them, so a chunk
-// moving on during the look is seen in the place it moves to. layer is read
-// first: the layer sets it before it takes the stamp of a read and clears it
-// only as it reads again, by when the forwarder has queued every chunk from
-// the reads before (a chunk it hands on over that read takes that read's
-// stamp, or, when the read brought nothing, the forwarder's). held is read
-// next, before the lock: the forwarder sets it before it queues the chunk and
-// clears it after, so a chunk it queues after this look read held clear is one
-// it stamped no earlier than the look (heldUnstamped), and one it queued
-// before is on the queue under the lock. A chunk further on is older than one
+// Both marks are read before the lock, which is what keeps a chunk moving on
+// during the look from being missed; the order of the two loads is not. The
+// layer sets layer before it takes the stamp of a read and clears it only as
+// it reads again, by when the forwarder has queued every chunk from the reads
+// before (a chunk it hands on over that read takes that read's stamp, or,
+// when the read brought nothing, the forwarder's). The forwarder sets held
+// before it stamps a chunk and clears it once it has queued, refused or
+// stashed it. So when this look read a mark clear, every chunk that was in
+// that hand has left it (onto the queue, which the look reads under the lock,
+// or refused or stashed), and one that comes into it later is stamped no
+// earlier than the look (heldUnstamped). A chunk further on is older than one
 // behind it, so the first place that holds one gives the oldest.
 func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
 	l := t.progress.layer.Load()
