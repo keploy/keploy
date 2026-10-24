@@ -123,12 +123,7 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	recorded.reset()
 	defer recorded.reset()
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close() // nothing listens there now
+	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
 
 	p := selfCallProxy()
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}

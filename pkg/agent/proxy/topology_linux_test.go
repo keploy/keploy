@@ -321,12 +321,7 @@ func TestUnderTheSwitchATreeServedMockRealDestinationIsCountedAsARelay(t *testin
 // depended on whether the host could hold handshakes (realDialFailed).
 func TestUnderTheSwitchAMockRealDestinationNothingListensAtIsCountedFailed(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close()
+	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
 	listed := fmt.Sprintf("127.0.0.1:%d", port)
 	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
 		t.Fatal(err)
@@ -415,16 +410,17 @@ func TestUnderTheSwitchAnIPEntryIsNotReachedThroughTheOtherLoopbackFamily(t *tes
 			t.Skipf("no IPv6 loopback here: %v", err)
 		}
 		port := l6.Addr().(*net.TCPAddr).Port
-		// Nothing may listen at the listed address, 127.0.0.1 at that port.
-		if l4, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-			_ = l4.Close()
+		// Nothing may listen at the listed address, 127.0.0.1 at that
+		// port, for the test's life: the port is held at every IPv4
+		// address, beside the IPv6-only listener.
+		if holdPort(t, port) {
 			l = l6
 			break
 		}
 		_ = l6.Close()
 	}
 	if l == nil {
-		t.Fatal("found no port free at 127.0.0.1 for a listener at [::1]")
+		t.Fatal("found no port free at every IPv4 address for a listener at [::1]")
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	go func() {
@@ -592,12 +588,7 @@ func TestAMockedContainerIsListedByItsKey(t *testing.T) {
 // which the runner did not start.
 func TestUnderTheSwitchARecordedLocalDependencyThatIsNotRunningIsListed(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close() // nothing listens there now
+	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
 	recorded.add([]*models.Mock{recordedPlainDep(port)})
 	served, _, outside := callTree(t, p, port, uint32(os.Getpid()))
 	if served {
@@ -614,12 +605,7 @@ func TestUnderTheSwitchARecordedLocalDependencyThatIsNotRunningIsListed(t *testi
 // it is not listed.
 func TestUnderTheSwitchACallNothingAnswersAndNoRecordingHasIsNotListed(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close()
+	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
 	// A recording of another port: this one is not recorded.
 	recorded.add([]*models.Mock{recordedPlainDep(port + 1)})
 	// An address of this machine that is not loopback, so the call is not
