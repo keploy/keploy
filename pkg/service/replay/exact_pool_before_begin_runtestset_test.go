@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -39,6 +40,9 @@ type viewInstr struct {
 	pools  int
 	opens  int
 	events []string
+	// aheads is, pool call by pool call it took, the calls in flight the
+	// call named (models.ExactServing.Ahead).
+	aheads [][]string
 }
 
 func (v *viewInstr) note(e string) {
@@ -98,6 +102,9 @@ func (v *viewInstr) UpdateMockParams(ctx context.Context, params models.MockFilt
 			v.note("pool-failed")
 			return errors.New("the agent did not take the pool call")
 		}
+		v.mu.Lock()
+		v.aheads = append(v.aheads, append([]string(nil), ex.Ahead...))
+		v.mu.Unlock()
 	}
 	v.note(what)
 	return v.prInstr.UpdateMockParams(ctx, params)
@@ -182,9 +189,47 @@ func (h startDiffers) SimulateRequest(ctx context.Context, tc *models.TestCase, 
 		Reader: io.NopCloser(iotest.ErrReader(&pkg.AnswerStallError{Target: "app", Answered: true})), StreamConfig: pkg.DetectHTTPStreamConfig(tc, nil)}, nil
 }
 
+// consumedNoted notes in its agent's trace each read of what the agent
+// consumed ("consumed": GetConsumedMocks), and answers it as hooks do.
+type consumedNoted struct {
+	TestHooks
+	vi *viewInstr
+}
+
+func (c consumedNoted) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	c.vi.note("consumed")
+	return c.TestHooks.GetConsumedMocks(ctx)
+}
+
+// lastReadAfterPool reports, of test's own events (from its view asked for
+// to the next test's begin or view), whether it makes read, and whether its
+// last read is made after a pool call: a read made before the pool call,
+// with the test's own view still served, may leave calls of the test's to
+// the next test's read.
+func lastReadAfterPool(events []string, test, read string) (bool, bool) {
+	in, pooled, made, after := false, false, false, false
+	for _, e := range events {
+		switch {
+		case e == "test:"+test:
+			in = true
+		case !in:
+		case strings.HasPrefix(e, "test:") || e == "begin" || e == "continue":
+			return made, after
+		case e == "pool":
+			pooled = true
+		case e == read:
+			made, after = true, pooled
+		}
+	}
+	return made, after
+}
+
 // A streamed test case that fails ends with the pool served, on every exit
-// the streaming pass has, before its capture window is read: the agent's
-// learn tracker ends it and begins the next test case only over the pool.
+// the streaming pass has, before its last read of what it consumed and
+// before its capture window is read: the agent's learn tracker ends it and
+// begins the next test case only over the pool, and a call the application
+// makes after the read is the pool's, not one of the failed test's that its
+// read leaves to the next test's.
 // Before, these exits served no pool: the next test case's tracker began
 // over the failed one's view, and the store answered the next test's calls
 // from that view while the tracker filed what the failed one served as
@@ -211,7 +256,7 @@ func TestAFailedStreamedTestEndsWithThePoolServed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, vi := exactViewRun(t, nil, "test-1", "test-2", "test-3")
-			h.replayer.hookImpl = tc.hooks()
+			h.replayer.hookImpl = consumedNoted{TestHooks: tc.hooks(), vi: vi}
 			if status := h.run(t); status != models.TestSetStatusFailed {
 				t.Fatalf("precondition: the set reported %q; want FAILED (test-1 fails)", status)
 			}
@@ -221,6 +266,11 @@ func TestAFailedStreamedTestEndsWithThePoolServed(t *testing.T) {
 			}
 			if bad := unendedTest(events); bad != "" {
 				t.Errorf("%s's capture window was read with its own view still served: %v", bad, events)
+			}
+			if made, afterPool := lastReadAfterPool(events, "test-1", "consumed"); !made {
+				t.Errorf("test-1's exit read nothing of what it consumed, which the next test's read takes then: %v", events)
+			} else if !afterPool {
+				t.Errorf("what test-1 consumed was last read with its own view still served: %v", events)
 			}
 			if bad := overATestView(events); bad != "" {
 				t.Errorf("a test began over a test's view, %s: %v", bad, events)
@@ -634,5 +684,99 @@ func TestACaptureWindowTheAgentDoesNotOpenIsBestEffortWithoutTheSwitch(t *testin
 	}
 	if want := []string{"begin-failed", "continue-failed", "continue-failed"}; strings.Join(opens, " ") != strings.Join(want, " ") {
 		t.Errorf("the capture calls were %v; want %v: %v", opens, want, events)
+	}
+}
+
+// appliedThenFailed is an agent that installs test-1's own view and then
+// fails the call all the same, as a call that failed may have reached the
+// agent (exactPlan.testView).
+type appliedThenFailed struct{ *viewInstr }
+
+func (v appliedThenFailed) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	err := v.viewInstr.UpdateMockParams(ctx, params)
+	if params.Exact != nil && params.Exact.Test == "test-1" {
+		return errors.New("the agent installed test-1's view, and the call failed")
+	}
+	return err
+}
+
+// A test case's view call that fails is taken as installed: the main loop
+// stops on it, and the streaming pass that runs after it serves the pool
+// before its first test case begins. Taken as not installed, the streaming
+// pass's first test case began over test-1's view.
+func TestAFailedViewCallIsFollowedByThePoolBeforeTheNextTestBegins(t *testing.T) {
+	h, vi := exactViewRun(t, nil, "test-2", "test-3")
+	h.replayer.instrumentation = appliedThenFailed{vi}
+	h.run(t)
+	events := vi.trace()
+	if !hasEvent(events, "test:test-1") || !hasEvent(events, "test:test-2") {
+		t.Fatalf("precondition: test-1's view was not asked for, or the streaming pass did not run after the main loop stopped: %v", events)
+	}
+	if bad := overATestView(events); bad != "" {
+		t.Errorf("a test began over a test's view, %s: %v", bad, events)
+	}
+}
+
+// A failed streamed test case whose pool call the agent does not take, as it
+// ends, says so at the warn level, naming the test case and why: the next
+// test case's loop head serves the pool again before it begins.
+func TestAFailedStreamedTestWhosePoolTheAgentDidNotTakeSaysSo(t *testing.T) {
+	// test-1's end is the set's first pool call.
+	h, vi := exactViewRun(t, func(n int) bool { return n == 1 }, "test-1", "test-2", "test-3")
+	h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-1": errors.New("connection refused")}}
+	logs := observeLog(h)
+	h.run(t)
+	events := vi.trace()
+	if !hasEvent(events, "pool-failed") || !hasEvent(events, "test:test-2") {
+		t.Fatalf("precondition: test-1's pool call did not fail, or test-2 never opened: %v", events)
+	}
+	said := logs.FilterMessageSnippet("keploy could not serve the test set's pool as a failed streaming test case ended").All()
+	if len(said) != 1 {
+		t.Fatalf("the pool call test-1's failed exit made, which the agent did not take, was said %d times; want once: %v", len(said), events)
+	}
+	fields := said[0].ContextMap()
+	if said[0].Level != zapcore.WarnLevel || fields["testCase"] != "test-1" || !strings.Contains(fmt.Sprint(fields["error"]), "the agent did not take the pool call") {
+		t.Errorf("the line is at %v with %v; want warn, test-1 and the agent's error", said[0].Level, fields)
+	}
+	if bad := overATestView(events); bad != "" {
+		t.Errorf("a test began over a test's view, %s: %v", bad, events)
+	}
+}
+
+// The pool call made before a test case begins, when the latest one was not
+// taken (poolBeforeBegin), names that test case's calls in flight, as the
+// one it makes again would have: the gap answers them as its, and its open
+// reads what the gap answered (drainAnsweredInGap). Naming none, the pool
+// answered them as the pool's.
+func TestThePoolServedBeforeATestBeginsNamesItsCallsInFlight(t *testing.T) {
+	h, vi := exactViewRun(t, nil)
+	plan := &exactPlan{testView: "test-1", ahead: map[string][]string{"test-2": {"fetch"}}}
+	if err := h.replayer.poolBeforeBegin(context.Background(), plan, "test-2"); err != nil {
+		t.Fatalf("the pool call failed: %v", err)
+	}
+	vi.mu.Lock()
+	aheads := vi.aheads
+	vi.mu.Unlock()
+	if len(aheads) != 1 || strings.Join(aheads[0], ",") != "fetch" {
+		t.Errorf("the pool calls named %v; want one naming test-2's call in flight, fetch", aheads)
+	}
+	if plan.aheadNamed != "test-2" || plan.testView != "" {
+		t.Errorf("the plan says the pool named %q's calls in flight, with %q's view served; want test-2's, and the pool", plan.aheadNamed, plan.testView)
+	}
+}
+
+// A run with no agent has no exact serving, the switch on: on the
+// streaming pass's two exits where such a run's context ended part way
+// (endedPartWay), which only it reaches, the pool call they make does
+// nothing, as no test case's view was installed to end.
+func TestARunWithNoAgentHasNoExactServing(t *testing.T) {
+	setSwitch(t, true)
+	r := &Replayer{instrument: true}
+	if !r.exactServing() {
+		t.Fatal("precondition: a run with an agent under the switch has no exact serving")
+	}
+	r.noAgent = true
+	if r.exactServing() {
+		t.Error("a run with no agent has exact serving, so the streaming pass's exits where its context ended part way would serve the pool of a run that installs no views")
 	}
 }

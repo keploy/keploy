@@ -3087,10 +3087,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	// drainBeforeFiling reads, under the proven switch, what a test that
-	// ends early (no answer, or one judged on its start) consumed, before its
-	// row is filed: its calls are its own, not the next test's, whose drain
-	// would read them otherwise. Without the switch an early row files as it
-	// always did.
+	// ends early (no answer, an answer of another type, or one judged on its
+	// start) consumed, before its row is filed: its calls are its own, not
+	// the next test's, whose drain would read them otherwise. Without the
+	// switch an early row files as it always did.
 	//
 	// answeredInGap and gapReadErr are what the gap before it answered of its
 	// calls in flight, read as it opened under exact serving
@@ -4464,13 +4464,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 			// endStream ends the streamed test case under exact serving: the
-			// agent serves the pool from then on, on every exit, before the
-			// test case's consumption and misses are read (as the main loop
-			// serves it once its test case has its answer), so the next test
-			// case never begins over this one's view. Each exit calls it
-			// once and leaves the iteration (continue or break). A failed
-			// pool call is returned, and served again at the next one's loop
-			// head (poolBeforeBegin).
+			// agent serves the pool from then on, before the test case's
+			// last read of what it consumed and its misses (as the main
+			// loop serves it once its test case has its answer), so the
+			// next test case never begins over this one's view. Every exit
+			// calls it once and leaves the iteration (continue or break).
+			// On the two endedPartWay exits, which only a run with no agent
+			// reaches, it does nothing: that run has no exact plan (r.exact
+			// is nil, exactServing). A failed pool call is returned, and
+			// served again at the next one's loop head (poolBeforeBegin).
 			endStream := func() error {
 				rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
 				for _, s := range streamingTests[i+1:] {
@@ -4519,6 +4521,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			if simErr != nil {
 				if status, ended := endedPartWay(); ended {
+					endStreamOnFailure(r.logger, tc.Name, endStream())
 					testSetStatus, exitLoop = status, true
 					break
 				}
@@ -4675,6 +4678,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 					if streamErr != nil {
 						if status, ended := endedPartWay(); ended {
+							endStreamOnFailure(r.logger, tc.Name, endStream())
 							testSetStatus, exitLoop = status, true
 							break
 						}
@@ -4754,6 +4758,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New(errMsg))
 					endStreamOnFailure(r.logger, tc.Name, endStream())
+					drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
