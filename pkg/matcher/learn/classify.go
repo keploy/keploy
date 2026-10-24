@@ -100,7 +100,8 @@ type Earlier struct {
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
-// in the test (Served), or recorded before the request L classifies (At).
+// in the test (Served), or recorded before the request L classifies (At), or
+// at its own instant (earlierThan).
 // Its text (Text) is its recorded request and answer, the payload only, as
 // one text: a value found there flowed from that mock, at a place no leaf
 // names.
@@ -157,6 +158,17 @@ type Raw struct {
 
 // Mock is the name of r's mock.
 func (r Raw) Mock() string { return r.mock }
+
+// earlierThan reports whether r is an earlier place of a call recorded at
+// at: served earlier in the test, or recorded before the call or at its own
+// instant. A recording made at that instant (a fixture's whole second) may
+// have been made before the call, so it is read as one, the fail-closed
+// side: a value it holds is refused or bound, never learned as noise by
+// default. The caller hands neither the paired recording nor one F served
+// at that instant (what F gave alone: GivenEarlier) as a Raw.
+func (r Raw) earlierThan(at time.Time) bool {
+	return r.served || !r.at.After(at)
+}
 
 // At is when r's mock's request was recorded.
 func (r Raw) At() time.Time { return r.at }
@@ -1539,7 +1551,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	for _, x := range raw {
-		if !x.served && !x.at.Before(at) {
+		if !x.earlierThan(at) {
 			continue
 		}
 		if from, ok := dc.echoRaw(x, echoed); ok {
@@ -1628,7 +1640,7 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 		}
 	}
 	for _, x := range raw {
-		if !x.served && !x.at.Before(at) {
+		if !x.earlierThan(at) {
 			continue
 		}
 		for _, f := range x.fields {
@@ -1762,7 +1774,7 @@ func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, ra
 func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
 	var held heldMoments
 	for _, x := range raw {
-		if x.served || x.at.Before(at) {
+		if x.earlierThan(at) {
 			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
 		}
 	}
@@ -1789,7 +1801,7 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 func (dc *DriftCache) recordedMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
 	var held heldMoments
 	for _, x := range raw {
-		if x.served || x.at.Before(at) {
+		if x.earlierThan(at) {
 			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
 		}
 	}

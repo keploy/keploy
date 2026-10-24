@@ -794,8 +794,9 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // it (given: in the previous test, at the start-up, between tests;
 // ofPairedTest), and every mock recorded before it
 // that the scope shows or that the store stages, served or not (visible: a
-// start-up call a kept-alive app never makes again in F is one). Each is
-// read once. The paired mock is not one, and neither is an exchange the
+// start-up call a kept-alive app never makes again in F is one), or at its
+// own instant where F did not serve it in the set before the call (set,
+// served, given: unservedPlace). Each is read once. The paired mock is not one, and neither is an exchange the
 // learn step served (earlier): its leaves and fixed parts, with what F saw
 // at each, are read instead (earlierOf); where F served the paired mock
 // before the call, givenEarlier reads it for the offset rule alone. A mock
@@ -815,7 +816,26 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // answer (DriftCache.ReadRaw). err names one whose answer the agent parked
 // on disk and that cannot be read back, and why; no mock is then returned,
 // since what it held cannot be told.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visible []*models.Mock, order learn.Order, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, set, served, given, visible []*models.Mock, order learn.Order, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
+	at := paired.Spec.ReqTimestampMock
+	// What F served in the set before the call, by recording. One F did not
+	// serve that was recorded at the call's own instant (a fixture's whole
+	// second: record may have made it before the call) is an earlier place
+	// too, the fail-closed side: givenEarlier reads only what F gave, so,
+	// read by neither, a value copied from it would pass as noise. One F
+	// served there is what F gave the application alone (givenEarlier).
+	fGave := make(map[string]bool, len(set)+len(served)+len(given))
+	for _, list := range [][]*models.Mock{set, served, given} {
+		for _, m := range list {
+			if m != nil {
+				fGave[rawID(m)] = true
+			}
+		}
+	}
+	unservedPlace := func(m *models.Mock) bool {
+		t := m.Spec.ReqTimestampMock
+		return t.Before(at) || t.Equal(at) && !fGave[rawID(m)]
+	}
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -865,7 +885,7 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visibl
 		}
 	}
 	for _, m := range visible {
-		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) && once(m) {
+		if m != nil && !leafed[m.Name] && unservedPlace(m) && once(m) {
 			if err := add(m, false, [2]int{}); err != nil {
 				return nil, err
 			}
@@ -879,7 +899,7 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visibl
 	var readErr error
 	if err := recorded(func(m *models.Mock) bool {
 		prev.See(m)
-		if m == nil || leafed[m.Name] || !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
+		if m == nil || leafed[m.Name] || !unservedPlace(m) || !once(m) {
 			return true
 		}
 		r, err := learn.ReadRaw(m, false)
@@ -1126,7 +1146,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				prev.See(s)
 			}
 			given := ofPairedTest(before, m, windows, own)
-			raw, err := earlierRaw(tracker.Drifts(), m, served, given, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...), order, recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
+			raw, err := earlierRaw(tracker.Drifts(), m, set, served, given, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...), order, recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
 			var unread recordedUnread
 			if errors.As(err, &unread) {
 				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",

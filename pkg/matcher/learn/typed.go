@@ -399,7 +399,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		return best, true
 	}
 	for _, x := range raw {
-		if !x.served && !x.at.Before(at) {
+		if !x.earlierThan(at) {
 			continue
 		}
 		for _, f := range x.fields {
@@ -452,7 +452,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 // holds it.
 func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
-		if !x.served && !x.at.Before(at) {
+		if !x.earlierThan(at) {
 			continue
 		}
 		texts := dc.searched(x, false)

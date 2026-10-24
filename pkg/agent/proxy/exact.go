@@ -734,7 +734,8 @@ func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models
 }
 
 // RangeRecordedBefore visits every recording of the staged set made before
-// t, by request time, of any kind (integrations.RecordedBeforeReader): those
+// t, or at t's own instant, by request time, of any kind
+// (integrations.RecordedBeforeReader): those
 // in the manager's trees (StagedMocks), then those the agent keeps on disk
 // (SetRecordedBefore), each once, until visit returns false. A recording a
 // tree holds a copy of (the open test's own, loaded from disk) is visited
@@ -746,7 +747,7 @@ func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) 
 		return mk.Name + "\x00" + string(mk.Kind) + "\x00" + strconv.FormatInt(mk.Spec.ReqTimestampMock.UnixNano(), 10)
 	}
 	for _, mk := range m.StagedMocks() {
-		if mk == nil || !mk.Spec.ReqTimestampMock.Before(t) || seen[id(mk)] {
+		if mk == nil || mk.Spec.ReqTimestampMock.After(t) || seen[id(mk)] {
 			continue
 		}
 		seen[id(mk)] = true
@@ -761,7 +762,7 @@ func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) 
 		return nil
 	}
 	return src(t, func(mk *models.Mock) bool {
-		if mk == nil || !mk.Spec.ReqTimestampMock.Before(t) || seen[id(mk)] {
+		if mk == nil || mk.Spec.ReqTimestampMock.After(t) || seen[id(mk)] {
 			return true
 		}
 		return visit(mk)

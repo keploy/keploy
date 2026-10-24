@@ -152,9 +152,11 @@ func TestLoadBefore_StartupBand(t *testing.T) {
 	}
 }
 
-// The recordings before an instant are visited by request time, wherever a
-// mock is placed (one placed at its answer past the instant was recorded
-// before it), in recorded order, until the visitor stops.
+// The recordings before an instant, and at its own (a fixture's whole
+// second may have made one before it: the learn step reads it as an earlier
+// place), are visited by request time, wherever a mock is placed (one placed
+// at its answer past the instant was recorded before it), in recorded order,
+// until the visitor stops.
 func TestRangeRecordedBefore_ByRequestTime(t *testing.T) {
 	defer models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Name == "m15-answered-late" })()
 	late := perTestMockAt("m15-answered-late", 15)
@@ -174,8 +176,8 @@ func TestRangeRecordedBefore_ByRequestTime(t *testing.T) {
 	}
 	order = nil
 	_ = s.RangeRecordedBefore(time.Unix(20, 0).UTC(), func(m *models.Mock) bool { order = append(order, m.Name); return true })
-	if len(order) != 2 {
-		t.Fatalf("recorded before 20: %v; want the instant itself excluded", order)
+	if strings.Join(order, ",") != "m10,m15-answered-late,m20" {
+		t.Fatalf("recorded before 20: %v; want m10, m15-answered-late and m20, the one recorded at the instant itself too", order)
 	}
 	order = nil
 	_ = s.RangeRecordedBefore(time.Unix(25, 0).UTC(), func(m *models.Mock) bool { order = append(order, m.Name); return false })

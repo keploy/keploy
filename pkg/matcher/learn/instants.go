@@ -474,7 +474,9 @@ func (e *valueDrift) holdsMomentOf(v *valueDrift) bool {
 // with (rec) and the moment F saw in it (live), and the rules (cutRule) one
 // of which names both, live by what F served and rec by what the recordings
 // hold; nil where an instant F served names F's moment alone, and any rule
-// may then name the recorded one.
+// may then name the recorded one (and where one F served at a place recorded
+// at or after the call names F's moment by a rule that does not name the
+// recorded one: lateEchoes).
 type echoMatch struct {
 	rec, live moment
 	rules     map[cutRule]bool
@@ -647,6 +649,19 @@ func (h *heldMoments) holds(m moment) bool {
 func (h *heldMoments) holdsApart(m, other moment) bool {
 	for _, held := range h.list {
 		if covers(held, m) && !covers(held, other) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesApart reports whether an instant of the place names m's moment by a
+// rule that does not name other's (namesMomentApart): one that names both by
+// one rule (a day both fall in) names neither apart, whatever another rule
+// names (lateEchoes).
+func (h *heldMoments) namesApart(m, other moment) bool {
+	for _, held := range h.list {
+		if namesMomentApart(held, m, other, nil) {
 			return true
 		}
 	}

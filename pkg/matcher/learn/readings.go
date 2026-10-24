@@ -827,7 +827,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 		}
 		for _, x := range raw {
-			if !x.served && !x.at.Before(at) {
+			if !x.earlierThan(at) {
 				continue
 			}
 			// A protocol-phase answer's own clock reads blanked
@@ -885,10 +885,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 // givenWhose says whose a recording F gave the application before a call
 // recorded at at is, that no earlier place of the call's own test is
 // (givenWhy, echoedElsewhere), its request recorded at gat: another test's,
-// or, recorded after the call, no earlier place of any test's call.
+// or, recorded at or after the call, no earlier place of any test's call
+// (one recorded at the call's own instant may have been made after it).
 func givenWhose(gat, at time.Time) string {
 	if !gat.Before(at) {
-		return "was recorded after the call, so it is no earlier place of the call's own test (record made the call before it): keploy follows no value of a recording made after the call"
+		return "was recorded at or after the call, so it is no earlier place of the call's own test: keploy follows no value of a recording made at or after the call"
 	}
 	return "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
 }

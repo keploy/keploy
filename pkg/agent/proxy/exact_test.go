@@ -1658,7 +1658,11 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	pool := exactMock("pool-1", time.Second, models.LifetimeSession)
 	own := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
 	later := exactMock("pool-9", 9*time.Second, models.LifetimeSession)
-	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later}, models.BaseTime, time.Now())
+	// Recorded at the instant itself: a fixture's whole second may have made
+	// it before the call, so it is visited (the learn step reads it as an
+	// earlier place unless F served it).
+	same := exactMock("pool-5", 5*time.Second, models.LifetimeSession)
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later, same}, models.BaseTime, time.Now())
 	at := exactT0.Add(5 * time.Second)
 	visit := func(db integrations.RecordedBeforeReader) (string, []*models.Mock, error) {
 		var names []string
@@ -1671,16 +1675,18 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 		sort.Strings(names)
 		return strings.Join(names, ","), got, err
 	}
-	if names, _, err := visit(mm); err != nil || names != "own-2,pool-1" {
-		t.Fatalf("with no disk: %s %v; want own-2,pool-1", names, err)
+	if names, _, err := visit(mm); err != nil || names != "own-2,pool-1,pool-5" {
+		t.Fatalf("with no disk: %s %v; want own-2,pool-1,pool-5", names, err)
 	}
 	onDisk := exactMock("other-test-3", 3*time.Second, models.LifetimePerTest)
 	ownCopy := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
+	onDiskSame := exactMock("other-test-5", 5*time.Second, models.LifetimePerTest)
+	onDiskLater := exactMock("other-test-6", 6*time.Second, models.LifetimePerTest)
 	mm.SetRecordedBefore(func(t2 time.Time, v func(*models.Mock) bool) error {
 		if !t2.Equal(at) {
 			t.Fatalf("the disk read before %v", t2)
 		}
-		for _, m := range []*models.Mock{ownCopy, onDisk} {
+		for _, m := range []*models.Mock{ownCopy, onDisk, onDiskSame, onDiskLater} {
 			if !v(m) {
 				return nil
 			}
@@ -1692,10 +1698,10 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	for _, m := range got {
 		treeCopy = treeCopy || m == own
 	}
-	if err != nil || names != "other-test-3,own-2,pool-1" || !treeCopy {
-		t.Fatalf("with the disk: %s %v (own-2 the tree's: %v); want other-test-3, own-2 (the tree's), pool-1", names, err, treeCopy)
+	if err != nil || names != "other-test-3,other-test-5,own-2,pool-1,pool-5" || !treeCopy {
+		t.Fatalf("with the disk: %s %v (own-2 the tree's: %v); want other-test-3, other-test-5, own-2 (the tree's), pool-1, pool-5 (not other-test-6, a source that hands more)", names, err, treeCopy)
 	}
-	if names, _, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "other-test-3,own-2,pool-1" {
+	if names, _, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "other-test-3,other-test-5,own-2,pool-1,pool-5" {
 		t.Fatalf("through the scoped view: %s %v", names, err)
 	}
 	type noReader struct{ integrations.MockMemDb }

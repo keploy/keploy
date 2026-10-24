@@ -498,8 +498,8 @@ func (s *scopedMockDb) StagedMocks() []*models.Mock {
 
 var _ integrations.StagedReader = (*scopedMockDb)(nil)
 
-// RangeRecordedBefore forwards the store's recordings before t
-// (integrations.RecordedBeforeReader), whatever this view's allowlist shows:
+// RangeRecordedBefore forwards the store's recordings before t, or at its
+// own instant (integrations.RecordedBeforeReader), whatever this view's allowlist shows:
 // the learn step's earlier places are the recording's. Over a store that
 // keeps no such reader it is an error, not what the view holds: the view
 // cannot visit every recording made before t, and a caller that took what it

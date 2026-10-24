@@ -501,8 +501,8 @@ func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// RangeRecordedBefore visits the mocks recorded strictly before t, by
-// request time (wherever they are placed: one placed at its answer may sit
+// RangeRecordedBefore visits the mocks recorded before t, or at t's own
+// instant (integrations.RecordedBeforeReader), by request time (wherever they are placed: one placed at its answer may sit
 // past t), in recorded order, until visit returns false, for the learn
 // step's earlier places (MockManager.RangeRecordedBefore). Each is decoded
 // for visit alone, one at a time, and kept by no one: what the store keeps
@@ -516,7 +516,7 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 	cut := t.UnixNano()
 	var sel []diskEntry
 	for _, e := range d.entries {
-		if e.reqTsNano < cut {
+		if e.reqTsNano <= cut {
 			sel = append(sel, e)
 		}
 	}

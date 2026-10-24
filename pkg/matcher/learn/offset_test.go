@@ -794,7 +794,7 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 		want      string // "" noise
 	}{
 		{"a word of the value in another test's answer's own clock stamp alone", stamped, "slot-03", "slot-17", ""},
-		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording record's full round gave the application before the call that was recorded after the call"},
+		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording record's full round gave the application before the call that was recorded at or after the call"},
 		{"the recorded id in another test's answer recorded before the call", receiveOf("mock-13", recID, before), recID, liveID, "a word of its recorded value (its characters 1 to 8) appears in mock-13, a recording record's full round gave the application before the call that is another test's"},
 		{"the recorded id in another test's answer recorded after the call", receiveOf("mock-14", recID, after), recID, liveID, ""},
 		{"the live id in another test's request alone", sentOnly, recID, liveID, ""},
@@ -1054,11 +1054,11 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 			m    *models.Mock
 			want string // "" noise
 		}{
-			{"copied, recorded after the call", sentAtReceive("mock-30", after, f.copied), "was recorded after the call"},
+			{"copied, recorded after the call", sentAtReceive("mock-30", after, f.copied), "was recorded at or after the call"},
 			{"copied, recorded before the call", sentAtReceive("mock-31", before, f.copied), "is another test's"},
 			{"the recorded moment alone, recorded after the call", sentAtReceive("mock-32", after, recT.Format(time.RFC3339Nano)), ""},
 			{"copied in the request the application sent alone", requestOnly("mock-35", after, f.copied), ""},
-			{"copied, inside a base64 body", base64Receive("mock-36", after, f.copied), "was recorded after the call"},
+			{"copied, inside a base64 body", base64Receive("mock-36", after, f.copied), "was recorded at or after the call"},
 		} {
 			for _, viaSet := range []bool{false, true} {
 				dc := NewDriftCache()
@@ -1084,10 +1084,12 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		}
 	}
 	// A moment of the answer names both the recorded minute (cut down) and
-	// F's (rounded): alone a copy of neither. The neighbour naming the
-	// recorded minute rounded, as F's is, makes it a copy where the recording
-	// gave the application it before the call; recorded after the call, it
-	// gave the recorded value nothing.
+	// F's (rounded): alone a copy of neither where both runs were given it.
+	// The neighbour naming the recorded minute rounded, as F's is, makes it a
+	// copy where the recording gave the application it before the call.
+	// Recorded after the call, the recorded application was never given it
+	// before the call, so only what F served there counts, and F's minute is
+	// a cut of it: a copy all the same.
 	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
 	both, neighbour := recT.Truncate(time.Minute).Add(45*time.Second).Format(time.RFC3339), recT.Truncate(time.Minute).Add(10*time.Second).Format(time.RFC3339)
 	for _, row := range []struct {
@@ -1096,7 +1098,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		want string
 	}{
 		{"recorded before the call", sentAtReceive("mock-33", before, both, neighbour), "is another test's"},
-		{"recorded after the call", sentAtReceive("mock-34", after, both, neighbour), ""},
+		{"recorded after the call", sentAtReceive("mock-34", after, both, neighbour), "was recorded at or after the call"},
 	} {
 		for _, viaSet := range []bool{false, true} {
 			dc := NewDriftCache()
@@ -1117,6 +1119,95 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 			}
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in "+row.m.Name+" at spec.resp.body") || !strings.Contains(ln.Why, row.want) {
 				t.Errorf("an instant naming both, its neighbour %s (set %v): %s (%s); want it refused, naming %s", row.name, viaSet, ln.Kind, ln.Why, row.m.Name)
+			}
+		}
+	}
+}
+
+// A recording F gave the application before the call that was recorded at
+// or after the call (at the call's own instant too: a fixture's whole
+// second) was never given to the recorded application before the call, so
+// only what F served there counts: an instant of it that names the moment F
+// saw is a copy, refused naming it, even where the same instant names the
+// recorded moment too (11:14:40 rounds to F's minute and cuts down to the
+// recorded one); one that names the recorded moment alone shows no copy,
+// noise, unless the recording at the call's own instant, read as one the
+// recorded application may have been given, names it by the rule by which
+// the call's own place names F's.
+func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	before, after := at.Add(-time.Minute), at.Add(3*time.Minute)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
+	base := recT.Truncate(time.Minute)
+	for _, when := range []struct {
+		name string
+		at   time.Time
+	}{{"recorded after the call", after}, {"recorded at the call's own instant", at}} {
+		for _, tc := range []struct {
+			name    string
+			sent    time.Time
+			withOwn bool
+			want    string
+		}{
+			{"F's minute alone", base.Add(65 * time.Second), false, "stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call"},
+			{"F's minute alone, beside the own place", base.Add(65 * time.Second), true, "mock-44"},
+			{"rounds to F's minute, cuts down to the recorded one", base.Add(40 * time.Second), false, "stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call"},
+			{"rounds to F's minute, cuts down to the recorded one, beside the own place", base.Add(40 * time.Second), true, "stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call"},
+			{"the recorded minute alone", base.Add(10 * time.Second), false, ""},
+			{"the recorded minute alone, beside the own place", base.Add(10 * time.Second), true, ""},
+		} {
+			want := tc.want
+			if when.at.Equal(at) && tc.withOwn && want == "" {
+				// The own place's 11:14:45 rounds to F's minute; the
+				// neighbour's 11:14:10, which the recorded application may
+				// have been given before the call, rounds to the recorded one.
+				want = "the moment record's full round saw in it stands in mock-42 at spec.resp.body, and the moment it was recorded with stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call"
+			}
+			for _, viaSet := range []bool{false, true} {
+				dc := NewDriftCache()
+				nb := dc.RawOf(sentAtReceive("mock-44", when.at, tc.sent.Format(time.RFC3339)), true).ServedAs(1)
+				var own []Raw
+				if tc.withOwn {
+					own = []Raw{dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)}
+				}
+				var ln Learned
+				if viaSet {
+					ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, own, nil, nil, func() ([]GivenPlaces, error) {
+						return []GivenPlaces{PlacesOf(nb)}, nil
+					})[0]
+				} else {
+					ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, append(own, nb.OfAnotherTest()), nil, nil)[0]
+				}
+				if want == "" {
+					if ln.Kind != KindNoise {
+						t.Errorf("%s, %s (set %v): %s (%s); want noise, no copy shown", when.name, tc.name, viaSet, ln.Kind, ln.Why)
+					}
+					continue
+				}
+				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, want) {
+					t.Errorf("FALSE GREEN? %s, %s (set %v): %s (%s); want it refused: %s", when.name, tc.name, viaSet, ln.Kind, ln.Why, want)
+				}
+			}
+		}
+		// A day both moments fall in, served there, names both by one rule:
+		// it is the source of no change (what changed is the application's
+		// own minute), so the value is noise, never refused naming it.
+		for _, viaSet := range []bool{false, true} {
+			dc := NewDriftCache()
+			nb := dc.RawOf(sentAtReceive("mock-45", when.at, base.Format("2006-01-02")), true).ServedAs(1)
+			var ln Learned
+			if viaSet {
+				ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+					return []GivenPlaces{PlacesOf(nb)}, nil
+				})[0]
+			} else {
+				ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{nb.OfAnotherTest()}, nil, nil)[0]
+			}
+			if ln.Kind != KindNoise {
+				t.Errorf("%s, the day both moments fall in (set %v): %s (%s); want noise, the day no source of the change", when.name, viaSet, ln.Kind, ln.Why)
 			}
 		}
 	}

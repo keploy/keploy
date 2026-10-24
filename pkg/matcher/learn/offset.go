@@ -232,7 +232,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		payloads = append(payloads, p)
 	}
 	for _, x := range raw {
-		if x.read && (x.served || x.at.Before(at)) {
+		if x.read && x.earlierThan(at) {
 			add(x, x.served)
 		}
 	}
@@ -442,12 +442,21 @@ func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
 // what the recordings gave it, the call's own places' (recordedMoments) and
 // only those of these recordings that were recorded before the call, which
 // the recording gave the application too: a recording made after the call
-// holds nothing the recorded value was built on. No variable is bound there
-// (keploy follows no value of another test's, nor of a recording made after
-// the call): the value is refused, naming the place that holds the moment F
-// saw (or, where that is a place of the call's own test, the one of those
-// recordings that holds the moment it was recorded with by the same rule),
-// never learned as noise. It reads the set (places) only where a changed
+// holds nothing the recorded value was built on. One recorded at the call's
+// own instant (a fixture's whole second) may have been given to the recorded
+// application before the call or not, so it is read both ways: as one the
+// recording gave it, and as one only F gave it. A recording made at or after
+// the call was never given to the recorded application before the call, so
+// only the moment F served there counts: an instant of it that names the
+// moment F saw by a rule that does not name the recorded one is a copy,
+// whatever else it names by another rule (lateEchoes; one that names both
+// moments is no copy only where both runs were given it, holdsApart).
+// No variable is bound there
+// (keploy follows no value of another test's, nor of a recording made at or
+// after the call): the value is refused, naming the place that holds the
+// moment F saw (or, where that is a place of the call's own test, the one of
+// those recordings that holds the moment it was recorded with by the same
+// rule), never learned as noise. It reads the set (places) only where a changed
 // instant asks, and only after the offset rule, which refuses every changed
 // instant where one of those recordings could not be read (places().unread).
 func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
@@ -459,13 +468,18 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 		return ""
 	}
 	held, recorded := dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
+	var late heldMoments
 	for _, g := range op.answers {
 		held.addMoment(g.m)
-		if g.at.Before(at) {
+		if !g.at.After(at) {
 			recorded.addMoment(g.m)
+		}
+		if !g.at.Before(at) {
+			late.addMoment(g.m)
 		}
 	}
 	echoed := echoedPairs(pairs, held, recorded)
+	echoed = append(echoed, lateEchoes(pairs, echoed, &late)...)
 	if len(echoed) == 0 {
 		return ""
 	}
@@ -486,7 +500,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 		where = "earlier in the test set"
 	}
 	for _, g := range op.answers {
-		if !g.at.Before(at) {
+		if g.at.After(at) {
 			continue
 		}
 		for _, e := range echoed {
@@ -498,6 +512,39 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 	// Unreached but where an instant names both moments by one rule: refused
 	// all the same.
 	return pickUnaccounted(where)
+}
+
+// lateEchoes are the pairs of pairs that echoed (the echo's other reads)
+// does not hold whose moment F saw an instant of late names by a rule that
+// does not name the recorded moment (namesApart): late holds what F served
+// at the places it gave the application before the call that were recorded
+// at or after it, which the recorded application was never given before the
+// call. The recorded value was built on none of them, so an instant there
+// that names the moment F saw by such a rule is a copy of what F served,
+// even where another rule names the recorded moment too (a minute rounded
+// from "11:14:40" is F's "11:15", cut down it is the recorded "11:14"): only
+// F's run had it to cut. One that names both by one rule (a served date the
+// value is built on, the day both moments fall in) is the source of no
+// change: what changed is the application's own.
+func lateEchoes(pairs []driftedInstant, echoed []echoMatch, late *heldMoments) []echoMatch {
+	var out []echoMatch
+	for _, p := range pairs {
+		if echoedPair(echoed, p) || !late.namesApart(p.live, p.rec) {
+			continue
+		}
+		out = append(out, echoMatch{rec: p.rec, live: p.live})
+	}
+	return out
+}
+
+// echoedPair reports whether echoed holds p.
+func echoedPair(echoed []echoMatch, p driftedInstant) bool {
+	for _, e := range echoed {
+		if e.rec == p.rec && e.live == p.live {
+			return true
+		}
+	}
+	return false
 }
 
 // givenWords are the words of a recording's answer where the word rule

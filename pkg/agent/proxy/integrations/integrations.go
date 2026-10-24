@@ -453,8 +453,10 @@ type StagedReader interface {
 }
 
 // RecordedBeforeReader is an optional MockMemDb capability: it visits every
-// recording of the staged test set made before t (by request time), of any
-// kind, whether the store holds it in its trees or keeps it on disk (a test's
+// recording of the staged test set made before t (by request time), and
+// those made at t's own instant (a fixture recorded to the whole second may
+// have made one before t: the caller tells them apart, as the paired
+// recording is one), of any kind, whether the store holds it in its trees or keeps it on disk (a test's
 // own recordings are staged only as that test opens), served or not, each
 // once, until visit returns false. A recording kept on disk is decoded for
 // visit alone and kept by no one: visit must not keep m (or any part of it a
