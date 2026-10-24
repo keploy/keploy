@@ -943,9 +943,11 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 // The processes a stop watches all gone is the app's exit, though its event
 // has not come (a starved daemon slow to say its container stopped); and at
 // the user's Ctrl+C, which the stop offers once the run is interrupted, a
-// group's stop kills at once, and says so as the user's.
+// group's stop kills at once, and says so as the user's. The press comes at
+// the offer, from its log line. The stall bound is 10s, so a stop that missed
+// either fails the test (it ends stalled), not holds it.
 func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
-	shortStall(t, time.Hour)
+	shortStall(t, 10*time.Second)
 	cmd, reaped := startGroupLeader(t, "sh", "-c", "sleep 1")
 	p, ok := ProcOf(cmd.Process.Pid)
 	if !ok {
@@ -957,22 +959,14 @@ func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
 	}
 	awaitReaped(t, "the process", reaped)
 
-	offer := StopOffer
-	StopOffer = 0
-	t.Cleanup(func() { StopOffer = offer; ClearInterrupted(); ResetInterruptedAgain() })
-	MarkInterrupted()
-	go func() {
-		for !MarkInterruptedAgain() {
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
 	pid, reaped := readyLeader(t, t.TempDir(), `trap "" INT; touch ready; exec sleep 600`)
-	killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, nil)
+	logger, _, taken := pressAtOffer(t)
+	killed, _, err := InterruptProcessTreeStop(logger, pid, syscall.SIGINT, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if killed != "keploy killed a process of it at the press of Ctrl+C, before it had exited" {
-		t.Fatalf("the stop said %q; want the press's kill", killed)
+	if killed != "keploy killed a process of it at the press of Ctrl+C, before it had exited" || !taken.Load() {
+		t.Fatalf("the stop said %q, the press taken %v; want the press's kill", killed, taken.Load())
 	}
 	awaitReaped(t, "the app", reaped)
 }
