@@ -109,7 +109,7 @@ func (f *follows) excusedSeen(e Earlier, ed *valueDrift, i int, t string, at tim
 	}
 	before, untimed := e.Given, ""
 	if !e.Given {
-		before, untimed = recordedGave(e.At, e.Payload.answered, at, e.Mock)
+		before, untimed = recordedGave(e.recordedAt(), e.Payload.answered, at, e.Mock)
 	}
 	return f.excused(t, before && ed.recTok[i][t], ed.liveTok[i][t], untimed, why)
 }
@@ -123,7 +123,7 @@ func (f *follows) excusedRaw(x Raw, i int, t string, at time.Time, why string) b
 	if f == nil {
 		return false
 	}
-	before, untimed := recordedGave(x.at, x.answered, at, x.mock)
+	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
 	held := f.dc.searchedTokens(x, false)[i][t]
 	return f.excused(t, before && held, x.served && held, untimed, why)
 }
@@ -229,12 +229,12 @@ func recordedOrder(at time.Time, earlier []Earlier, raw []Raw) (order []string, 
 			order = append(order, "the test case's request")
 			continue
 		}
-		if why := add(recPlace{e.Mock, e.At, e.Payload.answered, e.Payload.conn, e.Payload.pos}); why != "" {
+		if why := add(recPlace{e.Mock, e.recordedAt(), e.Payload.answered, e.Payload.conn, e.Payload.pos}); why != "" {
 			return nil, why
 		}
 	}
 	for _, x := range raw {
-		if why := add(recPlace{x.mock, x.at, x.answered, x.conn, x.pos}); why != "" {
+		if why := add(recPlace{x.mock, x.recordedAt(), x.answered, x.conn, x.pos}); why != "" {
 			return nil, why
 		}
 	}

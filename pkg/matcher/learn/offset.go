@@ -87,7 +87,8 @@ import (
 // in the set (Raw.ServedIn; 0 where it did not or that is not known): the
 // two orders the two runs gave the application their recordings in. A place
 // whose mock was recorded at the call's own instant (atCall: a fixture's
-// whole second) is recorded, as every rule reads the equal instant, the
+// whole second; or one whose recorded time keploy cannot read, read as it:
+// noTime) is recorded, as every rule reads the equal instant, the
 // fail-closed reading: the recording may have given it before the call. It
 // is never one the recording surely gave, which only lets a pair go
 // (inRecordedOrder).
@@ -97,8 +98,11 @@ type offsetPlace struct {
 	where                   string
 	call                    string
 	recorded, given, atCall bool
-	at                      time.Time
-	first, last             int
+	// noTime: its mock's recorded time keploy cannot read (Raw.noTime),
+	// read as the call's own instant: the reason says so (offsetWhy).
+	noTime      bool
+	at          time.Time
+	first, last int
 }
 
 // inRecordedOrder reports whether F gave the application the recordings of
@@ -213,6 +217,17 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	}
 	var payloads []*payload
 	byID := map[string]*payload{}
+	// What F served at the leaves of an exchange's answer with another value
+	// than recorded (a template value: Raw.moves), each where the payload
+	// holds it, of each exchange: places F gave the application, never the
+	// recording, which its payload's places at those leaves are.
+	type moved struct {
+		mock, call  string
+		at          time.Time
+		first, last int
+		moves       []servedMove
+	}
+	var moves []moved
 	merge := func(p *payload, given bool, first, last int) {
 		if !given {
 			first, last = 0, 0
@@ -237,9 +252,17 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		payloads = append(payloads, p)
 	}
 	for _, x := range raw {
-		if x.read && x.earlierThan(at) {
-			add(x, x.served)
+		if !x.read || !x.earlierThan(at) {
+			continue
 		}
+		if len(x.moves) > 0 {
+			// What F served at a late exchange's leaves (servedAnswer): read
+			// where its payload holds them, as its own places, never merged
+			// into the payload's.
+			moves = append(moves, moved{mock: x.mock, call: x.call, at: x.at, first: x.first, last: x.last, moves: x.moves})
+			continue
+		}
+		add(x, x.served)
 	}
 	for _, e := range served {
 		if e.Given {
@@ -261,6 +284,9 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 		if e.Payload.read {
 			add(e.Payload, true)
+			if mv := e.servedMoves(); len(mv) > 0 {
+				moves = append(moves, moved{mock: e.Mock, call: e.Payload.call, at: e.At, first: e.Payload.first, last: e.Payload.last, moves: mv})
+			}
 		} else if op.unread == "" {
 			// What RawOf could not read, and an exchange that came with no
 			// payload at all, is no place the rule can search: a value
@@ -293,17 +319,22 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	// A place recorded at the call's own instant is read as the recording
 	// gave it before the call, as every rule reads the equal instant: the
 	// fail-closed reading, which an offset on it refuses.
-	put := func(kp keyedPlace, mock, call string, rat time.Time, given bool, first, last int) {
-		op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mock, where: kp.where, call: call, recorded: !rat.After(at), given: given, atCall: rat.Equal(at), at: rat, first: first, last: last})
+	put := func(kp keyedPlace, mock, call string, rat time.Time, given, noTime bool, first, last int) {
+		op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mock, where: kp.where, call: call, recorded: !rat.After(at), given: given, atCall: rat.Equal(at), noTime: noTime, at: rat, first: first, last: last})
 	}
 	for _, p := range payloads {
 		for _, kp := range dc.keyedPlaces(p.x) {
-			put(kp, p.x.mock, p.x.call, p.x.at, p.given, p.first, p.last)
+			put(kp, p.x.mock, p.x.call, p.x.at, p.given, p.x.noTime, p.first, p.last)
 		}
 	}
 	for _, g := range others {
 		for _, kp := range g.places {
-			put(kp, g.mock, g.call, g.at, true, g.first, g.last)
+			put(kp, g.mock, g.call, g.at, true, false, g.first, g.last)
+		}
+	}
+	for _, mv := range moves {
+		for _, kp := range dc.movePlaces(mv.mock, mv.moves) {
+			op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mv.mock, where: kp.where, call: mv.call, given: true, at: mv.at, first: mv.first, last: mv.last})
 		}
 	}
 	for k, list := range op.byPlace {
@@ -348,6 +379,48 @@ func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
 					continue
 				}
 				out = append(out, keyedPlace{k: offsetKey{path: f.path, form: form, layout: sp.layout, label: instantLabel(t, spans, si)}, m: sp.moment(), where: where})
+			}
+		}
+	}
+	return out
+}
+
+// servedMove is a leaf of an exchange's answer F served with another value
+// than recorded (a template value: Earlier.servedMoves): path, its field of
+// the mock's spec ("Res.body.Messages[0].SentAt"); in, the field of the
+// exchange's payload it stands in (rawField.path: "Res.body"), its own path
+// where none holds it; name, the key written before it there ("SentAt"; ""
+// where none is); live, what F served; quoted, whether it is written as a
+// string.
+type servedMove struct {
+	path, in, name, live string
+	quoted               bool
+}
+
+// movePlaces are the instants of what F served at moves, an exchange's
+// leaves, where the offset rule reads them: keyed as the payload's own
+// instants there are (keyedPlaces: the field it stands in, the form, the
+// layout and the word written before it, here the leaf's key), so that the
+// place F gave the application stands where another recording's payload
+// holds the recording's, and named by the leaf ("<mock> at <leaf>").
+func (dc *DriftCache) movePlaces(mock string, moves []servedMove) []keyedPlace {
+	var out []keyedPlace
+	for _, mv := range moves {
+		t := mv.live
+		switch {
+		case mv.name != "" && mv.quoted:
+			t = `"` + mv.name + `":"` + mv.live + `"`
+		case mv.name != "":
+			t = `"` + mv.name + `":` + mv.live
+		}
+		where := mock + " at " + rawField{path: mv.path}.describe()
+		for form, ft := range []string{t, dc.rawExtra(t)} {
+			spans := dc.spansOf(ft)
+			for si, sp := range spans {
+				if !sp.keyed {
+					continue
+				}
+				out = append(out, keyedPlace{k: offsetKey{path: mv.in, form: form, layout: sp.layout, label: instantLabel(ft, spans, si)}, m: sp.moment(), where: where})
 			}
 		}
 	}
@@ -400,8 +473,9 @@ type givenMoment struct {
 	m           moment
 	mock, where string
 	at          time.Time
-	// late is Raw.late: the reason says the recording is read both ways.
-	late bool
+	// late is Raw.late: the reason says the recording is read both ways;
+	// noTime, Raw.noTime: that keploy cannot read when it was recorded.
+	late, noTime bool
 }
 
 // answerMoments are the instants of x's answer as F gave the application
@@ -419,7 +493,7 @@ func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
 		for _, form := range []string{t, dc.rawExtra(t)} {
 			for _, sp := range dc.spansOf(form) {
 				if sp.keyed {
-					out = append(out, givenMoment{m: sp.moment(), mock: x.mock, where: where, at: x.at, late: x.late})
+					out = append(out, givenMoment{m: sp.moment(), mock: x.mock, where: where, at: x.at, late: x.late, noTime: x.noTime})
 				}
 			}
 		}
@@ -496,7 +570,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 	for _, g := range op.answers {
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.live, e.rec, e.rules) {
-				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock)
+				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock)
 			}
 		}
 	}
@@ -515,7 +589,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 		}
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.rec, e.live, e.rules) {
-				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock)
+				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock)
 			}
 		}
 	}
@@ -568,13 +642,14 @@ type givenWords struct {
 	mock           string
 	at             time.Time
 	words, stamped [][]string
-	// late is Raw.late: the reason says the recording is read both ways.
-	late bool
+	// late is Raw.late: the reason says the recording is read both ways;
+	// noTime, Raw.noTime: that keploy cannot read when it was recorded.
+	late, noTime bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime}
 	plain := dc.answerWords(x, false)
 	kept := plain
 	if len(x.stamps) > 0 {
@@ -943,7 +1018,10 @@ func offsetWhy(m offsetMatch) string {
 	}
 	unit := unitName(max(m.rec.res, m.live.res))
 	gave := " holds as the recording gave it"
-	if m.hr.atCall {
+	switch {
+	case m.hr.noTime:
+		gave += noTimeNote
+	case m.hr.atCall:
 		gave += atCallNote
 	}
 	why := "its moment, to the " + unit + ", stands " + rel + " the moment " + m.hr.where + gave + ", and record's full round saw it " + rel + " the moment " + m.hf.where + " holds, which record's full round gave the application in its place: a value built on what the application was given by an offset moves so, as a read of the clock does, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it is built on " + m.hf.mock + "'s instant, which keploy cannot follow with an offset yet"

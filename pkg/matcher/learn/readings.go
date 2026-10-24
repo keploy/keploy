@@ -837,10 +837,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
 			if dc.searchedTokens(x, keep)[i][t] {
-				note := ""
-				if x.at.Equal(at) {
-					note = atCallNote
-				}
+				note := x.atNote(at)
 				place := x.mock + "'s payload"
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
 					place = x.mock + " at " + f
@@ -892,7 +889,7 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
 			}
 		}
 		return ""
@@ -911,8 +908,10 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 // as well have been made after the call, so keploy reads it both ways, and
 // as one made after the call follows no value of it but what record's full
 // round served there.
-func givenWhose(gat, at time.Time, late bool) string {
+func givenWhose(gat, at time.Time, late, noTime bool) string {
 	switch {
+	case late && noTime:
+		return "was " + noTimeWords + ", yet may as well have been made after the call, so keploy reads it both ways: as one made after the call, keploy follows no value of it but what record's full round served there"
 	case late:
 		return "was " + atCallWords + ", yet may as well have been made after the call, so keploy reads it both ways: as one made after the call, keploy follows no value of it but what record's full round served there"
 	case gat.Equal(at):

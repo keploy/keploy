@@ -95,6 +95,10 @@ type Earlier struct {
 	// (ClassifyIn), never learned as noise or an echo.
 	Unread string
 	Seen   []Seen
+	// noTime: the exchange's recorded time keploy cannot read (At was the
+	// zero time), read as one made at the call's own instant
+	// (timedEarlier), and named so.
+	noTime bool
 	// Payload is the exchange's recording as a payload is read (RawOf), its
 	// answer read back, where the adapter that served it leaf by leaf gives
 	// it (the zero Raw where it does not): the answer's fields name the same
@@ -160,6 +164,10 @@ type Raw struct {
 	// (givenAtCall): a reason naming it says it is read both ways
 	// (givenWhose), never that it is no place of the call's own test.
 	late bool
+	// noTime: the recording's recorded time keploy cannot read, read as one
+	// made at the call's own instant (timedEarlier): a reason naming it says
+	// so (atNote, givenWhose).
+	noTime bool
 	// read: the text was read from the mock (RawOf).
 	read bool
 	// unread, of a Raw that was not read, says why where the place it stands
@@ -177,10 +185,48 @@ type Raw struct {
 	// within the span keploy stamped the exchange in): no value came from
 	// one, and only the echo reads them.
 	stamps []rawField
+	// moves are, of what F served at the leaves of an exchange's answer
+	// (servedAnswer), the leaves F served with another value than recorded
+	// (a template value), each where the exchange's payload holds it
+	// (servedMove): the offset rule reads them as places F gave the
+	// application, keyed as the payload's own are (movePlaces), never as
+	// places the recording gave it.
+	moves []servedMove
 }
 
 // Mock is the name of r's mock.
 func (r Raw) Mock() string { return r.mock }
+
+// recordedAt is when r's request was recorded, the zero time where keploy
+// cannot read it (noTime: at then stands for the call's own instant).
+func (r Raw) recordedAt() time.Time {
+	if r.noTime {
+		return time.Time{}
+	}
+	return r.at
+}
+
+// recordedAt is when e's request was recorded, the zero time where keploy
+// cannot read it (noTime: At then stands for the call's own instant).
+func (e Earlier) recordedAt() time.Time {
+	if e.noTime {
+		return time.Time{}
+	}
+	return e.At
+}
+
+// atNote is what a reason naming r, an earlier place of a call recorded at
+// at, says of when r was recorded: that keploy cannot read it (noTimeNote),
+// or that it was the call's own instant (atCallNote); "" otherwise.
+func (r Raw) atNote(at time.Time) string {
+	switch {
+	case r.noTime:
+		return noTimeNote
+	case r.at.Equal(at):
+		return atCallNote
+	}
+	return ""
+}
 
 // earlierThan reports whether r is an earlier place of a call recorded at
 // at: served earlier in the test, or recorded before the call or at its own
@@ -373,14 +419,22 @@ type Place struct {
 	// before the call, the fail-closed side (Raw.earlierThan). A reason
 	// naming the place says so (placeAt).
 	AtCall bool
+	// noTime: that mock's recorded time keploy cannot read, read as the
+	// call's own instant (Raw.noTime): a reason says so (placeAt).
+	noTime bool
 }
 
 // atCallNote is what a reason says of a recording it names that was made at
 // the call's own instant: keploy reads it as given to the application before
 // the call, the fail-closed side, as every rule reads the equal instant.
+//
+// noTimeNote is what it says of one whose recorded time keploy cannot read
+// (the zero time): read both ways, as one made at the call's own instant is.
 const (
 	atCallWords = "recorded at the call's own instant, so keploy reads it as given to the application before the call"
 	atCallNote  = " (" + atCallWords + ")"
+	noTimeWords = "recorded at a time keploy cannot read, so keploy reads it as given to the application before the call"
+	noTimeNote  = " (" + noTimeWords + ")"
 )
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -513,6 +567,7 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 		dc = NewDriftCache()
 	}
 	given = givenOnce(given)
+	earlier = timedEarlier(earlier, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)
 	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
 	late, ok := givenAtCall(raw, at, given)
@@ -564,12 +619,44 @@ func leafedAfterCall(earlier []Earlier, raw []Raw, at time.Time) ([]Earlier, []R
 	return kept, append(append([]Raw(nil), raw...), moved...)
 }
 
+// timedEarlier is earlier with each exchange served leaf by leaf whose
+// recorded time keploy cannot read (the zero time) read as one recorded at
+// the call's own instant (at), and marked so (noTime): the record cannot show
+// it was given to the recorded application before the call or after it, so
+// it is read both ways (leafedAtCall), refused where either reading refuses,
+// and a reason naming it says keploy cannot read when it was recorded. earlier
+// is returned as it is where there is none.
+func timedEarlier(earlier []Earlier, at time.Time) []Earlier {
+	var out []Earlier
+	for i, e := range earlier {
+		if e.Given || !e.At.IsZero() || at.IsZero() {
+			continue
+		}
+		if out == nil {
+			out = append([]Earlier(nil), earlier...)
+		}
+		e.At, e.noTime = at, true
+		if e.Payload.at.IsZero() {
+			e.Payload.at = at
+		}
+		e.Payload.noTime = true
+		out[i] = e
+	}
+	if out == nil {
+		return earlier
+	}
+	return out
+}
+
 // leafedAtCall is earlier without each exchange served leaf by leaf whose
-// request was recorded at the call's own instant (at), and each of them as a
+// request was recorded at the call's own instant (at; one whose recorded time
+// keploy cannot read is read as one: timedEarlier), and each of them as a
 // recording made at or after the call (lateOf), for the second reading of
-// the call (classifyGiven): F served it in the test before the call, so it is
-// read both ways, as a Raw made at that instant is (givenAtCall). late is nil
-// where there is none, and earlier is then returned as it is.
+// the call (classifyGiven): F served it in the test before the call, and the
+// record cannot show it was given to the recorded application before the
+// call or after it, so it is read both ways, as a Raw made at that instant is
+// (givenAtCall), and refused where either reading refuses. late is nil where
+// there is none, and earlier is then returned as it is.
 func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) {
 	for i, e := range earlier {
 		if e.Given || !e.At.Equal(at) {
@@ -601,7 +688,7 @@ func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) 
 func (e Earlier) lateOf(late bool) []Raw {
 	x := e.Payload
 	if !x.read {
-		x = Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, unread: payloadUnread(e)}
+		x = Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, noTime: e.noTime, unread: payloadUnread(e)}
 	}
 	x.served = true
 	out := []Raw{x}
@@ -620,18 +707,14 @@ func (e Earlier) lateOf(late bool) []Raw {
 // fields stand where the payload's answer does ("spec.resp.<leaf>"), served
 // as the payload was: the values F gave the application there, a template
 // value too, which its payload, the recording, may not hold. Its fields are
-// the leaves' alone, none a key, and its moments the offset rule reads as
-// the payload's (one recording, read once). false where e names no leaf of
-// its answer.
+// the leaves' alone, none a key. The offset rule reads it by the leaves F
+// served with another value than recorded (moves: servedMoves), keyed where
+// the payload holds them, never by its own fields: those name no place
+// another recording's payload does. false where e names no leaf of its
+// answer.
 func (e Earlier) servedAnswer() (Raw, bool) {
-	root := "Res"
-	for _, f := range e.Payload.fields {
-		if r := fieldRoot(f.path); answerFields[r] {
-			root = r
-			break
-		}
-	}
-	x := Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, served: true, read: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call}
+	root := e.answerRoot()
+	x := Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, served: true, read: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call, noTime: e.noTime, moves: e.servedMoves()}
 	var sb strings.Builder
 	for _, s := range e.Seen {
 		if s.Side != Response || s.Stamp {
@@ -647,6 +730,56 @@ func (e Earlier) servedAnswer() (Raw, bool) {
 	}
 	x.text = sb.String()
 	return x, true
+}
+
+// answerRoot is the field of e's payload that holds its answer (answerFields:
+// "Res" of an HTTP exchange), "Res" where the payload names none.
+func (e Earlier) answerRoot() string {
+	for _, f := range e.Payload.fields {
+		if r := fieldRoot(f.path); answerFields[r] {
+			return r
+		}
+	}
+	return "Res"
+}
+
+// servedMoves are the leaves of e's answer F served with another value than
+// recorded (a template value; never its answer's stamp), each where e's
+// payload holds it (servedMove): the payload's field it stands in, the
+// longest whose path is the leaf's or holds it, and the key written before
+// it there. A leaf no field of the payload holds stands in a field of its
+// own.
+func (e Earlier) servedMoves() []servedMove {
+	root := e.answerRoot()
+	var out []servedMove
+	for _, s := range e.Seen {
+		if s.Side != Response || s.Stamp || s.Live == s.Leaf.Value {
+			continue
+		}
+		full := root + "." + s.Leaf.Path
+		in := ""
+		for _, f := range e.Payload.fields {
+			if f.key || len(f.path) <= len(in) {
+				continue
+			}
+			if full == f.path || strings.HasPrefix(full, f.path+".") || strings.HasPrefix(full, f.path+"[") {
+				in = f.path
+			}
+		}
+		mv := servedMove{path: full, in: in, live: s.Live, quoted: s.Leaf.Type == String}
+		if in == "" {
+			mv.in = full
+		}
+		if rel := full[len(mv.in):]; strings.Contains(rel, ".") {
+			name := rel[strings.LastIndexByte(rel, '.')+1:]
+			if i := strings.IndexByte(name, '['); i >= 0 {
+				name = name[:i]
+			}
+			mv.name = name
+		}
+		out = append(out, mv)
+	}
+	return out
 }
 
 // givenOnce is given read at most once, however often it is asked: both
@@ -1905,23 +2038,23 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
-			from.AtCall = atCall
+			from.AtCall, from.noTime = atCall, x.noTime
 			return from, true
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall}, true
+				return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}, true
 			}
 		}
 	}
@@ -1994,10 +2127,7 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 		if !x.earlierThan(at) {
 			continue
 		}
-		note := ""
-		if x.at.Equal(at) {
-			note = atCallNote
-		}
+		note := x.atNote(at)
 		for _, f := range x.fields {
 			if !f.key && holds(x.text[f.start:f.end]) {
 				return "in " + x.mock + " at " + f.describe() + note
@@ -2038,7 +2168,10 @@ func evidence(v *valueDrift, from Place) string {
 // the call's own instant where it was (Place.AtCall).
 func placeAt(from Place) string {
 	note := ""
-	if from.AtCall {
+	switch {
+	case from.noTime:
+		note = noTimeNote
+	case from.AtCall:
 		note = atCallNote
 	}
 	switch {

@@ -1772,3 +1772,159 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 		t.Errorf("FALSE GREEN? an exchange recorded after the call with no payload: %s (%s); want it refused, naming it", got.Kind, got.Why)
 	}
 }
+
+// What F served at a leaf of an exchange it served leaf by leaf (a template
+// value: 11:10:11 where the recording holds 11:12:00) is a place F gave the
+// application, which the offset rule reads where the exchange's payload holds
+// the leaf, as another recording's payload holds the recording's: a value
+// built on it by an offset (11:15:11, five minutes after it, where the
+// recording's was five minutes after the receive it gave the application,
+// mock-43's 11:09:10) is refused, naming the leaf F served it at and the
+// offset, wherever the exchange was recorded (later in the call's own test's
+// window, in a later test's, at the call's own instant, or before the call),
+// and at any index of the answer's list. The leaf served as recorded names
+// no moment of F's: noise. A leaf F served as recorded is no place of F's
+// apart from its payload's, so two recordings both runs gave the
+// application in the recording's order stay no move.
+func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
+	at := r1Insert
+	const p = "body.visible_after"
+	rec, live := strLeaf(p, "2026-10-22T11:14:10Z"), strLeaf(p, "2026-10-22T11:15:11Z")
+	const recorded, template = "2026-10-22T11:12:00Z", "2026-10-22T11:10:11Z"
+	for _, idx := range []int{0, 1} {
+		sent := func(v string) []string {
+			if idx == 0 {
+				return []string{v}
+			}
+			return []string{"2026-10-22T11:00:00Z", v}
+		}
+		m43 := sentAtReceive("mock-43", at.Add(-2*time.Second), sent("2026-10-22T11:09:10Z")...)
+		leaf := "body.Messages[" + strconv.Itoa(idx) + "].SentAt"
+		for _, rc := range []struct {
+			name string
+			at   time.Time
+			own  bool
+		}{
+			{"recorded later in the call's own test's window", at.Add(30 * time.Second), true},
+			{"recorded in a later test's window", at.Add(2 * time.Minute), false},
+			{"recorded at the call's own instant", at, true},
+			{"recorded before the call", at.Add(-time.Second), true},
+		} {
+			for _, servedAs := range []string{template, recorded} {
+				e := leafedOf(sentAtReceive("mock-44", rc.at, sent(recorded)...), rc.own, 1)
+				for i := range e.Seen {
+					if e.Seen[i].Leaf.Path == leaf {
+						e.Seen[i].Live = servedAs
+					}
+				}
+				name := rc.name + ", " + leaf + " served " + servedAs
+				got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{RawOf(m43, false)}, nil, nil, nil)[0]
+				if servedAs == recorded {
+					if got.Kind != KindNoise {
+						t.Errorf("%s: %s (%s); want noise: the leaf served as recorded names no moment of F's", name, got.Kind, got.Why)
+					}
+					continue
+				}
+				if got.Kind != KindUnaccounted ||
+					!strings.Contains(got.Why, "stands 5m0s after the moment mock-43 at spec.resp.body holds as the recording gave it") ||
+					!strings.Contains(got.Why, "5m0s after the moment mock-44 at spec.resp."+leaf+" holds, which record's full round gave the application in its place") {
+					t.Errorf("FALSE GREEN? %s: %s (%s); want it refused, built on what F served at mock-44's leaf by an offset", name, got.Kind, got.Why)
+				}
+			}
+		}
+	}
+	m43 := RawOf(sentAtReceive("mock-43", at.Add(-3*time.Second), "2026-10-22T11:09:10Z"), true).ServedAs(1)
+	e := leafedOf(sentAtReceive("mock-44", at.Add(-time.Second), template), true, 2)
+	if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{m43}, nil, nil, nil)[0]; got.Kind != KindNoise {
+		t.Errorf("two recordings both runs gave in the recording's order, the later one's leaf served as recorded: %s (%s); want noise", got.Kind, got.Why)
+	}
+	// What F served at the leaf is no place the recording gave the
+	// application: the value 3m59s after it as recorded, and 3m59s after
+	// what F served before the call at mock-43 (11:11:12) as F saw it, moved
+	// by the lead and is built on no place both ways: noise.
+	// Served first, or in an order keploy cannot tell (no pair of the two
+	// is then let go as one both runs gave in the recording's order).
+	m43 = RawOf(sentAtReceive("mock-43", at.Add(-3*time.Second), "2026-10-22T11:11:12Z"), true)
+	for _, n43 := range []int{1, 0} {
+		x43 := m43
+		if n43 > 0 {
+			x43 = m43.ServedAs(n43)
+		}
+		for _, when := range []time.Duration{30 * time.Second, -time.Second} {
+			e = leafedOf(sentAtReceive("mock-44", at.Add(when), recorded), true, 2)
+			for i := range e.Seen {
+				if e.Seen[i].Leaf.Path == "body.Messages[0].SentAt" {
+					e.Seen[i].Live = template
+				}
+			}
+			if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{x43}, nil, nil, nil)[0]; got.Kind != KindNoise {
+				t.Errorf("mock-43 served as serve %d, mock-44 recorded %v from the call, its leaf served %s: %s (%s); want noise: what F served there is no place the recording gave the application", n43, when, template, got.Kind, got.Why)
+			}
+		}
+	}
+}
+
+// An exchange F served leaf by leaf in the test before the call whose
+// recorded time keploy cannot read (the zero time) cannot be shown, from the
+// record, to have been given to the recorded application before the call or
+// after it: it is read both ways, as one made at the call's own instant is,
+// and refused where either reading refuses. A minute F's run rounded from
+// what F served there (15:50:40 to 15:51, recorded 15:50) names both moments
+// read as an earlier place, yet copies what F served read as one made after
+// the call: refused, naming the exchange and saying keploy cannot read when
+// it was recorded, beside the own place or not. What names the recorded
+// minute alone (15:50:10) is noise. Each verdict is the one the same exchange
+// recorded at the call's own instant gets.
+func TestAnExchangeWithNoRecordedTimeIsReadBothWays(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
+	base := recT.Truncate(time.Minute)
+	for _, f := range []struct {
+		name string
+		sent string
+		copy bool
+	}{
+		{"15:50:40, rounded to F's minute", base.Add(40 * time.Second).Format(time.RFC3339), true},
+		{"15:51:05, cut to F's minute", base.Add(65 * time.Second).Format(time.RFC3339), true},
+		{"15:50:10, the recorded minute alone", base.Add(10 * time.Second).Format(time.RFC3339), false},
+	} {
+		for _, withOwn := range []bool{false, true} {
+			name := f.name
+			var ownRaw []Raw
+			if withOwn {
+				name += ", beside the own place"
+				ownRaw = []Raw{RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)}
+			}
+			nb := sentAtReceive("mock-44", time.Time{}, f.sent)
+			got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, true, 1)}, ownRaw, nil, nil, nil)[0]
+			twin := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(sentAtReceive("mock-44", at, f.sent), true, 1)}, ownRaw, nil, nil, nil)[0]
+			if got.Kind != twin.Kind {
+				t.Errorf("%s: %s (%s); the same exchange recorded at the call's own instant is %s (%s)", name, got.Kind, got.Why, twin.Kind, twin.Why)
+			}
+			if !f.copy {
+				if !withOwn && got.Kind != KindNoise {
+					t.Errorf("%s: %s (%s); want noise", name, got.Kind, got.Why)
+				}
+				// Beside the own place, the offset rule reads it as one
+				// the recording may have given before the call, and says
+				// why.
+				if withOwn && !strings.Contains(got.Why, "mock-44 at spec.resp.body holds as the recording gave it (recorded at a time keploy cannot read, so keploy reads it as given to the application before the call)") {
+					t.Errorf("%s: %s (%s); want the reason to say keploy cannot read when mock-44 was recorded", name, got.Kind, got.Why)
+				}
+				continue
+			}
+			if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44") {
+				t.Errorf("FALSE GREEN? %s: %s (%s); want it refused, naming mock-44", name, got.Kind, got.Why)
+			}
+			// Read as an earlier place, 15:50:40 names both moments: only
+			// the reading as one made after the call refuses it, and says
+			// why.
+			if f.sent == base.Add(40*time.Second).Format(time.RFC3339) && !withOwn && !strings.Contains(got.Why, "recorded at a time keploy cannot read, so keploy reads it as given to the application before the call, yet may as well have been made after the call, so keploy reads it both ways") {
+				t.Errorf("%s: %s; want the reason to say keploy cannot read when mock-44 was recorded, so it reads it both ways", name, got.Why)
+			}
+		}
+	}
+}
