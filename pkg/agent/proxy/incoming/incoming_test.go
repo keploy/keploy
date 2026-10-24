@@ -2,12 +2,17 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -42,12 +47,7 @@ func TestWaitForIngressTargetReady(t *testing.T) {
 }
 
 func TestWaitForIngressTargetTimeout(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	if err := waitForIngressTarget(context.Background(), addr, 40*time.Millisecond); err == nil {
 		t.Fatal("expected timeout waiting for unused port")
@@ -69,17 +69,15 @@ func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
 }
 
 func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	// The port is held for the test's life (testnet.SharedPort): a dial to
+	// it is refused until the app listens there, and no other socket can
+	// take it meanwhile.
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
 
 	listening := make(chan net.Listener, 1)
 	go func() {
 		time.Sleep(150 * time.Millisecond)
-		l, err := net.Listen("tcp4", addr)
+		l, err := testnet.OpenShared("tcp4", addr)
 		if err != nil {
 			listening <- nil
 			return
@@ -100,12 +98,7 @@ func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
 }
 
 func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	start := time.Now()
 	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond); err == nil {
@@ -117,12 +110,7 @@ func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
 }
 
 func TestDialIngressTargetStopsOnCanceledContext(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -152,11 +140,114 @@ func freeTCPPort(t *testing.T) uint16 {
 	return port
 }
 
+// startIngressAtFreePort starts hook's forwarder at a free port and returns
+// the port. Nothing holds the port between freeTCPPort and the forwarder's
+// bind: the forwarder binds it with net.Listen, and no hold can sit beside
+// that. So when another socket took the port meanwhile, it tries another.
+// On Windows the bind's error there is WSAEADDRINUSE, which errors.Is does
+// not match to EADDRINUSE, so it fails at once, as the test did before.
+func startIngressAtFreePort(t *testing.T, ctx context.Context, hook *goTCPIngressHook) uint16 {
+	t.Helper()
+	for i := 0; ; i++ {
+		port := freeTCPPort(t)
+		err := hook.StartIngress(ctx, port, 0)
+		if err == nil {
+			return port
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) || i == 19 {
+			t.Fatalf("StartIngress: %v", err)
+		}
+	}
+}
+
+// bindAgain binds port at every IPv4 address and closes it, as the next
+// run's app would. On Linux it first fails when a socket of this process is
+// at the port (testnet.BoundHere). It is nil when the bind succeeds, and on
+// Linux also when the bind failed and no socket of this process is at the
+// port after it either: another process took the port once it was free, and
+// may have let it go again. Else it is the bind's error. Its callers stop
+// the collector first (stopCollector), so a listener the code left open is
+// still open here.
+func bindAgain(t *testing.T, port uint16) error {
+	t.Helper()
+	if n, known := testnet.BoundHere(t, int(port)); known && n > 0 {
+		return fmt.Errorf("%d socket(s) of this process still at port %d", n, port)
+	}
+	ln, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(int(port)))
+	if err == nil {
+		_ = ln.Close()
+		return nil
+	}
+	if n, known := testnet.BoundHere(t, int(port)); known && n == 0 {
+		return nil
+	}
+	return err
+}
+
+// stopCollector turns the garbage collector off for the rest of the test.
+// net closes a listener that nothing references once a collection finds it,
+// so with the collector on, a listener the code under test left open can be
+// closed before the test looks, and the test's check that the code closed
+// it passes. BoundHere's reads of /proc can allocate enough to start one.
+func stopCollector(t *testing.T) {
+	t.Helper()
+	old := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(old) })
+}
+
+// forwarderOf is the state of hook's forwarder at port. The test keeps it,
+// so its listener stays reachable whatever the code under test does with it.
+func forwarderOf(t *testing.T, hook *goTCPIngressHook, port uint16) *tcpForwarderState {
+	t.Helper()
+	hook.mu.Lock()
+	defer hook.mu.Unlock()
+	st, ok := hook.forwarders[port]
+	if !ok {
+		t.Fatalf("no forwarder registered for port %d", port)
+	}
+	return st
+}
+
+// listenerClosed reports whether ln was closed: the descriptor of a closed
+// listener takes no more calls (net.ErrClosed).
+func listenerClosed(t *testing.T, ln net.Listener) bool {
+	t.Helper()
+	rc, err := ln.(*net.TCPListener).SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	err = rc.Control(func(uintptr) {})
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Control: %v", err)
+	}
+	return err != nil
+}
+
+// bindAgain passes a port another process took once it was free, and fails
+// one a socket of this process still holds.
+func TestBindAgainTellsAPortAnotherProcessTookFromOneThisProcessHolds(t *testing.T) {
+	stopCollector(t)
+	ln, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	if err := bindAgain(t, port); err == nil {
+		t.Fatalf("bindAgain passed port %d while this test's listener holds it", port)
+	}
+	testnet.GiveAway(t, ln.(*net.TCPListener))
+	if err := bindAgain(t, port); err != nil {
+		t.Fatalf("bindAgain failed port %d, which another process took: %v", port, err)
+	}
+}
+
 // A forwarder must NOT bind the app port when the agent context is already
 // canceled (shutting down). Binding during teardown leaves the listener holding
 // the port, so the next record run's application fails to bind it with "address
 // already in use" — the flaky port-8000 reuse failure.
 func TestStartIngressSkipsBindWhenContextCanceled(t *testing.T) {
+	stopCollector(t)
 	hook := newTestIngressHook()
 	port := freeTCPPort(t)
 
@@ -168,11 +259,9 @@ func TestStartIngressSkipsBindWhenContextCanceled(t *testing.T) {
 	}
 
 	// The port must be free — the fix must not have bound it.
-	ln, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(int(port)))
-	if err != nil {
+	if err := bindAgain(t, port); err != nil {
 		t.Fatalf("port %d should be free after a canceled StartIngress, but bind failed: %v", port, err)
 	}
-	_ = ln.Close()
 
 	hook.mu.Lock()
 	_, registered := hook.forwarders[port]
@@ -185,12 +274,10 @@ func TestStartIngressSkipsBindWhenContextCanceled(t *testing.T) {
 // The normal path must bind the port and fully release it on StopIngress, so a
 // subsequent run can rebind it immediately.
 func TestStartIngressReleasesPortOnStop(t *testing.T) {
+	stopCollector(t)
 	hook := newTestIngressHook()
-	port := freeTCPPort(t)
-
-	if err := hook.StartIngress(context.Background(), port, 0); err != nil {
-		t.Fatalf("StartIngress: %v", err)
-	}
+	port := startIngressAtFreePort(t, context.Background(), hook)
+	st := forwarderOf(t, hook, port)
 
 	// Port is bound now.
 	if ln, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(int(port))); err == nil {
@@ -201,19 +288,21 @@ func TestStartIngressReleasesPortOnStop(t *testing.T) {
 	if err := hook.StopIngress(port); err != nil {
 		t.Fatalf("StopIngress: %v", err)
 	}
+	if !listenerClosed(t, st.listener) {
+		t.Fatalf("StopIngress returned with the forwarder's listener at port %d open", port)
+	}
 
 	// Port must be released.
-	ln, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(int(port)))
-	if err != nil {
+	if err := bindAgain(t, port); err != nil {
 		t.Fatalf("port %d should be free after StopIngress, but bind failed: %v", port, err)
 	}
-	_ = ln.Close()
 }
 
 // The teardown guard in StartIngressProxy must be SILENT: a bind event drained
 // after context cancel must not arm a forwarder AND must not emit an ERROR log
 // (the flask-secret CI lane fails on any ERROR in the record output).
 func TestStartIngressProxySilentOnCanceledContext(t *testing.T) {
+	stopCollector(t)
 	core, logs := observer.New(zapcore.DebugLevel)
 	pm := &IngressProxyManager{
 		logger: zap.New(core),
@@ -236,36 +325,28 @@ func TestStartIngressProxySilentOnCanceledContext(t *testing.T) {
 	if active {
 		t.Fatalf("no forwarder should be armed for port %d after a canceled StartIngressProxy", port)
 	}
-	if ln, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(int(port))); err != nil {
+	if err := bindAgain(t, port); err != nil {
 		t.Fatalf("port %d should be free after a canceled StartIngressProxy, bind failed: %v", port, err)
-	} else {
-		_ = ln.Close()
 	}
 }
 
 // When the accept loop exits because its context was canceled (and StopIngress is
 // never called), the deferred listener.Close must still release the port so the
-// next run can rebind it. Without that defer this test times out.
+// next run can rebind it. Without that defer this test fails.
 func TestStartIngressReleasesPortWhenAcceptLoopExits(t *testing.T) {
+	stopCollector(t)
 	hook := newTestIngressHook()
-	port := freeTCPPort(t)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := hook.StartIngress(ctx, port, 0); err != nil {
-		t.Fatalf("StartIngress: %v", err)
-	}
+	port := startIngressAtFreePort(t, ctx, hook)
+	st := forwarderOf(t, hook, port)
 	cancel() // cancel WITHOUT calling StopIngress
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if ln, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(int(port))); err == nil {
-			_ = ln.Close()
-			return // port released by the accept-loop defer
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("port %d not released within 5s after context cancel without StopIngress", port)
-		}
-		time.Sleep(20 * time.Millisecond)
+	<-st.done // the accept loop exited
+	if !listenerClosed(t, st.listener) {
+		t.Fatalf("the accept loop exited with the forwarder's listener at port %d open", port)
+	}
+	if err := bindAgain(t, port); err != nil {
+		t.Fatalf("port %d should be free once the accept loop exited without StopIngress, but bind failed: %v", port, err)
 	}
 }
 

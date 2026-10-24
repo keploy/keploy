@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -321,7 +322,7 @@ func TestUnderTheSwitchATreeServedMockRealDestinationIsCountedAsARelay(t *testin
 // depended on whether the host could hold handshakes (realDialFailed).
 func TestUnderTheSwitchAMockRealDestinationNothingListensAtIsCountedFailed(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
+	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 	listed := fmt.Sprintf("127.0.0.1:%d", port)
 	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
 		t.Fatal(err)
@@ -413,7 +414,7 @@ func TestUnderTheSwitchAnIPEntryIsNotReachedThroughTheOtherLoopbackFamily(t *tes
 		// Nothing may listen at the listed address, 127.0.0.1 at that
 		// port, for the test's life: the port is held at every IPv4
 		// address, beside the IPv6-only listener.
-		if holdPort(t, port) {
+		if testnet.HoldPort(t, port) {
 			l = l6
 			break
 		}
@@ -588,7 +589,7 @@ func TestAMockedContainerIsListedByItsKey(t *testing.T) {
 // which the runner did not start.
 func TestUnderTheSwitchARecordedLocalDependencyThatIsNotRunningIsListed(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
+	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 	recorded.add([]*models.Mock{recordedPlainDep(port)})
 	served, _, outside := callTree(t, p, port, uint32(os.Getpid()))
 	if served {
@@ -605,7 +606,7 @@ func TestUnderTheSwitchARecordedLocalDependencyThatIsNotRunningIsListed(t *testi
 // it is not listed.
 func TestUnderTheSwitchACallNothingAnswersAndNoRecordingHasIsNotListed(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
+	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 	// A recording of another port: this one is not recorded.
 	recorded.add([]*models.Mock{recordedPlainDep(port + 1)})
 	// An address of this machine that is not loopback, so the call is not
