@@ -122,7 +122,7 @@ type carriedChunk struct {
 func newTookHarness(script ...clientLook) *tookHarness {
 	h := &tookHarness{sock: &scriptedSocket{script: script, wrote: script[0].acked}}
 	h.t = newTee(fakeconn.FromDest, 1<<20, 16, time.Second, func() bool {
-		at, _, ok := h.t.oldestUnconsumed()
+		at, _, ok := h.t.oldestUnconsumed(unstampedInAnyWindow)
 		if !ok {
 			at = 0
 		}
@@ -337,7 +337,7 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 		if n := h.t.awaitingLen(); n != 0 {
 			t.Fatalf("%d chunks still set aside after the client refused them all, want none", n)
 		}
-		if _, _, held := h.t.oldestUnconsumed(); held {
+		if _, _, held := h.t.oldestUnconsumed(unstampedInAnyWindow); held {
 			t.Fatal("the capture watermark still waits for a refused chunk")
 		}
 		if q := h.queued(); len(q) != 0 || h.stops.Load() != 1 {
@@ -557,7 +557,7 @@ func TestAChunkSetAsideHoldsTheCaptureWatermark(t *testing.T) {
 		}
 	}
 	oldest := func(h *tookHarness) (int64, bool) {
-		at, unstamped, ok := h.t.oldestUnconsumed()
+		at, unstamped, ok := h.t.oldestUnconsumed(unstampedInAnyWindow)
 		if unstamped {
 			t.Fatal("the oldest unconsumed chunk is unstamped, want the one set aside")
 		}

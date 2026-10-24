@@ -145,9 +145,11 @@ func (t *tee) trimDeliveredLocked() {
 // oldestUnconsumed is the stamp of the oldest chunk of this direction that its
 // parser has not consumed whole: delivered, queued, waiting for the client's
 // answer (tee.awaiting), in the forwarder's hand, or in the layer it reads
-// through. ok is false when there is none; unstamped is true when the only
-// one is in the forwarder's or the layer's hand, not yet stamped (it can be
-// from any time from now on).
+// through. ok is false when there is none. A mark not stamped yet
+// (heldUnstamped) is taken as view says: with unstampedInAnyWindow it is the
+// answer (unstamped, as it can be stamped at any time from now on); with
+// stampsOnly it is passed over and the next place answers, so a record the
+// forwarder is stamping does not hide the stamp of the layer's read under it.
 //
 // Both marks are read before the lock, which is what keeps a chunk moving on
 // during the look from being missed; the order of the two loads is not. The
@@ -164,7 +166,7 @@ func (t *tee) trimDeliveredLocked() {
 // leaves awaiting (doneAwaiting), so a look under the lock finds it in one of
 // the two. A chunk further on is older than one behind it, so the first place
 // that holds one gives the oldest.
-func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
+func (t *tee) oldestUnconsumed(view stampView) (at int64, unstamped, ok bool) {
 	l := t.progress.layer.Load()
 	h := t.progress.held.Load()
 	t.mu.Lock()
@@ -183,7 +185,7 @@ func (t *tee) oldestUnconsumed() (at int64, unstamped, ok bool) {
 	}
 	for _, m := range [2]int64{h, l} {
 		switch {
-		case m == heldUnstamped:
+		case m == heldUnstamped && view == unstampedInAnyWindow:
 			return 0, true, true
 		case m > 0:
 			return m, false, true
@@ -214,7 +216,7 @@ func (t *tee) lagDelivery(c fakeconn.Chunk) bool {
 // directionState is where one direction's capture is, for what holds the
 // watermark.
 func (t *tee) directionState() string {
-	at, unstamped, ok := t.oldestUnconsumed()
+	at, unstamped, ok := t.oldestUnconsumed(unstampedInAnyWindow)
 	where := "nothing unconsumed"
 	switch {
 	case unstamped:
@@ -327,8 +329,8 @@ func minNonZero(a, b int64) int64 {
 // When it is not done it says why (for what holds the watermark).
 func (r *Relay) passedThrough(t int64, view stampView) (bool, string) {
 	for _, tt := range [2]*tee{r.teeC2D, r.teeD2C} {
-		at, unstamped, ok := tt.oldestUnconsumed()
-		if ok && (unstamped && view == unstampedInAnyWindow || !unstamped && at <= t) {
+		at, unstamped, ok := tt.oldestUnconsumed(view)
+		if ok && (unstamped || at <= t) {
 			return false, tt.directionState()
 		}
 	}
