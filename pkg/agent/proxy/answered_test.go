@@ -149,6 +149,11 @@ func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 	if !ok || got.Mock.Name != "new" {
 		t.Fatalf("found %v, want the one answered last", got.Mock)
 	}
+	// Whichever key comes first: the newest is not the last one looked at.
+	got, ok = mm.FindAnsweredEarlier(models.HTTP, []string{"url:/y", "url:/x"}, func(*models.Mock) bool { return true })
+	if !ok || got.Mock.Name != "new" {
+		t.Fatalf("with the newest's key first, found %v, want the one answered last", got.Mock)
+	}
 }
 
 // Under exact serving a test's recording that answered through any door (a
