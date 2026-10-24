@@ -169,6 +169,10 @@ func (v *exactView) hear(mk *models.Mock) {
 // for a replay session (view nil), off again at the next one.
 type exactState struct {
 	view atomic.Pointer[exactView]
+	// beforePublish, set only by tests and before any install, is called
+	// with each view as installExact is about to publish it in view: it
+	// sees the view as a reader loading view first will.
+	beforePublish func(*exactView)
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
 	poolNames atomic.Pointer[map[string]struct{}]
@@ -1018,11 +1022,16 @@ func (m *MockManager) ServeExactWorker(names []string) {
 
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
-// and so does the window signal.
+// and so does the window signal. v is complete as it is published: what no
+// lock of its own guards (its stamp, its test, its mocks) is set before the
+// swap that publishes it, and never written after.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if w := m.exact.worker.Load(); w != nil {
 		v.worker = *w
+	}
+	if m.exact.beforePublish != nil {
+		m.exact.beforePublish(v)
 	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
